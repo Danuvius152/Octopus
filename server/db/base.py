@@ -697,6 +697,11 @@ class DatabaseBase:
                 "ALTER TABLE schedules ADD COLUMN last_run_session_id TEXT"
             )
             await self.conn.commit()
+        # Wiki authorization is separate from the scheduled body. Legacy
+        # schedules remain unprivileged until explicitly configured.
+        if not await self._has_column("schedules", "wiki_mode"):
+            await self.conn.execute("ALTER TABLE schedules ADD COLUMN wiki_mode TEXT")
+            await self.conn.commit()
 
     async def _column_info(self, table: str) -> list[tuple[Any, ...]]:
         cursor = await self.conn.execute(f"PRAGMA table_info({table})")

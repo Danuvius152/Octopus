@@ -22,7 +22,12 @@ from urllib.parse import unquote
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import (
+    FileResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
 
 from .. import deps
 from ..app_agent import AppAgentError, app_agent_manager
@@ -404,21 +409,64 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
     # A long read timeout because a backend may legitimately be slow (a clone,
     # a build); a short connect timeout because a backend we just confirmed is
     # listening should answer the socket immediately.
+    from ..wiki.app_bridge import begin, complete_cleanup
+
+    mutation = await begin(row, request.method, path, request.query_params)
     client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0))
+    transferred = False
+    dispatched = False
     try:
+        if mutation:
+            # A preceding uncertain writer may have stopped its backend while
+            # this request waited for the shared vault lock.
+            state = await backend_supervisor.ensure_running(app_id, row["app_dir"])
+            if state.state != RUNNING or not state.port:
+                raise HTTPException(503, state.error or "Application backend stopped")
+            url = f"http://127.0.0.1:{state.port}/api/{path}"
         upstream = client.build_request(
-            request.method,
-            url,
-            headers=headers,
-            params=dict(request.query_params),
-            content=await request.body(),
+            request.method, url, headers=headers,
+            params=dict(request.query_params), content=await request.body(),
         )
+        dispatched = True
         resp = await client.send(upstream, stream=True)
-    except httpx.HTTPError as exc:
-        await client.aclose()
-        raise HTTPException(
-            status.HTTP_502_BAD_GATEWAY, f"backend did not answer: {exc}"
-        )
+        response_headers = {
+            k: v for k, v in resp.headers.items()
+            if k.lower() not in _SKIP_RESPONSE_HEADERS
+        }
+        if mutation:
+            # Mutation responses are JSON receipts. Consume them before returning
+            # ownership to ASGI so disconnects cannot bypass lock cleanup.
+            payload = await resp.aread()
+            await resp.aclose()
+            if path == "save" and resp.status_code == 409:
+                await mutation.conflict(await request.json())
+            if resp.status_code == 202:
+                job_id = json.loads(payload).get("id")
+                if not isinstance(job_id, str) or not job_id:
+                    raise ValueError("Application returned no async job receipt")
+                mutation.follow_job(client, f"http://127.0.0.1:{state.port}", job_id, app_id)
+                transferred = True
+            else:
+                await complete_cleanup(mutation.finish())
+                mutation = None
+                await client.aclose()
+            return Response(payload, status_code=resp.status_code, headers=response_headers)
+        transferred = True
+    except BaseException as exc:
+        async def cleanup():
+            try:
+                if mutation and not transferred:
+                    if dispatched:
+                        await mutation.abort(app_id)
+                    else:
+                        await mutation.finish()
+            finally:
+                if not transferred:
+                    await client.aclose()
+        await complete_cleanup(cleanup())
+        if isinstance(exc, httpx.HTTPError):
+            raise HTTPException(status.HTTP_502_BAD_GATEWAY, f"backend did not answer: {exc}") from exc
+        raise
 
     async def body():
         try:
@@ -429,12 +477,7 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
             await client.aclose()
 
     return StreamingResponse(
-        body(),
-        status_code=resp.status_code,
-        headers={
-            k: v for k, v in resp.headers.items()
-            if k.lower() not in _SKIP_RESPONSE_HEADERS
-        },
+        body(), status_code=resp.status_code, headers=response_headers,
         media_type=resp.headers.get("content-type"),
     )
 

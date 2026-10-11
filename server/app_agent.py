@@ -260,6 +260,7 @@ class AppAgentManager:
         agent: str | None = None,
         conversation_id: str | None = None,
         title: str | None = None,
+        wiki_mode: str | None = None,
     ) -> _Turn:
         """Validate, resolve the conversation, register the record, start the
         turn. Registration happens *before* `start_message` on purpose: the
@@ -328,7 +329,9 @@ class AppAgentManager:
             app_row, message=message, context=context, first_turn=first_turn
         )
         try:
-            await mgr.start_message(session.id, body)
+            from .wiki.tasks import explicit_mode
+            mode = explicit_mode(message, wiki_mode)
+            await mgr.start_message(session.id, body, **({"wiki_mode": mode} if mode else {}))
         except Exception as exc:
             self._turns.pop(session.id, None)
             raise AppAgentError(

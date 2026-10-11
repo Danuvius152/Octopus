@@ -125,6 +125,7 @@ async def start_callback_api(
     *routers: Any,
     mcp: bool = True,
     overrides: dict[Any, Any] | None = None,
+    exception_handlers: dict[Any, Any] | None = None,
 ) -> CallbackApi:
     """Serve `routers` plus (by default) every MCP namespace on a free port.
 
@@ -138,7 +139,7 @@ async def start_callback_api(
     from server.mcp_http import build_servers, mount_all
 
     _seize_sse_shutdown_latch()
-    app = FastAPI()
+    app = FastAPI(exception_handlers=exception_handlers or {})
     for router in routers:
         app.include_router(router)
     app.dependency_overrides.update(overrides or {})

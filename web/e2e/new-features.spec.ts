@@ -1484,6 +1484,7 @@ test.describe("slash-command autocomplete", () => {
     // Bare "/" lists every command. Asserted by name, not by count alone —
     // a bare number goes stale silently every time a command is added.
     const ALL_COMMANDS = [
+      "/wiki",
       "/schedule",
       "/remember",
       "/research",

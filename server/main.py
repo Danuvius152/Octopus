@@ -54,10 +54,12 @@ from .routers import bg_tasks as bg_tasks_router
 from .routers import delegations as delegations_router
 from .routers import monitor as monitor_router
 from .routers import research as research_router
+from .routers import wiki as wiki_router
 from .scheduler import ScheduleRunner
 from .session_manager import session_manager
 from .tunnel import CloudflareTunnel
 from .users import UserManager
+from .wiki import WikiError
 from .workspace import WorkspaceError
 
 logging.basicConfig(
@@ -113,6 +115,7 @@ async def lifespan(app: FastAPI):
     # so a build session's turns drive each application's building/ready/failed
     # status.
     application_manager.bind(session_mgr=session_manager, db=db)
+    from .wiki.jobs import worker as wiki_worker
     # Pick up icons for applications that already exist. Discovery otherwise
     # only runs after a build, so an app that already ships a logo would keep
     # showing the generic fallback until someone rebuilt it.
@@ -165,6 +168,7 @@ async def lifespan(app: FastAPI):
     )
 
     async with mcp_lifespan(app):
+        await wiki_worker.start(session_manager)
         logger.info("MCP namespaces served in-process: %s", ", ".join(_mcp_mounts))
         yield
 
@@ -177,6 +181,8 @@ async def lifespan(app: FastAPI):
     await session_manager.stop_reaper()
     await session_manager.stop_all_held_processes()
     await backend_supervisor.shutdown()
+    from .wiki.app_bridge import shutdown as shutdown_wiki_app_writers
+    await shutdown_wiki_app_writers()
 
     if tunnel:
         await tunnel.stop()
@@ -188,6 +194,7 @@ async def lifespan(app: FastAPI):
     await codex_login_manager.shutdown()
 
     await bg_task_manager.shutdown()
+    await wiki_worker.stop()
     app_agent_manager.shutdown()
     application_manager.shutdown()
     delegation_manager.shutdown()
@@ -199,6 +206,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Octopus", version="0.1.0", lifespan=lifespan)
+
+
+@app.exception_handler(WikiError)
+async def _wiki_error(_request: Request, exc: WikiError) -> JSONResponse:
+    return JSONResponse(status_code=exc.status, content={"detail": str(exc)})
 
 @app.exception_handler(WorkspaceError)
 async def _workspace_error(_request: Request, exc: WorkspaceError) -> JSONResponse:
@@ -282,6 +294,7 @@ app.include_router(monitor_router.router)
 app.include_router(applications_router.router)
 # /apps/{id}/… — the application itself. Registered before the SPA catch-all
 # mount so it wins the path (applications.md §3).
+app.include_router(wiki_router.app_router)
 app.include_router(applications_router.static_router)
 app.include_router(sessions.router)
 app.include_router(attachments.router)
@@ -289,6 +302,7 @@ app.include_router(files.router)
 app.include_router(bg_tasks_router.router)
 app.include_router(delegations_router.router)
 app.include_router(research_router.router)
+app.include_router(wiki_router.router)
 app.include_router(questions.router)
 app.include_router(schedules.router)
 app.include_router(schedules.session_router)

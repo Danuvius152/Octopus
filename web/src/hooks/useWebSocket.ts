@@ -619,7 +619,7 @@ export function useWebSocket() {
   }, []);
 
   const sendMessage = useCallback(
-    (sessionId: string, content: string, attachmentIds?: string[]) => {
+    (sessionId: string, content: string, attachmentIds?: string[], wikiMode?: "read" | "maintain") => {
       // Don't optimistically add to chat — the backend broadcasts a
       // user_message event whether the prompt fires immediately or after
       // dequeue, so a single broadcast handler keeps state consistent.
@@ -631,6 +631,7 @@ export function useWebSocket() {
       if (attachmentIds && attachmentIds.length > 0) {
         payload.attachment_ids = attachmentIds;
       }
+      if (wikiMode) payload.wiki_mode = wikiMode;
       send(payload);
     },
     [send]

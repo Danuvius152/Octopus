@@ -31,6 +31,12 @@ fails if it has drifted. The hand-written version of this list had reached 13 of
 | Plan | Status | What |
 |---|---|---|
 | [Multi-tenancy, second pass: Connectors, Schedules, Harness](plans/multi-tenancy-gaps.md) | in-progress | Proposal: close the gaps a read-only review found where accounts can reach each other's work through the Manage surfaces, and make each class of gap structurally impossible. |
+| [Octopus 本地共享 Wiki：任务拆分提案](plans/local-shared-wiki-ticket-proposal.md) | in-progress | 框架与 Weber 已部署验收；首次旧库批量整理等待 Q35 样稿确认。 |
+| [Octopus 本地共享 Wiki：规格评审稿](plans/local-shared-wiki-spec.md) | in-progress | 框架与 Weber 已部署验收；首次旧库批量整理等待 Q35 样稿确认。 |
+| [本地共享 Wiki：实施交接](plans/local-shared-wiki-implementation-handoff.md) | in-progress | 框架与 Weber 已部署验收；首次旧库批量整理等待 Q35 样稿确认。 |
+| [本地共享 Wiki：实施审查](plans/local-shared-wiki-review.md) | in-progress | 独立审查及复核发现的六项已修复并通过限定复核；旧库批量整理等待 Q35 样稿确认。 |
+| [本地共享 Wiki：补充访谈记录](plans/local-shared-wiki-grill-round2.md) | in-progress | 框架与 Weber 已部署验收；首次旧库批量整理等待 Q35 样稿确认。 |
+| [本地共享 Wiki：轻量模板与 prompt 审阅稿](plans/local-shared-wiki-prompt-proposal.md) | in-progress | 框架与 Weber 已部署验收；首次旧库批量整理等待 Q35 样稿确认。 |
 | [/fork — duplicate a session onto a copied working directory](plans/session-fork.md) | shipped | Duplicate a session onto an independent full copy of its working directory. |
 | [Agent Collaboration — Tech Plan (agent-to-agent delegation)](plans/agent-collaboration.md) | shipped | Agent-to-agent delegation — the `mcp__ask_agent__*` tools, one hop, replies injected as follow-up turns. Reverses the "no A2A" carve-out in `agent-refactor.md` §40-41. |
 | [Agent Memory — Tech Plan (native, agent-written, per-agent)](plans/memory.md) | shipped | Per-agent native memory: one markdown directory per agent, shared by both harnesses. |

@@ -29,6 +29,7 @@ class SchedulesMixin(DatabaseBase):
         enabled: bool = True,
         origin_session_id: str | None = None,
         run_at: str | None = None,
+        wiki_mode: str | None = None,
     ) -> None:
         """Persist a schedule. Recurrence is one of `interval_seconds`, `cron`
         (with `timezone`), or `run_at` (ISO datetime, fires once then auto-deletes).
@@ -38,7 +39,7 @@ class SchedulesMixin(DatabaseBase):
         await self.conn.execute(
             "INSERT INTO schedules (id, agent_id, origin_session_id, name, prompt, "
             "interval_seconds, cron, timezone, recurrence_label, enabled, "
-            "created_at, run_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "created_at, run_at, wiki_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 schedule_id,
                 agent_id,
@@ -52,6 +53,7 @@ class SchedulesMixin(DatabaseBase):
                 int(enabled),
                 created_at,
                 run_at,
+                wiki_mode,
             ),
         )
         await self.conn.commit()
@@ -74,7 +76,7 @@ class SchedulesMixin(DatabaseBase):
         sql = (
             "SELECT s.id, s.agent_id, s.name, s.prompt, s.interval_seconds, s.cron, "
             "s.timezone, s.recurrence_label, s.enabled, s.created_at, s.last_run_at, "
-            "s.origin_session_id, s.run_at, s.last_run_session_id FROM schedules s"
+            "s.origin_session_id, s.run_at, s.last_run_session_id, s.wiki_mode FROM schedules s"
         )
         params: list[Any] = []
         if user_id is not None:
@@ -98,6 +100,7 @@ class SchedulesMixin(DatabaseBase):
                 "origin_session_id": row[11],
                 "run_at": row[12],
                 "last_run_session_id": row[13],
+                "wiki_mode": row[14],
             }
             for row in rows
         ]
@@ -143,6 +146,7 @@ class SchedulesMixin(DatabaseBase):
             "enabled",
             "last_run_at",
             "last_run_session_id",
+            "wiki_mode",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:

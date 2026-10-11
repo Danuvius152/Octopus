@@ -80,6 +80,10 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                     continue
 
                 try:
+                    from ..wiki.tasks import explicit_mode
+                    session = session_manager.get_session(session_id)
+                    if session is None or session.user_id != user_id:
+                        raise ValueError("Session not found")
                     # The only steerable caller: this is a person typing.
                     # Everything else that injects a turn (bg results,
                     # delegation replies, schedules, research) needs its own
@@ -89,6 +93,7 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                         content,
                         attachment_ids=attachment_ids,
                         steerable=True,
+                        **({"wiki_mode": mode} if (mode := explicit_mode(content, data.get("wiki_mode"))) else {}),
                     )
                 except QuotaExceeded as e:
                     # Its own branch: this is "you, shortly" rather than

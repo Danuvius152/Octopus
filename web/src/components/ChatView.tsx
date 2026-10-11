@@ -82,7 +82,8 @@ interface Props {
   sendMessage: (
     sessionId: string,
     content: string,
-    attachmentIds?: string[]
+    attachmentIds?: string[],
+    wikiMode?: "read" | "maintain"
   ) => void;
   interrupt: (sessionId: string) => void;
   approveTool: (sessionId: string, toolUseId: string) => void;
@@ -113,6 +114,7 @@ export function ChatView({
   onOpenSchedules,
 }: Props) {
   const [input, setInput] = useState("");
+  const [wikiEnabled, setWikiEnabled] = useState(false);
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   // Fork dialog (session-rewind.md §6.1-6.2). `null` = closed; `{}` = the
@@ -132,6 +134,7 @@ export function ChatView({
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  useEffect(() => setWikiEnabled(false), [activeSessionId]);
   const messagesMap = useSessionStore((s) => s.messages);
   const streamingMap = useSessionStore((s) => s.streamingText);
   const messages = activeSessionId ? (messagesMap[activeSessionId] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES;
@@ -625,6 +628,7 @@ export function ChatView({
     // Block while uploads are still in flight so we don't drop attachments
     // the user just added but the server hasn't finished receiving.
     if (hasUploadInFlight) return;
+    setWikiEnabled(false);
 
     // /reset command — escape hatch for wedged sessions. Calls the
     // server's force-reset endpoint, which cancels the active task,
@@ -1028,10 +1032,12 @@ export function ChatView({
     sendMessage(
       activeSessionId,
       trimmed,
-      readyAttachmentIds.length > 0 ? readyAttachmentIds : undefined
+      readyAttachmentIds.length > 0 ? readyAttachmentIds : undefined,
+      wikiEnabled ? "read" : undefined
     );
     setInput("");
     setHistory(HISTORY_IDLE);
+    setWikiEnabled(false);
     // Drop both ready uploads (they're now associated with the message
     // we just sent) and any failed uploads (the user can retry by
     // re-attaching). Leave in-flight uploads alone — addFiles already
@@ -1799,6 +1805,10 @@ export function ChatView({
 
             <div className="composer-actions flex items-center justify-between gap-2 px-1.5 pb-1.5">
               <div className="flex items-center gap-1 text-muted-foreground">
+                <button type="button" aria-label="Use local Wiki for this message" aria-pressed={wikiEnabled}
+                  title="仅本条消息查询本地知识库；入库与整理用 /wiki maintain"
+                  className="btn inline-flex items-center justify-center h-8 px-2 rounded-lg hover:bg-accent"
+                  onClick={() => setWikiEnabled(v => !v)}>Wiki</button>
                 <button
                   type="button"
                   className="btn btn-attach inline-flex items-center justify-center size-8 rounded-lg transition-colors duration-200 hover:bg-accent hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"

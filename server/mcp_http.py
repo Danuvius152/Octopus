@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 # Namespace key -> module path. The keys match assembly's builtin set, because
 # they are what the tool names are built from.
 _BUILTIN_MODULES: dict[str, str] = {
+    "wiki": "server.mcp_servers.wiki",
     "bg": "server.mcp_servers.bg",
     "ask": "server.mcp_servers.ask",
     "ask_agent": "server.mcp_servers.ask_agent",

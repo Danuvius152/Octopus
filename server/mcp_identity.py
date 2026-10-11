@@ -43,6 +43,7 @@ class McpScope:
     # without a round trip — and so the signature covers it, which is what
     # stops a bearer being edited into somebody else's.
     user_id: str | None = None
+    wiki_task_id: str | None = None
 
 
 def _sign(payload: str) -> str:
@@ -64,15 +65,17 @@ def _sign(payload: str) -> str:
 
 
 def _payload(scope: McpScope) -> str:
-    return (
+    payload = (
         f"mcp:{scope.session_id}:{scope.installation_id or ''}:{scope.user_id or ''}"
     )
+    return payload + (f":wiki:{scope.wiki_task_id}" if scope.wiki_task_id else "")
 
 
 def mint(
     session_id: str,
     installation_id: str | None = None,
     user_id: str | None = None,
+    wiki_task_id: str | None = None,
 ) -> str:
     """The bearer for one session (and one connector installation, if any).
 
@@ -80,10 +83,11 @@ def mint(
     tell *which* session is calling without a lookup table, while the signature
     is what makes the claim trustworthy. Nothing here is stored.
     """
-    scope = McpScope(session_id, installation_id, user_id)
+    scope = McpScope(session_id, installation_id, user_id, wiki_task_id)
     return (
         f"{scope.session_id}.{scope.installation_id or ''}."
-        f"{scope.user_id or ''}.{_sign(_payload(scope))}"
+        f"{scope.user_id or ''}."
+        f"{scope.wiki_task_id + '.' if scope.wiki_task_id else ''}{_sign(_payload(scope))}"
     )
 
 
@@ -96,12 +100,14 @@ def verify(bearer: str | None) -> McpScope | None:
     if not bearer:
         return None
     parts = bearer.split(".")
-    if len(parts) != 4:
+    if len(parts) not in (4, 5):
         return None
-    session_id, installation_id, user_id, signature = parts
+    session_id, installation_id, user_id = parts[:3]
+    signature = parts[-1]
+    wiki_task_id = parts[3] if len(parts) == 5 else None
     if not session_id:
         return None
-    scope = McpScope(session_id, installation_id or None, user_id or None)
+    scope = McpScope(session_id, installation_id or None, user_id or None, wiki_task_id)
     if not hmac.compare_digest(signature, _sign(_payload(scope))):
         return None
     return scope

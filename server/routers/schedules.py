@@ -5,7 +5,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from ..auth import verify_token
 from ..deps import ScopeUser, SessionMgr
@@ -88,6 +88,22 @@ async def _broadcast_change() -> None:
         logger.debug("schedules_changed broadcast failed", exc_info=True)
 
 
+def schedule_wiki_mode(request: Request, prompt: str, selected: str | None = None):
+    """Persist verified intent separately from the agent-authored scheduled body."""
+    from ..mcp_identity import verify
+    from ..wiki.tasks import explicit_mode, tasks
+    from .applications import _presented_token
+
+    scope = verify(_presented_token(request))
+    requested = explicit_mode(prompt, selected)
+    if not scope:
+        return requested
+    if requested:
+        task = tasks.require(scope, write=requested == "maintain", publish=requested == "maintain")
+        return task.mode if requested == task.mode else requested
+    return None
+
+
 async def create_schedule_for_agent(
     agent_id: str,
     name: str,
@@ -99,6 +115,7 @@ async def create_schedule_for_agent(
     recurrence_label: str | None = None,
     origin_session_id: str | None = None,
     run_at: str | None = None,
+    wiki_mode: str | None = None,
 ) -> dict:
     """Persist a schedule owned by `agent_id` and register its job. Recurrence
     is one of `interval_seconds`, `cron` (+`timezone`), or `run_at` (ISO
@@ -126,6 +143,7 @@ async def create_schedule_for_agent(
         "created_at": now,
         "last_run_at": None,
         "run_at": run_at,
+        "wiki_mode": wiki_mode,
     }
     await _get_db().save_schedule(
         schedule_id=schedule_id,
@@ -139,6 +157,7 @@ async def create_schedule_for_agent(
         recurrence_label=label,
         origin_session_id=origin_session_id,
         run_at=run_at,
+        wiki_mode=wiki_mode,
     )
     await _get_runner().add(row)
     await _broadcast_change()
@@ -207,6 +226,7 @@ async def list_schedules(user_id: ScopeUser = None, _: str = Depends(verify_toke
 
 @router.post("", response_model=ScheduleInfo, status_code=status.HTTP_201_CREATED)
 async def create_schedule(
+    request: Request,
     session_manager: SessionMgr,
     req: CreateScheduleRequest,
     user_id: ScopeUser = None,
@@ -235,12 +255,14 @@ async def create_schedule(
         req.prompt,
         interval_seconds=req.interval_seconds,
         origin_session_id=req.session_id,
+        wiki_mode=schedule_wiki_mode(request, req.prompt, req.wiki_mode),
     )
     return to_schedule_info(row)
 
 
 @router.patch("/{schedule_id}", response_model=ScheduleInfo)
 async def update_schedule(
+    request: Request,
     schedule_id: str,
     req: UpdateScheduleRequest,
     user_id: ScopeUser = None,
@@ -254,6 +276,8 @@ async def update_schedule(
 
     try:
         updates = schedule_updates(existing, req)
+        if req.prompt is not None or "wiki_mode" in req.model_fields_set:
+            updates["wiki_mode"] = schedule_wiki_mode(request, req.prompt or existing["prompt"], req.wiki_mode)
     except ScheduleParseError as e:
         raise HTTPException(422, str(e))
     if not updates:
@@ -342,6 +366,7 @@ async def list_session_schedules(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_session_schedule(
+    request: Request,
     session_manager: SessionMgr,
     session_id: str,
     req: AgentScheduleRequest,
@@ -374,6 +399,7 @@ async def create_session_schedule(
         recurrence_label=parsed.recurrence_label,
         run_at=parsed.run_at,
         origin_session_id=session_id if req.in_session else None,
+        wiki_mode=schedule_wiki_mode(request, req.prompt, req.wiki_mode),
     )
     return to_schedule_info(row)
 
@@ -382,6 +408,7 @@ async def create_session_schedule(
     "/{session_id}/schedules/{schedule_id}", response_model=ScheduleInfo
 )
 async def update_session_schedule(
+    request: Request,
     session_manager: SessionMgr,
     session_id: str,
     schedule_id: str,
@@ -393,6 +420,8 @@ async def update_session_schedule(
     existing = await _owned_row(schedule_id, agent_id)
     try:
         updates = schedule_updates(existing, req)
+        if req.prompt is not None or "wiki_mode" in req.model_fields_set:
+            updates["wiki_mode"] = schedule_wiki_mode(request, req.prompt or existing["prompt"], req.wiki_mode)
     except ScheduleParseError as e:
         raise HTTPException(422, str(e))
     if not updates:

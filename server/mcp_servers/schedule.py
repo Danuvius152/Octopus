@@ -120,6 +120,7 @@ def create_schedule(
     run_at: str | None = None,
     timezone: str | None = None,
     in_session: bool = True,
+    wiki_mode: str | None = None,
 ) -> str:
     """Schedule a task for yourself — a prompt Octopus will send you later,
     once or on a repeat, whether or not anyone is at the keyboard.
@@ -162,6 +163,8 @@ def create_schedule(
             the user sees it where the schedule was set up. False — each fire
             gets its own throwaway session; use it for noisy background
             routines that shouldn't fill up the chat.
+        wiki_mode: Optional read/maintain intent. Can only be persisted
+            while this turn already has the corresponding explicit Wiki grant.
 
     Returns:
         The schedule's id and when it will first run — tell the user both.
@@ -180,6 +183,7 @@ def create_schedule(
         ("interval_seconds", interval_seconds),
         ("run_at", run_at),
         ("timezone", timezone),
+        ("wiki_mode", wiki_mode),
     ):
         if value not in (None, ""):
             body[key] = value

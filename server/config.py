@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     # confinement check covers. A setting for the pre-accounts install, and
     # `<users_root>/<id>/research` after (multi-tenancy.md §6).
     research_dir: str = "~/.octopus/research"
+    # Rebuildable Wiki indexes, revisions and configuration. Vault originals
+    # stay in the registered existing location, separate from this state.
+    wiki_dir: str = "~/.octopus/wiki"
     # Per-agent durable state root (docs/plans/memory.md §2). Each agent gets
     # `<agents_dir>/<agent_id>/memory/` — the canonical native, agent-written
     # markdown memory both harnesses point at (Claude via

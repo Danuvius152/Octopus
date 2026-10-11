@@ -64,6 +64,7 @@ def select_mcp_servers(
     callback_env: dict[str, str],
     session_id: str | None = None,
     user_id: str | None = None,
+    wiki_task_id: str | None = None,
 ) -> list[McpServerEntry]:
     """The built-in servers the agent enabled (None = all builtins) plus one
     entry per enabled connector installation. Order is stable: bg, ask, then
@@ -78,7 +79,7 @@ def select_mcp_servers(
     argv inspection, and it is the only remaining caller of the old shape.
     """
     if session_id:
-        return _http_entries(mcp_servers, connectors, session_id, user_id)
+        return _http_entries(mcp_servers, connectors, session_id, user_id, wiki_task_id)
     builtin_specs: dict[str, dict[str, Any]] = {
         "bg": {
             "command": sys.executable,
@@ -137,6 +138,7 @@ def _http_entries(
     connectors: list[tuple[Any, Any]],
     session_id: str,
     user_id: str | None = None,
+    wiki_task_id: str | None = None,
 ) -> list[McpServerEntry]:
     """The same namespaces, served over HTTP by this process.
 
@@ -161,13 +163,15 @@ def _http_entries(
             # The bearer carries whose call this is as well as which session
             # (multi-tenancy.md §7), so a tool body has an owner without a
             # round trip and the signature covers it.
-            credential=mint(session_id, installation_id, user_id),
+            credential=mint(session_id, installation_id, user_id, wiki_task_id),
         )
 
     names = list(_BUILTIN_MODULES) if mcp_servers is None else [
         n for n in _BUILTIN_MODULES if n in mcp_servers
     ]
     entries = [entry(n, n) for n in names]
+    if wiki_task_id:
+        entries.append(entry("wiki", "wiki"))
     for connector, installation in connectors:
         entries.append(
             entry(
@@ -240,6 +244,9 @@ def compose_system_prompt(
     memory_dir: str | None = None,
     inject_memory: bool = False,
     fork_note: str | None = None,
+    wiki_mode: str | None = None,
+    wiki_capability: bool = False,
+    wiki_task_id: str | None = None,
 ) -> str:
     """persona (if any) ahead of the harness's in-app-tools blurb, then the
     connectors blurb (if any), then the memory blurb (when the harness has no
@@ -258,4 +265,9 @@ def compose_system_prompt(
         out = f"{out}\n\n{render_memory_blurb(memory_dir)}"
     if fork_note:
         out = f"{out}\n\n{fork_note}"
+    if wiki_capability:
+        out += "\n\nLocal Wiki: access only during an explicitly enabled /wiki task. Ordinary tasks must not read the vault or store shared knowledge in private memory. Prior retrieved content may remain in resumed history."
+    if wiki_mode:
+        from ..wiki.workflow import instructions
+        out += "\n\n" + instructions(wiki_mode, wiki_task_id)
     return out

@@ -167,6 +167,8 @@ class RunConfig:
     # a tool call carries an owner without a round trip and the signature
     # covers it.
     user_id: str | None = None
+    wiki_task_id: str | None = None
+    wiki_mode: str | None = None
     system_prompt: str | None = None   # agent persona
     model: str | None = None
     mcp_servers: list[str] | None = None
@@ -248,6 +250,7 @@ class HarnessRun:
             callback_env,
             session_id=self._config.session_id,
             user_id=self._config.user_id,
+            wiki_task_id=self._config.wiki_task_id,
         )
         system_prompt = assembly.compose_system_prompt(
             self._config.system_prompt,
@@ -256,6 +259,9 @@ class HarnessRun:
             memory_dir=self._config.memory_dir,
             inject_memory=self._profile.injects_memory_prompt,
             fork_note=self._config.fork_note,
+            wiki_mode=self._config.wiki_mode,
+            wiki_capability=True,
+            wiki_task_id=self._config.wiki_task_id,
         )
         return TurnContext(
             prompt=prompt,
@@ -383,6 +389,8 @@ class HarnessRun:
         """
         parts = [
             self._profile.backend,
+            self._config.wiki_task_id or "",
+            self._config.wiki_mode or "",
             self._config.system_prompt or "",
             self._config.model or "",
             ",".join(sorted(self._config.mcp_servers or [])),

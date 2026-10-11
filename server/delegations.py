@@ -88,6 +88,7 @@ class DelegationRunState:
     target_agent_id: str
     target_agent_name: str
     request: str
+    wiki_mode: str | None = None
     created_at: str = field(
         default_factory=lambda: datetime.now(UTC).isoformat()
     )
@@ -234,6 +235,7 @@ class DelegationManager:
             target_agent_id=target["id"],
             target_agent_name=target["name"],
             request=request,
+            wiki_mode=parent._wiki_mode,
         )
         # Register BEFORE start_message: the broadcast may fire
         # synchronously from inside start_message on a fast harness
@@ -256,7 +258,7 @@ class DelegationManager:
             working_dir=parent.working_dir,
         )
         try:
-            await self.session_mgr.start_message(child.id, composed)
+            await self.session_mgr.start_message(child.id, composed, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {}))
         except Exception as exc:
             # Surface as failure on the record so the parent still
             # gets a terminal injection rather than a phantom run.
@@ -431,7 +433,8 @@ class DelegationManager:
             f"---\n{request.strip()}"
         )
         try:
-            await self.session_mgr.start_message(rec.delegation_id, composed)
+            rec.wiki_mode = parent._wiki_mode if parent else None
+            await self.session_mgr.start_message(rec.delegation_id, composed, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {}))
         except Exception as exc:
             logger.exception(
                 "Failed to start follow-up turn on child %s", rec.delegation_id
@@ -851,7 +854,7 @@ class DelegationManager:
         )
         try:
             await self.session_mgr.start_message(
-                rec.parent_session_id, prompt
+                rec.parent_session_id, prompt, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {})
             )
         except Exception:
             logger.exception(
@@ -999,7 +1002,7 @@ class DelegationManager:
             )
         try:
             await self.session_mgr.start_message(
-                rec.parent_session_id, prompt
+                rec.parent_session_id, prompt, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {})
             )
         except Exception:
             # The parent may have been deleted while the child was

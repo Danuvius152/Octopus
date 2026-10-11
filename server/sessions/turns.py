@@ -307,6 +307,7 @@ class TurnsMixin(SessionManagerBase):
         attachment_ids: list[str] | None = None,
         *,
         steerable: bool = False,
+        wiki_mode: str | None = None,
     ) -> None:
         """Kick off a message, or queue it if the session is already running.
 
@@ -335,7 +336,7 @@ class TurnsMixin(SessionManagerBase):
 
         self._check_turn_quota(session)
 
-        queued = QueuedPrompt(prompt=prompt, attachment_ids=list(attachment_ids or []))
+        queued = QueuedPrompt(prompt=prompt, attachment_ids=list(attachment_ids or []), wiki_mode=wiki_mode)
 
         # Busy path. First chance: steer — hand the message to the turn that's
         # already running instead of queueing behind it (inline-steering.md §8).
@@ -474,7 +475,7 @@ class TurnsMixin(SessionManagerBase):
         self, session_id: str, queued: QueuedPrompt
     ) -> None:
         async for _event in self.send_message(
-            session_id, queued.prompt, queued.attachment_ids
+            session_id, queued.prompt, queued.attachment_ids, **({"wiki_mode": queued.wiki_mode} if queued.wiki_mode else {})
         ):
             pass  # send_message persists + broadcasts each event
 
@@ -483,6 +484,8 @@ class TurnsMixin(SessionManagerBase):
         session_id: str,
         prompt: str,
         attachment_ids: list[str] | None = None,
+        *,
+        wiki_mode: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         session = self.sessions.get(session_id)
         if session is None:
@@ -493,7 +496,10 @@ class TurnsMixin(SessionManagerBase):
         except TimeoutError:
             raise ValueError(f"Session {session_id} is busy")
 
+        from ..wiki.tasks import tasks as wiki_tasks
         try:
+            session._wiki_mode = wiki_mode
+            session._wiki_task_id = wiki_tasks.open(session, wiki_mode, prompt) if wiki_mode else None
             # Resolve attachment ids → on-disk paths so the prompt can
             # cite absolute paths the agent's `Read` tool will open.
             # Missing files are dropped (with a logged warning) rather
@@ -563,8 +569,13 @@ class TurnsMixin(SessionManagerBase):
             # Attachments wrap the raw prompt; the `/showme` viewer flow now
             # resolves on the client + dedicated resolution endpoint instead of
             # being rewritten into a backend command.
+            wiki_prompt = prompt
+            if wiki_mode and prompt.strip().split(maxsplit=1)[0:1] == ["/wiki"]:
+                pieces = prompt.strip().split(maxsplit=2)
+                skip = 2 if len(pieces) > 1 and pieces[1] == "maintain" else 1
+                wiki_prompt = prompt.strip().split(maxsplit=skip)[skip] if len(prompt.strip().split(maxsplit=skip)) > skip else "Explain the enabled Wiki task and ask what the user wants to do."
             augmented_prompt = _augment_prompt_with_attachments(
-                prompt, attachment_paths
+                wiki_prompt, attachment_paths
             )
 
             # Fork first-turn replay (HISTORY_REPLAY backends, e.g. Codex —
@@ -625,6 +636,9 @@ class TurnsMixin(SessionManagerBase):
                     {"type": "status", "session_id": session_id, "status": "idle"}
                 )
         finally:
+            wiki_tasks.close(session._wiki_task_id)
+            session._wiki_task_id = None
+            session._wiki_mode = None
             session._lock.release()
 
     async def interrupt(self, session_id: str) -> bool:
@@ -1447,7 +1461,7 @@ class TurnsMixin(SessionManagerBase):
         (the turn is finishing), when the backlog is full, or when the message
         carries attachments, which the frame channel doesn't take.
         """
-        if queued.attachment_ids:
+        if queued.attachment_ids or queued.wiki_mode or session._wiki_mode:
             return False
         async with session._steer_lock:
             if not session._steer_open:
@@ -1577,6 +1591,8 @@ class TurnsMixin(SessionManagerBase):
         return RunConfig(
             session_id=session.id,
             user_id=session.user_id,
+            wiki_task_id=session._wiki_task_id,
+            wiki_mode=session._wiki_mode,
             system_prompt=system_prompt,
             model=model,
             mcp_servers=mcp_servers,

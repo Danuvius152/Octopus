@@ -156,6 +156,7 @@ class QueuedPrompt:
 
     prompt: str
     attachment_ids: list[str]
+    wiki_mode: str | None = None
 
 
 @dataclass
@@ -272,6 +273,8 @@ class Session:
     _pending_question_events: dict[str, asyncio.Event] = field(default_factory=dict, repr=False)
     _pending_question_answers: dict[str, str] = field(default_factory=dict, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    _wiki_task_id: str | None = field(default=None, repr=False)
+    _wiki_mode: str | None = field(default=None, repr=False)
     _pending_queue: list[QueuedPrompt] = field(default_factory=list, repr=False)
     # Steers: messages typed while THIS turn is running, to be handed to the
     # CLI mid-turn rather than queued behind the turn (inline-steering.md §8).

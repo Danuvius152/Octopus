@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from ..agent_manager import AgentError, AgentManager
 from ..auth import verify_token
@@ -269,11 +269,16 @@ async def list_agent_schedules(agent_id: str, user_id: ScopeUser = None, _: str 
     status_code=status.HTTP_201_CREATED,
 )
 async def create_agent_schedule(
+    request: Request,
     agent_id: str, req: CreateScheduleRequest, user_id: ScopeUser = None, _: str = Depends(verify_token)
 ):
     if await _get_manager().get_agent(agent_id, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
-    from .schedules import create_schedule_for_agent, to_schedule_info
+    from .schedules import (
+        create_schedule_for_agent,
+        schedule_wiki_mode,
+        to_schedule_info,
+    )
 
     row = await create_schedule_for_agent(
         agent_id,
@@ -281,6 +286,7 @@ async def create_agent_schedule(
         req.prompt,
         interval_seconds=req.interval_seconds,
         origin_session_id=req.session_id,
+        wiki_mode=schedule_wiki_mode(request, req.prompt, req.wiki_mode),
     )
     return to_schedule_info(row)
 
@@ -291,6 +297,7 @@ async def create_agent_schedule(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_agent_schedule_from_text(
+    request: Request,
     session_manager: SessionMgr,
     agent_id: str, req: ScheduleFromTextRequest, user_id: ScopeUser = None, _: str = Depends(verify_token)
 ):
@@ -303,7 +310,11 @@ async def create_agent_schedule_from_text(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
     from ..harness import get_harness
     from ..schedule_ai import ScheduleParseError, parse_schedule_text
-    from .schedules import create_schedule_for_agent, to_schedule_info
+    from .schedules import (
+        create_schedule_for_agent,
+        schedule_wiki_mode,
+        to_schedule_info,
+    )
 
     # The AI parse runs on the agent's own harness (claude-code or codex —
     # both support one-shot, D2), with its own model + credential resolved in
@@ -336,5 +347,6 @@ async def create_agent_schedule_from_text(
         recurrence_label=parsed.recurrence_label,
         origin_session_id=req.session_id,
         run_at=parsed.run_at,
+        wiki_mode=schedule_wiki_mode(request, req.text, req.wiki_mode),
     )
     return to_schedule_info(row)

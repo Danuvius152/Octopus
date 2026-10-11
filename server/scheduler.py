@@ -134,6 +134,7 @@ class ScheduleRunner:
         now = datetime.now(UTC).isoformat()
         row = await self._schedule_row(schedule_id)
         body = self._compose_prompt(row, prompt)
+        wiki_kwargs = {"wiki_mode": mode} if (mode := (row or {}).get("wiki_mode")) else {}
 
         try:
             if origin_session_id and self._session_mgr.get_session(origin_session_id):
@@ -147,7 +148,7 @@ class ScheduleRunner:
                 try:
                     # Queue-aware: appends to the live session, waiting its turn if
                     # the user is mid-conversation rather than failing on a held lock.
-                    await self._session_mgr.start_message(origin_session_id, body)
+                    await self._session_mgr.start_message(origin_session_id, body, **wiki_kwargs)
                     await self._db.update_schedule(
                         schedule_id,
                         last_run_at=now,
@@ -187,7 +188,7 @@ class ScheduleRunner:
                 await self._db.update_schedule(
                     schedule_id, last_run_session_id=session.id
                 )
-                async for _event in self._session_mgr.send_message(session.id, body):
+                async for _event in self._session_mgr.send_message(session.id, body, **wiki_kwargs):
                     pass
                 await self._db.update_schedule(schedule_id, last_run_at=now)
             except ValueError as e:
