@@ -206,15 +206,14 @@ def organize(
 ) -> dict:
     """Curator adapts an assigned article in place; pass frontmatter_patch for OKF adaptation.
 
-    Read every chunk of the current note first. Supply a nonempty key_note
-    if opening points need supplementing, even if a summary heading exists.
-    null preserves trusted existing Weber points; set reuse_existing_summary
-    only after judging the user's existing points usable. aliases are a few
+    Read every chunk of the current note first. For OKF adaptation, supply
+    key_note only when Key note is missing. null preserves existing points;
+    set reuse_existing_summary only after judging them usable. Use revise
+    for a specific correction or addition to existing points. aliases are a few
     reliable names; native frontmatter stays intact. relations have doc,
     revision, location (L1-L3 or an actual heading), explanation; read their
     cited current passages first. New links use unique vault-path wikilinks.
-    Existing summaries are preserved; use revise for a specific correction. TXT/HTML
-    originals stay intact with a sibling Markdown reading note.
+    TXT/HTML originals stay intact with a sibling Markdown reading note.
     """
     return call(
         "POST",
