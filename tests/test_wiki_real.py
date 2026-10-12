@@ -75,7 +75,8 @@ async def test_codex_explicit_wiki_and_native_helper_then_ordinary_task(
         await db.close()
 
 
-async def test_codex_weber_maintains_only_new_material(tmp_path, monkeypatch):
+@pytest.mark.parametrize("request_supplement", [False, True])
+async def test_codex_weber_maintains_only_new_material(tmp_path, monkeypatch, request_supplement):
     from server.agent_manager import AgentManager
     from server.wiki.jobs import WikiJobs, worker
     from server.wiki.workflow import guide
@@ -107,7 +108,8 @@ async def test_codex_weber_maintains_only_new_material(tmp_path, monkeypatch):
         job = jobs.maintain(
             "real-new-note",
             material,
-            "只整理这篇新增笔记。保留条件和判断强度；查找已有判断的关联，但不可改旧文。",
+            "只整理这篇新增笔记。保留条件和判断强度；查找已有判断的关联，但不可改旧文。"
+            + ("用户明确要求在开头补充 Weber 的 Key note，总结前提与未验证的限制；原文仍逐字保留。" if request_supplement else ""),
             [],
             "Library/新判断.md",
             [],
@@ -121,7 +123,14 @@ async def test_codex_weber_maintains_only_new_material(tmp_path, monkeypatch):
         assert (vault / "Library/旧观点.md").read_text() == old
         current = jobs.store.read("Library/新判断.md")
         assert current["metadata"]["author"] == "Weber 整理"
-        assert "## Key note" in current["content"]
+        # This short original already contains usable opening points. The
+        # spec permits explicit content-based reuse instead of a duplicate heading.
+        decision = current["metadata"]["opening_points_decision"]
+        assert decision in {"reuse", "supplement"}, current
+        if request_supplement:
+            assert decision == "supplement", current
+        if decision == "supplement":
+            assert "## Key note" in current["content"], current
         import json
 
         from server.wiki.sections import original_text

@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from . import agent_memory
+from .config import settings
 from .database import Database
 
 
@@ -55,9 +56,10 @@ class AgentManager:
         avatar: str | None = None,
         system_prompt: str = "",
         model: str | None = None,
+        reasoning_effort: str | None = None,
         credential_id: str | None = None,
         user_id: str | None = None,
-        backend: str = "claude-code",
+        backend: str | None = None,
         mcp_servers: list[str] | None = None,
         tool_allow: str = "",
         tool_deny: str = "",
@@ -79,8 +81,9 @@ class AgentManager:
             avatar=avatar,
             system_prompt=system_prompt,
             model=model,
+            reasoning_effort=reasoning_effort,
             credential_id=credential_id,
-            backend=backend,
+            backend=backend or settings.default_backend,
             mcp_servers=mcp_servers,
             tool_allow=tool_allow,
             tool_deny=tool_deny,

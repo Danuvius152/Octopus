@@ -7,6 +7,7 @@ rewrite + fallback + cleanup — for both backends. Real CLI copy->resume->recal
 lives in test_fork_native_copy_real.py (gated)."""
 
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -148,6 +149,11 @@ async def test_codex_fork_copy_rewrites_session_meta(tmp_path):
 
     copied = cx._find_rollout(home / "sessions", "rid-2")
     assert copied is not None
+    timestamp = copied.name.removeprefix("rollout-").removesuffix("-rid-2.jsonl")
+    created = datetime.strptime(timestamp, "%Y-%m-%dT%H-%M-%S")
+    assert copied.parent.relative_to(home / "sessions").as_posix() == (
+        created.strftime("%Y/%m/%d")
+    )
     meta = json.loads(copied.read_text().splitlines()[0])
     assert meta["payload"]["id"] == "rid-2"
 
@@ -219,3 +225,29 @@ async def test_codex_fork_cleanup_removes_copy(tmp_path):
     assert cx._find_rollout(home / "sessions", "rid-2") is None
     # The ORIGINAL rollout is untouched.
     assert cx._find_rollout(home / "sessions", "rid-1") is not None
+
+
+@pytest.mark.asyncio
+async def test_codex_fork_cleanup_removes_unreadable_and_legacy_copies(
+    tmp_path, monkeypatch
+):
+    home = tmp_path / "codexhome"
+    original = _write_codex_rollout(home, "rid-1")
+    cred = HarnessCredential(backend="codex", auth_type="oauth", home_dir=str(home))
+    await cx._fork_copy(
+        parent_working_dir="/x", parent_resume_id="rid-1",
+        parent_credential=cred, dest_working_dir="/y", new_resume_id="rid-2",
+    )
+    copied = cx._find_rollout(home / "sessions", "rid-2")
+    assert copied is not None
+    legacy = original.parent / "rollout-fork-rid-2.jsonl"
+    legacy.write_text('{"type":"session_meta","payload":{"id":"rid-2"}}\n')
+
+    def unreadable(self, *args, **kwargs):
+        raise PermissionError("cannot read transcript")
+
+    monkeypatch.setattr(Path, "open", unreadable)
+    await cx._fork_cleanup("/y", "rid-2", "fork1", credential=cred)
+    assert not copied.exists()
+    assert not legacy.exists()
+    assert original.exists()

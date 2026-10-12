@@ -25,11 +25,14 @@ def test_settings_defaults():
         assert s.host == "0.0.0.0"
         assert s.port == 8000
         assert s.default_working_dir == "."
+        assert s.default_backend == "claude-code"
         assert "http://localhost:5173" in s.cors_origins
         # Paths too: these are what the deployed install runs on when its own
         # `.env` says nothing, so a change to them is a change to production.
         assert s.db_path == "octopus.db"
         assert s.agents_dir == "~/.octopus/agents"
+        assert s.turn_max_seconds == 0
+        assert s.turn_idle_max_retries == 2
     finally:
         os.environ.update(cleared)
 
@@ -38,9 +41,23 @@ def test_settings_from_env(monkeypatch):
     """Config reads from environment variables."""
     monkeypatch.setenv("OCTOPUS_AUTH_TOKEN", "my-secret")
     monkeypatch.setenv("OCTOPUS_PORT", "9000")
+    monkeypatch.setenv("OCTOPUS_DEFAULT_BACKEND", "codex")
+    monkeypatch.setenv("OCTOPUS_TURN_IDLE_MAX_RETRIES", "0")
 
     from server.config import Settings
 
     s = Settings()
     assert s.auth_token == "my-secret"
     assert s.port == 9000
+    assert s.default_backend == "codex"
+    assert s.turn_idle_max_retries == 0
+
+
+def test_default_backend_rejects_an_unknown_harness():
+    import pytest
+    from pydantic import ValidationError
+
+    from server.config import Settings
+
+    with pytest.raises(ValidationError, match="default_backend"):
+        Settings(_env_file=None, default_backend="unavailable")

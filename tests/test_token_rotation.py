@@ -275,7 +275,6 @@ async def test_the_route_refuses_a_weak_token_without_touching_anything(
     assert settings.auth_token == OLD
 
 
-# `/api/auth/identity` moved with accounts: it answers the signed-in account's
-# username rather than `OCTOPUS_USER_LABEL`, and needs a session bearer rather
-# than the global token. Its tests live with the other account routes, in
-# tests/test_auth_routes.py.
+# `/api/auth/identity` answers `OCTOPUS_USER_LABEL` before accounts exist and
+# the signed-in account's username afterward. Its tests live with the other
+# account routes, in tests/test_auth_routes.py.

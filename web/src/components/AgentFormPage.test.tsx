@@ -5,10 +5,12 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { AgentFormPage } from "./AgentFormPage";
-import { useSessionStore, type Agent, type SessionInfo } from "../stores/sessionStore";
+import {
+  useSessionStore, type Agent, type BackendKind, type SessionInfo,
+} from "../stores/sessionStore";
 
 function agent(o: Partial<Agent> = {}): Agent {
   return {
@@ -39,7 +41,8 @@ let fetchMock: ReturnType<typeof vi.fn>;
 function mount(
   editingAgentId: string | null = null,
   agents: Agent[] = [agent()],
-  pageTab: "all" | "form" = "form"
+  pageTab: "all" | "form" = "form",
+  defaultBackend: BackendKind = "claude-code",
 ) {
   useSessionStore.setState({
     token: "tok",
@@ -50,6 +53,7 @@ function mount(
     credentials: [],
     connectorInstallations: [],
     availableBackends: ["claude-code", "codex"],
+    defaultBackend,
     mainView: "agent-form",
   });
   return render(<AgentFormPage onToggleSidebar={() => {}} />);
@@ -68,6 +72,59 @@ afterEach(() => {
 });
 
 describe("AgentFormPage", () => {
+  it("saves Codex model and reasoning defaults", async () => {
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if (String(url).includes("/backends/codex/models")) return json({
+        default_model: "model-a", default_reasoning_effort: "max",
+        models: [{ id: "model-a", name: "Model A", reasoning_efforts: ["low", "high", "max"] }],
+        reasoning_efforts: ["low", "high", "max"],
+      });
+      return init?.method === "POST" ? json(agent({ name: "Reasoner", backend: "codex" }), 201) : json([]);
+    });
+    mount(null, [], "form", "codex");
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Reasoner" } });
+    await waitFor(() => expect(screen.getByLabelText("Reasoning effort")).toBeEnabled());
+    fireEvent.change(screen.getByLabelText("Model"), { target: { value: "model-a" } });
+    fireEvent.change(screen.getByLabelText("Reasoning effort"), { target: { value: "high" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create Agent" }));
+    await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));
+    const request = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(JSON.parse(String(request?.[1].body))).toMatchObject({
+      model: "model-a", reasoning_effort: "high", backend: "codex",
+    });
+  });
+
+  it("creates an agent with the install's configured Codex default", async () => {
+    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) =>
+      init?.method === "POST"
+        ? json(agent({ id: "ag2", name: "Codex default", backend: "codex", is_system: false }), 201)
+        : json([])
+    );
+    mount(null, [agent({ backend: "codex" })], "form", "codex");
+    expect(screen.getByRole("radio", { name: /Codex/ }).getAttribute("aria-checked")).toBe("true");
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Codex default" } });
+    fireEvent.click(screen.getByRole("button", { name: "Create Agent" }));
+
+    await waitFor(() => expect(useSessionStore.getState().mainView).toBe("chat"));
+    const call = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
+    expect(JSON.parse(call![1].body)).toMatchObject({ backend: "codex" });
+  });
+
+  it("applies a late default without clearing the draft's name", () => {
+    mount();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "My agent" } });
+    act(() => useSessionStore.setState({ defaultBackend: "codex" }));
+    expect(screen.getByRole("radio", { name: /Codex/ }).getAttribute("aria-checked")).toBe("true");
+    expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("My agent");
+  });
+
+  it("preserves an explicit backend choice when the install default arrives", () => {
+    mount();
+    fireEvent.click(screen.getByRole("radio", { name: /Claude/ }));
+    act(() => useSessionStore.setState({ defaultBackend: "codex" }));
+    expect(screen.getByRole("radio", { name: /Claude/ }).getAttribute("aria-checked")).toBe("true");
+  });
+
   it("POSTs a new agent and returns to chat", async () => {
     fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) =>
       init?.method === "POST"
@@ -95,7 +152,8 @@ describe("AgentFormPage", () => {
           })
         : new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
     );
-    mount("ag9", [existing]);
+    mount("ag9", [existing], "form", "codex");
+    expect(screen.getByRole("radio", { name: /Claude/ }).getAttribute("aria-checked")).toBe("true");
     expect((screen.getByLabelText("Name") as HTMLInputElement).value).toBe("Vera");
     expect((screen.getByLabelText(/System prompt/) as HTMLTextAreaElement).value).toBe(
       "review code"

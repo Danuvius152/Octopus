@@ -21,6 +21,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from ..auth import verify_token
 from ..bootstrap import BootstrapError, bootstrap_first_account
+from ..config import settings
 from ..deps import (
     AdminUser,
     CurrentUser,
@@ -228,13 +229,27 @@ async def change_password(
 
 
 @router.get("/identity", response_model=IdentityResponse)
-async def identity(user: CurrentUser) -> IdentityResponse:
+async def identity(
+    users: UserMgr,
+    user_id: ScopeUser = None,
+    _: str = Depends(verify_token),
+) -> IdentityResponse:
     """Who you are, for the sidebar's account row.
 
-    It used to answer `OCTOPUS_USER_LABEL` — a single-user install's idea of a
-    name. Now it answers the account's own username, which is the same field
-    doing the same job for a site with several people on it.
+    Before the first account, the install token identifies its operator by
+    `OCTOPUS_USER_LABEL`. After it, the authenticated scope names the account
+    whose username belongs in the sidebar.
     """
+    if user_id is None:
+        from .. import deps
+
+        if await deps.accounts_exist():
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
+        return IdentityResponse(label=settings.user_label)
+
+    user = await users.db.get_user(user_id)
+    if user is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
     return IdentityResponse(
         label=user["username"], user_id=user["id"], is_admin=user["is_admin"]
     )

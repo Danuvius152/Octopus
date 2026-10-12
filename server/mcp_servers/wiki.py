@@ -26,9 +26,9 @@ class TaskWiki(FastMCP):
             "jobs",
         }
         if task.mode == "maintain":
-            if task.job_id:
+            if tasks.is_curator_worker(task):
                 names |= {"organize", "publish", "blocks", "restructure"}
-            else:
+            elif not task.job_id:
                 names.add("maintain")
         return [tool for tool in await super().list_tools() if tool.name in names]
 
@@ -58,8 +58,18 @@ def search(
     offset: int = 0,
     kind: str | None = None,
     include_assets: bool = False,
+    directory: str | None = None,
 ) -> dict:
-    """Find local sources; continue next_offset. Only during an explicit wiki task."""
+    """Find sources in the local Chinese/English chapter index; follow next_offset.
+
+    Each document appears once. section.start/end locate evidence for read();
+    sections includes extra matched chapters for terms discussed separately.
+    pass expected_revision to check freshness. Snippets are navigation only.
+    match_mode=lexical_partial means some query words were absent; index_status
+    and index_errors distinguish extraction failure from missing knowledge.
+    Use directory to narrow an explicitly identified folder; it is a literal
+    vault-relative prefix. Preserve named objects when adjusting query wording.
+    """
     return call(
         "GET", "search", params={k: v for k, v in locals().items() if v is not None}
     )
@@ -160,13 +170,19 @@ def organize(
     tags: list[str] | None = None,
     relations: list[dict] | None = None,
     sources: list[dict] | None = None,
+    aliases: list[str] | None = None,
+    reuse_existing_summary: bool = False,
 ) -> dict:
     """Curator supplements an assigned note, preserving user text and frontmatter.
 
     Read every chunk of the current note first. Supply a nonempty key_note
-    if there are no opening points; null only reuses existing points.
-    key_note is new prose beneath 'Key note'; use null to reuse existing points.
-    relations have doc, revision, location, explanation. Refresh replaces only
+    if opening points need supplementing, even if a summary heading exists.
+    null preserves trusted existing Weber points; set reuse_existing_summary
+    only after judging the user's existing points usable. aliases are a few
+    reliable names; native frontmatter stays intact. relations have doc,
+    revision, location (L1-L3 or an actual heading), explanation; read their
+    cited current passages first. New links use unique vault-path wikilinks.
+    Refresh replaces only
     untouched Weber sections; user-edited additions require review. TXT/HTML
     originals stay intact with a sibling Markdown reading note.
     """
@@ -181,6 +197,8 @@ def organize(
             "tags": tags or [],
             "relations": relations or [],
             "sources": sources or [],
+            "aliases": aliases,
+            "reuse_existing_summary": reuse_existing_summary,
         },
     )
 

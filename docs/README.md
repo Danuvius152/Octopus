@@ -5,11 +5,20 @@ system works today; the rest is design history and reference.
 
 ## Current
 
+- **[本地 Wiki 开发交接](plans/local-shared-wiki-implementation-handoff.md)** — W01–W07 已做与未做、实际上线状态和验收证据；包括 Weber 待补验、真实快照尚未退役和旧库尚未批量整理。
+- **[user-guide.md](user-guide.md)** — practical instructions for this local
+  WSL + Codex installation: startup, agents, and phone access with the
+  project's Cloudflare Tunnel integration.
 - **[architecture.md](architecture.md)** — the current system design: harness
   layer, agents, sessions, backends, MCP tools, connectors, the
   WebSocket protocol, the data model, and key decisions. The doc to read first.
 - **[connectors-setup.md](connectors-setup.md)** — user how-to for setting up
   GitHub / Gmail / custom OAuth connectors entirely from the browser.
+- **[agent-prompts.md](agent-prompts.md)** — copyable One-line role and System
+  prompt configurations for Octo, Vera, and Weber on the Codex harness.
+- **[pika-toolkit-analysis.md](pika-toolkit-analysis.md)** — design analysis of
+  the local Pika skill suite and practical uses for AI study and Weber's
+  Obsidian knowledge workflow.
 - **[backup-and-migrate.md](backup-and-migrate.md)** — what state a deployment
   has and where it lives. State is spread across several places, and the two
   that matter most (the database, and the engine's own transcripts) are not
@@ -31,12 +40,10 @@ fails if it has drifted. The hand-written version of this list had reached 13 of
 | Plan | Status | What |
 |---|---|---|
 | [Multi-tenancy, second pass: Connectors, Schedules, Harness](plans/multi-tenancy-gaps.md) | in-progress | Proposal: close the gaps a read-only review found where accounts can reach each other's work through the Manage surfaces, and make each class of gap structurally impossible. |
-| [Octopus 本地共享 Wiki：任务拆分提案](plans/local-shared-wiki-ticket-proposal.md) | in-progress | 框架与 Weber 已部署验收；首次旧库批量整理等待 Q35 样稿确认。 |
-| [Octopus 本地共享 Wiki：规格评审稿](plans/local-shared-wiki-spec.md) | in-progress | 框架与 Weber 已部署验收；首次旧库批量整理等待 Q35 样稿确认。 |
-| [本地共享 Wiki：实施交接](plans/local-shared-wiki-implementation-handoff.md) | in-progress | 框架与 Weber 已部署验收；首次旧库批量整理等待 Q35 样稿确认。 |
-| [本地共享 Wiki：实施审查](plans/local-shared-wiki-review.md) | in-progress | 独立审查及复核发现的六项已修复并通过限定复核；旧库批量整理等待 Q35 样稿确认。 |
-| [本地共享 Wiki：补充访谈记录](plans/local-shared-wiki-grill-round2.md) | in-progress | 框架与 Weber 已部署验收；首次旧库批量整理等待 Q35 样稿确认。 |
-| [本地共享 Wiki：轻量模板与 prompt 审阅稿](plans/local-shared-wiki-prompt-proposal.md) | in-progress | 框架与 Weber 已部署验收；首次旧库批量整理等待 Q35 样稿确认。 |
+| [Octopus 本地共享 Wiki：已确认规格](plans/local-shared-wiki-spec.md) | in-progress | Q53 规格保持；W01–W05 已实现并部署，W06 补验、真实迁移与 W07 尚未完成。 |
+| [Octopus 本地共享 Wiki：开发任务与验收](plans/local-shared-wiki-ticket-proposal.md) | in-progress | W01–W05 已实现并部署；W06 实际 Weber 补验、真实快照退役与 W07 旧库整理尚未完成。 |
+| [本地共享 Wiki：Weber 与任务 prompt 设计](plans/local-shared-wiki-prompt-proposal.md) | in-progress | 任务指南分层已上线，Weber persona 保留；r6 职业字段与零基全文分页修正待实机补验/复核。 |
+| [本地共享 Wiki：实施交接](plans/local-shared-wiki-implementation-handoff.md) | in-progress | W01–W05 已实现并部署；W06 尚有实际 Weber 补验，真实快照退役与 W07 旧库整理未执行。 |
 | [/fork — duplicate a session onto a copied working directory](plans/session-fork.md) | shipped | Duplicate a session onto an independent full copy of its working directory. |
 | [Agent Collaboration — Tech Plan (agent-to-agent delegation)](plans/agent-collaboration.md) | shipped | Agent-to-agent delegation — the `mcp__ask_agent__*` tools, one hop, replies injected as follow-up turns. Reverses the "no A2A" carve-out in `agent-refactor.md` §40-41. |
 | [Agent Memory — Tech Plan (native, agent-written, per-agent)](plans/memory.md) | shipped | Per-agent native memory: one markdown directory per agent, shared by both harnesses. |
@@ -49,11 +56,12 @@ fails if it has drifted. The hand-written version of this list had reached 13 of
 | [Harness credential re-authorization (reactive 401 detection)](plans/harness-credential-reauth.md) | shipped | Reactive 401 detection: flag a credential that died mid-turn as `needs_reconnect` and offer re-authorization. |
 | [Harness transient-error retry](plans/harness-transient-retry.md) | shipped | Bounded retry on transient provider failures, kept distinct from auth failures and quota errors. |
 | [Inline steering — and the turn latency that pays for it](plans/inline-steering.md) | shipped | A message typed mid-turn reaches the agent already running, and the held CLI process that makes a turn cheap to start. |
+| [Model and reasoning settings](plans/model-reasoning.md) | shipped | Independent agent and session reasoning controls with runtime model discovery and preserved conversation history. |
 | [Multi-tenancy (`user-1.0`)](plans/multi-tenancy.md) | shipped | one site, many users: the label becomes a username, the token becomes a password, and every user gets their own directory, rows and keys. |
 | [Native sub-agents, surfaced](plans/native-subagents.md) | shipped | The CLIs' own sub-agents surfaced as one event and one card — including the ones that finish after the turn that started them. |
 | [Octopus on a phone](plans/mobile.md) | shipped | Octopus on a phone — the drawer that puts itself away, 16px fields, touch targets, and safe-area insets. |
 | [Octopus-native deep research](plans/native-deep-research.md) | shipped | Octopus-orchestrated deep research: scoped fan-out of web-search sub-turns, adversarially verified, then synthesized. |
-| [Polish pass, September 2026](plans/polish-2026-09.md) | shipped | The September 2026 polish pass: size debt, migration safety, the MCP sidecar footprint, gates, docs, and monitoring. All eleven items in §10 landed; what changed, and the four defects the pass found, is in [`../2026-09-25-polish-pass.md`](../2026-09-25-polish-pass.md). |
+| [Polish pass, September 2026](plans/polish-2026-09.md) | shipped | The September 2026 polish pass: size debt, migration safety, the MCP sidecar footprint, gates, docs, and monitoring. All eleven items in §10 landed; the changes and four defects are recorded in docs/2026-09-25-polish-pass.md. |
 | [Rotating the access token without breaking anything](plans/token-rotation.md) | shipped | Rotating `OCTOPUS_AUTH_TOKEN`: re-key every stored secret, rewrite the env files, and keep open tabs working. |
 | [Scheduled runs: what a fire is, and what stops it stacking](plans/scheduled-runs.md) | shipped | What a scheduled fire is: the overlap guard, the `[scheduled:…]` marker, and the link from "last run" to the run. |
 | [Session Tree-Rewind — Tech Plan (`/rewind`)](plans/session-rewind.md) | shipped | Branch a conversation at any prior user message, with an optional git revert of the working tree. |
@@ -62,7 +70,9 @@ fails if it has drifted. The hand-written version of this list had reached 13 of
 | [Tech Plan: Introduce first-class Agents into Octopus](plans/agent-refactor.md) | shipped | First-class Agents: the durable definition that owns sessions, schedules and memory. |
 | [The schedule an agent sets for itself](plans/schedule-tool.md) | shipped | `mcp__schedule__*` over session-scoped routes: an agent sets, lists, re-times and pauses its own schedules. |
 | [Three small affordances: message time, composer history, `/model`](plans/composer-and-time.md) | shipped | hover a message for its time, ArrowUp for what you sent, `/model` to switch model for one session. |
-| [Turn safety (Layer 1): timeout + process-group reaping](plans/turn-safety.md) | shipped | The per-turn watchdog (idle + overall) and process-group reaping, so a wedged tool cannot hang a session forever. |
+| [Turn safety (Layer 1): timeout + process-group reaping](plans/turn-safety.md) | shipped | Bounded automatic recovery after idle stops, an optional whole-turn duration cap, and process-group reaping. |
+| [本地共享 Wiki：实施审查](plans/local-shared-wiki-review.md) | shipped | a85582f 基础版六项问题已修复并限定复核；不代表 Q53 后优化已审查。 |
+| [本地共享 Wiki：补充访谈记录](plans/local-shared-wiki-grill-round2.md) | superseded by local-shared-wiki-spec.md | 保留 Q17–Q36 的历史访谈；最终规则已在 Q53 收束，样稿已接受。 |
 
 <!-- END plans-index -->
 

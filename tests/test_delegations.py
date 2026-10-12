@@ -1025,6 +1025,95 @@ async def test_error_injection_on_error_event(dm, mgr, db, monkeypatch):
     assert len(injected) == 1
 
 
+@pytest.mark.parametrize("event", [
+    {"type": "error", "code": "turn_timeout_retry", "retrying": True},
+    {"type": "error", "code": "transient_retry", "retrying": True},
+    {"type": "error", "code": "stale_session", "retrying": True},
+    {"type": "result", "is_error": True, "retrying": True},
+])
+async def test_recovery_events_do_not_terminate_a_delegation(dm, mgr, db, monkeypatch, event):
+    injected = []
+
+    async def capture(sid, prompt, attachment_ids=None):
+        injected.append((sid, prompt))
+
+    monkeypatch.setattr(mgr, "start_message", capture)
+    octo = await db.get_system_agent()
+    await _make_agent(db, "Vera")
+    parent = await _make_session(mgr, octo["id"])
+    rec = await dm.start_delegation(parent_session_id=parent.id, agent_name="Vera", request="r")
+    injected.clear()
+
+    await dm._on_broadcast({**event, "session_id": rec.delegation_id})
+    assert rec.state == "running"
+    assert rec.delegation_id in mgr.sessions
+    assert injected == []
+    await dm._on_broadcast({
+        "type": "assistant_text", "session_id": rec.delegation_id, "content": "recovered reply"
+    })
+    await dm._on_broadcast({"type": "result", "session_id": rec.delegation_id, "is_error": False})
+    assert rec.state == "completed"
+    assert len(injected) == 1
+    assert "recovered reply" in injected[0][1]
+
+
+@pytest.mark.parametrize("failure", ["idle", "transient"])
+async def test_delegation_waits_for_real_turn_recovery(dm, mgr, db, monkeypatch, failure):
+    import asyncio
+
+    from server.config import settings as cfg
+    from server.harness import HarnessEvent
+    from tests.fake_run import FakeRunBase
+
+    injected = []
+
+    async def capture(sid, prompt, attachment_ids=None):
+        injected.append((sid, prompt))
+
+    monkeypatch.setattr(mgr, "start_message", capture)
+    monkeypatch.setattr(cfg, "turn_idle_timeout_seconds", 0.1)
+    monkeypatch.setattr(cfg, "turn_max_seconds", 0)
+    monkeypatch.setattr(type(mgr), "_TRANSIENT_RETRY_BASE_DELAY", 0.0)
+    octo = await db.get_system_agent()
+    await _make_agent(db, "Vera")
+    parent = await _make_session(mgr, octo["id"])
+    rec = await dm.start_delegation(parent_session_id=parent.id, agent_name="Vera", request="review")
+    child = mgr.sessions[rec.delegation_id]
+    injected.clear()
+
+    class RecoveryRun(FakeRunBase):
+        def __init__(self, recovering=False):
+            self.recovering = recovering
+            self.unblocked = asyncio.Event()
+
+        async def start(self, *args, **kwargs):
+            assert rec.state == "running"
+            assert child.id in mgr.sessions
+
+        async def stop(self):
+            self.unblocked.set()
+
+        async def stream(self):
+            yield HarnessEvent(type="session_started", session_id="saved-thread")
+            if self.recovering:
+                yield HarnessEvent(type="text", content="final review")
+                yield HarnessEvent(type="result", session_id="saved-thread")
+            elif failure == "idle":
+                yield HarnessEvent(type="tool_use", tool_name="Read", tool_use_id="read-1")
+                await self.unblocked.wait()
+            else:
+                yield HarnessEvent(type="result", is_error=True, content="API Error: 529 Overloaded")
+
+    runs = iter([RecoveryRun(), RecoveryRun(recovering=True)])
+    monkeypatch.setattr(mgr, "_make_run", lambda *args, **kwargs: next(runs))
+    events = [e async for e in mgr.send_message(child.id, "review")]
+    assert any(e.get("retrying") for e in events)
+    assert rec.state == "completed"
+    assert len(injected) == 1
+    assert injected[0][0] == parent.id
+    assert "[agent-reply:Vera" in injected[0][1] and "final review" in injected[0][1]
+
+
 @pytest.mark.asyncio
 async def test_post_terminal_events_ignored(dm, mgr, db, monkeypatch):
     """Once a delegation is terminal, late events don't reopen it."""

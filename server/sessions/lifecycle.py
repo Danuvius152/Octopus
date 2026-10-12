@@ -256,6 +256,12 @@ class LifecycleMixin(SessionManagerBase):
             origin=old.origin,
             backend=old.backend,
         )
+        new.model = old.model
+        new.reasoning_effort = old.reasoning_effort
+        if self.db:
+            await self.db.update_session_field(
+                new.id, model=new.model, reasoning_effort=new.reasoning_effort,
+            )
 
         # Schedules are agent-owned, so ownership needs no repoint.
         # But a schedule created from this session (origin_session_id == old.id)
@@ -381,6 +387,8 @@ class LifecycleMixin(SessionManagerBase):
                     "agent_id": row.get("agent_id"),
                     "origin": row.get("origin") or "user",
                     "backend": row.get("backend") or "claude-code",
+                    "model": row.get("model"),
+                    "reasoning_effort": row.get("reasoning_effort"),
                     "parent_session_id": row.get("parent_session_id"),
                     "delegation_request": row.get("delegation_request"),
                     "archived": True,
@@ -431,6 +439,8 @@ class LifecycleMixin(SessionManagerBase):
             agent_id=match.get("agent_id"),
             origin=match.get("origin") or "user",
             backend=match.get("backend") or "claude-code",
+            model=match.get("model"),
+            reasoning_effort=match.get("reasoning_effort"),
             parent_session_id=match.get("parent_session_id"),
             delegation_request=match.get("delegation_request"),
             **fork_info_fields(
@@ -479,6 +489,9 @@ class LifecycleMixin(SessionManagerBase):
             agent_id=match.get("agent_id"),
             origin=match.get("origin") or "user",
             backend=match.get("backend") or "claude-code",
+            model=match.get("model"),
+            reasoning_effort=match.get("reasoning_effort"),
+            user_id=match.get("user_id"),
             # Preserve the delegation chain fields when unarchiving —
             # without these, an unarchived delegation child would lose
             # its parent_session_id pointer and the "Delegated from"

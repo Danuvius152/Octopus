@@ -188,7 +188,7 @@ Phone / Browser
 
 ```bash
 # Clone and set up
-git clone https://github.com/archeryue/Octopus.git && cd Octopus
+git clone https://github.com/Danuvius152/Octopus.git && cd Octopus
 python3 -m venv .venv && .venv/bin/pip install -e "."
 cp .env.example .env          # edit OCTOPUS_AUTH_TOKEN
 

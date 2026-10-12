@@ -1,6 +1,8 @@
 # 本地共享 Wiki：实施审查
 
-> **Status:** in-progress — 独立审查及复核发现的六项已修复并通过限定复核；旧库批量整理等待 Q35 样稿确认。
+> **Status:** shipped — a85582f 基础版六项问题已修复并限定复核；不代表 Q53 后优化已审查。
+
+2026-10-12 注：这份记录只审查基础实现。三篇样稿已接受；新检索、有限历史、冲突重试等尚未实现，不能套用本审查的通过结论。接手 agent 仍需按新 spec 开发和验收，见[实施交接](local-shared-wiki-implementation-handoff.md)。
 
 按 `code-review` skill 分别审查 Standards 和 Spec。基线 HEAD 为 `88d2284b2b2493001be2e945df375d7a228ccc1f`；本次改动从独立 index 导出，未把用户原有模型、账户、fork 和其他未提交工作纳入本次提交。最终代码验证见[实施交接](local-shared-wiki-implementation-handoff.md)。
 

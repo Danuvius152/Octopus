@@ -74,6 +74,7 @@ export function AccountPage({ onToggleSidebar }: { onToggleSidebar?: () => void 
 
   const [identity, setIdentity] = useState<IdentityResponse | null>(null);
   const [accountsExist, setAccountsExist] = useState<boolean | null>(null);
+  const [claimSummary, setClaimSummary] = useState<BootstrapSummary | null>(null);
 
   const headers = useCallback(
     () => ({
@@ -112,13 +113,17 @@ export function AccountPage({ onToggleSidebar }: { onToggleSidebar?: () => void 
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
         <div className="mx-auto flex w-full max-w-2xl flex-col gap-8">
           <IdentityCard identity={identity} accountsExist={accountsExist} />
-          {accountsExist === false && (
+          {claimSummary && <ClaimSummary summary={claimSummary} />}
+          {accountsExist === false && !claimSummary && (
             <ClaimInstall
               token={token}
               /* Storing the new bearer re-runs the loader above, which is how
                * the page turns from "claim this install" into the account it
                * just created. */
-              onClaimed={setToken}
+              onClaimed={(newToken, summary) => {
+                setClaimSummary(summary);
+                setToken(newToken);
+              }}
             />
           )}
           {identity?.user_id && (
@@ -190,18 +195,45 @@ function IdentityCard({
   );
 }
 
+function ClaimSummary({ summary }: { summary: BootstrapSummary }) {
+  const moved = Object.entries(summary.adopted ?? {});
+  return (
+    <Section
+      className="account-claimed"
+      title={`This install now belongs to ${summary.username}`}
+      description="The install token no longer signs anybody in. Use your username and password from here on."
+    >
+      <ul className="space-y-1 text-[12.5px] text-gray-800">
+        {moved.length === 0 && <li>Nothing was here to adopt.</li>}
+        {moved.map(([table, n]) => (
+          <li key={table}>
+            <span className="font-mono text-[11.5px]">{table}</span> — {n} row
+            {n === 1 ? "" : "s"} adopted
+          </li>
+        ))}
+        {(summary.extra_roots ?? []).length > 0 && (
+          <li>
+            {summary.extra_roots?.length} existing working director
+            {summary.extra_roots?.length === 1 ? "y" : "ies"} stay reachable
+          </li>
+        )}
+        {summary.agent_memory_moved && <li>Agent memory moved into your workspace</li>}
+      </ul>
+    </Section>
+  );
+}
+
 function ClaimInstall({
   token,
   onClaimed,
 }: {
   token: string;
-  onClaimed: (token: string) => void;
+  onClaimed: (token: string, summary: BootstrapSummary) => void;
 }) {
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [summary, setSummary] = useState<BootstrapSummary | null>(null);
 
   const claim = async () => {
     setBusy(true);
@@ -225,42 +257,13 @@ function ClaimInstall({
         return;
       }
       const reply = data as BootstrapResponse;
-      setSummary((reply.summary ?? {}) as BootstrapSummary);
-      onClaimed(reply.token);
+      onClaimed(reply.token, (reply.summary ?? {}) as BootstrapSummary);
     } catch {
       setError("Could not reach Octopus.");
     } finally {
       setBusy(false);
     }
   };
-
-  if (summary) {
-    const moved = Object.entries(summary.adopted ?? {});
-    return (
-      <Section
-        className="account-claimed"
-        title={`This install now belongs to ${summary.username}`}
-        description="The install token no longer signs anybody in. Use your username and password from here on."
-      >
-        <ul className="space-y-1 text-[12.5px] text-gray-800">
-          {moved.length === 0 && <li>Nothing was here to adopt.</li>}
-          {moved.map(([table, n]) => (
-            <li key={table}>
-              <span className="font-mono text-[11.5px]">{table}</span> — {n} row
-              {n === 1 ? "" : "s"} adopted
-            </li>
-          ))}
-          {(summary.extra_roots ?? []).length > 0 && (
-            <li>
-              {summary.extra_roots?.length} existing working director
-              {summary.extra_roots?.length === 1 ? "y" : "ies"} stay reachable
-            </li>
-          )}
-          {summary.agent_memory_moved && <li>Agent memory moved into your workspace</li>}
-        </ul>
-      </Section>
-    );
-  }
 
   return (
     <Section

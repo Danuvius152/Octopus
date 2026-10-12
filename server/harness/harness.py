@@ -17,8 +17,9 @@ import logging
 import signal
 
 from ..aio import stopped_within
-from .events import HarnessOneshotError
+from .events import HarnessCredential, HarnessOneshotError
 from .login import LoginDriver
+from .model_settings import ModelOption, ModelSettings
 from .profile import OneShotContext, RuntimeProfile
 from .run import HarnessRun, RunConfig, _which_with_fallback, prepare_spawn
 
@@ -31,6 +32,11 @@ class Harness:
 
     def __init__(self, profile: RuntimeProfile) -> None:
         self.profile = profile
+
+    def model_settings(self, credential: HarnessCredential | None = None) -> ModelSettings:
+        if self.profile.model_settings:
+            return self.profile.model_settings(credential)
+        return ModelSettings(models=[ModelOption(m, m) for m in self.profile.models])
 
     @property
     def backend(self) -> str:

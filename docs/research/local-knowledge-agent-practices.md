@@ -1,6 +1,6 @@
 # Octopus 本地共享知识库：agent 接口与工作流来源笔记
 
-核验日期：2026-10-11。用途：支撑设计访谈；Q1–Q16 已确认设计共识，当前进入 spec/ticket 评审，尚未实施或部署。
+历史核验：2026-10-11；最新补充：2026-10-12。§1–§8 保留首轮研究与工作流纠正记录，其中当时的状态、PDF 处理及全库备份建议不是当前要求。基础版已部署；Q53 已确认最终方案，本轮只交付文档。当前权威见[spec](../plans/local-shared-wiki-spec.md)与[实施交接](../plans/local-shared-wiki-implementation-handoff.md)，最新参考与决定见 §9。
 范围：官方协议、格式规范、第一方工程资料；保留现有 Octopus、Sapphire 与用户工作区。
 文中“官方事实”是来源直接支持的内容；“项目推论”是结合当前代码给出的设计判断。
 没有统一的“所有项目最新最佳实践”；下面列出可核验的原则与本项目需要作出的选择。
@@ -194,3 +194,51 @@ pypdf 仍留在 `.venv`，未将该安装视为技术方案或验收通过；未
 当前顺序为 grill → spec 评审 → tickets 拆分评审/发布 → implement → 框架验收 → 实际 Weber 配置与真实验证 → 首次旧库整理 → Sapphire Iterate prompt。
 [规格评审稿](../plans/local-shared-wiki-spec.md)和[任务拆分提案](../plans/local-shared-wiki-ticket-proposal.md)已形成本地文件，尚未发布 tracker 或标记 ready-for-agent。
 Weber 的职责和触发边界现在进入规格；其实际 persona 配置只能使用已经验收的接口，并先于生产旧库整理完成真实验证。
+
+## 9. Q37–Q53 后的参考核查与采用边界
+
+2026-10-12 再次只读核对 Octopus、两个本地参考项目及一手网页。这里记录设计依据；Q53 已确认，但优化代码与真实库迁移尚未执行。不是一份宣称所有项目统一采用的“最新 best practice”。
+
+### 9.1 my-wiki 与 Pika 的具体借鉴
+
+| 来源 | 代码/指南事实 | 本项目采用范围 |
+| --- | --- | --- |
+| [my-wiki query workflow](/home/jack/ref/my-wiki/my-wiki-skill/references/workflows.md:35) | 用户原词加中英/缩写/别名；先 Concept，必要时查 Reference；区分库内支持与一般背景 | 原词/命名对象定位、整理层导航、当前正文查证；沿用现有 Library，不强制另一套目录 |
+| [my-wiki retrieval](/home/jack/ref/my-wiki/scripts/core/viki-retrieval.mjs:6) | Intl.Segmenter 中文分词，MiniSearch 标题/别名/正文不同权重；正文只取前 24,000 字符 | 字段索引与双语分词思路；本库索引完整自然章节，不复制其正文前段截断 |
+| [my-wiki query tools](/home/jack/ref/my-wiki/scripts/core/viki-query-tools.mjs:15) 与 [API agent](/home/jack/ref/my-wiki/scripts/core/viki-api-agent.mjs:130) | batch read 的 1–3 路径是单次工具限制；另一 provider 实现有三轮和字符预算 | 小批必要读取；不把三篇/三轮当通用语义上限，整篇任务读完整或明确覆盖限制 |
+| [my-wiki maintain](/home/jack/ref/my-wiki/my-wiki-skill/references/workflows.md:47) | 有来源/概念/主题联动，routine maintenance 明确排除 Git | 学习知识联动和证据；本库日常新文任务保持旧文只读，Git 留 Sapphire |
+| [Pika retrieval protocol](/home/jack/ref/pika_math_learning_toolkit-2.1.5/payload/obsidian-vault-notes/references/retrieval-protocol.md:14) | 元数据定位、small 三篇/章节包、exact whole-note、刷新与当前文件；单次预算不等于持久语义证明 | 章节定位、分页、当前证据和增量刷新；不用固定 small 包阻止必要阅读 |
+| [Pika db.py](/home/jack/ref/pika_math_learning_toolkit-2.1.5/payload/obsidian-vault-notes/scripts/obsidian_local_kb/obsidian_local_kb/db.py:80) 与 [util.py](/home/jack/ref/pika_math_learning_toolkit-2.1.5/payload/obsidian-vault-notes/scripts/obsidian_local_kb/obsidian_local_kb/util.py:25) | FTS5 章节、BM25、路径/标题/别名/标签/heading/邻接信号；英文词与中文二元组 | 本地轻量索引，中文短词实际测试；保留词序和频次，不直接复制去重后的 token 集合 |
+| [Pika cross-note maintenance](/home/jack/ref/pika_math_learning_toolkit-2.1.5/payload/obsidian-vault-notes/references/cross-note-maintenance.md) | 唯一链接目标、相关位置读证据、锚点/文件验证、范围/版本保护 | 特别相关的 wikilinks、新文可写旧文只读，不自动扩大批次 |
+| [article revision](/home/jack/ref/pika_math_learning_toolkit-2.1.5/payload/obsidian-vault-notes/references/article-revision-style.md)、[rewrite](/home/jack/ref/pika_math_learning_toolkit-2.1.5/payload/obsidian-vault-notes/references/ai-style-rewrite.md)、[voice](/home/jack/ref/pika_math_learning_toolkit-2.1.5/payload/obsidian-vault-notes/references/author-voice-profile.md) | 条件、因果、角色、判断强度保全；同文体可靠作者样本校准；改后冷读 | 只改允许新增的文字，保护既有原文；不认定参考 voice profile 是本用户，不复制数学特化 |
+
+### 9.2 LLM-wiki 与最新研究的边界
+
+Karpathy 的 2026-04-04 LLM Wiki 是可适配的思想稿：保留原始来源，构建持续、有链接的知识整理层，由人选择材料与方向。他本人倾向逐来源检查新增整理，但示例也允许一次更新多页或把查询成果入库。[原始思想稿](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)
+
+**本项目推论：**借鉴持久知识积累与具体关联，同时按用户要求收紧权限：原文/成稿/核心观点由人控制，新文维护不改旧文，查询不自动写回，也不为了“积累”制造无独立用途的 AI 页面。不能把评论区第三方产品宣传当 Karpathy 原文或已验证改进。
+
+按需读取支持轻量入口、工具定位与逐步取上下文；它不规定固定篇数，具体预检索/探索比例应随任务选择。[Anthropic context engineering](https://www.anthropic.com/engineering/effective-context-engineering-for-ai-agents)
+
+2026-09-21 的课程 Wiki 研究比较了 59 个问题；局限中明确 Wiki 组每问收到相同的已选章节，覆盖所问材料，没有可能失败的检索选择环节。因此它支持继续检验有结构、有关联且有出处的整理层，**不能证明本项目检索已优于向量 RAG，不能推出固定三篇最好**。[研究与局限](https://arxiv.org/html/2609.25303v1)
+
+SQLite FTS5 支持 BM25 和字段权重；默认 unicode61 把连续字母字符作为 token，porter 主要针对英文；trigram 的 MATCH 不支持不足三个 Unicode 字符的查询。需要独立验证中文切分与短词查询，而非仅声明“已用 FTS”。[官方文档](https://www.sqlite.org/fts5.html)
+
+**本项目选择：**本地中英字段/章节索引 + 当前证据按需阅读 + 特别相关链接，先用本库问题评估。来源、条件、人工观点和可恢复改动比自动长文摘要或自动遍历大标签更重要。向量服务、复杂图推理与自动全库重总结没有当前必要性。
+
+### 9.3 Q37–Q53 最终决定与覆盖关系
+
+| 访谈分支 | 最终决定 |
+| --- | --- |
+| Q37、Q41–Q45：Git/备份 | 早期 Git 作为唯一恢复机制的设想被后续讨论替代；Git 留 Sapphire，框架只保护实际文本改动，30 天/每篇 10 个不同版本，内部每日/启动清理，附件不复制 |
+| Q38：样稿与联动 | 三篇样稿总体满意；风格关卡已满足。检索服务整理好的知识层，也让未整理普通笔记可搜；首次批量尚未执行 |
+| Q39–Q40：问答与重复 | 根据文章定位/问答/全文讨论选择阅读，答案自然带出处；同原材料复用，相似异内容可新建，同名异内容不覆盖 |
+| Q43、Q46–Q47：索引与人工编辑 | 中英章节、标题/别名/标签/Key note 一起定位；可靠双语别名；小改只更新索引，既有整理与人工内容保留 |
+| Q48：阅读策略 | 从最相关小批开始，按具体证据缺口扩展，足够即停；固定三篇/三轮不是普遍最佳实践，全文任务完整读 |
+| Q49：旧快照 | 新机制验收、原件核对和有效引用保护后退役 baseline 全库快照，回收无引用对象；不删持久 state |
+| Q50 与用户追加：冲突 | 未解决候选保留 90 天；当前维护版本变化先在同任务内有限重读重试。正常小修改不再总结入库，除非明确指定 |
+| Q51：完成定义 | 全文读取、原文保全、必要整理与链接、自检/冷读、实际发布和索引更新；结构 lint 不冒充语义证明 |
+| Q52 与用户追加：关联 | 仅特别相关，同一具体 research topic/问题/对象/论点/方法且两篇正文有关系依据；目录或大标签一致不足够，无强关系就不加 |
+| Q53 与本轮指令 | 整体共同理解已确认；本次只完善文档，开发交其他 agent。优化、迁移和批量整理没有在本轮执行 |
+
+历史研究中“整理前备份全部二进制”“PDF 自动提取”“等待样稿批准”的建议已被以上决定覆盖。开发依据以 spec/tickets 为准，不从历史研究恢复被用户排除的工作。

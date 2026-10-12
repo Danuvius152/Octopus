@@ -19,6 +19,8 @@ const addOctoSession = (page: Page) =>
     .click();
 
 const OWNED_NAMES = new Set([
+  "Reasoning Session",
+  "Model Session",
   "Credential Swap",
   "Schedule UI Test",
   "Schedule Cmd Test",
@@ -2713,6 +2715,44 @@ test.describe("Composer history", () => {
 });
 
 test.describe("/model", () => {
+  test("changes reasoning from the visible chat control and preserves history after reload", async ({ page, request }) => {
+    await page.route("**/api/backends/codex/models*", (route) => route.fulfill({
+      json: {
+        default_model: "model-a", default_reasoning_effort: "max",
+        models: [{ id: "model-a", name: "Model A", reasoning_efforts: ["low", "high", "max"] }],
+        reasoning_efforts: ["low", "high", "max"],
+      },
+    }));
+    const imported = await request.post(`${API}/sessions/import`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+      data: {
+        name: "Reasoning Session", working_dir: "/tmp", backend: "codex",
+        claude_session_id: "existing-thread",
+        messages: [{ role: "user", type: "text", content: "Remember the existing history" }],
+      },
+    });
+    expect(imported.ok()).toBeTruthy();
+    const { id } = await imported.json();
+    await login(page);
+    await page.locator(".session-item .session-name", { hasText: "Reasoning Session" }).click();
+    await page.getByRole("button", { name: "Model and reasoning settings" }).click();
+    const dialog = page.locator(".model-picker-dialog");
+    await expect(dialog.getByLabel("Reasoning effort")).toBeEnabled();
+    await dialog.getByLabel("Reasoning effort").selectOption("high");
+    await dialog.getByRole("button", { name: "Save settings" }).click();
+    await expect(dialog).toBeHidden();
+    await page.reload();
+    await openSessionRail(page);
+    await page.locator(".session-item .session-name", { hasText: "Reasoning Session" }).click();
+    await expect(page.locator(".chat-header .btn-model-settings")).toContainText("high");
+    await expect(page.locator(".msg", { hasText: "Remember the existing history" })).toBeVisible();
+    const detail = await request.get(`${API}/sessions/${id}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    const saved = await detail.json();
+    expect(saved.reasoning_effort).toBe("high");
+    expect(saved.model).toBeNull();
+    expect(saved.claude_session_id).toBe("existing-thread");
+  });
+
   // Per session, not per agent: a stronger model for one hard question is not a
   // reason to re-point every session the agent owns.
   test("sets the session's model, and the picker offers the way back", async ({
@@ -2750,6 +2790,7 @@ test.describe("/model", () => {
       "Agent default"
     );
     await dialog.locator(".btn-model-option", { hasText: "Agent default" }).click();
+    await dialog.getByRole("button", { name: "Save settings" }).click();
     await expect(dialog).toBeHidden();
     await expect(
       page.locator(".msg-notice, .msg", { hasText: "the agent's default" })

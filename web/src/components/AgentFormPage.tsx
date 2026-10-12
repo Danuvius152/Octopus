@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { IconArchive, IconPlus, IconTrash, IconUsers } from "@tabler/icons-react";
 import { setAgentPinned } from "../api/agents";
 import { fetchAgentConnectors, toggleAgentConnector } from "../api/connectors";
 import { openAgentChat } from "../lib/openAgentChat";
 import { pinnedInOrder } from "../lib/sidebarPins";
+import { useModelSettings } from "../hooks/useModelSettings";
 import {
   useSessionStore,
   type Agent,
@@ -13,6 +14,7 @@ import {
 import { EmojiPicker } from "./EmojiPicker";
 import { ItemLibrary, type LibraryItem } from "./ItemLibrary";
 import { PageHeader } from "./PageHeader";
+import { ReasoningEffortSelect } from "./ReasoningEffortSelect";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -45,6 +47,7 @@ export function AgentFormPage({
   const credentials = useSessionStore((s) => s.credentials);
   const installations = useSessionStore((s) => s.connectorInstallations);
   const availableBackends = useSessionStore((s) => s.availableBackends);
+  const defaultBackend = useSessionStore((s) => s.defaultBackend);
   const showChat = useSessionStore((s) => s.showChat);
   const openAgentForm = useSessionStore((s) => s.openAgentForm);
   const setActiveAgentId = useSessionStore((s) => s.setActiveAgentId);
@@ -59,8 +62,12 @@ export function AgentFormPage({
   const [description, setDescription] = useState("");
   const [avatar, setAvatar] = useState("");
   const [systemPrompt, setSystemPrompt] = useState("");
-  const [backend, setBackend] = useState("claude-code");
+  const [backend, setBackend] = useState<string>(defaultBackend);
+  const backendChosen = useRef(false);
   const [credentialId, setCredentialId] = useState("");
+  const [model, setModel] = useState("");
+  const [reasoningEffort, setReasoningEffort] = useState("");
+  const { catalog, error: catalogError } = useModelSettings(backend, credentialId, tab === "form");
   const [toolAllow, setToolAllow] = useState("");
   const [toolDeny, setToolDeny] = useState("");
   const [enabledConnectors, setEnabledConnectors] = useState<string[]>([]);
@@ -82,14 +89,23 @@ export function AgentFormPage({
     setDescription(editing?.description ?? "");
     setAvatar(editing?.avatar ?? "");
     setSystemPrompt(editing?.system_prompt ?? "");
-    setBackend(editing?.backend ?? "claude-code");
+    backendChosen.current = false;
+    setBackend(editing?.backend ?? useSessionStore.getState().defaultBackend);
     setCredentialId(editing?.credential_id ?? "");
+    setModel(editing?.model ?? "");
+    setReasoningEffort(editing?.reasoning_effort ?? "");
     setToolAllow(editing?.tool_allow ?? "");
     setToolDeny(editing?.tool_deny ?? "");
     setSubagents(editing?.subagents ?? []);
     setError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingAgentId]);
+
+  // The install preference may finish loading after the form opens. Apply it
+  // to a new draft, preserving a backend the user has already chosen.
+  useEffect(() => {
+    if (!editingAgentId && !backendChosen.current) setBackend(defaultBackend);
+  }, [defaultBackend, editingAgentId]);
 
   useEffect(() => {
     if (!editing) {
@@ -128,6 +144,8 @@ export function AgentFormPage({
       avatar: avatar.trim() || null,
       system_prompt: systemPrompt,
       credential_id: credentialId || null,
+      model: model.trim() || null,
+      reasoning_effort: backend === "codex" ? reasoningEffort || null : null,
       backend,
       tool_allow: toolAllow,
       tool_deny: toolDeny,
@@ -380,8 +398,13 @@ export function AgentFormPage({
                               : "border-gray-400 hover:bg-gray-50"
                           } ${usable ? "" : "opacity-50"}`}
                           onClick={() => {
+                            backendChosen.current = true;
                             setBackend(b);
                             setCredentialId("");
+                            if (b !== backend) {
+                              setModel("");
+                              setReasoningEffort("");
+                            }
                           }}
                           role="radio"
                           aria-checked={picked}
@@ -419,6 +442,23 @@ export function AgentFormPage({
                       </option>
                     ))}
                   </select>
+                  <Label htmlFor="agent-model">Model</Label>
+                  <Input
+                    id="agent-model" list="agent-model-options" value={model}
+                    onChange={(e) => setModel(e.target.value)} disabled={busy}
+                    placeholder={`CLI default${catalog?.default_model ? ` (${catalog.default_model})` : ""}`}
+                  />
+                  <datalist id="agent-model-options">
+                    {catalog?.models?.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
+                  </datalist>
+                  {backend === "codex" && (
+                    <ReasoningEffortSelect
+                      id="agent-reasoning-effort" value={reasoningEffort} onChange={setReasoningEffort}
+                      model={model} catalog={catalog} disabled={busy}
+                      inherited={`CLI default${catalog?.default_reasoning_effort ? ` (${catalog.default_reasoning_effort})` : ""}`}
+                    />
+                  )}
+                  {catalogError && <p className="text-xs text-destructive">{catalogError}</p>}
                   <p className="font-mono text-[11px] text-gray-700">
                     from Harness · memory lives on the agent, survives engine
                     swaps

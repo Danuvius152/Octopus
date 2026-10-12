@@ -1,5 +1,5 @@
 #!/bin/bash
-# Run every gate CLAUDE.md requires before a commit, in one command.
+# Run the fast gates documented in AGENTS.md before a commit.
 #
 # Usage:
 #   ./scripts/check.sh          # the four fast gates (~40s)
@@ -20,7 +20,7 @@ set -uo pipefail
 cd "$(dirname "$0")/.."
 ROOT="$PWD"
 
-# The JS toolchain lives under nvm, not on the default PATH (see CLAUDE.md
+# The JS toolchain lives under nvm, not on the default PATH (see AGENTS.md
 # Conventions). Resolve it here so callers don't have to.
 if [ -d "$HOME/.nvm/versions/node" ]; then
   NODE_BIN="$HOME/.nvm/versions/node/$(ls "$HOME/.nvm/versions/node" | sort -V | tail -1)/bin"

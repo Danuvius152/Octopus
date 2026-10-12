@@ -196,6 +196,8 @@ interface SessionStore {
   // is always present; 'codex' only when the binary resolves. Drives the
   // backend selector in the session-create form (codex-backend.md §6).
   availableBackends: string[];
+  defaultBackend: BackendKind;
+  setDefaultBackend: (backend: BackendKind) => void;
   setAvailableBackends: (b: string[]) => void;
   // Model shortlist per backend, from the same `GET /api/backends`. Feeds
   // `/model`'s picker; empty for a backend whose accepted names this build
@@ -513,6 +515,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     set({ mainView: "chat", activeApplicationId: null, sidebarOpen: false }),
 
   availableBackends: ["claude-code"],
+  defaultBackend: "claude-code",
+  setDefaultBackend: (defaultBackend) => set({ defaultBackend }),
   setAvailableBackends: (availableBackends) => set({ availableBackends }),
   backendModels: {},
   setBackendModels: (backendModels) => set({ backendModels }),

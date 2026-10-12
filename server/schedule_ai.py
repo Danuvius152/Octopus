@@ -622,6 +622,7 @@ async def parse_schedule_text(
     timezone: str | None = None,
     now_iso: str | None = None,
     model: str | None = None,
+    reasoning_effort: str | None = None,
     credential: HarnessCredential | None = None,
     working_dir: str | None = None,
     runner=None,
@@ -648,7 +649,8 @@ async def parse_schedule_text(
     now = now_iso or datetime.now(ZoneInfo(tz)).isoformat(timespec="minutes")
     prompt = build_parse_prompt(text, now, tz)
     ctx = OneShotContext(
-        prompt=prompt, model=model, credential=credential, working_dir=working_dir
+        prompt=prompt, model=model, credential=credential, working_dir=working_dir,
+        reasoning_effort=reasoning_effort,
     )
     try:
         model_text = await run(ctx)

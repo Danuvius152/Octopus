@@ -79,6 +79,19 @@ You MUST verify your changes before considering them done:
 
 **Zero test failures are acceptable.** All tests must pass before committing. If a test fails, investigate and fix it — do not ignore, skip, or dismiss any failure as "flaky" or "pre-existing".
 
+### Local Codex validation
+
+For this user's Codex-based WSL installation, the user authorizes committing
+after the hermetic backend tests, frontend unit tests, TypeScript check,
+pure-UI E2E bucket and available Codex real-CLI/browser tests all pass. Run
+the existing lint, generated-contract and documentation-index checks too.
+Claude live tests are not a commit blocker for this installation when its
+provider is unavailable. Report those unavailable checks separately; skipped
+or failed Claude checks do not count as passes. Failures in the required local
+checks must still be investigated and fixed before committing. This local
+agreement does not change the full-suite requirements for environments with
+both backends usable.
+
 ## Test Coverage
 
 | Suite | Tool | Command | Count | Scope |
@@ -273,4 +286,31 @@ cd web && npx playwright test --reporter=list  # verbose output
 - Use `useSessionStore.getState()` (not hook selectors) inside callbacks/effects that mutate store to avoid re-render loops
 ### Environment traps
 
-- The JS toolchain (`bun`, `node`, `npm`, `npx`) and `codex` live under `~/.nvm/versions/node/*/bin`, **not** on the default PATH. Prepend that bin dir for any frontend/codex command (`export PATH="$HOME/.nvm/versions/node/<ver>/bin:$PATH"`). It's also required for the 4 `test_backend_codex_real.py` tests to resolve `codex` (otherwise they error rather than skip)
+- The JS toolchain (`bun`, `node`, `npm`, `npx`) lives under `~/.nvm/versions/node/*/bin`; the local standalone `codex` is exposed through `~/.local/bin`. Prepend both directories for frontend and real-CLI checks (`export PATH="$HOME/.nvm/versions/node/<ver>/bin:$HOME/.local/bin:$PATH"`). See `docs/local-wsl.md` for the current installation and proxy settings.
+
+## Repository and Upstream Maintenance
+
+This is the independently maintained repository
+https://github.com/Danuvius152/Octopus, and `origin` points to it. It originated
+from https://github.com/archeryue/Octopus, but its GitHub fork relationship has
+been removed. The `upstream` remote remains
+https://github.com/archeryue/Octopus.git as a reference for original-author
+updates; retaining this Git remote does not recreate a GitHub fork relationship.
+
+- Preserve the user's local configuration and customizations when syncing
+  upstream. Prefer the existing `.env` / `OCTOPUS_*` settings for
+  machine-specific configuration; keep secrets and runtime data out of Git.
+- The local WSL installation follows the README's `python3 -m venv .venv`
+  and pip workflow. The user explicitly does not want uv. Use the existing
+  signed-in Codex backend. See `docs/local-wsl.md` for local runtime details.
+- Commit and push this project's changes to `origin`; keep source changes in
+  focused commits so original-author updates can be reviewed and integrated
+  without losing local behavior.
+- When the user requests original-author updates, run `git fetch upstream`,
+  inspect the incoming changes, and merge `upstream/main` into the maintained
+  branch. The repositories still share Git history despite GitHub detachment.
+  Protect existing uncommitted work before merging. Resolve conflicts by
+  preserving the intended upstream updates and local behavior; do not replace
+  this repository with a hard reset or blindly choose one side of every conflict.
+- After an upstream merge that changes code, run all checks required above.
+  Rebuild the frontend when its source or build dependencies change.

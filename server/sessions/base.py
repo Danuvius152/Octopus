@@ -212,6 +212,7 @@ class Session:
     # Per-session model (`/model`). None = inherit the agent's, whose None
     # means the backend's own default. Same shape as `backend` above.
     model: str | None = None
+    reasoning_effort: str | None = None
     # Who owns this conversation (multi-tenancy.md §5). Denormalised from the
     # agent on purpose: `agent_id` is nullable, and the WebSocket fan-out has
     # to route by owner on every frame.
@@ -336,6 +337,12 @@ class SessionManagerBase:
     def _event_to_ws_message(session_id: str, event: HarnessEvent) -> dict[str, Any] | None:
         raise NotImplementedError  # provided by a mixin
 
+    @staticmethod
+    def _tag_persisted(
+        event: dict[str, Any], seq: int | None, msg: MessageContent
+    ) -> dict[str, Any]:
+        raise NotImplementedError  # provided by a mixin
+
     def _flush_text_deltas(
         self, session_id: str, buf: list[str]
     ) -> dict[str, Any] | None:
@@ -399,7 +406,7 @@ class SessionManagerBase:
         raise NotImplementedError  # provided by a mixin
 
     def _start_turn_watchdog(
-        self, backend: HarnessRun, state: dict[str, Any]
+        self, backend: HarnessRun, state: dict[str, Any], *, started_at: float | None = None
     ) -> asyncio.Task | None:
         raise NotImplementedError  # provided by a mixin
 
@@ -424,7 +431,12 @@ class SessionManagerBase:
         raise NotImplementedError  # provided by a mixin
 
     async def _surface_turn_timeout(
-        self, session: Session, *, reason: str, limit: int, backend: str
+        self, session: Session, *, reason: str, limit: int, backend: str, retries: int = 0
+    ) -> dict[str, Any]:
+        raise NotImplementedError  # provided by a mixin
+
+    async def _surface_idle_retry(
+        self, session: Session, *, limit: int, attempt: int, max_attempts: int
     ) -> dict[str, Any]:
         raise NotImplementedError  # provided by a mixin
 
@@ -506,6 +518,7 @@ class SessionManagerBase:
                 origin=row.get("origin") or "user",
                 backend=row.get("backend") or "claude-code",
                 model=row.get("model") or None,
+                reasoning_effort=row.get("reasoning_effort") or None,
                 user_id=row.get("user_id") or None,
                 parent_session_id=row.get("parent_session_id"),
                 delegation_request=row.get("delegation_request"),

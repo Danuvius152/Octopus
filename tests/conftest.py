@@ -13,6 +13,7 @@ import pytest
 # Override env vars before any module imports Settings, so tests
 # don't pick up values from the user's .env file.
 os.environ["OCTOPUS_AUTH_TOKEN"] = "changeme"
+os.environ["OCTOPUS_DEFAULT_BACKEND"] = "claude-code"
 
 _PROC = Path("/proc")
 
@@ -111,6 +112,9 @@ def _account_state_stays_in_tmp(tmp_path_factory, monkeypatch):
     monkeypatch.setattr(settings, "master_key_file", str(root / "master.key"))
     monkeypatch.setattr(settings, "users_root", str(root / "users"))
     monkeypatch.setattr(settings, "research_dir", str(root / "research"))
+    # Startup now sweeps Wiki text retention; never let a lifespan test reach
+    # the installation's legacy Wiki state either.
+    monkeypatch.setattr(settings, "wiki_dir", str(root / "wiki"))
 
 
 @pytest.fixture(autouse=True)

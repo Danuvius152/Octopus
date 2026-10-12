@@ -1,12 +1,11 @@
-import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
+import {
+  test, expect, type Page, type APIRequestContext, type WebSocketRoute,
+} from "@playwright/test";
 
-// Pure-UI-ish e2e for native deep research (native-deep-research.md §7). We do
-// NOT need a working LLM: the `/research` command creates a job row + a
-// `research_started` broadcast regardless of model auth, so the ResearchCard
-// appears deterministically. This exercises the full command → REST →
-// ResearchManager → WS → store → card path. (The pipeline itself degrades fast
-// when the backend CLI is logged out; we only assert the card lifecycle, not a
-// real report — that's covered by the gated tests/test_research_real.py.)
+// The research UI uses controlled REST responses and WS events so cancellation
+// cannot race a real model finishing (or an unavailable CLI failing). Sessions
+// and sign-in still use the real backend. ResearchManager's cancellation is
+// covered by backend unit tests; the live pipeline by test_research_real.py.
 
 const TOKEN = "changeme";
 const API = "http://localhost:8765/api";
@@ -73,7 +72,48 @@ async function importSession(request: APIRequestContext): Promise<{ id: string }
 }
 
 test("the /research command surfaces a live research card", async ({ page, request }) => {
-  await importSession(request);
+  const session = await importSession(request);
+  const question = "what is the capital of France";
+  const job = {
+    id: "research-ui-cancel",
+    session_id: session.id,
+    question,
+    status: "running",
+    phase: "scope",
+  };
+  let started = false;
+  let socket: WebSocketRoute | undefined;
+  await page.routeWebSocket("**/ws?*", (ws) => {
+    ws.connectToServer();
+    socket = ws;
+  });
+  await page.route(`**/api/sessions/${session.id}/research`, async (route) => {
+    const req = route.request();
+    expect(req.headers().authorization).toBe(`Bearer ${TOKEN}`);
+    if (req.method() === "GET") {
+      await route.fulfill({ json: started ? [job] : [] });
+      return;
+    }
+    expect(req.method()).toBe("POST");
+    expect(req.postDataJSON()).toEqual({ question });
+    started = true;
+    await route.fulfill({ status: 201, json: job });
+  });
+  const cancelPath = `/api/sessions/${session.id}/research/${job.id}/cancel`;
+  await page.route(`**${cancelPath}`, async (route) => {
+    expect(route.request().method()).toBe("POST");
+    expect(route.request().headers().authorization).toBe(`Bearer ${TOKEN}`);
+    job.status = "cancelled";
+    await route.fulfill({ json: job });
+    expect(socket).toBeDefined();
+    socket!.send(JSON.stringify({
+      type: "research_failed",
+      session_id: session.id,
+      research_id: job.id,
+      status: "cancelled",
+      error: "cancelled by user",
+    }));
+  });
   await login(page);
 
   await page
@@ -84,21 +124,34 @@ test("the /research command surfaces a live research card", async ({ page, reque
   // Fire the slash command. A space after the command hides the slash menu, so
   // Enter sends rather than completing a menu item.
   const composer = page.locator(".chat-input-bar textarea");
-  await composer.fill("/research what is the capital of France");
+  await composer.fill(`/research ${question}`);
   await composer.press("Enter");
 
-  // The ResearchCard appears with the question (driven by the optimistic
-  // upsert on the 201 + the research_started WS event) in the running state
-  // with a cancel affordance.
+  // The command's 201 creates the card; subsequent changes arrive over WS.
   const card = page.locator(".research-card").first();
   await expect(card).toBeVisible({ timeout: 15_000 });
-  await expect(card).toContainText("what is the capital of France");
+  await expect(card).toContainText(question);
   await expect(card).toHaveAttribute("data-status", "running");
 
-  // Cancel is the fast, deterministic terminal transition (no waiting on the
-  // whole pipeline): cancelling the job flips it to "cancelled" over the WS.
+  expect(socket).toBeDefined();
+  socket!.send(JSON.stringify({
+    type: "research_progress",
+    session_id: session.id,
+    research_id: job.id,
+    phase: "search",
+    detail: "Checking sources",
+  }));
+  await expect(card.locator(".research-phase")).toContainText("Checking sources");
+
+  // The cancel request identifies this session and job; its WS event is what
+  // removes the button and changes the status, rather than the HTTP response.
+  const cancellation = page.waitForRequest((req) =>
+    new URL(req.url()).pathname === cancelPath && req.method() === "POST",
+  );
   await card.locator(".btn-research-cancel").click();
+  await cancellation;
   await expect(card).toHaveAttribute("data-status", "cancelled", {
     timeout: 20_000,
   });
+  await expect(card.locator(".btn-research-cancel")).toHaveCount(0);
 });

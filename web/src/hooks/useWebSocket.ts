@@ -6,6 +6,7 @@ import {
 } from "../lib/hydrateSession";
 import { refreshSchedules } from "../lib/refreshSchedules";
 import { applyTranscript } from "../lib/transcript";
+import type { WikiMessageMode } from "../lib/wikiComposer";
 import {
   useSessionStore,
   type Agent,
@@ -619,7 +620,7 @@ export function useWebSocket() {
   }, []);
 
   const sendMessage = useCallback(
-    (sessionId: string, content: string, attachmentIds?: string[], wikiMode?: "read" | "maintain") => {
+    (sessionId: string, content: string, attachmentIds?: string[], wikiMode?: WikiMessageMode) => {
       // Don't optimistically add to chat — the backend broadcasts a
       // user_message event whether the prompt fires immediately or after
       // dequeue, so a single broadcast handler keeps state consistent.

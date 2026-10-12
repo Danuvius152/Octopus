@@ -18,12 +18,15 @@ from __future__ import annotations
 import json
 import logging
 import os
+import tomllib
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .events import HarnessCredential, HarnessEvent, SubagentUpdate
 from .harness import Harness
 from .login import LoginMethod
+from .model_settings import ModelOption, ModelSettings
 from .profile import (
     EventParser,
     OneShotContext,
@@ -120,6 +123,62 @@ def _apply_home_dir(env: dict[str, str], credential: HarnessCredential | None) -
         env["CODEX_HOME"] = credential.home_dir
 
 
+def read_model_settings(credential: HarnessCredential | None = None) -> ModelSettings:
+    """Use Codex's own cached catalog; never guess model names or contact a model."""
+    home = Path(
+        credential.home_dir if credential and credential.home_dir
+        else os.environ.get("CODEX_HOME") or Path.home() / ".codex"
+    )
+    config: dict[str, Any] = {}
+    try:
+        config = tomllib.loads((home / "config.toml").read_text())
+    except (OSError, ValueError):
+        pass
+    profiles = config.get("profiles", {})
+    profile_name = config.get("profile")
+    profile = profiles.get(profile_name, {}) if isinstance(profiles, dict) and isinstance(profile_name, str) else {}
+    if isinstance(profile, dict):
+        config = {**config, **profile}
+    default_model = config.get("model")
+    default_effort = config.get("model_reasoning_effort")
+    result = ModelSettings(
+        default_model=default_model if isinstance(default_model, str) else None,
+        default_reasoning_effort=default_effort if isinstance(default_effort, str) else None,
+        reasoning_efforts=["low", "medium", "high", "xhigh"],
+    )
+    try:
+        cached = json.loads((home / "models_cache.json").read_text())
+        entries = cached.get("models", []) if isinstance(cached, dict) else []
+    except (OSError, ValueError):
+        entries = []
+    if not isinstance(entries, list):
+        return result
+    for entry in entries:
+        if not isinstance(entry, dict):
+            continue
+        slug = entry.get("slug")
+        if not isinstance(slug, str) or not slug:
+            continue
+        if entry.get("visibility") != "list" and slug != result.default_model:
+            continue
+        levels = entry.get("supported_reasoning_levels", [])
+        efforts = [
+            level["effort"] for level in levels
+            if isinstance(level, dict) and isinstance(level.get("effort"), str)
+        ] if isinstance(levels, list) else []
+        default = entry.get("default_reasoning_level")
+        name = entry.get("display_name")
+        result.models.append(ModelOption(
+            id=slug, name=name if isinstance(name, str) else slug,
+            reasoning_efforts=efforts,
+            default_reasoning_effort=default if isinstance(default, str) else None,
+        ))
+        for effort in efforts:
+            if effort not in result.reasoning_efforts:
+                result.reasoning_efforts.append(effort)
+    return result
+
+
 def _apply_mcp_bearers(env: dict[str, str], ctx: TurnContext) -> None:
     """Put each HTTP MCP server's bearer where Codex will look for it.
 
@@ -197,6 +256,8 @@ def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
     argv += _mcp_config_args(ctx)
     if ctx.model:
         argv += ["-m", ctx.model]
+    if ctx.reasoning_effort:
+        argv += ["-c", f"model_reasoning_effort={_toml_basic_string(ctx.reasoning_effort)}"]
     if ctx.resume_id:
         argv += ["resume", ctx.resume_id, "--", ctx.prompt]
     else:
@@ -548,6 +609,8 @@ def build_oneshot_argv(ctx: OneShotContext) -> tuple[list[str], dict[str, Any]]:
         argv += ["-C", ctx.working_dir]
     if ctx.model:
         argv += ["-m", ctx.model]
+    if ctx.reasoning_effort:
+        argv += ["-c", f"model_reasoning_effort={_toml_basic_string(ctx.reasoning_effort)}"]
     argv += ["--", ctx.prompt]
     env = os.environ.copy()
     _apply_home_dir(env, ctx.credential)
@@ -663,7 +726,12 @@ async def _fork_copy(
     if src is None:
         return ForkArtifact(resume_id=None, needs_replay=True)
 
-    dest = src.parent / f"rollout-fork-{new_resume_id}.jsonl"
+    # Codex validates the timestamp and id in the native rollout filename when
+    # resuming. Give the copy its own creation time and matching date partition.
+    created = datetime.now(UTC)
+    dest_dir = sessions / created.strftime("%Y/%m/%d")
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    dest = dest_dir / f"rollout-{created:%Y-%m-%dT%H-%M-%S}-{new_resume_id}.jsonl"
     # Temp + atomic rename so a crash mid-copy can't leave a half-written
     # rollout that later looks resumable (Vera review).
     tmp = dest.with_suffix(".jsonl.tmp")
@@ -703,14 +771,16 @@ async def _fork_cleanup(
     if not resume_id_hint:
         return
     sessions = _codex_sessions_dir(credential)
-    # Target the COPY's deterministic name (`_fork_copy` wrote
-    # rollout-fork-<id>.jsonl) directly — NOT the read-based `_find_rollout`,
-    # whose session_meta read could fail and make a present-but-unreadable
-    # rollout look absent, so cleanup "succeeds" and the row is deleted, leaking
-    # it (Vera review). A name match needs no read.
+    # The caller minted this id for the incomplete fork, so exact id suffixes
+    # identify its artifacts without reading a possibly unreadable transcript.
+    # Include the old filename format for copies made by earlier versions.
     if not sessions.is_dir():
         return
-    for copied in sessions.rglob(f"rollout-fork-{resume_id_hint}.jsonl"):
+    patterns = (
+        f"rollout-????-??-??T??-??-??-{resume_id_hint}.jsonl",
+        f"rollout-fork-{resume_id_hint}.jsonl",
+    )
+    for copied in (p for pattern in patterns for p in sessions.rglob(pattern)):
         try:
             copied.unlink()
         except FileNotFoundError:
@@ -834,11 +904,7 @@ _CODEX_TRANSIENT_ERROR_PATTERNS = (
 
 
 CODEX = RuntimeProfile(
-    # Left empty deliberately: nothing in this repo establishes which names
-    # `codex -m` accepts, and a guessed shortlist that silently fails is worse
-    # than no shortlist. `/model <name>` works, and the picker still offers the
-    # models this user's agents and sessions already run.
-    models=(),
+    model_settings=read_model_settings,
     backend="codex",
     binary="codex",
     tools_prompt=_OCTOPUS_SYSTEM_PROMPT_CODEX,

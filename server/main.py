@@ -39,6 +39,7 @@ from .research import research_manager
 from .routers import (
     agents,
     attachments,
+    backends,
     connectors,
     credentials,
     files,
@@ -168,6 +169,8 @@ async def lifespan(app: FastAPI):
     )
 
     async with mcp_lifespan(app):
+        from .wiki.cleanup import sweep as sweep_wiki_history
+        await sweep_wiki_history()
         await wiki_worker.start(session_manager)
         logger.info("MCP namespaces served in-process: %s", ", ".join(_mcp_mounts))
         yield
@@ -310,6 +313,7 @@ app.include_router(credentials.router)
 app.include_router(auth_router.router)
 app.include_router(connectors.router)
 app.include_router(connectors.agent_router)
+app.include_router(backends.router)
 app.include_router(notifiers.router)
 app.include_router(ws.router)
 
@@ -333,7 +337,11 @@ async def list_backends(_: str = Depends(verify_token)):
             models[kind] = list(get_harness(kind).profile.models)
         except Exception:
             models[kind] = []
-    return {"available": available, "models": models}
+    return {
+        "available": available,
+        "models": models,
+        "default": settings.default_backend,
+    }
 
 
 @app.get("/health")

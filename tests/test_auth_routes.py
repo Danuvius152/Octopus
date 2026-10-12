@@ -304,6 +304,30 @@ async def test_the_legacy_token_opens_an_install_with_no_accounts(client):
 
 
 @pytest.mark.asyncio
+async def test_identity_identifies_the_operator_before_accounts(client, monkeypatch):
+    """A successful install-token sign-in must survive the sidebar's identity
+    fetch, which otherwise signs the browser straight back out."""
+    from server.config import settings
+
+    monkeypatch.setattr(settings, "user_label", "local-operator")
+    c, _users, _db = client
+    res = await c.get("/api/auth/identity", headers=_bearer(settings.auth_token))
+    assert res.status_code == 200
+    assert res.json() == {
+        "label": "local-operator", "user_id": None, "is_admin": False,
+    }
+    assert settings.auth_token not in res.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("token", [None, "wrong-install-token"])
+async def test_identity_requires_the_install_token_before_accounts(client, token):
+    c, _users, _db = client
+    res = await c.get("/api/auth/identity", headers=_bearer(token) if token else {})
+    assert res.status_code == 401
+
+
+@pytest.mark.asyncio
 async def test_the_legacy_token_dies_the_moment_an_account_exists(client):
     """The whole defence of keeping it at all: it is self-limiting. There is
     no setting that brings it back, and no account it can impersonate."""
@@ -313,12 +337,16 @@ async def test_the_legacy_token_dies_the_moment_an_account_exists(client):
     assert (
         await c.get("/api/sessions", headers=_bearer(settings.auth_token))
     ).status_code == 200
+    assert (
+        await c.get("/api/auth/identity", headers=_bearer(settings.auth_token))
+    ).status_code == 200
 
     await users.create_user(username="archer", password="password1")
 
-    assert (
-        await c.get("/api/sessions", headers=_bearer(settings.auth_token))
-    ).status_code == 401, "the global token outlived the first account"
+    for path in ("/api/sessions", "/api/auth/identity"):
+        assert (
+            await c.get(path, headers=_bearer(settings.auth_token))
+        ).status_code == 401, "the global token outlived the first account"
 
 
 @pytest.mark.asyncio

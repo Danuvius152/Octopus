@@ -176,7 +176,8 @@ async def test_engine_resolves_binary_from_fallback_dir(tmp_path, monkeypatch):
     fake_bin_dir = tmp_path / ".local" / "bin"
     fake_bin_dir.mkdir(parents=True)
     fake_binary = fake_bin_dir / "my-cli-xyzzy"
-    fake_binary.write_text("#!/bin/sh\nexit 0\n")
+    # A stream-input CLI must stay alive long enough to receive the first frame.
+    fake_binary.write_text("#!/bin/sh\nIFS= read -r frame\nexit 0\n")
     fake_binary.chmod(0o755)
     monkeypatch.setenv("PATH", "")
     monkeypatch.setenv("HOME", str(tmp_path))

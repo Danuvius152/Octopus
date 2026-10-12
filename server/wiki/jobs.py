@@ -9,6 +9,7 @@ from functools import partial
 from pathlib import Path
 
 from ..config import settings
+from . import materials
 from .app_bridge import complete_cleanup
 from .curation import WikiCuration
 from .history import WikiHistory
@@ -31,6 +32,32 @@ class WikiJobs:
               payload TEXT NOT NULL,status TEXT NOT NULL,items TEXT NOT NULL,error TEXT,
               session_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL
             )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS job_requests (
+              request_key TEXT PRIMARY KEY,request_hash TEXT NOT NULL,job_id TEXT NOT NULL
+            )""")
+
+    @staticmethod
+    def request_hash(request):
+        return hashlib.sha256(json.dumps(request, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
+
+    def previous_request(self, key, request):
+        with self.store.connect() as db:
+            alias = db.execute("SELECT * FROM job_requests WHERE request_key=?", (key,)).fetchone()
+            previous = db.execute("SELECT * FROM jobs WHERE request_key=?", (key,)).fetchone()
+        if alias:
+            if alias["request_hash"] != self.request_hash(request):
+                raise WikiError("Idempotency key already names a different maintenance request", 409)
+            return self.get(alias["job_id"])
+        if previous:
+            if json.loads(previous["payload"]).get("request") != request:
+                raise WikiError("Idempotency key already names a different maintenance request", 409)
+            return self.public(previous)
+        return None
+
+    def alias(self, key, request, job_id):
+        with self.store.connect() as db:
+            db.execute("INSERT INTO job_requests VALUES(?,?,?)", (key, self.request_hash(request), job_id))
+        return self.get(job_id)
 
     @staticmethod
     def public(row):
@@ -69,6 +96,11 @@ class WikiJobs:
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         digest = hashlib.sha256(raw.encode()).hexdigest()
         with self.store.connect() as db:
+            alias = db.execute("SELECT * FROM job_requests WHERE request_key=?", (key,)).fetchone()
+            if alias:
+                if alias["request_hash"] != self.request_hash(payload.get("request", payload)):
+                    raise WikiError("Idempotency key already names a different submission", 409)
+                return self.get(alias["job_id"])
             previous = db.execute(
                 "SELECT * FROM jobs WHERE request_key=?", (key,)
             ).fetchone()
@@ -95,6 +127,7 @@ class WikiJobs:
                     now,
                 ),
             )
+            db.execute("INSERT INTO job_requests VALUES(?,?,?)", (key, self.request_hash(payload.get("request", payload)), job_id))
         worker.wake(self.user_id)
         return self.get(job_id)
 
@@ -125,6 +158,12 @@ class WikiJobs:
     def maintain(
         self, key, material, scope, paths, target, sources, actor, created_changes=None
     ):
+        with WikiHistory(self.store).locked():
+            return self._maintain(key, material, scope, paths, target, sources, actor, created_changes)
+
+    def _maintain(
+        self, key, material, scope, paths, target, sources, actor, created_changes=None
+    ):
         created_changes = created_changes or {}
         if not key.strip() or not (material.strip() or paths):
             raise WikiError(
@@ -145,16 +184,9 @@ class WikiJobs:
             "actor": actor,
             "created_changes": created_changes,
         }
-        with self.store.connect() as db:
-            previous = db.execute(
-                "SELECT * FROM jobs WHERE request_key=?", (key,)
-            ).fetchone()
+        previous = self.previous_request(key, request)
         if previous:
-            if json.loads(previous["payload"]).get("request") != request:
-                raise WikiError(
-                    "Idempotency key already names a different maintenance request", 409
-                )
-            return self.public(previous)
+            return previous
         refs = WikiCuration(self.store).sources(sources)
         if target:
             self.store.path(target)
@@ -191,15 +223,27 @@ class WikiJobs:
                         "A new-file manifest requires the current creation change for each file",
                         403,
                     )
-            selected.append(
-                {
+                with self.store.connect() as db:
+                    identity = db.execute("SELECT document_id FROM change_retention WHERE change_id=?", (change["id"],)).fetchone()
+                if not identity or identity[0] != document["id"]:
+                    raise WikiError("The creation receipt belongs to a different document identity", 403)
+            item = {
                     "status": "pending",
                     "path": document["path"],
                     "doc": document["id"],
                     "revision": document["revision"],
                     "quality": document["quality"],
                 }
-            )
+            if Path(path).suffix.lower() not in {".md", ".markdown"}:
+                paired_path = path + ".md"
+                item["paired_doc"] = None
+                if self.store.path(paired_path).is_file():
+                    with self.store.connect() as db:
+                        owned = db.execute("SELECT metadata FROM managed_notes WHERE path=?", (paired_path,)).fetchone()
+                    if paired_path not in paths and (not owned or not any(ref.get("doc") == document["id"] for ref in json.loads(owned[0]).get("sources", []))):
+                        raise WikiError("The paired reading page is not owned by this source; select it explicitly after review", 403)
+                    item["paired_doc"] = self.store.read(paired_path, length=1)["id"]
+            selected.append(item)
         payload = {
             "kind": "submission" if material else "curation",
             "new_only": bool(material or created_changes),
@@ -211,6 +255,22 @@ class WikiJobs:
             "actor": actor,
             "request": request,
         }
+        if material:
+            with self.store.connect() as db:
+                pending = db.execute("SELECT id,payload FROM jobs WHERE status IN ('queued','running','interrupted') ORDER BY created_at").fetchall()
+            for job in pending:
+                if json.loads(job["payload"]).get("material") == material:
+                    return self.alias(key, request, job["id"])
+            reused = materials.find(self.store, material.encode())
+            if reused:
+                result = self.enqueue(key, payload, [{
+                    "doc": reused["id"], "path": reused["path"], "revision": reused["revision"],
+                    "quality": reused["quality"], "status": "done", "reused": True,
+                    "output": reused["path"], "output_revision": reused["revision"],
+                }])
+                return self.update(result["id"], status="completed")
+            if target and self.store.path(target).exists():
+                raise WikiError("New-note target already exists with different material", 409)
         return self.enqueue(key, payload, selected)
 
     def curate(self, key, scope):
@@ -232,9 +292,6 @@ class WikiJobs:
             documents = db.execute(
                 "SELECT * FROM documents WHERE kind='original' ORDER BY path"
             ).fetchall()
-        snapshot = WikiHistory(self.store).snapshot(
-            "Before full original-vault curation"
-        )
         items = [
             {
                 "doc": row["id"],
@@ -251,7 +308,6 @@ class WikiJobs:
                 "kind": "curation",
                 "scope": scope,
                 "new_only": False,
-                "snapshot_id": snapshot["id"],
             },
             items,
         )
@@ -290,14 +346,22 @@ class WikiJobs:
             if job["status"] == "cancelled":
                 return None
             payload = job["payload"]
+            existing = materials.find(self.store, payload["material"].encode())
+            if existing:
+                with self.store.connect() as db:
+                    own_creation = db.execute("""SELECT 1 FROM changes c JOIN change_retention r ON r.change_id=c.id
+                      WHERE c.path=? AND c.reason=? AND c.status='applied' AND c.before_hash IS NULL
+                        AND r.document_id=?""", (existing["path"], f"Ingest job {job_id}", existing["id"])).fetchone()
+                return existing | {"reused": not bool(own_creation)}
             path = payload.get("target") or f"Library/Inbox/{job_id}.md"
             target = self.store.path(path)
             if target.exists():
-                if not any(
-                    entry["reason"] == f"Ingest job {job_id}"
-                    and entry["status"] == "applied"
-                    for entry in history.history(path)["items"]
-                ):
+                current = self.store.read(path, length=1)
+                with self.store.connect() as db:
+                    receipt = db.execute("""SELECT 1 FROM changes c JOIN change_retention r ON r.change_id=c.id
+                      WHERE c.path=? AND c.reason=? AND c.status='applied' AND c.before_hash IS NULL
+                        AND r.document_id=?""", (path, f"Ingest job {job_id}", current["id"])).fetchone()
+                if not receipt:
                     raise WikiError(
                         "New-note target already exists; the original was not overwritten",
                         409,
@@ -313,6 +377,10 @@ class WikiJobs:
             return self.store.read(path, length=1)
 
     def retry(self, job_id):
+        with WikiHistory(self.store).locked():
+            return self._retry(job_id)
+
+    def _retry(self, job_id):
         job = self.get(job_id)
         if job["status"] in {"running", "queued", "completed"}:
             raise WikiError(
@@ -321,6 +389,13 @@ class WikiJobs:
             )
         for item in job["items"]:
             if item["status"] != "done":
+                if item.get("index_recovery") or self.publication(job_id, item["doc"]):
+                    item.update(status="pending", index_recovery=True)
+                    item.pop("error", None)
+                    continue
+                if item.get("retry_count", 0) >= 2:
+                    item.update(status="attention", error="The two reread attempts are exhausted; create a new explicit task after review")
+                    continue
                 try:
                     current = self.store.read(item["doc"], length=1)
                 except WikiError:
@@ -331,6 +406,7 @@ class WikiJobs:
                             item["revision"]
                         )
                         item["revision"] = current["revision"]
+                    item["retry_count"] = item.get("retry_count", 0) + 1
                     item["quality"] = current["quality"]
                 item.pop("error", None)
                 item["status"] = "pending"
@@ -339,6 +415,97 @@ class WikiJobs:
         )
         worker.wake(self.user_id)
         return result
+
+    def resolve_conflicts(self, job_id, path):
+        history = WikiHistory(self.store)
+        with history.locked():
+            with self.store.connect() as db:
+                ids = [row[0] for row in db.execute(
+                    "SELECT change_id FROM change_proposals WHERE json_extract(operation,'$.job_id')=? AND json_extract(operation,'$.source_path')=?",
+                    (job_id, path),
+                )]
+            history.resolve_proposals(ids)
+
+    def has_conflict(self, job_id, path):
+        with self.store.connect() as db:
+            return bool(db.execute("""SELECT 1 FROM change_proposals p
+              JOIN change_retention r ON r.change_id=p.change_id
+              WHERE json_extract(p.operation,'$.job_id')=?
+                AND json_extract(p.operation,'$.source_path')=?
+                AND r.resolved_at IS NULL LIMIT 1""", (job_id, path)).fetchone())
+
+    def publication(self, job_id, document_id):
+        with self.store.connect() as db:
+            return db.execute("SELECT p.*,c.status AS change_status,r.document_id AS output_doc FROM job_publications p JOIN changes c ON c.id=p.change_id JOIN change_retention r ON r.change_id=c.id WHERE p.job_id=? AND p.source_doc=? ORDER BY p.rowid DESC LIMIT 1", (job_id, document_id)).fetchone()
+
+    def recover_publication(self, job_id, item):
+        """Recognize our durable publication before treating it as input drift."""
+        history = WikiHistory(self.store)
+        with history.locked():
+            published = self.publication(job_id, item["doc"])
+            if not published:
+                return False
+            item.update(input_revision=published["input_revision"], output=published["output_path"],
+                        output_revision=published["output_revision"], output_change_id=published["change_id"],
+                        index_complete=False, index_recovery=True)
+            if published["change_status"] != "applied":
+                # The receipt precedes the atomic write. A crash followed by
+                # editing or reverting the file cannot prove whether it landed.
+                # Preserve that uncertainty instead of generating another draft.
+                item.update(status="attention", error="Publication interrupted before its applied marker; review the retained change and current text without regenerating the note")
+                return True
+            try:
+                output = self.store.read(published["output_path"], length=1, expected_revision=published["output_revision"])
+                if published["output_path"] != item["path"]:
+                    self.store.read(item["doc"], length=1, expected_revision=published["input_revision"])
+                if output["id"] != published["output_doc"]:
+                    raise WikiError("Published output identity was replaced", 409)
+                if output["stale"]:
+                    raise WikiError("Published output or its cited sources changed; review the existing publication", 409)
+                with self.store.connect() as db:
+                    self.store.require_indexed(db, published["output_path"])
+                    db.execute("UPDATE job_publications SET indexed=1 WHERE change_id=?", (published["change_id"],))
+            except WikiError as exc:
+                item.update(status="attention", index_complete=False, index_recovery=True,
+                            output=published["output_path"], output_revision=published["output_revision"],
+                            output_change_id=published["change_id"], error=str(exc))
+                return True
+            item.update(status="done", input_revision=published["input_revision"], output=published["output_path"], output_revision=published["output_revision"], output_change_id=published["change_id"], index_complete=True)
+            item.pop("error", None)
+            item.pop("index_recovery", None)
+            self.resolve_conflicts(job_id, item["path"])
+            return True
+
+    def reread(self, job_id, item, error, *, retryable=True):
+        history = WikiHistory(self.store)
+        with history.locked():
+            fresh = self.get(job_id)
+            persisted = next(entry for entry in fresh["items"] if entry["doc"] == item["doc"])
+            item["retry_count"] = persisted.get("retry_count", 0)
+            retrying = retryable and item["retry_count"] < 2
+            if retrying:
+                # Reserve the attempt durably before reading or starting a new
+                # worker turn. Restarts and manual retry cannot reset it.
+                item["retry_count"] += 1
+                persisted.update(item)
+                self.update(job_id, expected_status="running", items=fresh["items"])
+            current = self.store.read(item["doc"], length=1)
+            raw = self.store.path(current["path"]).read_bytes()
+            candidate = history.record(item["path"], raw, raw, "curator-worker", error, "conflict", proposal={
+                "job_id": job_id, "source_path": item["path"], "expected_revision": item["revision"],
+                "operation": "reread-and-organize", "reason": error,
+            })
+            item.setdefault("candidate_changes", []).append(candidate["id"])
+            item.setdefault("input_revision", item["revision"])
+            if not retrying:
+                item.update(status="attention", error=error + "; retained candidate for review")
+            else:
+                if current["revision"] != item["revision"]:
+                    item.setdefault("previous_revisions", []).append(item["revision"])
+                item.update(status="pending", revision=current["revision"], quality=current["quality"], retry_reason=error)
+                item.pop("error", None)
+            persisted.update(item)
+            self.update(job_id, expected_status="running", items=fresh["items"])
 
 
 class WikiWorker:
@@ -432,7 +599,7 @@ class WikiWorker:
             return
         if payload["kind"] == "submission" and payload["material"]:
             path = payload.get("target") or f"Library/Inbox/{job_id}.md"
-            if not any(item["path"] == path for item in job["items"]):
+            if not job["items"]:
                 doc = await _io(jobs.ingest, job_id)
                 if (
                     doc is None
@@ -442,10 +609,11 @@ class WikiWorker:
                 job["items"].append(
                     {
                         "doc": doc["id"],
-                        "path": path,
+                        "path": doc["path"],
                         "revision": doc["revision"],
                         "quality": doc["quality"],
-                        "status": "pending",
+                        "status": "done" if doc.get("reused") else "pending",
+                        **({"reused": True, "output": doc["path"], "output_revision": doc["revision"]} if doc.get("reused") else {}),
                     }
                 )
                 await _io(
@@ -473,12 +641,18 @@ class WikiWorker:
             briefing = []
             readable = []
             for item in batch:
-                doc = await _io(jobs.store.read, item["doc"], length=1)
+                if await _io(jobs.recover_publication, job_id, item):
+                    continue
+                if item.get("index_recovery"):
+                    item.update(status="attention", error="Publication recovery receipt is unavailable; review without regenerating the note")
+                    continue
+                try:
+                    doc = await _io(jobs.store.read, item["doc"], length=1)
+                except WikiError as exc:
+                    item.update(status="attention", error=str(exc))
+                    continue
                 if doc["revision"] != item["revision"]:
-                    item.update(
-                        status="attention",
-                        error="Source changed since this task was submitted; retry after review",
-                    )
+                    await _io(jobs.reread, job_id, item, "Source changed since this task was submitted")
                 elif doc["quality"] == "error" or doc["characters"] == 0:
                     item.update(
                         status="attention",
@@ -534,15 +708,13 @@ class WikiWorker:
             grants.assign(session.id, job_id, assigned)
             prompt = (
                 "这是已明确授权的持久维护任务。按本次共享维护与写作指南执行。\n"
-                "完整读取指定正文；用 organize 保留原文并补 Key note、必要标签和关联。"
-                "开头已有要点则沿用，不重复总结。新增关联之前读相关旧文，链接只写到指定笔记中。"
-                "不逐篇复制来源卡、不更新未指定旧文；必要的新概念/主题入口使用 Library 分类。"
-                "工具/tmp/静态/PDF 等资产不套模板。完成意义自检和连续冷读。"
-                "用实际工具产物完成任务，不能只在对话中说已完成；本队列没有人等待回答问题。\n"
                 + "用户要求: "
                 + payload["scope"]
                 + "\n仅可修改这些文件（其他旧文只读）:\n"
                 + json.dumps(briefing, ensure_ascii=False)
+                + "\n重读原因与已用重读次数:\n"
+                + json.dumps([{key: item.get(key) for key in ("path", "retry_reason", "retry_count")} for item in readable], ensure_ascii=False)
+                + "\n本队列没有人等待同步答复；以实际发布产物结束。"
             )
             errors = []
             try:
@@ -561,6 +733,8 @@ class WikiWorker:
                 if Path(path).suffix.lower() not in {".md", ".markdown"}:
                     path += ".md"
                 try:
+                    if await _io(jobs.recover_publication, job_id, item):
+                        continue
                     if errors:
                         raise WikiError("; ".join(errors))
                     output = await _io(jobs.store.read, path, length=1)
@@ -577,11 +751,19 @@ class WikiWorker:
                         raise WikiError(
                             "Organized content is stale; review current sources"
                         )
+                    with jobs.store.connect() as db:
+                        jobs.store.require_indexed(db, path)
                     item.update(
-                        status="done", output=path, output_revision=output["revision"]
+                        status="done", output=path, output_revision=output["revision"], index_complete=True
                     )
                 except WikiError as exc:
-                    item.update(status="failed", error="; ".join(errors) or str(exc))
+                    try:
+                        current = await _io(jobs.store.read, item["doc"], length=1)
+                    except WikiError:
+                        item.update(status="attention", error="; ".join(errors) or str(exc))
+                    else:
+                        conflict = await _io(jobs.has_conflict, job_id, item["path"])
+                        await _io(jobs.reread, job_id, item, "; ".join(errors) or str(exc), retryable=current["revision"] != item["revision"] or conflict)
             await _io(
                 jobs.update,
                 job_id,

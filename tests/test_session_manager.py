@@ -1876,8 +1876,9 @@ class _StallBackend(FakeRunBase):
         self.stderr_text = ""
         self._unblock = asyncio.Event()
 
-    async def start(self, *args, **kwargs):
-        pass
+    async def start(self, prompt, working_dir=None, resume_id=None, **kwargs):
+        self.started_with = prompt
+        self.started_resume = resume_id
 
     def stream(self):
         async def _gen():
@@ -1897,6 +1898,7 @@ async def test_turn_idle_timeout_stops_and_surfaces(manager, monkeypatch):
 
     monkeypatch.setattr(cfg, "turn_idle_timeout_seconds", 0.2)
     monkeypatch.setattr(cfg, "turn_max_seconds", 0)
+    monkeypatch.setattr(cfg, "turn_idle_max_retries", 0)
     session = await _new(manager, "Stall")
     backend = _StallBackend()
     monkeypatch.setattr(manager, "_make_run", lambda *a, **k: backend)
@@ -1924,6 +1926,28 @@ async def test_fast_turn_not_killed_by_watchdog(manager, monkeypatch):
     assert not any(e.get("code") == "turn_timeout" for e in events)
 
 
+async def test_disabled_overall_cap_does_not_stop_a_long_active_turn(manager, monkeypatch):
+    import time
+
+    from server.config import settings as cfg
+
+    monkeypatch.setattr(cfg, "turn_idle_timeout_seconds", 0.3)
+    monkeypatch.setattr(cfg, "turn_max_seconds", 0)
+    backend = _StallBackend()
+    state = {"last": time.monotonic(), "tripped": None}
+    # The turn began an hour ago, but it has just reported activity. Its age
+    # alone must not stop it when the administrator has left the cap disabled.
+    watchdog = manager._start_turn_watchdog(
+        backend, state, started_at=time.monotonic() - 3600
+    )
+    try:
+        await asyncio.sleep(0.1)
+        assert state["tripped"] is None
+        assert not backend.stopped
+    finally:
+        await manager._stop_watchdog(watchdog)
+
+
 @pytest.mark.asyncio
 async def test_turn_timeout_does_not_trigger_premature_exit_respawn(manager, monkeypatch):
     """A timed-out turn must return BEFORE the premature-exit "continue" respawn
@@ -1933,6 +1957,7 @@ async def test_turn_timeout_does_not_trigger_premature_exit_respawn(manager, mon
 
     monkeypatch.setattr(cfg, "turn_idle_timeout_seconds", 0.2)
     monkeypatch.setattr(cfg, "turn_max_seconds", 0)
+    monkeypatch.setattr(cfg, "turn_idle_max_retries", 0)
     session = await _new(manager, "StallTool")  # claude-code → premature recovery on
     backend = _StallBackend(pre=[
         HarnessEvent(type="session_started", session_id="resume-1"),
@@ -1950,6 +1975,177 @@ async def test_turn_timeout_does_not_trigger_premature_exit_respawn(manager, mon
 
     assert any(e.get("code") == "turn_timeout" for e in events)
     assert calls["n"] == 1  # not respawned with "continue"
+
+
+@pytest.mark.parametrize("backend_kind", ["claude-code", "codex"])
+@pytest.mark.parametrize("original_resume", [None, "original-thread"])
+async def test_idle_recovery_retries_original_without_duplicate_user_messages(
+    manager, monkeypatch, backend_kind, original_resume
+):
+    from server.config import settings as cfg
+    from server.harness import HarnessEvent
+
+    monkeypatch.setattr(cfg, "turn_idle_timeout_seconds", 0.1)
+    monkeypatch.setattr(cfg, "turn_max_seconds", 0)
+    agent = await manager.db.get_system_agent()
+    session = await manager.create_session(agent["id"], "Recover", backend=backend_kind)
+    session.claude_session_id = original_resume
+    first = _StallBackend([HarnessEvent(type="session_started", session_id="failed-thread")])
+    second = _SeqBackend([
+        HarnessEvent(type="text", content="recovered"),
+        HarnessEvent(type="result", session_id="new-thread"),
+    ])
+    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second]))
+
+    events = [e async for e in manager.send_message(session.id, "original request")]
+
+    retry = next(e for e in events if e.get("code") == "turn_timeout_retry")
+    assert retry["retrying"] is True
+    assert not any(e.get("code") == "turn_timeout" for e in events)
+    assert second.started_with == "original request"
+    assert second.started_resume == original_resume
+    assert first.stopped
+    messages = await manager.db.load_messages(session.id)
+    assert [m["content"] for m in messages if m["role"] == "user"] == ["original request"]
+    assert any(m["content"] == retry["message"] for m in messages)
+
+
+@pytest.mark.parametrize("backend_kind", ["claude-code", "codex"])
+@pytest.mark.parametrize("output_kind", ["tool_use", "text_delta"])
+async def test_idle_recovery_resumes_after_output(
+    manager, monkeypatch, backend_kind, output_kind
+):
+    from server.config import settings as cfg
+    from server.harness import HarnessEvent
+
+    monkeypatch.setattr(cfg, "turn_idle_timeout_seconds", 0.1)
+    monkeypatch.setattr(cfg, "turn_max_seconds", 0)
+    agent = await manager.db.get_system_agent()
+    session = await manager.create_session(agent["id"], "Resume", backend=backend_kind)
+    first = _StallBackend([
+        HarnessEvent(type="session_started", session_id="saved-thread"),
+        HarnessEvent(type=output_kind, content="partial", tool_name="Bash", tool_use_id="t1"),
+    ])
+    second = _SeqBackend([HarnessEvent(type="result", session_id="saved-thread")])
+    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second]))
+
+    events = [e async for e in manager._run_backend(session, "original request")]
+
+    assert any(e.get("code") == "turn_timeout_retry" for e in events)
+    assert second.started_resume == "saved-thread"
+    assert "Continue the user's unfinished request" in second.started_with
+    assert "Check existing files and tool outcomes" in second.started_with
+    assert second.started_with != "original request"
+
+
+async def test_idle_recovery_has_a_per_turn_budget(manager, monkeypatch):
+    from server.config import settings as cfg
+    from server.harness import HarnessEvent
+
+    monkeypatch.setattr(cfg, "turn_idle_timeout_seconds", 0.1)
+    monkeypatch.setattr(cfg, "turn_max_seconds", 0)
+    monkeypatch.setattr(cfg, "turn_idle_max_retries", 2)
+    session = await _new(manager, "Budget")
+    stalls = [_StallBackend() for _ in range(3)]
+    success = _SeqBackend([HarnessEvent(type="result", session_id="done")])
+    monkeypatch.setattr(manager, "_make_run", _seq_factory([*stalls, success]))
+
+    events = [e async for e in manager.send_message(session.id, "first request")]
+
+    assert len([e for e in events if e.get("code") == "turn_timeout_retry"]) == 2
+    final = [e for e in events if e.get("code") == "turn_timeout"]
+    assert len(final) == 1 and not final[0].get("retrying")
+    assert "after 2 retries" in final[0]["message"]
+    assert all(b.stopped for b in stalls)
+    # A failed logical turn leaves the session usable for the next request.
+    await manager.start_message(session.id, "next request")
+    await asyncio.wait_for(session._active_task, timeout=1)
+    assert success.started_with == "next request"
+
+
+@pytest.mark.parametrize("second_failure", ["idle", "transient"])
+async def test_recovery_remembers_output_from_earlier_attempts(manager, monkeypatch, second_failure):
+    from server.config import settings as cfg
+    from server.harness import HarnessEvent
+
+    monkeypatch.setattr(cfg, "turn_idle_timeout_seconds", 0.1)
+    monkeypatch.setattr(cfg, "turn_max_seconds", 0)
+    monkeypatch.setattr(type(manager), "_TRANSIENT_RETRY_BASE_DELAY", 0.0)
+    session = await _new(manager, "MixedRecovery")
+    first = _StallBackend([
+        HarnessEvent(type="session_started", session_id="saved-thread"),
+        HarnessEvent(type="tool_use", tool_name="Write", tool_use_id="write-1"),
+    ])
+    second = _StallBackend() if second_failure == "idle" else _SeqBackend([
+        HarnessEvent(type="result", is_error=True, content="API Error: 529 Overloaded")
+    ])
+    final = _SeqBackend([HarnessEvent(type="result", session_id="saved-thread")])
+    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second, final]))
+
+    events = [e async for e in manager._run_backend(session, "original request")]
+
+    assert not any(e.get("code") == "turn_timeout" for e in events)
+    assert final.started_resume == "saved-thread"
+    assert final.started_with != "original request"
+
+
+async def test_idle_recovery_does_not_replay_output_without_resume_id(manager, monkeypatch):
+    from server.config import settings as cfg
+    from server.harness import HarnessEvent
+
+    monkeypatch.setattr(cfg, "turn_idle_timeout_seconds", 0.1)
+    monkeypatch.setattr(cfg, "turn_max_seconds", 0)
+    session = await _new(manager, "NoResume")
+    first = _StallBackend([HarnessEvent(type="text_delta", content="partial")])
+    monkeypatch.setattr(manager, "_make_run", _seq_factory([first]))
+
+    events = [e async for e in manager._run_backend(session, "request")]
+
+    assert any(e.get("code") == "turn_timeout" for e in events)
+    assert not any(e.get("code") == "turn_timeout_retry" for e in events)
+
+
+async def test_overall_timeout_bounds_all_recovery_attempts(manager, monkeypatch):
+    from server.config import settings as cfg
+
+    monkeypatch.setattr(cfg, "turn_idle_timeout_seconds", 0.1)
+    monkeypatch.setattr(cfg, "turn_max_seconds", 0.35)
+    monkeypatch.setattr(cfg, "turn_idle_max_retries", 10)
+    session = await _new(manager, "TotalBudget")
+    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: _StallBackend())
+
+    events = [e async for e in manager._run_backend(session, "request")]
+
+    retries = [e for e in events if e.get("code") == "turn_timeout_retry"]
+    assert 0 < len(retries) < 10
+    final = next(e for e in events if e.get("code") == "turn_timeout")
+    assert "maximum duration" in final["message"]
+
+
+async def test_user_interrupt_stops_idle_recovery(manager, monkeypatch):
+    from server.config import settings as cfg
+    from server.harness import HarnessEvent
+
+    monkeypatch.setattr(cfg, "turn_idle_timeout_seconds", 0.2)
+    monkeypatch.setattr(cfg, "turn_max_seconds", 0)
+    session = await _new(manager, "CancelRecovery")
+    started_second = asyncio.Event()
+    first = _StallBackend()
+    second = _StallBackend([HarnessEvent(type="text", content="second attempt")])
+    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second]))
+
+    async def watch(event):
+        if event.get("content") == "second attempt":
+            started_second.set()
+
+    manager.on_broadcast("second-attempt", watch)
+    await manager.start_message(session.id, "request")
+    await asyncio.wait_for(started_second.wait(), timeout=1)
+    assert await manager.interrupt(session.id)
+    await asyncio.wait_for(session._active_task, timeout=1)
+    messages = await manager.db.load_messages(session.id)
+    assert sum(m["content"] == "(interrupted by user)" for m in messages) == 1
+    assert session.status == SessionStatus.idle
 
 
 class _DripBackend(FakeRunBase):
@@ -2004,6 +2200,42 @@ async def test_turn_overall_cap_trips_even_with_steady_events(manager, monkeypat
 # --------------------------------------------------------------------------- #
 # Streamed token deltas (inline-steering.md §4 S1)
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.asyncio
+async def test_effort_saved_during_recovery_applies_on_the_next_turn(manager, monkeypatch):
+    from server.harness import HarnessEvent
+
+    monkeypatch.setattr(manager, "_TRANSIENT_RETRY_BASE_DELAY", 0)
+    session = await _new(manager, "Reasoning")
+    session.backend = "codex"
+    session.reasoning_effort = "low"
+    settings_seen = []
+    attempt_count = 0
+
+    class Scripted(_FakeBackend):
+        def stream(self):
+            async def events():
+                nonlocal attempt_count
+                attempt_count += 1
+                if attempt_count == 1:
+                    session.reasoning_effort = "high"
+                    yield HarnessEvent(type="error", content="stream disconnected", is_error=True)
+                    yield HarnessEvent(type="result", is_error=True)
+                else:
+                    yield HarnessEvent(type="text", content="done")
+                    yield HarnessEvent(type="result", is_error=False)
+            return events()
+
+    def factory(configured, agent=None, connectors=None):
+        settings_seen.append(configured.reasoning_effort)
+        return Scripted([])
+
+    monkeypatch.setattr(manager, "_make_run", factory)
+    events = [event async for event in manager._run_backend(session, "work")]
+    assert settings_seen == ["low", "low"], events
+    _ = [event async for event in manager._run_backend(session, "next")]
+    assert settings_seen == ["low", "low", "high"]
 
 
 def test_text_delta_broadcasts_but_never_persists():

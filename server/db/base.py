@@ -12,6 +12,7 @@ from typing import Any
 
 import aiosqlite
 
+from ..config import settings
 from ..monitor import Event as _MonEvent
 from ..monitor import record as _mon_record
 from .schema import _DEFAULT_MCP_SERVERS_JSON, _SCHEMA
@@ -179,7 +180,7 @@ class DatabaseBase:
         "mcp_servers, tool_allow, tool_deny, is_system, archived, "
         "created_at, updated_at, backend, subagents, pinned, pin_order, "
         # Appended, never inserted: `_row_to_agent` maps by position.
-        "user_id"
+        "user_id, reasoning_effort"
     )
     # Subquery counting live (non-archived) sessions for an agent — shared
     # by load_agents and get_agent so the UI can show "3 sessions".
@@ -245,6 +246,9 @@ class DatabaseBase:
         # `/model`: a per-session model, the same shape `backend` already has.
         # NULL means "use the agent's", whose NULL means "backend default".
         ("sessions", "model", "ALTER TABLE sessions ADD COLUMN model TEXT"),
+        ("sessions", "reasoning_effort",
+         "ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT"),
+        ("agents", "reasoning_effort", "ALTER TABLE agents ADD COLUMN reasoning_effort TEXT"),
         # sidebar-pins.md — the sidebar shows pinned applications. DEFAULT 1
         # pins every existing app, so the sidebar looks the same the day this
         # lands; `pin_order` is backfilled in `_backfill_pin_order`.
@@ -467,6 +471,8 @@ class DatabaseBase:
         for table, column, ddl in self._LATE_COLUMN_MIGRATIONS:
             await self._add_column(table, column, ddl)
 
+        await self._backfill_fork_owners()
+
         # After the columns, necessarily: these indexes name `user_id`, which
         # the loop above is what adds to a database that predates accounts.
         # Placed earlier they fail with "no such column" on exactly the
@@ -542,6 +548,38 @@ class DatabaseBase:
         # nothing here a user would miss.
         await self.conn.execute("DROP TABLE IF EXISTS bridge_mappings")
         await self._stamp("drop:bridge_mappings")
+
+    async def _backfill_fork_owners(self) -> None:
+        """Recover forks whose creation omitted the parent's account.
+
+        Include archived parents and repeat for fork chains. A deleted parent
+        can be resolved through the inherited agent. Conflicting owners and
+        unresolved chains stay untouched; existing ownership never changes.
+        """
+        repaired = 0
+        while True:
+            cur = await self.conn.execute(
+                """
+                UPDATE sessions AS fork
+                   SET user_id = COALESCE(parent.user_id, agent.user_id)
+                  FROM sessions AS source
+                  LEFT JOIN sessions AS parent ON parent.id = source.forked_from_session_id
+                  LEFT JOIN agents AS agent ON agent.id = source.agent_id
+                 WHERE fork.id = source.id AND fork.origin = 'fork'
+                   AND fork.user_id IS NULL
+                   AND (
+                       (parent.user_id IS NOT NULL AND
+                        (agent.user_id IS NULL OR agent.user_id = parent.user_id))
+                       OR (parent.id IS NULL AND agent.user_id IS NOT NULL)
+                   )
+                """
+            )
+            if cur.rowcount == 0:
+                break
+            repaired += cur.rowcount
+        if repaired:
+            logger.info("Restored account ownership for %d fork sessions", repaired)
+        await self._stamp("backfill:fork_session_owners")
 
     async def _set_pinned(self, table: str, row_id: str, pinned: bool) -> None:
         """Pin a row to the sidebar (at the bottom) or unpin it.
@@ -770,9 +808,9 @@ class DatabaseBase:
             await self.conn.execute(
                 "INSERT INTO agents "
                 "(id, name, description, system_prompt, mcp_servers, "
-                " is_system, created_at, updated_at) "
-                "VALUES (?, 'Octo', '', '', ?, 1, ?, ?)",
-                (default_id, _DEFAULT_MCP_SERVERS_JSON, now, now),
+                " is_system, created_at, updated_at, backend) "
+                "VALUES (?, 'Octo', '', '', ?, 1, ?, ?, ?)",
+                (default_id, _DEFAULT_MCP_SERVERS_JSON, now, now, settings.default_backend),
             )
         else:
             default_id = row[0]

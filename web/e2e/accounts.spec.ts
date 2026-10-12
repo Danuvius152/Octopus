@@ -109,6 +109,63 @@ test.describe("Accounts", () => {
     await expect(page.locator(".account-handle")).toHaveText(OWNER.username);
   });
 
+  test("an account's rewind keeps its conversation after reload", async ({ page, request }) => {
+    await signIn(page, OWNER);
+    const bearer = await page.evaluate(() => localStorage.getItem("octopus_token") ?? "");
+    const headers = { Authorization: `Bearer ${bearer}` };
+    const name = "Owned rewind history";
+    const imported = await request.post(`${API}/sessions/import`, {
+      headers,
+      data: {
+        name,
+        backend: "codex",
+        messages: [
+          { role: "user", type: "text", content: "keep the first question" },
+          { role: "assistant", type: "text", content: "keep the first answer" },
+          { role: "user", type: "text", content: "redo the next question" },
+          { role: "assistant", type: "text", content: "old answer" },
+        ],
+      },
+    });
+    expect(imported.ok()).toBeTruthy();
+    const parent = await imported.json();
+    let forkId: string | null = null;
+    try {
+      await page.reload();
+      const agent = page.locator(".agent-item", { hasText: "Octo" });
+      await agent.click();
+      await page.locator(".session-item .session-name", { hasText: name }).click();
+      const message = page.locator(".msg-user").nth(1);
+      await message.hover();
+      await message.locator('[data-testid="fork-from-here"]').click();
+      const created = page.waitForResponse(
+        (response) => response.url().endsWith(`/sessions/${parent.id}/fork`) &&
+          response.request().method() === "POST",
+      );
+      await page.locator(".btn-create-fork").click();
+      const fork = await (await created).json();
+      forkId = fork.id;
+      await expect(page.locator('[data-testid="fork-banner"]')).toBeVisible();
+      await expect(page.locator(".msg-assistant")).toContainText("keep the first answer");
+
+      await page.reload();
+      await page.locator(".agent-item", { hasText: "Octo" }).click();
+      const session = page.locator(".session-item .session-name", { hasText: name });
+      await expect(session).toHaveCount(1);
+      await session.click();
+      await expect(page.locator(".msg-user")).toContainText("keep the first question");
+      await expect(page.locator(".msg-assistant")).toContainText("keep the first answer");
+      await expect(page.locator(".chat-input-bar textarea")).toHaveValue("redo the next question");
+      const history = await request.get(`${API}/sessions/${parent.id}`, { headers });
+      expect(history.ok()).toBeTruthy();
+      expect((await history.json()).messages).toHaveLength(4);
+    } finally {
+      for (const id of [forkId, parent.id]) {
+        if (id) await request.delete(`${API}/sessions/${id}`, { headers });
+      }
+    }
+  });
+
   test("a wrong password is refused, and says so", async ({ page }) => {
     await page.goto("/");
     await page.locator("#username").fill(OWNER.username);

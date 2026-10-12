@@ -1,0 +1,374 @@
+"""Rebuildable, local lexical navigation. Evidence stays in current files."""
+
+from __future__ import annotations
+
+import json
+import logging
+import re
+import unicodedata
+
+import jieba
+
+VERSION = "sections-v3"
+_tokenizer = jieba.Tokenizer()
+jieba.setLogLevel(logging.WARNING)
+_letter = r"(?:(?![\u3400-\u9fff])[^\W_])"
+_pieces = re.compile(rf"[\u3400-\u9fff]+|{_letter}+(?:[-+]{_letter}+)*", re.UNICODE)
+_chinese = re.compile(r"[\u3400-\u9fff]+\Z")
+_stop = set(
+    "的 了 和 与 或 是 在 有 我 我的 我们 你 这个 那个 一下 如何 怎么 什么 哪些 "
+    "为什么 是否 请 请问 关于 告诉 解释 介绍 可以 能 吗 呢 么 地 得 "
+    "那篇 这篇 那份 这份 怎样 有何 查找 搜索 "
+    "a an the of on in is are to for and or what how why my me please".split()
+)
+
+
+def normalize(text: str) -> str:
+    return unicodedata.normalize("NFKC", text).casefold().strip()
+
+
+def words(text: str) -> list[str]:
+    result: list[str] = []
+    for match in _pieces.finditer(normalize(text)):
+        piece = match[0]
+        if not _chinese.fullmatch(piece):
+            result.append(piece)
+            continue
+        # Unknown names are often emitted as adjacent single characters.
+        # Keep those runs intact; matching their letters separately is not
+        # evidence of the name. Grammar stopwords delimit lexical runs.
+        pending = ""
+        for word in _tokenizer.cut(piece, HMM=False):
+            if len(word) == 1 and word not in _stop:
+                pending += word
+            else:
+                if pending:
+                    result.append(pending)
+                    pending = ""
+                result.append(word)
+        if pending:
+            result.append(pending)
+    return result
+
+
+def encoded(word: str, prefix="w") -> str:
+    # One safe unicode61 token, including hyphenated terms and punctuation.
+    return prefix + word.encode().hex()
+
+
+def tokens(text: str) -> str:
+    lexical = []
+    for word in words(text):
+        lexical.append(encoded(word))
+        if "-" in word:
+            lexical.extend(encoded(part) for part in word.split("-"))
+    # Keep order and frequency. A query uses a whole contiguous bigram phrase,
+    # never ORs arbitrary fragments from an unknown term.
+    bigrams: list[str] = []
+    for chunk in re.findall(r"[\u3400-\u9fff]+", normalize(text)):
+        bigrams.extend(encoded(chunk[i : i + 2], "b") for i in range(len(chunk) - 1))
+        bigrams.append("boundary")
+    return " ".join([*lexical, *bigrams])
+
+
+def query_groups(query: str) -> tuple[list[str], list[str]]:
+    candidates = []
+    for match in _pieces.finditer(normalize(query)):
+        piece = match[0]
+        split = words(piece)
+        # A bare Chinese concept stays contiguous even when the dictionary
+        # splits it (数字 + 人, 自 + 监督 + 学习). In questions, grammar
+        # stopwords separate the request from its searchable content words.
+        if _chinese.fullmatch(piece) and len(split) > 1 and not any(word in _stop for word in split):
+            candidates.append(piece)
+        else:
+            candidates.extend(split)
+    terms = list(dict.fromkeys(word for word in candidates if word not in _stop))
+    if not terms:
+        terms = list(dict.fromkeys(words(query)))
+    groups = []
+    for word in terms:
+        group = '"' + encoded(word) + '"'
+        if len(word) >= 2 and _chinese.fullmatch(word):
+            phrase = " ".join(
+                encoded(word[i : i + 2], "b") for i in range(len(word) - 1)
+            )
+            group = f'({group} OR "{phrase}")'
+        elif "-" in word:
+            phrase = " ".join(encoded(part) for part in word.split("-"))
+            group = f'({group} OR "{phrase}")'
+        groups.append(group)
+    return terms, groups
+
+
+def sections(text: str, title: str) -> list[dict]:
+    """Character coordinates refer to extracted text, exactly as read() does."""
+    boundaries = [(0, title)]
+    offset = 0
+    fence = None
+    front = text.lstrip("\ufeff").startswith("---\n") or text.lstrip(
+        "\ufeff"
+    ).startswith("---\r\n")
+    for number, line in enumerate(text.splitlines(keepends=True)):
+        stripped = line.strip()
+        if front:
+            if number > 0 and stripped == "---":
+                front = False
+        else:
+            marker = re.match(r"^\s*(`{3,}|~{3,})", line)
+            if marker:
+                if fence is None:
+                    fence = marker[1]
+                elif marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
+                    fence = None
+            elif fence is None:
+                heading_match = re.match(r"^#{1,6}\s+(.+?)\s*#*\s*$", line)
+                if heading_match:
+                    if offset == 0:
+                        boundaries[0] = (0, heading_match[1])
+                    else:
+                        boundaries.append((offset, heading_match[1]))
+        offset += len(line)
+    result = []
+    for index, (start, heading) in enumerate(boundaries):
+        end = boundaries[index + 1][0] if index + 1 < len(boundaries) else len(text)
+        while start < end:
+            stop = min(start + 6000, end)
+            if stop < end:
+                newline = text.rfind("\n", start + 3000, stop)
+                if newline >= 0:
+                    stop = newline + 1
+            result.append({"title": heading, "start": start, "end": stop})
+            # A query is at most 1000 characters. Overlap keeps any bounded
+            # term/Chinese adjacency phrase intact even in unbroken prose.
+            # Coordinates remain literal slices of the current extracted text.
+            start = stop if stop == end else stop - min(1000, (stop - start) // 2)
+    return result or [{"title": title, "start": 0, "end": 0}]
+
+
+def initialize(db) -> None:
+    expected = {"search_documents", "search_sections", "search_fts"}
+    existing = {
+        row[0]
+        for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+    }
+    incomplete = not expected.issubset(existing)
+    db.execute("""CREATE TABLE IF NOT EXISTS search_documents (
+      doc_id TEXT PRIMARY KEY,revision TEXT NOT NULL,path TEXT NOT NULL,
+      title TEXT NOT NULL,aliases TEXT NOT NULL,version TEXT NOT NULL
+    )""")
+    db.execute("""CREATE TABLE IF NOT EXISTS search_sections (
+      id INTEGER PRIMARY KEY,doc_id TEXT NOT NULL,title TEXT NOT NULL,
+      start INTEGER NOT NULL,end INTEGER NOT NULL,line_start INTEGER NOT NULL,
+      line_end INTEGER NOT NULL
+    )""")
+    db.execute(
+        "CREATE INDEX IF NOT EXISTS search_sections_doc ON search_sections(doc_id)"
+    )
+    db.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
+      title,path,aliases,tags,key_note,heading,body,tokenize='unicode61'
+    )""")
+    db.execute("""CREATE TRIGGER IF NOT EXISTS search_section_delete
+      AFTER DELETE ON search_sections BEGIN
+      DELETE FROM search_fts WHERE rowid=old.id; END""")
+    db.execute("""CREATE TRIGGER IF NOT EXISTS search_document_delete
+      AFTER DELETE ON documents BEGIN
+      DELETE FROM search_sections WHERE doc_id=old.id;
+      DELETE FROM search_documents WHERE doc_id=old.id; END""")
+    if incomplete:
+        db.execute("DELETE FROM search_sections")
+        db.execute("DELETE FROM search_fts")
+        db.execute("DELETE FROM search_documents")
+
+
+def current(db, row) -> bool:
+    indexed = db.execute(
+        "SELECT revision,path,version FROM search_documents WHERE doc_id=?",
+        (row["id"],),
+    ).fetchone()
+    return bool(
+        indexed and tuple(indexed) == (row["revision"], normalize(row["path"]), VERSION)
+        and db.execute("SELECT 1 FROM search_sections WHERE doc_id=? LIMIT 1", (row["id"],)).fetchone()
+        and not db.execute("SELECT 1 FROM search_sections s LEFT JOIN search_fts f ON f.rowid=s.id WHERE s.doc_id=? AND f.rowid IS NULL LIMIT 1", (row["id"],)).fetchone()
+    )
+
+
+def index(db, row, metadata) -> None:
+    doc_id, text = row["id"], row["text"]
+    aliases = metadata.get("aliases", [])
+    tags = metadata.get("tags", [])
+    managed = db.execute(
+        "SELECT metadata FROM managed_notes WHERE path=?", (row["path"],)
+    ).fetchone()
+    if managed:
+        supplied = json.loads(managed[0])
+        aliases = [*aliases, *supplied.get("aliases", [])]
+        tags = [*tags, *supplied.get("tags", [])]
+    chunks = sections(text, row["title"])
+    fields = [
+        tokens(row["title"]),
+        tokens(row["path"]),
+        tokens(" ".join(aliases)),
+        tokens(" ".join(tags)),
+    ]
+    db.execute("DELETE FROM search_sections WHERE doc_id=?", (doc_id,))
+    for part in chunks:
+        content = text[part["start"] : part["end"]]
+        # The heading already has its own field. A title that lists several
+        # concepts must not outrank chapters that actually discuss them.
+        prose = re.sub(r"\A\ufeff?#{1,6}\s+[^\n]*(?:\n|$)", "", content)
+        cursor = db.execute(
+            "INSERT INTO search_sections(doc_id,title,start,end,line_start,line_end) VALUES(?,?,?,?,?,?)",
+            (
+                doc_id,
+                part["title"],
+                part["start"],
+                part["end"],
+                text.count("\n", 0, part["start"]) + 1,
+                text.count("\n", 0, part["end"]) + 1,
+            ),
+        )
+        db.execute(
+            "INSERT INTO search_fts(rowid,title,path,aliases,tags,key_note,heading,body) VALUES(?,?,?,?,?,?,?,?)",
+            (
+                cursor.lastrowid,
+                *fields,
+                tokens(prose)
+                if normalize(part["title"]) in {"key note", "摘要", "要点", "核心观点", "总结"}
+                else "",
+                tokens(part["title"]),
+                tokens(prose),
+            ),
+        )
+    db.execute(
+        "INSERT OR REPLACE INTO search_documents VALUES(?,?,?,?,?,?)",
+        (
+            doc_id,
+            row["revision"],
+            normalize(row["path"]),
+            normalize(row["title"]),
+            json.dumps([normalize(alias) for alias in aliases]),
+            VERSION,
+        ),
+    )
+
+
+def select(db, query, kind, include_assets, offset, limit, directory=None):
+    terms, groups = query_groups(query)
+    if not groups:
+        return [], 0, terms, "lexical"
+    filters, arguments = [], []
+    if kind:
+        filters.append("d.kind=?")
+        arguments.append(kind)
+    elif not include_assets:
+        filters.append("d.kind<>'asset'")
+    if directory:
+        prefix = directory.rstrip("/") + "/"
+        filters.append("substr(d.path,1,?)=?")
+        arguments.extend([len(prefix), prefix])
+    predicate = " AND " + " AND ".join(filters) if filters else ""
+    # Metadata names break ranking ties; body coverage keeps precedence and
+    # every matching body candidate remains available to the reader.
+    latin_names = [group for term, group in zip(terms, groups, strict=True) if re.fullmatch(r"[a-z][a-z0-9-]+", term)]
+    named_documents = []
+    if latin_names:
+        named_documents = [row[0] for row in db.execute("""SELECT DISTINCT s.doc_id FROM search_fts
+          JOIN search_sections s ON s.id=search_fts.rowid JOIN documents d ON d.id=s.doc_id
+          WHERE search_fts MATCH ?""" + predicate,
+          ["{title path aliases} : (" + " OR ".join(latin_names) + ")", *arguments])]
+    # Coverage belongs to a document, not a chapter: a comparison can discuss
+    # the queried concepts in separate sections. Rank actual reading locations
+    # only after choosing documents with complete term-group coverage.
+    group_sql = (
+        """WITH group_hits AS MATERIALIZED (
+      SELECT s.id,s.doc_id,t.key AS term
+      FROM json_each(?) t JOIN search_fts ON search_fts MATCH t.value
+      JOIN search_sections s ON s.id=search_fts.rowid
+      JOIN documents d ON d.id=s.doc_id WHERE 1=1"""
+        + predicate
+        + ") "
+    )
+    prefix = (
+        group_sql + """, local_hits AS MATERIALIZED (
+      SELECT s.id,s.doc_id,t.key AS term
+      FROM json_each(?) t JOIN search_fts
+        ON search_fts MATCH ('{key_note body} : (' || t.value || ')')
+      JOIN search_sections s ON s.id=search_fts.rowid
+      JOIN documents d ON d.id=s.doc_id WHERE 1=1"""
+        + predicate
+        + """
+    ), coverage AS (
+      SELECT doc_id,count(DISTINCT term) AS covered FROM group_hits GROUP BY doc_id
+    ), hits AS MATERIALIZED (
+      SELECT s.*, bm25(search_fts,18,12,16,5,4,6,1) AS cost
+      FROM search_fts JOIN search_sections s ON s.id=search_fts.rowid
+      JOIN documents d ON d.id=s.doc_id
+      WHERE search_fts MATCH ?"""
+        + predicate
+        + """
+    ), locations AS (
+      SELECT h.*, c.covered,
+        (SELECT count(*) FROM local_hits l WHERE l.id=h.id) AS local_coverage,
+        (SELECT count(DISTINCT term) FROM local_hits l WHERE l.doc_id=h.doc_id) AS local_doc_coverage,
+        (SELECT count(*) FROM group_hits g WHERE g.id=h.id) AS section_coverage,
+        (SELECT json_group_array(term) FROM group_hits g WHERE g.id=h.id) AS term_hits,
+        (SELECT json_group_array(term) FROM local_hits l WHERE l.id=h.id) AS local_term_hits
+      FROM hits h JOIN coverage c ON c.doc_id=h.doc_id WHERE c.covered>=?
+    ), ranked AS (
+      SELECT h.*, CASE WHEN n.path=? THEN 4 WHEN n.title=? THEN 3
+        WHEN EXISTS (SELECT 1 FROM json_each(n.aliases) WHERE value=?) THEN 2
+        ELSE 0 END AS exact,
+        CASE WHEN h.doc_id IN (SELECT value FROM json_each(?)) THEN 1 ELSE 0 END AS name_hit,
+        row_number() OVER (PARTITION BY h.doc_id
+          ORDER BY local_coverage DESC,section_coverage DESC,cost,start) AS position
+      FROM locations h JOIN search_documents n ON n.doc_id=h.doc_id
+    ) """
+    )
+    normalized = normalize(query)
+    expression = " OR ".join(groups)
+    common = [json.dumps(groups), *arguments, json.dumps(groups), *arguments, expression, *arguments]
+
+    def parameters(required):
+        return [*common, required, normalized, normalized, normalized, json.dumps(named_documents)]
+
+    def count(required):
+        return db.execute(
+            group_sql + "SELECT count(*) FROM (SELECT doc_id FROM group_hits GROUP BY doc_id HAVING count(DISTINCT term)>=?)",
+            [json.dumps(groups), *arguments, required],
+        ).fetchone()[0]
+
+    required = len(groups)
+    total = count(required)
+    mode = "lexical"
+    if total == 0 and len(groups) > 1:
+        mode = "lexical_partial"
+        required = 1
+        total = count(required)
+    rows = [dict(row) for row in db.execute(
+        prefix + "SELECT * FROM ranked WHERE position=1 ORDER BY exact DESC,covered DESC,local_doc_coverage DESC,name_hit DESC,cost,doc_id LIMIT ? OFFSET ?",
+        [*parameters(required), limit, offset],
+    )]
+    for row in rows:
+        row["sections"] = [{key: row[key] for key in ("title", "start", "end", "line_start", "line_end")}]
+    ids = [row["doc_id"] for row in rows if row["section_coverage"] < row["covered"] or row["local_coverage"] < row["local_doc_coverage"]]
+    if ids:
+        locations = db.execute(
+            prefix + "SELECT * FROM ranked WHERE doc_id IN (" + ",".join("?" for _ in ids) + ") ORDER BY doc_id,position",
+            [*parameters(required), *ids],
+        ).fetchall()
+        for row in rows:
+            # Supply additional chapters only when they contribute missing
+            # terms. Long notes never occupy multiple document result slots.
+            covered = set(json.loads(row["term_hits"]))
+            local_covered = set(json.loads(row["local_term_hits"]))
+            for location in locations:
+                if location["doc_id"] != row["doc_id"]:
+                    continue
+                contributed = set(json.loads(location["term_hits"]))
+                local_contributed = set(json.loads(location["local_term_hits"]))
+                if contributed - covered or local_contributed - local_covered:
+                    row["sections"].append(dict(location))
+                    covered.update(contributed)
+                    local_covered.update(local_contributed)
+    return rows, total, terms, mode

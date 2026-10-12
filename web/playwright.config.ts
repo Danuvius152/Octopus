@@ -108,6 +108,7 @@ export default defineConfig({
         // can find the binary without the user having to configure shell.
         PATH: `${process.env.HOME ?? ""}/.local/bin:${process.env.PATH ?? ""}`,
         OCTOPUS_AUTH_TOKEN: "changeme",
+        OCTOPUS_DEFAULT_BACKEND: "claude-code",
         // Tell pydantic-settings the actual uvicorn port (matches the
         // `port: 8765` above and `--port 8765` in the command). The bg
         // MCP server reads settings.port to build OCTOPUS_API_BASE; the
@@ -156,6 +157,7 @@ export default defineConfig({
         ...process.env,
         PATH: `${process.env.HOME ?? ""}/.local/bin:${process.env.PATH ?? ""}`,
         OCTOPUS_AUTH_TOKEN: "changeme",
+        OCTOPUS_DEFAULT_BACKEND: "claude-code",
         OCTOPUS_PORT: `${E2E_ACCOUNTS_PORT}`,
         OCTOPUS_DB_PATH: ":memory:",
         OCTOPUS_METRICS_DB_PATH: path.join(

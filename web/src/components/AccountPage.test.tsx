@@ -33,6 +33,8 @@ function stub(routes: Routes) {
       if (init?.method && init.method !== "GET") {
         posts.push({ path, body: init.body ? JSON.parse(String(init.body)) : null });
         if (path === "/bootstrap") {
+          routes.accountsExist = true;
+          routes.identity = { label: "archer", user_id: "owner", is_admin: true };
           return {
             ok: true,
             json: async () => ({
@@ -84,7 +86,7 @@ describe("AccountPage", () => {
     expect(screen.queryByText("Invites")).toBeNull();
   });
 
-  it("reports what the claim moved, and stores the new bearer", async () => {
+  it("keeps the claim report after refreshing the new account identity", async () => {
     stub({
       accountsExist: false,
       identity: { label: "archeryue", user_id: null, is_admin: false },
@@ -96,8 +98,9 @@ describe("AccountPage", () => {
     fireEvent.click(screen.getByText("Create account"));
 
     await waitFor(() =>
-      expect(screen.getByText("This install now belongs to archer")).toBeTruthy()
+      expect(screen.getByText("Change password")).toBeTruthy()
     );
+    expect(screen.getByText("This install now belongs to archer")).toBeTruthy();
     expect(screen.getByText(/12 rows adopted/)).toBeTruthy();
     expect(useSessionStore.getState().token).toBe("issued");
     expect(posts[0]).toEqual({

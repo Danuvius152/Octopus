@@ -12,7 +12,7 @@ import asyncio
 import json
 import time
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -52,7 +52,7 @@ from .base import (
 class _Attempt:
     """One CLI invocation inside a logical turn.
 
-    These eleven fields were local variables in a 473-line `_run_backend`, and
+    These fields were local variables in a 473-line `_run_backend`, and
     the fact that eight of its branches read and wrote them is precisely why
     that method could not be split: an event handler needs the same mutable
     view of "what this invocation has seen so far" as the failure classifiers
@@ -69,12 +69,15 @@ class _Attempt:
     reused: bool
     saw_result: bool = False
     saw_tool_use: bool = False
-    # Whether any assistant text streamed — gates the transient retry (don't
-    # re-run a turn that already produced output).
+    # Whether any assistant text streamed, including unfinished delta blocks.
+    # Once output exists, recovery requires the captured conversation.
     saw_text: bool = False
     # Terminal-error signal for post-turn auth-expiry classification.
     saw_error_event: bool = False
     error_text: str = ""
+    # Failed results cannot be announced as terminal until the retry decision
+    # is known: delegation and app callers use these frames to finish a job.
+    failure_frames: list[dict[str, Any]] = field(default_factory=list)
     # Streaming-text coalescing (inline-steering.md §4 S1). The CLI emits one
     # delta per token; forwarding each as its own WS frame would be a frame
     # per token and a React render per token. We batch them into at most one
@@ -140,6 +143,9 @@ class _Turn:
     # A dangling resume id is recoverable exactly once per turn: clear it,
     # start fresh. A second failure is a different problem.
     stale_session_retries: int = 0
+    idle_timeout_retries: int = 0
+    started_at: float = field(default_factory=time.monotonic)
+    produced_output: bool = False
 
 
 @dataclass
@@ -744,6 +750,7 @@ class TurnsMixin(SessionManagerBase):
         credential: HarnessCredential | None,
         agent: dict[str, Any] | None,
         connectors: list[tuple[Any, Any]] | None,
+        configured_session: Session | None = None,
     ) -> tuple[HarnessRun, bool]:
         """The process this attempt runs in, and whether it already holds the
         conversation.
@@ -754,8 +761,11 @@ class TurnsMixin(SessionManagerBase):
         process that nothing points at any more, so neither the reaper nor
         shutdown can ever reach it. Let it go properly first.
         """
+        configured = configured_session or session
+        configured._backend = session._backend
+        configured._steer_open = session._steer_open
         reused = self._reusable_run(
-            session, session.working_dir, credential, agent, connectors
+            configured, session.working_dir, credential, agent, connectors
         )
         if reused is None and session._backend is not None:
             stale = session._backend
@@ -766,7 +776,7 @@ class TurnsMixin(SessionManagerBase):
                 logger.warning(
                     "session %s: abandoning a process we couldn't stop", session.id
                 )
-        backend = reused or self._make_run(session, agent, connectors)
+        backend = reused or self._make_run(configured, agent, connectors)
         session._backend = backend
         return backend, reused is not None
 
@@ -967,6 +977,8 @@ class TurnsMixin(SessionManagerBase):
         contract rather than on whatever a CLI happened to print.
         """
         if event.type == "text_delta":
+            if event.content and event.content.strip():
+                attempt.saw_text = True
             flushed = self._coalesce_delta(session, attempt, event)
             return [flushed] if flushed is not None else []
 
@@ -1044,16 +1056,51 @@ class TurnsMixin(SessionManagerBase):
     async def _timeout_decision(
         self, session: Session, turn: _Turn, attempt: _Attempt
     ) -> _Decision | None:
-        """Turn watchdog tripped (idle or overall cap): the backend was stopped
-        mid-turn. Surface a clear error and STOP — this runs before the
-        auth/transient/premature-exit classifiers so a timeout is never
-        mis-read as transient or respawned (turn-safety.md §3)."""
+        """Resume an idle stop within its budget; the logical-turn cap stops
+        all recovery. Output requires a resume id so completed tools aren't
+        replayed from the original request."""
         if attempt.timeout is None:
             return None
         reason, limit = attempt.timeout
+        overall = settings.turn_max_seconds
+        if overall > 0 and time.monotonic() - turn.started_at >= overall:
+            reason, limit = "overall", overall
+        maximum = max(0, settings.turn_idle_max_retries)
+        if (
+            reason == "idle"
+            and turn.idle_timeout_retries < maximum
+            and (not turn.produced_output or session.claude_session_id)
+        ):
+            turn.idle_timeout_retries += 1
+            if turn.produced_output:
+                next_prompt = (
+                    "The previous attempt stopped after a period without backend "
+                    "activity. Continue the user's unfinished request from this "
+                    "conversation. Check existing files and tool outcomes before "
+                    "repeating operations: interrupted tools may already have "
+                    "changed things. Keep any existing delegations and background "
+                    "jobs; do not duplicate them. Work in smaller steps and use "
+                    "background execution for long commands when available."
+                )
+            else:
+                next_prompt = turn.prompt
+                if session.claude_session_id != turn.resume_at_turn_start:
+                    session.claude_session_id = turn.resume_at_turn_start
+                    if self.db:
+                        await self.db.update_session_field(
+                            session.id, claude_session_id=turn.resume_at_turn_start
+                        )
+            return _Decision.again(
+                next_prompt,
+                await self._surface_idle_retry(
+                    session, limit=limit, attempt=turn.idle_timeout_retries,
+                    max_attempts=maximum,
+                ),
+            )
         return _Decision.stop(
             await self._surface_turn_timeout(
-                session, reason=reason, limit=limit, backend=turn.harness.backend
+                session, reason=reason, limit=limit, backend=turn.harness.backend,
+                retries=turn.idle_timeout_retries,
             )
         )
 
@@ -1136,12 +1183,12 @@ class TurnsMixin(SessionManagerBase):
         )
 
     async def _transient_decision(
-        self, session: Session, turn: _Turn, attempt: _Attempt, blob: str
+        self, session: Session, turn: _Turn, blob: str
     ) -> _Decision | None:
         """Transient provider-reliability failure (5xx / overloaded / dropped
         connection / server-side throttle) → bounded retry.
 
-        TWO modes, by whether the turn already produced output:
+        TWO modes, by whether any attempt in this turn already produced output:
 
         * **no output yet** → re-run the ORIGINAL prompt from the turn-start
           resume state (side-effect-free; discard any resume id a failed
@@ -1158,7 +1205,7 @@ class TurnsMixin(SessionManagerBase):
         if not turn.harness.is_transient_error(blob):
             return None
         can_retry = turn.transient_attempts < self._MAX_TRANSIENT_RETRIES and (
-            not attempt.produced_output or bool(session.claude_session_id)
+            not turn.produced_output or bool(session.claude_session_id)
         )
         if not can_retry:
             # Budget exhausted (or output with no resume id to continue from) —
@@ -1181,9 +1228,9 @@ class TurnsMixin(SessionManagerBase):
             delay,
             turn.transient_attempts,
             self._MAX_TRANSIENT_RETRIES,
-            attempt.produced_output,
+            turn.produced_output,
         )
-        if attempt.produced_output:
+        if turn.produced_output:
             # Continue the in-progress conversation from its captured resume
             # id — no re-run, no duplication.
             next_prompt = "continue"
@@ -1264,7 +1311,7 @@ class TurnsMixin(SessionManagerBase):
         """Classify a finished CLI invocation.
 
         The order is the design, not a preference. A watchdog timeout is read
-        first so it can never be mistaken for something retryable. Auth comes
+        first so it uses its own budget rather than a transient retry. Auth comes
         before the retries because re-auth won't fix itself. A dangling resume
         id comes before transient because it looks transient and is not.
         Premature-exit recovery is last and always answers, because "the CLI
@@ -1282,7 +1329,7 @@ class TurnsMixin(SessionManagerBase):
             decision = await self._stale_session_decision(session, turn, blob)
             if decision is not None:
                 return decision
-            decision = await self._transient_decision(session, turn, attempt, blob)
+            decision = await self._transient_decision(session, turn, blob)
             if decision is not None:
                 return decision
 
@@ -1308,6 +1355,9 @@ class TurnsMixin(SessionManagerBase):
         harness = get_harness(session.backend)
         credential = await self._resolve_credential(session, agent, harness)
         connectors = await self._load_connectors(agent)
+        # A setting saved while this turn is running belongs to the next turn,
+        # including when the current one needs an automatic retry.
+        configured_session = replace(session)
         turn = _Turn(
             prompt=prompt,
             current_prompt=prompt,
@@ -1319,12 +1369,14 @@ class TurnsMixin(SessionManagerBase):
 
         while True:
             backend, reused = await self._acquire_backend(
-                session, credential, agent, connectors
+                session, credential, agent, connectors, configured_session
             )
             attempt = _Attempt(
                 backend=backend, prompt=turn.current_prompt, reused=reused
             )
-            watchdog = self._start_turn_watchdog(backend, attempt.watchdog)
+            watchdog = self._start_turn_watchdog(
+                backend, attempt.watchdog, started_at=turn.started_at
+            )
             # Bound before the try: the `finally` reads it, and a spawn that
             # raises would otherwise unwind through an unbound name and hide
             # the real error.
@@ -1338,7 +1390,12 @@ class TurnsMixin(SessionManagerBase):
                     for frame in await self._handle_stream_event(
                         session, attempt, event
                     ):
-                        yield frame
+                        if frame["type"] == "error" or (
+                            frame["type"] == "result" and frame.get("is_error")
+                        ):
+                            attempt.failure_frames.append(frame)
+                        else:
+                            yield frame
             finally:
                 # Close the steering window and stop the writer before anything
                 # else touches the process (§9), then decide the process's fate.
@@ -1346,8 +1403,11 @@ class TurnsMixin(SessionManagerBase):
                 await self._stop_watchdog(watchdog)
                 await self._retire_or_hold_process(session, attempt)
 
+            turn.produced_output = turn.produced_output or attempt.produced_output
             decision = await self._after_attempt(session, turn, attempt)
-            for frame in decision.events:
+            for frame in [*attempt.failure_frames, *decision.events]:
+                if decision.retry:
+                    frame["retrying"] = True
                 yield frame
             if not decision.retry:
                 return
@@ -1543,12 +1603,14 @@ class TurnsMixin(SessionManagerBase):
         way its profile dictates — no backend-kind branching here."""
         system_prompt: str | None = None
         model: str | None = None
+        reasoning_effort: str | None = None
         mcp_servers: list[str] | None = None
         tool_allow: list[str] | None = None
         tool_deny: list[str] | None = None
         if agent:
             system_prompt = agent.get("system_prompt") or None
             model = agent.get("model") or None
+            reasoning_effort = agent.get("reasoning_effort") or None
             servers = agent.get("mcp_servers")
             mcp_servers = list(servers) if servers is not None else None
             tool_allow = _split_tool_list(agent.get("tool_allow"))
@@ -1557,6 +1619,8 @@ class TurnsMixin(SessionManagerBase):
         # wins. Both unset means the backend picks, which is the default.
         if session.model:
             model = session.model
+        if session.reasoning_effort:
+            reasoning_effort = session.reasoning_effort
 
         # Per-agent native memory (docs/plans/memory.md): derive the agent's
         # canonical memory dir and ensure it exists. None when there's no agent
@@ -1595,6 +1659,7 @@ class TurnsMixin(SessionManagerBase):
             wiki_mode=session._wiki_mode,
             system_prompt=system_prompt,
             model=model,
+            reasoning_effort=reasoning_effort,
             mcp_servers=mcp_servers,
             tool_allow=tool_allow,
             tool_deny=tool_deny,

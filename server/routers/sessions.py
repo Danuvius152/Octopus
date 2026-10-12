@@ -71,6 +71,7 @@ def _to_session_info(
         origin=s.origin,
         backend=s.backend,
         model=s.model,
+        reasoning_effort=s.reasoning_effort,
         parent_session_id=s.parent_session_id,
         delegation_request=s.delegation_request,
         app_id=s.app_id,
@@ -134,7 +135,7 @@ async def update_session(
     session_id: str, req: SessionUpdate, user_id: ScopeUser = None,
     _: str = Depends(verify_token)
 ):
-    """Repoint a live session — today its credential, its name and its model.
+    """Update a session's credential, name, model or reasoning effort.
 
     The credential is the point: it used to be fixed at creation, so a lapsed
     or deleted sign-in stranded the conversation with no way back. The
@@ -167,6 +168,26 @@ async def update_session(
     if "model" in fields:
         raw = fields["model"]
         updates["model"] = (str(raw).strip() or None) if raw is not None else None
+
+    if "reasoning_effort" in fields:
+        updates["reasoning_effort"] = fields["reasoning_effort"]
+    if {"model", "reasoning_effort", "credential_id"} & updates.keys():
+        from .backends import model_settings_for, validate_reasoning
+
+        agent = (
+            await session_manager.db.get_agent(session.agent_id, user_id)
+            if session.agent_id else None
+        ) or {}
+        effort = updates.get("reasoning_effort", session.reasoning_effort) or agent.get("reasoning_effort")
+        if effort is not None:
+            catalog = await model_settings_for(
+                session_manager, session.backend,
+                updates.get("credential_id", session.credential_id) or agent.get("credential_id"),
+                user_id,
+            )
+            validate_reasoning(
+                catalog, updates.get("model", session.model) or agent.get("model"), effort,
+            )
 
     if "name" in fields and fields["name"] is not None:
         name = str(fields["name"]).strip()
@@ -260,6 +281,7 @@ async def import_session(
         origin=s.origin,
         backend=s.backend,
         model=s.model,
+        reasoning_effort=s.reasoning_effort,
         parent_session_id=s.parent_session_id,
         delegation_request=s.delegation_request,
         app_id=s.app_id,
@@ -307,6 +329,7 @@ async def get_session(
             origin=s.origin,
             backend=s.backend,
             model=s.model,
+            reasoning_effort=s.reasoning_effort,
             parent_session_id=s.parent_session_id,
             delegation_request=s.delegation_request,
             app_id=s.app_id,

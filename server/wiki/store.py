@@ -15,6 +15,7 @@ from typing import Any
 
 import yaml
 
+from . import search_index
 from .extract import SUPPORTED, extract
 
 
@@ -88,6 +89,13 @@ class WikiStore:
                     "INSERT OR IGNORE INTO document_identities VALUES(?,?,?)",
                     (row["id"], row["path"], key),
                 )
+            try:
+                search_index.initialize(db)
+                from . import materials
+
+                materials.initialize(db)
+            except sqlite3.DatabaseError as exc:
+                raise WikiError(f"Chapter index unavailable; rebuild derived search index: {exc}", 503) from exc
 
     @contextlib.contextmanager
     def connect(self):
@@ -188,13 +196,24 @@ class WikiStore:
             )
         return doc_id
 
+    def detach_path(self, db, relative):
+        """Observed deletion ends a binding; historical IDs remain tombstones."""
+        db.execute(
+            "UPDATE document_identities SET path=NULL,file_key='' WHERE path=?",
+            (relative,),
+        )
+        db.execute("DELETE FROM documents WHERE path=?", (relative,))
+        db.execute("DELETE FROM managed_notes WHERE path=?", (relative,))
+
     def _index(self, db: sqlite3.Connection, relative: str) -> sqlite3.Row:
         path = self.path(relative)
         if not path.is_file() or path.suffix.lower() not in SUPPORTED:
             raise WikiError("Document not found", 404)
-        raw = path.read_bytes()
-        digest = revision(raw)
         stat = path.stat()
+        # Excluded PDFs are navigation assets: never load attachment bytes to
+        # update the index after an unrelated text save.
+        raw = b"" if path.suffix.lower() == ".pdf" else path.read_bytes()
+        digest = revision(f"excluded-pdf:{stat.st_mtime_ns}:{stat.st_size}".encode()) if path.suffix.lower() == ".pdf" else revision(raw)
         doc_id = self.identity(db, relative, stat)
         signature = f"{stat.st_mtime_ns}:{stat.st_size}:v3"
         existing = db.execute(
@@ -207,10 +226,15 @@ class WikiStore:
             and json.loads(existing["metadata"]).get("pipeline_version")
             == "octopus-extract-v3"
         ):
+            from . import materials
+
+            materials.index(db, existing, raw)
             db.execute(
                 "UPDATE documents SET signature=? WHERE id=?",
                 (signature, existing["id"]),
             )
+            if not search_index.current(db, existing):
+                search_index.index(db, existing, json.loads(existing["metadata"]))
             return db.execute(
                 "SELECT * FROM documents WHERE id=?", (existing["id"],)
             ).fetchone()
@@ -225,6 +249,8 @@ class WikiStore:
             }
         text = extracted["text"]
         metadata = extracted["metadata"]
+        if path.suffix.lower() == ".pdf":
+            metadata["revision_kind"] = "stat"
         front = re.match(
             r"\A\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|$)", text[:65536], re.S
         )
@@ -301,6 +327,10 @@ class WikiStore:
         )
         row = db.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
         assert row is not None
+        search_index.index(db, row, metadata)
+        from . import materials
+
+        materials.index(db, row, raw)
         return row
 
     @vault_read
@@ -325,27 +355,68 @@ class WikiStore:
                     found.add(relative)
                     stat = path.stat()
                     old = db.execute(
-                        "SELECT signature FROM documents WHERE path=?", (relative,)
+                        "SELECT d.signature,n.version,p.revision,p.ownership,coalesce(m.regions,''),NOT EXISTS(SELECT 1 FROM search_sections s WHERE s.doc_id=d.id) OR EXISTS(SELECT 1 FROM search_sections s LEFT JOIN search_fts f ON f.rowid=s.id WHERE s.doc_id=d.id AND f.rowid IS NULL) FROM documents d LEFT JOIN search_documents n ON n.doc_id=d.id LEFT JOIN raw_materials p ON p.doc_id=d.id LEFT JOIN managed_notes m ON m.path=d.path WHERE d.path=?", (relative,)
                     ).fetchone()
-                    if old is None or old[0] != f"{stat.st_mtime_ns}:{stat.st_size}:v3":
+                    if old is None or old[0] != f"{stat.st_mtime_ns}:{stat.st_size}:v3" or old[1] != search_index.VERSION or old[5] or (not asset_reason(relative) and (old[2] is None or old[3] != old[4])):
                         self._index(db, relative)
+            # Discover moves before detaching missing paths. This also covers
+            # missing files when only the durable ledger survived a rebuild.
+            for row in db.execute("SELECT path FROM document_identities WHERE path IS NOT NULL").fetchall():
+                if not self.path(row["path"]).is_file():
+                    self.detach_path(db, row["path"])
             for row in db.execute("SELECT id,path FROM documents").fetchall():
                 if row["path"] not in found:
                     db.execute("DELETE FROM documents WHERE id=?", (row["id"],))
+
+    def rebuild_search(self) -> None:
+        """Rebuild only derived chapters/FTS, retaining all durable ledgers."""
+        from .history import WikiHistory
+
+        with WikiHistory(self).locked():
+            with self.connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                db.execute("DROP TRIGGER IF EXISTS search_section_delete")
+                db.execute("DROP TRIGGER IF EXISTS search_document_delete")
+                for name in ("search_fts", "search_sections", "search_documents"):
+                    db.execute(f"DROP TABLE IF EXISTS {name}")
+                search_index.initialize(db)
+            self.refresh()
+
+    def require_indexed(self, db, path):
+        """A published revision is complete only after usable extraction and FTS."""
+        row = self._index(db, path)
+        if row["quality"] == "error":
+            raise WikiError("Published text awaits index recovery: " + json.loads(row["metadata"]).get("error", "Extraction failed"), 503)
+        if not search_index.current(db, row) or not db.execute(
+            "SELECT 1 FROM search_sections WHERE doc_id=? LIMIT 1", (row["id"],)
+        ).fetchone():
+            raise WikiError("Published text awaits chapter index recovery", 503)
+        return row
+
+    def indexed_metadata(self, row):
+        """Navigation metadata only; current evidence is read separately."""
+        native = json.loads(row["metadata"])
+        with self.connect() as db:
+            managed = db.execute("SELECT metadata FROM managed_notes WHERE path=?", (row["path"],)).fetchone()
+        supplied = json.loads(managed[0]) if managed else {}
+        merged = native | supplied
+        for field in ("tags", "aliases"):
+            if field in native or field in supplied:
+                merged[field] = list(dict.fromkeys([*native.get(field, []), *supplied.get(field, [])]))
+        return merged
 
     def public(self, row: sqlite3.Row) -> dict[str, Any]:
         metadata = json.loads(row["metadata"])
         from .sections import managed_metadata
 
         managed, stale = managed_metadata(
-            self, row["path"], self.path(row["path"]).read_bytes()
+            self, row["path"], b"" if Path(row["path"]).suffix.lower() == ".pdf" else self.path(row["path"]).read_bytes()
         )
-        native_tags = metadata.get("tags", [])
+        native_fields = {field: metadata.get(field, []) for field in ("tags", "aliases")}
         metadata |= managed
-        if native_tags or managed.get("tags"):
-            metadata["tags"] = list(
-                dict.fromkeys([*native_tags, *managed.get("tags", [])])
-            )
+        for field, original in native_fields.items():
+            if original or field in managed:
+                metadata[field] = list(dict.fromkeys([*original, *managed.get(field, [])]))
         with self.connect() as db:
             for ref in metadata.get("sources", []):
                 source_id = ref.get("doc", "")
@@ -365,7 +436,7 @@ class WikiStore:
                             f"{stat.st_mtime_ns}:{stat.st_size}:v3"
                             != source["signature"]
                         ):
-                            current = revision(file.read_bytes())
+                            current = revision(f"excluded-pdf:{stat.st_mtime_ns}:{stat.st_size}".encode()) if file.suffix.lower() == ".pdf" else revision(file.read_bytes())
                     except (OSError, WikiError):
                         current = None
                 if source:
@@ -389,59 +460,48 @@ class WikiStore:
         offset: int = 0,
         kind: str | None = None,
         include_assets: bool = False,
+        directory: str | None = None,
     ) -> dict[str, Any]:
         if not 1 <= limit <= 50 or offset < 0 or len(query) > 1000:
             raise WikiError("Invalid search pagination or query length", 422)
         self.refresh()
-        terms = query.lower().split()
-        if not terms:
+        if not query.strip():
             raise WikiError("Search query is required")
-        # Contiguous Chinese questions need lexical pieces without a remote
-        # embedding service. Exact words retain a much larger score.
-        expanded = set(terms)
-        for chunk in re.findall(r"[\u3400-\u9fff]+", query):
-            for width in (2, 3, 4):
-                expanded.update(
-                    chunk[i : i + width] for i in range(len(chunk) - width + 1)
-                )
+        if directory:
+            self.path(directory.rstrip("/"))
         with self.connect() as db:
-            ranked = []
-            for row in db.execute("SELECT * FROM documents"):
-                if row["kind"] == "asset" and not include_assets and kind != "asset":
-                    continue
-                if kind and row["kind"] != kind:
-                    continue
-                text = row["text"].lower()
-                score = sum(
-                    20 * (t in row["title"].lower())
-                    + 8 * (t in row["path"].lower())
-                    + min(text.count(t), 8)
-                    for t in terms
-                )
-                score = score * 20 + sum(
-                    (5 if t in row["title"].lower() else 1)
-                    for t in expanded
-                    if t in text
-                )
-                if not score:
-                    continue
-                start = max(
-                    0, next((text.find(t) for t in terms if t in text), 0) - 100
-                )
-                ranked.append(
-                    self.public(row)
-                    | {
-                        "snippet": row["text"][start : start + 400],
-                        "snippet_start": start,
-                        "score": score,
-                    }
-                )
-            ranked.sort(key=lambda item: (-item["score"], item["path"]))
-            end = offset + limit
+            try:
+                hits, total, terms, mode = search_index.select(db, query, kind, include_assets, offset, limit, directory)
+            except sqlite3.DatabaseError as exc:
+                raise WikiError(f"Chapter search failed; rebuild derived search index: {exc}", 503) from exc
+            errors = [
+                {"path": row["path"], "error": json.loads(row["metadata"]).get("error", "Extraction failed")}
+                for row in db.execute("SELECT path,metadata FROM documents WHERE quality='error'")
+            ]
+            items = []
+            for hit in hits:
+                row = db.execute("SELECT * FROM documents WHERE id=?", (hit["doc_id"],)).fetchone()
+                section_text = row["text"][hit["start"] : hit["end"]]
+                # Snippets are navigation. Character normalization can change
+                # offsets, so find the original terms in original text only.
+                positions = [m.start() for term in terms for m in re.finditer(re.escape(term), section_text, re.I)]
+                local = max(0, min(positions, default=0) - 100)
+                start = hit["start"] + local
+                items.append(self.public(row) | {
+                    "snippet": row["text"][start : min(start + 400, hit["end"])],
+                    "snippet_start": start,
+                    "score": float(hit["exact"]) - hit["cost"],
+                    "section": {"title": hit["title"], "start": hit["start"], "end": hit["end"], "line_start": hit["line_start"], "line_end": hit["line_end"]},
+                    "sections": [
+                        {key: part[key] for key in ("title", "start", "end", "line_start", "line_end")}
+                        for part in hit["sections"]
+                    ],
+                })
             return {
-                "items": ranked[offset:end],
-                "total": len(ranked),
-                "next_offset": end if end < len(ranked) else None,
+                "items": items, "total": total,
+                "next_offset": offset + limit if offset + limit < total else None,
+                "index_status": "partial" if errors else "ready",
+                "index_errors": errors, "match_mode": mode, "query_terms": terms,
             }
 
     @vault_read
@@ -460,32 +520,45 @@ class WikiStore:
             raise WikiError("Invalid document pagination", 422)
         self.refresh()
         with self.connect() as db:
-            items = []
-            for row in db.execute("SELECT * FROM documents ORDER BY title,path"):
-                if row["kind"] == "asset" and not include_assets and kind != "asset":
-                    continue
-                if directory and not row["path"].startswith(
-                    directory.rstrip("/") + "/"
-                ):
-                    continue
-                if (
-                    kind
-                    and row["kind"] != kind
-                    or quality
-                    and row["quality"] != quality
-                ):
-                    continue
-                document = self.public(row)
-                if source and not any(
-                    s.get("doc") == source or s.get("path") == source
-                    for s in document["metadata"].get("sources", [])
-                ):
-                    continue
-                items.append(document)
+            filters, arguments = [], []
+            if not include_assets and kind != "asset":
+                filters.append("d.kind<>'asset'")
+            if directory:
+                # substr treats '%' and '_' as literal directory characters.
+                prefix = directory.rstrip("/") + "/"
+                filters.append("substr(d.path,1,?)=?")
+                arguments.extend([len(prefix), prefix])
+            for column, value in (("kind", kind), ("quality", quality)):
+                if value:
+                    filters.append(f"d.{column}=?")
+                    arguments.append(value)
+            if source:
+                # Managed sources override native sources, as public() does.
+                # Resolve stable IDs to their current path for renamed sources.
+                filters.append("""EXISTS (
+                  SELECT 1 FROM json_each(CASE
+                    WHEN json_type(m.metadata,'$.sources') IS NOT NULL
+                    THEN m.metadata ELSE d.metadata END,'$.sources') ref
+                  LEFT JOIN documents src ON src.id=json_extract(ref.value,'$.doc')
+                    OR ((length(coalesce(json_extract(ref.value,'$.doc'),''))<>32
+                      OR json_extract(ref.value,'$.doc') GLOB '*[^0-9a-f]*')
+                      AND src.path=coalesce(nullif(json_extract(ref.value,'$.doc'),''),json_extract(ref.value,'$.path')))
+                  WHERE json_extract(ref.value,'$.doc')=?
+                    OR coalesce(src.path,json_extract(ref.value,'$.path'))=?
+                )""")
+                arguments.extend([source, source])
+            relation = " FROM documents d LEFT JOIN managed_notes m ON m.path=d.path"
+            predicate = " WHERE " + " AND ".join(filters) if filters else ""
+            total = db.execute("SELECT count(*)" + relation + predicate, arguments).fetchone()[0]
+            rows = db.execute(
+                "SELECT d.*" + relation + predicate + " ORDER BY d.title,d.path LIMIT ? OFFSET ?",
+                [*arguments, limit, offset],
+            ).fetchall()
+            items = [self.public(row) for row in rows]
         return {
-            "items": items[offset : offset + limit],
-            "total": len(items),
-            "next_offset": offset + limit if offset + limit < len(items) else None,
+            "items": items,
+            "total": total,
+            "next_offset": offset + limit if offset + limit < total else None,
         }
 
     @vault_read
@@ -494,7 +567,7 @@ class WikiStore:
         center = self.read(doc, length=1)
         with self.connect() as db:
             rows = db.execute("SELECT * FROM documents").fetchall()
-        documents = [self.public(row) for row in rows]
+        documents = [{key: row[key] for key in ("id", "path", "revision", "title")} | {"metadata": self.indexed_metadata(row)} for row in rows]
         nodes, edges = {center["id"]: center}, []
         for row, document in zip(rows, documents, strict=True):
             for source in document["metadata"].get("sources", []):
@@ -504,7 +577,7 @@ class WikiStore:
                         (r for r in rows if r["id"] == source.get("doc")), None
                     )
                     if linked:
-                        nodes[linked["id"]] = self.public(linked)
+                        nodes[linked["id"]] = next(doc for doc in documents if doc["id"] == linked["id"])
                     edges.append(
                         {
                             "from": document["id"],
@@ -535,7 +608,8 @@ class WikiStore:
                             "relation": relation,
                         }
                     )
-        return {"nodes": list(nodes.values()), "edges": edges}
+        by_id = {row["id"]: row for row in rows}
+        return {"nodes": [self.public(by_id[doc_id]) for doc_id in nodes], "edges": edges}
 
     @vault_read
     def read(
@@ -551,14 +625,20 @@ class WikiStore:
             raise WikiError("Invalid read range", 422)
         with self.connect() as db:
             old = db.execute(
-                "SELECT path FROM document_identities WHERE id=? OR path=?", (doc, doc)
+                "SELECT path FROM document_identities WHERE id=?", (doc,)
+            ).fetchone() or db.execute(
+                "SELECT path FROM document_identities WHERE path=?", (doc,)
             ).fetchone()
         if old and old[0] and not self.path(old[0]).is_file():
             self.refresh()
         with self.connect() as db:
             old = db.execute(
-                "SELECT path FROM document_identities WHERE id=? OR path=?", (doc, doc)
+                "SELECT path FROM document_identities WHERE id=?", (doc,)
+            ).fetchone() or db.execute(
+                "SELECT path FROM document_identities WHERE path=?", (doc,)
             ).fetchone()
+            if old is not None and old[0] is None:
+                raise WikiError("Document not found", 404)
             row = self._index(db, old[0] if old and old[0] else doc)
             if expected_revision and expected_revision != row["revision"]:
                 raise WikiError("Document changed; read the current revision", 409)

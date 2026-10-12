@@ -54,6 +54,19 @@ class WikiTasks:
         if token:
             self.active.pop(token, None)
 
+    def is_curator_worker(self, task):
+        if task is None or task.mode != "maintain" or not task.job_id:
+            return False
+        from .jobs import WikiJobs
+        from .registry import registry
+
+        try:
+            config = registry.config(task.user_id)
+            job = WikiJobs(task.user_id).get(task.job_id)
+        except WikiError:
+            return False
+        return task.agent_id == config["curator_agent_id"] and job["status"] == "running" and job["session_id"] == task.session_id
+
     def require(self, scope, *, write: bool = False, publish: bool = False) -> WikiTask:
         task = self.active.get(scope.wiki_task_id) if scope else None
         if task is None or (task.session_id, task.user_id) != (
@@ -79,6 +92,14 @@ class WikiTasks:
             raise WikiError("This maintenance assignment is no longer active", 403)
         target = store.path(path)
         if path in task.writable:
+            selected = next((item for item in job["items"] if item["path"] == path), None)
+            paired = next((item for item in job["items"] if item["path"] + ".md" == path), None)
+            expected_id = selected["doc"] if selected else paired.get("paired_doc") if paired else None
+            if not selected and not paired:
+                raise WikiError("This path has no current document assignment", 403)
+            current_id = store.read(path, length=1)["id"] if target.is_file() else None
+            if current_id != expected_id:
+                raise WikiError("The assigned document identity was deleted or replaced", 403)
             return
         from .store import asset_reason
 
@@ -114,7 +135,7 @@ class WikiTasks:
     def record_read(self, task, document):
         if task is None or document.get("page"):
             return
-        key = (document["path"], document["revision"])
+        key = (document["id"], document["path"], document["revision"])
         task.reads.setdefault(key, []).append((document["start"], document["end"]))
         task.read_sizes[key] = document["characters"]
 
@@ -122,7 +143,7 @@ class WikiTasks:
         if task is None:
             return
         document = store.read(path, length=1)
-        key = (document["path"], expected_revision)
+        key = (document["id"], document["path"], expected_revision)
         covered = 0
         for start, end in sorted(task.reads.get(key, [])):
             if start > covered:
@@ -131,9 +152,32 @@ class WikiTasks:
         if key not in task.read_sizes or covered < task.read_sizes[key]:
             raise WikiError("Read the full current note before organizing it", 422)
 
+    def require_source_read(self, task, store, source):
+        from .links import source_span
+
+        document = store.read(source["doc"], length=1, expected_revision=source["revision"])
+        with store.connect() as db:
+            text = db.execute("SELECT text FROM documents WHERE id=?", (document["id"],)).fetchone()[0]
+        span = source_span(text, source["location"])
+        if span is None:
+            raise WikiError("A relation needs an existing line, heading or block locator", 422)
+        if task is None:
+            return
+        covered = span[0]
+        for start, end in sorted(task.reads.get((document["id"], document["path"], document["revision"]), [])):
+            if start > covered:
+                break
+            covered = max(covered, end)
+        if covered < span[1]:
+            raise WikiError("Read the relation's cited current passage before adding its link", 422)
+
 
 def explicit_mode(message: str, selected: str | None = None) -> str | None:
     """Only call at trusted input boundaries, never on app context/reports."""
+    # A person's explicit cancellation must win over text in their draft.
+    # This transport value only revokes access; never pass it to tasks.open.
+    if selected == "off":
+        return None
     words = message.strip().split(maxsplit=2)
     if words and words[0] == "/wiki":
         return words[1] if len(words) > 1 and words[1] == "maintain" else "read"

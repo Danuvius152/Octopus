@@ -1,7 +1,9 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { IconCheck, IconCpu } from "@tabler/icons-react";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { buildModelOptions } from "../lib/modelOptions";
+import { useModelSettings } from "../hooks/useModelSettings";
+import { ReasoningEffortSelect } from "./ReasoningEffortSelect";
 import {
   Dialog,
   DialogContent,
@@ -11,6 +13,7 @@ import {
 } from "./ui/dialog";
 import { Input } from "./ui/input";
 import { Button } from "./ui/button";
+import { Label } from "./ui/label";
 
 const API_URL = window.location.origin;
 
@@ -35,32 +38,48 @@ export function ModelPickerDialog({
   session: SessionInfo;
   open: boolean;
   onOpenChange: (v: boolean) => void;
-  onApplied?: (model: string | null) => void;
+  onApplied?: (session: SessionInfo) => void;
 }) {
   const token = useSessionStore((s) => s.token);
   const agents = useSessionStore((s) => s.agents);
   const sessions = useSessionStore((s) => s.sessions);
   const backendModels = useSessionStore((s) => s.backendModels);
   const [typed, setTyped] = useState("");
+  const [effort, setEffort] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const agent = agents.find((a) => a.id === session.agent_id) ?? null;
+  const { catalog, error: catalogError } = useModelSettings(
+    session.backend, session.credential_id || agent?.credential_id, open,
+  );
+  useEffect(() => {
+    if (open) {
+      setTyped(session.model ?? "");
+      setEffort(session.reasoning_effort ?? "");
+      setError(null);
+    }
+  }, [open, session.id, session.model, session.reasoning_effort]);
   const options = useMemo(
     () =>
       buildModelOptions({
-        sessionModel: session.model,
-        agentModel: agent?.model,
-        backendModels: backendModels[session.backend],
+        sessionModel: typed,
+        agentModel: agent?.model || catalog?.default_model,
+        backendModels: catalog?.models?.map((m) => m.id) ?? backendModels[session.backend],
         inUse: [
           ...agents.map((a) => a.model),
           ...sessions.map((s) => s.model),
         ],
       }),
-    [session.model, session.backend, agent?.model, backendModels, agents, sessions]
+    [typed, session.backend, agent?.model, catalog, backendModels, agents, sessions]
   );
 
-  const apply = async (model: string | null) => {
+  const apply = async () => {
+    const model = typed.trim() || null;
+    const reasoning = effort || null;
+    const changes: Record<string, string | null> = {};
+    if (model !== (session.model ?? null)) changes.model = model;
+    if (reasoning !== (session.reasoning_effort ?? null)) changes.reasoning_effort = reasoning;
     setBusy(true);
     setError(null);
     try {
@@ -70,18 +89,21 @@ export function ModelPickerDialog({
           "Content-Type": "application/json",
           Authorization: `Bearer ${token}`,
         },
-        body: JSON.stringify({ model }),
+        body: JSON.stringify(changes),
       });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(typeof detail.detail === "string" ? detail.detail : `HTTP ${res.status}`);
+      }
       const updated: SessionInfo = await res.json();
       // Keep the list in step so the composer hint and this dialog agree
       // without a refetch.
       useSessionStore
         .getState()
         .setSessions(
-          sessions.map((s) => (s.id === updated.id ? { ...s, ...updated } : s))
+          useSessionStore.getState().sessions.map((s) => (s.id === updated.id ? { ...s, ...updated } : s))
         );
-      onApplied?.(updated.model ?? null);
+      onApplied?.(updated);
       onOpenChange(false);
     } catch (e) {
       setError(e instanceof Error ? e.message : "could not change the model");
@@ -94,21 +116,21 @@ export function ModelPickerDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="model-picker-dialog max-w-md">
         <DialogHeader>
-          <DialogTitle>Model for this session</DialogTitle>
+          <DialogTitle>Model and reasoning</DialogTitle>
           <DialogDescription>
-            Applies from the next turn, to this conversation only — the agent's
-            own model is unchanged.
+            Choose settings for this conversation. Changes apply from the next turn and keep its history.
           </DialogDescription>
         </DialogHeader>
 
-        <div className="model-options flex flex-col gap-1">
+        <div className="model-options flex max-h-56 flex-col gap-1 overflow-y-auto">
           {options.map((o) => (
             <button
               key={o.value ?? "__agent__"}
               type="button"
               disabled={busy}
+              aria-pressed={o.current}
               className="btn-model-option group flex items-center gap-2 rounded-lg border border-border bg-card px-3 py-2 text-left text-sm hover:bg-accent disabled:opacity-50"
-              onClick={() => apply(o.value)}
+              onClick={() => setTyped(o.value ?? "")}
             >
               <IconCpu size={14} className="shrink-0 text-muted-foreground" />
               <span className="min-w-0 flex-1 truncate">{o.label}</span>
@@ -124,24 +146,33 @@ export function ModelPickerDialog({
           ))}
         </div>
 
+        <Label htmlFor="session-model">Model name</Label>
         <form
           className="model-freeform flex items-center gap-2 pt-1"
           onSubmit={(e) => {
             e.preventDefault();
-            const name = typed.trim();
-            if (name) void apply(name);
+            void apply();
           }}
         >
           <Input
+            id="session-model"
             value={typed}
+            disabled={busy}
             onChange={(e) => setTyped(e.target.value)}
             placeholder="…or type any model name"
             className="h-9 text-sm"
           />
-          <Button type="submit" size="sm" disabled={busy || !typed.trim()}>
-            Use
-          </Button>
         </form>
+
+        {session.backend === "codex" && (
+          <ReasoningEffortSelect
+            id="session-reasoning-effort" value={effort} onChange={setEffort}
+            model={typed || agent?.model} catalog={catalog} disabled={busy}
+            inherited={`Agent default${agent?.reasoning_effort || catalog?.default_reasoning_effort ? ` (${agent?.reasoning_effort || catalog?.default_reasoning_effort})` : ""}`}
+          />
+        )}
+        {catalogError && <p className="text-xs text-destructive">{catalogError}</p>}
+        <Button className="btn-apply-model-settings" disabled={busy} onClick={apply}>Save settings</Button>
 
         {error && (
           <p className="model-error text-xs text-destructive">{error}</p>

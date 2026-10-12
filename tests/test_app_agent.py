@@ -445,6 +445,26 @@ async def test_an_errored_turn_is_reported_not_swallowed(aam, am, db, turns):
     assert e.value.status_code == 502
 
 
+async def test_app_waits_through_recovery_events(aam, am, db, mgr, turns):
+    row = await _make_app(am, db)
+    turns.emit = False
+    turn = await aam.begin_turn(row, message="hi")
+    sid = turn.session_id
+    for event in (
+        {"type": "result", "is_error": True, "retrying": True},
+        {"type": "error", "code": "turn_timeout_retry", "retrying": True},
+    ):
+        await mgr._broadcast({**event, "session_id": sid})
+        assert not turn.done.is_set()
+        assert turn.error is None
+    await mgr._broadcast({"type": "assistant_text", "session_id": sid, "content": "recovered"})
+    await mgr._broadcast({"type": "result", "session_id": sid, "is_error": False})
+    events = [event async for event in aam.stream_turn(turn)]
+    assert events[-1]["type"] == "done"
+    assert events[-1]["reply"] == "recovered"
+    assert not any(event["type"] == "error" for event in events)
+
+
 @pytest.mark.asyncio
 async def test_ask_that_outlives_its_wait_says_where_the_answer_went(
     aam, am, db, turns, monkeypatch

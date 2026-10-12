@@ -511,6 +511,8 @@ class AppAgentManager:
             return
 
         kind = msg.get("type")
+        if kind in ("result", "error") and msg.get("retrying"):
+            return
         if kind == "assistant_delta":
             content = msg.get("content")
             if content:

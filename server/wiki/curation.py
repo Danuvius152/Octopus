@@ -9,7 +9,7 @@ from urllib.parse import quote
 
 from .extract import blocks
 from .history import WikiHistory
-from .links import local_links, resolve_link
+from .links import anchor_exists, local_links, resolve_link, source_span
 from .sections import original_text, region, top_offset
 from .store import WikiError, revision
 
@@ -39,7 +39,7 @@ class WikiCuration:
             )
         return result
 
-    def validate_links(self, path, content):
+    def validate_links(self, path, content, candidate=None):
         links = list(local_links(content))
         if not links:
             return
@@ -49,29 +49,46 @@ class WikiCuration:
                 {
                     "path": row["path"],
                     "title": row["title"],
-                    "metadata": json.loads(row["metadata"]),
+                    "metadata": self.store.indexed_metadata(row),
                 }
                 for row in db.execute("SELECT path,title,metadata FROM documents")
             ]
         parent = Path(path).parent.as_posix()
-        for target, _anchor, kind in links:
+        for target, anchor, kind in links:
             if not target:
+                if anchor and not anchor_exists(candidate if candidate is not None else content, anchor):
+                    raise WikiError(f"New local anchor does not exist: {anchor}", 422)
+                continue
+            if candidate is not None and path in {
+                os.path.normpath(os.path.join(parent, target)).replace(os.sep, "/"),
+                target if kind == "wikilink" else "",
+                target + ".md" if kind == "wikilink" else "",
+            }:
+                if anchor and not anchor_exists(candidate, anchor):
+                    raise WikiError(f"New local anchor does not exist: {target}#{anchor}", 422)
                 continue
             resolved = resolve_link(target, parent, documents, wiki=kind == "wikilink")
             if resolved:
                 self.store.path(resolved["path"])
+                if anchor:
+                    text = candidate if candidate is not None and resolved["path"] == path else self.store.path(resolved["path"]).read_text(encoding="utf-8-sig")
+                    if not anchor_exists(text, anchor):
+                        raise WikiError(f"New local anchor does not exist: {target}#{anchor}", 422)
                 continue
             relative = os.path.normpath(os.path.join(parent, target)).replace(
                 os.sep, "/"
             )
             if kind == "markdown_link" and self.store.path(relative).is_file():
+                if anchor:
+                    raise WikiError(f"Cannot verify an anchor in this non-note asset: {target}#{anchor}", 422)
                 continue
             raise WikiError(
                 f"New local link does not resolve unambiguously: {target}", 422
             )
 
     def organize(
-        self, path, expected_revision, key_note, tags, relations, sources, actor, reason
+        self, path, expected_revision, key_note, tags, relations, sources, actor, reason,
+        publication=None, aliases=None, reuse_existing_summary=False, task=None,
     ):
         try:
             return self._organize(
@@ -83,6 +100,10 @@ class WikiCuration:
                 sources,
                 actor,
                 reason,
+                publication,
+                aliases,
+                reuse_existing_summary,
+                task,
             )
         except WikiError as exc:
             if exc.status != 409:
@@ -97,7 +118,11 @@ class WikiCuration:
                     "tags": tags,
                     "relations": relations,
                     "sources": sources,
+                    "aliases": aliases,
+                    "reuse_existing_summary": reuse_existing_summary,
                 }
+                if publication:
+                    operation |= {"job_id": publication["job_id"], "source_path": path}
                 row = self.history.record(
                     path, raw, raw, actor, reason, "conflict", proposal=operation
                 )
@@ -106,11 +131,18 @@ class WikiCuration:
             ) from exc
 
     def _organize(
-        self, path, expected_revision, key_note, tags, relations, sources, actor, reason
+        self, path, expected_revision, key_note, tags, relations, sources, actor, reason,
+        publication=None, aliases=None, reuse_existing_summary=False, task=None,
     ):
         """Supplement an assigned note without rewriting any user-owned bytes."""
         with self.history.locked():
-            self.validate_links(path, key_note or "")
+            if task:
+                from .tasks import tasks
+
+                tasks.require_path(task, self.store, path)
+                tasks.require_read(task, self.store, path, expected_revision)
+                for ref in sources + relations:
+                    tasks.require_source_read(task, self.store, ref)
             source = self.store.read(
                 path, length=1, expected_revision=expected_revision
             )
@@ -118,10 +150,19 @@ class WikiCuration:
                 raise WikiError("Excluded assets are not note templates", 422)
             refs = self.sources(sources)
             linked = self.sources(relations)
+            for entry, relationship in zip(linked, relations, strict=True):
+                with self.store.connect() as db:
+                    text = db.execute("SELECT text FROM documents WHERE id=?", (entry["doc"],)).fetchone()[0]
+                if source_span(text, entry["location"]) is None:
+                    raise WikiError("A relation needs an existing line, heading or block locator", 422)
+                if not relationship["explanation"].strip():
+                    raise WikiError("A relation needs a concrete explanation", 422)
             destination = path
             if Path(path).suffix.lower() not in {".md", ".markdown"}:
                 destination = path + ".md"
                 target = self.store.path(destination)
+                if task:
+                    tasks.require_path(task, self.store, destination)
                 if target.exists():
                     with self.store.connect() as db:
                         paired = db.execute(
@@ -140,6 +181,9 @@ class WikiCuration:
                 destination_revision = (
                     revision(base.encode()) if target.exists() else None
                 )
+                if task:
+                    if target.exists():
+                        tasks.require_read(task, self.store, destination, destination_revision)
                 refs.append(
                     {
                         "doc": source["id"],
@@ -170,24 +214,24 @@ class WikiCuration:
                 "sources": refs + linked,
                 "source_revision": source["revision"],
             }
-            existing_summary = re.search(
-                r"(?mi)^#{1,6}\s+(?:Key note|摘要|要点|核心观点|总结)\s*$",
-                base[: top_offset(base) + 1500],
-            )
+            supplied_points = bool(key_note and key_note.strip())
+            if supplied_points and reuse_existing_summary:
+                raise WikiError("Choose supplementary Key note or explicit reuse of existing points", 422)
             if (
-                not existing_summary
-                and not (key_note and key_note.strip())
-                and not any(part["role"] == "key_note" for part in previous)
+                not supplied_points and not reuse_existing_summary
+                and not (key_note is None and any(part["role"] == "key_note" for part in previous))
             ):
                 raise WikiError(
-                    "Read the note and supply Key note when it has no opening points",
+                    "Supply Key note or explicitly choose reuse_existing_summary after reading its content",
                     422,
                 )
-            if key_note is not None and key_note.strip() and not existing_summary:
+            if reuse_existing_summary and not re.sub(r"(?ms)<!--.*?-->|^#{1,6}\s+[^\n]*$", "", base[top_offset(base):]).strip():
+                raise WikiError("An empty note has no existing points to reuse", 422)
+            if supplied_points:
                 additions.append(
                     region("key_note", "## Key note\n\n" + key_note.strip(), provenance)
                 )
-            elif key_note is None:
+            elif key_note is None and not reuse_existing_summary:
                 additions.extend(
                     part for part in previous if part["role"] == "key_note"
                 )
@@ -203,14 +247,16 @@ class WikiCuration:
                         {"tags": normalized},
                     )
                 )
+            normalized_aliases = list(dict.fromkeys(alias.strip() for alias in aliases if alias.strip())) if aliases is not None else json.loads(owned["metadata"]).get("aliases", []) if owned else []
+            if aliases is None:
+                additions.extend(part for part in previous if part["role"] == "aliases")
+            elif normalized_aliases:
+                additions.append(region("aliases", "<!-- octopus-aliases " + json.dumps(normalized_aliases, ensure_ascii=False).replace("-->", "--\\u003e") + " -->", {"aliases": normalized_aliases}))
             if linked:
                 links = []
                 for entry, relationship in zip(linked, relations, strict=True):
-                    relative = os.path.relpath(
-                        entry["path"], Path(destination).parent.as_posix()
-                    )
                     links.append(
-                        f"- [{Path(entry['path']).stem}]({quote(relative)}): {relationship['explanation']}"
+                        f"- [[{entry['path']}]]：{relationship['explanation']}"
                     )
                 additions.append(
                     region(
@@ -219,21 +265,23 @@ class WikiCuration:
                         {"sources": linked},
                     )
                 )
-            for addition in additions:
-                self.validate_links(destination, addition["raw"])
             offset = top_offset(base)
             head = "".join(
                 part["raw"]
                 for part in additions
-                if part["role"] in {"key_note", "tags"}
+                if part["role"] in {"key_note", "tags", "aliases"}
             )
             tail = "".join(
                 part["raw"] for part in additions if part["role"] == "relations"
             )
             text = base[:offset] + head + base[offset:] + tail
+            for addition in additions:
+                self.validate_links(destination, addition["raw"], candidate=text)
             metadata = {
                 "author": "Weber 整理",
                 "tags": normalized,
+                "aliases": normalized_aliases,
+                "opening_points_decision": "supplement" if supplied_points else "reuse" if reuse_existing_summary else "preserve_owned",
                 "sources": [ref for ref in refs + linked if ref["path"] != destination],
                 "original_revision": revision(base.encode()),
                 "organized_from_revision": source["revision"],
@@ -252,10 +300,11 @@ class WikiCuration:
                 actor,
                 reason,
                 management,
+                publication=publication | {"source_doc": source["id"], "source_path": path, "input_revision": source["revision"]} if publication else None,
             )
             return result | {"original_preserved": True, "source_path": path}
 
-    def publish(self, path, content, kind, sources, expected_revision, actor, reason):
+    def publish(self, path, content, kind, sources, expected_revision, actor, reason, task=None):
         if (
             not path.startswith(("Library/", "Wiki/"))
             or Path(path).suffix.lower() != ".md"
@@ -267,6 +316,15 @@ class WikiCuration:
         if not sources:
             raise WikiError("Derived knowledge must cite current sources")
         with self.history.locked():
+            if task:
+                from .tasks import tasks
+
+                tasks.require_path(task, self.store, path)
+                for source in sources:
+                    tasks.require_source_read(task, self.store, source)
+            existing = self.store.path(path)
+            if existing.exists():
+                raise WikiError("Publish creates new pages; preserve existing text with organize or restructure", 403)
             self.validate_links(path, content)
             try:
                 refs = self.sources(sources)
@@ -292,13 +350,6 @@ class WikiCuration:
                 + content
                 + "\n\n> Weber 整理：以上为新增整理内容，请按所列来源核验。\n"
             ).encode()
-            existing = self.store.path(path)
-            if existing.is_file():
-                current = self.store.read(path, length=1)
-                if current["kind"] == "original":
-                    raise WikiError(
-                        "An original cannot be replaced by derived knowledge", 403
-                    )
             return self.history.write_locked(
                 path, raw, expected_revision, actor, reason
             )
@@ -326,8 +377,16 @@ class WikiCuration:
             ],
         }
 
-    def restructure(self, path, expected_revision, order, additions, actor, reason):
+    def restructure(self, path, expected_revision, order, additions, actor, reason, task=None):
         with self.history.locked():
+            if task:
+                from .tasks import tasks
+
+                tasks.require_path(task, self.store, path)
+                tasks.require_read(task, self.store, path, expected_revision)
+                for addition in additions:
+                    for source in addition.get("sources", []):
+                        tasks.require_source_read(task, self.store, source)
             current = self.blocks(path)
             if current["revision"] != expected_revision:
                 raw = self.store.path(path).read_bytes()
@@ -359,7 +418,6 @@ class WikiCuration:
                 raise WikiError("Original frontmatter must stay first")
             inserted = {}
             for addition in additions:
-                self.validate_links(path, addition["content"])
                 position = addition["before"]
                 if (
                     position < 0
@@ -389,6 +447,7 @@ class WikiCuration:
                 result.extend(inserted.get(index, []))
                 if index < len(order):
                     result.append(mapping[order[index]])
-            return self.history.write_locked(
-                path, "".join(result).encode(), expected_revision, actor, reason
-            )
+            text = "".join(result)
+            for addition in additions:
+                self.validate_links(path, addition["content"], candidate=text)
+            return self.history.write_locked(path, text.encode(), expected_revision, actor, reason)

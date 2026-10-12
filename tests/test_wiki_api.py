@@ -652,7 +652,7 @@ async def test_worker_only_organizes_assigned_notes_and_rejects_writing_related_
             json={
                 "idempotency_key": "one-note",
                 **(
-                    {"material": "# 原始资料\n双链应有可核验来源。", "target": target}
+                    {"material": "# 原始资料\n双链应有可核验来源。\n这是本次不同的新材料。", "target": target}
                     if ingestion
                     else {"paths": [target]}
                 ),
@@ -751,7 +751,7 @@ async def test_bound_app_token_can_edit_only_its_registered_wiki(
         manager.shutdown()
 
 
-async def test_binary_snapshot_can_restore_originals_without_losing_history(
+async def test_legacy_binary_snapshot_restore_and_new_snapshot_creation_retired(
     client, tmp_path
 ):
     vault = tmp_path / "vault"
@@ -759,7 +759,18 @@ async def test_binary_snapshot_can_restore_originals_without_losing_history(
     (vault / "note.md").write_bytes(b"original\r\n")
     (vault / "image.png").write_bytes(b"\x89PNG\r\n\x1a\noriginal-image")
     await configure(client, vault)
-    snapshot = (await client.post("/api/wiki/snapshot", headers=HEADERS)).json()
+    import json
+    import uuid
+    from datetime import UTC, datetime
+
+    from server.wiki.history import WikiHistory, atomic
+    from server.wiki.registry import registry
+
+    history_store = WikiHistory(registry.store(None))
+    snapshot = {"id": uuid.uuid4().hex, "created_at": datetime.now(UTC).isoformat(), "reason": "Legacy snapshot fixture", "files": {"note.md": history_store.blob(b"original\r\n"), "image.png": history_store.blob(b"\x89PNG\r\n\x1a\noriginal-image")}}
+    atomic(history_store.state / "snapshots" / f"{snapshot['id']}.json", json.dumps(snapshot).encode())
+    retired = await client.post("/api/wiki/snapshot", headers=HEADERS)
+    assert retired.status_code == 410
     (vault / "image.png").write_bytes(b"changed-image")
     import hashlib
 

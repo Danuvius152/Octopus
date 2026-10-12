@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconArrowUp,
+  IconBook2,
+  IconCheck,
+  IconCpu,
   IconFile,
   IconMenu2,
   IconPaperclip,
@@ -43,6 +46,7 @@ import {
 import { Button } from "./ui/button";
 import { isSessionBusy } from "../lib/deferredFork";
 import { loadOlderMessages } from "../lib/transcript";
+import { wikiCommandMode, type WikiMessageMode } from "../lib/wikiComposer";
 
 const EMPTY_MESSAGES: Message[] = [];
 
@@ -83,7 +87,7 @@ interface Props {
     sessionId: string,
     content: string,
     attachmentIds?: string[],
-    wikiMode?: "read" | "maintain"
+    wikiMode?: WikiMessageMode
   ) => void;
   interrupt: (sessionId: string) => void;
   approveTool: (sessionId: string, toolUseId: string) => void;
@@ -114,7 +118,17 @@ export function ChatView({
   onOpenSchedules,
 }: Props) {
   const [input, setInput] = useState("");
-  const [wikiEnabled, setWikiEnabled] = useState(false);
+  const [wikiSelection, setWikiSelection] = useState<"read" | "off" | undefined>();
+  const commandMode = wikiCommandMode(input);
+  const wikiMode = wikiSelection === "off" ? undefined : commandMode ?? wikiSelection;
+  const wikiSelected = wikiMode !== undefined;
+  const wikiMaintaining = wikiMode === "maintain";
+  const toggleWiki = () => {
+    // Preserve the whole draft. The explicit off signal wins over command
+    // text, so cancelling cannot reinterpret the task as a new grant.
+    setWikiSelection(wikiSelected ? "off" : commandMode ? undefined : "read");
+    textareaRef.current?.focus();
+  };
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   // Fork dialog (session-rewind.md §6.1-6.2). `null` = closed; `{}` = the
@@ -134,7 +148,11 @@ export function ChatView({
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  useEffect(() => setWikiEnabled(false), [activeSessionId]);
+  useEffect(() => {
+    // Drafts survive conversation changes, so their explicit cancellation
+    // must survive too. Only discard a manually selected read grant.
+    setWikiSelection((selection) => selection === "off" ? "off" : undefined);
+  }, [activeSessionId]);
   const messagesMap = useSessionStore((s) => s.messages);
   const streamingMap = useSessionStore((s) => s.streamingText);
   const messages = activeSessionId ? (messagesMap[activeSessionId] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES;
@@ -628,7 +646,7 @@ export function ChatView({
     // Block while uploads are still in flight so we don't drop attachments
     // the user just added but the server hasn't finished receiving.
     if (hasUploadInFlight) return;
-    setWikiEnabled(false);
+    setWikiSelection(undefined);
 
     // /reset command — escape hatch for wedged sessions. Calls the
     // server's force-reset endpoint, which cancels the active task,
@@ -1033,11 +1051,11 @@ export function ChatView({
       activeSessionId,
       trimmed,
       readyAttachmentIds.length > 0 ? readyAttachmentIds : undefined,
-      wikiEnabled ? "read" : undefined
+      wikiSelection
     );
     setInput("");
     setHistory(HISTORY_IDLE);
-    setWikiEnabled(false);
+    setWikiSelection(undefined);
     // Drop both ready uploads (they're now associated with the message
     // we just sent) and any failed uploads (the user can retry by
     // re-attaching). Leave in-flight uploads alone — addFiles already
@@ -1223,6 +1241,16 @@ export function ChatView({
       meta={activeSession ? renderStatusBadge(activeSession.status) : undefined}
       actions={
         <>
+          {activeSession && (
+            <Button
+              className="btn-model-settings" variant="ghost" size="sm"
+              title="Model and reasoning settings" aria-label="Model and reasoning settings"
+              onClick={() => setModelPickerOpen(true)}
+            >
+              <IconCpu size={16} />
+              <span className="hidden sm:inline">Model{activeSession.reasoning_effort || activeAgent?.reasoning_effort ? ` · ${activeSession.reasoning_effort || activeAgent?.reasoning_effort}` : " & reasoning"}</span>
+            </Button>
+          )}
           {activeSession && <CredentialPicker session={activeSession} />}
           <span
             className={`conn-status ${connected ? "on" : "off"} pill ${
@@ -1604,14 +1632,12 @@ export function ChatView({
           session={activeSession}
           open={modelPickerOpen}
           onOpenChange={setModelPickerOpen}
-          onApplied={(model) =>
+          onApplied={(updated) =>
             activeSessionId &&
             useSessionStore.getState().addMessage(activeSessionId, {
               role: "system",
               type: "notice",
-              content: model
-                ? `Model for this session: ${model} — from the next turn.`
-                : "Model for this session: the agent's default — from the next turn.",
+              content: `Model for this session: ${updated.model || "the agent's default"}${updated.backend === "codex" ? `; reasoning effort: ${updated.reasoning_effort || "the agent's default"}` : ""} — from the next turn.`,
             })
           }
         />
@@ -1805,10 +1831,31 @@ export function ChatView({
 
             <div className="composer-actions flex items-center justify-between gap-2 px-1.5 pb-1.5">
               <div className="flex items-center gap-1 text-muted-foreground">
-                <button type="button" aria-label="Use local Wiki for this message" aria-pressed={wikiEnabled}
-                  title="仅本条消息查询本地知识库；入库与整理用 /wiki maintain"
-                  className="btn inline-flex items-center justify-center h-8 px-2 rounded-lg hover:bg-accent"
-                  onClick={() => setWikiEnabled(v => !v)}>Wiki</button>
+                <button
+                  type="button"
+                  aria-label="Use local Wiki for this message"
+                  aria-pressed={wikiSelected}
+                  aria-describedby="wiki-composer-hint"
+                  title={wikiSelected
+                    ? "本条消息已启用 Wiki；点击取消，发送后自动关闭"
+                    : wikiSelection === "off"
+                      ? "本条消息已关闭 Wiki，即使正文含 /wiki；点击重新启用"
+                      : "仅本条消息查询本地知识库；入库与整理用 /wiki maintain"}
+                  className={`btn btn-wiki inline-flex items-center justify-center gap-1.5 h-8 px-2 rounded-lg border text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${wikiSelected
+                    ? "border-primary-200 bg-primary-50 text-primary hover:bg-primary-100"
+                    : "border-transparent hover:bg-accent hover:text-foreground"}`}
+                  onClick={toggleWiki}
+                >
+                  {wikiSelected ? <IconCheck size={15} aria-hidden /> : <IconBook2 size={15} stroke={1.5} aria-hidden />}
+                  <span>{wikiMaintaining ? "Wiki · 整理" : wikiSelected ? "Wiki · 已启用" : "Wiki"}</span>
+                </button>
+                <span id="wiki-composer-hint" className="sr-only">
+                  {wikiMaintaining
+                    ? "本条消息将入库或整理知识库；发送后自动关闭。"
+                    : wikiSelection === "off"
+                      ? "本条消息已关闭 Wiki，即使正文含 /wiki。"
+                      : "仅本条消息查询本地知识库；发送后自动关闭。"}
+                </span>
                 <button
                   type="button"
                   className="btn btn-attach inline-flex items-center justify-center size-8 rounded-lg transition-colors duration-200 hover:bg-accent hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"

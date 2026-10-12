@@ -775,6 +775,8 @@ class DelegationManager:
             return
 
         kind = msg.get("type")
+        if kind in ("result", "error") and msg.get("retrying"):
+            return  # the logical turn is still running its recovery attempts
         if kind == "assistant_text":
             text = msg.get("content")
             if isinstance(text, str) and text:

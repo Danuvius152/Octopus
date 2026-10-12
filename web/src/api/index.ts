@@ -40,6 +40,7 @@ export type MessageContent = components["schemas"]["MessageContent"];
 // A page of older transcript (polish-2026-09.md §4 B2).
 export type MessagePage = components["schemas"]["MessagePage"];
 export type MessageRole = components["schemas"]["MessageRole"];
+export type ModelSettings = components["schemas"]["ModelSettings"];
 export type NotifierInfo = components["schemas"]["NotifierInfo"];
 export type NotifierType = components["schemas"]["NotifierType"];
 export type PendingQuestionInfo = components["schemas"]["PendingQuestionInfo"];

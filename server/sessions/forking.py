@@ -275,6 +275,8 @@ class ForkingMixin(SessionManagerBase):
                 parent_id=parent_id,
                 backend=parent.backend,
                 model=parent.model,
+                reasoning_effort=parent.reasoning_effort,
+                user_id=parent.user_id,
                 agent_id=parent.agent_id,
                 credential_id=parent.credential_id,
                 resume_id=resume_id_hint,
@@ -288,9 +290,11 @@ class ForkingMixin(SessionManagerBase):
                 claude_session_id=resume_id_hint,
                 credential_id=parent.credential_id,
                 model=parent.model,
+                reasoning_effort=parent.reasoning_effort,
                 agent_id=parent.agent_id,
                 origin="fork",
                 backend=parent.backend,
+                user_id=parent.user_id,
                 forked_from_session_id=parent_id,
                 fork_after_seq=fork_after_seq,
                 fork_status="initializing",
@@ -409,7 +413,8 @@ class ForkingMixin(SessionManagerBase):
                         "old_session_id": parent_id,
                         "new_session_id": fork.id,
                         "name": fork.name,
-                    }
+                    },
+                    user_id=parent.user_id,
                 )
             return fork
         finally:
@@ -562,6 +567,8 @@ class ForkingMixin(SessionManagerBase):
                     fork_id=fork_id, name=fork_name, working_dir=dest,
                     created_at=now, parent_id=parent_id, backend=parent.backend,
                     model=parent.model,
+                    reasoning_effort=parent.reasoning_effort,
+                    user_id=parent.user_id,
                     agent_id=parent.agent_id, credential_id=parent.credential_id,
                     resume_id=resume_id_hint, fork_after_seq=last_seq,
                     fork_metadata=fork_meta,
@@ -574,6 +581,8 @@ class ForkingMixin(SessionManagerBase):
                 claude_session_id=resume_id_hint, credential_id=parent.credential_id,
                 agent_id=parent.agent_id, origin="fork", backend=parent.backend,
                 model=parent.model,
+                reasoning_effort=parent.reasoning_effort,
+                user_id=parent.user_id,
                 forked_from_session_id=parent_id, fork_after_seq=last_seq,
                 fork_metadata=fork_meta, fork_status="initializing",
             )
@@ -640,7 +649,7 @@ class ForkingMixin(SessionManagerBase):
                 "parent_session_id": parent_id,
                 "fork_session_id": fork.id,
                 "name": fork.name,
-            })
+            }, user_id=parent.user_id)
             return fork
         finally:
             parent._forking = False

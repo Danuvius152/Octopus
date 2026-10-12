@@ -76,6 +76,53 @@ async def test_default_agent_backend_is_claude(client):
 
 
 @pytest.mark.asyncio
+async def test_new_agents_and_sessions_use_the_configured_backend(client, monkeypatch):
+    from server.config import settings
+
+    monkeypatch.setattr(settings, "default_backend", "codex")
+    backends = await client.get("/api/backends", headers=HEADERS)
+    assert backends.json()["default"] == "codex"
+
+    agent = await _create_agent(client, name="Configured Codex")
+    assert agent["backend"] == "codex"
+    session = await client.post(
+        f"/api/agents/{agent['id']}/sessions", json={}, headers=HEADERS,
+    )
+    assert session.status_code == 201
+    assert session.json()["backend"] == "codex"
+
+    explicit = await _create_agent(client, name="Explicit Claude", backend="claude-code")
+    assert explicit["backend"] == "claude-code"
+
+
+@pytest.mark.asyncio
+async def test_new_install_uses_configured_backend_without_overwriting_saved_agents(
+    tmp_path, monkeypatch
+):
+    from server.config import settings
+
+    monkeypatch.setattr(settings, "default_backend", "codex")
+    path = str(tmp_path / "configured.db")
+    db = Database(path)
+    await db.initialize()
+    try:
+        assert (await db.get_system_agent())["backend"] == "codex"
+        agent = await AgentManager(db).create_agent(name="Manager default")
+        assert agent["backend"] == "codex"
+    finally:
+        await db.close()
+
+    monkeypatch.setattr(settings, "default_backend", "claude-code")
+    db = Database(path)
+    await db.initialize()
+    try:
+        assert (await db.get_system_agent())["backend"] == "codex"
+        assert (await db.get_agent(agent["id"]))["backend"] == "codex"
+    finally:
+        await db.close()
+
+
+@pytest.mark.asyncio
 async def test_agent_backend_create_and_update(client):
     a = await _create_agent(client, name="Codex Agent", backend="codex")
     assert a["backend"] == "codex"

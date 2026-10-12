@@ -105,7 +105,8 @@ async def resolve_showme(
         result = await resolve_showme_reference(
             req.text,
             harness=harness,
-            model=agent.get("model"),
+            model=session.model or agent.get("model"),
+            reasoning_effort=session.reasoning_effort or agent.get("reasoning_effort"),
             credential=credential,
             working_dir=session.working_dir,
             messages=await session_manager.db.load_messages(session_id),

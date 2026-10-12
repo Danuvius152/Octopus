@@ -114,6 +114,115 @@ async def test_listing_shows_only_your_own(two_accounts):
     assert "Archer's agent" not in agent_names, f"Vera was shown {agent_names}"
 
 
+@pytest.mark.parametrize("operation", ["fork", "duplicate"])
+async def test_owned_fork_survives_interrupt_refresh_and_restart(
+    two_accounts, monkeypatch, tmp_path, operation
+):
+    ctx = two_accounts
+    parent = ctx["archer"]["session"]
+    owner = ctx["archer"]["user"]["id"]
+    other = ctx["vera"]["user"]["id"]
+    headers = _as(ctx["archer"]["token"])
+    parent.backend = "codex"
+    parent.model = "model-a"
+    parent.reasoning_effort = "high"
+    await ctx["db"].update_session_field(
+        parent.id, backend="codex", model="model-a", reasoning_effort="high",
+    )
+    for seq, (role, content) in enumerate(
+        [("user", "first"), ("assistant", "answer"), ("user", "redo"), ("assistant", "old")]
+    ):
+        await ctx["db"].append_message(
+            session_id=parent.id, seq=seq, role=role, type="text", content=content
+        )
+    await ctx["db"].flush()
+    parent._message_count = 4
+    monkeypatch.setattr(
+        session_manager, "_fork_copy_dest", lambda src, sid: str(tmp_path / f"copy-{sid}")
+    )
+    owner_events, other_events = [], []
+
+    async def owned_event(event):
+        owner_events.append(event)
+
+    async def foreign_event(event):
+        other_events.append(event)
+
+    session_manager.on_broadcast("fork-owner", owned_event, owner)
+    session_manager.on_broadcast("fork-other", foreign_event, other)
+    try:
+        body = {"rewind_to_msg_seq": 2} if operation == "fork" else {}
+        response = await ctx["client"].post(
+            f"/api/sessions/{parent.id}/{operation}", json=body, headers=headers
+        )
+        assert response.status_code == 201, response.text
+        fork_id = response.json()["id"]
+        assert session_manager.get_session(fork_id, owner) is not None
+        assert session_manager.get_session(fork_id, other) is None
+        fork_event = "session_archived" if operation == "fork" else "session_forked"
+        assert any(e["type"] == fork_event for e in owner_events)
+        assert not any(e["type"] == fork_event for e in other_events)
+
+        entered = asyncio.Event()
+
+        async def stalled_turn(session, prompt):
+            entered.set()
+            await asyncio.Event().wait()
+            yield {}  # the stand-in remains an async iterator
+
+        monkeypatch.setattr(session_manager, "_run_backend", stalled_turn)
+        fork = session_manager.get_session(fork_id, owner)
+        await session_manager.start_message(fork_id, "new request")
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert await session_manager.interrupt(fork_id)
+        await asyncio.wait_for(fork._active_task, timeout=1)
+
+        # Reload from persisted rows as a restart would, then use the browser's
+        # account-scoped list/detail paths. Neither path may hide this fork.
+        session_manager.sessions.clear()
+        await session_manager.initialize(ctx["db"])
+        live = (await ctx["client"].get("/api/sessions", headers=headers)).json()
+        assert fork_id in {s["id"] for s in live}
+        assert (parent.id in {s["id"] for s in live}) == (operation == "duplicate")
+        detail = await ctx["client"].get(f"/api/sessions/{fork_id}", headers=headers)
+        assert detail.status_code == 200, detail.text
+        assert detail.json()["model"] == "model-a"
+        assert detail.json()["reasoning_effort"] == "high"
+        contents = [m["content"] for m in detail.json()["messages"]]
+        assert contents[:2] == ["first", "answer"]
+        assert contents[-2:] == ["new request", "(interrupted by user)"]
+        foreign = await ctx["client"].get(
+            f"/api/sessions/{fork_id}", headers=_as(ctx["vera"]["token"])
+        )
+        assert foreign.status_code == 404
+        parent_detail = await ctx["client"].get(f"/api/sessions/{parent.id}", headers=headers)
+        assert parent_detail.status_code == 200
+        assert len(parent_detail.json()["messages"]) == 4
+    finally:
+        session_manager.remove_broadcast("fork-owner")
+        session_manager.remove_broadcast("fork-other")
+
+
+@pytest.mark.asyncio
+async def test_model_catalog_cannot_read_another_accounts_credential(two_accounts):
+    ctx = two_accounts
+    await ctx["db"].save_credential(
+        "private-codex", "codex", "private", "oauth", "", "2026-10-11T00:00:00Z",
+        user_id=ctx["archer"]["user"]["id"],
+    )
+    response = await ctx["client"].get(
+        "/api/backends/codex/models?credential_id=private-codex",
+        headers=_as(ctx["vera"]["token"]),
+    )
+    assert response.status_code == 404
+    missing = await ctx["client"].get(
+        "/api/backends/codex/models?credential_id=missing",
+        headers=_as(ctx["vera"]["token"]),
+    )
+    assert missing.status_code == response.status_code
+    assert missing.json() == response.json()
+
+
 @pytest.mark.asyncio
 async def test_reading_someone_elses_row_is_a_404_not_a_403(two_accounts):
     """404, because 403 confirms the id exists — which is a slow way to

@@ -547,7 +547,7 @@ export interface paths {
         head?: never;
         /**
          * Update Session
-         * @description Repoint a live session — today its credential, its name and its model.
+         * @description Update a session's credential, name, model or reasoning effort.
          *
          *     The credential is the point: it used to be fixed at creation, so a lapsed
          *     or deleted sign-in stranded the conversation with no way back. The
@@ -1937,9 +1937,9 @@ export interface paths {
          * Identity
          * @description Who you are, for the sidebar's account row.
          *
-         *     It used to answer `OCTOPUS_USER_LABEL` — a single-user install's idea of a
-         *     name. Now it answers the account's own username, which is the same field
-         *     doing the same job for a site with several people on it.
+         *     Before the first account, the install token identifies its operator by
+         *     `OCTOPUS_USER_LABEL`. After it, the authenticated scope names the account
+         *     whose username belongs in the sidebar.
          */
         get: operations["identity_api_auth_identity_get"];
         put?: never;
@@ -2364,6 +2364,23 @@ export interface paths {
         patch: operations["toggle_agent_connector_api_agents__agent_id__connectors__installation_id__patch"];
         trace?: never;
     };
+    "/api/backends/{backend}/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Model Settings */
+        get: operations["model_settings_api_backends__backend__models_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/notifiers": {
         parameters: {
             query?: never;
@@ -2479,10 +2496,11 @@ export interface components {
             system_prompt: string;
             /** Model */
             model?: string | null;
+            /** Reasoning Effort */
+            reasoning_effort?: string | null;
             /** Credential Id */
             credential_id?: string | null;
-            /** @default claude-code */
-            backend: components["schemas"]["BackendKind"];
+            backend?: components["schemas"]["BackendKind"];
             /**
              * Mcp Servers
              * @default [
@@ -2527,6 +2545,8 @@ export interface components {
             system_prompt: string;
             /** Model */
             model?: string | null;
+            /** Reasoning Effort */
+            reasoning_effort?: string | null;
             /** Credential Id */
             credential_id?: string | null;
             /** @default claude-code */
@@ -2621,6 +2641,8 @@ export interface components {
             system_prompt?: string | null;
             /** Model */
             model?: string | null;
+            /** Reasoning Effort */
+            reasoning_effort?: string | null;
             /** Credential Id */
             credential_id?: string | null;
             backend?: components["schemas"]["BackendKind"] | null;
@@ -3340,9 +3362,8 @@ export interface components {
          * IdentityResponse
          * @description Who the account row says you are — a label, deliberately not the token.
          *
-         *     `label` is the username now (multi-tenancy.md §3): the field that used to
-         *     carry `OCTOPUS_USER_LABEL` carries the account's own name, so the sidebar
-         *     needed a different value rather than a different shape.
+         *     `label` is `OCTOPUS_USER_LABEL` before accounts exist, then the signed-in
+         *     account's username (multi-tenancy.md §3).
          */
         IdentityResponse: {
             /** Label */
@@ -3526,6 +3547,28 @@ export interface components {
          * @enum {string}
          */
         MessageRole: "user" | "assistant" | "system" | "tool";
+        /** ModelOption */
+        ModelOption: {
+            /** Id */
+            id: string;
+            /** Name */
+            name: string;
+            /** Reasoning Efforts */
+            reasoning_efforts?: string[];
+            /** Default Reasoning Effort */
+            default_reasoning_effort?: string | null;
+        };
+        /** ModelSettings */
+        ModelSettings: {
+            /** Models */
+            models?: components["schemas"]["ModelOption"][];
+            /** Reasoning Efforts */
+            reasoning_efforts?: string[];
+            /** Default Model */
+            default_model?: string | null;
+            /** Default Reasoning Effort */
+            default_reasoning_effort?: string | null;
+        };
         /**
          * NotifierInfo
          * @description Notifier metadata returned to clients.
@@ -3610,6 +3653,13 @@ export interface components {
              * @default []
              */
             sources: components["schemas"]["Source"][];
+            /** Aliases */
+            aliases?: string[] | null;
+            /**
+             * Reuse Existing Summary
+             * @default false
+             */
+            reuse_existing_summary: boolean;
             /** Reason */
             reason: string;
         };
@@ -3757,6 +3807,74 @@ export interface components {
             /** Next Run At */
             next_run_at?: string | null;
         };
+        /** SearchItem */
+        SearchItem: {
+            /** Id */
+            id: string;
+            /** Path */
+            path: string;
+            /** Revision */
+            revision: string;
+            /** Title */
+            title: string;
+            /** Kind */
+            kind: string;
+            /** Quality */
+            quality: string;
+            /** Metadata */
+            metadata: {
+                [key: string]: unknown;
+            };
+            /** Pages */
+            pages: {
+                [key: string]: unknown;
+            }[];
+            /** Stale */
+            stale: boolean;
+            /** Characters */
+            characters: number;
+            /** Snippet */
+            snippet: string;
+            /** Snippet Start */
+            snippet_start: number;
+            /** Score */
+            score: number;
+            section: components["schemas"]["SearchSection"];
+            /** Sections */
+            sections: components["schemas"]["SearchSection"][];
+        };
+        /** SearchResult */
+        SearchResult: {
+            /** Items */
+            items: components["schemas"]["SearchItem"][];
+            /** Total */
+            total: number;
+            /** Next Offset */
+            next_offset: number | null;
+            /** Index Status */
+            index_status: string;
+            /** Index Errors */
+            index_errors: {
+                [key: string]: string;
+            }[];
+            /** Match Mode */
+            match_mode: string;
+            /** Query Terms */
+            query_terms: string[];
+        };
+        /** SearchSection */
+        SearchSection: {
+            /** Title */
+            title: string;
+            /** Start */
+            start: number;
+            /** End */
+            end: number;
+            /** Line Start */
+            line_start: number;
+            /** Line End */
+            line_end: number;
+        };
         /** SessionDetail */
         SessionDetail: {
             /** Id */
@@ -3788,6 +3906,8 @@ export interface components {
             backend: components["schemas"]["BackendKind"];
             /** Model */
             model?: string | null;
+            /** Reasoning Effort */
+            reasoning_effort?: string | null;
             /** Parent Session Id */
             parent_session_id?: string | null;
             /** Delegation Request */
@@ -3885,6 +4005,8 @@ export interface components {
             backend: components["schemas"]["BackendKind"];
             /** Model */
             model?: string | null;
+            /** Reasoning Effort */
+            reasoning_effort?: string | null;
             /** Parent Session Id */
             parent_session_id?: string | null;
             /** Delegation Request */
@@ -3940,6 +4062,8 @@ export interface components {
             name?: string | null;
             /** Model */
             model?: string | null;
+            /** Reasoning Effort */
+            reasoning_effort?: string | null;
         };
         /** SetAgentConnectorsRequest */
         SetAgentConnectorsRequest: {
@@ -6721,6 +6845,7 @@ export interface operations {
                 offset?: number;
                 kind?: string | null;
                 include_assets?: boolean;
+                directory?: string | null;
                 token?: string | null;
             };
             header?: never;
@@ -6735,7 +6860,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["SearchResult"];
                 };
             };
             /** @description Validation Error */
@@ -9175,6 +9300,40 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    model_settings_api_backends__backend__models_get: {
+        parameters: {
+            query?: {
+                credential_id?: string | null;
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                backend: components["schemas"]["BackendKind"];
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ModelSettings"];
+                };
             };
             /** @description Validation Error */
             422: {

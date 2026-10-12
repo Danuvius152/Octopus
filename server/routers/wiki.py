@@ -91,6 +91,7 @@ async def app_wiki(request: Request, app_id: str, operation: str):
                 "limit": int(request.query_params.get("limit", 12)),
                 "offset": int(request.query_params.get("offset", 0)),
                 "kind": request.query_params.get("kind"),
+                "directory": request.query_params.get("directory"),
                 "include_assets": request.query_params.get(
                     "include_assets", "false"
                 ).lower()
@@ -245,6 +246,8 @@ def get_config(
 
 @router.get("/info")
 def info(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    from ..wiki.retention import POLICY
+
     task = access(request)
     config = registry.config(user_id)
     return {
@@ -252,6 +255,8 @@ def info(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_to
         "curator_agent_id": config["curator_agent_id"],
         "organization": "Library categories, Key note, concept tags, useful links",
         "mode": task.mode if task else "human",
+        "history_policy": POLICY,
+        "snapshot_creation_enabled": False,
         "writable_files": list(task.writable) if task else [],
         "excluded": [
             "PDF processing",
@@ -261,7 +266,43 @@ def info(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_to
     }
 
 
-@router.get("/search")
+class SearchSection(BaseModel):
+    title: str
+    start: int
+    end: int
+    line_start: int
+    line_end: int
+
+
+class SearchItem(BaseModel):
+    id: str
+    path: str
+    revision: str
+    title: str
+    kind: str
+    quality: str
+    metadata: dict[str, Any]
+    pages: list[dict]
+    stale: bool
+    characters: int
+    snippet: str
+    snippet_start: int
+    score: float
+    section: SearchSection
+    sections: list[SearchSection]
+
+
+class SearchResult(BaseModel):
+    items: list[SearchItem]
+    total: int
+    next_offset: int | None
+    index_status: str
+    index_errors: list[dict[str, str]]
+    match_mode: str
+    query_terms: list[str]
+
+
+@router.get("/search", response_model=SearchResult)
 def search(
     request: Request,
     query: str,
@@ -269,11 +310,12 @@ def search(
     offset: int = Query(0, ge=0),
     kind: str | None = None,
     include_assets: bool = False,
+    directory: str | None = None,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
     access(request)
-    return registry.store(user_id).search(query, limit, offset, kind, include_assets)
+    return registry.store(user_id).search(query, limit, offset, kind, include_assets, directory)
 
 
 @router.get("/read")
@@ -345,7 +387,7 @@ def edit_document(
 ):
     access(request, human_only=True)
     store = registry.store(user_id)
-    if Path(body.path).suffix.lower() not in {".md", ".txt", ".html", ".htm"}:
+    if Path(body.path).suffix.lower() not in {".md", ".markdown", ".txt", ".html", ".htm"}:
         raise WikiError("This endpoint edits text documents only")
     return WikiHistory(store).write(
         body.path, body.content.encode(), body.expected_revision, "human", body.reason
@@ -449,6 +491,10 @@ def publish(
     _: str = Depends(verify_token),
 ):
     actor = curator(request, user_id, body.path)
+    task = access(request)
+    if task:
+        for source in body.sources:
+            tasks.require_source_read(task, registry.store(user_id), source.model_dump())
     return WikiCuration(registry.store(user_id)).publish(
         body.path,
         body.content,
@@ -457,6 +503,7 @@ def publish(
         body.expected_revision,
         actor,
         body.reason,
+        task=task,
     )
 
 
@@ -488,6 +535,8 @@ class Organize(BaseModel):
     tags: list[str] = []
     relations: list[Relation] = []
     sources: list[Source] = []
+    aliases: list[str] | None = None
+    reuse_existing_summary: bool = False
     reason: str
 
 
@@ -499,9 +548,15 @@ def organize(
     _: str = Depends(verify_token),
 ):
     actor = curator(request, user_id, body.path)
+    task = access(request)
     tasks.require_read(
-        access(request), registry.store(user_id), body.path, body.expected_revision
+        task, registry.store(user_id), body.path, body.expected_revision
     )
+    for relation in body.relations:
+        tasks.require_source_read(task, registry.store(user_id), relation.model_dump())
+    if task:
+        for source in body.sources:
+            tasks.require_source_read(task, registry.store(user_id), source.model_dump())
     return WikiCuration(registry.store(user_id)).organize(
         body.path,
         body.expected_revision,
@@ -511,6 +566,10 @@ def organize(
         [s.model_dump() for s in body.sources],
         actor,
         body.reason,
+        publication={"job_id": task.job_id, "session_id": task.session_id} if task and task.job_id else None,
+        aliases=body.aliases,
+        reuse_existing_summary=body.reuse_existing_summary,
+        task=task,
     )
 
 
@@ -530,6 +589,12 @@ def restructure(
     _: str = Depends(verify_token),
 ):
     actor = curator(request, user_id, body.path)
+    task = access(request)
+    tasks.require_read(task, registry.store(user_id), body.path, body.expected_revision)
+    if task:
+        for addition in body.additions:
+            for source in addition.sources:
+                tasks.require_source_read(task, registry.store(user_id), source.model_dump())
     return WikiCuration(registry.store(user_id)).restructure(
         body.path,
         body.expected_revision,
@@ -537,6 +602,7 @@ def restructure(
         [a.model_dump() for a in body.additions],
         actor,
         body.reason,
+        task=task,
     )
 
 

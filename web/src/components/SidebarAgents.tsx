@@ -98,6 +98,7 @@ export function SidebarAgents() {
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
         if (d?.available) setAvailableBackends(d.available);
+        if (d?.default) useSessionStore.getState().setDefaultBackend(d.default);
         if (d?.models) useSessionStore.getState().setBackendModels(d.models);
       })
       .catch(() => {});

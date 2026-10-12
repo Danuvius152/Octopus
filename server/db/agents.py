@@ -13,6 +13,7 @@ import sqlite3
 from datetime import UTC, datetime
 from typing import Any
 
+from ..config import settings
 from .base import DatabaseBase, _load_json_list
 from .schema import _DEFAULT_MCP_SERVERS
 
@@ -91,6 +92,7 @@ class AgentsMixin(DatabaseBase):
             "pinned": bool(row[16]),
             "pin_order": row[17],
             "user_id": row[18],
+            "reasoning_effort": row[19],
         }
         # The active-session count that `load_agents` / `get_agent` append
         # after the columns. Derived from the column list rather than written
@@ -113,8 +115,9 @@ class AgentsMixin(DatabaseBase):
         avatar: str | None = None,
         system_prompt: str = "",
         model: str | None = None,
+        reasoning_effort: str | None = None,
         credential_id: str | None = None,
-        backend: str = "claude-code",
+        backend: str | None = None,
         mcp_servers: list[str] | None = None,
         tool_allow: str = "",
         tool_deny: str = "",
@@ -131,14 +134,14 @@ class AgentsMixin(DatabaseBase):
             "(id, name, description, avatar, system_prompt, model, "
             " credential_id, backend, mcp_servers, tool_allow, tool_deny, "
             " is_system, archived, created_at, updated_at, subagents, user_id, "
-            " pinned, pin_order) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, 1, "
+            " reasoning_effort, pinned, pin_order) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 1, "
             f" {self._NEXT_PIN_ORDER.format(table='agents')})",
             (
                 agent_id, name, description, avatar, system_prompt, model,
-                credential_id, backend or "claude-code", servers_json,
+                credential_id, backend or settings.default_backend, servers_json,
                 tool_allow, tool_deny, int(bool(is_system)),
-                created_at, updated_at, json.dumps(subagents or []), user_id,
+                created_at, updated_at, json.dumps(subagents or []), user_id, reasoning_effort,
             ),
         )
         await self.conn.commit()
@@ -248,12 +251,13 @@ class AgentsMixin(DatabaseBase):
         await self._ensure_connected()
         allowed = {
             "name", "description", "avatar", "system_prompt", "model",
+            "reasoning_effort",
             "credential_id", "backend", "mcp_servers", "tool_allow", "tool_deny",
             "subagents",
             "archived",
         }
         # credential_id / model / avatar are nullable and may be cleared.
-        nullable = {"credential_id", "model", "avatar"}
+        nullable = {"credential_id", "model", "avatar", "reasoning_effort"}
         updates: dict[str, Any] = {}
         for k, v in fields.items():
             if k not in allowed:

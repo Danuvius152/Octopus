@@ -5,6 +5,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from .config import settings
+
 
 class SessionStatus(str, Enum):
     idle = "idle"
@@ -46,6 +48,8 @@ class SessionUpdate(BaseModel):
     # What `/model` sets. Same shape: null falls back to the agent's model,
     # whose own null means the backend's default.
     model: str | None = Field(default=None)
+    # Independent of the model override; null inherits the agent/CLI setting.
+    reasoning_effort: str | None = Field(default=None, min_length=1, max_length=32)
 
 
 class ForkSessionRequest(BaseModel):
@@ -108,6 +112,7 @@ class SessionInfo(BaseModel):
     # null means the backend's default. Sent so the composer can say which is in
     # force without a second request.
     model: str | None = None
+    reasoning_effort: str | None = None
     # Agent-to-agent: set on delegation sessions to point at the parent
     # session that spawned them; NULL elsewhere. The verbatim original
     # delegation prompt is kept alongside for UI display.
@@ -413,6 +418,7 @@ class AgentRead(BaseModel):
     avatar: str | None = None
     system_prompt: str = ""
     model: str | None = None
+    reasoning_effort: str | None = None
     credential_id: str | None = None
     # Default AI backend for this agent's new sessions (codex-backend.md §4.1).
     # Per-session overrides still win; this is the inherited default.
@@ -467,8 +473,12 @@ class AgentCreate(BaseModel):
     avatar: str | None = None
     system_prompt: str = ""
     model: str | None = None
+    reasoning_effort: str | None = Field(default=None, min_length=1, max_length=32)
     credential_id: str | None = None
-    backend: BackendKind = BackendKind.claude_code
+    backend: BackendKind = Field(
+        default_factory=lambda: BackendKind(settings.default_backend),
+        validate_default=True,
+    )
     # Legacy default for API callers that don't name a set. The UI sends the
     # full built-in list (AgentFormPage's BUILTIN_MCP); a brand-new row that
     # names nothing gets the DB default instead.
@@ -489,6 +499,7 @@ class AgentUpdate(BaseModel):
     avatar: str | None = None
     system_prompt: str | None = None
     model: str | None = None
+    reasoning_effort: str | None = Field(default=None, min_length=1, max_length=32)
     credential_id: str | None = None
     backend: BackendKind | None = None
     mcp_servers: list[str] | None = None
@@ -500,9 +511,8 @@ class AgentUpdate(BaseModel):
 class IdentityResponse(BaseModel):
     """Who the account row says you are — a label, deliberately not the token.
 
-    `label` is the username now (multi-tenancy.md §3): the field that used to
-    carry `OCTOPUS_USER_LABEL` carries the account's own name, so the sidebar
-    needed a different value rather than a different shape.
+    `label` is `OCTOPUS_USER_LABEL` before accounts exist, then the signed-in
+    account's username (multi-tenancy.md §3).
     """
 
     label: str

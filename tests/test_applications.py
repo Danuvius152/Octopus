@@ -312,6 +312,21 @@ async def test_error_event_flips_to_failed_with_the_message(am, db, mgr, sent):
     assert updated["error"] == "credit exhausted"
 
 
+async def test_build_stays_running_through_recovery_events(am, db, mgr, sent):
+    row = await _create_app(am, db)
+    for event in (
+        {"type": "result", "is_error": True, "retrying": True},
+        {"type": "error", "code": "turn_timeout_retry", "retrying": True},
+    ):
+        await mgr._broadcast({**event, "session_id": row["session_id"]})
+        updated = await db.get_application(row["id"])
+        assert updated["status"] == "building"
+        assert updated["error"] is None
+    open(os.path.join(row["app_dir"], "index.html"), "w").write("<h1>recovered</h1>")
+    await mgr._broadcast({"type": "result", "session_id": row["session_id"], "is_error": False})
+    assert (await db.get_application(row["id"]))["status"] == "ready"
+
+
 @pytest.mark.asyncio
 async def test_a_written_app_stays_ready_even_if_the_turn_errored(am, db, mgr, sent):
     """The filesystem is the source of truth: an agent that wrote a perfectly

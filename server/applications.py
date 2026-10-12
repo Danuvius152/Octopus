@@ -834,6 +834,8 @@ class ApplicationManager:
         kind = msg.get("type")
         if kind not in ("status", "result", "error"):
             return
+        if kind in ("result", "error") and msg.get("retrying"):
+            return
         if kind == "status" and msg.get("status") != "running":
             return
         try:

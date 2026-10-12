@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic_settings import BaseSettings
 
 
@@ -9,6 +11,9 @@ class Settings(BaseSettings):
     # screenshot, a shared window, someone walking past. A label identifies the
     # operator without being a secret, so it can be read out loud.
     user_label: str = "octopus"
+    # New agents use the install's preferred harness; saved agents and explicit
+    # per-session choices retain their own backend.
+    default_backend: Literal["claude-code", "codex"] = "claude-code"
     # The key that wraps every user's data key (multi-tenancy.md §4). Set
     # `OCTOPUS_MASTER_KEY` to hand it in from a secret manager; leave it empty
     # and the server creates one at `master_key_file` on first boot, which is
@@ -92,11 +97,14 @@ class Settings(BaseSettings):
 
     # Per-turn safety watchdog (turn-safety.md §3). A turn that emits no harness
     # event for `turn_idle_timeout_seconds`, or that runs longer than
-    # `turn_max_seconds` overall, is stopped and surfaced as an error instead of
-    # hanging forever (the deep-research wedge). Idle is generous — a single web
-    # sub-turn can legitimately take tens of seconds. 0 disables that check.
+    # `turn_max_seconds` overall, is stopped instead of hanging forever. Idle
+    # stops can resume automatically within a bounded per-turn retry budget.
+    # An optional overall cap includes all attempts; it is disabled by default
+    # so long tasks with continuing progress aren't stopped just for their age.
+    # 0 disables each timeout check.
     turn_idle_timeout_seconds: int = 300
-    turn_max_seconds: int = 1800
+    turn_max_seconds: int = 0
+    turn_idle_max_retries: int = 2  # 0 disables automatic idle recovery
 
     # Native deep research (native-deep-research.md §6/§8). Max jobs running
     # concurrently across all sessions (per-job leaf fan-out is bounded inside

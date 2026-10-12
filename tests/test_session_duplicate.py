@@ -181,13 +181,20 @@ async def test_duplicate_broadcasts_session_forked(manager, tmp_path, monkeypatc
     parent = await _seed_parent(manager, repo)
 
     events = []
-    monkeypatch.setattr(manager, "_broadcast", lambda e: events.append(e) or _noop())
+    owners = []
+
+    async def capture(event, *, user_id=None):
+        events.append(event)
+        owners.append(user_id)
+
+    monkeypatch.setattr(manager, "_broadcast", capture)
 
     fork = await manager.duplicate_session(parent.id)
     evt = next(e for e in events if e.get("type") == "session_forked")
     assert evt["parent_session_id"] == parent.id
     assert evt["fork_session_id"] == fork.id
     assert evt["name"] == fork.name
+    assert owners == [parent.user_id]
 
 
 async def _noop():

@@ -26,7 +26,7 @@ from .base import (
 class OutcomesMixin(SessionManagerBase):
 
     def _start_turn_watchdog(
-        self, backend: HarnessRun, state: dict[str, Any]
+        self, backend: HarnessRun, state: dict[str, Any], *, started_at: float | None = None
     ) -> asyncio.Task | None:
         """Stop `backend` if the turn goes silent for `turn_idle_timeout_seconds`
         or runs past `turn_max_seconds` (turn-safety.md §3). Returns the watchdog
@@ -41,16 +41,16 @@ class OutcomesMixin(SessionManagerBase):
             return None
         limits = [x for x in (idle, overall) if x and x > 0]
         tick = min(5.0, max(0.05, min(limits) / 4))
-        started = time.monotonic()
+        started = started_at if started_at is not None else time.monotonic()
 
         async def _run() -> None:
             while True:
                 await asyncio.sleep(tick)
                 now = time.monotonic()
-                if idle > 0 and now - state["last"] > idle:
-                    state["tripped"] = ("idle", idle)
-                elif overall > 0 and now - started > overall:
+                if overall > 0 and now - started > overall:
                     state["tripped"] = ("overall", overall)
+                elif idle > 0 and now - state["last"] > idle:
+                    state["tripped"] = ("idle", idle)
                 else:
                     continue
                 logger.warning(
@@ -66,7 +66,7 @@ class OutcomesMixin(SessionManagerBase):
         return asyncio.create_task(_run())
 
     async def _surface_turn_timeout(
-        self, session: Session, *, reason: str, limit: int, backend: str
+        self, session: Session, *, reason: str, limit: int, backend: str, retries: int = 0
     ) -> dict[str, Any]:
         """Persist + return the error for a watchdog-stopped turn
         (turn-safety.md §3)."""
@@ -75,9 +75,11 @@ class OutcomesMixin(SessionManagerBase):
             human = (
                 f"This turn was stopped after {limit}s with no activity from "
                 f"{display} — it looked wedged (e.g. a tool or sub-task that "
-                "never returned). Nothing was lost; try again, and consider "
-                "narrowing the task."
+                "never returned). Conversation history and completed work "
+                "have been kept; try again, and consider narrowing the task."
             )
+            if retries:
+                human += f" Automatic recovery stopped after {retries} retries."
         else:
             human = (
                 f"This turn hit the {limit}s maximum duration and was stopped. "
@@ -98,6 +100,30 @@ class OutcomesMixin(SessionManagerBase):
         if seq is not None:
             event["seq"] = seq
         return event
+
+    async def _surface_idle_retry(
+        self, session: Session, *, limit: int, attempt: int, max_attempts: int
+    ) -> dict[str, Any]:
+        """Record recovery without announcing a terminal turn failure."""
+        marker = MessageContent(
+            role=MessageRole.system,
+            type="error",
+            content=(
+                f"(no backend activity for {limit}s — automatically continuing, "
+                f"attempt {attempt}/{max_attempts})"
+            ),
+        )
+        seq = await self._persist_message(session, marker)
+        return self._tag_persisted(
+            {
+                "type": "error",
+                "session_id": session.id,
+                "message": marker.content,
+                "code": "turn_timeout_retry",
+            },
+            seq,
+            marker,
+        )
 
     async def _surface_auth_expiry(
         self, session: Session, *, cred_id: str | None, backend: str

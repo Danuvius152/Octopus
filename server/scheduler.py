@@ -74,7 +74,19 @@ class ScheduleRunner:
             id="__metrics_retention__",
             replace_existing=True,
         )
+        self._scheduler.add_job(
+            self._prune_wiki,
+            CronTrigger(hour=4, minute=15),
+            id="__wiki_text_retention__",
+            replace_existing=True,
+            max_instances=1,
+        )
         self._scheduler.start()
+
+    async def _prune_wiki(self):
+        from .wiki.cleanup import sweep
+
+        await sweep()
 
     def _add_job(self, row: dict) -> None:
         # Recurrence priority: run_at (one-time) > cron > interval.

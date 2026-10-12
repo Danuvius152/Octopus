@@ -66,9 +66,16 @@ In development, Vite serves the SPA on port 5173 with HMR and proxies `/api`,
 
 An **Agent** is the durable definition of an assistant: name/avatar, system
 prompt, model, default backend (`claude-code` | `codex`), an attached credential,
+an optional reasoning-effort default (Codex),
 its MCP/tool set, tool allow/deny policy, and enabled connectors. Agents **own**
 their Sessions and Schedules. A protected **Default Agent**
 ("Octo", `is_system=1`) always exists.
+
+The chat header and `/model` offer independent session overrides for model and
+reasoning effort. Both inherit agent defaults when cleared, apply on the next
+logical turn, and retain the conversation's resume id. Model metadata comes
+from the selected runtime, with credential ownership checked before reading.
+See [model and reasoning settings](plans/model-reasoning.md).
 
 - A **Session** is one conversation thread (an instance of talking to an agent).
   It carries the backend resume id, working dir, origin (`user` | `schedule` |
@@ -494,17 +501,25 @@ provisioned on agent create, kept on archive, removed on hard delete.
   the working directory using a native transcript copy (Claude: copy the JSONL
   and rewrite session id + cwd; Codex: copy the rollout file) so the fork resumes
   with genuine context. Both commands produce `origin='fork'` session rows with a
-  `forked_from_session_id` pointer; the sidebar builds a disclosure tree from this
-  DAG. File revert on `/rewind` uses `git stash` gated on a strict preflight (clean
+  `forked_from_session_id` pointer and inherit the parent's account in both
+  memory and persistence; fork broadcasts are scoped to that account. Startup
+  repairs older unowned forks using consistent parent/agent ownership, keeping
+  transcripts and archive flags intact. The sidebar builds a disclosure tree
+  from this DAG. File revert on `/rewind` uses `git stash` gated on a strict preflight (clean
   tree at branch point, matching HEAD, only agent-touched files dirty). Designs:
   [`plans/session-rewind.md`](plans/session-rewind.md) and
   [`plans/session-fork.md`](plans/session-fork.md).
 - **Per-turn safety net.** Every harness turn runs with a configurable idle
   timeout (`turn_idle_timeout_seconds`, default 300 s) and an overall cap
-  (`turn_max_seconds`, default 1800 s). The child subprocess is spawned in its
+  (`turn_max_seconds`, default 0 / disabled). Active tasks have no total duration
+  limit unless the administrator enables one. The child subprocess is spawned in its
   own process group (`start_new_session=True`) so `stop()` kills the whole
-  group, not just the direct child. A timed-out turn surfaces a `turn_timeout`
-  error and never enters premature-exit recovery or transient retry. Design:
+  group, not just the direct child. Idle stops recover automatically up to
+  `turn_idle_max_retries` times (default 2), continuing the captured conversation
+  after partial output. `retrying:true` marks nonterminal errors and failed
+  results so delegation/app callers keep waiting. The overall cap includes all
+  attempts; exhausted recovery surfaces `turn_timeout`. Manual interruption
+  cancels recovery. Design:
   [`plans/turn-safety.md`](plans/turn-safety.md).
 - **Three-tier failed-turn disposition.** After a turn fails, the run loop
   classifies the error: (1) auth-credential rejection (401/revoked/expired) →

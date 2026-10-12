@@ -1,0 +1,14 @@
+[
+  {"message": "/wiki 查询", "mode": "read"},
+  {"message": "  /wiki\nmaintain Library/a.md", "mode": "maintain"},
+  {"message": "/wiki /wiki maintain 的用法是什么？", "mode": "read"},
+  {"message": "/wiki\u0085maintain Library/a.md", "mode": "maintain"},
+  {"message": "/wiki \ufeffmaintain Library/a.md", "mode": "read"},
+  {"message": "/wiki\u001cmaintain Library/a.md", "mode": "maintain"},
+  {"message": "/wiki\u00a0maintain Library/a.md", "mode": "maintain"},
+  {"message": "/wiki\u3000maintain Library/a.md", "mode": "maintain"},
+  {"message": "/wikimedia", "mode": null},
+  {"message": "/wiki-maintain", "mode": null},
+  {"message": "讨论 /wiki 的用法", "mode": null},
+  {"message": "/Wiki 查询", "mode": null}
+]

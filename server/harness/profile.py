@@ -23,6 +23,7 @@ from typing import Any, Protocol
 
 from .events import HarnessCredential, HarnessEvent
 from .login import LoginDriver
+from .model_settings import ModelSettings
 
 
 @dataclass
@@ -103,6 +104,7 @@ class TurnContext:
     # Sub-agent definitions to register for this turn (native-subagents.md §6).
     # A profile without a surface for them simply doesn't render them.
     subagents: list[dict[str, Any]] = field(default_factory=list)
+    reasoning_effort: str | None = None
 
 
 @dataclass
@@ -113,6 +115,7 @@ class OneShotContext:
     model: str | None = None
     credential: HarnessCredential | None = None
     working_dir: str | None = None
+    reasoning_effort: str | None = None
 
 
 @dataclass
@@ -230,6 +233,9 @@ class RuntimeProfile:
     # fine — `/model <name>` still works, and the picker also offers whatever
     # models the user's own agents and sessions already use.
     models: tuple[str, ...] = ()
+    # Read-only discovery from the selected runtime's local metadata. No model
+    # call or auth refresh, and no credentials/config contents in the result.
+    model_settings: Callable[[HarnessCredential | None], ModelSettings] | None = None
     # Collaborators (optional features):
     login: LoginDriver | None = None
     transcript_codec: TranscriptCodec | None = None

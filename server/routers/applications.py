@@ -411,7 +411,8 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
     # listening should answer the socket immediately.
     from ..wiki.app_bridge import begin, complete_cleanup
 
-    mutation = await begin(row, request.method, path, request.query_params)
+    request_body = await request.body()
+    mutation = await begin(row, request.method, path, request.query_params, request_body)
     client = httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=300.0))
     transferred = False
     dispatched = False
@@ -425,7 +426,7 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
             url = f"http://127.0.0.1:{state.port}/api/{path}"
         upstream = client.build_request(
             request.method, url, headers=headers,
-            params=dict(request.query_params), content=await request.body(),
+            params=dict(request.query_params), content=request_body,
         )
         dispatched = True
         resp = await client.send(upstream, stream=True)
@@ -439,7 +440,9 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
             payload = await resp.aread()
             await resp.aclose()
             if path == "save" and resp.status_code == 409:
-                await mutation.conflict(await request.json())
+                await mutation.conflict(mutation.body)
+            if path == "delete" and resp.is_success:
+                await mutation.receipt(json.loads(payload))
             if resp.status_code == 202:
                 job_id = json.loads(payload).get("id")
                 if not isinstance(job_id, str) or not job_id:

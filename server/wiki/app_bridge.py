@@ -4,11 +4,13 @@ import asyncio
 import fcntl
 import json
 import logging
+import re
+import uuid
 from pathlib import Path
 
 import anyio
 
-from .history import WikiHistory, atomic
+from .history import WikiHistory, atomic, history_text
 from .registry import registry
 
 _pending: set[asyncio.Task] = set()
@@ -42,9 +44,10 @@ async def shutdown():
 
 
 class AppMutation:
-    def __init__(self, history, handle, before, journal, actor, reason):
+    def __init__(self, history, handle, before, journal, actor, reason, body=None):
         self.history, self.handle, self.before = history, handle, before
         self.journal, self.actor, self.reason = journal, actor, reason
+        self.body = body or {}
 
     async def finish(self):
         if self.handle.closed:
@@ -66,26 +69,41 @@ class AppMutation:
         content = body.get("content")
         if isinstance(relative, str) and isinstance(content, str):
             path = self.history.store.path(relative)
-            await asyncio.to_thread(
-                lambda: self.history.record(
-                    relative,
-                    path.read_bytes() if path.is_file() else None,
-                    content.encode(),
-                    self.actor,
-                    "Sapphire save revision conflict",
-                    "conflict",
-                )
-            )
+
+            def record_conflict():
+                with self.history.under_existing_lock(self.handle):
+                    return self.history.record(
+                        relative,
+                        path.read_bytes() if path.is_file() else None,
+                        content.encode(),
+                        self.actor,
+                        "Sapphire save revision conflict",
+                        "conflict",
+                    )
+
+            await complete_cleanup(asyncio.to_thread(record_conflict))
 
     def _finish(self):
         with self.history.under_existing_lock(self.handle):
-            self._journal_changes()
-            self.history.store.refresh()
+            if self.before is not None:
+                self._journal_changes()
+                self.history.store.refresh()
 
     def _journal_changes(self):
-        after = self.history.inventory()
-        self.history.record_external(self.before, after, self.actor, self.reason)
+        self.history.finish_external(self.before)
         self.journal.unlink(missing_ok=True)
+
+    async def receipt(self, payload):
+        if self.before is None or self.reason != "delete":
+            return
+
+        def remember():
+            trash_id = payload.get("id")
+            if isinstance(trash_id, str) and re.fullmatch(r"[a-f0-9]{32}", trash_id):
+                self.before["trash_id"] = trash_id
+                atomic(self.journal, json.dumps(self.before).encode())
+
+        await complete_cleanup(asyncio.to_thread(remember))
 
     def follow_job(self, client, base, job_id, app_id):
         async def wait():
@@ -139,7 +157,7 @@ class AppMutation:
         task.add_done_callback(finished)
 
 
-async def begin(app_row, method, endpoint, query):
+async def begin(app_row, method, endpoint, query, body=b""):
     if method in {"GET", "HEAD", "OPTIONS"} or endpoint not in {
         "save",
         "upload",
@@ -178,25 +196,63 @@ async def begin(app_row, method, endpoint, query):
         journal = state / "external-change.json"
 
         def prepare():
-            history.recover()
-            before = history.inventory()
-            atomic(
-                journal,
-                json.dumps(
-                    {
-                        "before": before,
-                        "actor": f"app:{app_row['id']}",
-                        "reason": endpoint,
-                    }
-                ).encode(),
-            )
-            return before
+            with history.under_existing_lock(handle):
+                history.recover()
+                try:
+                    payload = json.loads(body)
+                    if not isinstance(payload, dict):
+                        payload = {}
+                except (ValueError, UnicodeError):
+                    payload = {}
+                paths = []
+                restored = None
+                trash_root = Path(app_row["app_dir"] + ".data") / "trash" / str(vault)
+                trash_id = payload.get("id")
+                if endpoint == "git":
+                    paths = None if payload.get("action") in {"pull", "sync"} else []
+                elif endpoint == "restore":
+                    if isinstance(trash_id, str) and re.fullmatch(
+                        r"[a-f0-9]{32}", trash_id
+                    ):
+                        info = trash_root / trash_id / "info.json"
+                        if info.is_file():
+                            relative = json.loads(info.read_text()).get("path")
+                            if isinstance(relative, str) and history_text(relative):
+                                history.store.path(relative)
+                                paths.append(relative)
+                                with history.store.connect() as db:
+                                    row = db.execute(
+                                        "SELECT * FROM app_trash WHERE trash_id=?",
+                                        (trash_id,),
+                                    ).fetchone()
+                                    restored = dict(row) if row else None
+                else:
+                    for key in ("path", "to") if endpoint == "rename" else ("path",):
+                        relative = payload.get(key)
+                        if isinstance(relative, str) and history_text(relative):
+                            history.store.path(relative)
+                            paths.append(relative)
+                if paths == []:
+                    return None, payload
+                entry = {
+                    "id": uuid.uuid4().hex,
+                    "version": 2,
+                    "paths": paths,
+                    "before": history.capture_external(paths),
+                    "actor": f"app:{app_row['id']}",
+                    "reason": endpoint,
+                    "restored": restored,
+                    "trash_id": trash_id,
+                    "trash_root": str(trash_root),
+                }
+                atomic(journal, json.dumps(entry).encode())
+                return entry, payload
 
         # Cancelling an await does not stop a worker thread. Join preparation
         # before releasing its lock, including its final journal rename.
-        before = await complete_cleanup(asyncio.to_thread(prepare))
+        before, payload = await complete_cleanup(asyncio.to_thread(prepare))
         return AppMutation(
-            history, handle, before, journal, f"app:{app_row['id']}", endpoint
+            history, handle, before, journal, f"app:{app_row['id']}", endpoint, payload
         )
     except BaseException:
         handle.close()

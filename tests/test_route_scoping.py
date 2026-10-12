@@ -14,11 +14,13 @@ scope a new route is not.
 from __future__ import annotations
 
 import ast
-import inspect
 import pathlib
 
+from fastapi import Depends, FastAPI
 from fastapi.routing import APIRoute
 
+from server import deps
+from server.auth import verify_token
 from server.main import app
 
 ROUTERS = pathlib.Path(__file__).resolve().parent.parent / "server" / "routers"
@@ -38,6 +40,11 @@ SCOPE_MARKERS = (
     "operator_user",
     "ViewerUser",
     "viewer_user_id",
+)
+
+SCOPE_GUARDS = (
+    deps.scope_user_id, deps.current_user, deps.require_admin,
+    deps.operator_user, deps.viewer_user_id,
 )
 
 # (method, path) -> why this one carries no account scope.
@@ -102,19 +109,72 @@ UNSCOPED_BY_DESIGN: dict[tuple[str, str], str] = {
 }
 
 
+def _dependency_has_scope(dependency) -> bool:
+    """A scoped service dependency carries its account guard to the route.
+
+    Inspect actual dependency calls recursively, not an arbitrary alias name.
+    Authentication alone does not qualify as an ownership scope.
+    """
+    return any(dependency.call is guard for guard in SCOPE_GUARDS) or any(
+        _dependency_has_scope(child) for child in dependency.dependencies
+    )
+
+
 def _routes() -> list[tuple[str, str, bool]]:
     out: list[tuple[str, str, bool]] = []
     for route in app.routes:
         if not isinstance(route, APIRoute):
             continue
-        annotations = " ".join(
-            f"{p.annotation} {p.default}"
-            for p in inspect.signature(route.endpoint).parameters.values()
-        )
-        scoped = any(m in annotations for m in SCOPE_MARKERS)
+        scoped = _dependency_has_scope(route.dependant)
         for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
             out.append((method, route.path, scoped))
     return out
+
+
+def test_a_scope_named_endpoint_without_authorization_is_not_scoped():
+    async def current_user():
+        return {"user_id": "unverified"}
+
+    route = APIRoute("/fake", current_user)
+    assert not _dependency_has_scope(route.dependant)
+
+
+def test_a_scope_named_nested_dependency_without_authorization_is_not_scoped():
+    async def scope_user_id():
+        return "unverified"
+
+    unverified = Depends(scope_user_id)
+
+    async def endpoint(user_id=unverified):
+        return {"user_id": user_id}
+
+    route = APIRoute("/fake", endpoint)
+    assert not _dependency_has_scope(route.dependant)
+
+
+def test_a_nested_real_scope_dependency_is_scoped():
+    async def access(user_id: deps.ScopeUser = None):
+        return user_id
+
+    authorized = Depends(access)
+
+    async def endpoint(user_id=authorized):
+        return {"user_id": user_id}
+
+    scoped_app = FastAPI()
+    scoped_app.add_api_route("/real", endpoint)
+    route = next(r for r in scoped_app.routes if isinstance(r, APIRoute))
+    assert _dependency_has_scope(route.dependant)
+
+
+def test_authentication_alone_is_not_an_account_scope():
+    authentication = Depends(verify_token)
+
+    async def endpoint(token=authentication):
+        return {"authenticated": bool(token)}
+
+    route = APIRoute("/authentication", endpoint)
+    assert not _dependency_has_scope(route.dependant)
 
 
 def test_every_route_is_scoped_or_listed_with_a_reason():

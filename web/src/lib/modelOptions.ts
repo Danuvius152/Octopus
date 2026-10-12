@@ -10,8 +10,7 @@
  *     that harness's CLI is known to take. A shortlist, not a whitelist.
  *  3. **Models already in use** by this user's own agents and sessions — real
  *     data, so a model this build has never heard of still shows up once it has
- *     been used, and Codex (whose shortlist is deliberately empty) is not an
- *     empty menu forever.
+ *     been used. Codex also supplies its own cached catalog for the picker.
  *
  * Anything not listed is still reachable as `/model <name>`, which is why the
  * server stores whatever string it is given.

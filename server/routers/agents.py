@@ -16,6 +16,7 @@ from ..models import (
     ScheduleInfo,
     SessionInfo,
 )
+from .backends import model_settings_for, validate_reasoning
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -67,6 +68,11 @@ async def list_agents(
 async def create_agent(
     session_manager: SessionMgr, req: AgentCreate, user_id: ScopeUser = None, _: str = Depends(verify_token)
 ):
+    if req.reasoning_effort is not None:
+        catalog = await model_settings_for(
+            session_manager, req.backend, req.credential_id, user_id,
+        )
+        validate_reasoning(catalog, req.model, req.reasoning_effort)
     try:
         # The owner, which is the whole point of the `ScopeUser` above: it was
         # declared and never passed, so every agent created through this route
@@ -120,6 +126,16 @@ async def update_agent(
     # exclude_unset so omitting a field leaves it untouched while explicitly
     # passing null clears a nullable field (model/credential_id/avatar).
     fields = req.model_dump(exclude_unset=True)
+    if {"model", "reasoning_effort", "backend", "credential_id"} & fields.keys():
+        current = await session_manager.db.get_agent(agent_id, user_id)
+        if current is None:
+            raise HTTPException(404, "Agent not found")
+        merged = {**current, **fields}
+        if merged.get("reasoning_effort") is not None:
+            catalog = await model_settings_for(
+                session_manager, merged["backend"], merged.get("credential_id"), user_id,
+            )
+            validate_reasoning(catalog, merged.get("model"), merged["reasoning_effort"])
     try:
         agent = await _get_manager().update_agent(agent_id, user_id, **fields)
     except AgentError as e:
@@ -332,6 +348,7 @@ async def create_agent_schedule_from_text(
             timezone=req.timezone,
             now_iso=req.now,
             model=agent.get("model") or None,
+            reasoning_effort=agent.get("reasoning_effort") or None,
             credential=credential,
         )
     except ScheduleParseError as e:

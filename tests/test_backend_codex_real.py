@@ -95,7 +95,7 @@ async def test_real_command_execution(tmp_path):
 
 @pytest.mark.asyncio
 async def test_real_resume_across_two_subprocesses(tmp_path):
-    b1 = _codex_run(session_id="r1", mcp_servers=[])
+    b1 = _codex_run(session_id="r1", mcp_servers=[], reasoning_effort="low")
     await b1.start(
         "Remember this exact word for later: MARIGOLD. Reply only with OK.",
         str(tmp_path),
@@ -107,7 +107,7 @@ async def test_real_resume_across_two_subprocesses(tmp_path):
     sid = next(e for e in e1 if e.type == "result").session_id
     assert sid, "turn 1 didn't yield a resumable thread id"
 
-    b2 = _codex_run(session_id="r2", mcp_servers=[])
+    b2 = _codex_run(session_id="r2", mcp_servers=[], reasoning_effort="high")
     await b2.start(
         "What exact word did I ask you to remember? Reply only with that word.",
         str(tmp_path),
@@ -119,3 +119,4 @@ async def test_real_resume_across_two_subprocesses(tmp_path):
         await b2.stop()
     text = "".join(e.content or "" for e in e2 if e.type == "text")
     assert "MARIGOLD" in text.upper(), f"resume didn't recall the word; got {text!r}"
+    assert next(e for e in e2 if e.type == "result").session_id == sid
