@@ -87,7 +87,7 @@ class AppMutation:
         with self.history.under_existing_lock(self.handle):
             if self.before is not None:
                 self._journal_changes()
-                self.history.store.refresh()
+            self.history.store.synchronize()
 
     def _journal_changes(self):
         self.history.finish_external(self.before)

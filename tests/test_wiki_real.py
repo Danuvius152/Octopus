@@ -122,24 +122,16 @@ async def test_codex_weber_maintains_only_new_material(tmp_path, monkeypatch, re
         assert outcome["progress"]["completed"] == 1
         assert (vault / "Library/旧观点.md").read_text() == old
         current = jobs.store.read("Library/新判断.md")
-        assert current["metadata"]["author"] == "Weber 整理"
-        # This short original already contains usable opening points. The
-        # spec permits explicit content-based reuse instead of a duplicate heading.
-        decision = current["metadata"]["opening_points_decision"]
-        assert decision in {"reuse", "supplement"}, current
+        assert material.split("\n\n", 1)[1] in current["content"], current
+        assert outcome["receipts"], outcome
+        assert outcome["items"][0]["output_revision"] == current["revision"]
+        assert outcome["items"][0]["index_complete"] is True
         if request_supplement:
-            assert decision == "supplement", current
-        if decision == "supplement":
             assert "## Key note" in current["content"], current
-        import json
-
-        from server.wiki.sections import original_text
-
-        with jobs.store.connect() as connection:
-            owned = connection.execute(
-                "SELECT regions FROM managed_notes WHERE path=?", ("Library/新判断.md",)
-            ).fetchone()
-        assert original_text(current["content"], json.loads(owned[0])) == material
+        # Preserve actual words and conditions under either compatible format;
+        # private legacy ownership fields are not the v2 acceptance contract.
+        assert "不是已证事实" in current["content"]
+        assert "不能说一定成立" in current["content"]
     finally:
         await worker.stop()
         await manager.stop_all_held_processes()

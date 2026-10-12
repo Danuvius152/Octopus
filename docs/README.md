@@ -5,7 +5,8 @@ system works today; the rest is design history and reference.
 
 ## Current
 
-- **[本地 Wiki 开发交接](plans/local-shared-wiki-implementation-handoff.md)** — W01–W07 已做与未做、实际上线状态和验收证据；包括 Weber 待补验、真实快照尚未退役和旧库尚未批量整理。
+- **[共享 Wiki v2 核心交接](plans_new/local-shared-wiki-implementation-v2.md)** — 本轮框架实现、验证与停止位置；由 Octo 接续部署、既有 Weber 配置合并、真实试点和批量模板化。
+- **[前期本地 Wiki 开发交接](plans/local-shared-wiki-implementation-handoff.md)** — W01–W07 历史实施和上线记录；本轮最新决策与交付以 v2 文档为准。
 - **[user-guide.md](user-guide.md)** — practical instructions for this local
   WSL + Codex installation: startup, agents, and phone access with the
   project's Cloudflare Tunnel integration.

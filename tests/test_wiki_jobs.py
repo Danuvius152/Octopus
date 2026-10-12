@@ -87,6 +87,59 @@ async def process(jobs, job, curator):
     return jobs.get(job["id"])
 
 
+async def test_no_change_requires_actual_read_and_survives_worker_restart_without_regeneration(jobs, client, tmp_path):
+    from server.mcp_identity import mint
+    from server.wiki.registry import registry
+    from server.wiki.tasks import tasks
+
+    history = WikiHistory(jobs.store)
+    history.write("Library/note.md", "# 判断\n\n保留我写的思想和条件。\n".encode(), None, "human", "create")
+    job = jobs.maintain("review", "", "检查，已经满足时无需修改", ["Library/note.md"], None, [], "human")
+    session = await wiki_api.session_manager.create_session(registry.config(None)["curator_agent_id"], "真实任务范围", str(tmp_path))
+    jobs.update(job["id"], status="running", session_id=session.id)
+    tasks.assign(session.id, job["id"], ["Library/note.md"])
+    token = tasks.open(session, "maintain")
+    headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
+    original = jobs.store.path("Library/note.md").read_bytes()
+    try:
+        locator = (await client.get("/api/wiki/blocks", params={"doc": "Library/note.md", "view": "locators"}, headers=headers)).json()
+        body = {"doc": locator["id"], "expected_revision": locator["revision"], "operation": "no_change", "reason": "条件、观点及措辞已经符合任务"}
+        denied = await client.post("/api/wiki/revise", json=body, headers=headers)
+        assert denied.status_code == 422
+        await client.get("/api/wiki/read", params={"doc": locator["id"]}, headers=headers)
+        accepted = await client.post("/api/wiki/revise", json=body, headers=headers)
+        assert accepted.status_code == 200, accepted.text
+        assert accepted.json()["change_id"] is None
+        assert accepted.json()["receipt_id"]
+        assert jobs.store.path("Library/note.md").read_bytes() == original
+        assert len(history.history("Library/note.md")["items"]) == 1
+    finally:
+        tasks.close(token)
+        tasks.unassign(session.id)
+    curator = Curator(jobs)
+    restored = await process(WikiJobs(None), job, curator)
+    assert restored["status"] == "completed"
+    assert restored["items"][0]["operation"] == "no_change"
+    assert curator.turns == 0
+
+
+async def test_new_page_recovery_checks_assigned_input_revision_separately_from_target_preimage(jobs):
+    history = WikiHistory(jobs.store)
+    history.write("Library/source.md", b"# Source\noriginal input\n", None, "human", "create")
+    job = jobs.maintain("new-page", "", "new explanation", ["Library/source.md"], None, [], "human")
+    jobs.update(job["id"], status="running", session_id="new-page-worker")
+    source = jobs.store.read("Library/source.md")
+    history.write_locked("Library/explanation.md", b"# Independent explanation\n", None, "curator", "new page", publication={"job_id": job["id"], "session_id": "new-page-worker", "source_doc": source["id"], "source_path": source["path"], "input_revision": source["revision"]}, operation="publish")
+    receipt = jobs.get(job["id"])["receipts"][0]
+    assert receipt["input_revision"] is None
+    assert receipt["details"]["input_source_revision"] == source["revision"]
+    jobs.store.path("Library/source.md").write_text("# Source\ninput changed afterwards\n")
+    item = dict(job["items"][0])
+    assert jobs.recover_publication(job["id"], item)
+    assert item["status"] == "attention"
+    assert jobs.store.path("Library/explanation.md").read_bytes() == b"# Independent explanation\n"
+
+
 def sapphire_delete(history, path):
     with history.locked():
         before = history.capture_external([path])
@@ -350,10 +403,10 @@ async def test_active_publication_protects_unindexed_output_until_recovered(
     )
     original_index = jobs.store._index
 
-    def fail_after_publish(db, path):
+    def fail_after_publish(db, path, *, raw=None):
         if b"octopus-section" in jobs.store.path(path).read_bytes():
             raise RuntimeError("index unavailable after publish")
-        return original_index(db, path)
+        return original_index(db, path, raw=raw)
 
     monkeypatch.setattr(jobs.store, "_index", fail_after_publish)
     curator = Curator(jobs)

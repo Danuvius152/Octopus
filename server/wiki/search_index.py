@@ -9,7 +9,7 @@ import unicodedata
 
 import jieba
 
-VERSION = "sections-v3"
+VERSION = "sections-v4"
 _tokenizer = jieba.Tokenizer()
 jieba.setLogLevel(logging.WARNING)
 _letter = r"(?:(?![\u3400-\u9fff])[^\W_])"
@@ -103,34 +103,14 @@ def query_groups(query: str) -> tuple[list[str], list[str]]:
 
 def sections(text: str, title: str) -> list[dict]:
     """Character coordinates refer to extracted text, exactly as read() does."""
-    boundaries = [(0, title)]
-    offset = 0
-    fence = None
-    front = text.lstrip("\ufeff").startswith("---\n") or text.lstrip(
-        "\ufeff"
-    ).startswith("---\r\n")
-    for number, line in enumerate(text.splitlines(keepends=True)):
-        stripped = line.strip()
-        if front:
-            if number > 0 and stripped == "---":
-                front = False
-        else:
-            marker = re.match(r"^\s*(`{3,}|~{3,})", line)
-            if marker:
-                if fence is None:
-                    fence = marker[1]
-                elif marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
-                    fence = None
-            elif fence is None:
-                heading_match = re.match(r"^#{1,6}\s+(.+?)\s*#*\s*$", line)
-                if heading_match:
-                    if offset == 0:
-                        boundaries[0] = (0, heading_match[1])
-                    else:
-                        boundaries.append((offset, heading_match[1]))
-        offset += len(line)
+    from .format import parse
+
+    parsed = parse(text)
+    boundaries = [(part["start"], part["title"] or title, part["role"]) for part in parsed.sections]
+    if not boundaries:
+        boundaries = [(parsed.body_start, title, "body")]
     result = []
-    for index, (start, heading) in enumerate(boundaries):
+    for index, (start, heading, role) in enumerate(boundaries):
         end = boundaries[index + 1][0] if index + 1 < len(boundaries) else len(text)
         while start < end:
             stop = min(start + 6000, end)
@@ -138,12 +118,12 @@ def sections(text: str, title: str) -> list[dict]:
                 newline = text.rfind("\n", start + 3000, stop)
                 if newline >= 0:
                     stop = newline + 1
-            result.append({"title": heading, "start": start, "end": stop})
+            result.append({"title": heading, "start": start, "end": stop, "section_role": role})
             # A query is at most 1000 characters. Overlap keeps any bounded
             # term/Chinese adjacency phrase intact even in unbroken prose.
             # Coordinates remain literal slices of the current extracted text.
             start = stop if stop == end else stop - min(1000, (stop - start) // 2)
-    return result or [{"title": title, "start": 0, "end": 0}]
+    return result or [{"title": title, "start": parsed.body_start, "end": parsed.body_start, "section_role": "body"}]
 
 
 def initialize(db) -> None:
@@ -160,11 +140,13 @@ def initialize(db) -> None:
     db.execute("""CREATE TABLE IF NOT EXISTS search_sections (
       id INTEGER PRIMARY KEY,doc_id TEXT NOT NULL,title TEXT NOT NULL,
       start INTEGER NOT NULL,end INTEGER NOT NULL,line_start INTEGER NOT NULL,
-      line_end INTEGER NOT NULL
+      line_end INTEGER NOT NULL,section_role TEXT NOT NULL DEFAULT 'body'
     )""")
     db.execute(
         "CREATE INDEX IF NOT EXISTS search_sections_doc ON search_sections(doc_id)"
     )
+    if "section_role" not in {column[1] for column in db.execute("PRAGMA table_info(search_sections)")}:
+        db.execute("ALTER TABLE search_sections ADD COLUMN section_role TEXT NOT NULL DEFAULT 'body'")
     db.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
       title,path,aliases,tags,key_note,heading,body,tokenize='unicode61'
     )""")
@@ -209,7 +191,7 @@ def index(db, row, metadata) -> None:
         tokens(row["title"]),
         tokens(row["path"]),
         tokens(" ".join(aliases)),
-        tokens(" ".join(tags)),
+        tokens(" ".join(tags) + " " + metadata.get("description", "")),
     ]
     db.execute("DELETE FROM search_sections WHERE doc_id=?", (doc_id,))
     for part in chunks:
@@ -217,8 +199,11 @@ def index(db, row, metadata) -> None:
         # The heading already has its own field. A title that lists several
         # concepts must not outrank chapters that actually discuss them.
         prose = re.sub(r"\A\ufeff?#{1,6}\s+[^\n]*(?:\n|$)", "", content)
+        prose = re.sub(r"(?s)<!--.*?-->", "", prose)
+        if part["section_role"] in {"related_notes", "curator_note"}:
+            prose = ""
         cursor = db.execute(
-            "INSERT INTO search_sections(doc_id,title,start,end,line_start,line_end) VALUES(?,?,?,?,?,?)",
+            "INSERT INTO search_sections(doc_id,title,start,end,line_start,line_end,section_role) VALUES(?,?,?,?,?,?,?)",
             (
                 doc_id,
                 part["title"],
@@ -226,6 +211,7 @@ def index(db, row, metadata) -> None:
                 part["end"],
                 text.count("\n", 0, part["start"]) + 1,
                 text.count("\n", 0, part["end"]) + 1,
+                part["section_role"],
             ),
         )
         db.execute(
@@ -253,7 +239,7 @@ def index(db, row, metadata) -> None:
     )
 
 
-def select(db, query, kind, include_assets, offset, limit, directory=None):
+def select(db, query, kind, include_assets, offset, limit, directory=None, exclude_roles=False, deduplicate=False, comparison=False, diversify=False):
     terms, groups = query_groups(query)
     if not groups:
         return [], 0, terms, "lexical"
@@ -267,6 +253,8 @@ def select(db, query, kind, include_assets, offset, limit, directory=None):
         prefix = directory.rstrip("/") + "/"
         filters.append("substr(d.path,1,?)=?")
         arguments.extend([len(prefix), prefix])
+    if exclude_roles:
+        filters.append("coalesce(json_extract(d.metadata,'$.doc_role'),'unknown') NOT IN ('template','source_snapshot')")
     predicate = " AND " + " AND ".join(filters) if filters else ""
     # Metadata names break ranking ties; body coverage keeps precedence and
     # every matching body candidate remains available to the reader.
@@ -338,15 +326,27 @@ def select(db, query, kind, include_assets, offset, limit, directory=None):
             [json.dumps(groups), *arguments, required],
         ).fetchone()[0]
 
-    required = len(groups)
+    required = 1 if comparison else len(groups)
     total = count(required)
-    mode = "lexical"
+    mode = "comparison" if comparison else "lexical"
     if total == 0 and len(groups) > 1:
         mode = "lexical_partial"
         required = 1
         total = count(required)
+    chosen = "SELECT * FROM ranked WHERE position=1"
+    if deduplicate:
+        chosen = """SELECT * FROM (SELECT ranked.*,row_number() OVER (
+            PARTITION BY coalesce((SELECT target_doc FROM wiki_edges WHERE source_doc=ranked.doc_id AND relation='representation_of' AND target_doc IS NOT NULL LIMIT 1),ranked.doc_id)
+            ORDER BY exact DESC,covered DESC,local_doc_coverage DESC,name_hit DESC,cost,doc_id) AS duplicate_position
+            FROM ranked WHERE position=1) WHERE duplicate_position=1"""
+        total = db.execute(prefix + "SELECT count(*) FROM (" + chosen + ")", parameters(required)).fetchone()[0]
+    order = "exact DESC,covered DESC,local_doc_coverage DESC,name_hit DESC,cost,doc_id"
+    if comparison or diversify:
+        direction = "json_extract(candidate.term_hits,'$[0]')" if comparison else "coalesce(nullif((SELECT json_extract(metadata,'$.tags[0]') FROM documents WHERE id=candidate.doc_id),''),candidate.doc_id)"
+        chosen = "SELECT candidate.*,row_number() OVER (PARTITION BY " + direction + " ORDER BY " + order + ") AS direction_position FROM (" + chosen + ") candidate"
+        order = "direction_position," + order
     rows = [dict(row) for row in db.execute(
-        prefix + "SELECT * FROM ranked WHERE position=1 ORDER BY exact DESC,covered DESC,local_doc_coverage DESC,name_hit DESC,cost,doc_id LIMIT ? OFFSET ?",
+        prefix + chosen + " ORDER BY " + order + " LIMIT ? OFFSET ?",
         [*parameters(required), limit, offset],
     )]
     for row in rows:
@@ -372,3 +372,14 @@ def select(db, query, kind, include_assets, offset, limit, directory=None):
                     covered.update(contributed)
                     local_covered.update(local_contributed)
     return rows, total, terms, mode
+
+
+def public_section(part):
+    return {key: part[key] for key in ("title", "start", "end", "line_start", "line_end")}
+
+
+def preview(row, hit, terms=()):
+    content = row["text"][hit["start"]:hit["end"]]
+    positions = [match.start() for term in terms for match in re.finditer(re.escape(term), content, re.I)]
+    start = hit["start"] + max(0, min(positions, default=0) - 100)
+    return row["text"][start:min(start + 400, hit["end"])], start

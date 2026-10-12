@@ -19,6 +19,8 @@ class WikiTask:
     new_pages: bool = False
     reads: dict = field(default_factory=dict, compare=False)
     read_sizes: dict = field(default_factory=dict, compare=False)
+    raw_reads: dict = field(default_factory=dict, compare=False)
+    raw_read_sizes: dict = field(default_factory=dict, compare=False)
 
 
 class WikiTasks:
@@ -149,8 +151,32 @@ class WikiTasks:
             if start > covered:
                 break
             covered = max(covered, end)
-        if key not in task.read_sizes or covered < task.read_sizes[key]:
+        raw_covered = self.coverage(task.raw_reads.get(key, []), 0)
+        raw_complete = key in task.raw_read_sizes and raw_covered >= task.raw_read_sizes[key]
+        if not raw_complete and (key not in task.read_sizes or covered < task.read_sizes[key]):
             raise WikiError("Read the full current note before organizing it", 422)
+
+    @staticmethod
+    def coverage(ranges, start):
+        covered = start
+        for first, last in sorted(ranges):
+            if first > covered:
+                break
+            covered = max(covered, last)
+        return covered
+
+    def record_raw_read(self, task, document, start, end, size):
+        if task is not None:
+            key = (document["id"], document["path"], document["revision"])
+            task.raw_reads.setdefault(key, []).append((start, end))
+            task.raw_read_sizes[key] = size
+
+    def require_raw_read(self, task, document, start, end):
+        if task is None:
+            return
+        key = (document["id"], document["path"], document["revision"])
+        if key not in task.raw_read_sizes or self.coverage(task.raw_reads.get(key, []), start) < end:
+            raise WikiError("Read the current raw passage and context before revising it", 422)
 
     def require_source_read(self, task, store, source):
         from .links import source_span

@@ -1156,6 +1156,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/wiki/guide": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Guide */
+        get: operations["get_guide_api_wiki_guide_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/wiki/search": {
         parameters: {
             query?: never;
@@ -1184,6 +1201,23 @@ export interface paths {
         get: operations["read_api_wiki_read_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/wiki/read-many": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Read Many */
+        post: operations["wiki_read_many"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1337,6 +1371,23 @@ export interface paths {
         get: operations["get_blocks_api_wiki_blocks_get"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/wiki/revise": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Revise Document */
+        post: operations["revise_document_api_wiki_revise_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3009,6 +3060,69 @@ export interface components {
             message?: string | null;
             credential?: components["schemas"]["CredentialInfo"] | null;
         };
+        /** CompactSearchItem */
+        CompactSearchItem: {
+            /** Id */
+            id: string;
+            /** Uid */
+            uid: string | null;
+            /** Path */
+            path: string;
+            /** Title */
+            title: string;
+            /** Doc Role */
+            doc_role: string;
+            /** Description */
+            description: string;
+            /** Revision */
+            revision: string;
+            /**
+             * Freshness
+             * @constant
+             */
+            freshness: "indexed";
+            /** Matched Fields */
+            matched_fields: string[];
+            /** Sections */
+            sections: components["schemas"]["CompactSearchSection"][];
+            /** Matched Section Count */
+            matched_section_count: number;
+            /** Snippet */
+            snippet: string;
+            /** Snippet Start */
+            snippet_start: number;
+        };
+        /** CompactSearchSection */
+        CompactSearchSection: {
+            /** Id */
+            id: string;
+            /** Heading Path */
+            heading_path: string[];
+            /** Section Role */
+            section_role: string;
+            /** Start */
+            start: number;
+            /** End */
+            end: number;
+        };
+        /** ConfirmRevision */
+        ConfirmRevision: {
+            /** Doc */
+            doc: string;
+            /** Expected Revision */
+            expected_revision: string;
+            /** Reason */
+            reason: string;
+            /** Item Doc */
+            item_doc?: string | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            operation: "confirm_sources";
+            /** Checks */
+            checks: components["schemas"]["SourceCheck"][];
+        };
         /** ConnectorCatalogEntry */
         ConnectorCatalogEntry: {
             /** Kind */
@@ -3569,6 +3683,22 @@ export interface components {
             /** Default Reasoning Effort */
             default_reasoning_effort?: string | null;
         };
+        /** NoChangeRevision */
+        NoChangeRevision: {
+            /** Doc */
+            doc: string;
+            /** Expected Revision */
+            expected_revision: string;
+            /** Reason */
+            reason: string;
+            /** Item Doc */
+            item_doc?: string | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            operation: "no_change";
+        };
         /**
          * NotifierInfo
          * @description Notifier metadata returned to clients.
@@ -3638,21 +3768,15 @@ export interface components {
             expected_revision: string;
             /** Key Note */
             key_note?: string | null;
-            /**
-             * Tags
-             * @default []
-             */
-            tags: string[];
+            /** Tags */
+            tags?: string[] | null;
             /**
              * Relations
              * @default []
              */
             relations: components["schemas"]["Relation"][];
-            /**
-             * Sources
-             * @default []
-             */
-            sources: components["schemas"]["Source"][];
+            /** Sources */
+            sources?: components["schemas"]["Source"][] | null;
             /** Aliases */
             aliases?: string[] | null;
             /**
@@ -3662,6 +3786,12 @@ export interface components {
             reuse_existing_summary: boolean;
             /** Reason */
             reason: string;
+            /** Frontmatter Patch */
+            frontmatter_patch?: {
+                [key: string]: unknown;
+            } | null;
+            /** Item Doc */
+            item_doc?: string | null;
         };
         /** PasswordChangeRequest */
         PasswordChangeRequest: {
@@ -3669,6 +3799,34 @@ export interface components {
             current_password: string;
             /** New Password */
             new_password: string;
+        };
+        /** PatchRevision */
+        PatchRevision: {
+            /** Doc */
+            doc: string;
+            /** Expected Revision */
+            expected_revision: string;
+            /** Reason */
+            reason: string;
+            /** Item Doc */
+            item_doc?: string | null;
+            /**
+             * @description discriminator enum property added by openapi-typescript
+             * @enum {string}
+             */
+            operation: "patch";
+            /** Edits */
+            edits: components["schemas"]["RawEdit"][];
+            /** Frontmatter Patch */
+            frontmatter_patch?: {
+                [key: string]: unknown;
+            } | null;
+            /** Tags */
+            tags?: string[] | null;
+            /** Aliases */
+            aliases?: string[] | null;
+            /** Sources */
+            sources?: components["schemas"]["Source"][] | null;
         };
         /** PendingQuestionInfo */
         PendingQuestionInfo: {
@@ -3701,7 +3859,64 @@ export interface components {
             /** Kind */
             kind: string;
             /** Sources */
-            sources: components["schemas"]["Source"][];
+            sources?: components["schemas"]["Source"][] | null;
+            /** Frontmatter Patch */
+            frontmatter_patch?: {
+                [key: string]: unknown;
+            } | null;
+            /** Tags */
+            tags?: string[] | null;
+            /** Aliases */
+            aliases?: string[] | null;
+            /** Item Doc */
+            item_doc?: string | null;
+        };
+        /** RawEdit */
+        RawEdit: {
+            /** Locator */
+            locator: string;
+            /** Expected Block Hash */
+            expected_block_hash: string;
+            /** Start */
+            start: number;
+            /** End */
+            end: number;
+            /** Expected Text */
+            expected_text: string;
+            /** Replacement */
+            replacement: string;
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "correction" | "addition" | "annotation";
+        };
+        /** ReadBatch */
+        ReadBatch: {
+            /** Items */
+            items: components["schemas"]["ReadRequest"][];
+            /**
+             * Budget Chars
+             * @default 24000
+             */
+            budget_chars: number;
+        };
+        /** ReadRequest */
+        ReadRequest: {
+            /** Doc */
+            doc: string;
+            /**
+             * Start
+             * @default 0
+             */
+            start: number;
+            /**
+             * Length
+             * @default 16000
+             */
+            length: number;
+            /** Expected Revision */
+            expected_revision?: string | null;
         };
         /** RegisterRequest */
         RegisterRequest: {
@@ -3750,6 +3965,16 @@ export interface components {
             additions: components["schemas"]["Addition"][];
             /** Reason */
             reason: string;
+            /** Frontmatter Patch */
+            frontmatter_patch?: {
+                [key: string]: unknown;
+            } | null;
+            /** Tags */
+            tags?: string[] | null;
+            /** Aliases */
+            aliases?: string[] | null;
+            /** Item Doc */
+            item_doc?: string | null;
         };
         /**
          * ScheduleFromTextRequest
@@ -3842,11 +4067,16 @@ export interface components {
             section: components["schemas"]["SearchSection"];
             /** Sections */
             sections: components["schemas"]["SearchSection"][];
+            /**
+             * Freshness
+             * @enum {string}
+             */
+            freshness: "indexed" | "live";
         };
         /** SearchResult */
         SearchResult: {
             /** Items */
-            items: components["schemas"]["SearchItem"][];
+            items: (components["schemas"]["SearchItem"] | components["schemas"]["CompactSearchItem"])[];
             /** Total */
             total: number;
             /** Next Offset */
@@ -3861,6 +4091,18 @@ export interface components {
             match_mode: string;
             /** Query Terms */
             query_terms: string[];
+            /** Index Epoch */
+            index_epoch: number;
+            /** Index Checked At */
+            index_checked_at: string | null;
+            /** Pending Changes */
+            pending_changes: number;
+            /** View */
+            view: string;
+            /** Intent */
+            intent: string;
+            /** Next Cursor */
+            next_cursor: string | null;
         };
         /** SearchSection */
         SearchSection: {
@@ -4108,6 +4350,17 @@ export interface components {
             revision: string;
             /** Location */
             location: string;
+        };
+        /** SourceCheck */
+        SourceCheck: {
+            /** Doc */
+            doc: string;
+            /** Revision */
+            revision: string;
+            /** Location */
+            location: string;
+            /** Resource */
+            resource: string;
         };
         /** StartBgTaskRequest */
         StartBgTaskRequest: {
@@ -6678,6 +6931,8 @@ export interface operations {
                 source?: string | null;
                 include_assets?: boolean;
                 directory?: string | null;
+                view?: "full" | "compact";
+                cursor?: string | null;
                 offset?: number;
                 limit?: number;
                 token?: string | null;
@@ -6712,6 +6967,9 @@ export interface operations {
         parameters: {
             query: {
                 doc: string;
+                offset?: number;
+                limit?: number;
+                cursor?: string | null;
                 token?: string | null;
             };
             header?: never;
@@ -6837,6 +7095,38 @@ export interface operations {
             };
         };
     };
+    get_guide_api_wiki_guide_get: {
+        parameters: {
+            query: {
+                module: "article" | "writing";
+                token?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     search_api_wiki_search_get: {
         parameters: {
             query: {
@@ -6846,6 +7136,9 @@ export interface operations {
                 kind?: string | null;
                 include_assets?: boolean;
                 directory?: string | null;
+                intent?: ("lookup" | "question" | "overview" | "compare") | null;
+                view?: "full" | "compact";
+                cursor?: string | null;
                 token?: string | null;
             };
             header?: never;
@@ -6889,6 +7182,41 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    wiki_read_many: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReadBatch"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -7182,6 +7510,12 @@ export interface operations {
         parameters: {
             query: {
                 doc: string;
+                view?: string;
+                ids?: string[] | null;
+                expected_revision?: string | null;
+                budget_chars?: number | null;
+                offset?: number;
+                limit?: number | null;
                 token?: string | null;
             };
             header?: never;
@@ -7189,6 +7523,41 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    revise_document_api_wiki_revise_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PatchRevision"] | components["schemas"]["ConfirmRevision"] | components["schemas"]["NoChangeRevision"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

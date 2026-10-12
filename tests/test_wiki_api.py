@@ -98,6 +98,453 @@ async def configure(client, vault):
     return response.json()
 
 
+async def test_read_reuses_current_bytes_for_content_and_metadata(client, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    article = vault / "note.md"
+    article.write_text("# 当前文章\n观点及其适用条件。\n")
+    await configure(client, vault)
+    opened = []
+    original_open = Path.open
+
+    def observe_open(path, mode="r", *args, **kwargs):
+        if path == article and "r" in mode:
+            opened.append(mode)
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", observe_open)
+    response = await client.get(
+        "/api/wiki/read", params={"doc": "note.md"}, headers=HEADERS
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["content"] == "# 当前文章\n观点及其适用条件。\n"
+    assert opened == ["rb"]
+
+
+async def test_unchanged_navigation_does_not_scan_the_vault(client, tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "selected.md").write_text("# 精确对象\n只有这一篇相关。\n")
+    unrelated = vault / "unrelated.md"
+    unrelated.write_text("# 无关文档\n不必检查。\n")
+    await configure(client, vault)
+    initial = await client.get(
+        "/api/wiki/search", params={"query": "精确对象"}, headers=HEADERS
+    )
+    assert initial.status_code == 200, initial.text
+    walks, unrelated_stats = [], []
+    original_walk, original_stat = os.walk, Path.stat
+
+    def observe_walk(path, *args, **kwargs):
+        if Path(path) == vault:
+            walks.append(path)
+        return original_walk(path, *args, **kwargs)
+
+    def observe_stat(path, *args, **kwargs):
+        if path == unrelated:
+            unrelated_stats.append(path)
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "walk", observe_walk)
+    monkeypatch.setattr(Path, "stat", observe_stat)
+    result = await client.get(
+        "/api/wiki/search", params={"query": "精确对象"}, headers=HEADERS
+    )
+    assert result.status_code == 200, result.text
+    assert [item["path"] for item in result.json()["items"]] == ["selected.md"]
+    assert walks == []
+    assert unrelated_stats == []
+
+
+async def test_index_epoch_reports_a_single_document_save(client, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "note.md").write_text("# 原观点\n原有条件。\n")
+    unrelated = vault / "other.md"
+    unrelated.write_text("# 无关\n无需读取。\n")
+    await configure(client, vault)
+    before = (await client.get("/api/wiki/info", headers=HEADERS)).json()
+    current = (await client.get("/api/wiki/read", params={"doc": "note.md"}, headers=HEADERS)).json()
+    opened = []
+    original_open = Path.open
+
+    def observe_open(path, mode="r", *args, **kwargs):
+        if path == unrelated and "r" in mode:
+            opened.append(path)
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", observe_open)
+    saved = await client.put("/api/wiki/document", headers=HEADERS, json={
+        "path": "note.md", "content": "# 原观点\n补上明确条件。\n",
+        "expected_revision": current["revision"], "reason": "保存单篇",
+    })
+    assert saved.status_code == 200, saved.text
+    after = (await client.get("/api/wiki/info", headers=HEADERS)).json()
+    assert after["index_epoch"] > before["index_epoch"]
+    assert after["index_status"] == "ready"
+    assert after["pending_changes"] == 0
+    assert opened == []
+    found = await client.get("/api/wiki/search", params={"query": "明确条件"}, headers=HEADERS)
+    assert found.json()["items"][0]["revision"] == saved.json()["revision"]
+    assert found.json()["index_epoch"] == after["index_epoch"]
+
+
+async def test_okf_metadata_is_indexed_without_rewriting_the_article(client, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    original = (
+        "---\ntype: Reference\ntitle: 精确显示题名\n"
+        "description: 保留条件与立场的文章。\nsources: []\n"
+        "generated: {by: imported/model, at: 2026-01-01T00:00:00Z}\n"
+        "x_wiki: {profile: article-v1, body_dialect: obsidian}\n"
+        "private_extension: {keep: true}\n---\n# 原作者题名\n"
+        "## Key note\n有条件的观点。\n```markdown\n## 正文\n示例标题\n```\n"
+        "## 正文\n原作者的风格与理由，不应重写。\n"
+    )
+    article = vault / "note.md"
+    article.write_text(original)
+    await configure(client, vault)
+    found = await client.get("/api/wiki/search", params={"query": "精确显示题名"}, headers=HEADERS)
+    assert found.status_code == 200, found.text
+    item = found.json()["items"][0]
+    assert item["title"] == "精确显示题名"
+    assert item["metadata"]["doc_role"] == "reference"
+    assert item["metadata"]["description"] == "保留条件与立场的文章。"
+    assert item["metadata"]["generated"]["at"] == "2026-01-01T00:00:00Z"
+    assert [part["role"] for part in item["metadata"]["body_sections"]].count("body") == 2
+    assert article.read_text() == original
+
+
+async def test_portable_uid_is_an_alias_and_collision_does_not_replace_identity(client, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    uid = "urn:uuid:54b89d70-8829-40fb-ae52-3c99001293fe"
+    (vault / "first.md").write_text(f"---\ntype: Reference\nuid: {uid}\n---\n# 第一篇\n原观点。\n")
+    await configure(client, vault)
+    first = (await client.get("/api/wiki/read", params={"doc": "first.md"}, headers=HEADERS)).json()
+    by_uid = await client.get("/api/wiki/read", params={"doc": uid}, headers=HEADERS)
+    assert by_uid.status_code == 200, by_uid.text
+    assert by_uid.json()["id"] == first["id"]
+    (vault / "second.md").write_text(f"---\ntype: Reference\nuid: {uid}\n---\n# 第二篇\n另一立场。\n")
+    second = (await client.get("/api/wiki/read", params={"doc": "second.md"}, headers=HEADERS)).json()
+    assert second["id"] != first["id"]
+    assert second["metadata"]["uid_conflict"]["existing_doc"] == first["id"]
+    again = await client.get("/api/wiki/read", params={"doc": uid}, headers=HEADERS)
+    assert again.json()["path"] == "first.md"
+
+
+async def test_publish_preserves_portable_sources_when_runtime_sources_are_omitted(client, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    await configure(client, vault)
+    content = "---\nsources:\n  - {id: article, resource: 'https://example.com/article'}\ncustom: retained\n---\n# Explanation\nThe article describes a conditional conclusion.[^article]\n"
+    result = await client.post("/api/wiki/publish", headers=HEADERS, json={"path": "Library/explanation.md", "content": content, "kind": "source", "expected_revision": None, "reason": "保留用户提供的实际出处"})
+    assert result.status_code == 200, result.text
+    current = (await client.get("/api/wiki/read", params={"doc": "Library/explanation.md"}, headers=HEADERS)).json()
+    assert current["metadata"]["sources"] == [{"id": "article", "resource": "https://example.com/article"}]
+    assert current["metadata"]["source_refs"][0]["status"] == "external"
+    assert "custom: retained" in (vault / "Library/explanation.md").read_text()
+
+
+async def test_okf_local_source_is_a_direct_dependency_and_can_be_rechecked(client, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "source.md").write_text("# 依据\n只在条件 A 下成立。\n")
+    await configure(client, vault)
+    source = (await client.get("/api/wiki/read", params={"doc": "source.md"}, headers=HEADERS)).json()
+    (vault / "summary.md").write_text(
+        "---\ntype: Synthesis\nsources:\n"
+        f"  - {{id: basis, resource: source.md, revision: '{source['revision']}', location: L2-L2}}\n"
+        "---\n# 解释\n保留条件 A。[^basis]\n"
+    )
+    summary = (await client.get("/api/wiki/read", params={"doc": "summary.md"}, headers=HEADERS)).json()
+    assert summary["stale"] is False
+    graph = await client.get("/api/wiki/graph", params={"doc": summary["id"]}, headers=HEADERS)
+    assert any(edge["to"] == source["id"] and edge["relation"] == "derived_from" for edge in graph.json()["edges"])
+    (vault / "source.md").write_text("# 依据\n新增了条件 B。\n")
+    after = (await client.get("/api/wiki/read", params={"doc": summary["id"]}, headers=HEADERS)).json()
+    assert after["stale"] is True
+    assert after["metadata"]["sources"][0]["resource"] == "source.md"
+
+
+async def test_article_normalization_preserves_words_unknown_yaml_and_existing_sources(client, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    original = "\ufeff---\r\ncustom: {keep: '原值'} # 我的字段\r\nsources: [{resource: 'https://example.org/article'}]\r\n---\r\n# 我的判断\r\n\r\n我认为这很糟，但只在条件 A 下。😀\r\n\r\n```python\r\nprint('原样')\r\n```\r\n"
+    (vault / "note.md").write_bytes(original.encode())
+    await configure(client, vault)
+    before = (await client.get("/api/wiki/read", params={"doc": "note.md"}, headers=HEADERS)).json()
+    result = await client.post("/api/wiki/organize", headers=HEADERS, json={
+        "path": "note.md", "expected_revision": before["revision"], "key_note": "判断限于条件 A。",
+        "frontmatter_patch": {"type": "Reference", "title": "我的判断", "description": "带有条件的个人判断", "x_wiki": {"profile": "article-v1", "body_dialect": "obsidian"}},
+        "reason": "按最新文章约定规范，保留原话",
+    })
+    assert result.status_code == 200, result.text
+    raw = (vault / "note.md").read_bytes()
+    assert raw.startswith(b"\xef\xbb\xbf---\r\n")
+    assert "custom: {keep: '原值'} # 我的字段\r\n".encode() in raw
+    assert original.split("# 我的判断\r\n", 1)[1].encode() in raw
+    current = (await client.get("/api/wiki/read", params={"doc": "note.md"}, headers=HEADERS)).json()
+    assert current["metadata"]["sources"] == [{"resource": "https://example.org/article"}]
+    assert current["metadata"]["doc_role"] == "reference"
+    assert current["metadata"]["x_wiki"]["profile"] == "article-v1"
+    assert current["metadata"]["generated"]["by"] == "human"
+    assert not list(vault.rglob("*.source.md.txt"))
+
+
+async def test_targeted_revision_changes_only_selected_raw_words_after_human_edit(client, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    original = "\ufeff---\r\ncustom: keep\r\n---\r\n# 判断\r\n\r\n我认为这很糟，只在条件 A 下。😀 单位为 10 ms。\r\n\r\n同样的单位为 10 ms，但这是另一个例子。\r\n"
+    note = vault / "note.md"
+    note.write_bytes(original.encode())
+    await configure(client, vault)
+    listed = await client.get("/api/wiki/blocks", params={"doc": "note.md", "view": "locators"}, headers=HEADERS)
+    assert listed.status_code == 200
+    body = listed.json()
+    assert all("content" not in part for part in body["blocks"])
+    selected = (await client.get("/api/wiki/blocks", params={"doc": "note.md", "ids": "1"}, headers=HEADERS)).json()
+    part = selected["blocks"][0]
+    start = part["content"].index("10 ms")
+    response = await client.post("/api/wiki/revise", headers=HEADERS, json={
+        "doc": body["id"], "expected_revision": body["revision"], "operation": "patch", "reason": "确认单位应为秒",
+        "edits": [{"locator": part["locator"], "expected_block_hash": part["sha256"], "start": start, "end": start + 5, "expected_text": "10 ms", "replacement": "10 s", "kind": "correction"}],
+    })
+    assert response.status_code == 200, response.text
+    assert note.read_bytes() == original.replace("10 ms", "10 s", 1).encode()
+    assert response.json()["changed_ranges"][0]["expected_text"] == "10 ms"
+    assert response.json()["original_preserved"] is False
+    assert response.json()["receipt_id"]
+    conflict = await client.post("/api/wiki/revise", headers=HEADERS, json={
+        "doc": body["id"], "expected_revision": body["revision"], "operation": "no_change", "reason": "旧版本不能确认",
+    })
+    assert conflict.status_code == 409
+
+
+async def test_confirm_sources_updates_only_checked_dependencies_and_keeps_body(client, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    for name in ("a", "b"):
+        (vault / f"{name}.md").write_text(f"# {name}\n原条件。\n")
+    await configure(client, vault)
+    inputs = [(await client.get("/api/wiki/read", params={"doc": f"{name}.md"}, headers=HEADERS)).json() for name in ("a", "b")]
+    body = "# 综合\n\n我认为有条件成立；保留反例。\n"
+    front = "---\ntype: Synthesis\nsources:\n" + "".join(f"  - {{id: {name}, resource: {name}.md, revision: '{item['revision']}', location: L2-L2}}\n" for name, item in zip(("a", "b"), inputs, strict=True)) + "---\n"
+    (vault / "summary.md").write_text(front + body)
+    for name in ("a", "b"):
+        (vault / f"{name}.md").write_text(f"# {name}\n追加条件。\n")
+    summary = (await client.get("/api/wiki/read", params={"doc": "summary.md"}, headers=HEADERS)).json()
+    current = (await client.get("/api/wiki/read", params={"doc": "a.md"}, headers=HEADERS)).json()
+    result = await client.post("/api/wiki/revise", headers=HEADERS, json={"doc": summary["id"], "expected_revision": summary["revision"], "operation": "confirm_sources", "checks": [{"resource": "a.md", "doc": current["id"], "revision": current["revision"], "location": "L2-L2"}], "reason": "已重读 a，原解释仍适用"})
+    assert result.status_code == 200, result.text
+    after = (await client.get("/api/wiki/read", params={"doc": summary["id"]}, headers=HEADERS)).json()
+    assert after["metadata"]["sources"][0]["revision"] == current["revision"]
+    assert after["metadata"]["sources"][1]["revision"] == inputs[1]["revision"]
+    assert after["stale"] is True
+    assert (vault / "summary.md").read_text().split("---\n", 2)[2] == body
+
+
+async def test_compact_lookup_and_domain_search_use_index_only_and_respect_roles(client, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "paper.md").write_text("---\ntype: Reference\ntitle: 视频蒸馏\ndescription: 讨论延迟和保真\naliases: [Vidu S2]\n---\n# 视频蒸馏\n数字人实时视频方法。\n")
+    (vault / "template.md").write_text("---\ntype: Template\ntitle: 数字人模板\n---\n# 数字人模板\n数字人数字人数字人\n")
+    await configure(client, vault)
+    opens = []
+    original = Path.open
+
+    def observe(path, mode="r", *args, **kwargs):
+        if path.is_relative_to(vault) and "r" in mode:
+            opens.append(path)
+        return original(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", observe)
+    looked = await client.get("/api/wiki/search", params={"query": "Vidu S2", "intent": "lookup", "view": "compact"}, headers=HEADERS)
+    assert looked.status_code == 200, looked.text
+    card = looked.json()["items"][0]
+    assert card["doc_role"] == "reference"
+    assert card["description"] == "讨论延迟和保真"
+    assert card["freshness"] == "indexed"
+    assert "metadata" not in card and "pages" not in card
+    assert looked.json()["match_mode"] == "exact"
+    found = (await client.get("/api/wiki/search", params={"query": "数字人", "intent": "overview", "view": "compact"}, headers=HEADERS)).json()
+    assert [item["path"] for item in found["items"]] == ["paper.md"]
+    template = (await client.get("/api/wiki/search", params={"query": "template.md", "intent": "lookup", "view": "compact"}, headers=HEADERS)).json()
+    assert template["items"][0]["doc_role"] == "template"
+    assert not opens
+
+
+async def test_read_many_merges_overlaps_and_reports_changed_missing_and_budget(client, tmp_path, monkeypatch):
+    from pathlib import Path
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "a.md").write_text("# A\n😀甲乙丙丁戊己庚辛壬癸\n")
+    (vault / "b.md").write_text("# B\n另一篇文章\n")
+    await configure(client, vault)
+    before = (await client.get("/api/wiki/read", params={"doc": "b.md"}, headers=HEADERS)).json()
+    (vault / "b.md").write_text("# B\n后来人工修改\n")
+    # Consume the notification before measuring the batch's current reads.
+    await client.get("/api/wiki/info", headers=HEADERS)
+    opens = []
+    original = Path.open
+
+    def observe(path, mode="r", *args, **kwargs):
+        if path == vault / "a.md" and mode == "rb":
+            opens.append(path)
+        return original(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", observe)
+    response = await client.post("/api/wiki/read-many", headers=HEADERS, json={"items": [
+        {"doc": "a.md", "start": 4, "length": 4}, {"doc": "a.md", "start": 6, "length": 4},
+        {"doc": "b.md", "expected_revision": before["revision"]}, {"doc": "absent.md"},
+        {"doc": "a.md", "start": 10, "length": 6},
+    ], "budget_chars": 6})
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert [item["status"] for item in result["items"]] == ["ok", "ok", "changed", "not_found", "budget_exhausted"]
+    assert result["ranges"][0]["content"] == "😀甲乙丙丁戊"
+    assert result["ranges"][0]["start"] == 4 and result["ranges"][0]["end"] == 10
+    assert result["characters_returned"] == 6
+    assert result["items"][-1]["next_start"] == 10
+    assert len(opens) == 1
+
+
+async def test_indexed_links_resolve_used_references_and_report_changed_heading_anchors(client, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "a.md").write_text("# 原标题\n观点。\n")
+    related = "# 导航\n[实际链接][used]\n\n[used]: a.md#原标题\n[unused]: absent.md\n\n`[[fake]]`\n"
+    (vault / "b.md").write_text(related)
+    await configure(client, vault)
+    before = (await client.get("/api/wiki/graph", params={"doc": "b.md"}, headers=HEADERS)).json()
+    assert len(before["edges"]) == 1
+    assert before["edges"][0]["status"] == "resolved"
+    document = (await client.get("/api/wiki/blocks", params={"doc": "a.md"}, headers=HEADERS)).json()
+    part = document["blocks"][0]
+    result = await client.post("/api/wiki/revise", headers=HEADERS, json={"doc": document["id"], "expected_revision": document["revision"], "operation": "patch", "reason": "明确更正题名", "edits": [{"locator": part["locator"], "expected_block_hash": part["sha256"], "start": 2, "end": 5, "expected_text": "原标题", "replacement": "新标题", "kind": "correction"}]})
+    assert result.status_code == 200, result.text
+    after = (await client.get("/api/wiki/graph", params={"doc": "b.md"}, headers=HEADERS)).json()
+    assert after["edges"][0]["status"] == "missing_anchor"
+    assert (vault / "b.md").read_text() == related
+
+
+@pytest.mark.parametrize("extension", ["verified: {by: human, extra: !!binary YQ==}", "verified: &review {by: human, extra: *review}"])
+async def test_unprojectable_optional_metadata_does_not_block_original_navigation(client, tmp_path, extension):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    raw = ("---\ntype: Reference\n" + extension + "\n---\n# 可读原文\n思想和风格原样保留。\n").encode()
+    (vault / "note.md").write_bytes(raw)
+    await configure(client, vault)
+    current = await client.get("/api/wiki/read", params={"doc": "note.md"}, headers=HEADERS)
+    assert current.status_code == 200, current.text
+    assert current.json()["metadata"]["frontmatter_error"]
+    assert (vault / "note.md").read_bytes() == raw
+
+
+@pytest.mark.parametrize("spacing", ["\n", ""])
+@pytest.mark.parametrize("replacement", ["一段全新的概括。\n", "我认为这是一段新总结，省略了原来的论证和反例。\n"])
+async def test_revise_rejects_replacing_an_entire_prose_block_with_a_new_summary(client, tmp_path, spacing, replacement):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    prose = "我认为很糟糕，但只在条件 A 下。理由是实验没有控制条件。反例 B 不能被省略。\n"
+    original = "---\ntype: Reference\n---\n# 我自己的判断\n" + spacing + prose
+    (vault / "note.md").write_text(original)
+    await configure(client, vault)
+    document = (await client.get("/api/wiki/blocks", params={"doc": "note.md"}, headers=HEADERS)).json()
+    part = document["blocks"][-1]
+    start = part["content"].index(prose)
+    response = await client.post("/api/wiki/revise", headers=HEADERS, json={"doc": document["id"], "expected_revision": document["revision"], "operation": "patch", "reason": "禁止用新摘要替代原论述", "edits": [{"locator": part["locator"], "expected_block_hash": part["sha256"], "start": start, "end": start + len(prose), "expected_text": prose, "replacement": replacement, "kind": "correction"}]})
+    assert response.status_code == 422
+    assert (vault / "note.md").read_text() == original
+
+
+@pytest.mark.parametrize("heading", ["# Bad title\n\n", "Bad title\n=========\n\n"])
+async def test_revise_allows_explicit_title_correction_without_replacing_the_prose(client, tmp_path, heading):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    original = heading + "Actual prose preserves the author's judgment and conditions.\n"
+    (vault / "note.md").write_text(original)
+    await configure(client, vault)
+    document = (await client.get("/api/wiki/blocks", params={"doc": "note.md"}, headers=HEADERS)).json()
+    part = document["blocks"][0]
+    start = part["content"].index("Bad title")
+    response = await client.post("/api/wiki/revise", headers=HEADERS, json={"doc": document["id"], "expected_revision": document["revision"], "operation": "patch", "reason": "明确纠正题名", "edits": [{"locator": part["locator"], "expected_block_hash": part["sha256"], "start": start, "end": start + 9, "expected_text": "Bad title", "replacement": "Good heading", "kind": "correction"}]})
+    assert response.status_code == 200, response.text
+    assert (vault / "note.md").read_text() == original.replace("Bad title", "Good heading", 1)
+
+
+async def test_graph_matches_real_basename_ambiguity_and_dotted_aliases(client, tmp_path):
+    vault = tmp_path / "vault"
+    for folder, title in (("a", "A"), ("b", "B")):
+        (vault / folder).mkdir(parents=True)
+        (vault / folder / "target.md").write_text(f"# {title}\nDistinct judgment.\n")
+    (vault / "source.md").write_text("---\naliases: [Vidu v2.0]\n---\n# Source\nKnown explanation.\n")
+    (vault / "myunique.md").write_text("# Different\nSuffix is not a basename.\n")
+    (vault / "linked.md").write_text("# Links\n[[target]]\n[[Vidu v2.0]]\n[[unique]]\n")
+    await configure(client, vault)
+    result = (await client.get("/api/wiki/graph", params={"doc": "linked.md"}, headers=HEADERS)).json()
+    edges = {edge["resource"]: edge for edge in result["edges"]}
+    assert edges["target"]["to"] is None and edges["target"]["status"] == "ambiguous"
+    assert edges["Vidu v2.0"]["status"] == "resolved"
+    assert edges["unique"]["to"] is None and edges["unique"]["status"] == "unresolved"
+    current = (await client.get("/api/wiki/read", params={"doc": "linked.md"}, headers=HEADERS)).json()
+    accepted = await client.put("/api/wiki/document", headers=HEADERS, json={"path": "linked.md", "content": "# Links\n[[Vidu v2.0]]\n", "expected_revision": current["revision"], "reason": "同一真实别名通过写入校验和导航解析"})
+    assert accepted.status_code == 200, accepted.text
+
+
+@pytest.mark.parametrize("suffix", [".MD", ".MARKDOWN"])
+async def test_wikilink_basename_keeps_supported_case_variants_of_markdown_suffixes(client, tmp_path, suffix):
+    vault = tmp_path / "vault"
+    (vault / "nested").mkdir(parents=True)
+    (vault / "nested" / ("Foo" + suffix)).write_text("# Different display title\nOriginal judgment.\n")
+    (vault / "linked.md").write_text("# Links\n[[Foo]]\n")
+    await configure(client, vault)
+    graph = (await client.get("/api/wiki/graph", params={"doc": "linked.md"}, headers=HEADERS)).json()
+    assert graph["edges"][0]["status"] == "resolved"
+    current = (await client.get("/api/wiki/read", params={"doc": "linked.md"}, headers=HEADERS)).json()
+    saved = await client.put("/api/wiki/document", headers=HEADERS, json={"path": "linked.md", "content": "# Links\n[[Foo]] is preserved.\n", "expected_revision": current["revision"], "reason": "保留受支持文件后缀"})
+    assert saved.status_code == 200, saved.text
+
+
+async def test_alias_removal_recomputes_navigation_and_distinguishes_ambiguity(client, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "a.md").write_text("---\naliases: [OldAlias]\n---\n# Shared\n观点 A。\n")
+    (vault / "b.md").write_text("# Shared\n观点 B。\n")
+    (vault / "linked.md").write_text("# 链接\n[[OldAlias]]\n[[Shared]]\n")
+    await configure(client, vault)
+    before = (await client.get("/api/wiki/graph", params={"doc": "linked.md"}, headers=HEADERS)).json()
+    assert next(edge for edge in before["edges"] if edge["resource"] == "Shared")["status"] == "ambiguous"
+    current = (await client.get("/api/wiki/read", params={"doc": "a.md"}, headers=HEADERS)).json()
+    saved = await client.put("/api/wiki/document", headers=HEADERS, json={"path": "a.md", "content": "---\naliases: [NewAlias]\n---\n# Shared\n观点 A。\n", "expected_revision": current["revision"], "reason": "修改别名"})
+    assert saved.status_code == 200, saved.text
+    after = (await client.get("/api/wiki/graph", params={"doc": "linked.md"}, headers=HEADERS)).json()
+    removed = next(edge for edge in after["edges"] if edge["resource"] == "OldAlias")
+    assert removed["to"] is None and removed["status"] == "unresolved"
+
+
+async def test_compare_keeps_each_named_method_when_a_comparison_page_exists(client, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    (vault / "alpha.md").write_text("# Alpha 方法\nAlpha 用视频蒸馏减少延迟，条件是固定帧长。\n")
+    (vault / "beta.md").write_text("# Beta 方法\nBeta 重建单目 Rig，条件是标定精度足够。\n")
+    (vault / "map.md").write_text("# 比较概览\nAlpha 与 Beta 用于不同研究问题。\n")
+    await configure(client, vault)
+    response = await client.get("/api/wiki/search", params={"query": "Alpha Beta", "intent": "compare", "view": "compact", "limit": 3}, headers=HEADERS)
+    assert response.status_code == 200, response.text
+    assert {item["path"] for item in response.json()["items"]} == {"alpha.md", "beta.md", "map.md"}
+
+
 async def test_user_searches_chinese_short_words_and_reads_revisioned_original(
     client, tmp_path
 ):
@@ -205,12 +652,65 @@ async def test_wiki_mcp_discloses_query_tools_and_maintenance_entry_by_current_t
                                 tool.name for tool in (await peer.list_tools()).tools
                             }
                 assert {"info", "search", "list_documents", "read", "graph"} <= visible
+                assert "read_many" in visible
                 assert "publish" not in visible
                 assert "organize" not in visible
                 assert ("maintain" in visible) == (mode == "maintain")
             finally:
                 tasks.close(token)
     finally:
+        await api.stop()
+
+
+async def test_mcp_curator_executes_new_contracts_through_real_http(client, tmp_path, monkeypatch):
+    import json
+
+    import httpx
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    from server.mcp_identity import mint
+    from server.wiki.jobs import WikiJobs
+    from server.wiki.tasks import tasks
+    from tests.callback_api import start_callback_api
+
+    vault = tmp_path / "vault"
+    (vault / "Library").mkdir(parents=True)
+    (vault / "Library/note.md").write_text("# 当前文章\n\n观点和条件完整。\n")
+    config = await configure(client, vault)
+    jobs = WikiJobs(None)
+    job = jobs.maintain("mcp-check", "", "检查当前文章", ["Library/note.md"], None, [], "human")
+    session = await session_manager.create_session(config["curator_agent_id"], "MCP 合同", str(tmp_path))
+    jobs.update(job["id"], status="running", session_id=session.id)
+    tasks.assign(session.id, job["id"], ["Library/note.md"])
+    token = tasks.open(session, "maintain")
+    from server.deps import get_session_manager
+    from server.main import _wiki_error
+    from server.routers.wiki import router
+    from server.wiki import WikiError
+
+    api = await start_callback_api(router, overrides={get_session_manager: lambda: session_manager}, exception_handlers={WikiError: _wiki_error})
+    monkeypatch.setattr(settings, "port", api.port)
+    try:
+        async with httpx.AsyncClient(headers={"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}) as transport:
+            async with streamable_http_client(f"http://127.0.0.1:{api.port}/mcp/wiki/mcp", http_client=transport) as (reader, writer, _):
+                async with ClientSession(reader, writer) as peer:
+                    await peer.initialize()
+                    visible = {tool.name for tool in (await peer.list_tools()).tools}
+                    assert {"read_many", "revise", "load_guide"} <= visible
+                    found = await peer.call_tool("search", {"query": "Library/note.md", "intent": "lookup", "view": "compact"})
+                    payload = json.loads(found.content[0].text)
+                    assert "items" in payload, payload
+                    card = payload["items"][0]
+                    assert card["freshness"] == "indexed" and "metadata" not in card
+                    evidence = await peer.call_tool("read_many", {"items": [{"doc": card["id"], "expected_revision": card["revision"]}], "budget_chars": 100})
+                    assert json.loads(evidence.content[0].text)["ranges"][0]["content"].endswith("观点和条件完整。\n")
+                    result = await peer.call_tool("revise", {"request": {"doc": card["id"], "expected_revision": card["revision"], "operation": "no_change", "reason": "已经满足当前范围"}})
+                    receipt = json.loads(result.content[0].text)
+                    assert receipt["changed"] is False and receipt["receipt_id"]
+    finally:
+        tasks.close(token)
+        tasks.unassign(session.id)
         await api.stop()
 
 
@@ -723,6 +1223,12 @@ async def test_bound_app_token_can_edit_only_its_registered_wiki(
             "/apps/sapphire/wiki/read?doc=note.md", headers=app_headers
         )
         assert original.status_code == 200, original.text
+        navigation = await client.get("/apps/sapphire/wiki/search", params={"query": "note.md", "intent": "lookup", "view": "compact"}, headers=app_headers)
+        assert navigation.status_code == 200, navigation.text
+        assert navigation.json()["items"][0]["freshness"] == "indexed"
+        batch = await client.post("/apps/sapphire/wiki/read-many", json={"items": [{"doc": "note.md", "length": 2}], "budget_chars": 2}, headers=app_headers)
+        assert batch.status_code == 200, batch.text
+        assert batch.json()["characters_returned"] == 2
         denied = await client.get(
             "/apps/other/wiki/read?doc=note.md",
             headers={"Authorization": f"Bearer {app_scope_token('other')}"},
@@ -936,7 +1442,9 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
             wiki_task_id=run_config.wiki_task_id,
         )
         wiki = next((e for e in entries if e.key == "wiki"), None)
-        seen.append((wiki is not None, "读取匹配文章的当前正文" in " ".join(argv)))
+        from server.wiki.workflow import guide
+
+        seen.append((wiki is not None, guide("query-v2").splitlines()[0] in " ".join(argv)))
 
         class Runtime(FakeRunBase):
             def set_idle_handler(self, handler):

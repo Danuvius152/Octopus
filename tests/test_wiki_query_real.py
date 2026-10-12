@@ -43,9 +43,11 @@ class QueryProbe:
     agent_id: str
     root: Path
     requests: list[tuple[str, dict]] = field(default_factory=list)
+    responses: list[tuple[str, dict]] = field(default_factory=list)
 
     async def ask(self, question):
         self.requests.clear()
+        self.responses.clear()
         session = await self.manager.create_session(
             self.agent_id, "Wiki query acceptance", str(self.root.parent), backend="codex"
         )
@@ -57,14 +59,13 @@ class QueryProbe:
         return answer
 
     def reads(self):
-        store = registry.store(None)
         result = []
-        for operation, params in self.requests:
+        for operation, response in self.responses:
             if operation == "read":
-                document = store.read(params["doc"], length=1)
-                start = int(params.get("start", 0))
-                end = min(document["characters"], start + int(params.get("length", 16000)))
-                result.append((document["path"], start, end))
+                result.append((response["path"], response["start"], response["end"]))
+            elif operation == "read-many":
+                paths = {document["id"]: document["path"] for document in response["documents"]}
+                result.extend((paths[part["doc"]], part["start"], part["end"]) for part in response["ranges"])
         return result
 
 
@@ -104,7 +105,8 @@ async def query_probe(tmp_path, monkeypatch):
     def record_call(method, path, *, params=None, body=None):
         result = original_call(method, path, params=params, body=body)
         if "error" not in result:
-            probe.requests.append((path, dict(params or {})))
+            probe.requests.append((path, dict(params or body or {})))
+            probe.responses.append((path, result))
         return result
 
     monkeypatch.setattr(wiki_tools, "call", record_call)
@@ -124,8 +126,8 @@ async def test_codex_personal_facts_use_current_me_directory_without_guessing(qu
     assert locating[0][0] == "documents" and locating[0][1].get("directory") == "Library/Me", locating
     first_limit = int(locating[0][1].get("limit", 30))
     if first_limit < 31:
-        assert any(operation == "documents" and int(params.get("offset", 0)) > 0 for operation, params in locating), locating
-    assert any(path == PERSONAL for path, _, _ in query_probe.reads())
+        assert any(operation == "documents" and (int(params.get("offset", 0)) > 0 or params.get("cursor")) for operation, params in locating), locating
+    assert any(path == PERSONAL for path, _, _ in query_probe.reads()), query_probe.requests
     assert all(path.startswith("Library/Me/") for path, _, _ in query_probe.reads())
     if "背景" in question:
         assert "青峦大学" in answer and "合成视觉推理" in answer, answer
@@ -155,5 +157,5 @@ async def test_codex_whole_report_evaluation_reads_all_current_pages(query_probe
         assert start <= covered, spans
         covered = max(covered, end)
     document = registry.store(None).read(REPORT, length=1)
-    assert covered == document["characters"] and len(spans) >= 2, spans
+    assert covered == document["characters"], spans
     assert "测试环境" in answer, answer

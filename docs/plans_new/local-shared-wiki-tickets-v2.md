@@ -1,6 +1,6 @@
 # Octopus 本地共享 Wiki：开发任务与接手指令 v2
 
-> **Status:** proposed — 本文为可执行设计，尚未修改、合入或部署应用。\
+> **Status:** in-progress — V2-01～03 与 V2-04 框架代码已实现，真实 Weber 配置、部署和内容试点由 Octo 接续；见[核心交接](local-shared-wiki-implementation-v2.md)。\
 > **版本：** 2.1；修订 2026-10-13（Asia/Shanghai）；保留 v2 文件名与 V2 任务编号。\
 > **审阅基线：** `Danuvius152/Octopus` commit `453a7995bd6c54df33b0fc41dec09d370b4b40aa`，以及 2026-10-12 提供的 `.octopus.zip`。\
 > **分工：** Octo 实现；Vera 独立验证；Weber 参与知识维护与阅读写作效果验收；SmartReader 承担后续阅读讨论，Sapphire 承担后续库浏览/标签/编辑。

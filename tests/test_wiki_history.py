@@ -302,7 +302,11 @@ async def test_sapphire_save_only_captures_modified_text_and_never_reads_attachm
     sapphire, monkeypatch
 ):
     row, history = sapphire
+    import os
+
     original = Path.read_bytes
+    original_walk = os.walk
+    scans = []
 
     def forbid(path):
         if path.is_relative_to(history.store.root) and path.name != "note.md":
@@ -310,6 +314,12 @@ async def test_sapphire_save_only_captures_modified_text_and_never_reads_attachm
         return original(path)
 
     monkeypatch.setattr(Path, "read_bytes", forbid)
+    def observe_walk(path, *args, **kwargs):
+        if path == history.store.root:
+            scans.append(path)
+        return original_walk(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "walk", observe_walk)
     body = json.dumps({"path": "note.md", "content": "edited"}).encode()
     mutation = await begin(row, "POST", "save", {"vault": "obv"}, body)
     history.store.path("note.md").write_bytes(b"edited")
@@ -320,6 +330,7 @@ async def test_sapphire_save_only_captures_modified_text_and_never_reads_attachm
     }
     assert history.history("note.md")["items"][0]["after_hash"] == revision(b"edited")
     assert not (history.state / "external-change.json").exists()
+    assert scans == []
 
 
 async def test_attachment_upload_and_git_commit_hold_lock_without_text_capture(

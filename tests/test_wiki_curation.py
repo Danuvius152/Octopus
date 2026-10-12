@@ -171,7 +171,7 @@ async def test_guides_follow_verified_job_role_instead_of_agent_name(client, not
     try:
         entry = instructions("maintain", entry_token)
         assert guide("entry") in entry
-        assert guide("writing") not in entry and guide("maintenance") not in entry and guide("query") not in entry
+        assert guide("writing") not in entry and guide("maintenance-v2") not in entry and guide("query-v2") not in entry
     finally:
         tasks.close(entry_token)
     jobs = WikiJobs(None)
@@ -181,10 +181,14 @@ async def test_guides_follow_verified_job_role_instead_of_agent_name(client, not
     token = tasks.open(session, "maintain")
     try:
         worker = instructions("maintain", token)
-        assert guide("maintenance") in worker and guide("writing") in worker and guide("query") in worker
+        assert guide("maintenance-v2") in worker and guide("writing") not in worker and guide("query-v2") not in worker
+        assert guide("retrieval-v2") in worker
+        from server.wiki.workflow import load_guide
+
+        assert load_guide("writing", token) == guide("writing")
         assert guide("entry") not in worker
         jobs.update(job["id"], status="cancelled")
-        assert guide("maintenance") not in instructions("maintain", token)
+        assert guide("maintenance-v2") not in instructions("maintain", token)
     finally:
         tasks.close(token)
         tasks.unassign(session.id)

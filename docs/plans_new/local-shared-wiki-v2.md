@@ -1,6 +1,6 @@
 # Octopus 本地共享 Wiki v2：协同设计与实施总纲
 
-> **Status:** proposed — 设计交付，尚未改动或部署应用。\
+> **Status:** in-progress — V2-01～03 与 V2-04 框架代码已实现，真实 Weber 配置、部署和内容试点由 Octo 接续；见[核心交接](local-shared-wiki-implementation-v2.md)。\
 > **修订：** v2.1，2026-10-13（Asia/Shanghai）；保留 v2 文件名与开发票编号。\
 > **审阅基线：** Octopus commit `453a7995bd6c54df33b0fc41dec09d370b4b40aa`；用户于 2026-10-12 提供的 `.octopus.zip`。\
 > **适用对象：** Octo 开发，Vera 验证，Weber 作为智者与知识库 curator；SmartReader 作为阅读讨论入口，Sapphire 作为库浏览与编辑应用。\

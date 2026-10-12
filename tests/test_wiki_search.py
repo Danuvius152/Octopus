@@ -110,6 +110,8 @@ def test_refresh_repairs_missing_fts_for_unchanged_files(store):
     store.refresh()
     with store.connect() as db:
         db.execute("DELETE FROM search_fts")
+    # Compensation is explicit/background; queries no longer walk the vault.
+    store.refresh()
     assert store.search("UNIQUEFTSREFRESH")["items"][0]["path"] == "note.md"
 
 
@@ -254,7 +256,8 @@ def test_incremental_search_does_not_parse_or_read_unreturned_documents(
     monkeypatch.setattr(Path, "read_bytes", watch)
     result = store.search("SSL", limit=1)
     assert result["items"][0]["path"] == "Library/Research/机器学习.md"
-    assert reads == ["Library/Research/机器学习.md"]
+    # Navigation now comes entirely from the index; read verifies evidence.
+    assert reads == []
 
 
 def test_directory_filter_and_pagination_only_read_the_requested_page(store, monkeypatch):
@@ -275,9 +278,10 @@ def test_directory_filter_and_pagination_only_read_the_requested_page(store, mon
     page = store.documents(directory="Library/Me", limit=1, offset=1)
     assert page["total"] == 4
     assert page["next_offset"] == 2
-    assert reads == [page["items"][0]["path"]] == ["Library/Me/b.md"]
+    assert reads == []
+    assert page["items"][0]["path"] == "Library/Me/b.md"
     assert store.documents(directory="Library/Me", limit=1, offset=10)["total"] == 4
-    assert reads == ["Library/Me/b.md"]
+    assert reads == []
 
 
 def test_document_source_filters_follow_managed_override_and_current_identity(store):

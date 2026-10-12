@@ -56,33 +56,6 @@ class WikiHistory:
         self.state = store.state
         self.blobs = self.state / "blobs"
         self.blobs.mkdir(exist_ok=True)
-        with store.connect() as db:
-            db.execute("""CREATE TABLE IF NOT EXISTS changes (
-              id TEXT PRIMARY KEY,path TEXT NOT NULL,before_hash TEXT,after_hash TEXT,
-              actor TEXT NOT NULL,reason TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL
-            )""")
-            db.execute("""CREATE TABLE IF NOT EXISTS change_management (
-              change_id TEXT PRIMARY KEY,before_state TEXT,after_state TEXT
-            )""")
-            db.execute(
-                "CREATE TABLE IF NOT EXISTS change_proposals (change_id TEXT PRIMARY KEY,operation TEXT NOT NULL)"
-            )
-            db.execute("""CREATE TABLE IF NOT EXISTS change_retention (
-              change_id TEXT PRIMARY KEY,document_id TEXT NOT NULL,
-              before_available INTEGER NOT NULL,after_available INTEGER NOT NULL,resolved_at TEXT
-            )""")
-            db.execute("""INSERT OR IGNORE INTO change_retention
-              SELECT c.id,COALESCE(i.id,c.path),1,1,NULL FROM changes c
-              LEFT JOIN document_identities i ON i.path=c.path""")
-            db.execute("""CREATE TABLE IF NOT EXISTS app_trash (
-              trash_id TEXT PRIMARY KEY,path TEXT NOT NULL,document_id TEXT,management TEXT
-            )""")
-            db.execute("""CREATE TABLE IF NOT EXISTS job_publications (
-              job_id TEXT NOT NULL,source_doc TEXT NOT NULL,input_revision TEXT NOT NULL,
-              change_id TEXT PRIMARY KEY,output_path TEXT NOT NULL,output_revision TEXT NOT NULL,
-              indexed INTEGER NOT NULL DEFAULT 0
-            )""")
-            db.execute("CREATE INDEX IF NOT EXISTS job_publication_source ON job_publications(job_id,source_doc)")
 
     @contextlib.contextmanager
     def under_existing_lock(self, handle):
@@ -141,6 +114,8 @@ class WikiHistory:
         document_id=None,
         change_id=None,
         publication=None,
+        operation="save",
+        operation_details=None,
     ):
         if change_id:
             with self.store.connect() as db:
@@ -219,10 +194,15 @@ class WikiHistory:
                 (row["id"], json.dumps(before_state), json.dumps(after_state)),
             )
             if publication:
+                first = db.execute("SELECT input_revision FROM job_publications WHERE job_id=? AND source_doc=? ORDER BY rowid LIMIT 1", (publication["job_id"], publication["source_doc"])).fetchone()
                 db.execute("INSERT INTO job_publications VALUES(?,?,?,?,?,?,0)", (
-                    publication["job_id"], publication["source_doc"], publication["input_revision"],
+                    publication["job_id"], publication["source_doc"], first[0] if first else publication["input_revision"],
                     row["id"], path, row["after_hash"],
                 ))
+            if status == "prepared":
+                from .operations import record
+
+                record(db, doc_id=document_id, path=path, before=row["before_hash"], after=row["after_hash"], operation=operation, reason=reason, publication=publication, change_id=row["id"], details=operation_details)
             if proposal is not None:
                 db.execute(
                     "INSERT INTO change_proposals VALUES(?,?)",
@@ -329,6 +309,8 @@ class WikiHistory:
     def write_locked(
         self, relative, raw, expected_revision, actor, reason, management=_UNCHANGED,
         publication=None, restore_document_id=None,
+        operation="save",
+        operation_details=None,
     ):
         path = self.store.path(relative)
         if path.exists() and not path.is_file():
@@ -356,7 +338,14 @@ class WikiHistory:
                     )
         if raw is None and management is _UNCHANGED:
             management = None
-        row = self.record(relative, before, raw, actor, reason, "prepared", management, publication=publication)
+        if operation != "save" and before is not None and before == raw:
+            from .operations import record
+
+            document = self.store.read(relative, length=1, expected_revision=current)
+            with self.store.connect() as db:
+                receipt = record(db, doc_id=document["id"], path=relative, before=current, after=current, operation=operation, reason=reason, publication=publication, details=operation_details)
+            return {"path": relative, "revision": current, "change_id": None, "receipt_id": receipt, "changed": False, **self.store.index_state()}
+        row = self.record(relative, before, raw, actor, reason, "prepared", management, publication=publication, operation=operation, operation_details=operation_details)
         if raw is None:
             path.unlink(missing_ok=True)
         else:
@@ -372,7 +361,9 @@ class WikiHistory:
         elif raw is None:
             with self.store.connect() as db:
                 db.execute("DELETE FROM documents WHERE path=?", (relative,))
-        return {"change_id": row["id"], "path": relative, "revision": row["after_hash"]}
+        with self.store.connect() as db:
+            receipt = db.execute("SELECT id FROM operation_receipts WHERE change_id=?", (row["id"],)).fetchone()
+        return {"change_id": row["id"], "path": relative, "revision": row["after_hash"], "receipt_id": receipt[0] if receipt else None, "changed": True, **self.store.index_state()}
 
     def history(self, path, offset=0, limit=50):
         with self.locked():
@@ -636,6 +627,9 @@ class WikiHistory:
             if raw is None and not any(old == relative for old, _ in moves):
                 with self.store.connect() as db:
                     self.store.detach_path(db, relative)
+            elif raw is not None:
+                with self.store.connect() as db:
+                    self.store._index(db, relative, raw=raw)
 
     def inventory(self):
         return {

@@ -169,6 +169,9 @@ async def lifespan(app: FastAPI):
     )
 
     async with mcp_lifespan(app):
+        from .wiki.registry import registry as wiki_registry
+
+        await wiki_registry.start()
         from .wiki.cleanup import sweep as sweep_wiki_history
         await sweep_wiki_history()
         await wiki_worker.start(session_manager)
@@ -198,6 +201,7 @@ async def lifespan(app: FastAPI):
 
     await bg_task_manager.shutdown()
     await wiki_worker.stop()
+    await wiki_registry.stop()
     app_agent_manager.shutdown()
     application_manager.shutdown()
     delegation_manager.shutdown()

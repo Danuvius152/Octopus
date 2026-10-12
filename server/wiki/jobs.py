@@ -75,9 +75,12 @@ class WikiJobs:
     def get(self, job_id):
         with self.store.connect() as db:
             row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+            receipts = [dict(receipt) for receipt in db.execute("SELECT r.*,coalesce(c.status,'applied') AS status FROM operation_receipts r LEFT JOIN changes c ON c.id=r.change_id WHERE r.job_id=? ORDER BY r.rowid", (job_id,))]
         if row is None:
             raise WikiError("Maintenance job not found", 404)
-        return self.public(row)
+        for receipt in receipts:
+            receipt["details"] = json.loads(receipt["details"])
+        return self.public(row) | {"receipts": receipts}
 
     def list(self, offset=0, limit=30):
         if offset < 0 or not 1 <= limit <= 100:
@@ -436,6 +439,15 @@ class WikiJobs:
 
     def publication(self, job_id, document_id):
         with self.store.connect() as db:
+            receipt = db.execute("""SELECT r.id AS receipt_id,r.job_id,r.item_doc AS source_doc,
+                coalesce(json_extract(r.details,'$.input_source_revision'),p.input_revision,r.input_revision) AS input_revision,r.path AS output_path,r.output_revision,r.change_id,
+                coalesce(p.indexed,0) AS indexed,coalesce(c.status,'applied') AS change_status,
+                r.doc_id AS output_doc,r.operation FROM operation_receipts r
+                LEFT JOIN changes c ON c.id=r.change_id
+                LEFT JOIN job_publications p ON p.change_id=r.change_id
+                WHERE r.job_id=? AND r.item_doc=? ORDER BY r.rowid DESC LIMIT 1""", (job_id, document_id)).fetchone()
+            if receipt:
+                return receipt
             return db.execute("SELECT p.*,c.status AS change_status,r.document_id AS output_doc FROM job_publications p JOIN changes c ON c.id=p.change_id JOIN change_retention r ON r.change_id=c.id WHERE p.job_id=? AND p.source_doc=? ORDER BY p.rowid DESC LIMIT 1", (job_id, document_id)).fetchone()
 
     def recover_publication(self, job_id, item):
@@ -448,6 +460,10 @@ class WikiJobs:
             item.update(input_revision=published["input_revision"], output=published["output_path"],
                         output_revision=published["output_revision"], output_change_id=published["change_id"],
                         index_complete=False, index_recovery=True)
+            operation = published["operation"] if "operation" in published.keys() else "organize"
+            item["operation"] = operation
+            if "receipt_id" in published.keys():
+                item["receipt_id"] = published["receipt_id"]
             if published["change_status"] != "applied":
                 # The receipt precedes the atomic write. A crash followed by
                 # editing or reverting the file cannot prove whether it landed.
@@ -460,7 +476,7 @@ class WikiJobs:
                     self.store.read(item["doc"], length=1, expected_revision=published["input_revision"])
                 if output["id"] != published["output_doc"]:
                     raise WikiError("Published output identity was replaced", 409)
-                if output["stale"]:
+                if operation in {"save", "organize"} and output["stale"]:
                     raise WikiError("Published output or its cited sources changed; review the existing publication", 409)
                 with self.store.connect() as db:
                     self.store.require_indexed(db, published["output_path"])

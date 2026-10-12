@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .capabilities import CAPABILITIES
 from .registry import registry
 from .store import WikiError
 from .tasks import tasks
@@ -21,6 +22,7 @@ def instructions(mode: str, task_id: str | None = None) -> str:
         "mode": mode,
         "organization": "Library 分类；Key note；细粒度标签；必要关联",
         "excluded": "PDF 不处理；工具/tmp/配套静态资产按需读取",
+        "capabilities": CAPABILITIES,
     }
     if task:
         try:
@@ -34,18 +36,24 @@ def instructions(mode: str, task_id: str | None = None) -> str:
             card["state"] = "主库尚未绑定；用 info 确认状态"
         if task.job_id:
             card["job_id"] = task.job_id
+            card["guides"] = ["article", "writing"]
     base = "本次知识操作卡：" + json.dumps(card, ensure_ascii=False) + "\n"
     base += "使用本次 mcp__wiki__ 工具；工具描述提供真实参数。原生助手共享当前任务凭据，等待它们结束后完成任务；之后没有知识授权。\n"
     if mode == "read":
-        base += guide("query")
+        base += guide("query-v2") + "\n" + guide("retrieval-v2")
     elif mode == "maintain" and tasks.is_curator_worker(task):
         base += (
-            guide("maintenance")
+            guide("maintenance-v2")
             + "\n"
-            + guide("writing")
-            + "\n"
-            + guide("query")
+            + guide("retrieval-v2")
         )
     elif mode == "maintain":
         base += guide("entry")
     return base
+
+
+def load_guide(module: str, task_id: str | None) -> str:
+    task = tasks.active.get(task_id)
+    if not tasks.is_curator_worker(task) or module not in {"article", "writing"}:
+        raise WikiError("This guide requires an active curator assignment", 403)
+    return guide("article-v2" if module == "article" else module)

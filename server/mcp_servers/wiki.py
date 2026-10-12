@@ -3,6 +3,7 @@
 import httpx
 from mcp.server.fastmcp import FastMCP, Image
 
+from ..wiki.contracts import ReadRequest, Revision
 from . import _host
 
 
@@ -20,6 +21,7 @@ class TaskWiki(FastMCP):
             "info",
             "search",
             "read",
+            "read_many",
             "list_documents",
             "graph",
             "inspect_image",
@@ -27,7 +29,7 @@ class TaskWiki(FastMCP):
         }
         if task.mode == "maintain":
             if tasks.is_curator_worker(task):
-                names |= {"organize", "publish", "blocks", "restructure"}
+                names |= {"organize", "publish", "blocks", "restructure", "revise", "load_guide"}
             elif not task.job_id:
                 names.add("maintain")
         return [tool for tool in await super().list_tools() if tool.name in names]
@@ -59,8 +61,11 @@ def search(
     kind: str | None = None,
     include_assets: bool = False,
     directory: str | None = None,
+    intent: str | None = None,
+    view: str = "full",
+    cursor: str | None = None,
 ) -> dict:
-    """Find sources in the local Chinese/English chapter index; follow next_offset.
+    """Find indexed navigation; use view=compact and an explicit lookup/question/overview/compare intent.
 
     Each document appears once. section.start/end locate evidence for read();
     sections includes extra matched chapters for terms discussed separately.
@@ -73,6 +78,17 @@ def search(
     return call(
         "GET", "search", params={k: v for k, v in locals().items() if v is not None}
     )
+
+
+@mcp.tool()
+def read_many(items: list[ReadRequest], budget_chars: int = 24000) -> dict:
+    """Read current evidence under a character budget, merging overlapping ranges.
+
+    Each item reports ok/partial/changed/not_found/excluded/budget_exhausted.
+    Content appears once in ranges; items reference range_id and start/end.
+    Only returned passages count as read. Follow each next_start as needed.
+    """
+    return call("POST", "read-many", body={"items": [item.model_dump() for item in items], "budget_chars": budget_chars})
 
 
 @mcp.tool()
@@ -96,12 +112,25 @@ def info() -> dict:
 
 
 @mcp.tool()
+def load_guide(module: str) -> dict:
+    """Load article conventions for normalization, or writing rules before new prose.
+
+    Ordinary reading and simple typo fixes do not need the writing module.
+    """
+    return call("GET", "guide", params={"module": module})
+
+
+@mcp.tool()
 def list_documents(
     directory: str | None = None,
     offset: int = 0,
     limit: int = 30,
     kind: str | None = None,
     include_assets: bool = False,
+    quality: str | None = None,
+    source: str | None = None,
+    view: str = "full",
+    cursor: str | None = None,
 ) -> dict:
     """Browse a directory when keywords miss; follow next_offset. Assets are opt-in."""
     return call(
@@ -110,9 +139,9 @@ def list_documents(
 
 
 @mcp.tool()
-def graph(doc: str) -> dict:
+def graph(doc: str, offset: int = 0, limit: int = 100, cursor: str | None = None) -> dict:
     """Read outgoing and reverse relations from the index without changing notes."""
-    return call("GET", "graph", params={"doc": doc})
+    return call("GET", "graph", params={key: value for key, value in locals().items() if value is not None})
 
 
 @mcp.tool()
@@ -172,8 +201,10 @@ def organize(
     sources: list[dict] | None = None,
     aliases: list[str] | None = None,
     reuse_existing_summary: bool = False,
+    frontmatter_patch: dict | None = None,
+    item_doc: str | None = None,
 ) -> dict:
-    """Curator supplements an assigned note, preserving user text and frontmatter.
+    """Curator adapts an assigned article in place; pass frontmatter_patch for OKF adaptation.
 
     Read every chunk of the current note first. Supply a nonempty key_note
     if opening points need supplementing, even if a summary heading exists.
@@ -182,8 +213,7 @@ def organize(
     reliable names; native frontmatter stays intact. relations have doc,
     revision, location (L1-L3 or an actual heading), explanation; read their
     cited current passages first. New links use unique vault-path wikilinks.
-    Refresh replaces only
-    untouched Weber sections; user-edited additions require review. TXT/HTML
+    Existing summaries are preserved; use revise for a specific correction. TXT/HTML
     originals stay intact with a sibling Markdown reading note.
     """
     return call(
@@ -194,11 +224,13 @@ def organize(
             "expected_revision": expected_revision,
             "reason": reason,
             "key_note": key_note,
-            "tags": tags or [],
+            "tags": tags,
             "relations": relations or [],
-            "sources": sources or [],
+            "sources": sources,
             "aliases": aliases,
             "reuse_existing_summary": reuse_existing_summary,
+            "frontmatter_patch": frontmatter_patch,
+            "item_doc": item_doc,
         },
     )
 
@@ -208,21 +240,40 @@ def publish(
     path: str,
     content: str,
     kind: str,
-    sources: list[dict],
+    sources: list[dict] | None,
     expected_revision: str | None,
     reason: str,
+    frontmatter_patch: dict | None = None,
+    tags: list[str] | None = None,
+    aliases: list[str] | None = None,
+    item_doc: str | None = None,
 ) -> dict:
     """Publish a necessary NEW Library concept/topic page with actual source references.
     Never create a source card for every Markdown or change related old pages.
     Source objects have doc, revision, location; conflicts retain the proposal.
     """
-    return call("POST", "publish", body=locals())
+    return call("POST", "publish", body={key: value for key, value in locals().items() if value is not None or key == "expected_revision"})
 
 
 @mcp.tool()
-def blocks(doc: str) -> dict:
-    """Read lossless original Markdown blocks before layout changes."""
-    return call("GET", "blocks", params={"doc": doc})
+def blocks(doc: str, view: str = "full", ids: list[str] | None = None, expected_revision: str | None = None, budget_chars: int | None = None, offset: int = 0, limit: int | None = None) -> dict:
+    """Locate current raw blocks with view=locators, then read selected ids.
+
+    Raw positions are Unicode codepoints and hashes cover original UTF-8 bytes.
+    Locators bind the document/revision; locator-only output is not a read.
+    """
+    return call("GET", "blocks", params={key: value for key, value in locals().items() if value is not None})
+
+
+@mcp.tool()
+def revise(request: Revision) -> dict:
+    """Apply exact sparse raw edits, confirm checked sources, or record no_change.
+
+    Current task, assignment, revision, block hash, original words and actual
+    read coverage are required. Prior human edits do not bar maintenance.
+    Patch cannot replace a whole document. Other words and omitted fields stay.
+    """
+    return call("POST", "revise", body=request.model_dump())
 
 
 @mcp.tool()
@@ -232,6 +283,10 @@ def restructure(
     order: list[str],
     additions: list[dict],
     reason: str,
+    frontmatter_patch: dict | None = None,
+    tags: list[str] | None = None,
+    aliases: list[str] | None = None,
+    item_doc: str | None = None,
 ) -> dict:
     """Reorder every original block once; additions have before, content, sources."""
     return call("POST", "restructure", body=locals())

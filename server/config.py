@@ -1,5 +1,6 @@
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings
 
 
@@ -70,6 +71,7 @@ class Settings(BaseSettings):
     # Rebuildable Wiki indexes, revisions and configuration. Vault originals
     # stay in the registered existing location, separate from this state.
     wiki_dir: str = "~/.octopus/wiki"
+    wiki_reconcile_seconds: float = Field(default=30, ge=1)
     # Per-agent durable state root (docs/plans/memory.md §2). Each agent gets
     # `<agents_dir>/<agent_id>/memory/` — the canonical native, agent-written
     # markdown memory both harnesses point at (Claude via

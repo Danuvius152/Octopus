@@ -2,7 +2,7 @@
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import Response
@@ -12,6 +12,7 @@ from ..auth import verify_token
 from ..deps import ScopeUser, SessionMgr
 from ..mcp_identity import verify
 from ..wiki import WikiError, registry
+from ..wiki.contracts import ReadBatch, Revision, Source
 from ..wiki.curation import WikiCuration
 from ..wiki.history import WikiHistory
 from ..wiki.jobs import WikiJobs, worker
@@ -45,6 +46,8 @@ async def app_wiki(request: Request, app_id: str, operation: str):
         ("GET", "image"): (image, None),
         ("GET", "search"): (search, None),
         ("GET", "read"): (read, None),
+        ("POST", "read_many"): (read_many, ReadBatch),
+        ("POST", "read-many"): (read_many, ReadBatch),
         ("GET", "blocks"): (get_blocks, None),
         ("GET", "history"): (history, None),
         ("PUT", "document"): (edit_document, Edit),
@@ -52,6 +55,7 @@ async def app_wiki(request: Request, app_id: str, operation: str):
         ("POST", "publish"): (publish, Publish),
         ("POST", "restructure"): (restructure, Restructure),
         ("POST", "organize"): (organize, Organize),
+        ("POST", "revise"): (revise_document, None),
         ("POST", "snapshot"): (snapshot, None),
     }
     handlers |= {
@@ -83,7 +87,11 @@ async def app_wiki(request: Request, app_id: str, operation: str):
     function, schema = handler
     kwargs = {"request": request, "user_id": user_id, "_": "app"}
     try:
-        if schema:
+        if operation == "revise":
+            from pydantic import TypeAdapter
+
+            kwargs["body"] = TypeAdapter(Revision).validate_python(await request.json())
+        elif schema:
             kwargs["body"] = schema.model_validate(await request.json())
         elif operation == "search":
             kwargs |= {
@@ -92,6 +100,9 @@ async def app_wiki(request: Request, app_id: str, operation: str):
                 "offset": int(request.query_params.get("offset", 0)),
                 "kind": request.query_params.get("kind"),
                 "directory": request.query_params.get("directory"),
+                "intent": request.query_params.get("intent"),
+                "view": request.query_params.get("view", "full"),
+                "cursor": request.query_params.get("cursor"),
                 "include_assets": request.query_params.get(
                     "include_assets", "false"
                 ).lower()
@@ -109,6 +120,7 @@ async def app_wiki(request: Request, app_id: str, operation: str):
             }
         elif operation == "blocks":
             kwargs["doc"] = request.query_params["doc"]
+            kwargs |= {"view": request.query_params.get("view", "full"), "ids": request.query_params.getlist("ids") or None, "expected_revision": request.query_params.get("expected_revision"), "budget_chars": int(request.query_params["budget_chars"]) if "budget_chars" in request.query_params else None, "offset": int(request.query_params.get("offset", 0)), "limit": int(request.query_params["limit"]) if "limit" in request.query_params else None}
         elif operation == "image":
             kwargs["path"] = request.query_params["path"]
         elif operation == "history":
@@ -134,9 +146,12 @@ async def app_wiki(request: Request, app_id: str, operation: str):
                 ).lower()
                 == "true",
                 "directory": request.query_params.get("directory"),
+                "view": request.query_params.get("view", "full"),
+                "cursor": request.query_params.get("cursor"),
             }
         elif operation == "graph":
             kwargs["doc"] = request.query_params["doc"]
+            kwargs |= {"offset": int(request.query_params.get("offset", 0)), "limit": int(request.query_params.get("limit", 100)), "cursor": request.query_params.get("cursor")}
         elif operation.startswith("jobs/"):
             kwargs["job_id"] = operation.split("/")[1]
     except (ValueError, KeyError, ValidationError) as exc:
@@ -180,6 +195,8 @@ def documents(
     source: str | None = None,
     include_assets: bool = False,
     directory: str | None = None,
+    view: Literal["full", "compact"] = "full",
+    cursor: str | None = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(30, ge=1, le=100),
     user_id: ScopeUser = None,
@@ -194,6 +211,8 @@ def documents(
         limit=limit,
         include_assets=include_assets,
         directory=directory,
+        view=view,
+        cursor=cursor,
     )
 
 
@@ -201,11 +220,14 @@ def documents(
 def graph(
     request: Request,
     doc: str,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(100, ge=1, le=100),
+    cursor: str | None = None,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
     access(request)
-    return registry.store(user_id).graph(doc)
+    return registry.store(user_id).graph(doc, offset, limit, cursor)
 
 
 @router.put("/config")
@@ -246,10 +268,13 @@ def get_config(
 
 @router.get("/info")
 def info(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    from ..wiki.capabilities import CAPABILITIES
     from ..wiki.retention import POLICY
 
     task = access(request)
     config = registry.config(user_id)
+    store = registry.store(user_id)
+    store.synchronize()
     return {
         "vault_id": config["vault_id"],
         "curator_agent_id": config["curator_agent_id"],
@@ -257,13 +282,26 @@ def info(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_to
         "mode": task.mode if task else "human",
         "history_policy": POLICY,
         "snapshot_creation_enabled": False,
+        "capabilities": CAPABILITIES,
         "writable_files": list(task.writable) if task else [],
         "excluded": [
             "PDF processing",
             "Codex Skills",
             "temporary/static assets in default results",
         ],
+        **store.index_state(),
     }
+
+
+@router.get("/guide")
+def get_guide(request: Request, module: Literal["article", "writing"], user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    from ..wiki.workflow import load_guide
+
+    task = access(request)
+    scope = verify(request.headers.get("authorization", "").split(" ", 1)[-1])
+    if task is None or scope is None or task.user_id != user_id:
+        raise WikiError("Guides for writing require an active curator assignment", 403)
+    return {"module": module, "content": load_guide(module, scope.wiki_task_id)}
 
 
 class SearchSection(BaseModel):
@@ -290,16 +328,47 @@ class SearchItem(BaseModel):
     score: float
     section: SearchSection
     sections: list[SearchSection]
+    freshness: Literal["indexed", "live"]
+
+
+class CompactSearchSection(BaseModel):
+    id: str
+    heading_path: list[str]
+    section_role: str
+    start: int
+    end: int
+
+
+class CompactSearchItem(BaseModel):
+    id: str
+    uid: str | None
+    path: str
+    title: str
+    doc_role: str
+    description: str
+    revision: str
+    freshness: Literal["indexed"]
+    matched_fields: list[str]
+    sections: list[CompactSearchSection]
+    matched_section_count: int
+    snippet: str
+    snippet_start: int
 
 
 class SearchResult(BaseModel):
-    items: list[SearchItem]
+    items: list[SearchItem | CompactSearchItem]
     total: int
     next_offset: int | None
     index_status: str
     index_errors: list[dict[str, str]]
     match_mode: str
     query_terms: list[str]
+    index_epoch: int
+    index_checked_at: str | None
+    pending_changes: int
+    view: str
+    intent: str
+    next_cursor: str | None
 
 
 @router.get("/search", response_model=SearchResult)
@@ -311,11 +380,14 @@ def search(
     kind: str | None = None,
     include_assets: bool = False,
     directory: str | None = None,
+    intent: Literal["lookup", "question", "overview", "compare"] | None = None,
+    view: Literal["full", "compact"] = "full",
+    cursor: str | None = None,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
     access(request)
-    return registry.store(user_id).search(query, limit, offset, kind, include_assets, directory)
+    return registry.store(user_id).search(query, limit, offset, kind, include_assets, directory, intent, view, cursor)
 
 
 @router.get("/read")
@@ -335,6 +407,14 @@ def read(
     )
     tasks.record_read(task, result)
     return result
+
+
+@router.post("/read_many", include_in_schema=False)
+@router.post("/read-many", operation_id="wiki_read_many")
+def read_many(body: ReadBatch, request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    from ..wiki.batch_read import read_many
+
+    return read_many(registry.store(user_id), body.items, body.budget_chars, access(request))
 
 
 @router.get("/image")
@@ -472,15 +552,13 @@ def curator(request: Request, user_id, path: str):
     return task.agent_id if task else "human"
 
 
-class Source(BaseModel):
-    doc: str
-    revision: str
-    location: str
-
-
 class Publish(Edit):
     kind: str
-    sources: list[Source]
+    sources: list[Source] | None = None
+    frontmatter_patch: dict[str, Any] | None = None
+    tags: list[str] | None = None
+    aliases: list[str] | None = None
+    item_doc: str | None = None
 
 
 @router.post("/publish")
@@ -493,17 +571,21 @@ def publish(
     actor = curator(request, user_id, body.path)
     task = access(request)
     if task:
-        for source in body.sources:
+        for source in body.sources or []:
             tasks.require_source_read(task, registry.store(user_id), source.model_dump())
     return WikiCuration(registry.store(user_id)).publish(
         body.path,
         body.content,
         body.kind,
-        [s.model_dump() for s in body.sources],
+        [s.model_dump() for s in body.sources] if body.sources is not None else None,
         body.expected_revision,
         actor,
         body.reason,
         task=task,
+        frontmatter_patch=body.frontmatter_patch,
+        tags=body.tags,
+        aliases=body.aliases,
+        item_doc=body.item_doc,
     )
 
 
@@ -511,11 +593,27 @@ def publish(
 def get_blocks(
     request: Request,
     doc: str,
+    view: str = "full",
+    ids: list[str] | None = Query(None),
+    expected_revision: str | None = None,
+    budget_chars: int | None = Query(None, ge=1, le=96000),
+    offset: int = Query(0, ge=0),
+    limit: int | None = Query(None, ge=1, le=100),
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    access(request)
-    return WikiCuration(registry.store(user_id)).blocks(doc)
+    task = access(request)
+    return WikiCuration(registry.store(user_id)).blocks(doc, view=view, ids=ids, expected_revision=expected_revision, budget_chars=budget_chars, offset=offset, limit=limit, task=task)
+
+
+@router.post("/revise")
+def revise_document(body: Revision, request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    from ..wiki.revise import revise
+
+    store = registry.store(user_id)
+    path = store.read(body.doc, length=1)["path"]
+    actor = curator(request, user_id, path)
+    return revise(WikiCuration(store), body, actor, access(request))
 
 
 class Addition(BaseModel):
@@ -532,12 +630,14 @@ class Organize(BaseModel):
     path: str
     expected_revision: str
     key_note: str | None = None
-    tags: list[str] = []
+    tags: list[str] | None = None
     relations: list[Relation] = []
-    sources: list[Source] = []
+    sources: list[Source] | None = None
     aliases: list[str] | None = None
     reuse_existing_summary: bool = False
     reason: str
+    frontmatter_patch: dict[str, Any] | None = None
+    item_doc: str | None = None
 
 
 @router.post("/organize")
@@ -555,7 +655,7 @@ def organize(
     for relation in body.relations:
         tasks.require_source_read(task, registry.store(user_id), relation.model_dump())
     if task:
-        for source in body.sources:
+        for source in body.sources or []:
             tasks.require_source_read(task, registry.store(user_id), source.model_dump())
     return WikiCuration(registry.store(user_id)).organize(
         body.path,
@@ -563,13 +663,15 @@ def organize(
         body.key_note,
         body.tags,
         [r.model_dump() for r in body.relations],
-        [s.model_dump() for s in body.sources],
+        [s.model_dump() for s in body.sources] if body.sources is not None else None,
         actor,
         body.reason,
         publication={"job_id": task.job_id, "session_id": task.session_id} if task and task.job_id else None,
         aliases=body.aliases,
         reuse_existing_summary=body.reuse_existing_summary,
         task=task,
+        frontmatter_patch=body.frontmatter_patch,
+        item_doc=body.item_doc,
     )
 
 
@@ -579,6 +681,10 @@ class Restructure(BaseModel):
     order: list[str]
     additions: list[Addition] = []
     reason: str
+    frontmatter_patch: dict[str, Any] | None = None
+    tags: list[str] | None = None
+    aliases: list[str] | None = None
+    item_doc: str | None = None
 
 
 @router.post("/restructure")
@@ -603,6 +709,10 @@ def restructure(
         actor,
         body.reason,
         task=task,
+        frontmatter_patch=body.frontmatter_patch,
+        tags=body.tags,
+        aliases=body.aliases,
+        item_doc=body.item_doc,
     )
 
 

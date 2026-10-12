@@ -11,16 +11,33 @@ from .extract import blocks
 
 
 def local_links(text):
-    # Code examples are not navigation links.
-    text = re.sub(r"(?ms)^\s*(`{3,}|~{3,})[^\n]*\n.*?^\s*\1\s*$", "", text)
-    for match in re.finditer(r"\[\[([^\]\n]+)\]\]", text):
-        target = match[1].split("|", 1)[0]
-        path, _, anchor = target.partition("#")
-        yield unquote(path), unquote(anchor), "wikilink"
-    for match in re.finditer(r"\]\(([^\s)]+)(?:\s+[^)]*)?\)", text):
-        url = urlsplit(match[1].strip("<>"))
-        if not url.scheme and not url.netloc and (url.path or url.fragment):
-            yield unquote(url.path), unquote(url.fragment), "markdown_link"
+    from .format import _markdown, parse
+
+    body = text[parse(text).body_start:]
+    for token in _markdown.parse(body):
+        for child in token.children or []:
+            if child.type in {"link_open", "image"}:
+                resource = child.attrGet("href") if child.type == "link_open" else child.attrGet("src")
+                if resource:
+                    try:
+                        url = urlsplit(resource)
+                    except ValueError:
+                        continue
+                    if not url.scheme and not url.netloc and (url.path or url.fragment):
+                        yield unquote(url.path), unquote(url.fragment), "markdown_link"
+            elif child.type == "text":
+                for match in re.finditer(r"\[\[([^\]\n]+)\]\]", child.content):
+                    target = match[1].split("|", 1)[0]
+                    path, _, anchor = target.partition("#")
+                    yield unquote(path), unquote(anchor), "wikilink"
+
+
+def note_name(path):
+    name = PurePosixPath(path).name
+    for suffix in (".md", ".markdown"):
+        if name.casefold().endswith(suffix):
+            return name[:-len(suffix)]
+    return name
 
 
 def resolve_link(path, parent, documents, *, wiki=False):
@@ -33,13 +50,13 @@ def resolve_link(path, parent, documents, *, wiki=False):
             if len(found) == 1:
                 return found[0]
     if wiki and "/" not in path:
-        name = PurePosixPath(path).name.removesuffix(".md")
+        name = note_name(path)
         found = [
             doc
             for doc in documents
             if name
             in {
-                PurePosixPath(doc["path"]).stem,
+                note_name(doc["path"]),
                 doc["title"],
                 *doc["metadata"].get("aliases", []),
             }

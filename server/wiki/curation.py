@@ -1,13 +1,11 @@
 """Curator operations: source-version checks and lossless original layout."""
 
-import hashlib
 import json
 import os
 import re
 from pathlib import Path
 from urllib.parse import quote
 
-from .extract import blocks
 from .history import WikiHistory
 from .links import anchor_exists, local_links, resolve_link, source_span
 from .sections import original_text, region, top_offset
@@ -43,7 +41,7 @@ class WikiCuration:
         links = list(local_links(content))
         if not links:
             return
-        self.store.refresh()
+        self.store.synchronize()
         with self.store.connect() as db:
             documents = [
                 {
@@ -89,15 +87,20 @@ class WikiCuration:
     def organize(
         self, path, expected_revision, key_note, tags, relations, sources, actor, reason,
         publication=None, aliases=None, reuse_existing_summary=False, task=None,
+        frontmatter_patch=None, item_doc=None,
     ):
+        if frontmatter_patch is not None:
+            from .normalize import organize
+
+            return organize(self, path, expected_revision, key_note, tags, aliases, relations, sources, actor, reason, frontmatter_patch, task, item_doc, reuse_existing_summary)
         try:
             return self._organize(
                 path,
                 expected_revision,
                 key_note,
-                tags,
+                tags or [],
                 relations,
-                sources,
+                sources or [],
                 actor,
                 reason,
                 publication,
@@ -304,7 +307,7 @@ class WikiCuration:
             )
             return result | {"original_preserved": True, "source_path": path}
 
-    def publish(self, path, content, kind, sources, expected_revision, actor, reason, task=None):
+    def publish(self, path, content, kind, sources, expected_revision, actor, reason, task=None, frontmatter_patch=None, tags=None, aliases=None, item_doc=None):
         if (
             not path.startswith(("Library/", "Wiki/"))
             or Path(path).suffix.lower() != ".md"
@@ -313,21 +316,19 @@ class WikiCuration:
             raise WikiError(
                 "Publish needed Markdown concepts or topic pages inside Library/"
             )
-        if not sources:
-            raise WikiError("Derived knowledge must cite current sources")
         with self.history.locked():
             if task:
                 from .tasks import tasks
 
                 tasks.require_path(task, self.store, path)
-                for source in sources:
+                for source in sources or []:
                     tasks.require_source_read(task, self.store, source)
             existing = self.store.path(path)
             if existing.exists():
                 raise WikiError("Publish creates new pages; preserve existing text with organize or restructure", 403)
             self.validate_links(path, content)
             try:
-                refs = self.sources(sources)
+                refs = self.sources(sources) if sources is not None else None
             except WikiError as exc:
                 existing = self.store.path(path)
                 row = self.history.record(
@@ -342,42 +343,24 @@ class WikiCuration:
                     f"Source conflict: {exc}; proposal retained as change {row['id']}",
                     409,
                 )
-            metadata = {"kind": kind, "sources": refs, "author": "Weber 整理"}
-            raw = (
-                "<!-- octopus-wiki "
-                + json.dumps(metadata, ensure_ascii=False)
-                + " -->\n\n"
-                + content
-                + "\n\n> Weber 整理：以上为新增整理内容，请按所列来源核验。\n"
-            ).encode()
+            import uuid
+
+            from . import format, operations
+
+            fields = {"type": {"source": "Reference", "concept": "Concept", "topic": "Topic"}[kind]} | (frontmatter_patch or {})
+            refs = [ref | {"resource": ref["path"]} for ref in refs] if refs is not None else None
+            raw = format.patch(content, fields=fields, tags=tags, aliases=aliases, sources=refs, uid="urn:uuid:" + str(uuid.uuid4()), actor=actor).encode()
+            context = operations.publication(task, self.store, item_doc=item_doc)
             return self.history.write_locked(
-                path, raw, expected_revision, actor, reason
+                path, raw, expected_revision, actor, reason, publication=context, operation="publish"
             )
 
-    def blocks(self, doc):
-        document = self.store.read(doc, length=1)
-        if Path(document["path"]).suffix.lower() != ".md":
-            raise WikiError("Lossless restructuring supports UTF-8 Markdown originals")
-        raw = self.store.path(document["path"]).read_bytes()
-        try:
-            text = raw.decode("utf-8")
-        except UnicodeError:
-            raise WikiError("Original encoding requires manual review")
-        parts = blocks(text)
-        return {
-            "path": document["path"],
-            "revision": revision(raw),
-            "blocks": [
-                {
-                    "id": str(index),
-                    "content": part,
-                    "sha256": hashlib.sha256(part.encode()).hexdigest(),
-                }
-                for index, part in enumerate(parts)
-            ],
-        }
+    def blocks(self, doc, **kwargs):
+        from .raw_blocks import read
 
-    def restructure(self, path, expected_revision, order, additions, actor, reason, task=None):
+        return read(self, doc, **kwargs)
+
+    def restructure(self, path, expected_revision, order, additions, actor, reason, task=None, frontmatter_patch=None, tags=None, aliases=None, item_doc=None):
         with self.history.locked():
             if task:
                 from .tasks import tasks
@@ -447,7 +430,12 @@ class WikiCuration:
                 result.extend(inserted.get(index, []))
                 if index < len(order):
                     result.append(mapping[order[index]])
+            from . import format, operations
+
             text = "".join(result)
             for addition in additions:
                 self.validate_links(path, addition["content"], candidate=text)
-            return self.history.write_locked(path, text.encode(), expected_revision, actor, reason)
+            document = self.store.read(path, length=1, expected_revision=expected_revision)
+            text = format.patch(text, fields=frontmatter_patch, tags=tags, aliases=aliases, uid=document["metadata"]["uid"] if frontmatter_patch is not None else None, actor=actor if frontmatter_patch is not None else None)
+            context = operations.publication(task, self.store, document, item_doc)
+            return self.history.write_locked(path, text.encode(), expected_revision, actor, reason, operations.management(self.store, path, text), publication=context, operation="restructure")
