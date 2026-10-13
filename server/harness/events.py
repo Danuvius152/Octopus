@@ -49,6 +49,7 @@ class SubagentUpdate:
 
     task_id: str                     # the harness's own id for the run
     tool_use_id: str | None = None   # the parent tool call it belongs to
+    tool_call_id: str | None = None
     status: str = "running"          # running | completed | failed
     name: str = ""                   # "Explore", "general-purpose", a thread id…
     description: str = ""            # what it is doing right now
@@ -81,6 +82,7 @@ class SubagentUpdate:
         return SubagentUpdate(
             task_id=self.task_id or older.task_id,
             tool_use_id=self.tool_use_id or older.tool_use_id,
+            tool_call_id=self.tool_call_id or older.tool_call_id,
             status=self.status or older.status,
             name=self.name or older.name,
             description=self.description or older.description,
@@ -134,6 +136,8 @@ class HarnessEvent:
     tool_name: str | None = None
     tool_input: dict[str, Any] | None = None
     tool_use_id: str | None = None
+    runtime_metadata: dict[str, Any] | None = None
+    identity_checked: bool = field(default=False, repr=False)
     is_error: bool = False
     error_code: str | None = None
     cost: float | None = None

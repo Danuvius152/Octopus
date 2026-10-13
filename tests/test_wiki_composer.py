@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 from fastapi import WebSocketDisconnect
 
+from server.deps import Principal
 from server.routers import ws as ws_router
 from server.wiki.tasks import explicit_mode
 
@@ -28,7 +29,7 @@ def test_explicit_cancellation_overrides_all_command_text(case):
 
 async def test_websocket_cancelled_wiki_command_never_opens_task(monkeypatch):
     monkeypatch.setattr(
-        ws_router, "scope_user_id_for", AsyncMock(return_value=(True, None))
+        ws_router.deps, "resolve_principal", AsyncMock(return_value=Principal(None, "legacy"))
     )
     manager = SimpleNamespace(
         on_broadcast=Mock(), remove_broadcast=Mock(),

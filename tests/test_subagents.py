@@ -335,7 +335,7 @@ def test_observations_merge_onto_the_run():
         session,
         SubagentUpdate(
             task_id="t1",
-            tool_use_id="tu1",
+            tool_use_id="tu1", tool_call_id="tu1",
             name="Explore",
             description="searching",
             prompt="find it",
@@ -344,7 +344,7 @@ def test_observations_merge_onto_the_run():
     )
     SessionManager._record_subagent(
         session,
-        SubagentUpdate(task_id="t1", tool_use_id="tu1", status="completed", summary="done"),
+        SubagentUpdate(task_id="t1", tool_use_id="tu1", tool_call_id="tu1", status="completed", summary="done"),
     )
 
     (run,) = session._subagents.values()
@@ -363,7 +363,7 @@ def test_runs_are_bounded_per_session():
     session = _session()
     for i in range(_MAX_SUBAGENTS_PER_SESSION + 20):
         SessionManager._record_subagent(
-            session, SubagentUpdate(task_id=f"t{i}", tool_use_id=f"tu{i}")
+            session, SubagentUpdate(task_id=f"t{i}", tool_use_id=f"tu{i}", tool_call_id=f"tu{i}")
         )
     assert len(session._subagents) == _MAX_SUBAGENTS_PER_SESSION
     # Oldest dropped, newest kept.
@@ -387,7 +387,7 @@ def test_subagent_events_broadcast_but_never_persist():
         type="subagent",
         subagent=SubagentUpdate(
             task_id="t1",
-            tool_use_id="tu1",
+            tool_use_id="tu1", tool_call_id="tu1",
             status="running",
             name="Explore",
             description="searching",
@@ -405,6 +405,7 @@ def test_subagent_events_broadcast_but_never_persist():
         "session_id": "s1",
         "task_id": "t1",
         "tool_use_id": "tu1",
+        "tool_call_id": "tu1",
         "status": "running",
         "name": "Explore",
         "description": "searching",
@@ -432,6 +433,7 @@ async def client():
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     agents_mod.set_manager(AgentManager(db))
 
@@ -497,7 +499,7 @@ async def test_the_session_snapshot_carries_live_runs(client):
     SessionManager._record_subagent(
         session_manager.sessions[sid],
         SubagentUpdate(
-            task_id="t1", tool_use_id="tu1", name="Explore", description="searching"
+            task_id="t1", tool_use_id="tu1", tool_call_id="tu1", name="Explore", description="searching"
         ),
     )
 
@@ -508,6 +510,7 @@ async def test_the_session_snapshot_carries_live_runs(client):
         {
             "task_id": "t1",
             "tool_use_id": "tu1",
+            "tool_call_id": "tu1",
             "status": "running",
             "name": "Explore",
             "description": "searching",
@@ -556,7 +559,7 @@ async def test_events_after_a_turn_reach_the_session(client):
                 type="subagent",
                 subagent=SubagentUpdate(
                     task_id="t1",
-                    tool_use_id="tu1",
+                    tool_use_id="tu1", tool_call_id="tu1",
                     status="completed",
                     name="general-purpose",
                     summary="2 files",
@@ -606,12 +609,12 @@ def test_losing_the_process_ends_its_sub_agents():
     mgr = SessionManager()
     session = _session()
     SessionManager._record_subagent(
-        session, SubagentUpdate(task_id="t1", tool_use_id="tu1", name="Explore")
+        session, SubagentUpdate(task_id="t1", tool_use_id="tu1", tool_call_id="tu1", name="Explore")
     )
     SessionManager._record_subagent(
         session,
         SubagentUpdate(
-            task_id="t2", tool_use_id="tu2", status="completed", summary="done"
+            task_id="t2", tool_use_id="tu2", tool_call_id="tu2", status="completed", summary="done"
         ),
     )
     session._held_run_at = 1.0
@@ -679,7 +682,7 @@ def test_the_trail_records_each_new_step_once():
     for description in ("Searching the web", "Searching the web", "Fetching a page"):
         SessionManager._record_subagent(
             session,
-            SubagentUpdate(task_id="t1", tool_use_id="tu1", description=description),
+            SubagentUpdate(task_id="t1", tool_use_id="tu1", tool_call_id="tu1", description=description),
         )
     (run,) = session._subagents.values()
     assert run.steps == ["Searching the web", "Fetching a page"]
@@ -693,7 +696,7 @@ def test_the_trail_is_bounded():
     for i in range(MAX_SUBAGENT_STEPS + 25):
         SessionManager._record_subagent(
             session,
-            SubagentUpdate(task_id="t1", tool_use_id="tu1", description=f"step {i}"),
+            SubagentUpdate(task_id="t1", tool_use_id="tu1", tool_call_id="tu1", description=f"step {i}"),
         )
     (run,) = session._subagents.values()
     assert len(run.steps) == MAX_SUBAGENT_STEPS

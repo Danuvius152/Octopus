@@ -14,13 +14,14 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..config import settings
-from .base import DatabaseBase, _load_json_list
+from .base import DatabaseBase, _load_json_list, serialized_write
 from .schema import _DEFAULT_MCP_SERVERS
 
 
 class AgentsMixin(DatabaseBase):
     # --- agent-scoped enablement join -------------------------------------
 
+    @serialized_write
     async def set_agent_connector(
         self, agent_id: str, installation_id: str, enabled: bool
     ) -> None:
@@ -105,6 +106,7 @@ class AgentsMixin(DatabaseBase):
             agent["active_session_count"] = row[trailing]
         return agent
 
+    @serialized_write
     async def save_agent(
         self,
         *,
@@ -250,6 +252,7 @@ class AgentsMixin(DatabaseBase):
         row = await cursor.fetchone()
         return self._row_to_agent(row) if row else None
 
+    @serialized_write
     async def update_agent(self, agent_id: str, **fields: Any) -> None:
         await self._ensure_connected()
         allowed = {
@@ -283,6 +286,7 @@ class AgentsMixin(DatabaseBase):
         )
         await self.conn.commit()
 
+    @serialized_write
     async def archive_agent(self, agent_id: str) -> None:
         """Soft-delete an agent and cascade-archive its sessions."""
         await self._ensure_connected()
@@ -296,6 +300,7 @@ class AgentsMixin(DatabaseBase):
         )
         await self.conn.commit()
 
+    @serialized_write
     async def unarchive_agent(self, agent_id: str) -> None:
         """Restore an archived agent. Its sessions stay archived: they were
         archived as a cascade, and silently reviving a dozen old threads is
@@ -316,6 +321,7 @@ class AgentsMixin(DatabaseBase):
         """The sidebar order of the pinned agents — see `_reorder_pins`."""
         await self._reorder_pins("agents", ordered_ids)
 
+    @serialized_write
     async def delete_agent(self, agent_id: str) -> bool:
         """Hard-delete an agent. FK ON DELETE CASCADE removes its sessions,
         schedules — guarded by AgentManager so this is

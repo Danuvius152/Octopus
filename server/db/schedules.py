@@ -10,11 +10,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import DatabaseBase
+from .base import DatabaseBase, serialized_write
 
 
 class SchedulesMixin(DatabaseBase):
 
+    @serialized_write
     async def save_schedule(
         self,
         schedule_id: str,
@@ -105,11 +106,13 @@ class SchedulesMixin(DatabaseBase):
             for row in rows
         ]
 
+    @serialized_write
     async def delete_schedule(self, schedule_id: str) -> None:
         await self._ensure_connected()
         await self.conn.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
         await self.conn.commit()
 
+    @serialized_write
     async def repoint_schedules_origin(
         self, old_session_id: str, new_session_id: str
     ) -> list[dict[str, Any]]:
@@ -133,6 +136,7 @@ class SchedulesMixin(DatabaseBase):
         await self.conn.commit()
         return [r for r in await self.load_schedules() if r["id"] in affected]
 
+    @serialized_write
     async def update_schedule(self, schedule_id: str, **fields: Any) -> None:
         await self._ensure_connected()
         allowed = {

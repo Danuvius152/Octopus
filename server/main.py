@@ -206,6 +206,8 @@ async def lifespan(app: FastAPI):
     application_manager.shutdown()
     delegation_manager.shutdown()
     await schedule_runner.shutdown()
+    from .ws_delivery import shutdown_connections
+    await shutdown_connections()
     # `db.close()` drains the turns still in flight first — they are registered
     # as a close hook when the manager is initialized — so nothing is left
     # awaiting a connection that has gone.

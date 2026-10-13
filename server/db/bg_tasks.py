@@ -10,13 +10,14 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import DatabaseBase
+from .base import DatabaseBase, serialized_write
 
 
 class BgTasksMixin(DatabaseBase):
     # --- Background tasks (cross-turn) ---
 
 
+    @serialized_write
     async def create_bg_task(
         self,
         task_id: str,
@@ -40,6 +41,7 @@ class BgTasksMixin(DatabaseBase):
         )
         await self.conn.commit()
 
+    @serialized_write
     async def update_bg_task(self, task_id: str, **fields: Any) -> None:
         """Patch any of: status, exit_code, stdout, stderr, truncated, completed_at."""
         await self._ensure_connected()
@@ -77,6 +79,7 @@ class BgTasksMixin(DatabaseBase):
         row = await cursor.fetchone()
         return self._row_to_bg_task(row) if row else None
 
+    @serialized_write
     async def mark_in_flight_bg_tasks_interrupted(
         self, completed_at: str
     ) -> int:

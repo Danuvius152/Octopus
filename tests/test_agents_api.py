@@ -1,5 +1,7 @@
 """Tests for the /api/agents routes (agent-refactor.md §5.4 / §8)."""
 
+import asyncio
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -20,6 +22,7 @@ async def client():
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
 
     agents_mod.set_manager(AgentManager(db))
@@ -275,6 +278,105 @@ async def test_archive_agent_cascades_sessions(client):
         await client.get("/api/sessions?include_archived=true", headers=HEADERS)
     ).json()
     assert sess["id"] in [s["id"] for s in arch]
+
+
+@pytest.mark.asyncio
+async def test_archive_agent_storage_refusal_keeps_agent_and_session_live(client, monkeypatch):
+    from server.sessions.turns import _Settlement
+
+    agent = await _create_agent(client, name="Unconfirmed storage")
+    session = await session_manager.create_session(agent["id"], "Needs verification", "/tmp")
+
+    async def fail_recording(**kwargs):
+        raise OSError("Result storage unavailable")
+
+    monkeypatch.setattr(session_manager.db, "record_terminal", fail_recording)
+    await session_manager._settle_turn(session, _Settlement(), status="success")
+    response = await client.post(f"/api/agents/{agent['id']}/archive", headers=HEADERS)
+    assert response.status_code == 409
+    assert "recording" in response.json()["detail"].lower()
+    assert not (await session_manager.db.get_agent(agent["id"]))["archived"]
+    assert session_manager.get_session(session.id) is session
+    assert not next(row for row in await session_manager.db.load_sessions(include_archived=True) if row["id"] == session.id)["archived"]
+
+
+@pytest.mark.asyncio
+async def test_archive_agent_retirement_refusal_keeps_agent_and_session_live(client):
+    agent = await _create_agent(client, name="Unconfirmed retirement")
+    session = await session_manager.create_session(agent["id"], "Needs retirement", "/tmp")
+
+    class UnreapedRun:
+        async def interrupt(self):
+            raise RuntimeError("Backend retirement remains unconfirmed")
+
+        async def stop(self):
+            raise RuntimeError("Backend retirement remains unconfirmed")
+
+    session._backend = UnreapedRun()
+    try:
+        response = await client.post(f"/api/agents/{agent['id']}/archive", headers=HEADERS)
+        assert response.status_code == 409
+        assert "retirement" in response.json()["detail"].lower()
+        assert not (await session_manager.db.get_agent(agent["id"]))["archived"]
+        assert session_manager.get_session(session.id) is session
+        assert not next(row for row in await session_manager.db.load_sessions(include_archived=True) if row["id"] == session.id)["archived"]
+    finally:
+        # The simulated run has no process. Remove only its completed fault
+        # evidence so the fixture can exercise normal database teardown.
+        assert all(task.done() for task in session._backend_cleanup_tasks)
+        session._backend_cleanup_tasks.clear()
+
+
+@pytest.mark.asyncio
+async def test_protected_agent_is_validated_before_session_eviction(client):
+    system = await session_manager.db.get_system_agent()
+    session = await session_manager.create_session(system["id"], "Protected queue", "/tmp")
+    await session_manager.interrupt(session.id)
+    receipt = await session_manager.start_message(session.id, "Queued result", source="bg")
+    response = await client.post(f"/api/agents/{system['id']}/archive", headers=HEADERS)
+    assert response.status_code == 400
+    assert session_manager.get_session(session.id) is session
+    assert session_manager.dispatch_snapshot(session.id)["items"][0]["request_id"] == receipt.request_id
+
+
+@pytest.mark.asyncio
+async def test_cancelled_archive_waiter_still_finishes_agent_and_session_archive(client, monkeypatch):
+    agent = await _create_agent(client, name="Owned archive")
+    session = await session_manager.create_session(agent["id"], "Captured session", "/tmp")
+    manager = agents_mod._get_manager()
+    archive = manager.archive_agent
+    entered, release = asyncio.Event(), asyncio.Event()
+    notices = []
+
+    async def held_archive(agent_id):
+        entered.set()
+        await release.wait()
+        await archive(agent_id)
+
+    async def observe(message):
+        if message.get("type") == "agent_archived" and message.get("agent_id") == agent["id"]:
+            notices.append(message)
+
+    monkeypatch.setattr(manager, "archive_agent", held_archive)
+    session_manager.on_broadcast("archive-completion-observer", observe)
+    request = asyncio.create_task(client.post(f"/api/agents/{agent['id']}/archive", headers=HEADERS))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        assert session_manager.get_session(session.id) is None
+        request.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request
+        release.set()
+        async with asyncio.timeout(1):
+            while not (await session_manager.db.get_agent(agent["id"]))["archived"] or not notices:
+                await asyncio.sleep(0)
+        rows = await session_manager.db.load_sessions(include_archived=True)
+        assert next(row for row in rows if row["id"] == session.id)["archived"]
+        assert len(notices) == 1
+    finally:
+        release.set()
+        await asyncio.gather(request, return_exceptions=True)
+        session_manager.remove_broadcast("archive-completion-observer")
 
 
 # --- agent-scoped sessions & schedules ---

@@ -12,16 +12,20 @@ leaves the system consistent.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
+
+import aiosqlite
 
 from .config import settings
 from .crypto import decrypt, encrypt
+from .db.base import serialized_write
 
 if TYPE_CHECKING:
     from .database import Database
@@ -55,6 +59,10 @@ class TokenRotationError(Exception):
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+
+
+class RekeyCommitUnconfirmed(Exception):
+    """Storage cannot prove which key committed; no caller may claim rollback."""
 
 
 @dataclass
@@ -189,9 +197,15 @@ async def rotate_auth_token(
     try:
         result = RotationResult(env_files=[str(p) for p in paths])
         result.reencrypted = await _reencrypt_secrets(db, old_token, token)
-    except Exception as exc:
+    except RekeyCommitUnconfirmed as exc:
+        raise TokenRotationError(
+            "The secret rekey commit is unconfirmed. Prepared environment files were retained; "
+            "verify the stored secret keys before restarting or retrying rotation.",
+            status_code=503,
+        ) from exc
+    except BaseException as exc:
         _restore(previous)
-        if isinstance(exc, TokenRotationError):
+        if not isinstance(exc, Exception) or isinstance(exc, TokenRotationError):
             raise
         raise TokenRotationError(
             f"Re-encrypting the stored secrets failed, so nothing was changed: {exc}",
@@ -219,6 +233,66 @@ def _restore(previous: dict[Path, str]) -> None:
             logger.exception("could not restore %s after a failed rotation", path)
 
 
+async def _committed_rekey_state(
+    db: Database, updates: list[tuple[str, str, str, str, str]],
+    originals: list[tuple[str, str, str, str, str]],
+) -> Literal["committed", "unchanged", "unconfirmed"]:
+    async def read(reader: aiosqlite.Connection) -> Literal["committed", "unchanged", "unconfirmed"]:
+        changed, unchanged = True, True
+        for update, original in zip(updates, originals, strict=True):
+            table, key_column, secret_column, row_key, intended = update
+            cursor = await reader.execute(
+                f"SELECT {secret_column} FROM {table} WHERE {key_column} = ?",
+                (row_key,),
+            )
+            row = await cursor.fetchone()
+            changed = changed and row is not None and row[0] == intended
+            unchanged = unchanged and row is not None and row[0] == original[4]
+        return "committed" if changed else "unchanged" if unchanged else "unconfirmed"
+
+    if db._db_path == ":memory:":
+        # Hermetic in-memory stores have no independent connection. The
+        # commit owner has already finished, and this view has no transaction.
+        return await read(db.conn) if not db.conn.in_transaction else "unconfirmed"
+    async with aiosqlite.connect(Path(db._db_path).resolve().as_uri() + "?mode=ro", uri=True) as reader:
+        await reader.execute("BEGIN")
+        return await read(reader)
+
+
+async def _commit_rekey(
+    db: Database, savepoint: str, updates: list[tuple[str, str, str, str, str]],
+    originals: list[tuple[str, str, str, str, str]],
+) -> None:
+    """Finish the captured commit before interpreting a lost acknowledgement."""
+    commit = asyncio.create_task(db.conn.commit(), name="secret-rekey-commit")
+    try:
+        await asyncio.shield(commit)
+    except BaseException as failure:
+        # Cancellation cannot release the shared connection while its worker
+        # still decides the transaction. Once committed, finish the key handoff.
+        while not commit.done():
+            try:
+                await asyncio.shield(commit)
+            except asyncio.CancelledError:
+                continue
+            except Exception:
+                break  # The finished commit error is classified by storage.
+        try:
+            if db.conn.in_transaction:
+                await db.conn.execute(f"ROLLBACK TO {savepoint}")
+                await db.conn.execute(f"RELEASE {savepoint}")
+            state = await _committed_rekey_state(db, updates, originals)
+        except BaseException as exc:
+            raise RekeyCommitUnconfirmed("Rekey commit could not be verified") from exc
+        if state == "committed":
+            logger.warning("Secret rekey commit confirmed despite missing acknowledgement")
+            return
+        if state == "unchanged":
+            raise failure
+        raise RekeyCommitUnconfirmed("Rekey committed contents did not match either known state") from failure
+
+
+@serialized_write
 async def _reencrypt_secrets(
     db: Database, old_token: str, new_token: str
 ) -> dict[str, int]:
@@ -229,6 +303,7 @@ async def _reencrypt_secrets(
     to a token nobody has any more.
     """
     await db._ensure_connected()
+    await db._flush_locked()
     counts: dict[str, int] = {}
 
     # Read and re-key everything BEFORE writing anything: a row that won't
@@ -238,6 +313,7 @@ async def _reencrypt_secrets(
     # halfway once, and the test that caught it is
     # `test_a_secret_that_cannot_be_decrypted_changes_nothing`.)
     updates: list[tuple[str, str, str, str, str]] = []
+    originals: list[tuple[str, str, str, str, str]] = []
     for table, key_col, secret_col in _SECRET_COLUMNS:
         cursor = await db.conn.execute(f"SELECT {key_col}, {secret_col} FROM {table}")
         rows = await cursor.fetchall()
@@ -255,16 +331,22 @@ async def _reencrypt_secrets(
             updates.append(
                 (table, key_col, secret_col, key, encrypt(plaintext, new_token))
             )
+            originals.append((table, key_col, secret_col, key, ciphertext))
 
+    await db.conn.execute("SAVEPOINT token_rekey")
     try:
         for table, key_col, secret_col, key, ciphertext in updates:
             await db.conn.execute(
                 f"UPDATE {table} SET {secret_col} = ? WHERE {key_col} = ?",
                 (ciphertext, key),
             )
-        await db.conn.commit()
-    except Exception:
-        await db.conn.rollback()
+        await _commit_rekey(db, "token_rekey", updates, originals)
+    except BaseException:
+        # This transaction owns only its savepoint. Buffered transcripts were
+        # acknowledged before it, and concurrent writers hold the same lock.
+        if db.conn.in_transaction:
+            await db.conn.execute("ROLLBACK TO token_rekey")
+            await db.conn.execute("RELEASE token_rekey")
         raise
     return counts
 

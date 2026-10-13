@@ -21,6 +21,7 @@ import re
 from typing import Any
 
 from .models import MessageContent, MessageRole
+from .tool_pairs import pair_tool_records
 
 logger = logging.getLogger(__name__)
 
@@ -166,19 +167,15 @@ async def classify_side_effects(db, parent_id: str, from_seq: int) -> dict[str, 
     preflight needs."""
     messages = await db.load_messages(parent_id)
     rows = [m for m in messages if m["seq"] >= from_seq]
-    tool_results = {
-        m["tool_use_id"]: m
-        for m in rows
-        if m["type"] == "tool_result" and m.get("tool_use_id")
-    }
+    pairs = pair_tool_records(rows)
 
     file_turns: dict[str, set[int]] = {}
     bash_count = 0
-    bg_tool_use_ids: list[str] = []
+    bg_tool_use_indices: list[int] = []
     mcp_counts: dict[str, int] = {}
     other_counts: dict[str, int] = {}
 
-    for m in rows:
+    for index, m in enumerate(rows):
         if m["type"] != "tool_use":
             continue
         name = m.get("tool_name") or ""
@@ -197,8 +194,7 @@ async def classify_side_effects(db, parent_id: str, from_seq: int) -> dict[str, 
             else:
                 bash_count += 1
         elif name == "mcp__bg__run":
-            if m.get("tool_use_id"):
-                bg_tool_use_ids.append(m["tool_use_id"])
+            bg_tool_use_indices.append(index)
         elif name.startswith(_INTERNAL_MCP_PREFIXES):
             continue  # ask / ask_agent — not world-changing side effects
         elif name.startswith("mcp__"):
@@ -212,15 +208,16 @@ async def classify_side_effects(db, parent_id: str, from_seq: int) -> dict[str, 
 
     # Background tasks: join tool_use → tool_result → bg_tasks for live state.
     bg_tasks: list[dict[str, Any]] = []
-    for tuid in bg_tool_use_ids:
-        res = tool_results.get(tuid)
-        task_id = _parse_bg_task_id(res["content"]) if res else None
+    for index in bg_tool_use_indices:
+        res = rows[pairs[index]] if index in pairs else None
+        receipt = (res.get("runtime_metadata") or {}).get("receipt") if res else None
+        task_id = receipt.get("task_id") if receipt and receipt.get("kind") == "bg" else None
         command: str | None = None
         description: str | None = None
         status = "unknown"
         if task_id:
             rec = await db.get_bg_task(task_id)
-            if rec:
+            if rec and rec.get("session_id") == parent_id:
                 status = rec["status"]
                 command = rec["command"]
                 description = rec.get("description")

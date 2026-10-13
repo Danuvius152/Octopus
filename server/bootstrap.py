@@ -29,6 +29,8 @@ from typing import Any
 
 from .config import settings
 from .crypto import decrypt, encrypt
+from .db.base import serialized_write
+from .token_rotation import RekeyCommitUnconfirmed, _commit_rekey
 from .users import UserError, UserManager
 from .workspace import paths_for
 
@@ -57,6 +59,7 @@ class BootstrapError(Exception):
         self.status_code = status_code
 
 
+@serialized_write
 async def _rekey_secrets(db: Any, old_key: str, new_key: str) -> dict[str, int]:
     """Move every stored secret off the old key. All, or none.
 
@@ -72,8 +75,10 @@ async def _rekey_secrets(db: Any, old_key: str, new_key: str) -> dict[str, int]:
     from .crypto import master_key
 
     await db._ensure_connected()
+    await db._flush_locked()
     counts: dict[str, int] = {}
     updates: list[tuple[str, str, str, str, str]] = []
+    originals: list[tuple[str, str, str, str, str]] = []
 
     for tables, destination in (
         (_SECRET_COLUMNS, new_key),
@@ -104,14 +109,28 @@ async def _rekey_secrets(db: Any, old_key: str, new_key: str) -> dict[str, int]:
                         encrypt(plaintext, destination),
                     )
                 )
+                originals.append((table, key_col, secret_col, row_key, ciphertext))
                 counts[table] += 1
 
-    for table, key_col, secret_col, row_key, ciphertext in updates:
-        await db.conn.execute(
-            f"UPDATE {table} SET {secret_col} = ? WHERE {key_col} = ?",  # noqa: S608
-            (ciphertext, row_key),
-        )
-    await db.conn.commit()
+    await db.conn.execute("SAVEPOINT account_rekey")
+    try:
+        for table, key_col, secret_col, row_key, ciphertext in updates:
+            await db.conn.execute(
+                f"UPDATE {table} SET {secret_col} = ? WHERE {key_col} = ?",  # noqa: S608
+                (ciphertext, row_key),
+            )
+        await _commit_rekey(db, "account_rekey", updates, originals)
+    except RekeyCommitUnconfirmed as exc:
+        raise BootstrapError(
+            "The account secret rekey commit is unconfirmed. The existing account was retained; "
+            "verify its stored secret keys before continuing the upgrade.",
+            status_code=503,
+        ) from exc
+    except BaseException:
+        if db.conn.in_transaction:
+            await db.conn.execute("ROLLBACK TO account_rekey")
+            await db.conn.execute("RELEASE account_rekey")
+        raise
     return counts
 
 

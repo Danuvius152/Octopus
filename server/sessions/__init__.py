@@ -7,7 +7,7 @@ presentation, and event conversion. It is now one file per responsibility
 (docs/plans/polish-2026-09.md §3 A1).
 
 Composed the same way the database was (§3 A4): every method still hangs off
-one object, so nothing that calls `session_manager.send_message(...)` changed.
+one object; requests enter through `session_manager.start_message(...)`.
 The module-level `session_manager` singleton is still exported from
 `server.session_manager`, which is where 18 modules import it from.
 """

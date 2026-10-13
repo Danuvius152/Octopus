@@ -5,6 +5,7 @@ import {
   hydrateSession,
   sessionInfoFromDetail,
 } from "../lib/hydrateSession";
+import { readRuntimeMetadata } from "../lib/toolIdentity";
 import { refreshSchedules } from "../lib/refreshSchedules";
 import type { WikiMessageMode } from "../lib/wikiComposer";
 import {
@@ -76,6 +77,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
   const addMessage: typeof addMessageRaw = (sid, msg) =>
     addMessageRaw(sid, {
       ...msg,
+      runtime_metadata: msg.runtime_metadata ?? readRuntimeMetadata(data.runtime_metadata),
       seq: msg.seq ?? seq ?? undefined,
       created_at:
         msg.created_at ??
@@ -92,6 +94,11 @@ export function handleWsMessage(data: Record<string, unknown>) {
 
   switch (type) {
     case "dispatch_state":
+      applyDispatchState(sessionId, data.dispatch_state);
+      break;
+
+    case "recording_failed":
+      clearStreamingText(sessionId);
       applyDispatchState(sessionId, data.dispatch_state);
       break;
 
@@ -140,6 +147,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
     case "subagent":
       upsertSubagent(sessionId, {
         task_id: data.task_id as string,
+        tool_call_id: (data.tool_call_id as string) ?? null,
         tool_use_id: (data.tool_use_id as string) ?? null,
         status: (data.status as string) ?? "running",
         name: (data.name as string) ?? "",
@@ -596,6 +604,17 @@ export function useWebSocket() {
               .then((r) => (r.ok ? r.json() : null))
               .then((tasks) => {
                 if (tasks) getState().setBgTasks(activeSessionId, tasks);
+              })
+              .catch(() => {});
+            fetch(
+              `${window.location.origin}/api/sessions/${activeSessionId}/delegations`,
+              { headers: { Authorization: `Bearer ${t}` } }
+            )
+              .then((r) => (r.ok ? r.json() : null))
+              .then((delegations) => {
+                if (delegations && wsRef.current === ws) {
+                  getState().setDelegations(activeSessionId, delegations);
+                }
               })
               .catch(() => {});
             // Research jobs: same reconnect reload, so an in-flight job's card

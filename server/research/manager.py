@@ -213,7 +213,10 @@ class ResearchManager:
             f"{report.report}"
         )
         try:
-            await self.session_mgr.start_message(session_id, prompt, source="research", delivery_id=f"research:{job_id}")
+            receipt = await self.session_mgr.start_message(session_id, prompt, source="research", delivery_id=f"research:{job_id}")
+            if not receipt.accepted:
+                await self.db.update_research_job(job_id, injection_status="failed", error="delivery suppressed: session admission is closed")
+                return
             await self.db.update_research_job(
                 job_id, injection_status="delivered", injected_at=_now()
             )

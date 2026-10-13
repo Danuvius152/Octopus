@@ -41,6 +41,7 @@ from server.routers import agents as agents_mod
 from server.routers import schedules as schedules_mod
 from server.scheduler import ScheduleRunner
 from server.session_manager import session_manager
+from tests.submission import accepted_receipt
 
 TOKEN = "changeme"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
@@ -192,6 +193,7 @@ async def test_files_resolved_against_working_dir(
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         started.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", fake_start_message)
     # Build a real working dir with one file that exists and one
@@ -384,6 +386,7 @@ async def test_nested_chain_intermediate_stays_alive_while_grandchild_runs(
         if sid not in mgr.sessions:
             raise ValueError(f"Session {sid} not found")
         delivered.append((sid, prompt))
+        return accepted_receipt()
 
     def capture_logger_exception(msg, *args, **kwargs):
         # When DelegationManager._inject_terminal catches a missing-
@@ -484,6 +487,7 @@ async def test_start_delegation_happy_path(dm, mgr, db, monkeypatch):
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         started.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", fake_start_message)
 
@@ -736,7 +740,7 @@ async def test_depth_cap_rejected(dm, mgr, db, monkeypatch):
 
 
 async def _noop_start_message(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-    return None
+    return accepted_receipt()
 
 
 @pytest.mark.asyncio
@@ -748,6 +752,7 @@ async def test_reply_injection_on_result(dm, mgr, db, monkeypatch):
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -793,6 +798,7 @@ async def test_parent_delegation_waits_for_its_own_sub_delegation(
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -865,6 +871,7 @@ async def test_parent_delegation_waits_when_its_sub_delegation_finished_first(
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -933,6 +940,7 @@ async def test_plain_delegation_finalises_on_its_first_result(
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -966,6 +974,7 @@ async def test_parent_delegation_still_fails_fast_on_error(dm, mgr, db, monkeypa
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -997,6 +1006,7 @@ async def test_error_injection_on_result_error(dm, mgr, db, monkeypatch):
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1025,6 +1035,7 @@ async def test_error_injection_on_error_event(dm, mgr, db, monkeypatch):
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1058,6 +1069,7 @@ async def test_recovery_events_do_not_terminate_a_delegation(dm, mgr, db, monkey
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1093,6 +1105,7 @@ async def test_delegation_waits_for_real_turn_recovery(dm, mgr, db, monkeypatch,
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     monkeypatch.setattr(cfg, "turn_idle_timeout_seconds", 0.1)
@@ -1130,7 +1143,7 @@ async def test_delegation_waits_for_real_turn_recovery(dm, mgr, db, monkeypatch,
 
     runs = iter([RecoveryRun(), RecoveryRun(recovering=True)])
     monkeypatch.setattr(mgr, "_make_run", lambda *args, **kwargs: next(runs))
-    events = [e async for e in mgr.send_message(child.id, "review", source="delegation", work_id=rec.work_id)]
+    events = [e async for e in mgr._execute_claimed_request(child.id, "review", source="delegation", work_id=rec.work_id)]
     assert any(e.get("retrying") for e in events)
     assert rec.state == "completed"
     assert len(injected) == 1
@@ -1166,6 +1179,7 @@ async def test_empty_reply_gets_placeholder(dm, mgr, db, monkeypatch):
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1194,6 +1208,7 @@ async def test_cancel_delegation(dm, mgr, db, monkeypatch):
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     async def fake_interrupt(sid):
         return True
@@ -1236,6 +1251,7 @@ async def test_follow_up_happy_path(dm, mgr, db, monkeypatch):
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1377,7 +1393,7 @@ async def test_route_follow_up_requires_live_parent(client, monkeypatch):
     record and start the child, then silently drop the terminal
     turn because there's no live parent to inject into."""
     async def noop(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        return None
+        return accepted_receipt()
 
     monkeypatch.setattr(session_manager, "start_message", noop)
 
@@ -1417,7 +1433,7 @@ async def test_route_follow_up(client, monkeypatch):
     """HTTP path mirrors the manager: 200/201 happy path; 404 for
     unknown delegation; 409 while running."""
     async def noop(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        return None
+        return accepted_receipt()
 
     monkeypatch.setattr(session_manager, "start_message", noop)
 
@@ -1464,6 +1480,7 @@ async def test_cancel_cascades_to_descendants(dm, mgr, db, monkeypatch):
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     async def fake_interrupt(sid):
         return True
@@ -1525,6 +1542,7 @@ async def test_cancel_delegation_single_inject_under_interrupt_broadcast(
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
 
@@ -1574,6 +1592,7 @@ async def test_terminal_injection_is_idempotent(dm, mgr, db, monkeypatch):
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1617,6 +1636,7 @@ async def test_concurrent_delegations_to_same_target(dm, mgr, db, monkeypatch):
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1658,6 +1678,7 @@ async def client(db):
     per-test in-memory DB. Bridges/scheduler are stood up so app
     lifespan doesn't matter for these tests."""
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
 
     agents_mod.set_manager(AgentManager(db))
@@ -1827,6 +1848,7 @@ async def test_question_request_routed_to_parent(dm, mgr, db, monkeypatch):
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         injected.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1890,6 +1912,7 @@ async def test_question_with_empty_questions_does_not_crash(
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         captured.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1933,6 +1956,7 @@ async def test_terminated_delegations_ignore_questions(
         if source == "delegation" and (session := mgr.get_session(sid)) is not None:
             session._work_id = work_id
         captured.append((sid, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", capture)
     await dm._on_broadcast({
@@ -2193,3 +2217,23 @@ async def test_route_answer_409_when_no_pending(client, monkeypatch):
         headers=HEADERS,
     )
     assert r.status_code == 409
+
+
+@pytest.mark.parametrize("state,expected", [("completed", True), ("failed", False), ("cancelled", False)])
+async def test_terminal_metric_is_independent_of_closed_parent(dm, mgr, db, monkeypatch, state, expected):
+    from server.delegations import DelegationRunState
+    from server.mcp_identity import close_work
+
+    records = []
+    monkeypatch.setattr("server.delegations._mon_record", records.append)
+    parent = await _make_session(mgr, (await db.get_system_agent())["id"], name="metric parent")
+    work = f"closed-metric-{state}"
+    close_work(work)
+    rec = DelegationRunState(delegation_id="metric-child", parent_session_id=parent.id,
+                             target_agent_id="agent", target_agent_name="worker", request="work",
+                             parent_work_id=work, state=state)
+    await dm._inject_terminal(rec)
+    await dm._inject_terminal(rec)
+    assert len(records) == 1 and records[0].ok is expected
+    assert rec._terminal_disposition == "closed"
+    assert rec._terminal_injected is False

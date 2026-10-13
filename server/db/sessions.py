@@ -9,14 +9,19 @@ changed.
 from __future__ import annotations
 
 import json
+import time
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
-from .base import DatabaseBase
+import aiosqlite
+
+from .base import DatabaseBase, serialized_write
 
 
 class SessionsMixin(DatabaseBase):
 
+    @serialized_write
     async def save_session(
         self,
         session_id: str,
@@ -58,11 +63,13 @@ class SessionsMixin(DatabaseBase):
         )
         await self.conn.commit()
 
+    @serialized_write
     async def delete_session(self, session_id: str) -> None:
         await self._ensure_connected()
         await self.conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         await self.conn.commit()
 
+    @serialized_write
     async def create_fork_session(
         self,
         *,
@@ -94,6 +101,8 @@ class SessionsMixin(DatabaseBase):
         row insert rather than leaving an open transaction a later commit would
         flush (Vera review SHOULD-FIX #1)."""
         await self._ensure_connected()
+        await self._flush_locked()
+        await self.conn.execute("SAVEPOINT fork_copy")
         try:
             await self.conn.execute(
                 "INSERT INTO sessions "
@@ -114,16 +123,17 @@ class SessionsMixin(DatabaseBase):
                 "INSERT INTO messages "
                 "(session_id, seq, role, type, content, tool_name, tool_input, "
                 " tool_use_id, is_error, session_id_ref, cost, attachments, "
-                " git_head, git_status_clean, created_at) "
+                " git_head, git_status_clean, created_at, runtime_metadata) "
                 "SELECT ?, seq, role, type, content, tool_name, tool_input, "
                 " tool_use_id, is_error, session_id_ref, cost, attachments, "
-                " git_head, git_status_clean, created_at "
+                " git_head, git_status_clean, created_at, runtime_metadata "
                 "FROM messages WHERE session_id = ? AND seq <= ?",
                 (fork_id, parent_id, fork_after_seq),
             )
             await self.conn.commit()
         except Exception:
-            await self.conn.rollback()
+            await self.conn.execute("ROLLBACK TO fork_copy")
+            await self.conn.execute("RELEASE fork_copy")
             raise
 
     async def load_sessions(
@@ -192,6 +202,7 @@ class SessionsMixin(DatabaseBase):
             "SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)
         )
 
+    @serialized_write
     async def append_message(
         self,
         session_id: str,
@@ -209,6 +220,8 @@ class SessionsMixin(DatabaseBase):
         git_head: str | None = None,
         git_status_clean: bool | None = None,
         created_at: str | None = None,
+        runtime_metadata: dict[str, Any] | None = None,
+        terminal_request_id: str | None = None,
     ) -> None:
         await self._ensure_connected()
         content_str = json.dumps(content) if content is not None else None
@@ -225,8 +238,8 @@ class SessionsMixin(DatabaseBase):
             "INSERT INTO messages "
             "(session_id, seq, role, type, content, tool_name, tool_input, "
             "tool_use_id, is_error, session_id_ref, cost, attachments, "
-            "git_head, git_status_clean, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "git_head, git_status_clean, created_at, runtime_metadata, terminal_request_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 session_id,
                 seq,
@@ -243,11 +256,59 @@ class SessionsMixin(DatabaseBase):
                 git_head,
                 git_status_clean_int,
                 created_at or datetime.now(UTC).isoformat(),
+                json.dumps(runtime_metadata) if runtime_metadata is not None else None,
+                terminal_request_id,
             ),
         )
         self._dirty = True
         self._pending_appends += 1
         await self._maybe_flush()
+
+    @serialized_write
+    async def record_terminal(self, *, request_id: str, **message: Any) -> None:
+        """Record one chosen outcome, acknowledge commit, and verify a fresh read.
+
+        Retrying storage uses the identical key and row. A matching uncommitted
+        row is committed before the independent read, never treated as proof.
+        """
+        await self._ensure_connected()
+        session_id = message["session_id"]
+        cursor = await self.conn.execute(
+            "SELECT seq, role, type, content, created_at, is_error, session_id_ref, cost "
+            "FROM messages WHERE session_id = ? AND terminal_request_id = ?",
+            (session_id, request_id),
+        )
+        row = await cursor.fetchone()
+        expected = (
+            message["seq"], message["role"], message["type"],
+            message.get("content"), message["created_at"],
+            message.get("is_error"), message.get("session_id_ref"), message.get("cost"),
+        )
+        def matches(record: Any) -> bool:
+            actual = (*record[:3], json.loads(record[3]) if record[3] else None,
+                      record[4], bool(record[5]) if record[5] is not None else None,
+                      record[6], record[7])
+            return actual == expected
+        if row is not None:
+            if not matches(row):
+                raise ValueError("terminal record conflict")
+        else:
+            await self.append_message(**message, terminal_request_id=request_id)
+        # Explicit acknowledgement even when another writer committed the row.
+        await self.conn.commit()
+        self._dirty = False
+        self._pending_appends = 0
+        self._last_flush = time.monotonic()
+        if self._db_path != ":memory:":
+            async with aiosqlite.connect(Path(self._db_path).resolve().as_uri() + "?mode=ro", uri=True) as reader:
+                cursor = await reader.execute(
+                    "SELECT seq, role, type, content, created_at, is_error, session_id_ref, cost "
+                    "FROM messages WHERE session_id = ? AND terminal_request_id = ?",
+                    (session_id, request_id),
+                )
+                row = await cursor.fetchone()
+                if row is None or not matches(row):
+                    raise OSError("terminal commit could not be verified")
 
     async def get_session_owner(self, session_id: str) -> str | None:
         """Resolve an event's owner even after its session leaves the live map."""
@@ -255,6 +316,25 @@ class SessionsMixin(DatabaseBase):
         cursor = await self.conn.execute("SELECT user_id FROM sessions WHERE id = ?", (session_id,))
         row = await cursor.fetchone()
         return row[0] if row else None
+
+    async def get_committed_terminal(self, session_id: str, request_id: str) -> dict[str, Any] | None:
+        """Read committed storage without committing an uncertain local batch."""
+        await self._ensure_connected()
+        async def read(reader: aiosqlite.Connection) -> dict[str, Any] | None:
+            cursor = await reader.execute(
+                "SELECT content FROM messages WHERE session_id = ? AND terminal_request_id = ?",
+                (session_id, request_id),
+            )
+            row = await cursor.fetchone()
+            return json.loads(row[0]) if row and row[0] else None
+        if self._db_path == ":memory:":
+            # In-memory databases cannot have an independent reader. Used only
+            # in isolated tests after acknowledgement, never as a disk proof.
+            if self.conn.in_transaction:
+                return None
+            return await read(self.conn)
+        async with aiosqlite.connect(Path(self._db_path).resolve().as_uri() + "?mode=ro", uri=True) as reader:
+            return await read(reader)
 
     async def load_messages(
         self,
@@ -283,7 +363,7 @@ class SessionsMixin(DatabaseBase):
         query = (
             "SELECT seq, role, type, content, tool_name, tool_input, tool_use_id, "
             "is_error, session_id_ref, cost, attachments, git_head, "
-            "git_status_clean, created_at "
+            "git_status_clean, created_at, runtime_metadata "
             "FROM messages WHERE session_id = ?"
         )
         params: list = [session_id]
@@ -321,10 +401,12 @@ class SessionsMixin(DatabaseBase):
                     "git_head": row[11],
                     "git_status_clean": git_status_clean,
                     "created_at": row[13],
+                    "runtime_metadata": json.loads(row[14]) if row[14] else None,
                 }
             )
         return results
 
+    @serialized_write
     async def clear_credential_from_sessions(self, credential_id: str) -> list[str]:
         """Unbind a credential from every session that pins it, returning the
         session ids changed.
@@ -380,6 +462,7 @@ class SessionsMixin(DatabaseBase):
             for r in rows
         ]
 
+    @serialized_write
     async def update_session_field(self, session_id: str, **fields: Any) -> None:
         await self._ensure_connected()
         allowed = {

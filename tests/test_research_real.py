@@ -27,6 +27,7 @@ from server.research.orchestrator import ResearchLimits
 from server.research.orchestrator import run_research as _real_run
 from server.session_manager import SessionManager
 from tests.cli_gate import _resolve_cli
+from tests.submission import accepted_receipt
 
 
 @functools.lru_cache(maxsize=1)
@@ -90,6 +91,7 @@ async def test_real_codex_deep_research_end_to_end(tmp_path, monkeypatch):
             assert source == "research"
             assert delivery_id.startswith("research:")
             injected.append(prompt)
+            return accepted_receipt()
 
         monkeypatch.setattr(mgr, "start_message", fake_start_message)
 

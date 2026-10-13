@@ -20,13 +20,14 @@ export function DispatchQueue({ sessionId, readOnly = false }: {
     request_id: `legacy-${index}`, source: "", summary, priority: false,
   }));
   const paused = snapshot?.paused ?? false;
+  const savingBlocked = Boolean(snapshot?.recording_failure);
 
   const resume = async () => {
     const store = useSessionStore.getState();
     setResuming(true);
     setError("");
     try {
-      const response = await fetch(`${window.location.origin}/api/sessions/${encodeURIComponent(sessionId)}/dispatch/resume`, {
+      const response = await fetch(`${window.location.origin}/api/sessions/${encodeURIComponent(sessionId)}/dispatch/resume${savingBlocked ? "?resume_queue=false" : ""}`, {
         method: "POST", headers: { Authorization: `Bearer ${store.token}` },
       });
       const data = await response.json();
@@ -39,14 +40,17 @@ export function DispatchQueue({ sessionId, readOnly = false }: {
     }
   };
 
-  if (!paused && items.length === 0) return null;
+  if (!savingBlocked && !paused && items.length === 0) return null;
   return <div className="queue-list shrink-0 border-t border-border bg-muted/30 px-4 py-2 text-xs space-y-1"
     aria-label="Queued messages">
+    {savingBlocked && <p role="alert" className="recording-failure text-destructive">
+      Result saving failed or is unconfirmed. Automatic processing is blocked until the saved result is verified.
+    </p>}
     <div className="queue-list-label flex flex-wrap items-center justify-between gap-2 text-muted-foreground mb-2">
-      <span>{paused ? `Paused · ${items.length} pending` : `Queued (${items.length}) — will fire after the current turn`}</span>
-      {paused && !readOnly && <Button type="button" size="sm" variant="outline"
+      <span>{savingBlocked ? `Saving blocked · ${items.length} pending` : paused ? `Paused · ${items.length} pending` : `Queued (${items.length}) — will fire after the current turn`}</span>
+      {(savingBlocked || paused) && !readOnly && <Button type="button" size="sm" variant="outline"
         className="btn-resume-dispatch h-8" disabled={resuming} onClick={resume}>
-        {resuming ? "Resuming…" : "Resume processing"}
+        {resuming ? savingBlocked ? "Checking saving…" : "Resuming…" : savingBlocked ? "Retry saving" : "Resume processing"}
       </Button>}
     </div>
     {items.map((item) => <div className="queue-item flex items-start gap-2 text-foreground" key={item.request_id}>

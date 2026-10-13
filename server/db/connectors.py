@@ -12,12 +12,13 @@ import json
 import sqlite3
 from typing import Any
 
-from .base import DatabaseBase
+from .base import DatabaseBase, serialized_write
 
 
 class ConnectorsMixin(DatabaseBase):
 
 
+    @serialized_write
     async def save_connector_installation(
         self,
         *,
@@ -122,6 +123,7 @@ class ConnectorsMixin(DatabaseBase):
         row = await cursor.fetchone()
         return row[0] if row else None
 
+    @serialized_write
     async def update_connector_installation(
         self, installation_id: str, **fields: Any
     ) -> None:
@@ -175,6 +177,7 @@ class ConnectorsMixin(DatabaseBase):
         if meta_updates or secret_value is not None:
             await self.conn.commit()
 
+    @serialized_write
     async def delete_connector_installation(self, installation_id: str) -> bool:
         await self._ensure_connected()
         # ON DELETE CASCADE drops the secret row and any agent_connectors links.
@@ -185,6 +188,7 @@ class ConnectorsMixin(DatabaseBase):
         return cursor.rowcount > 0
     # --- per-kind OAuth client credentials (in-app config) ----------------
 
+    @serialized_write
     async def set_connector_oauth_client(
         self, kind: str, client_id: str, client_secret_encrypted: str, now: str
     ) -> None:
@@ -219,6 +223,7 @@ class ConnectorsMixin(DatabaseBase):
             "client_secret_encrypted": row[2],
         }
 
+    @serialized_write
     async def delete_connector_oauth_client(self, kind: str) -> bool:
         await self._ensure_connected()
         cursor = await self.conn.execute(
@@ -227,6 +232,7 @@ class ConnectorsMixin(DatabaseBase):
         await self.conn.commit()
         return cursor.rowcount > 0
 
+    @serialized_write
     async def delete_connector_installations_by_kind(self, kind: str) -> int:
         """Delete every installation of a kind (cascades to secrets +
         agent_connectors). Used when a custom connector is removed."""
@@ -258,6 +264,7 @@ class ConnectorsMixin(DatabaseBase):
             "updated_at": row[8],
         }
 
+    @serialized_write
     async def save_custom_connector(
         self,
         *,
@@ -305,6 +312,7 @@ class ConnectorsMixin(DatabaseBase):
         rows = await cursor.fetchall()
         return [self._row_to_custom(row) for row in rows]
 
+    @serialized_write
     async def delete_custom_connector(self, kind: str) -> bool:
         await self._ensure_connected()
         cursor = await self.conn.execute(

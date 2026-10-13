@@ -10,12 +10,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import DatabaseBase
+from .base import DatabaseBase, serialized_write
 
 
 class ResearchMixin(DatabaseBase):
 
 
+    @serialized_write
     async def create_research_job(
         self, job_id: str, session_id: str, question: str, created_at: str
     ) -> None:
@@ -28,6 +29,7 @@ class ResearchMixin(DatabaseBase):
         )
         await self.conn.commit()
 
+    @serialized_write
     async def update_research_job(self, job_id: str, **fields: Any) -> None:
         """Patch any of: status, phase, error, report_path, cost, completed_at,
         injection_status, injected_at."""
@@ -54,6 +56,7 @@ class ResearchMixin(DatabaseBase):
         row = await cursor.fetchone()
         return self._row_to_research_job(row) if row else None
 
+    @serialized_write
     async def mark_in_flight_research_jobs_interrupted(self, completed_at: str) -> int:
         """Boot sweep: a `running` row belongs to a prior process — its task is
         gone, so flip it to `interrupted` (native-deep-research.md §6). v1 does

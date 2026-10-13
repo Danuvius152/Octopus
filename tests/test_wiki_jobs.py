@@ -12,6 +12,7 @@ from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiJobs, WikiWorker
 from server.wiki.store import WikiError
 from tests import test_wiki_api as wiki_api
+from tests.submission import receipt_from_events
 
 client = wiki_api.client
 
@@ -44,8 +45,19 @@ class Curator:
     async def archive_session(self, *args, **kwargs):
         pass
 
-    async def send_message(self, session_id, prompt, **kwargs):
+    async def start_message(self, session_id, prompt, **kwargs):
+        assert kwargs["source"] == "wiki"
+        return await receipt_from_events(self._events(session_id, prompt, **kwargs))
+
+    async def cancel_request(self, *args):
+        return True
+
+    async def _await_backend_retirement(self, session):
+        pass
+
+    async def _events(self, session_id, prompt, **kwargs):
         self.turns += 1
+        failed = False
         with self.jobs.store.connect() as db:
             job_id = db.execute(
                 "SELECT id FROM jobs WHERE session_id=?", (session_id,)
@@ -72,11 +84,12 @@ class Curator:
                     {"job_id": job_id, "session_id": session_id},
                 )
             except WikiError as exc:
+                failed = True
                 yield {"type": "error", "message": str(exc)}
             else:
                 if self.crash:
                     raise asyncio.CancelledError()
-        yield {"type": "result", "content": "published"}
+        yield {"type": "result", "content": "published", "is_error": failed}
 
 
 async def process(jobs, job, curator):
@@ -614,3 +627,238 @@ async def test_uncertain_publication_receipt_never_starts_another_model_turn(job
     assert outcome["status"] == "completed_with_attention"
     assert outcome["items"][0].get("retry_count", 0) == 0 and curator.turns == 1
     assert path.read_bytes() == before_recovery
+
+
+async def test_recording_failure_retry_verifies_original_without_new_model(jobs):
+    from server.models import TurnOutcome
+    from server.sessions.submission import RequestCompletion, SubmissionReceipt
+
+    class RecordingCurator(Curator):
+        committed = False
+        request_id = "original-recording-request"
+
+        def get_session(self, session_id):
+            return None  # A later process has no runtime pending outcome.
+
+        async def get_committed_terminal(self, session_id, request_id):
+            assert request_id == self.request_id
+            return {"request_id": request_id, "status": "success"} if self.committed else None
+
+        async def start_message(self, session_id, prompt, **kwargs):
+            assert kwargs["source"] == "wiki"
+            async for _ in self._events(session_id, prompt, **kwargs):
+                pass
+            future = asyncio.get_running_loop().create_future()
+            future.set_result(RequestCompletion(
+                input_request_id=self.request_id, request_id=self.request_id,
+                state="recording_failed", recording_state="unconfirmed",
+                outcome=TurnOutcome(request_id=self.request_id, status="success"),
+            ))
+            return SubmissionReceipt("accepted", self.request_id, future)
+
+    job = jobs.maintain("recording-failure", "Original source", "record original", [], "Library/source.md", [], "human")
+    curator = RecordingCurator(jobs)
+    first = await process(jobs, job, curator)
+    item = first["items"][0]
+    assert first["status"] == "completed_with_attention"
+    assert item["recording_failure"]["request_id"] == curator.request_id
+    assert curator.turns == 1
+    assert item.get("retry_count", 0) == 0
+    second = await process(jobs, jobs.retry(job["id"]), curator)
+    assert second["items"][0]["status"] == "attention"
+    assert curator.turns == 1
+    curator.committed = True
+    finished = await process(jobs, jobs.retry(job["id"]), curator)
+    assert finished["status"] == "completed"
+    assert finished["items"][0]["index_complete"] is True
+    assert "recording_failure" not in finished["items"][0]
+    assert curator.turns == 1
+
+
+async def test_worker_keeps_completed_session_until_owned_cleanup_and_archives_once(jobs, monkeypatch):
+    from server.harness import HarnessEvent
+    from server.wiki.tasks import tasks as grants
+    from tests.fake_run import FakeRunBase
+
+    manager = wiki_api.session_manager
+    started, finish_run = asyncio.Event(), asyncio.Event()
+    cleaning, finish_cleanup = asyncio.Event(), asyncio.Event()
+    automatic, archived, receipts = [], [], []
+    retirement = manager._await_backend_retirement
+    auto_archive = manager.auto_archive_scheduled_session
+    admit = manager.start_message
+    processing = None
+    job = jobs.maintain("owned-archive", "Original source", "organize", [], "Library/owned.md", [], "human")
+    jobs.update(job["id"], status="running")
+
+    class OwnedRun(FakeRunBase):
+        async def start(self, *args, **kwargs):
+            pass
+
+        async def stream(self):
+            started.set()
+            await finish_run.wait()
+            session_id = jobs.get(job["id"])["session_id"]
+            async for event in Curator(jobs)._events(session_id, "organize"):
+                yield HarnessEvent(type=event["type"], content=event.get("content", ""), is_error=event.get("is_error", False))
+
+        async def interrupt(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    async def owned_retirement(session, **kwargs):
+        await retirement(session, **kwargs)
+        if receipts and receipts[0]._completion.done():
+            cleaning.set()
+            await finish_cleanup.wait()
+
+    async def observed_admission(*args, **kwargs):
+        receipt = await admit(*args, **kwargs)
+        receipts.append(receipt)
+        return receipt
+
+    async def observed_auto_archive(session_id):
+        automatic.append(session_id)
+        return await auto_archive(session_id)
+
+    async def observe(event):
+        if event.get("type") == "session_archived":
+            archived.append((event["old_session_id"], event["old_session_id"] in grants.assignments))
+
+    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: OwnedRun())
+    monkeypatch.setattr(manager, "start_message", observed_admission)
+    monkeypatch.setattr(manager, "_await_backend_retirement", owned_retirement)
+    monkeypatch.setattr(manager, "auto_archive_scheduled_session", observed_auto_archive)
+    manager.on_broadcast("observe-worker-archive", observe)
+    worker = WikiWorker()
+    worker.manager = manager
+    processing = asyncio.create_task(worker.process(jobs, job["id"]))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        session_id = jobs.get(job["id"])["session_id"]
+        session = manager.get_session(session_id)
+        driver = session._active_task
+        assert session._current_request.source == "wiki"
+        finish_run.set()
+        await asyncio.wait_for(cleaning.wait(), 2)
+        await asyncio.wait_for(asyncio.shield(driver), 2)
+        assert automatic == []
+        assert manager.get_session(session_id) is session
+        assert session_id in grants.assignments
+        assert archived == []
+        rows = await manager.db.load_sessions(include_archived=True)
+        assert not next(row for row in rows if row["id"] == session_id)["archived"]
+
+        finish_cleanup.set()
+        await asyncio.wait_for(processing, 2)
+        assert jobs.get(job["id"])["status"] == "completed"
+        assert manager.get_session(session_id) is None
+        assert session_id not in grants.assignments
+        assert archived == [(session_id, False)]
+        rows = await manager.db.load_sessions(include_archived=True)
+        assert next(row for row in rows if row["id"] == session_id)["archived"]
+    finally:
+        finish_run.set()
+        finish_cleanup.set()
+        if not processing.done():
+            processing.cancel()
+        await asyncio.gather(processing, return_exceptions=True)
+
+
+async def test_worker_cancel_waits_for_owned_execution_before_removing_grant(jobs, monkeypatch):
+    from server.harness import HarnessEvent
+    from server.wiki.tasks import tasks as grants
+    from tests.fake_run import FakeRunBase
+
+    started, stopping, reaped = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class HeldRun(FakeRunBase):
+        async def start(self, *args, **kwargs):
+            pass
+
+        async def stream(self):
+            started.set()
+            await asyncio.Event().wait()
+            if False:
+                yield HarnessEvent(type="result")
+
+        async def interrupt(self):
+            await self.stop()
+
+        async def stop(self):
+            stopping.set()
+            await reaped.wait()
+
+    manager = wiki_api.session_manager
+    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: HeldRun())
+    job = jobs.maintain("cancel-grants", "Original source", "organize", [], "Library/cancel.md", [], "human")
+    jobs.update(job["id"], status="running")
+    worker = WikiWorker()
+    worker.manager = manager
+    processing = asyncio.create_task(worker.process(jobs, job["id"]))
+    try:
+        await asyncio.wait_for(started.wait(), 2)
+        session_id = jobs.get(job["id"])["session_id"]
+        session = manager.get_session(session_id)
+        assert session._current_request.source == "wiki"
+        assert session_id in grants.assignments
+        processing.cancel()
+        await asyncio.wait_for(stopping.wait(), 2)
+        assert session_id in grants.assignments
+        assert not processing.done()
+        reaped.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(processing, 2)
+        assert session_id not in grants.assignments
+        assert manager.get_session(session_id) is None
+    finally:
+        reaped.set()
+        if not processing.done():
+            processing.cancel()
+        await asyncio.gather(processing, return_exceptions=True)
+
+
+async def test_job_cancel_targets_captured_wiki_request_and_preserves_human_correction(jobs, monkeypatch):
+    from server.harness import HarnessEvent
+    from tests.fake_run import FakeRunBase
+
+    manager = wiki_api.session_manager
+    entered, finish = asyncio.Event(), asyncio.Event()
+
+    class HumanRun(FakeRunBase):
+        async def start(self, *args, **kwargs):
+            pass
+
+        async def stream(self):
+            entered.set()
+            await finish.wait()
+            yield HarnessEvent(type="result", is_error=False)
+
+        async def interrupt(self):
+            pass
+
+        async def stop(self):
+            pass
+
+    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: HumanRun())
+    job = jobs.maintain("cancel-captured-request", "Original source", "organize", [], "Library/precise.md", [], "human")
+    session = await manager.create_session((await manager.db.get_system_agent())["id"], "Wiki cancellation scope")
+    await manager.interrupt(session.id)
+    original = await manager.start_message(session.id, "Wiki queued work", source="wiki")
+    jobs.update(job["id"], status="running", session_id=session.id, items=[{
+        "status": "pending", "worker_request": {"session_id": session.id, "request_id": original.request_id},
+    }])
+    correction = await manager.start_message(session.id, "human correction")
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        result = await jobs.cancel(job["id"], manager)
+        assert result["status"] == "cancelled"
+        assert (await original.wait()).state == "withdrawn"
+        assert session._current_request.request_id == correction.request_id
+        assert not session._inner_task.done()
+        finish.set()
+        assert (await asyncio.wait_for(correction.wait(), 2)).outcome.status == "success"
+    finally:
+        finish.set()

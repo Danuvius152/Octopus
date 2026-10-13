@@ -22,13 +22,13 @@ import { useSessionStore } from "../stores/sessionStore";
  */
 export function SubagentCard({
   sessionId,
-  toolUseId,
+  toolCallId,
 }: {
   sessionId: string;
-  toolUseId?: string | null;
+  toolCallId?: string | null;
 }) {
   const run = useSessionStore((s) =>
-    toolUseId ? s.subagents[sessionId]?.[toolUseId] : undefined
+    toolCallId ? s.subagents[sessionId]?.[toolCallId] : undefined
   );
   const [open, setOpen] = useState(false);
   if (!run) return null;

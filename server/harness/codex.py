@@ -693,7 +693,7 @@ async def _fork_prepare_replay(
     """No on-disk work (session-rewind.md §5.3.2). Codex's resume state is
     internal to the binary and has no transcript codec, so the first fork turn
     instead carries the truncated history wrapped into its USER PROMPT (done in
-    `SessionManager.send_message`). `thread.started` captures the real resume id
+    `SessionManager._execute_claimed_request`). `thread.started` captures the real resume id
     on turn 1; turn 2+ uses native Codex resume. The `resume_id_hint` is
     ignored."""
     from .fork import ForkArtifact

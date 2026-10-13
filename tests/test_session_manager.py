@@ -114,7 +114,7 @@ async def test_delete_session(manager):
 @pytest.mark.asyncio
 async def test_send_message_unknown_session(manager):
     with pytest.raises(ValueError, match="not found"):
-        async for _ in manager.send_message("nonexistent", "hello"):
+        async for _ in manager._execute_claimed_request("nonexistent", "hello"):
             pass
 
 
@@ -203,6 +203,7 @@ async def test_start_message_queues_when_busy(manager, monkeypatch):
 
     # Second start_message should queue rather than fire
     await manager.start_message(session.id, "second")
+    await asyncio.gather(*tuple(manager._owned_tasks))
     assert [qp.prompt for qp in session._pending_queue] == ["second"]
 
     queued = [e for e in events if e["type"] == "queued"]
@@ -340,6 +341,7 @@ async def test_interrupt_does_not_wedge_on_slow_backend_stop(manager, monkeypatc
     must still return promptly (within the timeout) so the WS receive loop
     isn't blocked from processing subsequent interrupts."""
     session = await _new(manager,"SlowStop")
+    release_stop = asyncio.Event()
 
     async def stub_consume(session_id: str, queued) -> None:
         try:
@@ -360,10 +362,10 @@ async def test_interrupt_does_not_wedge_on_slow_backend_stop(manager, monkeypatc
             return _gen()
 
         async def stop(self):
-            await asyncio.sleep(60)  # would hang interrupt() if not timed out
+            await release_stop.wait()  # Caller remains prompt while teardown is held.
 
         async def interrupt(self):
-            await asyncio.sleep(60)
+            await release_stop.wait()
 
     monkeypatch.setattr(manager, "_consume_message", stub_consume)
     await manager.start_message(session.id, "x")
@@ -381,6 +383,8 @@ async def test_interrupt_does_not_wedge_on_slow_backend_stop(manager, monkeypatc
         ok = await asyncio.wait_for(manager.interrupt(session.id), timeout=4.0)
     except TimeoutError:
         pytest.fail("interrupt() blocked on hanging backend — WS would be wedged")
+    finally:
+        release_stop.set()
 
     assert ok is True
 
@@ -2009,7 +2013,7 @@ async def test_idle_recovery_retries_original_without_duplicate_user_messages(
     ])
     monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second]))
 
-    events = [e async for e in manager.send_message(session.id, "original request")]
+    events = [e async for e in manager._execute_claimed_request(session.id, "original request")]
 
     retry = next(e for e in events if e.get("code") == "turn_timeout_retry")
     assert retry["retrying"] is True
@@ -2062,7 +2066,7 @@ async def test_idle_recovery_has_a_per_turn_budget(manager, monkeypatch):
     success = _SeqBackend([HarnessEvent(type="result", session_id="done")])
     monkeypatch.setattr(manager, "_make_run", _seq_factory([*stalls, success]))
 
-    events = [e async for e in manager.send_message(session.id, "first request")]
+    events = [e async for e in manager._execute_claimed_request(session.id, "first request")]
 
     assert len([e for e in events if e.get("code") == "turn_timeout_retry"]) == 2
     final = [e for e in events if e.get("code") == "turn_timeout"]
@@ -2869,3 +2873,108 @@ async def test_the_ws_event_carries_the_row_it_was_persisted_as(manager):
     untagged: dict = {"type": "message"}
     manager._tag_persisted(untagged, None, MessageContent(role=MessageRole.user, type="text"))
     assert "seq" not in untagged and "created_at" not in untagged
+
+
+@pytest.mark.asyncio
+async def test_failed_attempt_retirement_blocks_recovery_and_next_request(manager, monkeypatch):
+    """An unconfirmed writer cannot be replaced after ordinary attempt cleanup."""
+    from server.harness import HarnessEvent
+
+    class FailingRetirement(_FakeBackend):
+        def __init__(self):
+            super().__init__([HarnessEvent(type="result", is_error=True,
+                                         error_code="server_overloaded", content="server overloaded")])
+            self.starts = 0
+            self.allow_retirement = False
+            self.retired = False
+
+        def is_alive(self):
+            return not self.retired
+
+        async def start(self, *args, **kwargs):
+            self.starts += 1
+
+        async def interrupt(self):
+            pass
+
+        async def stop(self):
+            if not self.allow_retirement:
+                raise RuntimeError("writer exit unconfirmed")
+            self.retired = True
+
+    class Successor(_FakeBackend):
+        def __init__(self):
+            super().__init__([HarnessEvent(type="result")])
+            self.starts = 0
+
+        async def start(self, *args, **kwargs):
+            self.starts += 1
+
+        async def interrupt(self):
+            pass
+
+    monkeypatch.setattr(type(manager), "_TRANSIENT_RETRY_BASE_DELAY", 0.0)
+    agent = await manager.db.get_system_agent()
+    session = await manager.create_session(agent["id"], "Failed retirement", backend="codex")
+    first, successor = FailingRetirement(), Successor()
+    monkeypatch.setattr(manager, "_make_run", _seq_factory([first, successor]))
+    try:
+        receipt = await manager.start_message(session.id, "recoverable request")
+        completion = await asyncio.wait_for(receipt.wait(), 2)
+        assert first.starts == 1 and successor.starts == 0
+        assert completion.outcome.status == "failed"
+        next_receipt = await manager.start_message(session.id, "human correction")
+        next_completion = await asyncio.wait_for(next_receipt.wait(), 2)
+        assert successor.starts == 0
+        assert next_completion.outcome.status == "failed"
+
+    finally:
+        # Restore and explicitly confirm the injected fake retirement before
+        # releasing its retained failure receipt for fixture shutdown.
+        first.allow_retirement = True
+        await first.stop()
+        assert not first.is_alive()
+        await asyncio.gather(*session._backend_cleanup_tasks, return_exceptions=True)
+        session._backend_cleanup_tasks.clear()
+        session._backend_retirements.clear()
+
+
+@pytest.mark.asyncio
+async def test_manual_stop_and_attempt_finally_share_captured_retirement(manager, monkeypatch):
+    started, retiring, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    class HeldRetirement(_FakeBackend):
+        def __init__(self):
+            super().__init__([])
+            self.interrupts = 0
+            self.stops = 0
+
+        async def start(self, *args, **kwargs):
+            started.set()
+
+        async def stream(self):
+            await asyncio.Event().wait()
+            yield None
+
+        async def interrupt(self):
+            self.interrupts += 1
+            retiring.set()
+            await release.wait()
+
+        async def stop(self):
+            self.stops += 1
+
+    backend = HeldRetirement()
+    session = await _new(manager, "Shared retirement")
+    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: backend)
+    receipt = await manager.start_message(session.id, "held request")
+    await started.wait()
+    try:
+        assert await asyncio.wait_for(manager.interrupt(session.id), 1)
+        await retiring.wait()
+        assert backend.interrupts == 1 and backend.stops == 0
+    finally:
+        release.set()
+    completion = await asyncio.wait_for(receipt.wait(), 2)
+    assert completion.outcome.status == "interrupted"
+    assert backend.interrupts == 1 and backend.stops == 1

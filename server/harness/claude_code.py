@@ -656,7 +656,7 @@ class _JsonlTranscriptCodec:
 # `claude` resumes its OWN sessions reliably, so HISTORY_REPLAY sidesteps the
 # problem: the fork's FIRST turn carries the truncated parent transcript wrapped
 # into its user prompt (a normal fresh `claude --print` turn — done in
-# SessionManager.send_message), and turn 2+ resumes claude's own captured
+# SessionManager._execute_claimed_request), and turn 2+ resumes claude's own captured
 # session id natively. Same contract + trade-offs as Codex (a heavier first
 # turn, no parent-prefix cache reuse). NATIVE_TRANSCRIPT can return as a cache
 # optimization if/when the CLI gains reliable external-transcript resume.
@@ -669,7 +669,7 @@ async def _fork_prepare_replay(
     fork_id: str,
 ) -> Any:
     """No on-disk work. The first fork turn's user prompt is wrapped with the
-    truncated history (in SessionManager.send_message); `session_started`
+    truncated history (in SessionManager._execute_claimed_request); `session_started`
     captures claude's real session id on turn 1; turn 2+ uses native resume of
     that own-session id. The `resume_id_hint` is ignored. Used by /rewind."""
     from .fork import ForkArtifact

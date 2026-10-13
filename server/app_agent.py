@@ -331,12 +331,15 @@ class AppAgentManager:
         try:
             from .wiki.tasks import explicit_mode
             mode = explicit_mode(message, wiki_mode)
-            await mgr.start_message(session.id, body, source="app", **({"wiki_mode": mode} if mode else {}))
+            receipt = await mgr.start_message(session.id, body, source="app", **({"wiki_mode": mode} if mode else {}))
         except Exception as exc:
             self._turns.pop(session.id, None)
             raise AppAgentError(
                 f"could not start the turn: {exc}", status_code=500
             )
+        if not receipt.accepted:
+            self._turns.pop(session.id, None)
+            raise AppAgentError("This conversation is closed to new turns", status_code=409)
         return turn
 
     # -------------------------------------------------------------- internals
@@ -507,10 +510,15 @@ class AppAgentManager:
         if not sid:
             return
         turn = self._turns.get(sid)
-        if turn is None:
+        if turn is None or turn.done.is_set():
             return
 
         kind = msg.get("type")
+        if kind == "recording_failed":
+            turn.error = "The agent finished, but saving its result is unconfirmed. Open the conversation to retry saving."
+            turn.queue.put_nowait({"type": "error", "code": "recording_unconfirmed", "message": turn.error})
+            turn.done.set()
+            return
         if kind in ("result", "error") and msg.get("retrying"):
             return
         if kind == "assistant_delta":

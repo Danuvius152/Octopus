@@ -18,6 +18,7 @@ from server.research import manager as rm_mod
 from server.research.manager import ResearchManager
 from server.research.orchestrator import ResearchProgress, ResearchReport
 from server.session_manager import SessionManager
+from tests.submission import accepted_receipt
 
 
 @pytest.fixture
@@ -76,6 +77,7 @@ async def test_start_completes_and_injects_report(rm, mgr, db, monkeypatch):
         assert source == "research"
         assert delivery_id.startswith("research:")
         injected.append((session_id, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", fake_start_message)
 

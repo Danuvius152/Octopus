@@ -11,12 +11,13 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .base import DatabaseBase
+from .base import DatabaseBase, serialized_write
 
 
 class NotifiersMixin(DatabaseBase):
     # --- Notifiers ---
 
+    @serialized_write
     async def save_notifier(
         self,
         notifier_id: str,
@@ -74,6 +75,7 @@ class NotifiersMixin(DatabaseBase):
             for row in rows
         ]
 
+    @serialized_write
     async def delete_notifier(self, notifier_id: str) -> bool:
         await self._ensure_connected()
         cursor = await self.conn.execute(
@@ -82,6 +84,7 @@ class NotifiersMixin(DatabaseBase):
         await self.conn.commit()
         return cursor.rowcount > 0
 
+    @serialized_write
     async def update_notifier(self, notifier_id: str, **fields: Any) -> None:
         await self._ensure_connected()
         allowed = {"label", "enabled", "config"}

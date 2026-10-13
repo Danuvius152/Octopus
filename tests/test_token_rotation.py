@@ -8,6 +8,8 @@ the failure this feature exists to prevent is a database nobody can decrypt.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -179,6 +181,170 @@ async def test_a_secret_that_cannot_be_decrypted_changes_nothing(db, env_file):
 
 
 @pytest.mark.asyncio
+async def test_failed_rotation_keeps_buffered_and_concurrent_session_messages(db, env_file, monkeypatch):
+    """A secret transaction cannot roll back another session's transcript."""
+    await _seed_secrets(db)
+    await db.save_session("active", "active conversation", "/tmp", "2026-10-14")
+    await db.append_message("active", 0, "assistant", "text", "Before rotation")
+    entered, release = asyncio.Event(), asyncio.Event()
+    execute = db.conn.execute
+
+    async def fail_second_secret(sql, parameters=()):
+        if sql.startswith("UPDATE connector_installation_secrets"):
+            entered.set()
+            await release.wait()
+            raise OSError("secret update failed")
+        return await execute(sql, parameters)
+
+    monkeypatch.setattr(db.conn, "execute", fail_second_secret)
+    rotation = asyncio.create_task(rotate_auth_token(db, NEW))
+    concurrent = None
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        concurrent = asyncio.create_task(
+            db.append_message("active", 1, "assistant", "text", "During rotation")
+        )
+        # Give the concurrent writer a chance to enter; a serialized owner
+        # legitimately holds it until its own transaction has unwound.
+        await asyncio.wait({concurrent}, timeout=0.05)
+        release.set()
+        with pytest.raises(TokenRotationError, match="secret update failed"):
+            await rotation
+        await concurrent
+    finally:
+        release.set()
+        await asyncio.gather(rotation, *([concurrent] if concurrent else []), return_exceptions=True)
+
+    await db.flush()
+    rows = await db.load_messages("active")
+    assert [row["content"] for row in rows] == ["Before rotation", "During rotation"]
+    assert decrypt(await _stored(db, "credential_secrets", "secret_encrypted", "credential_id", "cred-1"), OLD) == "sk-ant-secret"
+    assert settings.auth_token == OLD
+    assert f"OCTOPUS_AUTH_TOKEN={OLD}" in env_file.read_text()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_rotation_restores_files_secrets_and_releases_message_writer(db, env_file, monkeypatch):
+    await _seed_secrets(db)
+    await db.save_session("active", "active conversation", "/tmp", "2026-10-14")
+    await db.append_message("active", 0, "assistant", "text", "Before cancellation")
+    entered, release = asyncio.Event(), asyncio.Event()
+    execute = db.conn.execute
+
+    async def hold_second_secret(sql, parameters=()):
+        if sql.startswith("UPDATE connector_installation_secrets"):
+            entered.set()
+            await release.wait()
+        return await execute(sql, parameters)
+
+    monkeypatch.setattr(db.conn, "execute", hold_second_secret)
+    rotation = asyncio.create_task(rotate_auth_token(db, NEW))
+    concurrent = None
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        concurrent = asyncio.create_task(
+            db.append_message("active", 1, "assistant", "text", "After cancellation")
+        )
+        rotation.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await rotation
+        await asyncio.wait_for(concurrent, 1)
+    finally:
+        release.set()
+        await asyncio.gather(rotation, *([concurrent] if concurrent else []), return_exceptions=True)
+
+    await db.flush()
+    assert [row["content"] for row in await db.load_messages("active")] == ["Before cancellation", "After cancellation"]
+    assert decrypt(await _stored(db, "credential_secrets", "secret_encrypted", "credential_id", "cred-1"), OLD) == "sk-ant-secret"
+    assert settings.auth_token == OLD
+    assert f"OCTOPUS_AUTH_TOKEN={OLD}" in env_file.read_text()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acknowledgement_error", [OSError, asyncio.CancelledError])
+async def test_committed_rotation_with_lost_acknowledgement_keeps_new_key_everywhere(db, env_file, monkeypatch, acknowledgement_error):
+    await _seed_secrets(db)
+    commit = db.conn.commit
+    injected = False
+
+    async def lose_rekey_acknowledgement():
+        nonlocal injected
+        ciphertext = await _stored(db, "credential_secrets", "secret_encrypted", "credential_id", "cred-1")
+        changed = False
+        try:
+            decrypt(ciphertext, OLD)
+        except ValueError:
+            changed = True
+        await commit()
+        if changed and not injected:
+            injected = True
+            raise acknowledgement_error("Commit acknowledgement lost")
+
+    monkeypatch.setattr(db.conn, "commit", lose_rekey_acknowledgement)
+    result = await rotate_auth_token(db, NEW)
+    assert injected and result.reencrypted["credential_secrets"] == 1
+    assert settings.auth_token == NEW
+    assert f"OCTOPUS_AUTH_TOKEN={NEW}" in env_file.read_text()
+    assert decrypt(await _stored(db, "credential_secrets", "secret_encrypted", "credential_id", "cred-1"), NEW) == "sk-ant-secret"
+
+
+@pytest.mark.asyncio
+async def test_rotation_with_unverifiable_commit_reports_uncertainty_without_restoring_files(db, env_file, monkeypatch):
+    from server import token_rotation
+
+    await _seed_secrets(db)
+    commit = db.conn.commit
+
+    async def lose_acknowledgement():
+        await commit()
+        raise OSError("Commit acknowledgement lost")
+
+    def unavailable_reader(*args, **kwargs):
+        raise OSError("Committed read unavailable")
+
+    monkeypatch.setattr(db.conn, "commit", lose_acknowledgement)
+    monkeypatch.setattr(token_rotation.aiosqlite, "connect", unavailable_reader)
+    with pytest.raises(TokenRotationError) as exc:
+        await rotate_auth_token(db, NEW)
+    assert exc.value.status_code == 503
+    assert "unconfirmed" in exc.value.message.lower()
+    assert "nothing was changed" not in exc.value.message.lower()
+    assert f"OCTOPUS_AUTH_TOKEN={NEW}" in env_file.read_text()
+    assert decrypt(await _stored(db, "credential_secrets", "secret_encrypted", "credential_id", "cred-1"), NEW) == "sk-ant-secret"
+    monkeypatch.setattr(db.conn, "commit", commit)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancellations", [1, 2])
+async def test_cancelled_rotation_waiter_finishes_captured_commit_before_key_handoff(db, env_file, monkeypatch, cancellations):
+    await _seed_secrets(db)
+    commit = db.conn.commit
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed_acknowledgement():
+        await commit()
+        entered.set()
+        await release.wait()
+
+    monkeypatch.setattr(db.conn, "commit", delayed_acknowledgement)
+    rotation = asyncio.create_task(rotate_auth_token(db, NEW))
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        for _ in range(cancellations):
+            rotation.cancel()
+            await asyncio.sleep(0)
+        assert not rotation.done()
+        release.set()
+        await asyncio.wait_for(rotation, 1)
+    finally:
+        release.set()
+        await asyncio.gather(rotation, return_exceptions=True)
+    assert settings.auth_token == NEW
+    assert f"OCTOPUS_AUTH_TOKEN={NEW}" in env_file.read_text()
+    assert decrypt(await _stored(db, "credential_secrets", "secret_encrypted", "credential_id", "cred-1"), NEW) == "sk-ant-secret"
+
+
+@pytest.mark.asyncio
 async def test_a_rotation_with_nowhere_to_persist_is_refused(db, tmp_path, monkeypatch):
     """A token that can't survive a restart would leave the next boot unable
     to decrypt the database it just re-keyed."""
@@ -205,6 +371,7 @@ async def test_rotation_works_with_no_secrets_stored(db, env_file):
 @pytest.fixture
 async def client(db, env_file):
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     auth_router.set_db(db)
     transport = ASGITransport(app=app)

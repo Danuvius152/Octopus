@@ -100,10 +100,12 @@ async def test_classify_bg_task_live_state_join(db):
     await _append(db, "parent", 0, "user", "text", content="run tests")
     await _append(db, "parent", 1, "assistant", "tool_use",
                   tool_name="mcp__bg__run",
-                  tool_input={"command": "bun run test:e2e"}, tool_use_id="bg1")
+                  tool_input={"command": "bun run test:e2e"}, tool_use_id="bg1",
+                  runtime_metadata={"request_id": "r", "attempt_id": "a", "tool_call_id": "call1"})
     await _append(db, "parent", 2, "tool", "tool_result",
                   content="Started bg task `abc123def` (e2e suite)",
-                  tool_use_id="bg1")
+                  tool_use_id="bg1", runtime_metadata={"request_id": "r", "attempt_id": "a", "tool_call_id": "call1",
+                                                        "receipt": {"kind": "bg", "task_id": "abc123def"}})
     # The bg task itself is still running per bg_tasks (the source of truth).
     await db.create_bg_task("abc123def", "parent", "bun run test:e2e",
                             "e2e suite", "/tmp", "2026-06-08T00:00:00+00:00")
@@ -122,9 +124,11 @@ async def test_classify_bg_task_swept_from_history(db):
     await _append(db, "parent", 0, "user", "text", content="x")
     await _append(db, "parent", 1, "assistant", "tool_use",
                   tool_name="mcp__bg__run", tool_input={"command": "ls"},
-                  tool_use_id="bg1")
+                  tool_use_id="bg1", runtime_metadata={"request_id": "r", "attempt_id": "a", "tool_call_id": "call1"})
     await _append(db, "parent", 2, "tool", "tool_result",
-                  content="Started bg task `facade00beef` (ls)", tool_use_id="bg1")
+                  content="Started bg task `facade00beef` (ls)", tool_use_id="bg1",
+                  runtime_metadata={"request_id": "r", "attempt_id": "a", "tool_call_id": "call1",
+                                    "receipt": {"kind": "bg", "task_id": "facade00beef"}})
     # No bg_tasks row → swept by cleanup.
     summary = await fh.classify_side_effects(db, "parent", 0)
     assert summary["bg_tasks"][0]["status"] == "completed (history)"

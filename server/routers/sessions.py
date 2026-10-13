@@ -267,6 +267,7 @@ async def create_session(
 async def resume_dispatch(
     session_manager: SessionMgr,
     session_id: str,
+    resume_queue: bool = True,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ) -> DispatchState:
@@ -275,7 +276,9 @@ async def resume_dispatch(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     from ..sessions.turns import QuotaExceeded
     try:
-        if not await session_manager.resume_dispatch(session_id):
+        if not await session_manager.resume_dispatch(session_id, resume_queue=resume_queue):
+            if session._recording_blocked is not None:
+                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Result saving remains unconfirmed; automatic dispatch is paused")
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     except QuotaExceeded as exc:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc

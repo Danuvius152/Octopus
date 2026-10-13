@@ -455,7 +455,9 @@ class ApplicationManager:
             instructions=instructions,
         )
         try:
-            await self.session_mgr.start_message(session.id, prompt, source="application")
+            receipt = await self.session_mgr.start_message(session.id, prompt, source="application")
+            if not receipt.accepted:
+                raise ApplicationError("Session admission is closed; the build did not start", status_code=409)
         except Exception as exc:
             logger.exception("Failed to start build session for application %s", app_id)
             await db.update_application(
@@ -527,7 +529,13 @@ class ApplicationManager:
         )
         updated = await db.get_application(app_id)
         await self._broadcast_application("application_updated", updated)
-        await self.session_mgr.start_message(session.id, body, source="application")
+        receipt = await self.session_mgr.start_message(session.id, body, source="application")
+        if not receipt.accepted:
+            await db.update_application(
+                app_id, status=row["status"], error=row["error"], updated_at=_now()
+            )
+            await self._broadcast_application("application_updated", await db.get_application(app_id))
+            raise ApplicationError("Session admission is closed; the build did not start", status_code=409)
         assert updated is not None  # written immediately above
         return updated
 
@@ -826,13 +834,14 @@ class ApplicationManager:
         `status: running` means a build turn started (this is how a change
         typed directly into the build session's chat still flips the badge to
         "building"); `result` / `error` end one and hand status over to the
-        filesystem check.
+        filesystem check. An unconfirmed recording shows an explicit saving
+        failure until the original committed result arrives.
         """
         sid = msg.get("session_id")
         if not sid or self.db is None:
             return
         kind = msg.get("type")
-        if kind not in ("status", "result", "error"):
+        if kind not in ("status", "result", "error", "recording_failed"):
             return
         if kind in ("result", "error") and msg.get("retrying"):
             return
@@ -853,6 +862,18 @@ class ApplicationManager:
                     )
                     updated = await self.db.get_application(row["id"])
                     await self._broadcast_application("application_updated", updated)
+                elif kind == "recording_failed":
+                    # Files can already exist, but the chosen result has not
+                    # been confirmed saved. The eventual original terminal
+                    # event will run normal output derivation after verification.
+                    await self.db.update_application(
+                        row["id"], status=STATUS_FAILED,
+                        error="Saving the build result is unconfirmed. Open the build conversation to verify and retry saving.",
+                        updated_at=_now(),
+                    )
+                    await self._broadcast_application(
+                        "application_updated", await self.db.get_application(row["id"])
+                    )
                 elif kind == "result":
                     err = (
                         str(msg.get("message") or "The build turn ended with an error.")

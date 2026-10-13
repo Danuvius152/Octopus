@@ -331,3 +331,219 @@ async def test_paused_schedule_neither_notifies_completion_nor_archives_until_re
     await asyncio.wait_for(resumed, 2)
     assert manager.get_session(scheduled.id) is None
     assert len(notifications) == 1
+
+
+async def test_submission_receipt_duplicate_and_closed_are_explicit(dispatch):
+    from server.mcp_identity import close_work
+
+    manager, session, _, _ = dispatch
+    await manager.interrupt(session.id)
+    accepted = await manager.start_message(session.id, "return", source="bg", delivery_id="bg:receipt")
+    duplicate = await manager.start_message(session.id, "return", source="bg", delivery_id="bg:receipt")
+    assert accepted.disposition == "accepted"
+    assert duplicate.disposition == "duplicate"
+    assert duplicate.request_id == accepted.request_id
+    close_work("closed-receipt-work")
+    closed = await manager.start_message(session.id, "ignored", source="bg", work_id="closed-receipt-work")
+    assert closed.disposition == "closed"
+    assert (await closed.wait()).state == "withdrawn"
+    assert len(session._pending_queue) == 1
+
+
+async def test_cancelled_receipt_waiter_does_not_cancel_execution(dispatch):
+    manager, session, started, holds = dispatch
+    receipt = await manager.start_message(session.id, "first")
+    assert await asyncio.wait_for(started.get(), 2) == "first"
+    waiting = asyncio.create_task(receipt.wait())
+    waiting.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiting
+    assert session._inner_task is not None and not session._inner_task.done()
+    holds["first"].set()
+    completion = await asyncio.wait_for(receipt.wait(), 2)
+    assert completion.state == "completed"
+    assert completion.request_id == receipt.request_id
+    assert completion.outcome.status == "success"
+
+
+async def test_accepted_receipt_does_not_wait_for_notification(dispatch):
+    manager, session, _, _ = dispatch
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def blocked(event):
+        if event["type"] == "dispatch_state":
+            entered.set()
+            await release.wait()
+
+    manager.on_broadcast("blocked-admission", blocked)
+    receipt = await asyncio.wait_for(manager.start_message(session.id, "fast"), .2)
+    assert receipt.disposition == "accepted"
+    assert session._active_task is not None
+    release.set()
+    assert (await asyncio.wait_for(receipt.wait(), 2)).outcome.status == "success"
+
+
+async def test_withdrawn_queued_receipt_has_no_model_outcome(dispatch):
+    manager, session, _, _ = dispatch
+    await manager.interrupt(session.id)
+    receipt = await manager.start_message(session.id, "return", source="bg", work_id="withdraw-receipt-work")
+    affected = manager.close_work("withdraw-receipt-work")
+    await manager.finish_work_cancellation(affected)
+    completion = await asyncio.wait_for(receipt.wait(), .2)
+    assert completion.state == "withdrawn"
+    assert completion.outcome is None
+
+
+async def test_deleted_queued_receipt_ends_wait(dispatch):
+    manager, session, _, _ = dispatch
+    await manager.interrupt(session.id)
+    receipt = await manager.start_message(session.id, "return", source="bg")
+    await manager.delete_session(session.id)
+    assert (await asyncio.wait_for(receipt.wait(), .2)).state == "deleted"
+
+
+@pytest.mark.parametrize("dispatch", [True], indirect=True)
+async def test_inline_steer_receipt_follows_actual_logical_request(dispatch):
+    manager, session, started, holds = dispatch
+    delivered = asyncio.Event()
+
+    async def notice(event):
+        if event["type"] == "steered":
+            delivered.set()
+
+    manager.on_broadcast("steer-completion", notice)
+    original = await manager.start_message(session.id, "first")
+    assert await asyncio.wait_for(started.get(), 2) == "first"
+    steer = await manager.start_message(session.id, "inline input", steerable=True)
+    assert steer.disposition == "steered"
+    await asyncio.wait_for(holds["frame entered"].wait(), 2)
+    holds["frame"].set()
+    await asyncio.wait_for(delivered.wait(), 2)
+    holds["first"].set()
+    completed = await asyncio.wait_for(steer.wait(), 2)
+    assert completed.input_request_id == steer.request_id
+    assert completed.request_id == original.request_id
+    assert completed.outcome.request_id == original.request_id
+    rows = await manager.db.load_messages(session.id)
+    assert sum(row["type"] == "result" for row in rows) == 1
+
+
+@pytest.mark.parametrize("dispatch", [True], indirect=True)
+async def test_failed_inline_delivery_retains_receipt_for_queued_execution(dispatch):
+    manager, session, started, holds = dispatch
+    original = await manager.start_message(session.id, "first")
+    assert await asyncio.wait_for(started.get(), 2) == "first"
+    steer = await manager.start_message(session.id, "fallback input", steerable=True)
+    await asyncio.wait_for(holds["frame entered"].wait(), 2)
+    await manager.interrupt(session.id)
+    assert (await asyncio.wait_for(original.wait(), 2)).outcome.status == "interrupted"
+    await manager.resume_dispatch(session.id)
+    assert await asyncio.wait_for(started.get(), 2) == "fallback input"
+    completed = await asyncio.wait_for(steer.wait(), 2)
+    assert completed.request_id == steer.request_id
+    assert completed.outcome.status == "success"
+
+
+async def test_expired_question_delivery_finishes_without_model_outcome(dispatch):
+    manager, session, started, _ = dispatch
+    receipt = await manager.start_message(session.id, "answer old question", source="delegation", question_session_id="missing-child", question_id="expired")
+    completion = await asyncio.wait_for(receipt.wait(), 2)
+    assert completion.state == "expired"
+    assert completion.outcome is None
+    assert started.empty()
+
+
+async def test_shutdown_withdraws_accepted_unstarted_receipts(dispatch):
+    manager, session, _, _ = dispatch
+    await manager.interrupt(session.id)
+    receipt = await manager.start_message(session.id, "return", source="bg")
+    await manager.drain_turns()
+    assert (await asyncio.wait_for(receipt.wait(), 2)).state == "shutdown"
+    closed = await manager.start_message(session.id, "late return", source="bg")
+    assert closed.disposition == "closed"
+
+
+async def test_duplicate_delivery_after_shutdown_keeps_original_request_and_completion(dispatch):
+    manager, session, started, _ = dispatch
+    await manager.interrupt(session.id)
+    original = await manager.start_message(session.id, "return", source="bg", delivery_id="one-return")
+    await manager.drain_turns()
+    duplicate = await manager.start_message(session.id, "return", source="bg", delivery_id="one-return")
+    assert duplicate.disposition == "duplicate"
+    assert duplicate.request_id == original.request_id
+    assert await duplicate.wait() == await original.wait()
+    assert (await duplicate.wait()).state == "shutdown"
+    assert started.empty() and not session._pending_queue
+
+
+async def test_precise_request_cancel_keeps_later_input(dispatch):
+    manager, session, _, _ = dispatch
+    await manager.interrupt(session.id)
+    older = await manager.start_message(session.id, "older", source="wiki")
+    later = await manager.start_message(session.id, "later", source="wiki")
+    assert await manager.cancel_request(session.id, older.request_id)
+    assert (await older.wait()).state == "withdrawn"
+    assert [item.request_id for item in session._pending_queue] == [later.request_id]
+
+
+async def test_unconfirmed_old_backend_retirement_blocks_replacement(dispatch, monkeypatch):
+    from tests.fake_run import FakeRunBase
+
+    manager, session, _, _ = dispatch
+    reaped = asyncio.Event()
+    entered = asyncio.Event()
+    created = []
+
+    class OldRun(FakeRunBase):
+        async def interrupt(self):
+            pass
+
+        async def stop(self):
+            entered.set()
+            await reaped.wait()
+
+    session._backend = OldRun()
+    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: created.append(True))
+    try:
+        with pytest.raises(RuntimeError, match="retirement remains unconfirmed"):
+            await manager._acquire_backend(session, None, None, None, retirement_timeout=.01)
+        assert entered.is_set()
+        assert created == []
+        assert len(session._backend_cleanup_tasks) == 1
+        cleanup = next(iter(session._backend_cleanup_tasks))
+        assert not cleanup.cancelled() and not cleanup.done()
+        reaped.set()
+        await cleanup
+        await manager._await_backend_retirement(session)
+    finally:
+        reaped.set()
+
+
+async def test_cancelled_acquire_waiter_keeps_old_retirement_owned(dispatch):
+    from tests.fake_run import FakeRunBase
+
+    manager, session, _, _ = dispatch
+    entered, reaped = asyncio.Event(), asyncio.Event()
+
+    class OldRun(FakeRunBase):
+        async def interrupt(self):
+            pass
+
+        async def stop(self):
+            entered.set()
+            await reaped.wait()
+
+    session._backend = OldRun()
+    acquiring = asyncio.create_task(manager._acquire_backend(session, None, None, None))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        acquiring.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await acquiring
+        cleanup = next(iter(session._backend_cleanup_tasks))
+        assert not cleanup.cancelled() and cleanup in manager._owned_tasks
+        reaped.set()
+        await cleanup
+    finally:
+        reaped.set()
+        await asyncio.gather(acquiring, return_exceptions=True)

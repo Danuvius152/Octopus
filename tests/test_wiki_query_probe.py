@@ -16,7 +16,7 @@ class ReplayManager:
     async def create_session(self, *args, **kwargs):
         return SimpleNamespace(id="synthetic-session")
 
-    async def send_message(self, session_id, question, *, wiki_mode, request_id):
+    async def _execute_claimed_request(self, session_id, question, *, wiki_mode, request_id):
         assert wiki_mode == "read"
         yield {"type": "assistant_text", "content": "职业未记载。"}
         final = {"type": "result", "session_id": session_id, "request_id": request_id,

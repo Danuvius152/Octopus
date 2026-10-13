@@ -684,3 +684,34 @@ def test_spawn_signature_follows_where_the_mcp_namespaces_are_served():
         assert stdio.spawn_signature("/tmp", None) != before
     finally:
         settings.port = original_port
+
+
+@pytest.mark.asyncio
+async def test_retirement_owns_late_spawn_after_start_and_waiter_cancel(tmp_path, monkeypatch):
+    """A cancelled start/stop caller cannot leave a writer alive for the next attempt."""
+    original_spawn = asyncio.create_subprocess_exec
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    spawned = []
+
+    async def delayed_spawn(*argv, **kwargs):
+        entered.set()
+        await release.wait()
+        process = await original_spawn(*argv, **kwargs)
+        spawned.append(process)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
+    run = Harness(_mode_profile("sleep-then", "60")).create_run()
+    starting = asyncio.create_task(run.start("prompt", str(tmp_path)))
+    await entered.wait()
+    starting.cancel()
+    await asyncio.gather(starting, return_exceptions=True)
+    waiting = asyncio.create_task(run.stop())
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    waiting.cancel()
+    await asyncio.gather(waiting, return_exceptions=True)
+    release.set()
+    await asyncio.wait_for(run.stop(), 4)
+    assert len(spawned) == 1 and spawned[0].returncode is not None

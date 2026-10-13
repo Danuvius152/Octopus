@@ -44,6 +44,7 @@ from server.models import MessageContent
 from server.routers import agents as agents_mod
 from server.routers import applications as applications_mod
 from server.session_manager import SessionManager, session_manager
+from tests.submission import accepted_receipt
 
 TOKEN = "changeme"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
@@ -108,7 +109,7 @@ class FakeTurns:
     async def start_message(self, session_id, prompt, attachment_ids=None, **kw):
         self.prompts.append((session_id, prompt))
         if not self.emit:
-            return
+            return accepted_receipt()
         for chunk in ("Sure — ", "the article "):
             await self.mgr._broadcast(
                 {"type": "assistant_delta", "session_id": session_id, "content": chunk}
@@ -126,6 +127,7 @@ class FakeTurns:
             {"type": "result", "session_id": session_id, "is_error": self.is_error,
              "cost": 0.004}
         )
+        return accepted_receipt()
 
 
 @pytest.fixture
@@ -145,6 +147,17 @@ async def _make_app(am, db, *, name="SmartReader") -> dict:
 
 
 # ------------------------------------------------------------ the token
+
+
+@pytest.mark.asyncio
+async def test_closed_admission_refuses_app_turn_without_leaving_a_waiter(aam, am, db, mgr):
+    mgr._admission_closed = True
+    row = await _make_app(am, db)
+    with pytest.raises(AppAgentError) as exc:
+        await aam.begin_turn(row, message="Summarize this article")
+    assert exc.value.status_code == 409
+    assert "closed" in exc.value.message.lower()
+    assert not aam._turns
 
 
 def test_scope_token_is_per_app_and_not_the_master_token():
@@ -392,6 +405,7 @@ async def test_a_turn_still_unwinding_is_waited_out_not_refused(
         await mgr._broadcast(
             {"type": "result", "session_id": session_id, "is_error": False}
         )
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", start)
     first = await aam.ask(row, message="one")
@@ -421,6 +435,7 @@ async def test_a_conversation_busy_with_someone_elses_turn_is_refused(
         await mgr._broadcast(
             {"type": "result", "session_id": session_id, "is_error": False}
         )
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", start)
     first = await aam.ask(row, message="one")
@@ -463,6 +478,19 @@ async def test_app_waits_through_recovery_events(aam, am, db, mgr, turns):
     assert events[-1]["type"] == "done"
     assert events[-1]["reply"] == "recovered"
     assert not any(event["type"] == "error" for event in events)
+
+
+async def test_app_reports_recording_failure_without_a_saved_success(aam, am, db, mgr, turns):
+    row = await _make_app(am, db)
+    turns.emit = False
+    turn = await aam.begin_turn(row, message="hi")
+    await mgr._broadcast({"type": "recording_failed", "session_id": turn.session_id,
+                          "request_id": "chosen", "recording_state": "unconfirmed"})
+    assert turn.done.is_set()
+    events = [event async for event in aam.stream_turn(turn)]
+    assert events[-1]["type"] == "error"
+    assert events[-1]["code"] == "recording_unconfirmed"
+    assert not any(event["type"] == "done" for event in events)
 
 
 @pytest.mark.asyncio
@@ -516,6 +544,7 @@ async def test_a_question_reaches_the_app(aam, am, db, mgr, turns, monkeypatch):
         await mgr._broadcast(
             {"type": "result", "session_id": session_id, "is_error": False}
         )
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", ask_then_question)
     turn = await aam.begin_turn(row, message="hi")
@@ -534,6 +563,7 @@ async def client(apps_root, monkeypatch):
     database = Database(":memory:")
     await database.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(database)
 
     agents_mod.set_manager(AgentManager(database))

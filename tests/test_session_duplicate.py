@@ -297,6 +297,7 @@ async def client():
     db = Database(":memory:")
     await db.initialize()
     global_sm.sessions.clear()
+    global_sm._admission_closed = False
     await global_sm.initialize(db)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:

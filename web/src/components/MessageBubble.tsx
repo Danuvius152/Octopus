@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   IconChevronDown,
   IconChevronRight,
@@ -25,6 +25,7 @@ import {
 } from "./AgentDelegationEventCard";
 import { AgentDelegationRequestCard } from "./AgentDelegationRequestCard";
 import { SubagentCard } from "./SubagentCard";
+import { projectToolCall, readRuntimeMetadata } from "../lib/toolIdentity";
 import { requestSource } from "../lib/injectedTurns";
 
 // Marker the backend prepends to the synthesized user message it
@@ -350,18 +351,6 @@ function ToolUseBlock({
     return null;
   })();
 
-  // The bg MCP tool returns a task_id in its tool_result, but the
-  // tool_use itself doesn't carry it (the model generated the
-  // tool_use_id before knowing the bg task_id). We find the matching
-  // bg task by `bg_started` events stamped with the SAME tool's
-  // command text + most-recent-first. Simpler approach: the next
-  // tool_result message that follows this tool_use carries the
-  // started-at-task_id text. For now: render the chip whenever the
-  // tool is bg_run, and the chip itself fetches by id once we have
-  // it (via the followup tool_result text). We grab the task id from
-  // tool_input.__task_id if the backend injected it OR fall back to
-  // matching by command — the bg MCP server returns text like
-  // "Started bg task `<id>`" which the tool_result will contain.
   const isBgRun = message.tool_name === "mcp__bg__run";
   // Agent-to-agent delegation kick-off (agent-collaboration.md §6).
   // The MCP tool's full name is `mcp__<config-key>__<tool-name>`; the
@@ -370,7 +359,7 @@ function ToolUseBlock({
   const isAskAgent = message.tool_name === "mcp__ask_agent__ask";
   const askAgentInput = isAskAgent
     ? (message.tool_input as
-        | { name?: unknown; request?: unknown; files?: unknown }
+        | { name?: unknown; delegation_id?: unknown; request?: unknown; files?: unknown }
         | undefined)
     : undefined;
   const askAgentName =
@@ -420,15 +409,16 @@ function ToolUseBlock({
       {isBgRun && <BgChipForToolUse sessionId={sessionId} message={message} />}
       {/* Native sub-agents (native-subagents.md). Deliberately NOT matched on
         * the tool's name: Claude Code has called it `Task` and now `Agent`,
-        * and Codex's is `subagent:<tool>`. The run is keyed by tool_use_id,
+        * and Codex's is `subagent:<tool>`. The run is keyed by tool_call_id,
         * so the card renders exactly when there is a run to show and nothing
         * otherwise — no name list to keep in step with two CLIs. */}
-      <SubagentCard sessionId={sessionId} toolUseId={message.tool_use_id} />
-      {isAskAgent && askAgentName && askAgentRequest && (
+      <SubagentCard sessionId={sessionId} toolCallId={readRuntimeMetadata(message.runtime_metadata)?.tool_call_id} />
+      {isAskAgent && askAgentRequest && (
         <AgentDelegationRequestCard
           sessionId={sessionId}
-          toolUseId={message.tool_use_id}
+          message={message}
           agentName={askAgentName}
+          continued={typeof askAgentInput?.delegation_id === "string"}
           request={askAgentRequest}
           files={askAgentFiles}
         />
@@ -437,43 +427,15 @@ function ToolUseBlock({
   );
 }
 
-/**
- * Bridges a `mcp__bg__run` tool_use → the live BgTaskChip.
- *
- * The model's tool_use doesn't carry the task_id (we mint it
- * server-side). We pull the matching task out of the store by
- * looking for the most recent task whose `command` matches the
- * tool_use's input.command. The bg_started WS event populates the
- * store before this component mounts in normal flow; on snapshot
- * rehydration we still get a match because list_bg_tasks is fetched
- * on session load.
- */
-function BgChipForToolUse({
-  sessionId,
-  message,
-}: {
-  sessionId: string;
-  message: Message;
-}) {
-  const command =
-    message.tool_input && typeof message.tool_input.command === "string"
-      ? (message.tool_input.command as string)
-      : "";
-  const matchedId = useSessionStore((s) => {
-    const tasks = s.bgTasks[sessionId] || [];
-    const match = [...tasks]
-      .reverse()
-      .find((t) => t.command === command);
-    return match?.id ?? null;
-  });
-  if (!matchedId) {
-    return (
-      <div className="octo-bgtask-chip inline-flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs text-muted-foreground">
-        <span>Waiting for bg task to register…</span>
-      </div>
-    );
-  }
-  return <BgTaskChip sessionId={sessionId} taskId={matchedId} />;
+/** The receipt names the task; the command remains a readable description. */
+function BgChipForToolUse({ sessionId, message }: { sessionId: string; message: Message }) {
+  const messages = useSessionStore((s) => s.messages[sessionId]);
+  const projection = useMemo(() => projectToolCall(message, messages), [message, messages]);
+  const taskId = projection.receipt?.kind === "bg" ? projection.receipt.task_id : undefined;
+  if (taskId) return <BgTaskChip sessionId={sessionId} taskId={taskId} />;
+  return <div className="octo-bgtask-chip inline-flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1.5 text-xs text-muted-foreground">
+    <span>{projection.failed ? "Background command failed to start" : projection.result ? "Background task receipt unavailable" : "Waiting for background task receipt…"}</span>
+  </div>;
 }
 
 function BgTaskResultMessage({

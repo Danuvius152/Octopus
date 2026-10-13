@@ -11,8 +11,7 @@
  * REST round-trip the tool_use kicked off. Once the sibling
  * tool_result arrives, we match the live record by the
  * `delegation_id` and `work_id` captured in its own tool receipt.
- * Name/request and legacy receipts can display a session; cancelling
- * requires the receipt's exact work identity.
+ * Every association uses the canonical call and its exact round receipt.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -26,7 +25,8 @@ import {
   IconX,
 } from "@tabler/icons-react";
 
-import { useSessionStore, type Delegation } from "../stores/sessionStore";
+import { projectToolCall } from "../lib/toolIdentity";
+import { useSessionStore, type Delegation, type Message } from "../stores/sessionStore";
 
 const STATUS_LABEL: Record<Delegation["state"], string> = {
   running: "running",
@@ -50,16 +50,18 @@ function StatusIcon({ state }: { state: Delegation["state"] }) {
 
 export function AgentDelegationRequestCard({
   sessionId,
-  toolUseId,
+  message,
   agentName,
   request,
   files,
+  continued = false,
 }: {
   sessionId: string;
-  toolUseId: string | undefined;
+  message: Message;
   agentName: string;
   request: string;
   files: string[] | undefined;
+  continued?: boolean;
 }) {
   const token = useSessionStore((s) => s.token);
   const setDelegations = useSessionStore((s) => s.setDelegations);
@@ -67,92 +69,54 @@ export function AgentDelegationRequestCard({
   const setActiveAgentId = useSessionStore((s) => s.setActiveAgentId);
   const sessions = useSessionStore((s) => s.sessions);
   const messages = useSessionStore((s) => s.messages[sessionId]);
-  const wantName = (agentName || "").toLowerCase();
-
-  // Server-truth path: the tool_result for THIS tool_use carries
-  // "Started delegation `<id>`" plus its work_id. The session id alone
-  // cannot authorize cancellation of a subsequent round. We match it when the tool_result has
-  // already arrived; that's robust to any request-string round-trip
-  // differences between what the model wrote and what the server
-  // stored (which was tripping the (name,request) match in real
-  // browser runs).
-  const identityFromResult = useMemo(() => {
-    if (!toolUseId || !messages) return null;
-    const tr = messages.find(
-      (m) => m.type === "tool_result" && m.tool_use_id === toolUseId
-    );
-    if (!tr || typeof tr.content !== "string") return null;
-    const m = tr.content.match(/(?:Started|Continued) delegation `([A-Za-z0-9]+)`/);
-    const work = tr.content.match(/work_id=([A-Za-z0-9-]+)/);
-    return m ? { delegationId: m[1], workId: work?.[1] } : null;
-  }, [messages, toolUseId]);
-
-  // Fall back to (name, request) match only when the tool_result
-  // hasn't arrived yet — that's the brief window between the
-  // tool_use rendering and the MCP shim's HTTP round-trip completing.
-  // We deliberately do NOT fall further to "by name alone": under
-  // fan-out (multiple in-flight delegations to the same target) it
-  // would bind this card to the wrong record and the Cancel button
-  // would stop someone else's delegation. When neither match
-  // applies, render the card in a starting-state with no controls.
-  const match = useSessionStore((s) => {
-    const list = s.delegations[sessionId] || [];
-    if (identityFromResult) {
-      return list.find((d) => d.delegation_id === identityFromResult.delegationId &&
-        (!identityFromResult.workId || d.work_id === identityFromResult.workId));
-    }
-    return [...list]
-      .reverse()
-      .find(
-        (d) =>
-          (d.target_agent_name || "").toLowerCase() === wantName &&
-          d.request === request
-      );
-  });
+  const projection = useMemo(() => projectToolCall(message, messages), [message, messages]);
+  const receipt = projection.receipt?.kind === "delegation" ? projection.receipt : undefined;
+  const delegationId = receipt?.delegation_id;
+  const workId = receipt?.work_id;
+  const match = useSessionStore((s) => (s.delegations[sessionId] || []).find((delegation) =>
+    Boolean(delegationId && workId) && delegation.delegation_id === delegationId && delegation.work_id === workId
+  ));
   const [cancelling, setCancelling] = useState(false);
+  const state = match?.state;
+  const displayName = match?.target_agent_name || agentName || "agent";
 
-  // Poll the delegations list until we have a record AND it's in a
-  // terminal state. The card mounts when the tool_use is emitted,
-  // but the server-side delegation may not yet exist (the MCP shim's
-  // HTTP POST is still in flight); we can't rely on a single
-  // on-mount fetch. The poll fires an immediate request then every
-  // 2 s and stops automatically once the record terminates. No WS
-  // event for delegation state changes exists yet; this is the
-  // right shape for v1.
+  // A confirmed receipt names a round already created by the manager. One
+  // authoritative missing-round response ends polling; it cannot become the
+  // newer round. Network failures have a bounded retry and one in-flight fetch.
   useEffect(() => {
-    if (match && match.state !== "running") return;
-    const url = `${window.location.origin}/api/sessions/${encodeURIComponent(
-      sessionId
-    )}/delegations`;
+    if (!delegationId || !workId || (state && state !== "running")) return;
+    const url = `${window.location.origin}/api/sessions/${encodeURIComponent(sessionId)}/delegations`;
+    const abort = new AbortController();
     let cancelled = false;
-    const fire = () => {
-      fetch(url, { headers: { Authorization: `Bearer ${token}` } })
-        .then((r) => (r.ok ? r.json() : null))
-        .then((data) => {
-          if (!cancelled && Array.isArray(data))
-            setDelegations(sessionId, data as Delegation[]);
-        })
-        .catch(() => {});
+    let failures = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const fire = async () => {
+      let again = false;
+      try {
+        const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: abort.signal });
+        const data = response.ok ? await response.json() : null;
+        if (cancelled) return;
+        if (Array.isArray(data)) {
+          setDelegations(sessionId, data as Delegation[]);
+          again = data.some((item: Delegation) => item.delegation_id === delegationId && item.work_id === workId && item.state === "running");
+          failures = 0;
+        } else again = ++failures < 3;
+      } catch {
+        again = ++failures < 3;
+      }
+      if (!cancelled && again) timer = setTimeout(() => { void fire(); }, 2000);
     };
-    fire();
-    const id = window.setInterval(fire, 2000);
+    void fire();
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      if (timer !== undefined) clearTimeout(timer);
+      abort.abort();
     };
-    // `match?.state` is the precise dependency, and listing `match` itself
-    // would be a bug rather than a fix: this effect calls setDelegations,
-    // which replaces the store entry, which yields a fresh `match` object on
-    // the next render — so depending on the object would tear down and
-    // rebuild the interval on every poll. Only `.state` is read (the early
-    // return); `url` is built from sessionId. See CLAUDE.md Conventions on
-    // avoiding re-render loops.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [match?.state, sessionId, token, setDelegations]);
+  }, [delegationId, workId, state, sessionId, token, setDelegations]);
 
   const openChild = async () => {
-    if (!match) return;
-    let child = sessions.find((s) => s.id === match.delegation_id);
+    if (!delegationId) return;
+    let child = sessions.find((s) => s.id === delegationId);
     if (!child) {
       // After DelegationManager auto-archives the child on terminal
       // delivery, the child is no longer in the live `sessions`
@@ -160,7 +124,7 @@ export function AgentDelegationRequestCard({
       // archived rows too) and slot it into the right store map so
       // the chat view can render either as live or read-only.
       const url = `${window.location.origin}/api/sessions/${encodeURIComponent(
-        match.delegation_id
+        delegationId
       )}`;
       try {
         const r = await fetch(url, {
@@ -188,11 +152,11 @@ export function AgentDelegationRequestCard({
       }
     }
     if (child?.agent_id) setActiveAgentId(child.agent_id);
-    setActiveSessionId(match.delegation_id);
+    setActiveSessionId(delegationId);
   };
 
   const cancel = async () => {
-    if (!match || !identityFromResult?.workId || match.work_id !== identityFromResult.workId) return;
+    if (!match || state !== "running" || !workId || match.work_id !== workId) return;
     setCancelling(true);
     const url = `${window.location.origin}/api/sessions/${encodeURIComponent(
       sessionId
@@ -211,38 +175,31 @@ export function AgentDelegationRequestCard({
     }
   };
 
-  const state = match?.state ?? "running";
-  const label = STATUS_LABEL[state];
-  const delegationIdShort = match?.delegation_id?.slice(0, 8) ?? "…";
+  const label = state ? STATUS_LABEL[state] : projection.failed ? "failed to start" : receipt ? "status unavailable" : projection.result ? "receipt unavailable" : "awaiting receipt";
 
   return (
     <div
       className={`agent-delegation-request inline-flex items-start gap-2 rounded-md border px-2.5 py-1.5 text-xs ${
         state === "completed"
           ? "border-primary/40 bg-primary/5"
-          : state === "running"
+          : state === "running" || (!state && !projection.failed)
           ? "border-border bg-card"
           : state === "cancelled"
           ? "border-border bg-muted/40 text-muted-foreground"
           : "border-destructive/40 bg-destructive/5"
       }`}
-      data-delegation-state={state}
+      data-delegation-state={state ?? (projection.failed ? "failed" : receipt ? "unavailable" : "pending")}
     >
       <IconSubtask size={14} className="text-primary mt-0.5 shrink-0" />
       <div className="flex-1 min-w-0 space-y-0.5">
         <div className="flex items-center gap-2 flex-wrap">
           <span className="font-medium truncate">
-            Asked {agentName}
+            {continued ? "Continued" : "Asked"} {displayName}
           </span>
           <span className="inline-flex items-center gap-1 text-muted-foreground">
-            <StatusIcon state={state} />
+            {state && <StatusIcon state={state} />}
             <span>{label}</span>
           </span>
-          {match && (
-            <span className="text-[10px] text-muted-foreground/70 font-mono">
-              ({delegationIdShort})
-            </span>
-          )}
         </div>
         <div className="text-muted-foreground truncate" title={request}>
           “{request}”
@@ -254,17 +211,17 @@ export function AgentDelegationRequestCard({
         )}
       </div>
       <div className="flex items-center gap-1 shrink-0">
-        {match && (
+        {delegationId && (
           <button
             type="button"
             onClick={openChild}
             className="btn-open inline-flex items-center justify-center h-6 px-1.5 rounded text-muted-foreground hover:text-foreground hover:bg-accent"
-            title={`Open ${agentName}'s session`}
+            title={`Open ${displayName}'s session`}
           >
             <IconExternalLink size={12} />
           </button>
         )}
-        {state === "running" && match && identityFromResult?.workId && identityFromResult.workId === match.work_id && (
+        {state === "running" && match && workId === match.work_id && (
           <button
             type="button"
             onClick={cancel}

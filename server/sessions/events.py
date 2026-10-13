@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..harness import HarnessEvent
-from ..models import MessageContent, MessageRole
+from ..models import MessageContent, MessageRole, RuntimeMetadata
 from .base import (
     _MAX_SUBAGENTS_PER_SESSION,
     Session,
@@ -44,6 +44,7 @@ class EventsMixin(SessionManagerBase):
                 tool_name=event.tool_name,
                 tool_input=event.tool_input,
                 tool_use_id=event.tool_use_id,
+                runtime_metadata=RuntimeMetadata.model_validate(event.runtime_metadata) if event.runtime_metadata else None,
             )
         if event.type == "tool_result":
             return MessageContent(
@@ -51,6 +52,7 @@ class EventsMixin(SessionManagerBase):
                 type="tool_result",
                 content=event.content,
                 tool_use_id=event.tool_use_id,
+                runtime_metadata=RuntimeMetadata.model_validate(event.runtime_metadata) if event.runtime_metadata else None,
                 is_error=event.is_error,
             )
         if event.type == "question_request":
@@ -60,6 +62,7 @@ class EventsMixin(SessionManagerBase):
                 tool_name="AskUserQuestion",
                 tool_input=event.tool_input,
                 tool_use_id=event.tool_use_id,
+                runtime_metadata=RuntimeMetadata.model_validate(event.runtime_metadata) if event.runtime_metadata else None,
             )
         if event.type == "result":
             return MessageContent(
@@ -82,7 +85,9 @@ class EventsMixin(SessionManagerBase):
         first: a long session can spawn many, and this is UI state, not
         history.
         """
-        key = update.tool_use_id or update.task_id
+        key = update.tool_call_id
+        if not key:
+            return
         if not key:
             return
         session._subagents[key] = update.merged_with(session._subagents.get(key))
@@ -156,6 +161,7 @@ class EventsMixin(SessionManagerBase):
                 "session_id": session_id,
                 "task_id": u.task_id,
                 "tool_use_id": u.tool_use_id,
+                "tool_call_id": u.tool_call_id,
                 "status": u.status,
                 "name": u.name,
                 "description": u.description,

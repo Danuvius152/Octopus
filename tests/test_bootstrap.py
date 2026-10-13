@@ -8,6 +8,7 @@ than either the before or the after.
 
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -45,9 +46,10 @@ async def legacy(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "legacy-agents"))
     crypto._MASTER_CACHE.clear()
 
-    db = Database(":memory:")
+    db = Database(str(tmp_path / "legacy.db"))
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
 
     agent = await db.get_system_agent()
@@ -76,6 +78,7 @@ async def legacy(tmp_path, monkeypatch):
     finally:
         await db.close()
         session_manager.sessions.clear()
+        session_manager._admission_closed = False
 
 
 @pytest.mark.asyncio
@@ -132,12 +135,115 @@ async def test_a_secret_that_will_not_decrypt_changes_nothing(legacy):
 
 
 @pytest.mark.asyncio
+async def test_failed_bootstrap_rekey_restores_secrets_and_keeps_concurrent_messages(legacy, monkeypatch):
+    db, _agent = legacy
+    await db.save_connector_installation(
+        installation_id="inst-1", kind="github", label="GitHub", auth_type="oauth",
+        secret_encrypted=encrypt("github-secret", "the-old-token"), created_at="2026-10-14",
+    )
+    await db.append_message("s-old", 0, "assistant", "text", "Before upgrade")
+    entered, release = asyncio.Event(), asyncio.Event()
+    execute = db.conn.execute
+
+    async def fail_second_secret(sql, parameters=()):
+        if sql.startswith("UPDATE connector_installation_secrets"):
+            entered.set()
+            await release.wait()
+            raise OSError("secret update failed")
+        return await execute(sql, parameters)
+
+    monkeypatch.setattr(db.conn, "execute", fail_second_secret)
+    upgrade = asyncio.create_task(bootstrap_first_account(db, username="archer", password="password1"))
+    concurrent = None
+    try:
+        await asyncio.wait_for(entered.wait(), 1)
+        concurrent = asyncio.create_task(
+            db.append_message("s-old", 1, "assistant", "text", "During upgrade")
+        )
+        await asyncio.wait({concurrent}, timeout=0.05)
+        release.set()
+        with pytest.raises(OSError, match="secret update failed"):
+            await upgrade
+        await concurrent
+    finally:
+        release.set()
+        await asyncio.gather(upgrade, *([concurrent] if concurrent else []), return_exceptions=True)
+
+    await db.flush()
+    assert [row["content"] for row in await db.load_messages("s-old")] == ["Before upgrade", "During upgrade"]
+    assert decrypt(await _stored_secret(db, "cred-1"), "the-old-token") == "sk-ant-the-real-key"
+    assert decrypt(await db.get_connector_secret("inst-1"), "the-old-token") == "github-secret"
+
+
+@pytest.mark.asyncio
 async def test_it_can_only_happen_once(legacy):
     db, _agent = legacy
     await bootstrap_first_account(db, username="archer", password="password1")
     with pytest.raises(BootstrapError) as e:
         await bootstrap_first_account(db, username="vera", password="password2")
     assert e.value.status_code == 409
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("acknowledgement_error", [OSError, asyncio.CancelledError])
+async def test_committed_bootstrap_rekey_with_lost_acknowledgement_finishes_adoption(legacy, monkeypatch, acknowledgement_error):
+    db, _agent = legacy
+    commit = db.conn.commit
+    injected = False
+
+    async def lose_rekey_acknowledgement():
+        nonlocal injected
+        ciphertext = await _stored_secret(db, "cred-1")
+        changed = False
+        try:
+            decrypt(ciphertext, "the-old-token")
+        except ValueError:
+            changed = True
+        await commit()
+        if changed and not injected:
+            injected = True
+            raise acknowledgement_error("Commit acknowledgement lost")
+
+    monkeypatch.setattr(db.conn, "commit", lose_rekey_acknowledgement)
+    summary = await bootstrap_first_account(db, username="archer", password="password1")
+    assert injected and summary["adopted"]["sessions"] == 1
+    user = await db.get_user(summary["user_id"])
+    assert decrypt(await _stored_secret(db, "cred-1"), UserManager(db).data_key(user)) == "sk-ant-the-real-key"
+    assert await db.count_orphan_rows() == {}
+
+
+@pytest.mark.asyncio
+async def test_unverifiable_bootstrap_rekey_retains_account_and_reports_uncertainty(legacy, monkeypatch):
+    from server import token_rotation
+
+    db, _agent = legacy
+    commit = db.conn.commit
+
+    async def lose_rekey_acknowledgement():
+        ciphertext = await _stored_secret(db, "cred-1")
+        changed = False
+        try:
+            decrypt(ciphertext, "the-old-token")
+        except ValueError:
+            changed = True
+        await commit()
+        if changed:
+            raise OSError("Commit acknowledgement lost")
+
+    def unavailable_reader(*args, **kwargs):
+        raise OSError("Committed read unavailable")
+
+    monkeypatch.setattr(db.conn, "commit", lose_rekey_acknowledgement)
+    monkeypatch.setattr(token_rotation.aiosqlite, "connect", unavailable_reader)
+    with pytest.raises(BootstrapError) as exc:
+        await bootstrap_first_account(db, username="archer", password="password1")
+    assert exc.value.status_code == 503
+    assert "unconfirmed" in exc.value.message.lower()
+    assert "nothing was changed" not in exc.value.message.lower()
+    user = await db.get_user_by_username("archer")
+    assert user is not None
+    assert decrypt(await _stored_secret(db, "cred-1"), UserManager(db).data_key(user)) == "sk-ant-the-real-key"
+    monkeypatch.setattr(db.conn, "commit", commit)
 
 
 @pytest.mark.asyncio
@@ -271,6 +377,7 @@ async def test_every_secret_still_opens_through_the_paths_that_read_it(legacy):
     assert token["access_token"] == "gho_real"
 
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     resolved = await session_manager.resolve_credential_by_id(
         cred["id"], style="env", context="test"

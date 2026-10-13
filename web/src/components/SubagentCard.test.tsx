@@ -15,7 +15,8 @@ import { useSessionStore, type SubagentRun } from "../stores/sessionStore";
 const run = (o: Partial<SubagentRun> = {}): SubagentRun =>
   ({
     task_id: "t1",
-    tool_use_id: "tu1",
+    tool_use_id: "item_0",
+    tool_call_id: "call-1",
     status: "running",
     name: "Explore",
     description: "searching the repo",
@@ -39,7 +40,7 @@ describe("SubagentCard", () => {
     // Every tool call mounts one; only the ones that spawned a sub-agent
     // have anything to say.
     const { container } = render(
-      <SubagentCard sessionId="s1" toolUseId="tu1" />
+      <SubagentCard sessionId="s1" toolCallId="call-1" />
     );
     expect(container.firstChild).toBeNull();
   });
@@ -49,7 +50,7 @@ describe("SubagentCard", () => {
       run({ tokens: 11843, tool_uses: 3, duration_ms: 6100 }),
     ]);
     const { container } = render(
-      <SubagentCard sessionId="s1" toolUseId="tu1" />
+      <SubagentCard sessionId="s1" toolCallId="call-1" />
     );
     expect(container.querySelector(".subagent-name")?.textContent).toBe("Explore");
     expect(container.querySelector(".subagent-description")?.textContent).toBe(
@@ -72,7 +73,7 @@ describe("SubagentCard", () => {
         run({ status: "completed", summary: "It's in notes.txt" }),
       ]);
     const { container } = render(
-      <SubagentCard sessionId="s1" toolUseId="tu1" />
+      <SubagentCard sessionId="s1" toolCallId="call-1" />
     );
     expect(container.querySelector(".subagent-completed")).toBeTruthy();
     expect(container.querySelector(".subagent-spinner")).toBeNull();
@@ -94,7 +95,7 @@ describe("SubagentCard", () => {
       }),
     ]);
     const { container } = render(
-      <SubagentCard sessionId="s1" toolUseId="tu1" />
+      <SubagentCard sessionId="s1" toolCallId="call-1" />
     );
     expect(container.querySelector(".subagent-steps")).toBeNull();
 
@@ -110,7 +111,7 @@ describe("SubagentCard", () => {
   it("says a failure is a failure", () => {
     useSessionStore.getState().setSubagents("s1", [run({ status: "failed" })]);
     const { container } = render(
-      <SubagentCard sessionId="s1" toolUseId="tu1" />
+      <SubagentCard sessionId="s1" toolCallId="call-1" />
     );
     expect(container.querySelector(".subagent-failed")).toBeTruthy();
     expect(container.querySelector(".subagent-description")?.textContent).toBe(
@@ -128,7 +129,7 @@ describe("the store's sub-agent state", () => {
     upsertSubagent("s1", run({ description: "Searching the web" }));
     upsertSubagent("s1", run({ description: "Fetching a page" }));
 
-    expect(useSessionStore.getState().subagents["s1"]["tu1"].steps).toEqual([
+    expect(useSessionStore.getState().subagents["s1"]["call-1"].steps).toEqual([
       "Searching the web",
       "Fetching a page",
     ]);
@@ -143,7 +144,7 @@ describe("the store's sub-agent state", () => {
     useSessionStore
       .getState()
       .upsertSubagent("s1", run({ description: "four", steps: [] }));
-    expect(useSessionStore.getState().subagents["s1"]["tu1"].steps).toEqual([
+    expect(useSessionStore.getState().subagents["s1"]["call-1"].steps).toEqual([
       "one",
       "two",
       "three",
@@ -161,16 +162,19 @@ describe("the store's sub-agent state", () => {
       run({ name: "", description: "", prompt: "", status: "completed", summary: "done" })
     );
 
-    const stored = useSessionStore.getState().subagents["s1"]["tu1"];
+    const stored = useSessionStore.getState().subagents["s1"]["call-1"];
     expect(stored.status).toBe("completed");
     expect(stored.summary).toBe("done");
     expect(stored.name).toBe("Explore");
     expect(stored.tokens).toBe(500);
   });
 
-  it("keys on the tool call, falling back to the task id", () => {
+  it("keeps repeated provider tool IDs in distinct canonical calls", () => {
     const { upsertSubagent } = useSessionStore.getState();
-    upsertSubagent("s1", run({ tool_use_id: null, task_id: "t9" }));
-    expect(Object.keys(useSessionStore.getState().subagents["s1"])).toEqual(["t9"]);
+    upsertSubagent("s1", run({ tool_call_id: "call-old", status: "completed", summary: "Old answer" }));
+    upsertSubagent("s1", run({ tool_call_id: "call-new", task_id: "t2", description: "New work" }));
+    expect(Object.keys(useSessionStore.getState().subagents["s1"])).toEqual(["call-old", "call-new"]);
+    expect(useSessionStore.getState().subagents["s1"]["call-old"].summary).toBe("Old answer");
+    expect(useSessionStore.getState().subagents["s1"]["call-new"].description).toBe("New work");
   });
 });

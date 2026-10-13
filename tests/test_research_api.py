@@ -35,6 +35,7 @@ async def db():
 @pytest.fixture
 async def client(db, monkeypatch):
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     agents_mod.set_manager(AgentManager(db))
     research_manager.bind(session_mgr=session_manager, db=db)

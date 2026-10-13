@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from ..agent_manager import AgentError, AgentManager
@@ -192,18 +194,32 @@ async def _update_agent_settings(session_manager, agent_id: str, fields: dict, u
 
 @router.post("/{agent_id}/archive", response_model=AgentRead)
 async def archive_agent(session_manager: SessionMgr, agent_id: str, user_id: ScopeUser = None, _: str = Depends(verify_token)):
-    try:
-        await _get_manager().archive_agent(agent_id)
-    except AgentError as e:
-        raise _agent_http_error(e)
-    # DB rows are archived by the manager; evict the agent's sessions from
-    # the in-memory map so they leave the live list immediately.
-    await session_manager.evict_agent_sessions(agent_id)
-    agent = await _get_manager().get_agent(agent_id, user_id)
+    manager = _get_manager()
+    agent = await manager.get_agent(agent_id, user_id)
     if agent is None:
         raise HTTPException(status_code=404, detail="agent not found")
-    await _publish(session_manager, "agent_archived", agent)
-    return AgentRead(**agent)
+    if agent["is_system"]:
+        raise _agent_http_error(AgentError("The Default Agent cannot be archived"))
+    async def finish_archive() -> AgentRead:
+        # Keep retirement, persistence and notification under one owner. A
+        # disconnected HTTP waiter cannot strand evicted sessions in live rows.
+        try:
+            await session_manager.evict_agent_sessions(agent_id)
+        except (ValueError, RuntimeError) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        try:
+            await manager.archive_agent(agent_id)
+        except AgentError as exc:
+            raise _agent_http_error(exc)
+        archived = await manager.get_agent(agent_id, user_id)
+        if archived is None:
+            raise HTTPException(status_code=404, detail="agent not found")
+        await _publish(session_manager, "agent_archived", archived)
+        return AgentRead(**archived)
+
+    operation = asyncio.create_task(finish_archive(), name=f"archive-agent-{agent_id}")
+    session_manager._own_task(operation)
+    return await asyncio.shield(operation)
 
 
 @router.post("/{agent_id}/unarchive", response_model=AgentRead)

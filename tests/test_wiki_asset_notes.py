@@ -11,6 +11,7 @@ from server.wiki.jobs import WikiJobs, WikiWorker
 from server.wiki.store import revision
 from server.wiki.tasks import tasks
 from tests import test_wiki_api as wiki_api
+from tests.submission import receipt_from_events
 from tests.test_wiki_jobs import sapphire_delete
 
 client = wiki_api.client
@@ -83,7 +84,17 @@ class AssetCurator:
     async def archive_session(self, *args, **kwargs):
         await wiki_api.session_manager.archive_session(*args, **kwargs)
 
-    async def send_message(self, session_id, prompt, **kwargs):
+    async def start_message(self, session_id, prompt, **kwargs):
+        assert kwargs["source"] == "wiki"
+        return await receipt_from_events(self._events(session_id, prompt, **kwargs))
+
+    async def cancel_request(self, *args):
+        return True
+
+    async def _await_backend_retirement(self, session):
+        pass
+
+    async def _events(self, session_id, prompt, **kwargs):
         session = next(session for session in self.sessions if session.id == session_id)
         assert kwargs["wiki_mode"] == "maintain"
         token = tasks.open(session, "maintain", prompt)

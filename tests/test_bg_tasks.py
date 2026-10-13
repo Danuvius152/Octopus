@@ -607,6 +607,7 @@ async def api_client(tmp_path, monkeypatch):
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
 
     # The subprocess is the agreed system boundary. Delivery still runs the

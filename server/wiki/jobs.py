@@ -326,14 +326,31 @@ class WikiJobs:
     async def cancel(self, job_id, manager):
         job = await _io(self.mark_cancelled, job_id)
         if job["status"] == "cancelled" and job["session_id"] and manager:
-            await manager.interrupt(job["session_id"])
+            refs = {item["worker_request"]["request_id"] for item in job["items"]
+                    if item.get("worker_request", {}).get("session_id") == job["session_id"]}
+            # Capture the just-admitted Wiki input if its durable receipt write
+            # is still in flight. Human corrections have another source.
+            session = manager.get_session(job["session_id"])
+            if session is not None:
+                refs.update(request.request_id for request in
+                            [*session._pending_queue, *([session._current_request] if session._current_request else [])]
+                            if request.source == "wiki")
+            for request_id in refs:
+                await manager.cancel_request(job["session_id"], request_id)
         return await _io(self.get, job_id)
 
     def recover_jobs(self):
         with self.store.connect() as db:
-            db.execute(
-                "UPDATE jobs SET status='queued',error='Recovered after server restart',session_id=NULL WHERE status IN ('running','interrupted')"
-            )
+            rows = db.execute("SELECT id,items FROM jobs WHERE status IN ('running','interrupted')").fetchall()
+            for row in rows:
+                items = json.loads(row["items"])
+                for item in items:
+                    if item.get("recording_failure"):
+                        item.update(status="pending", recording_recovery=True)
+                db.execute(
+                    "UPDATE jobs SET status='queued',error='Recovered after server restart',session_id=NULL,items=? WHERE id=? AND status IN ('running','interrupted')",
+                    (json.dumps(items, ensure_ascii=False), row["id"]),
+                )
 
     def next_queued(self):
         with self.store.connect() as db:
@@ -392,6 +409,9 @@ class WikiJobs:
             )
         for item in job["items"]:
             if item["status"] != "done":
+                if item.get("recording_failure"):
+                    item.update(status="pending", recording_recovery=True)
+                    continue
                 if item.get("index_recovery") or self.publication(job_id, item["doc"]):
                     item.update(status="pending", index_recovery=True)
                     item.pop("error", None)
@@ -493,6 +513,9 @@ class WikiJobs:
             return True
 
     def reread(self, job_id, item, error, *, retryable=True):
+        if item.get("recording_failure"):
+            item.update(status="attention", error="Execution result recording remains unconfirmed; verify the original request without regenerating content")
+            return
         history = WikiHistory(self.store)
         with history.locked():
             fresh = self.get(job_id)
@@ -657,6 +680,9 @@ class WikiWorker:
             briefing = []
             readable = []
             for item in batch:
+                if item.get("recording_failure"):
+                    await self._recover_recorded_item(jobs, job_id, item)
+                    continue
                 if await _io(jobs.recover_publication, job_id, item):
                     continue
                 if item.get("index_recovery"):
@@ -704,7 +730,10 @@ class WikiWorker:
             session = await self.manager.create_session(
                 config["curator_agent_id"],
                 name=f"Wiki 维护 {job_id[:8]}",
-                origin="schedule",
+                # The worker owns this session through grant retirement and
+                # publication verification. A schedule origin lets the generic
+                # dispatcher archive it as soon as its execution receipt ends.
+                origin="wiki",
                 backend=agent.get("backend") or settings.default_backend,
             )
             await _io(
@@ -732,15 +761,38 @@ class WikiWorker:
                 + json.dumps([{key: item.get(key) for key in ("path", "retry_reason", "retry_count")} for item in readable], ensure_ascii=False)
                 + "\n本队列没有人等待同步答复；以实际发布产物结束。"
             )
-            errors = []
+            receipt = None
+            completion = None
             try:
-                async for event in self.manager.send_message(
-                    session.id, prompt, wiki_mode="maintain"
-                ):
-                    if event.get("type") == "error":
-                        errors.append(event.get("message", "Agent error"))
+                receipt = await self.manager.start_message(
+                    session.id, prompt, source="wiki", wiki_mode="maintain"
+                )
+                for item in readable:
+                    item["worker_request"] = {"session_id": session.id, "request_id": receipt.request_id}
+                await _io(jobs.update, job_id, expected_status="running", items=job["items"])
+                completion = await receipt.wait()
+            except BaseException:
+                if receipt is not None and receipt.accepted:
+                    await complete_cleanup(self.manager.cancel_request(session.id, receipt.request_id))
+                    completion = await receipt.wait()
+                    if completion.state == "recording_failed":
+                        await self._mark_recording_failure(jobs, job_id, job, readable, session.id, completion)
+                    else:
+                        await self.manager.archive_session(session.id, replace=False)
+                raise
             finally:
+                # Stop remains fast; the grants owner waits for captured old
+                # process retirement before removing its authority.
+                await complete_cleanup(self.manager._await_backend_retirement(session))
                 grants.unassign(session.id)
+            if completion.state == "recording_failed":
+                await self._mark_recording_failure(jobs, job_id, job, readable, session.id, completion)
+                continue
+            errors = []
+            if completion.outcome is None:
+                errors.append(completion.reason or "Maintenance request was not executed")
+            elif completion.outcome.status != "success":
+                errors.append(completion.outcome.message or completion.outcome.code or "Maintenance execution failed")
             await self.manager.archive_session(session.id, replace=False)
             if (await _io(jobs.get, job_id))["status"] == "cancelled":
                 return
@@ -787,6 +839,62 @@ class WikiWorker:
                 items=job["items"],
                 session_id=None,
             )
+
+    async def _mark_recording_failure(self, jobs, job_id, job, readable, session_id, completion):
+        reference = {
+            "session_id": session_id, "request_id": completion.request_id,
+            "recording_state": completion.recording_state,
+        }
+        for item in readable:
+            item.update(status="attention", recording_failure=reference,
+                        error="Execution result recording failed or is unconfirmed; verify the original request without rerunning the model")
+        current = await _io(jobs.get, job_id)
+        await _io(jobs.update, job_id, expected_status=current["status"], items=job["items"],
+                  error="Execution result recording remains unconfirmed", session_id=session_id)
+
+    async def _recover_recorded_item(self, jobs, job_id, item):
+        """Storage/publication verification only; never start another model."""
+        reference = item["recording_failure"]
+        session_id, request_id = reference["session_id"], reference["request_id"]
+        session = self.manager.get_session(session_id)
+        if session is not None and session._recording_blocked is not None:
+            blocked = session._recording_blocked
+            if blocked.request_id != request_id or not await self.manager._reconcile_recording(session):
+                item.update(status="attention", error="Original execution result recording remains unconfirmed")
+                return
+        try:
+            outcome = await self.manager.db.get_committed_terminal(session_id, request_id)
+        except Exception:
+            item.update(status="attention", error="Original execution result recording could not be verified")
+            return
+        if outcome is None:
+            item.update(status="attention", error="Original execution result is not committed; content was not regenerated")
+            return
+        if outcome.get("status") != "success":
+            item.update(status="attention", error=outcome.get("message") or "Original maintenance execution was not successful")
+            return
+        try:
+            recovered = await _io(jobs.recover_publication, job_id, item)
+            if not recovered:
+                path = item["path"]
+                if Path(path).suffix.lower() not in {".md", ".markdown"}:
+                    path += ".md"
+                output = await _io(jobs.store.read, path, length=1)
+                if (output["metadata"].get("organized_from_revision") != item["revision"]
+                    or output["metadata"].get("organized_revision") != output["revision"]
+                    or output["stale"]):
+                    raise WikiError("Original execution has no current verified publication")
+                with jobs.store.connect() as db:
+                    jobs.store.require_indexed(db, path)
+                item.update(status="done", output=path, output_revision=output["revision"], index_complete=True)
+        except WikiError as exc:
+            item.update(status="attention", error=str(exc))
+            return
+        item.pop("recording_failure", None)
+        item.pop("recording_recovery", None)
+        item.pop("error", None)
+        if session is not None:
+            await self.manager.archive_session(session_id, replace=False)
 
 
 worker = WikiWorker()

@@ -201,6 +201,20 @@ class TurnOutcome(BaseModel):
     recovery: dict[str, int] = Field(default_factory=dict)
 
 
+class ToolReceipt(BaseModel):
+    kind: Literal["bg", "delegation"]
+    task_id: str | None = None
+    delegation_id: str | None = None
+    work_id: str | None = None
+
+
+class RuntimeMetadata(BaseModel):
+    request_id: str
+    attempt_id: str
+    tool_call_id: str
+    receipt: ToolReceipt | None = None
+
+
 class MessageContent(BaseModel):
     role: MessageRole
     type: str  # "text", "tool_use", "tool_result", "error", "result"
@@ -208,6 +222,7 @@ class MessageContent(BaseModel):
     tool_name: str | None = None
     tool_input: dict[str, Any] | None = None
     tool_use_id: str | None = None
+    runtime_metadata: RuntimeMetadata | None = None
     is_error: bool | None = None
     session_id: str | None = None
     cost: float | None = None
@@ -245,6 +260,7 @@ class DispatchState(BaseModel):
     generation: str
     revision: int = 0
     paused: bool = False
+    recording_failure: dict[str, str] | None = None
     active_request_id: str | None = None
     items: list[DispatchQueueItem] = []
 
@@ -259,6 +275,7 @@ class SubagentRun(BaseModel):
 
     task_id: str
     tool_use_id: str | None = None
+    tool_call_id: str | None = None
     status: str = "running"
     name: str = ""
     description: str = ""

@@ -111,6 +111,9 @@ class DelegationRunState:
     # crashing child; this flag forces a single emission no matter
     # how the producers interleave.
     _terminal_injected: bool = False
+    _terminal_disposition: str | None = None
+    _metric_recorded: bool = False
+    _terminal_injecting: bool = False
     # True from the moment this child starts a sub-delegation until the end
     # of its NEXT turn. Its own answer cannot exist in the turn that merely
     # asked someone else — `ask_agent` is asynchronous, so that turn ends with
@@ -281,7 +284,12 @@ class DelegationManager:
             working_dir=parent.working_dir,
         )
         try:
-            await self.session_mgr.start_message(child.id, composed, source="delegation", work_id=rec.work_id, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {}))
+            receipt = await self.session_mgr.start_message(child.id, composed, source="delegation", work_id=rec.work_id, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {}))
+            if not receipt.accepted:
+                rec.state = "cancelled"
+                rec.error = "Child request suppressed: admission is closed"
+                rec.finished_at = datetime.now(UTC).isoformat()
+                await self._inject_terminal(rec)
         except Exception as exc:
             # Surface as failure on the record so the parent still
             # gets a terminal injection rather than a phantom run.
@@ -417,7 +425,8 @@ class DelegationManager:
         rec = replace(
             rec, work_id=uuid.uuid4().hex, parent_work_id=parent_work_id,
             state="running", captured_text=[], error=None, finished_at=None,
-            _terminal_injected=False, _awaiting_sub_relay=False, request=request,
+            _terminal_injected=False, _terminal_disposition=None, _metric_recorded=False,
+            _terminal_injecting=False, _awaiting_sub_relay=False, request=request,
             wiki_mode=parent._wiki_mode if parent else None,
             created_at=datetime.now(UTC).isoformat(),
         )
@@ -458,7 +467,12 @@ class DelegationManager:
             self._require_caller(scope, parent_session_id, parent_work_id)
             if rec.state != "running" or not work_is_open(rec.work_id) or self._records.get(delegation_id) is not rec:
                 return rec
-            await self.session_mgr.start_message(rec.delegation_id, composed, source="delegation", work_id=rec.work_id, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {}))
+            receipt = await self.session_mgr.start_message(rec.delegation_id, composed, source="delegation", work_id=rec.work_id, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {}))
+            if not receipt.accepted:
+                rec.state = "cancelled"
+                rec.error = "Child request suppressed: admission is closed"
+                rec.finished_at = datetime.now(UTC).isoformat()
+                await self._inject_terminal(rec)
         except asyncio.CancelledError:
             await asyncio.shield(rollback_setup())
             raise
@@ -845,13 +859,15 @@ class DelegationManager:
             f"`mcp__ask_agent__cancel`."
         )
         try:
-            await self.session_mgr.start_message(
+            receipt = await self.session_mgr.start_message(
                 rec.parent_session_id, prompt, source="delegation",
                 delivery_id=f"agent-question:{rec.work_id}:{question_id}",
                 work_id=rec.parent_work_id,
                 question_session_id=rec.delegation_id, question_id=question_id,
                 **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {})
             )
+            if not receipt.accepted:
+                logger.info("Delegation %s question suppressed by closed parent work", rec.delegation_id)
         except Exception:
             logger.exception(
                 "Failed to inject delegation %s question into parent %s",
@@ -969,22 +985,22 @@ class DelegationManager:
         ``[agent-…]`` turn lands in the parent session.
         """
         assert self.session_mgr is not None
-        if rec._terminal_injected:
+        if not rec._metric_recorded and rec.state in {"completed", "failed", "cancelled"}:
+            rec._metric_recorded = True
+            _mon_record(_MonEvent(
+                kind="delegation", session_id=rec.parent_session_id,
+                ok=rec.state == "completed", error_code=rec.state,
+                detail={"delegation_id": rec.delegation_id},
+            ))
+        if rec._terminal_disposition is not None or rec._terminal_injecting:
             return
-        from .mcp_identity import work_is_open
+        if rec.state not in {"completed", "failed", "cancelled"}:
+            return
         if not work_is_open(rec.parent_work_id):
-            rec._terminal_injected = True
+            rec._terminal_disposition = "closed"
+            logger.info("Delegation %s terminal return suppressed by closed parent work", rec.delegation_id)
             return
-        rec._terminal_injected = True
-        # How a delegation ENDED, not just how long it took — the question that
-        # matters when a chain misbehaves (§9 G1).
-        _mon_record(_MonEvent(
-            kind="delegation",
-            session_id=getattr(rec, "parent_session_id", None),
-            ok=getattr(rec, "state", "") not in ("error", "cancelled"),
-            error_code=getattr(rec, "state", None),
-            detail={"delegation_id": getattr(rec, "delegation_id", None)},
-        ))
+        rec._terminal_injecting = True
         if rec.state == "completed":
             body = ("".join(rec.captured_text)).strip()
             if not body:
@@ -1001,11 +1017,15 @@ class DelegationManager:
                 f"(child session ended in state {rec.state!r})"
             )
         try:
-            await self.session_mgr.start_message(
+            receipt = await self.session_mgr.start_message(
                 rec.parent_session_id, prompt, source="delegation",
                 delivery_id=f"agent-terminal:{rec.work_id}", work_id=rec.parent_work_id,
                 **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {})
             )
+            rec._terminal_disposition = receipt.disposition
+            rec._terminal_injected = receipt.accepted
+            if not receipt.accepted:
+                logger.info("Delegation %s terminal return suppressed by closed parent work", rec.delegation_id)
         except Exception:
             # The parent may have been deleted while the child was
             # running; that's a tolerable race — we just log it. The
@@ -1016,6 +1036,9 @@ class DelegationManager:
                 rec.delegation_id,
                 rec.parent_session_id,
             )
+            rec._terminal_disposition = "rejected"
+        finally:
+            rec._terminal_injecting = False
         # Regardless of whether the parent notification above
         # succeeded (it may not, if the parent itself was deleted
         # while the child was running — in which case we already

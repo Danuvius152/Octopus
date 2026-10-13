@@ -177,6 +177,7 @@ export function ChatView({
   const pendingQueueMap = useSessionStore((s) => s.pendingQueue);
   const dispatchStates = useSessionStore((s) => s.dispatchStates);
   const dispatchPaused = activeSessionId ? dispatchStates[activeSessionId]?.paused ?? false : false;
+  const savingBlocked = activeSessionId ? Boolean(dispatchStates[activeSessionId]?.recording_failure) : false;
   const pendingQuestionsMap = useSessionStore((s) => s.pendingQuestions);
   const pendingQuestions = activeSessionId
     ? (pendingQuestionsMap[activeSessionId] ?? EMPTY_QUESTIONS)
@@ -1718,8 +1719,8 @@ export function ChatView({
         </div>
       ) : (
         <div className="chat-input-bar shrink-0 bg-background px-6 pb-5 pt-2">
-          {dispatchPaused && <p className="dispatch-pause-hint mb-2 text-xs text-muted-foreground">
-            Your next message takes priority. Pending results stay paused until you resume processing.
+          {(dispatchPaused || savingBlocked) && <p className="dispatch-pause-hint mb-2 text-xs text-muted-foreground">
+            {savingBlocked ? "New messages stay queued until result saving is verified." : "Your next message takes priority. Pending results stay paused until you resume processing."}
           </p>}
           {/* `relative` anchors the slash-command menu, which floats just
               above the composer (bottom-full) like the Claude Code CLI. */}

@@ -201,12 +201,15 @@ class HarnessRun:
 
     def __init__(self, profile: RuntimeProfile, config: RunConfig | None = None) -> None:
         self._profile = profile
+        self._tool_identity_tracker: Any | None = None
+        self._tool_context: tuple[str, str] | None = None
         self._config = config or RunConfig()
         self.run_lease_id = uuid_module.uuid4().hex
         self.work_id = self._config.work_id
         self._lease_closed = False
         self._spawn_task: asyncio.Task[asyncio.subprocess.Process] | None = None
         self._spawn_cleanup: asyncio.Task[None] | None = None
+        self._stop_task: asyncio.Task[None] | None = None
         self._parser = profile.new_event_parser()
         self._process: asyncio.subprocess.Process | None = None
         self._event_queue: asyncio.Queue[HarnessEvent | object] = asyncio.Queue()
@@ -323,6 +326,8 @@ class HarnessRun:
         ctx = self._make_context(prompt, working_dir, resume_id, credential)
         argv, kwargs = self._profile.build_turn_argv(ctx)
         argv, kwargs = prepare_spawn(argv, kwargs)
+        if self._lease_closed:
+            raise asyncio.CancelledError
 
         from ..mcp_identity import register_run
         if self._config.session_id:
@@ -355,19 +360,20 @@ class HarnessRun:
                     await asyncio.wait_for(abandoned.wait(), timeout=4.0)
                 except Exception:
                     logger.exception("Failed to reap aborted harness startup")
+                    raise
                 finally:
                     self._spawn_task = None
             self._spawn_cleanup = asyncio.create_task(reap_aborted_spawn(), name="harness-startup-cleanup")
+            self._begin_retirement()
             raise
         except Exception:
-            self._lease_closed = True
-            from ..mcp_identity import revoke_run
-            revoke_run(self.run_lease_id)
+            self._begin_retirement()
             raise
         finally:
             if spawn.done():
                 self._spawn_task = None
         if self._lease_closed or not work_is_open(self.work_id):
+            self._process = process
             _terminate_process_group(process, signal.SIGKILL)
             await asyncio.wait_for(process.wait(), timeout=4.0)
             raise asyncio.CancelledError
@@ -531,13 +537,34 @@ class HarnessRun:
             assert isinstance(item, HarnessEvent)
             yield item
 
-    async def stop(self) -> None:
-        """Terminate the subprocess, drain reader tasks. Idempotent."""
+    def _begin_retirement(self) -> asyncio.Task[None]:
         self._lease_closed = True
+        self._tool_context = None
         from ..mcp_identity import revoke_run
         revoke_run(self.run_lease_id)
+        if self._stop_task is None:
+            self._stop_task = asyncio.create_task(self._stop(), name="harness-retirement")
+        return self._stop_task
+
+    async def stop(self) -> None:
+        """Owned retirement includes a late spawn; caller cancellation cannot orphan it."""
+        await asyncio.shield(self._begin_retirement())
+
+    async def _stop(self) -> None:
+        if self._spawn_cleanup is not None:
+            await self._spawn_cleanup
+            self._spawn_cleanup = None
+        elif self._spawn_task is not None:
+            try:
+                pending = await asyncio.shield(self._spawn_task)
+            except Exception:
+                pending = None
+            if pending is not None and self._process is None:
+                _terminate_process_group(pending, signal.SIGKILL)
+                await pending.wait()
         proc = self._process
         if proc is None:
+            self._close_stream()
             return
 
         # Closing stdin lets the CLI exit gracefully (flush its result first).
@@ -625,11 +652,26 @@ class HarnessRun:
         """
         self._idle_handler = handler
 
+    def bind_tool_context(self, request_id: str, attempt_id: str) -> None:
+        from .tool_identity import ToolIdentityTracker
+        if self._tool_identity_tracker is None:
+            self._tool_identity_tracker = ToolIdentityTracker()
+        self._tool_context = (request_id, attempt_id)
+
     async def _handle_line(self, line: str) -> None:
         obj = parse_json_line(line)
         if obj is None:
             return
         out = self._parser.parse(obj)
+        context = self._tool_context
+        if self._tool_identity_tracker is not None:
+            for event in out.events:
+                if context is not None:
+                    self._tool_identity_tracker.normalize(event, *context)
+                else:
+                    self._tool_identity_tracker.normalize_idle(event)
+        if out.end_of_stream:
+            self._tool_context = None
         for event in out.events:
             if self._stream_closed and self._idle_handler is not None:
                 # Out of turn: hand it to the session rather than dropping it.

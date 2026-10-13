@@ -23,6 +23,7 @@ from ..models import (
     SessionStatus,
 )
 from ..oauth_errors import RefreshErrorCode
+from .submission import RequestCompletion, SubmissionReceipt
 
 logger = logging.getLogger(__name__)
 
@@ -49,6 +50,8 @@ _MAX_HELD_PROCESSES = 4
 _REAPER_INTERVAL_SECONDS = 30.0
 # How long to wait for one held process to die before giving up on it.
 _HELD_STOP_TIMEOUT = 2.0
+# The complete stdin/TERM/KILL retirement, including late spawn compensation.
+_BACKEND_RETIRE_TIMEOUT = 8.0
 # How many un-written steers a single turn will hold. It's a person typing;
 # beyond this the message queues for the next turn instead of being refused.
 _MAX_PENDING_STEERS = 8
@@ -302,12 +305,18 @@ class Session:
     _wiki_mode: str | None = field(default=None, repr=False)
     _pending_queue: list[QueuedPrompt] = field(default_factory=list, repr=False)
     _dispatch_paused: bool = field(default=False, repr=False)
+    _admission_closed: bool = field(default=False, repr=False)
     _dispatch_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _archive_reservation: object | None = field(default=None, repr=False)
     _dispatch_revision: int = field(default=0, repr=False)
     _dispatch_order: int = field(default=0, repr=False)
     _current_request: QueuedPrompt | None = field(default=None, repr=False)
-    _seen_delivery_ids: set[str] = field(default_factory=set, repr=False)
+    _delivery_receipts: dict[str, SubmissionReceipt] = field(default_factory=dict, repr=False)
+    _request_completions: dict[str, asyncio.Future[RequestCompletion]] = field(default_factory=dict, repr=False)
+    _inline_requests: dict[str, list[QueuedPrompt]] = field(default_factory=dict, repr=False)
+    _backend_cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set, repr=False)
+    _backend_retirements: dict[int, tuple[HarnessRun, asyncio.Task[None]]] = field(default_factory=dict, repr=False)
+    _recording_blocked: Any | None = field(default=None, repr=False)
     # Steers: messages typed while THIS turn is running, to be handed to the
     # CLI mid-turn rather than queued behind the turn (inline-steering.md §8).
     # The turn's writer task drains this; `_steer_ready` is how it learns
@@ -348,6 +357,24 @@ class SessionManagerBase:
     async def _blit_attachments_to_descendant_forks(self, session_id: str) -> None:
         raise NotImplementedError  # provided by a mixin
 
+    def _own_task(self, task: asyncio.Task[Any]) -> None:
+        raise NotImplementedError
+
+    def _withdraw_requests(self, session: Session, requests: list[QueuedPrompt], *, reason: str) -> None:
+        raise NotImplementedError
+
+    def _retire_backend(self, session: Session, backend: HarnessRun) -> asyncio.Task[None]:
+        raise NotImplementedError
+
+    async def _await_backend_retirement(self, session: Session, *, timeout: float | None = None) -> None:
+        raise NotImplementedError
+
+    async def cancel_request(self, session_id: str, request_id: str) -> bool:
+        raise NotImplementedError
+
+    async def _reconcile_recording(self, session: Session) -> bool:
+        raise NotImplementedError
+
     async def drain_turns(self, timeout: float = 5.0) -> int:
         raise NotImplementedError  # provided by a mixin
 
@@ -360,7 +387,7 @@ class SessionManagerBase:
     def has_pending_question(self, session_id: str, question_id: str) -> bool:
         raise NotImplementedError  # provided by a mixin
 
-    async def resume_dispatch(self, session_id: str) -> bool:
+    async def resume_dispatch(self, session_id: str, *, resume_queue: bool = True) -> bool:
         raise NotImplementedError  # provided by a mixin
 
     async def _begin_question_attempt(self, session: Session, attempt_id: str, state: dict[str, Any]) -> None:
@@ -539,8 +566,11 @@ class SessionManagerBase:
     )
 
     def __init__(self) -> None:
+        self._finalization_tasks: set[asyncio.Task[Any]] = set()
         self.sessions: dict[str, Session] = {}
         self._dispatch_generation = uuid.uuid4().hex
+        self._admission_closed = False
+        self._owned_tasks: set[asyncio.Task[Any]] = set()
         # Short configuration operations share a lock, independently of turn
         # execution. Read/validate/write and turn snapshots must agree.
         self.configuration_lock = asyncio.Lock()
@@ -567,6 +597,7 @@ class SessionManagerBase:
 
     async def initialize(self, db: Database) -> None:
         self.configuration_lock = asyncio.Lock()
+        self._admission_closed = False
         self.db = db
         # Turns in flight unwind before this connection does (see
         # `drain_turns`). Registered here rather than in the lifespan so a test
@@ -774,7 +805,7 @@ class SessionManagerBase:
         Best-effort: any failure inside a notifier is logged by the
         manager. Skipped if no manager is wired (tests, etc.).
         """
-        if self._notifier_manager is None or session._dispatch_paused or session._pending_queue:
+        if self._notifier_manager is None or session._dispatch_paused or session._recording_blocked is not None or session._pending_queue:
             return
         try:
             from ..notifiers import NotifierEvent

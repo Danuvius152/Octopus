@@ -21,7 +21,8 @@ splits made for keeping one object with the same method names.
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from dataclasses import dataclass
+from typing import Annotated, Any, Literal
 
 from fastapi import Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -189,28 +190,34 @@ async def scope_user_id(
 ScopeUser = Annotated[str | None, Depends(scope_user_id)]
 
 
-async def scope_user_id_for(token: str) -> tuple[bool, str | None]:
-    """`(allowed, user_id)` for a bearer presented outside the request cycle.
+@dataclass(frozen=True)
+class Principal:
+    user_id: str | None
+    credential_kind: Literal["account", "mcp", "legacy"]
 
-    The WebSocket needs both answers at once and cannot use `Depends` for
-    either: it authenticates a query parameter before the socket is accepted,
-    and it has to know whose frames to subscribe to. Kept here, beside the
-    request-scoped versions, so there is one implementation of "is this bearer
-    good" rather than the hand-rolled comparison this endpoint used to carry.
-    """
-    from .auth import _allowed
 
-    if not await _allowed(token):
-        return False, None
-    if _user_manager is None:
-        return True, None
-    user = await _user_manager.resolve_token(token)
-    if user is not None:
-        return True, user["id"]
+async def resolve_principal(token: str) -> Principal | None:
+    """Validate once, read only. Runtime scopes keep their live authority checks."""
+    from .config import settings
+
+    if not token:
+        return None
+    if _user_manager is not None:
+        user = await _user_manager.resolve_token(token, touch=False)
+        if user is not None:
+            return Principal(user["id"], "account")
     scope = verify_mcp_scope(token)
-    if scope is not None and await scope_is_authorized(scope):
-        return True, scope.user_id
-    return (False, None) if await accounts_exist() else (True, None)
+    if scope is not None:
+        return Principal(scope.user_id, "mcp") if await scope_is_authorized(scope) else None
+    if not await accounts_exist() and token == settings.auth_token:
+        return Principal(None, "legacy")
+    return None
+
+
+async def scope_user_id_for(token: str) -> tuple[bool, str | None]:
+    """Allowed and scoped together, without double resolution or activity writes."""
+    principal = await resolve_principal(token)
+    return (True, principal.user_id) if principal is not None else (False, None)
 
 
 async def data_key_for(user_id: str | None) -> str:

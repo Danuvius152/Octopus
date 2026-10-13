@@ -16,6 +16,7 @@ async def client():
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
 
     transport = ASGITransport(app=app)

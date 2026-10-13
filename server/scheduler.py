@@ -160,7 +160,10 @@ class ScheduleRunner:
                 try:
                     # Queue-aware: appends to the live session, waiting its turn if
                     # the user is mid-conversation rather than failing on a held lock.
-                    await self._session_mgr.start_message(origin_session_id, body, source="schedule", **wiki_kwargs)
+                    receipt = await self._session_mgr.start_message(origin_session_id, body, source="schedule", **wiki_kwargs)
+                    if not receipt.accepted:
+                        logger.info("Schedule %s suppressed: session admission is closed", schedule_id)
+                        return
                     await self._db.update_schedule(
                         schedule_id,
                         last_run_at=now,
@@ -200,8 +203,14 @@ class ScheduleRunner:
                 await self._db.update_schedule(
                     schedule_id, last_run_session_id=session.id
                 )
-                async for _event in self._session_mgr.send_message(session.id, body, **wiki_kwargs):
-                    pass
+                receipt = await self._session_mgr.start_message(session.id, body, source="schedule", **wiki_kwargs)
+                if not receipt.accepted:
+                    logger.info("Schedule %s suppressed: session admission is closed", schedule_id)
+                    return
+                completion = await receipt.wait()
+                if completion.state == "recording_failed":
+                    logger.error("Schedule %s result recording is %s (session=%s request=%s)", schedule_id, completion.recording_state, session.id, completion.request_id)
+                    return
                 await self._db.update_schedule(schedule_id, last_run_at=now)
             except ValueError as e:
                 _mon_record(_MonEvent(kind="schedule_fire", agent_id=agent_id,
@@ -284,7 +293,13 @@ class ScheduleRunner:
         session = self._session_mgr.get_session(sid)
         if session is None:
             return False
-        return session.status != SessionStatus.idle or bool(session._pending_queue)
+        return (
+            session.status != SessionStatus.idle
+            or bool(session._pending_queue)
+            or session._current_request is not None
+            or bool(session._active_task and not session._active_task.done())
+            or session._recording_blocked is not None
+        )
 
     async def add(self, row: dict) -> None:
         if row["enabled"]:
