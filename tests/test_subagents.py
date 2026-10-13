@@ -298,7 +298,7 @@ def test_codex_collab_calls_are_also_real_tool_calls():
     assert results[-1].content == "./notes.txt"
 
 
-def test_codex_owner_map_is_bounded():
+def test_codex_late_child_result_keeps_original_spawn_after_many_agents():
     parser = CodexEventParser()
     for i in range(200):
         parser.parse(
@@ -313,7 +313,21 @@ def test_codex_owner_map_is_bounded():
                 },
             }
         )
-    assert len(parser._collab_owner) <= 64
+    updates = _subagent_events(parser, [{
+        "type": "item.completed",
+        "item": {
+            "id": "item_200",
+            "type": "collab_tool_call",
+            "tool": "wait",
+            "receiver_thread_ids": ["thread-0"],
+            "agents_states": {"thread-0": {"status": "completed", "message": "late result"}},
+        },
+    }])
+    assert len(updates) == 1
+    assert updates[0].task_id == "item_0"
+    assert updates[0].tool_use_id == "item_0"
+    assert updates[0].status == "completed"
+    assert updates[0].summary == "late result"
 
 
 # ------------------------------------------------------- session bookkeeping

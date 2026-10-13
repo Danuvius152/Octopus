@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
 import uuid
 from collections.abc import Iterable
@@ -12,8 +11,7 @@ from typing import Any
 from ..models import RuntimeMetadata, ToolReceipt
 from .events import HarnessEvent
 
-logger = logging.getLogger(__name__)
-_MAX_TRACKED_TOOL_IDS = 4096
+_SPAWN_TOOLS = {"Task", "Agent", "subagent:spawn_agent"}
 
 
 def _text_blocks(content: Any) -> Iterable[str]:
@@ -60,22 +58,9 @@ class ToolIdentityTracker:
         self._attempt_id: str | None = None
         self._calls: dict[str, tuple[RuntimeMetadata, str | None]] = {}
         self._children: dict[str, RuntimeMetadata] = {}
-        self._spawns: dict[str, RuntimeMetadata] = {}
-        self._seen_raw: set[str] = set()
-        self._repeated_raw: set[str] = set()
-        self._history_exhausted = False
-
-    def _remember_raw(self, raw: str) -> None:
-        if raw in self._seen_raw:
-            self._repeated_raw.add(raw)
-        elif len(self._seen_raw) < _MAX_TRACKED_TOOL_IDS:
-            self._seen_raw.add(raw)
-        elif not self._history_exhausted:
-            # Forgetting a raw ID would make a later reuse appear unique.
-            # Exhaustion permanently closes new native associations for this
-            # process, while exact captured children/results remain usable.
-            self._history_exhausted = True
-            logger.warning("Native tool provenance budget exhausted; new child associations disabled")
+        # One claim per actual spawn ID; None retains evidence of ambiguity.
+        # Ordinary calls need no process-history entries.
+        self._spawn_claims: dict[str, RuntimeMetadata | None] = {}
 
     def _resolve_result(self, event: HarnessEvent) -> None:
         captured = self._calls.pop(event.tool_use_id or "", None)
@@ -90,11 +75,9 @@ class ToolIdentityTracker:
             return
         update = event.subagent
         child_identity = self._children.get(update.task_id)
-        if (child_identity is None and not self._history_exhausted
-                and update.tool_use_id not in self._repeated_raw
-                and len(self._children) < _MAX_TRACKED_TOOL_IDS):
-            captured_spawn = self._spawns.get(update.tool_use_id or "")
-            if captured_spawn:
+        if child_identity is None:
+            captured_spawn = self._spawn_claims.get(update.tool_use_id or "")
+            if captured_spawn and captured_spawn.attempt_id == self._attempt_id:
                 child_identity = captured_spawn
                 self._children[update.task_id] = child_identity
         if child_identity:
@@ -106,11 +89,11 @@ class ToolIdentityTracker:
             return
         event.identity_checked = True
         if event.type in ("tool_use", "question_request") and event.tool_use_id:
-            self._remember_raw(event.tool_use_id)
+            if event.tool_name in _SPAWN_TOOLS or event.tool_use_id in self._spawn_claims:
+                self._spawn_claims[event.tool_use_id] = None
             # An unsolicited reuse cannot claim a result belonging to an old
             # pending call merely because the provider repeats its raw ID.
             self._calls.pop(event.tool_use_id, None)
-            self._spawns.pop(event.tool_use_id, None)
         elif event.type == "tool_result":
             self._resolve_result(event)
         self._resolve_child(event)
@@ -122,20 +105,16 @@ class ToolIdentityTracker:
         if attempt_id != self._attempt_id:
             self._attempt_id = attempt_id
             self._calls.clear()
-            self._spawns.clear()
         raw = event.tool_use_id
         if raw and event.type in ("tool_use", "question_request"):
             if event.type == "tool_use" or raw not in self._calls:
-                self._remember_raw(raw)
                 self._calls[raw] = (RuntimeMetadata(request_id=request_id, attempt_id=attempt_id,
                                                     tool_call_id=uuid.uuid4().hex), event.tool_name)
+                if raw in self._spawn_claims:
+                    self._spawn_claims[raw] = None
+                elif event.tool_name in _SPAWN_TOOLS:
+                    self._spawn_claims[raw] = self._calls[raw][0]
             event.runtime_metadata = self._calls[raw][0].model_dump()
-            if event.tool_name in ("Task", "Agent", "subagent:spawn_agent"):
-                self._spawns[raw] = self._calls[raw][0]
         elif raw and event.type == "tool_result":
             self._resolve_result(event)
         self._resolve_child(event)
-        # Bounded ephemeral maps. Eviction removes evidence, never fabricates it.
-        for mapping in (self._calls, self._spawns):
-            while len(mapping) > _MAX_TRACKED_TOOL_IDS:
-                mapping.pop(next(iter(mapping)))

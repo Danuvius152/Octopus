@@ -13,7 +13,7 @@ import os
 import re
 import stat
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Generator, Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -35,9 +35,7 @@ _METADATA = re.compile(rb'^\s*\{\s*(?:"timestamp"\s*:\s*"[^"\\]*"\s*,\s*)?(?:"or
 _ITEM_COMPLETION = re.compile(rb'\s*,\s*"payload"\s*:\s*\{\s*"type"\s*:\s*"item_completed"')
 _MAX_LINE = 256 * 1024
 _MAX_READ = 1024 * 1024
-_MAX_DISCOVERY = 1024
-_MAX_ITEMS = 4096
-_MAX_DELAY = 30.0
+_DISCOVERY_BATCH_SIZE = 1024
 
 
 def _uuid(value: Any) -> str | None:
@@ -64,17 +62,19 @@ class CodexActivityObserver:
         self._wall = wall_clock
         self._monotonic = monotonic
         self._started = wall_clock()
+        self._started_monotonic = monotonic()
         self._thread = _uuid(resume_id)
         self._stdout_thread: str | None = None
         self._diagnostic_thread: str | None = None
         self._turn: str | None = None
         self._path: Path | None = None
+        self._discovery: Generator[None, None, Path | None] | None = None
         self._inode: tuple[int, int] | None = None
         self._offset = 0
         self._partial = b""
         self._skipping_line = False
         self._file_verified = False
-        self._seen: set[str] = set()
+        self._latest_completion_ms: int | None = None
         self._closed = False
         self._disabled = False
         self._warning: str | None = None
@@ -149,63 +149,65 @@ class CodexActivityObserver:
         if self._root.is_symlink():
             self._disable("rollout_root_symlink")
             return None
-        if self._thread is None or not self._root.is_dir():
+        if self._thread is None:
             return None
+        if not self._root.is_dir():
+            if not self._closed and self._turn and self._stdout_thread:
+                self._disable("rollout_missing")
+            return None
+        if self._discovery is None:
+            self._discovery = self._find_rollout()
+        for _ in range(_DISCOVERY_BATCH_SIZE):
+            try:
+                next(self._discovery)
+            except StopIteration as done:
+                self._discovery = None
+                if isinstance(done.value, Path):
+                    return done.value
+                if not self._closed and self._turn and self._stdout_thread:
+                    self._disable("rollout_missing")
+                return None
+        return None
+
+    def _find_rollout(self) -> Generator[None, None, Path | None]:
         # UUIDv7 carries the native thread's creation date. It is only a
         # bounded directory hint; the file/header/turn checks still establish
         # ownership. Adjacent UTC dates cover the CLI's local-date partition.
-        identifier = UUID(self._thread)
+        identifier = UUID(self._thread or "")
+        scopes: list[tuple[list[Path], int]] = []
         if identifier.version == 7:
             born = datetime.fromtimestamp((identifier.int >> 80) / 1000, UTC)
             candidates = [self._root / (born + timedelta(days=offset)).strftime("%Y/%m/%d")
                           for offset in (-1, 0, 1)]
-            matches = []
-            remaining = _MAX_DISCOVERY
-            for directory in candidates:
-                if not directory.exists():
-                    continue
+            scopes.append((candidates, 0))
+        # Native fork copies may use UUIDv4 and a copy-date directory.
+        scopes.append(([self._root], 3))
+        for directories, max_depth in scopes:
+            pending = [(directory, 0) for directory in directories if directory.exists()]
+            found = None
+            while pending:
+                directory, depth = pending.pop()
                 if directory.is_symlink() or any(parent.is_symlink() for parent in directory.parents
                                                   if parent != self._root.parent):
                     self._disable("rollout_directory_symlink")
                     return None
                 with os.scandir(directory) as entries:
                     for entry in entries:
-                        remaining -= 1
-                        if remaining < 0:
-                            self._disable("discovery_limit")
+                        if self._closed or self._disabled:
                             return None
-                        if (not entry.is_symlink() and entry.is_file(follow_symlinks=False)
-                                and entry.name.endswith(f"-{self._thread}.jsonl")):
-                            matches.append(Path(entry.path))
-            if matches:
-                if len(matches) > 1:
-                    self._disable("rollout_identity_ambiguous")
-                    return None
-                return matches[0]
-        remaining = _MAX_DISCOVERY
-        pending = [(self._root, 0)]
-        matches = []
-        while pending and remaining:
-            directory, depth = pending.pop()
-            with os.scandir(directory) as entries:
-                for entry in entries:
-                    remaining -= 1
-                    if remaining < 0:
-                        self._disable("discovery_limit")
-                        return None
-                    if entry.is_symlink():
-                        continue
-                    if entry.is_dir(follow_symlinks=False) and depth < 3:
-                        pending.append((Path(entry.path), depth + 1))
-                    elif entry.is_file(follow_symlinks=False) and entry.name.endswith(f"-{self._thread}.jsonl"):
-                        matches.append(Path(entry.path))
-        if pending:
-            self._disable("discovery_limit")
-            return None
-        if len(matches) > 1:
-            self._disable("rollout_identity_ambiguous")
-            return None
-        return matches[0] if matches else None
+                        if not entry.is_symlink():
+                            if entry.is_dir(follow_symlinks=False) and depth < max_depth:
+                                pending.append((Path(entry.path), depth + 1))
+                            elif (entry.is_file(follow_symlinks=False)
+                                  and entry.name.endswith(f"-{self._thread}.jsonl")):
+                                if found is not None:
+                                    self._disable("rollout_identity_ambiguous")
+                                    return None
+                                found = Path(entry.path)
+                        yield None
+            if found is not None:
+                return found
+        return None
 
     def _open(self) -> int | None:
         if self._path is None:
@@ -294,16 +296,13 @@ class CodexActivityObserver:
                 or type(started) is not int or type(completed) is not int):
             self._disable("activity_schema")
             return None
-        if identifier in self._seen:
+        if self._latest_completion_ms is not None and completed <= self._latest_completion_ms:
             return None
-        age = self._wall() - completed / 1000
-        if started / 1000 < self._started or completed < started or not -2 <= age <= _MAX_DELAY:
+        if (started / 1000 < self._started or completed < started
+                or completed / 1000 > self._wall() + 2):
             return None
-        if len(self._seen) >= _MAX_ITEMS:
-            self._disable("dedup_limit")
-            return None
-        self._seen.add(identifier)
-        return self._monotonic() - max(0.0, age)
+        self._latest_completion_ms = completed
+        return min(self._monotonic(), self._started_monotonic + completed / 1000 - self._started)
 
     def _discard_large_line(self, prefix: bytes) -> None:
         envelope = _METADATA.match(prefix)
@@ -383,7 +382,7 @@ class CodexActivityObserver:
     async def _watch(self) -> None:
         while not self._closed and not self._disabled:
             await self.poll_once()
-            if self._wall() - self._started > 30 and not self.identity_confirmed:
+            if self._wall() - self._started > 30 and (not self._turn or not self._stdout_thread):
                 self._disable("identity_unconfirmed")
                 return
             await asyncio.sleep(0.25)
@@ -400,6 +399,9 @@ class CodexActivityObserver:
         if self._read_task is not None:
             await asyncio.shield(self._read_task)
             self._read_task = None
+        if self._discovery is not None:
+            self._discovery.close()
+            self._discovery = None
 
 
 def diagnostic_environment(env: dict[str, str]) -> None:

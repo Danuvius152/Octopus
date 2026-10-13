@@ -15,7 +15,6 @@ the neutral `TurnContext`.
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -338,11 +337,6 @@ _COLLAB_DESCRIPTIONS = {
     "close_agent": "closing",
 }
 
-# Bound on the child-thread → owning-item map, for the same reason the Claude
-# parser bounds its task map: one process parses many turns.
-_MAX_TRACKED_AGENTS = 64
-
-
 def _short_thread(thread_id: str) -> str:
     """Codex names a sub-agent by its thread uuid; the card shows a handle."""
     return f"agent {thread_id[:8]}" if thread_id else ""
@@ -368,28 +362,32 @@ class CodexEventParser(EventParser):
         # child thread id -> the `spawn_agent` item that created it, so every
         # later `wait` / `send_input` on that thread updates the same card.
         self._collab_owner: dict[str, str] = {}
-        self._activity_seen: set[tuple[str, str, str]] = set()
-        self._activity_exhausted = False
+        self._activity_last_item = -1
+        self._activity_open_items: set[int] = set()
+        self._activity_turn_started = False
+        self._activity_schema_warned = False
 
     def parse(self, obj: dict[str, Any]) -> ParseOutput:
         kind = obj.get("type")
 
         if kind == "thread.started":
             tid = obj.get("thread_id")
+            first = self._captured_thread_id is None
             self._captured_thread_id = tid
             if tid:
                 return ParseOutput(
-                    events=[HarnessEvent(type="session_started", session_id=tid)]
+                    events=[HarnessEvent(type="session_started", session_id=tid)],
+                    activity=first,
                 )
             return ParseOutput()
 
         if kind == "turn.started":
-            identity = (kind, "", "")
-            first = identity not in self._activity_seen
-            self._activity_seen.add(identity)
+            first = not self._activity_turn_started
+            self._activity_turn_started = True
             return ParseOutput(activity=first)
 
         if kind == "turn.completed":
+            self._activity_open_items.clear()
             usage = obj.get("usage") or {}
             return ParseOutput(
                 events=[
@@ -405,6 +403,7 @@ class CodexEventParser(EventParser):
             )
 
         if kind == "turn.failed":
+            self._activity_open_items.clear()
             err = obj.get("error")
             msg = err if isinstance(err, str) else (
                 (err or {}).get("message") if isinstance(err, dict) else None
@@ -438,29 +437,41 @@ class CodexEventParser(EventParser):
 
         if kind in ("item.started", "item.updated", "item.completed"):
             item = obj.get("item")
-            known = isinstance(item, dict) and item.get("type") in {
-                "reasoning", "agent_message", "mcp_tool_call", "command_execution",
-                "collab_tool_call", "file_edit", "file_write", "file_read", "file_change",
-                "web_search", "todo_list",
-            } and isinstance(item.get("id"), str) and bool(item["id"])
-            activity = False
-            if known and isinstance(item, dict) and not self._activity_exhausted:
-                fingerprint = (
-                    hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest()
-                    if kind == "item.updated" else ""
-                )
-                identity = (kind, item["id"], fingerprint)
-                if identity not in self._activity_seen:
-                    if len(self._activity_seen) >= 4096:
-                        self._activity_exhausted = True
-                        logger.warning("Codex stdout activity deduplication limit reached")
-                    else:
-                        self._activity_seen.add(identity)
-                        activity = True
-            return ParseOutput(events=self._item_events(kind, obj), activity=activity)
+            return ParseOutput(
+                events=self._item_events(kind, obj), activity=self._item_activity(kind, item),
+            )
 
         logger.debug("Unhandled codex event type: %s", kind)
         return ParseOutput()
+
+    def _item_activity(self, kind: str, item: Any) -> bool | None:
+        if not isinstance(item, dict) or not isinstance(item.get("type"), str) or item["type"] not in {
+            "reasoning", "agent_message", "mcp_tool_call", "command_execution",
+            "collab_tool_call", "file_edit", "file_write", "file_read", "file_change",
+            "web_search", "todo_list",
+        }:
+            return False
+        # Updates carry no revision or event time. Keep rendering them, but
+        # only provably new lifecycle events may extend the idle clock.
+        if kind == "item.updated":
+            return False
+        identifier = item.get("id")
+        number = identifier[5:] if isinstance(identifier, str) and identifier.startswith("item_") else ""
+        ordinal = int(number) if len(number) <= 20 and number.isascii() and number.isdecimal() else None
+        if ordinal is None or identifier != f"item_{ordinal}" or ordinal >= 2**64:
+            if not self._activity_schema_warned:
+                self._activity_schema_warned = True
+                logger.warning("Codex stdout activity identity unsupported; using display activity")
+            return None
+        if ordinal > self._activity_last_item:
+            self._activity_last_item = ordinal
+            if kind == "item.started":
+                self._activity_open_items.add(ordinal)
+            return True
+        if kind == "item.completed" and ordinal in self._activity_open_items:
+            self._activity_open_items.remove(ordinal)
+            return True
+        return False
 
     def _collab_events(
         self, item: dict[str, Any], *, started: bool, completed: bool
@@ -547,8 +558,6 @@ class CodexEventParser(EventParser):
                     raw=item,
                 )
             )
-        while len(self._collab_owner) > _MAX_TRACKED_AGENTS:
-            self._collab_owner.pop(next(iter(self._collab_owner)))
         return events
 
     def _item_events(self, kind: str, obj: dict[str, Any]) -> list[HarnessEvent]:

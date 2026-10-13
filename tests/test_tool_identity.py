@@ -2,7 +2,6 @@ import json
 
 import pytest
 
-from server.harness import tool_identity
 from server.harness.codex import CODEX
 from server.harness.events import HarnessEvent, SubagentUpdate
 from server.harness.run import HarnessRun
@@ -73,21 +72,20 @@ def test_held_native_progress_keeps_original_spawning_call_after_a_new_attempt()
     assert done.subagent.tool_call_id != new.runtime_metadata["tool_call_id"]
 
 
-def test_exhausted_provenance_budget_keeps_known_children_and_refuses_new_associations(monkeypatch):
-    monkeypatch.setattr(tool_identity, "_MAX_TRACKED_TOOL_IDS", 2)
+def test_long_run_preserves_new_and_known_native_child_associations():
     tracker = ToolIdentityTracker()
     original = HarnessEvent(type="tool_use", tool_use_id="spawn-old", tool_name="Agent")
     tracker.normalize(original, "old", "a1")
     started = HarnessEvent(type="subagent", subagent=SubagentUpdate(task_id="child-old", tool_use_id="spawn-old"))
     tracker.normalize(started, "old", "a1")
-    for index in range(5):
+    for index in range(5000):
         call = HarnessEvent(type="tool_use", tool_use_id=f"other-{index}", tool_name="Read")
         tracker.normalize(call, f"request-{index}", f"attempt-{index}")
     later = HarnessEvent(type="tool_use", tool_use_id="spawn-new", tool_name="Agent")
     tracker.normalize(later, "new", "new-attempt")
     unknown = HarnessEvent(type="subagent", subagent=SubagentUpdate(task_id="child-new", tool_use_id="spawn-new"))
     tracker.normalize(unknown, "new", "new-attempt")
-    assert unknown.subagent.tool_call_id is None
+    assert unknown.subagent.tool_call_id == later.runtime_metadata["tool_call_id"]
     known = HarnessEvent(type="subagent", subagent=SubagentUpdate(task_id="child-old", tool_use_id="spawn-old", status="completed"))
     tracker.normalize(known, "new", "new-attempt")
     assert known.subagent.tool_call_id == original.runtime_metadata["tool_call_id"]
@@ -98,6 +96,33 @@ def test_exhausted_provenance_budget_keeps_known_children_and_refuses_new_associ
     tracker.normalize(result, "new", "new-attempt")
     assert result.runtime_metadata["tool_call_id"] == ordinary.runtime_metadata["tool_call_id"]
     assert result.runtime_metadata["receipt"]["task_id"] == "exact"
+
+
+def test_non_spawn_reuse_cannot_claim_an_unknown_child_of_an_older_spawn():
+    tracker = ToolIdentityTracker()
+    spawn = HarnessEvent(type="tool_use", tool_use_id="shared", tool_name="Agent")
+    tracker.normalize(spawn, "r", "a")
+    known = HarnessEvent(type="subagent", subagent=SubagentUpdate(task_id="known", tool_use_id="shared"))
+    tracker.normalize(known, "r", "a")
+    ordinary = HarnessEvent(type="tool_use", tool_use_id="shared", tool_name="Read")
+    tracker.normalize(ordinary, "r", "a")
+    unknown = HarnessEvent(type="subagent", subagent=SubagentUpdate(task_id="unknown", tool_use_id="shared"))
+    tracker.normalize(unknown, "r", "a")
+    assert unknown.subagent.tool_call_id is None
+    done = HarnessEvent(type="subagent", subagent=SubagentUpdate(task_id="known", tool_use_id="shared", status="completed"))
+    tracker.normalize(done, "r", "a")
+    assert done.subagent.tool_call_id == spawn.runtime_metadata["tool_call_id"]
+
+
+def test_unclaimed_idle_spawn_cannot_be_rebound_to_a_new_call():
+    tracker = ToolIdentityTracker()
+    idle = HarnessEvent(type="tool_use", tool_use_id="shared", tool_name="Agent")
+    tracker.normalize_idle(idle)
+    claimed = HarnessEvent(type="tool_use", tool_use_id="shared", tool_name="Agent")
+    tracker.normalize(claimed, "r", "a")
+    child = HarnessEvent(type="subagent", subagent=SubagentUpdate(task_id="unknown", tool_use_id="shared"))
+    tracker.normalize(child, "r", "a")
+    assert child.subagent.tool_call_id is None
 
 
 def test_idle_events_resolve_captured_receipts_and_children_without_creating_new_calls():

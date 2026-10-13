@@ -16,7 +16,7 @@ async def test_empty_reasoning_updates_activity_without_display():
     token = run.bind_activity(ticks.append)
     await run._handle_line(json.dumps({
         "type": "item.completed",
-        "item": {"id": "reasoning_1", "type": "reasoning", "text": ""},
+        "item": {"id": "item_0", "type": "reasoning", "text": ""},
     }))
     assert len(ticks) == 1
     assert run._event_queue.empty()
@@ -61,11 +61,11 @@ async def test_noise_retired_generation_and_terminal_cannot_update_clock():
     for obj in ({"type": "unknown"}, {"type": "item.completed", "item": {"id": "x", "type": "unknown"}}):
         await run._handle_line(json.dumps(obj))
     assert first == second == []
-    await run._handle_line(json.dumps({"type": "item.completed", "item": {"id": "r", "type": "reasoning"}}))
+    await run._handle_line(json.dumps({"type": "item.completed", "item": {"id": "item_0", "type": "reasoning"}}))
     assert first == [] and len(second) == 1
     await run._handle_line('{"type":"turn.completed"}')
     count = len(second)
-    await run._handle_line(json.dumps({"type": "item.completed", "item": {"id": "late", "type": "reasoning"}}))
+    await run._handle_line(json.dumps({"type": "item.completed", "item": {"id": "item_1", "type": "reasoning"}}))
     assert len(second) == count
     run.unbind_activity(current)
 
@@ -136,10 +136,229 @@ async def test_duplicate_stdout_records_do_not_grant_activity():
     run = HarnessRun(CODEX)
     ticks: list[float | None] = []
     run.bind_activity(ticks.append)
-    obj = {"type": "item.completed", "item": {"id": "one", "type": "reasoning", "text": "readable"}}
+    obj = {"type": "item.completed", "item": {"id": "item_0", "type": "reasoning", "text": "readable"}}
     await run._handle_line(json.dumps(obj))
     await run._handle_line(json.dumps(obj))
     assert len(ticks) == 1
+
+
+def test_stdout_activity_survives_long_attempt_and_accepts_old_tool_completion():
+    parser = CODEX.new_event_parser()
+    command = {"id": "item_0", "type": "command_execution", "command": "sleep 10"}
+    assert parser.parse({"type": "item.started", "item": command}).activity is True
+    fresh = 0
+    for index in range(1, 5001):
+        result = parser.parse({"type": "item.completed", "item": {
+            "id": f"item_{index}", "type": "reasoning", "text": "",
+        }})
+        fresh += result.activity is True
+    assert fresh == 5000
+    completed = {"type": "item.completed", "item": {**command, "exit_code": 0}}
+    assert parser.parse(completed).activity is True
+    assert parser.parse(completed).activity is False
+    assert parser.parse({"type": "item.started", "item": command}).activity is False
+    assert parser.parse({"type": "item.completed", "item": {
+        "id": "item_1", "type": "reasoning", "text": "",
+    }}).activity is False
+
+
+def test_unversioned_updates_cannot_renew_stdout_activity():
+    parser = CODEX.new_event_parser()
+    item = {"id": "item_0", "type": "todo_list", "items": []}
+    assert parser.parse({"type": "item.started", "item": item}).activity is True
+    for status in ("pending", "done", "pending"):
+        changed = {**item, "items": [{"text": "plan", "completed": status == "done"}]}
+        assert parser.parse({"type": "item.updated", "item": changed}).activity is False
+    completed = {"type": "item.completed", "item": item}
+    assert parser.parse(completed).activity is True
+    assert parser.parse(completed).activity is False
+
+
+def test_repeated_startup_and_malformed_items_cannot_refresh_activity():
+    parser = CODEX.new_event_parser()
+    startup = {"type": "thread.started", "thread_id": "018f0000-1111-7222-8333-444444444444"}
+    assert parser.parse(startup).activity is True
+    assert parser.parse(startup).activity is False
+    assert parser.parse({"type": "turn.started"}).activity is True
+    assert parser.parse({"type": "turn.started"}).activity is False
+    assert parser.parse({"type": "item.completed", "item": {
+        "id": "item_0", "type": ["unknown"],
+    }}).activity is False
+
+
+def test_unknown_stdout_identity_falls_back_without_exposing_payload(caplog):
+    parser = CODEX.new_event_parser()
+    result = parser.parse({"type": "item.completed", "item": {
+        "id": "future-format", "type": "agent_message", "text": "private reply",
+    }})
+    assert result.activity is None
+    assert [event.content for event in result.events] == ["private reply"]
+    assert "identity unsupported" in caplog.text and "private reply" not in caplog.text
+    assert parser.parse({"type": "item.completed", "item": {
+        "id": "item_0", "type": "reasoning", "text": "",
+    }}).activity is True
+
+
+@pytest.mark.asyncio
+async def test_native_activity_continues_past_4096_and_replays_cannot_renew_it(tmp_path):
+    from server.harness.codex_activity import CodexActivityObserver
+
+    thread = "018f0000-1111-7222-8333-444444444444"
+    turn = "018f0000-5555-7666-8777-888888888888"
+    path = tmp_path / "sessions" / f"rollout-test-{thread}.jsonl"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"type": "session_meta", "payload": {"id": thread}}) + "\n")
+    clock = {"wall": 100.0, "mono": 10.0}
+    ticks = []
+    observer = CodexActivityObserver(
+        {"CODEX_HOME": str(tmp_path)}, ticks.append,
+        wall_clock=lambda: clock["wall"], monotonic=lambda: clock["mono"],
+    )
+    observer.observe_stdout({"type": "thread.started", "thread_id": thread})
+    observer.consume_stderr(f"2026-10-14T00:00:00Z INFO codex_exec: Sent prompt with event ID: {turn}")
+    await observer.poll_once()
+
+    def record(index):
+        return {"type": "event_msg", "payload": {
+            "type": "item_completed", "thread_id": thread, "turn_id": turn,
+            "item": {"type": "Reasoning", "id": f"rs_{index}"},
+            "started_at_ms": 100000, "completed_at_ms": 100000 + index,
+        }}
+
+    try:
+        for batch in range(5):
+            with path.open("a") as stream:
+                for index in range(batch * 1000 + 1, (batch + 1) * 1000 + 1):
+                    stream.write(json.dumps(record(index)) + "\n")
+            clock.update(wall=101.0 + batch, mono=11.0 + batch)
+            await observer.poll_once()
+        assert len(ticks) == 5000
+        assert ticks[-1] == 15.0
+        clock.update(wall=110.0, mono=20.0)
+        with path.open("a") as stream:
+            for index in (1, 4096, 5000):
+                stream.write(json.dumps(record(index)) + "\n")
+        await observer.poll_once()
+        assert len(ticks) == 5000 and ticks[-1] == 15.0
+    finally:
+        await observer.close()
+
+
+@pytest.mark.asyncio
+async def test_delayed_native_activity_uses_source_time_instead_of_a_fresh_idle_window(tmp_path):
+    from server.harness.codex_activity import CodexActivityObserver
+
+    thread = "018f0000-1111-7222-8333-444444444444"
+    turn = "018f0000-5555-7666-8777-888888888888"
+    path = tmp_path / "sessions" / f"rollout-test-{thread}.jsonl"
+    path.parent.mkdir()
+    path.write_text(json.dumps({"type": "session_meta", "payload": {"id": thread}}) + "\n")
+    clock = {"wall": 100.0, "mono": 10.0}
+    ticks = []
+    observer = CodexActivityObserver(
+        {"CODEX_HOME": str(tmp_path)}, ticks.append,
+        wall_clock=lambda: clock["wall"], monotonic=lambda: clock["mono"],
+    )
+    observer.observe_stdout({"type": "thread.started", "thread_id": thread})
+    observer.consume_stderr(f"2026-10-14T00:00:00Z INFO codex_exec: Sent prompt with event ID: {turn}")
+    await observer.poll_once()
+    row = {"type": "event_msg", "payload": {
+        "type": "item_completed", "thread_id": thread, "turn_id": turn,
+        "item": {"type": "Reasoning", "id": "rs_delayed"},
+        "started_at_ms": 100000, "completed_at_ms": 110000,
+    }}
+    try:
+        clock.update(wall=150.0, mono=60.0)
+        with path.open("a") as stream:
+            stream.write(json.dumps(row) + "\n")
+        await observer.poll_once()
+        assert ticks == [20.0]
+        clock.update(wall=500.0, mono=410.0)
+        with path.open("a") as stream:
+            stream.write(json.dumps(row) + "\n")
+        await observer.poll_once()
+        assert ticks == [20.0]
+    finally:
+        await observer.close()
+
+
+@pytest.mark.asyncio
+async def test_native_discovery_continues_across_large_fork_store(tmp_path, caplog):
+    from server.harness.codex_activity import CodexActivityObserver
+
+    # Native fork copies use UUIDv4 and cannot be located by a birth-date hint.
+    thread = "018f0000-1111-4222-8333-444444444444"
+    turn = "018f0000-5555-7666-8777-888888888888"
+    root = tmp_path / "sessions"
+    root.mkdir()
+    for index in range(1500):
+        (root / f"unrelated-{index}.jsonl").touch()
+    path = root / f"rollout-fork-{thread}.jsonl"
+    path.write_text(json.dumps({"type": "session_meta", "payload": {"id": thread}}) + "\n")
+    with path.open("a") as stream:
+        stream.write(json.dumps({"type": "event_msg", "payload": {
+            "type": "item_completed", "thread_id": thread, "turn_id": turn,
+            "item": {"type": "Reasoning", "id": "rs_fork"},
+            "started_at_ms": 100000, "completed_at_ms": 100000,
+        }}) + "\n")
+    ticks = []
+    observer = CodexActivityObserver(
+        {"CODEX_HOME": str(tmp_path)}, ticks.append,
+        wall_clock=lambda: 100.0, monotonic=lambda: 10.0,
+    )
+    observer.observe_stdout({"type": "thread.started", "thread_id": thread})
+    observer.consume_stderr(f"2026-10-14T00:00:00Z INFO codex_exec: Sent prompt with event ID: {turn}")
+    try:
+        for _ in range(3):
+            await observer.poll_once()
+        assert ticks == [10.0]
+        assert observer.identity_confirmed
+        assert caplog.text == ""
+    finally:
+        await observer.close()
+
+
+@pytest.mark.asyncio
+async def test_confirmed_process_identity_can_wait_for_incremental_discovery(tmp_path):
+    import asyncio
+
+    from server.harness.codex_activity import CodexActivityObserver
+
+    thread = "018f0000-1111-4222-8333-444444444444"
+    turn = "018f0000-5555-7666-8777-888888888888"
+    root = tmp_path / "sessions"
+    root.mkdir()
+    for index in range(4000):
+        (root / f"unrelated-{index}.jsonl").touch()
+    path = root / f"rollout-fork-{thread}.jsonl"
+    path.write_text(json.dumps({"type": "session_meta", "payload": {"id": thread}}) + "\n")
+    with path.open("a") as stream:
+        stream.write(json.dumps({"type": "event_msg", "payload": {
+            "type": "item_completed", "thread_id": thread, "turn_id": turn,
+            "item": {"type": "Reasoning", "id": "rs_fork"},
+            "started_at_ms": 100000, "completed_at_ms": 100000,
+        }}) + "\n")
+    clock = {"wall": 100.0, "mono": 10.0}
+    ready = asyncio.Event()
+    ticks = []
+
+    def notify(tick):
+        ticks.append(tick)
+        ready.set()
+
+    observer = CodexActivityObserver(
+        {"CODEX_HOME": str(tmp_path)}, notify,
+        wall_clock=lambda: clock["wall"], monotonic=lambda: clock["mono"],
+    )
+    observer.observe_stdout({"type": "thread.started", "thread_id": thread})
+    observer.consume_stderr(f"2026-10-14T00:00:00Z INFO codex_exec: Sent prompt with event ID: {turn}")
+    clock.update(wall=140.0, mono=50.0)
+    try:
+        await observer.start()
+        await asyncio.wait_for(ready.wait(), 1)
+        assert ticks == [10.0]
+    finally:
+        await observer.close()
 
 
 @pytest.mark.asyncio

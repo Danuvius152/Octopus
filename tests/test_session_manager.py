@@ -2949,7 +2949,7 @@ async def test_hidden_activity_and_true_silence_keep_cumulative_recovery_budget(
         for n in range(8):
             clock.now += 0.25
             await runs[0]._handle_line(json.dumps({"type": "item.completed", "item": {
-                "id": f"reasoning_{n}", "type": "reasoning", "text": "",
+                "id": f"item_{n}", "type": "reasoning", "text": "",
             }}))
             clock.waiter.set_result(None)
             await clock_ready()
@@ -2961,7 +2961,7 @@ async def test_hidden_activity_and_true_silence_keep_cumulative_recovery_budget(
                 await clock_ready()
                 # A retired attempt's late no-summary event cannot renew its successor.
                 await runs[index]._handle_line(json.dumps({"type": "item.completed", "item": {
-                    "id": "late", "type": "reasoning", "text": "",
+                    "id": "item_99", "type": "reasoning", "text": "",
                 }}))
         events = await asyncio.wait_for(task, 1)
         assert len([e for e in events if e.get("code") == "turn_timeout_retry"]) == 2
