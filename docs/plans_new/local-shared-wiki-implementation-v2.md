@@ -15,7 +15,7 @@
 | V2-03 | intent、compact、read_many、覆盖选择及分页已实现；旧 full 调用兼容 | 用真实问题检查候选覆盖、引用、复用与成本 |
 | V2-04 | 框架能力、分层指南与 persona 合并稿已实现 | 合并既有 Weber 配置，验证实际 worker 身份和装配 |
 | V2-06 | 隔离机械测试与 Codex 实机检查；真实文章试点尚未执行 | 约六份代表材料的真实闭环与批次放行记录 |
-| V2-08 | 未开始生产批量模板化 | V2-06 通过后按清单分批处理 pika_vault |
+| V2-08 | 未开始生产批量模板化 | V2-06 通过后，pika_vault 优先，按清单覆盖 Library 下所有 Markdown 的整理、入库与检索验证 |
 | V2-05 / 09 | Sapphire / SmartReader 新功能保持 feature plan | 另行实施，不阻塞少量试点或旧资料整理 |
 | V2-07 | 未加入语义适配器 | 达到已约定真实检索缺口条件后再决定 |
 
@@ -32,7 +32,7 @@
 | vault_id | `6bdb9fe5-3453-47a8-8510-9a892c510346` |
 | owner app_id | `3e7830a1336b` |
 | root | `/home/jack/.octopus/users/f527ad605dd4/applications/sapphire.data/vaults/obv/repo` |
-| 当前模板化目标目录 | `Library/pika_vault`，以逐批明确文件范围执行 |
+| 当前整理入库目标目录 | `Library/` 下所有 Markdown，pika_vault 优先，以逐批明确文件范围执行 |
 
 主库目录存在，运行服务 `/health` 正常；这些只证明现有服务可达，**不证明本次代码已上线**。当前开发对话没有 Octopus 委托工具及会话授权，因此没有伪造实际账户凭据或直接写生产数据库来代替框架协作。Octo 在自己的真实会话中使用现有任务入口。
 
@@ -167,7 +167,9 @@ start/end 在对应原始块内，必须与实际字句和 hash 一致；上例�
 
 按[迁移计划 §3.1](local-shared-wiki-migration-v2.md#31-真实-weber-链路与模板化放行)先放行 V2-06 少量试点，再放行 V2-08。不等待新的 app 开发。
 
-先核对迁移文档六份代表材料是否仍存在：Me 档案、三篇 pika_vault 随笔/开发文章、Vidu 技术报告与 models_runtime_deep_dive。它们全部可做读/检索检查，**只向 job 提交本次确需写入且已明确范围的文件**；Me 不凑职业、不套 Reference，长报告不为计数整篇重写。旧模板 `Library/pika_vault/编程与开发/00-文章入库模板.md` 只供对照，按最新 article-v1 和维护合同执行。
+用户在后续交接中明确：**Library 下所有 Markdown 都纳入整理、入库及检索验证，pika_vault 可以先来，最终全部覆盖。** Octo 建立全量清单并将每批明确到文件，现有 Vera 从试点前参与验收。Me、Research、课程笔记、导航、模板和其余目录均在最终范围，按真实用途整理；已符合要求的文件真实复核后记录 no_change，并验证当前索引和检索，不要求每篇都改字。
+
+先核对迁移文档六份代表材料是否仍存在：Me 档案、三篇 pika_vault 随笔/开发文章、Vidu 技术报告与 models_runtime_deep_dive。它们全部纳入整理复核与读/检索检查，**向 job 提交本批明确范围和动作的文件**；Me 不凑职业、不套 Reference，长报告不为计数整篇重写。旧模板 `Library/pika_vault/编程与开发/00-文章入库模板.md` 只供对照，按最新 article-v1 和维护合同执行。
 
 实际链路：明确 `/wiki maintain` 请求 → durable job/assignment → 现有 Weber worker → 当前全文读取 → 缺失 Key note 提取或已有摘要复用 → organize/restructure/revise → history/receipt/索引 → 后续查询。Weber 自己接收请求也先提交 job；普通查询直接使用共享服务，不固定转发给 Weber。
 
@@ -179,8 +181,67 @@ start/end 在对应原始块内，必须与实际字句和 hash 一致；上例�
 4. 人工编辑后仍可维护、一次明确局部纠错或补充。并发冲突、取消、恢复、漏事件和索引失败在隔离副本验证，不故意破坏生产资料。
 5. 一个真实研究问题确有独立用途时形成或补充知识页，再以不同问法复用，最后明确纠正；核心思想与有风格观点仍在。不强制每篇生成 Concept/Topic。
 
-Vera 核对这些实际产物和失败断言，Weber 的“已整理”或 schema lint 不替代验收。通过后 Octo 为 pika_vault 建有限批次清单并沿同一 job/受控写入链路执行；只重做具体失败项，不因改一段 persona 文风全库重写。文章来源暂缺正常入库，后续确有总结依据时记录真实出处。
+Vera 核对这些实际产物和失败断言，Weber 的“已整理”或 schema lint 不替代验收。通过后 Octo 先处理 pika_vault，再沿同一 job/受控写入链路覆盖当前 Library 全量清单；只重做具体失败项，不因改一段 persona 文风全库重写。每篇核对身份、revision、回执、索引、精确定位与当前读取，领域内容另检查内容检索，导航/模板按角色与明确范围验证。最终以文件枚举与清单对账，列明尚未解决的遗漏、冲突和失败；pika_vault 完成不能代替全量交付。文章来源暂缺正常入库，后续确有总结依据时记录真实出处。
 
 ## 8. 给 Octo 的可直接接手指令
 
-> 先读本交接及 v2 总纲/任务票，核对当前 commit、工作区、主库和已有 job。V2-01～03 与 V2-04 框架实现已交付，生产 persona/部署/内容试点未执行；不要重复开发已完成核心，也不要把隔离 Codex 测试当真实 Weber 验收。按本文部署并验证实际 capabilities，保留现有 Weber 身份和其他配置，只合并知识规则。随后在 Octopus 框架内由既有 Weber 执行明确范围的少量文章模板化、Key note 和 /wiki 维护，Vera 独立核对真实 diff、回执、当前引用、思想保全与复用。V2-06 闭环通过后再启动 V2-08 pika_vault 分批整理。Sapphire/SmartReader 新功能继续是后续 feature plan。
+> 先读本交接及 v2 总纲/任务票，核对当前 commit、工作区、主库和已有 job。V2-01～03 与 V2-04 框架实现已交付，生产 persona/部署/内容试点未执行；不要重复开发已完成核心，也不要把隔离 Codex 测试当真实 Weber 验收。按本文部署并验证实际 capabilities，保留现有 Weber 身份和其他配置，只合并知识规则。Octo 统一组织既有 Weber 与现有 Vera，Vera 从首次写入前参与验收讨论，Weber 经明确范围的 durable job 完成少量文章模板化、Key note 和 /wiki 维护；Vera 独立核对真实 diff、回执、当前引用、思想保全与复用。V2-06 闭环通过后启动 V2-08，pika_vault 优先，最终覆盖 Library 下所有 Markdown 的按类型整理、入库和逐篇检索验证；真实 no_change 也记录并验收，未完成项不计为全量交付。Sapphire/SmartReader 新功能继续是后续 feature plan。
+
+以下完整 prompt 包含用户后续确认的 Library 全量范围及现有 Vera 的验收时点，可直接复制给 Octo：
+
+```text
+Octo，请作为总负责人，组织本地共享 Wiki v2 从接手、上线、真实试点到全量整理入库与检索验收。你负责范围、部署、分派、跟踪、问题处理和放行；既有 Weber 负责内容理解与受控维护，现有 Vera 负责独立验收。以下范围内自主推进，无需让我逐批确认。
+
+一、接受交付
+仓库：/home/jack/Octopus。
+先读 docs/plans_new/local-shared-wiki-implementation-v2.md、local-shared-wiki-v2.md 和 local-shared-wiki-tickets-v2.md；执行时结合同目录 content、maintenance、retrieval、prompts、migration、evaluation、knowledge 的 v2 文档。
+旧 docs/plans 讨论用于理解设计思想；以最新 v2 文档、Q54～60 和本次 Library 全量范围确认作为当前依据。核心实现 ca45ffc、交接 73ea9cd 已推送 origin/main；交付时未部署、未修改实际 Weber persona 或整理生产文章，接手时重新核对当前状态。保护用户工作区，复用已交付核心。Sapphire/SmartReader 新功能继续是 feature plan。
+
+二、完整范围与顺序
+Vault 根目录：/home/jack/.octopus/users/f527ad605dd4/applications/sapphire.data/vaults/obv/repo。
+本轮范围是 Library 下所有 Markdown，递归枚举并兼容 .MD 等大小写后缀。pika_vault 优先，随后覆盖 Me、Research、课程笔记、导航、模板及其余目录；Me 和 Research 同样需要最终整理入库，按真实类型处理。
+建立全量文件清单，记录路径、服务身份、revision、类型、动作、任务/回执和检索结果。批次明确到具体文件；目录授权由你落实为清单，再通过实际维护入口纳入任务范围。
+已符合要求的文件真实完整复核后记录 no_change，也检查索引和检索。最终所有文件都有整理或复核、实际入库状态及检索验证；未处理、冲突、失败或不可检索项不计完成。
+
+三、上线和配置准备
+重新通过框架核实绑定：account f527ad605dd4，Weber f37612d667ec，vault 6bdb9fe5-3453-47a8-8510-9a892c510346，owner app 3e7830a1336b。
+新代码未上线时按交接文档部署。在没有在途写入时留下一致的配置、Wiki durable state 与 Vault 恢复点，保留身份、历史和回执。使用现有 venv、pip、本机设置及登录。
+本机以 systemctl --user 管理 octopus；更新后端并确认健康，再构建需要更新的前端。核对实际 capabilities、绑定、索引状态、当前 revision、compact 和 read-many，不能仅凭 health 判断完成。
+读取既有 Weber persona，只合并知识维护段，保留思考伙伴身份及其他定制。backend、model、reasoning、凭据、memory 等维持现有设置；仓库参考 prompt 与实际配置分别核对。
+
+四、首次写入前组织 Vera 讨论验收
+上线准备期间委托现有 Vera 阅读交接、迁移与评估文档，让 Weber 提供材料理解。你组织确定试点文件、原始版本基线、必须保留的主张/条件/反例/风格、检索问法、证据格式与停批条件，记录在清单中。
+验收落实已有合同，App、语言实验、大规模扩容和可选语义后端不成为前置条件。
+向 Weber、Vera 分派时完整提供背景、文档、明确范围和版本，不假设子会话继承你的上下文。普通 ask_agent 可用于讨论与验收；实际 Wiki 写权限由框架的任务上下文提供。
+
+五、由你统一提交维护任务
+真实链路为：明确 /wiki maintain → durable job/assignment → 既有 Weber worker → 当前全文读取 → 受控写入 → history/receipt/索引 → 当前查询验收。
+同一批指定一个提交者，固定 idempotency_key，明确 paths 和 scope，避免重复排队。已有 MD 用现有路径维护，material 留空，不重复导入成新文章。普通 /wiki 查询不自动整理。
+保留真实 delegation/session/job/item 标识，跟踪实际完成。异步返回任务 ID 仅表示已提交；后续批次由你调度，worker 完成自己的 assignment。
+
+六、每批给 Weber 的内容规则
+完整读取当前版本，包括长文后续部分。题名、摘要、首段不代替全文，预算不足继续分页读。
+Library/pika_vault/编程与开发/00-文章入库模板.md 只作参考，采用最新 OKF/article-v1。文章开头维护规范 YAML、真实 H1、Key note 和正文；个人记录、报告、课程笔记、导航及模板按自身类型组织。
+缺失 Key note 时从全文提取主张、理由、条件、反例和适用范围；已有好摘要沿用。摘要与原正文分开。正文措辞、核心思想、有风格的观点、限定词、公式、代码、引文、链接及媒体保留；必要纠错或补充做明确的定点维护并记录理由和差异，不整段润色或重写。
+不按 AI/人类作者或过去人工编辑限制维护资格。source 可以为空，不补造作者、日期、出处或 verified，不为现有 MD 新增永久 .source.md.txt。
+标签、可靠别名和关联基于实际内容及读到的上下文。已符合要求时记录真实 no_change。
+遵循有效 worker 指南，按需加载 article/writing。写入使用 organize/restructure/revise 等受控工具，新版 organize 显式使用 frontmatter_patch。版本变化重读并处理差异；文件已提交但索引失败时恢复索引，不重新生成正文。历史恢复同样检查当前版本，保护后来的人工作品。
+
+七、先完成试点，由 Vera 验收放行
+按 migration 文档核对六份代表材料。首个写入任务处理 1～2 篇，立即请 Vera 检查前后正文、diff、Key note、主体归属、回执和当前检索；你定位并安排修正，经复验继续完整试点。
+完整试点约 5～10 份，按长度分组，覆盖缺失摘要、已有摘要复用、no_change、长文、个人缺字段、精确对象、宽主题/比较，以及人工编辑后的定点维护。冲突、取消、恢复与索引失败在隔离副本验证。
+选一个真实、有复用价值的问题，明确材料、目标与范围后让 Weber 形成或补充知识页，再用不同问法复用并完成一次有依据的明确纠正；不强制每篇派生 Concept/Topic。
+向 Vera 提供真实 worker/session/job/item、输入输出 revision、receipt/history、实际 diff、索引与引用证据。她逐项给出通过、需修正、阻塞及依据。你核对必需合同全部通过后放行批量；资料修正继续由 Weber 受控执行。代码若需修改，按 AGENTS 的本机验证约定完成检查。
+
+八、覆盖整个 Library，逐篇检索验证
+试点通过后先完成 pika_vault，再按全量清单继续其他目录。每批通常 5～10 篇，长文按实际负载安排，直至整个范围处理完毕。
+框架负责索引更新，你逐篇检查稳定身份、路径、当前 revision、实际回执及索引状态，并实际验证精确路径/身份定位和当前内容读取。领域文档再以题名或正文关键词/问题检索确认命中；Me 在个人范围检查，导航/模板按相应角色及明确范围检查。索引可达与语义质量分别记录。
+你对逐篇范围、版本、差异、回执和检索执行全量核对；Vera 按类型抽查语义，覆盖长文、代码、风格观点和已有摘要。实质错误暂停受影响批次，检查同规则产物、修正并复验。重要 prompt、解析或维护规则变化后先复验受影响试点。
+已完成且未变化的项复用回执，只续失败/冲突或版本变化项，不重做成功全文。保留现有主文身份与路径，复用已有任务、索引和历史。
+
+九、最终由你统一交付
+持续记录代码/parser/prompt 版本、运行配置、逐篇动作、输入输出 revision、任务/回执/恢复引用、索引及检索结果、问题和实际成本。
+区分已保存可检索、已按类型整理、已形成有用途的综合知识。最终重新对账当前 Library 文件枚举与处理清单，列出总数、已改动、真实 no_change、检索通过和所有未完成项，核对途中新增/移动/修改的文件。
+请 Vera 汇总验收结论、抽查范围和证据限制，你交付上线/配置结果、试点验收、全部批次清单、实际恢复引用及检索复用示例。pika_vault 完成只代表优先批次完成；仍有未处理、冲突或失败时如实报告，不宣称全量完成。
+工具或权限缺失时说明具体缺口并继续可完成部分。如实报告实际执行者和任务状态；日常 /wiki 查询仍直接读共享库，上述多 agent 协作用于本轮迁移及重要变更验收。
+```
