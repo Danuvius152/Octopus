@@ -10,12 +10,18 @@ not go through this manager.
 
 from __future__ import annotations
 
+import sqlite3
 import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from . import agent_memory
 from .config import settings
+from .credential_bindings import (
+    CredentialBindingError,
+    validate_credential_binding,
+    validate_failed_credential_write,
+)
 from .database import Database
 
 
@@ -71,28 +77,43 @@ class AgentManager:
             raise AgentError("Agent name is required")
         if await self.db.get_agent_by_name(name, user_id=user_id) is not None:
             raise AgentError(f"An agent named {name!r} already exists")
+        backend = backend or settings.default_backend
+        credential_id = credential_id or None
+        try:
+            await validate_credential_binding(self.db, credential_id, backend, user_id)
+        except CredentialBindingError as exc:
+            raise AgentError(str(exc)) from exc
         agent_id = uuid.uuid4().hex[:12]
         now = datetime.now(UTC).isoformat()
-        await self.db.save_agent(
-            agent_id=agent_id,
-            name=name,
-            created_at=now,
-            updated_at=now,
-            description=description,
-            avatar=avatar,
-            system_prompt=system_prompt,
-            model=model,
-            reasoning_effort=reasoning_effort,
-            service_tier=service_tier,
-            credential_id=credential_id,
-            backend=backend or settings.default_backend,
-            mcp_servers=mcp_servers,
-            tool_allow=tool_allow,
-            tool_deny=tool_deny,
-            subagents=subagents,
-            is_system=False,
-            user_id=user_id,
-        )
+        try:
+            await self.db.save_agent(
+                agent_id=agent_id,
+                name=name,
+                created_at=now,
+                updated_at=now,
+                description=description,
+                avatar=avatar,
+                system_prompt=system_prompt,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                service_tier=service_tier,
+                credential_id=credential_id,
+                backend=backend,
+                mcp_servers=mcp_servers,
+                tool_allow=tool_allow,
+                tool_deny=tool_deny,
+                subagents=subagents,
+                is_system=False,
+                user_id=user_id,
+            )
+        except sqlite3.IntegrityError as exc:
+            try:
+                await validate_failed_credential_write(
+                    self.db, exc, credential_id, backend, user_id
+                )
+            except CredentialBindingError as binding_error:
+                raise AgentError(str(binding_error)) from exc
+            raise
         agent = await self.db.get_agent(agent_id)
         assert agent is not None
         # Provision the agent's canonical memory/ dir up front; also ensured
@@ -107,6 +128,19 @@ class AgentManager:
         agent = await self.db.get_agent(agent_id, user_id=user_id)
         if agent is None:
             raise AgentError("Agent not found")
+        if "credential_id" in fields:
+            fields["credential_id"] = fields["credential_id"] or None
+        credential_id = fields.get("credential_id", agent.get("credential_id"))
+        backend = fields.get("backend")
+        if backend is None:
+            backend = agent["backend"]
+        owner_id = agent.get("user_id")
+        try:
+            await validate_credential_binding(
+                self.db, credential_id, backend, owner_id
+            )
+        except CredentialBindingError as exc:
+            raise AgentError(str(exc)) from exc
         if "name" in fields and fields["name"] is not None:
             new_name = fields["name"].strip()
             if not new_name:
@@ -117,7 +151,16 @@ class AgentManager:
             if clash is not None and clash["id"] != agent_id:
                 raise AgentError(f"An agent named {new_name!r} already exists")
             fields["name"] = new_name
-        await self.db.update_agent(agent_id, **fields)
+        try:
+            await self.db.update_agent(agent_id, **fields)
+        except sqlite3.IntegrityError as exc:
+            try:
+                await validate_failed_credential_write(
+                    self.db, exc, credential_id, backend, owner_id
+                )
+            except CredentialBindingError as binding_error:
+                raise AgentError(str(binding_error)) from exc
+            raise
         updated = await self.db.get_agent(agent_id)
         assert updated is not None
         return updated

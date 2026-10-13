@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from ..agent_manager import AgentError, AgentManager
 from ..auth import verify_token
+from ..credential_bindings import CredentialBindingError, validate_credential_binding
 from ..deps import ScopeUser, SessionMgr
 from ..models import (
     AgentCreate,
@@ -50,7 +51,7 @@ async def _publish(session_manager, kind: str, agent: dict) -> None:
     )
 
 
-def _agent_http_error(e: AgentError) -> HTTPException:
+def _agent_http_error(e: AgentError | CredentialBindingError) -> HTTPException:
     msg = str(e)
     code = status.HTTP_404_NOT_FOUND if "not found" in msg.lower() else status.HTTP_400_BAD_REQUEST
     return HTTPException(code, msg)
@@ -68,9 +69,16 @@ async def list_agents(
 async def create_agent(
     session_manager: SessionMgr, req: AgentCreate, user_id: ScopeUser = None, _: str = Depends(verify_token)
 ):
+    credential_id = req.credential_id or None
+    try:
+        await validate_credential_binding(
+            session_manager.db, credential_id, req.backend, user_id
+        )
+    except CredentialBindingError as e:
+        raise _agent_http_error(e)
     if req.reasoning_effort is not None or req.service_tier is not None:
         catalog = await model_settings_for(
-            session_manager, req.backend, req.credential_id, user_id,
+            session_manager, req.backend, credential_id, user_id,
         )
         validate_reasoning(catalog, req.model, req.reasoning_effort)
         validate_service_tier(catalog, req.model, req.service_tier)
@@ -134,11 +142,23 @@ async def update_agent(
 
 
 async def _update_agent_settings(session_manager, agent_id: str, fields: dict, user_id: str | None) -> dict:
+    if "credential_id" in fields:
+        fields["credential_id"] = fields["credential_id"] or None
     if {"model", "reasoning_effort", "service_tier", "backend", "credential_id"} & fields.keys():
         current = await session_manager.db.get_agent(agent_id, user_id)
         if current is None:
             raise HTTPException(404, "Agent not found")
         merged = {**current, **fields}
+        # Explicit null for backend is ignored by Database.update_agent; check
+        # the backend that will actually be saved, including backend-only edits.
+        if merged["backend"] is None:
+            merged["backend"] = current["backend"]
+        try:
+            await validate_credential_binding(
+                session_manager.db, merged.get("credential_id"), merged["backend"], user_id
+            )
+        except CredentialBindingError as e:
+            raise _agent_http_error(e)
         if merged.get("reasoning_effort") is not None or merged.get("service_tier") is not None:
             catalog = await model_settings_for(
                 session_manager, merged["backend"], merged.get("credential_id"), user_id,
