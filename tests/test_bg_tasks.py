@@ -106,6 +106,7 @@ async def test_start_task_returns_immediately_and_completes(manager, db, tmp_pat
     )
     assert rec.id
     assert rec.status == "running"
+    assert (rec.idle_timeout_seconds, rec.timeout_seconds) == (60, 1800)
 
     await _wait_for(lambda: rec.id in [d.id for d in manager._delivered_])
     delivered = next(d for d in manager._delivered_ if d.id == rec.id)
@@ -131,6 +132,171 @@ async def test_failing_command_records_failure(manager, db, tmp_path):
     assert delivered.exit_code == 7
 
 
+@pytest.mark.parametrize("idle, expected_status", [(0, "completed"), (1, "failed")])
+async def test_task_selected_idle_limit_controls_a_normal_quiet_phase(
+    manager, db, tmp_path, idle, expected_status
+):
+    await _make_session_row(db, "s1", str(tmp_path))
+    rec = await manager.start_task(
+        session_id="s1", command="echo started; sleep 1.6; echo finished",
+        working_dir=str(tmp_path), idle_timeout_seconds=idle, timeout_seconds=5,
+    )
+    await _wait_for(lambda: bool(manager._delivered_))
+    result = await manager.get_task(rec.id)
+    assert result.status == expected_status
+    assert result.idle_timeout_seconds == idle
+    if idle:
+        assert result.stop_reason == "idle_timeout"
+        assert "finished" not in result.stdout
+    else:
+        assert result.stop_reason is None
+        assert "finished" in result.stdout
+
+
+async def test_total_timeout_still_stops_a_task_with_idle_disabled(manager, db, tmp_path):
+    await _make_session_row(db, "s1", str(tmp_path))
+    rec = await manager.start_task(
+        session_id="s1", command="echo started; sleep 10; echo finished",
+        working_dir=str(tmp_path), idle_timeout_seconds=0, timeout_seconds=1,
+    )
+    await _wait_for(lambda: bool(manager._delivered_))
+    result = await manager.get_task(rec.id)
+    assert result.status == "failed"
+    assert result.stop_reason == "total_timeout"
+    assert "started" in result.stdout and "finished" not in result.stdout
+    assert "total_timeout" in render_delivery_prompt(result)
+
+
+@pytest.mark.parametrize("notification_delay", [0.6, 1.5])
+async def test_slow_started_notification_does_not_extend_total_runtime(
+    manager, db, tmp_path, notification_delay
+):
+    await _make_session_row(db, "s1", str(tmp_path))
+    delivered = []
+
+    async def capture(record):
+        delivered.append(record)
+
+    async def slow_notification(event):
+        if event["type"] == "bg_started":
+            await asyncio.sleep(notification_delay)
+
+    manager.bind(db=db, deliver_cb=capture, broadcast_cb=slow_notification)
+    rec = await manager.start_task(
+        session_id="s1", command="echo started; sleep 1.2; echo finished",
+        working_dir=str(tmp_path), idle_timeout_seconds=0, timeout_seconds=1,
+    )
+    await _wait_for(lambda: bool(delivered))
+    result = await manager.get_task(rec.id)
+    assert (result.status, result.stop_reason) == ("failed", "total_timeout")
+    assert "finished" not in result.stdout
+
+
+@pytest.mark.parametrize("cause, expected_status", [
+    ("user_cancel", "cancelled"), ("server_shutdown", "interrupted"),
+    ("external_signal", "interrupted"),
+])
+async def test_task_reports_the_actual_interruption_source(
+    manager, db, tmp_path, cause, expected_status
+):
+    import os
+    import signal
+
+    await _make_session_row(db, "s1", str(tmp_path))
+    pid_file = tmp_path / "process.pid"
+    rec = await manager.start_task(
+        session_id="s1", command="echo $$ > process.pid; exec sleep 10",
+        working_dir=str(tmp_path),
+    )
+    await _wait_for(pid_file.exists)
+    if cause == "user_cancel":
+        assert await manager.cancel_task(rec.id)
+    elif cause == "server_shutdown":
+        await manager.shutdown()
+    else:
+        os.killpg(int(pid_file.read_text()), signal.SIGTERM)
+    await _wait_for(lambda: bool(manager._delivered_))
+    result = await manager.get_task(rec.id)
+    assert (result.status, result.stop_reason) == (expected_status, cause)
+    assert cause in render_delivery_prompt(result)
+
+
+async def test_cancel_reaps_a_descendant_that_ignores_sigterm(manager, db, tmp_path):
+    import os
+    import shlex
+    import signal
+    import sys
+
+    await _make_session_row(db, "s1", str(tmp_path))
+    child_code = (
+        "import os,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        "open('child.pid','w').write(str(os.getpid())); time.sleep(30)"
+    )
+    parent_code = (
+        f"import subprocess,sys,time; subprocess.Popen([sys.executable,'-c',{child_code!r}]); "
+        "time.sleep(30)"
+    )
+    rec = await manager.start_task(
+        session_id="s1", command=f"exec {shlex.quote(sys.executable)} -c {shlex.quote(parent_code)}",
+        working_dir=str(tmp_path),
+    )
+    child_file = tmp_path / "child.pid"
+    await _wait_for(child_file.exists)
+    child_pid = int(child_file.read_text())
+
+    def child_finished():
+        try:
+            return (Path(f"/proc/{child_pid}/stat").read_text().rsplit(")", 1)[1].split()[0] == "Z")
+        except FileNotFoundError:
+            return True
+
+    from pathlib import Path
+
+    try:
+        assert await manager.cancel_task(rec.id)
+        await _wait_for(child_finished, timeout=7)
+        await _wait_for(lambda: bool(manager._delivered_))
+        assert (await manager.get_task(rec.id)).stop_reason == "user_cancel"
+    finally:
+        if not child_finished():
+            os.kill(child_pid, signal.SIGKILL)
+
+
+async def test_an_unsent_signal_does_not_claim_a_user_cancellation(
+    manager, db, tmp_path, monkeypatch
+):
+    import os
+
+    await _make_session_row(db, "s1", str(tmp_path))
+    rec = await manager.start_task(
+        session_id="s1", command="touch ready; sleep 0.15; echo finished",
+        working_dir=str(tmp_path),
+    )
+    await _wait_for((tmp_path / "ready").exists)
+
+    def denied(*args):
+        raise PermissionError("test signal denied")
+
+    monkeypatch.setattr(os, "killpg", denied)
+    assert not await manager.cancel_task(rec.id)
+    await _wait_for(lambda: bool(manager._delivered_))
+    result = await manager.get_task(rec.id)
+    assert (result.status, result.stop_reason) == ("completed", None)
+
+
+async def test_stderr_activity_keeps_a_stdout_quiet_task_running(manager, db, tmp_path):
+    await _make_session_row(db, "s1", str(tmp_path))
+    rec = await manager.start_task(
+        session_id="s1",
+        command="echo started; for n in 1 2 3 4; do echo tick >&2; sleep 0.4; done; echo finished",
+        working_dir=str(tmp_path), idle_timeout_seconds=1, timeout_seconds=5,
+    )
+    await _wait_for(lambda: bool(manager._delivered_))
+    result = await manager.get_task(rec.id)
+    assert (result.status, result.stop_reason) == ("completed", None)
+    assert "finished" in result.stdout and result.stderr.count("tick") == 4
+
+
 async def test_idle_watchdog_terminates_proc_that_goes_silent(
     manager, db, tmp_path, monkeypatch
 ):
@@ -146,7 +312,6 @@ async def test_idle_watchdog_terminates_proc_that_goes_silent(
 
     from server import bg_tasks as bgm
 
-    monkeypatch.setattr(bgm, "IDLE_AFTER_OUTPUT_TIMEOUT_SECS", 2)
     monkeypatch.setattr(bgm, "IDLE_CHECK_INTERVAL_SECS", 1)
 
     await _make_session_row(db, "s1", str(tmp_path))
@@ -161,6 +326,7 @@ async def test_idle_watchdog_terminates_proc_that_goes_silent(
         session_id="s1",
         command=cmd,
         working_dir=str(tmp_path),
+        idle_timeout_seconds=2,
     )
     await _wait_for(
         lambda: any(d.id == rec.id for d in manager._delivered_),
@@ -168,8 +334,8 @@ async def test_idle_watchdog_terminates_proc_that_goes_silent(
     )
     elapsed = asyncio.get_running_loop().time() - start
     delivered = next(d for d in manager._delivered_ if d.id == rec.id)
-    assert delivered.status == "interrupted", (
-        f"idle watchdog should label this 'interrupted', got {delivered.status!r} "
+    assert delivered.status == "failed", (
+        f"idle watchdog should report a timeout failure, got {delivered.status!r} "
         f"(exit_code={delivered.exit_code})"
     )
     assert delivered.exit_code is not None and delivered.exit_code < 0
@@ -188,7 +354,6 @@ async def test_idle_watchdog_does_not_fire_on_quiet_short_command(
     tasks unfairly."""
     from server import bg_tasks as bgm
 
-    monkeypatch.setattr(bgm, "IDLE_AFTER_OUTPUT_TIMEOUT_SECS", 1)
     monkeypatch.setattr(bgm, "IDLE_CHECK_INTERVAL_SECS", 1)
 
     await _make_session_row(db, "s1", str(tmp_path))
@@ -198,6 +363,7 @@ async def test_idle_watchdog_does_not_fire_on_quiet_short_command(
         session_id="s1",
         command="sleep 3",
         working_dir=str(tmp_path),
+        idle_timeout_seconds=1,
     )
     await _wait_for(
         lambda: any(d.id == rec.id for d in manager._delivered_),
@@ -354,6 +520,26 @@ async def test_in_flight_marked_interrupted_on_startup(db):
     assert row["completed_at"] is not None
 
 
+async def test_restart_marks_only_orphans_and_keeps_old_limits_unknown(db):
+    await _make_session_row(db, "s1", "/tmp")
+    for task_id in ("legacy-finished", "legacy-running"):
+        await db.create_bg_task(
+            task_id=task_id, session_id="s1", command="true", description=None,
+            working_dir="/tmp", started_at="2026-05-18T00:00:00Z",
+        )
+    await db.update_bg_task("legacy-finished", status="failed", exit_code=7)
+    restarted = BgTaskManager()
+    restarted.bind(db=db, deliver_cb=_noop_deliver, broadcast_cb=_noop_broadcast)
+    await restarted.start()
+    orphan = await restarted.get_task("legacy-running")
+    history = await restarted.get_task("legacy-finished")
+    assert (orphan.status, orphan.stop_reason) == ("interrupted", "server_restart")
+    assert (history.status, history.stop_reason) == ("failed", None)
+    assert orphan.idle_timeout_seconds is None and orphan.timeout_seconds is None
+    assert history.idle_timeout_seconds is None and history.timeout_seconds is None
+    assert "idle timeout: unknown" in render_delivery_prompt(history)
+
+
 async def _noop_deliver(_rec):
     pass
 
@@ -415,13 +601,26 @@ def test_render_delivery_prompt_handles_truncation_and_stderr():
 
 
 @pytest.fixture
-async def api_client(tmp_path):
+async def api_client(tmp_path, monkeypatch):
     """In-memory DB + ASGI client + a manager wired in the same shape
     as production's lifespan. Mirrors test_attachments.client."""
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
     await session_manager.initialize(db)
+
+    # The subprocess is the agreed system boundary. Delivery still runs the
+    # real session path, but no hermetic API check may launch a live model.
+    import os
+
+    spawn_process = asyncio.create_subprocess_exec
+
+    async def isolated_process(program, *args, **kwargs):
+        if os.path.basename(str(program)) in {"claude", "codex"}:
+            raise FileNotFoundError("model CLI excluded from this hermetic test")
+        return await spawn_process(program, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", isolated_process)
 
     # Mirror main.py lifespan: bind manager to the singleton used by
     # the router and broadcast through session_manager._broadcast.
@@ -468,6 +667,95 @@ async def test_rest_start_and_get_bg_task(api_client):
     final = g.json()
     assert final["status"] == "completed"
     assert "hello" in final["stdout"]
+
+
+async def test_rest_task_keeps_its_explicit_limits_in_details_and_results(api_client):
+    client, wd = api_client
+    # Observe the real background process without starting a model on delivery.
+    delivered = []
+    events = []
+
+    async def capture(record):
+        delivered.append(record)
+
+    async def capture_event(event):
+        events.append(event)
+
+    bg_task_manager.bind(
+        db=session_manager.db,
+        deliver_cb=capture,
+        broadcast_cb=capture_event,
+    )
+    sess = await session_manager.create_session(
+        (await session_manager.db.get_system_agent())["id"],
+        name="explicit limits", working_dir=str(wd),
+    )
+    response = await client.post(
+        f"/api/sessions/{sess.id}/bg-tasks",
+        json={"command": "echo started; sleep 0.05; echo finished",
+              "idle_timeout_seconds": 0, "timeout_seconds": 2},
+        headers=HEADERS,
+    )
+    assert response.status_code == 201
+    started = response.json()
+    assert (started["idle_timeout_seconds"], started["timeout_seconds"]) == (0, 2)
+    await _wait_for(lambda: bool(delivered))
+    details = await client.get(
+        f"/api/sessions/{sess.id}/bg-tasks/{started['id']}", headers=HEADERS,
+    )
+    body = details.json()
+    assert (body["idle_timeout_seconds"], body["timeout_seconds"]) == (0, 2)
+    assert body["status"] == "completed"
+    assert "finished" in body["stdout"]
+    prompt = render_delivery_prompt(delivered[0])
+    assert "idle timeout: disabled" in prompt
+    assert "total timeout: 2s" in prompt
+    assert [e["type"] for e in events] == ["bg_started", "bg_completed"]
+    assert all((e["idle_timeout_seconds"], e["timeout_seconds"]) == (0, 2) for e in events)
+    listing = await client.get(f"/api/sessions/{sess.id}/bg-tasks", headers=HEADERS)
+    assert listing.json()[0] == body
+
+
+INVALID_LIMITS = [
+    ("idle_timeout_seconds", -1), ("idle_timeout_seconds", 0.5),
+    ("idle_timeout_seconds", True), ("idle_timeout_seconds", "60"),
+    ("idle_timeout_seconds", None), ("timeout_seconds", 0),
+    ("timeout_seconds", -1), ("timeout_seconds", 0.5),
+    ("timeout_seconds", False), ("timeout_seconds", "1800"),
+    ("timeout_seconds", None),
+    ("idle_timeout_seconds", 2**63), ("timeout_seconds", 2**63),
+]
+
+
+@pytest.mark.parametrize("field,value", INVALID_LIMITS)
+async def test_rest_rejects_invalid_limits_before_starting_a_command(api_client, field, value):
+    client, wd = api_client
+    sess = await session_manager.create_session(
+        (await session_manager.db.get_system_agent())["id"],
+        name="invalid limits", working_dir=str(wd),
+    )
+    response = await client.post(
+        f"/api/sessions/{sess.id}/bg-tasks",
+        json={"command": "touch spawned", field: value}, headers=HEADERS,
+    )
+    assert response.status_code == 422
+    assert not (wd / "spawned").exists()
+    tasks = await client.get(f"/api/sessions/{sess.id}/bg-tasks", headers=HEADERS)
+    assert tasks.json() == []
+
+
+@pytest.mark.parametrize("field,value", INVALID_LIMITS)
+async def test_manager_rejects_invalid_limits_before_starting_a_command(
+    manager, db, tmp_path, field, value
+):
+    await _make_session_row(db, "s1", str(tmp_path))
+    with pytest.raises(BgTaskError, match="integer"):
+        await manager.start_task(
+            session_id="s1", command="touch spawned", working_dir=str(tmp_path),
+            **{field: value},
+        )
+    assert not (tmp_path / "spawned").exists()
+    assert await manager.list_tasks("s1") == []
 
 
 async def test_rest_rejects_empty_command(api_client):
@@ -698,6 +986,44 @@ def test_mcp_bg_run_success(monkeypatch):
     assert posted["command"] == "echo hi"
     assert posted["description"] == "say hi"
     assert posted["url"].endswith("/api/sessions/s/bg-tasks")
+
+
+def test_mcp_task_receipt_uses_the_host_confirmed_limits(monkeypatch):
+    import httpx
+
+    monkeypatch.setenv("OCTOPUS_API_BASE", "http://x")
+    monkeypatch.setenv("OCTOPUS_SESSION_ID", "s")
+    monkeypatch.setenv("OCTOPUS_AUTH_TOKEN", "t")
+    posted = {}
+
+    def post(url, *, json, headers, timeout):
+        posted.update(json)
+        return httpx.Response(201, json={"id": "quiet-tests", **json})
+
+    monkeypatch.setattr(httpx, "post", post)
+    receipt = _call(
+        "bg_run", command="echo started; sleep 2", idle_timeout_seconds=0,
+        timeout_seconds=10,
+    )
+    assert posted["idle_timeout_seconds"] == 0
+    assert posted["timeout_seconds"] == 10
+    assert "idle timeout: disabled" in receipt
+    assert "total timeout: 10s" in receipt
+
+
+@pytest.mark.parametrize("field,value", INVALID_LIMITS)
+def test_mcp_rejects_invalid_limits_without_sending_a_request(monkeypatch, field, value):
+    import httpx
+
+    monkeypatch.setenv("OCTOPUS_API_BASE", "http://x")
+    monkeypatch.setenv("OCTOPUS_SESSION_ID", "s")
+    monkeypatch.setenv("OCTOPUS_AUTH_TOKEN", "t")
+
+    def post(*args, **kwargs):
+        pytest.fail("an invalid command must not reach the host")
+
+    monkeypatch.setattr(httpx, "post", post)
+    assert "integer" in _call("bg_run", command="touch spawned", **{field: value})
 
 
 def test_mcp_bg_cancel_handles_404(monkeypatch):

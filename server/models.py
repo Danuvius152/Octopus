@@ -180,6 +180,27 @@ class AttachmentMetadata(BaseModel):
     mime_type: str
 
 
+class TurnRecovery(BaseModel):
+    kind: Literal["recovery"] = "recovery"
+    request_id: str
+    phase: Literal["diagnostic", "retrying", "recovered"]
+    code: str
+    message: str
+    attempt: int | None = None
+    maximum: int | None = None
+    delay: float | None = None
+
+
+class TurnOutcome(BaseModel):
+    kind: Literal["outcome"] = "outcome"
+    request_id: str
+    status: Literal["success", "failed", "interrupted"]
+    message: str | None = None
+    code: str | None = None
+    provider_code: str | None = None
+    recovery: dict[str, int] = Field(default_factory=dict)
+
+
 class MessageContent(BaseModel):
     role: MessageRole
     type: str  # "text", "tool_use", "tool_result", "error", "result"
@@ -208,6 +229,24 @@ class MessageContent(BaseModel):
 class PendingQuestionInfo(BaseModel):
     question_id: str
     questions: list[dict[str, Any]]
+    deadline: str | None = None
+    request_id: str | None = None
+    attempt_id: str | None = None
+
+
+class DispatchQueueItem(BaseModel):
+    request_id: str
+    source: str
+    summary: str
+    priority: bool = False
+
+
+class DispatchState(BaseModel):
+    generation: str
+    revision: int = 0
+    paused: bool = False
+    active_request_id: str | None = None
+    items: list[DispatchQueueItem] = []
 
 
 class SubagentRun(BaseModel):
@@ -256,6 +295,7 @@ class SessionDetail(SessionInfo):
     oldest_loaded_seq: int | None = None
     has_more_messages: bool = False
     pending_queue: list[str] = []
+    dispatch_state: DispatchState | None = None
     pending_questions: list[PendingQuestionInfo] = []
     # Sub-agents still on screen for this session (native-subagents.md §4).
     subagents: list[SubagentRun] = []

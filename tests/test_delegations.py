@@ -188,7 +188,9 @@ async def test_files_resolved_against_working_dir(
     'absolute under <working_dir>' claim a lie)."""
     started: list[tuple[str, str]] = []
 
-    async def fake_start_message(sid, prompt, attachment_ids=None):
+    async def fake_start_message(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         started.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", fake_start_message)
@@ -370,7 +372,9 @@ async def test_nested_chain_intermediate_stays_alive_while_grandchild_runs(
     delivered: list[tuple[str, str]] = []
     inject_errors: list[str] = []
 
-    async def faithful_start_message(sid, prompt, attachment_ids=None):
+    async def faithful_start_message(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         # Mirror SessionManager.start_message: ValueError when the
         # target session id is no longer in the in-memory map. Any
         # archival-too-early bug surfaces here as an exception that
@@ -476,7 +480,9 @@ async def test_start_delegation_happy_path(dm, mgr, db, monkeypatch):
     # Disable real harness spawn — we only want to verify the wiring.
     started: list[tuple[str, str]] = []
 
-    async def fake_start_message(sid, prompt, attachment_ids=None):
+    async def fake_start_message(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         started.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", fake_start_message)
@@ -729,7 +735,7 @@ async def test_depth_cap_rejected(dm, mgr, db, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-async def _noop_start_message(sid, prompt, attachment_ids=None):
+async def _noop_start_message(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
     return None
 
 
@@ -738,7 +744,9 @@ async def test_reply_injection_on_result(dm, mgr, db, monkeypatch):
     """assistant_text + result(is_error=False) → [agent-reply:...] turn."""
     injected: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -781,7 +789,9 @@ async def test_parent_delegation_waits_for_its_own_sub_delegation(
     """
     injected: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -851,7 +861,9 @@ async def test_parent_delegation_waits_when_its_sub_delegation_finished_first(
     """
     injected: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -917,7 +929,9 @@ async def test_plain_delegation_finalises_on_its_first_result(
     """
     injected: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -948,7 +962,9 @@ async def test_parent_delegation_still_fails_fast_on_error(dm, mgr, db, monkeypa
     crashed middle agent would hang its caller forever."""
     injected: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -977,7 +993,9 @@ async def test_error_injection_on_result_error(dm, mgr, db, monkeypatch):
     """result(is_error=True) → [agent-error:...] turn, state=failed."""
     injected: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -1003,7 +1021,9 @@ async def test_error_injection_on_error_event(dm, mgr, db, monkeypatch):
     """An explicit error event from the child also terminates."""
     injected: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -1034,7 +1054,9 @@ async def test_error_injection_on_error_event(dm, mgr, db, monkeypatch):
 async def test_recovery_events_do_not_terminate_a_delegation(dm, mgr, db, monkeypatch, event):
     injected = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -1067,7 +1089,9 @@ async def test_delegation_waits_for_real_turn_recovery(dm, mgr, db, monkeypatch,
 
     injected = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -1106,7 +1130,7 @@ async def test_delegation_waits_for_real_turn_recovery(dm, mgr, db, monkeypatch,
 
     runs = iter([RecoveryRun(), RecoveryRun(recovering=True)])
     monkeypatch.setattr(mgr, "_make_run", lambda *args, **kwargs: next(runs))
-    events = [e async for e in mgr.send_message(child.id, "review")]
+    events = [e async for e in mgr.send_message(child.id, "review", source="delegation", work_id=rec.work_id)]
     assert any(e.get("retrying") for e in events)
     assert rec.state == "completed"
     assert len(injected) == 1
@@ -1138,7 +1162,9 @@ async def test_empty_reply_gets_placeholder(dm, mgr, db, monkeypatch):
     gets a reply injection, with a placeholder body."""
     injected: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -1164,7 +1190,9 @@ async def test_empty_reply_gets_placeholder(dm, mgr, db, monkeypatch):
 async def test_cancel_delegation(dm, mgr, db, monkeypatch):
     injected: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     async def fake_interrupt(sid):
@@ -1204,7 +1232,9 @@ async def test_follow_up_happy_path(dm, mgr, db, monkeypatch):
     her transcript when she resumes."""
     injected: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -1346,7 +1376,7 @@ async def test_route_follow_up_requires_live_parent(client, monkeypatch):
     rounds) must 404 — otherwise the manager would round-reset the
     record and start the child, then silently drop the terminal
     turn because there's no live parent to inject into."""
-    async def noop(sid, prompt, attachment_ids=None):
+    async def noop(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         return None
 
     monkeypatch.setattr(session_manager, "start_message", noop)
@@ -1386,7 +1416,7 @@ async def test_route_follow_up_requires_live_parent(client, monkeypatch):
 async def test_route_follow_up(client, monkeypatch):
     """HTTP path mirrors the manager: 200/201 happy path; 404 for
     unknown delegation; 409 while running."""
-    async def noop(sid, prompt, attachment_ids=None):
+    async def noop(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
         return None
 
     monkeypatch.setattr(session_manager, "start_message", noop)
@@ -1430,7 +1460,9 @@ async def test_cancel_cascades_to_descendants(dm, mgr, db, monkeypatch):
     cancelled with a reason naming the parent cancel."""
     injected: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     async def fake_interrupt(sid):
@@ -1463,14 +1495,11 @@ async def test_cancel_cascades_to_descendants(dm, mgr, db, monkeypatch):
     assert "parent delegation cancelled" in (
         dm.get_delegation(pete_rec.delegation_id).error or ""
     )
-    # Two terminal injections: one into Vera's session for Pete's
-    # cancel, one into Octo's session for Vera's cancel. Pete's
-    # injection fires BEFORE Vera's so the cascade unwinds bottom-up.
+    # The descendant retains its cancellation state without waking the
+    # closed branch. Only the still-valid caller receives a terminal turn.
     pete_injects = [p for s, p in injected if s == vera_rec.delegation_id]
     vera_injects = [p for s, p in injected if s == octo_sess.id]
-    assert len(pete_injects) == 1
-    assert "agent-error:Pete" in pete_injects[0]
-    assert "user stop" in pete_injects[0]
+    assert pete_injects == []
     assert len(vera_injects) == 1
     assert "agent-error:Vera" in vera_injects[0]
     assert "user stop" in vera_injects[0]
@@ -1492,7 +1521,9 @@ async def test_cancel_delegation_single_inject_under_interrupt_broadcast(
     so `_on_broadcast` short-circuits on `rec.state != "running"`."""
     injected: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -1539,7 +1570,9 @@ async def test_terminal_injection_is_idempotent(dm, mgr, db, monkeypatch):
     `[agent-…]` turn lands in the parent."""
     injected: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -1580,7 +1613,9 @@ async def test_concurrent_delegations_to_same_target(dm, mgr, db, monkeypatch):
     independently, parent sees both terminal turns."""
     injected: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -1788,7 +1823,9 @@ async def test_question_request_routed_to_parent(dm, mgr, db, monkeypatch):
     drains it later."""
     injected: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         injected.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -1849,7 +1886,9 @@ async def test_question_with_empty_questions_does_not_crash(
     can decide to cancel."""
     captured: list[tuple[str, str]] = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         captured.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)
@@ -1890,7 +1929,9 @@ async def test_terminated_delegations_ignore_questions(
     # Now a stray question_request should be a no-op.
     captured = []
 
-    async def capture(sid, prompt, attachment_ids=None):
+    async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
+        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
+            session._work_id = work_id
         captured.append((sid, prompt))
 
     monkeypatch.setattr(mgr, "start_message", capture)

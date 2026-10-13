@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { useSessionStore, type Message } from "../stores/sessionStore";
 import { applyTranscript, loadOlderMessages } from "./transcript";
+import { handleWsMessage } from "../hooks/useWebSocket";
 
 const msg = (seq: number): Message => ({
   role: "user",
@@ -25,6 +26,7 @@ describe("applyTranscript", () => {
       oldestSeq: {},
       hasMoreMessages: {},
       lastAppliedSeq: {},
+      streamingText: {},
     });
   });
 
@@ -51,6 +53,27 @@ describe("applyTranscript", () => {
       next_message_seq: 1,
     });
     expect(useSessionStore.getState().hasMoreMessages.s1).toBe(false);
+  });
+
+  it("loads earlier history while retaining a newer live message and streaming progress", () => {
+    handleWsMessage({ type: "user_message", session_id: "s1", seq: 12, content: "correction",
+      tool_input: { request_context: { request_id: "human-12", source: "human" } } });
+    handleWsMessage({ type: "assistant_delta", session_id: "s1", content: "new answer in progress" });
+    applyTranscript("s1", { messages: [msg(10), msg(11)], oldest_loaded_seq: 10,
+      has_more_messages: true, next_message_seq: 12 });
+    const state = useSessionStore.getState();
+    expect(state.messages.s1.map((m) => m.seq)).toEqual([10, 11, 12]);
+    expect(state.messages.s1[2].tool_input).toEqual({ request_context: { request_id: "human-12", source: "human" } });
+    expect(state.lastAppliedSeq.s1).toBe(12);
+    expect(state.streamingText.s1).toBe("new answer in progress");
+    expect(state.oldestSeq.s1).toBe(10);
+  });
+
+  it("retains live deltas when the snapshot has no newer stored row", () => {
+    handleWsMessage({ type: "user_message", session_id: "s1", seq: 0, content: "question" });
+    handleWsMessage({ type: "assistant_delta", session_id: "s1", content: "answer still streaming" });
+    applyTranscript("s1", { messages: [msg(0)], next_message_seq: 1 });
+    expect(useSessionStore.getState().streamingText.s1).toBe("answer still streaming");
   });
 });
 

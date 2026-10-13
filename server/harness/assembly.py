@@ -65,6 +65,8 @@ def select_mcp_servers(
     session_id: str | None = None,
     user_id: str | None = None,
     wiki_task_id: str | None = None,
+    run_lease_id: str | None = None,
+    work_id: str | None = None,
 ) -> list[McpServerEntry]:
     """The built-in servers the agent enabled (None = all builtins) plus one
     entry per enabled connector installation. Order is stable: bg, ask, then
@@ -79,7 +81,7 @@ def select_mcp_servers(
     argv inspection, and it is the only remaining caller of the old shape.
     """
     if session_id:
-        return _http_entries(mcp_servers, connectors, session_id, user_id, wiki_task_id)
+        return _http_entries(mcp_servers, connectors, session_id, user_id, wiki_task_id, run_lease_id, work_id)
     builtin_specs: dict[str, dict[str, Any]] = {
         "bg": {
             "command": sys.executable,
@@ -139,6 +141,8 @@ def _http_entries(
     session_id: str,
     user_id: str | None = None,
     wiki_task_id: str | None = None,
+    run_lease_id: str | None = None,
+    work_id: str | None = None,
 ) -> list[McpServerEntry]:
     """The same namespaces, served over HTTP by this process.
 
@@ -163,7 +167,16 @@ def _http_entries(
             # The bearer carries whose call this is as well as which session
             # (multi-tenancy.md §7), so a tool body has an owner without a
             # round trip and the signature covers it.
-            credential=mint(session_id, installation_id, user_id, wiki_task_id),
+            credential=mint(session_id, installation_id, user_id, wiki_task_id, run_lease_id, work_id),
+            # Ask waits for a human. Keep the client's tool deadline beyond
+            # the host's answer deadline; Codex otherwise defaults to 60s.
+            # Its numeric setting has no documented infinity value. The
+            # positive sentinel allows a disabled host deadline in practice
+            # without treating zero as a native timeout-disable instruction.
+            tool_timeout_seconds=(
+                _settings.ask_user_question_timeout_seconds + 60
+                if _settings.ask_user_question_timeout_seconds > 0 else 2**31 - 1
+            ) if namespace == "ask" else None,
         )
 
     names = list(_BUILTIN_MODULES) if mcp_servers is None else [

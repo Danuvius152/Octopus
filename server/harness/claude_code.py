@@ -55,7 +55,7 @@ You have access to extra tools injected by the Octopus controller. \
 They are first-class — call them whenever appropriate, not as a \
 fallback.
 
-[1] `mcp__bg__run(command, description?)` — fire-and-forget a shell \
+[1] `mcp__bg__run(command, description?, idle_timeout_seconds?, timeout_seconds?)` — fire-and-forget a shell \
 command that runs in the BACKGROUND across turns. Returns a task_id \
 immediately. When the bg task finishes, Octopus injects a follow-up \
 turn into this session with the captured output, and you respond \
@@ -95,6 +95,12 @@ was auto-injected, not user-typed.
 Related: `mcp__bg__cancel(task_id)` to abort a running task, and \
 `mcp__bg__list()` to see recent bg tasks for this session (useful if \
 the chat history is too long to scroll for the task_id).
+
+Background commands stop by default after 60 seconds of silence following \
+output. For long quiet tests or model calls, explicitly pass \
+`idle_timeout_seconds=0`; a positive value sets this task's silence limit. \
+`timeout_seconds` is a positive total time limit, default 1800 seconds. \
+These task-level choices do not disable cancellation or the total limit.
 
 [2] `mcp__ask__user(questions: list[QuestionSpec])` — ask the user \
 one or more clarification questions and BLOCK until they answer. Use \

@@ -8,6 +8,7 @@ from ..deps import ScopeUser, SessionMgr
 from ..harness import BackendForkNotSupported, StdinMode, get_harness
 from ..models import (
     CreateSessionRequest,
+    DispatchState,
     DuplicateSessionRequest,
     ForkSessionRequest,
     ImportSessionRequest,
@@ -262,6 +263,27 @@ async def create_session(
     return _to_session_info(s, message_count=0)
 
 
+@router.post("/{session_id}/dispatch/resume", response_model=DispatchState)
+async def resume_dispatch(
+    session_manager: SessionMgr,
+    session_id: str,
+    user_id: ScopeUser = None,
+    _: str = Depends(verify_token),
+) -> DispatchState:
+    session = session_manager.get_session(session_id, user_id)
+    if session is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    from ..sessions.turns import QuotaExceeded
+    try:
+        if not await session_manager.resume_dispatch(session_id):
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    except QuotaExceeded as exc:
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
+    if session_manager.get_session(session_id, user_id) is not session:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    return DispatchState(**session_manager.dispatch_snapshot(session_id))
+
+
 @router.post("/import", response_model=SessionDetail, status_code=status.HTTP_201_CREATED)
 async def import_session(
     session_manager: SessionMgr,
@@ -307,9 +329,14 @@ async def import_session(
         **_fork_fields(s),
         messages=messages,
         pending_queue=[qp.prompt for qp in s._pending_queue],
+        dispatch_state=DispatchState(**session_manager.dispatch_snapshot(s.id)),
         pending_questions=[
-            PendingQuestionInfo(question_id=q.question_id, questions=q.questions)
+            PendingQuestionInfo(
+                question_id=q.question_id, questions=q.questions, deadline=q.deadline,
+                request_id=q.request_id, attempt_id=q.attempt_id,
+            )
             for q in s._pending_questions.values()
+            if session_manager.has_pending_question(s.id, q.question_id)
         ],
         subagents=[SubagentRun(**asdict(u)) for u in s._subagents.values()],
         # High-water mark: clients use this as the dedup baseline so any
@@ -333,6 +360,8 @@ async def get_session(
         messages_raw = await session_manager.db.load_messages(
             s.id, limit=MESSAGE_WINDOW, newest_first=True
         )
+        if session_manager.get_session(session_id, user_id) is not s:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
         messages = [MessageContent(**m) for m in messages_raw]
         oldest = messages[0].seq if messages else None
         return SessionDetail(
@@ -356,9 +385,14 @@ async def get_session(
             **_fork_fields(s),
             messages=messages,
             pending_queue=[qp.prompt for qp in s._pending_queue],
+            dispatch_state=DispatchState(**session_manager.dispatch_snapshot(s.id)),
             pending_questions=[
-                PendingQuestionInfo(question_id=q.question_id, questions=q.questions)
+                PendingQuestionInfo(
+                    question_id=q.question_id, questions=q.questions, deadline=q.deadline,
+                    request_id=q.request_id, attempt_id=q.attempt_id,
+                )
                 for q in s._pending_questions.values()
+                if session_manager.has_pending_question(s.id, q.question_id)
             ],
             subagents=[SubagentRun(**asdict(u)) for u in s._subagents.values()],
             oldest_loaded_seq=oldest,

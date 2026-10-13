@@ -213,7 +213,7 @@ class ResearchManager:
             f"{report.report}"
         )
         try:
-            await self.session_mgr.start_message(session_id, prompt)
+            await self.session_mgr.start_message(session_id, prompt, source="research", delivery_id=f"research:{job_id}")
             await self.db.update_research_job(
                 job_id, injection_status="delivered", injected_at=_now()
             )

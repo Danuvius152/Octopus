@@ -22,6 +22,7 @@ from pydantic import BaseModel
 from ..auth import verify_token
 from ..delegations import DelegationError, delegation_manager
 from ..deps import ScopeUser, SessionMgr
+from ..mcp_identity import verify
 from ..sessions import SessionManager
 
 router = APIRouter(prefix="/api/sessions", tags=["delegations"])
@@ -39,6 +40,7 @@ class StartDelegationRequest(BaseModel):
 
 class CancelDelegationRequest(BaseModel):
     reason: str | None = None
+    work_id: str | None = None
 
 
 class AnswerDelegationQuestionRequest(BaseModel):
@@ -106,6 +108,7 @@ async def start_delegation(
             agent_name=req.agent_name,
             request=req.request,
             files=req.files,
+            scope=verify(_),
         )
     except DelegationError as e:
         raise HTTPException(e.status_code, str(e))
@@ -142,10 +145,12 @@ async def cancel_delegation(
     _: str = Depends(verify_token),
 ) -> dict[str, Any]:
     """Best-effort cancel. Idempotent — cancelling a finished
-    delegation returns the existing terminal record without touching
-    anything. The parent gets an `[agent-error:…]` injection on the
+    delegation preserves its terminal record and parent reply while cleaning
+    up that round's remaining background work and descendants. The parent
+    gets an `[agent-error:…]` injection on the
     transition from running → cancelled."""
     rec = delegation_manager.get_delegation(delegation_id)
+    captured_work_id = req.work_id if req and req.work_id is not None else (rec.work_id if rec else None)
     if (
         rec is None
         or rec.parent_session_id != session_id
@@ -156,7 +161,8 @@ async def cancel_delegation(
         )
     try:
         updated = await delegation_manager.cancel_delegation(
-            delegation_id, reason=(req.reason if req else None)
+            delegation_id, reason=(req.reason if req else None),
+            work_id=captured_work_id, scope=verify(_),
         )
     except DelegationError as e:
         raise HTTPException(e.status_code, str(e))
@@ -200,6 +206,7 @@ async def follow_up_delegation(
             parent_session_id=session_id,
             delegation_id=delegation_id,
             request=req.request,
+            scope=verify(_),
         )
     except DelegationError as e:
         raise HTTPException(e.status_code, str(e))

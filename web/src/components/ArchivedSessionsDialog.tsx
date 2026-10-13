@@ -12,7 +12,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "./ui/dialog";
-import { applyTranscript } from "../lib/transcript";
+import { applySessionSnapshot } from "../lib/hydrateSession";
 
 const API_URL = window.location.origin;
 
@@ -33,8 +33,6 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
   const setArchived = useSessionStore((s) => s.setArchivedSessions);
   const setActiveAgentId = useSessionStore((s) => s.setActiveAgentId);
   const setActiveSessionId = useSessionStore((s) => s.setActiveSessionId);
-  const setPendingQueue = useSessionStore((s) => s.setPendingQueue);
-  const setPendingQuestions = useSessionStore((s) => s.setPendingQuestions);
 
   const headers = {
     "Content-Type": "application/json",
@@ -63,6 +61,7 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
   // active session is archived (it's in archivedSessions) and renders the
   // read-only banner + history. Mirrors SessionList's old selectSession.
   const view = async (s: SessionInfo) => {
+    const generation = useSessionStore.getState().dispatchGeneration;
     setActiveAgentId(s.agent_id ?? null);
     setActiveSessionId(s.id);
     onOpenChange(false);
@@ -73,9 +72,7 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
       ]);
       if (detailRes.ok) {
         const data = await detailRes.json();
-        applyTranscript(s.id, data);
-        setPendingQueue(s.id, data.pending_queue || []);
-        setPendingQuestions(s.id, data.pending_questions || []);
+        applySessionSnapshot(s.id, data, generation);
       }
       if (bgRes.ok) {
         useSessionStore.getState().setBgTasks(s.id, await bgRes.json());

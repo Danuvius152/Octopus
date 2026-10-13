@@ -14,17 +14,17 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
 
 from ..auth import verify_token
-from ..bg_tasks import BgTaskError, BgTaskRecord, bg_task_manager
+from ..bg_tasks import BgTaskError, BgTaskLimits, BgTaskRecord, bg_task_manager
 from ..deps import ScopeUser, SessionMgr
+from ..mcp_identity import verify
 from ..sessions import SessionManager
 
 router = APIRouter(prefix="/api/sessions", tags=["bg-tasks"])
 
 
-class StartBgTaskRequest(BaseModel):
+class StartBgTaskRequest(BgTaskLimits):
     command: str
     description: str | None = None
 
@@ -43,6 +43,10 @@ def _record_to_json(rec: BgTaskRecord) -> dict[str, Any]:
         "truncated": rec.truncated,
         "started_at": rec.started_at,
         "completed_at": rec.completed_at,
+        "idle_timeout_seconds": rec.idle_timeout_seconds,
+        "timeout_seconds": rec.timeout_seconds,
+        "stop_reason": rec.stop_reason,
+        "work_id": rec.work_id,
     }
 
 
@@ -86,6 +90,9 @@ async def start_bg_task(
             command=req.command,
             working_dir=working_dir,
             description=req.description,
+            idle_timeout_seconds=req.idle_timeout_seconds,
+            timeout_seconds=req.timeout_seconds,
+            scope=verify(_),
         )
     except BgTaskError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))

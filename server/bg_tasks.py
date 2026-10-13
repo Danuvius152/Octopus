@@ -30,16 +30,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shlex
 import signal
+import time
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
+
 from .aio import drain_cancelled, stopped_within
 from .database import Database
+from .mcp_identity import McpScope, require_live_scope, work_is_open
 
 logger = logging.getLogger(__name__)
 
@@ -50,18 +55,14 @@ logger = logging.getLogger(__name__)
 # they can redirect to a file inside working_dir and `/showme` it.
 MAX_STREAM_BYTES = 200 * 1024
 
-# Hard wall-clock cap. The bg task is a *fire and forget* convenience,
-# not a long-running daemon — anything beyond this is almost certainly
-# stuck or doing something pathological. SIGTERM at the limit, SIGKILL
-# 5 s later if it doesn't respect TERM.
+# A task always has a positive wall-clock cap, even when it explicitly
+# disables idle checks. SIGTERM at the limit, then SIGKILL after a grace.
 DEFAULT_TIMEOUT_SECONDS = 30 * 60  # 30 min
+# Limits are persisted as SQLite INTEGER values.
+MAX_TIMEOUT_SECONDS = 2**63 - 1
 
-# Idle watchdog: how long a command may remain silent on stdio after
-# it has produced *some* output before we conclude it's wedged and
-# force-terminate. 60 s is loose enough that a slow test suite with
-# multi-second quiet phases (e.g. Playwright trace assembly, Cargo
-# linker) isn't cut short, but tight enough that the pytest-atexit
-# hang we hit doesn't camp the chip for 6+ minutes.
+# The user's default: stop after output followed by 60s of silence on both
+# streams. Legitimately quiet tests/builds must select their own idle limit.
 IDLE_AFTER_OUTPUT_TIMEOUT_SECS = 60
 # How often the watchdog checks the idle clock. Small enough that
 # detection is prompt once the threshold is crossed, large enough to
@@ -74,6 +75,18 @@ IDLE_CHECK_INTERVAL_SECS = 5
 # session_manager / WS layer for testability.
 DeliveryCallback = Callable[["BgTaskRecord"], Awaitable[None]]
 BroadcastCallback = Callable[[dict[str, Any]], Awaitable[None]]
+
+
+class BgTaskLimits(BaseModel):
+    """The effective, immutable limits selected when a task starts."""
+
+    model_config = ConfigDict(frozen=True)
+    idle_timeout_seconds: int = Field(
+        default=IDLE_AFTER_OUTPUT_TIMEOUT_SECS, strict=True, ge=0, le=MAX_TIMEOUT_SECONDS,
+    )
+    timeout_seconds: int = Field(
+        default=DEFAULT_TIMEOUT_SECONDS, strict=True, gt=0, le=MAX_TIMEOUT_SECONDS,
+    )
 
 
 @dataclass
@@ -96,10 +109,22 @@ class BgTaskRecord:
     truncated: bool
     started_at: str
     completed_at: str | None
+    # NULL for records written before limits and stop causes were recorded.
+    idle_timeout_seconds: int | None = None
+    timeout_seconds: int | None = None
+    stop_reason: str | None = None
+    work_id: str | None = None
 
 
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
+
+
+def describe_limits(idle: int | None, total: int | None) -> str:
+    """The same limits description in the tool receipt and result delivery."""
+    idle_text = "unknown" if idle is None else "disabled" if idle == 0 else f"{idle}s"
+    total_text = "unknown" if total is None else f"{total}s"
+    return f"idle timeout: {idle_text}; total timeout: {total_text}"
 
 
 def _short_id() -> str:
@@ -140,9 +165,21 @@ class _RunningTask:
     handle + the asyncio.Task we await + buffers we're filling.
     """
 
-    def __init__(self, record: BgTaskRecord, proc: asyncio.subprocess.Process) -> None:
+    def __init__(
+        self, record: BgTaskRecord, proc: asyncio.subprocess.Process, limits: BgTaskLimits,
+        started_monotonic: float,
+    ) -> None:
         self.record = record
         self.proc = proc
+        # start_new_session makes the spawn pid its process-group identity.
+        # Keep it even if that leader exits before descendants close the pipes.
+        self.pgid = proc.pid
+        self.limits = limits
+        self.started_monotonic = started_monotonic
+        self.started_notice = asyncio.Event()
+        self.registration_done = asyncio.Event()
+        self.registered = False
+        self.stop_reason: str | None = None
         self.stdout_buf = bytearray()
         self.stderr_buf = bytearray()
         self.stdout_truncated = False
@@ -152,6 +189,13 @@ class _RunningTask:
         # The asyncio.Task running the orchestration coroutine; held so
         # shutdown() can cancel it.
         self.task: asyncio.Task[None] | None = None
+
+
+@dataclass
+class _StartingTask:
+    work_id: str | None
+    stop_reason: str | None = None
+    running: _RunningTask | None = None
 
 
 class BgTaskManager:
@@ -170,7 +214,10 @@ class BgTaskManager:
         self._deliver_cb: DeliveryCallback | None = None
         self._broadcast_cb: BroadcastCallback | None = None
         self._running: dict[str, _RunningTask] = {}
+        self._starting: dict[str, _StartingTask] = {}
         self._started: bool = False
+        self._shutting_down = False
+        self._cleanup_tasks: set[asyncio.Task[None]] = set()
 
     # ------------------------------------------------------------------ wiring
 
@@ -181,6 +228,7 @@ class BgTaskManager:
         broadcast_cb: BroadcastCallback,
     ) -> None:
         """Wire up dependencies. Called once from main.py lifespan."""
+        self._shutting_down = False
         self._db = db
         self._deliver_cb = deliver_cb
         self._broadcast_cb = broadcast_cb
@@ -201,14 +249,22 @@ class BgTaskManager:
     async def shutdown(self) -> None:
         """Graceful teardown: SIGTERM all running subprocesses and await
         their orchestration tasks. The DB-update path in `_run_task`
-        will fire `status=cancelled` for each one so chat history is
+        will fire `status=interrupted` for each one so chat history is
         consistent."""
+        self._shutting_down = True
+        starting = list(self._starting.values())
+        for item in starting:
+            item.stop_reason = item.stop_reason or "server_shutdown"
+        for item in starting:
+            if item.running is not None:
+                await self._terminate_proc(item.running, reason=item.stop_reason)
+        for cleanup in list(self._cleanup_tasks):
+            await stopped_within(asyncio.shield(cleanup), "cancelled bg startup", timeout=6.0)
         if not self._running:
             return
-        logger.info("Cancelling %d in-flight bg tasks for shutdown", len(self._running))
+        logger.info("Stopping %d in-flight bg tasks for shutdown", len(self._running))
         for rt in list(self._running.values()):
-            rt.cancel_requested = True
-            await self._terminate_proc(rt)
+            await self._terminate_proc(rt, reason="server_shutdown")
         # Wait for orchestration tasks to wrap up DB writes.
         for rt in list(self._running.values()):
             if rt.task and not rt.task.done():
@@ -226,6 +282,9 @@ class BgTaskManager:
         working_dir: str,
         description: str | None = None,
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
+        idle_timeout_seconds: int = IDLE_AFTER_OUTPUT_TIMEOUT_SECS,
+        work_id: str | None = None,
+        scope: McpScope | None = None,
     ) -> BgTaskRecord:
         """Create the row, spawn the process, return immediately.
 
@@ -234,29 +293,29 @@ class BgTaskManager:
         that need the latest state should re-fetch via get_task().
         """
         assert self._db is not None, "BgTaskManager not bound"
+        if self._shutting_down:
+            raise BgTaskError("Background task manager is shutting down")
+        try:
+            require_live_scope(scope, session_id)
+        except ValueError as exc:
+            raise BgTaskError(str(exc)) from exc
+        if scope is not None:
+            work_id = scope.work_id
+        if not work_is_open(work_id):
+            raise BgTaskError("Delegated work is closed")
+        try:
+            limits = BgTaskLimits(
+                idle_timeout_seconds=idle_timeout_seconds,
+                timeout_seconds=timeout_seconds,
+            )
+        except ValidationError as exc:
+            raise BgTaskError(
+                "idle_timeout_seconds must be a non-negative integer; "
+                "timeout_seconds must be a positive integer"
+            ) from exc
         task_id = _short_id()
         started_at = _now_iso()
-
-        # Spawn through /bin/sh -c so the model can use shell syntax
-        # (pipes, redirects, &&) — same trust model as the SDK's Bash
-        # tool. working_dir confines blast radius the same way.
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                "/bin/sh",
-                "-c",
-                command,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=working_dir,
-                start_new_session=True,  # isolate process group so we can SIGTERM cleanly
-            )
-        except Exception as e:
-            # Don't even persist a row — the task never existed. The
-            # MCP tool will surface this as an error string the model
-            # can read and adjust its plan.
-            raise BgTaskError(f"failed to spawn bg task: {e}") from e
-
+        started_monotonic = time.monotonic()
         record = BgTaskRecord(
             id=task_id,
             session_id=session_id,
@@ -270,34 +329,92 @@ class BgTaskManager:
             truncated=False,
             started_at=started_at,
             completed_at=None,
+            idle_timeout_seconds=limits.idle_timeout_seconds,
+            timeout_seconds=limits.timeout_seconds,
+            work_id=work_id,
         )
-        await self._db.create_bg_task(
-            task_id=task_id,
-            session_id=session_id,
-            command=command,
-            description=description,
-            working_dir=working_dir,
-            started_at=started_at,
-        )
-        if self._broadcast_cb:
-            await self._broadcast_cb(
-                {
-                    "type": "bg_started",
-                    "session_id": session_id,
-                    "task_id": task_id,
-                    "command": command,
-                    "description": description,
-                    "started_at": started_at,
-                }
-            )
+        reservation = _StartingTask(work_id)
+        self._starting[task_id] = reservation
 
-        rt = _RunningTask(record, proc)
+        # Spawn through /bin/sh -c so the model can use shell syntax
+        # (pipes, redirects, &&) — same trust model as the SDK's Bash
+        # tool. working_dir confines blast radius the same way.
+        spawn = asyncio.create_task(asyncio.create_subprocess_exec(
+                "/bin/sh",
+                "-c",
+                command,
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                cwd=working_dir,
+                start_new_session=True,  # isolate process group so we can SIGTERM cleanly
+            ))
+        try:
+            proc = await asyncio.shield(spawn)
+        except asyncio.CancelledError:
+            # The spawn may already have created an OS process before returning
+            # its handle. Its own task retains ownership until we can reap it.
+            async def reap_aborted_start() -> None:
+                try:
+                    abandoned = await asyncio.shield(spawn)
+                    running = _RunningTask(record, abandoned, limits, started_monotonic)
+                    reservation.running = running
+                    await self._terminate_proc(running, reason=reservation.stop_reason or "server_shutdown")
+                    await stopped_within(abandoned.wait(), f"aborted bg startup {task_id}", timeout=6.0)
+                except Exception:
+                    logger.exception("Failed to reap aborted bg startup %s", task_id)
+                finally:
+                    self._starting.pop(task_id, None)
+            cleanup = asyncio.create_task(reap_aborted_start(), name=f"bg-startup-cleanup-{task_id}")
+            self._cleanup_tasks.add(cleanup)
+            cleanup.add_done_callback(self._cleanup_tasks.discard)
+            raise
+        except Exception as e:
+            self._starting.pop(task_id, None)
+            # Don't even persist a row — the task never existed. The
+            # MCP tool will surface this as an error string the model
+            # can read and adjust its plan.
+            raise BgTaskError(f"failed to spawn bg task: {e}") from e
+
+        creation = replace(record)
+        rt = _RunningTask(record, proc, limits, started_monotonic)
+        reservation.running = rt
         self._running[task_id] = rt
-        rt.task = asyncio.create_task(
-            self._run_task(rt, timeout_seconds),
-            name=f"bg-task-{task_id}",
-        )
-        return record
+        rt.task = asyncio.create_task(self._run_task(rt), name=f"bg-task-{task_id}")
+        if reservation.stop_reason or not work_is_open(work_id):
+            await self._terminate_proc(rt, reason=reservation.stop_reason or "work_cancelled")
+        try:
+            await self._db.create_bg_task(
+                task_id=task_id, session_id=session_id, command=command,
+                description=description, working_dir=working_dir, started_at=started_at,
+                idle_timeout_seconds=limits.idle_timeout_seconds,
+                timeout_seconds=limits.timeout_seconds, work_id=work_id,
+            )
+        except BaseException:
+            rt.registration_done.set()
+            rt.started_notice.set()
+            await self._terminate_proc(rt, reason="server_shutdown")
+            await stopped_within(asyncio.shield(rt.task), f"unregistered bg task {task_id}", timeout=7.0)
+            raise
+        finally:
+            self._starting.pop(task_id, None)
+        rt.registered = True
+        rt.registration_done.set()
+        # The process is supervised from spawn, independently of registration
+        # and listeners. Terminal persistence waits until the row exists.
+        try:
+            if self._broadcast_cb:
+                await self._broadcast_cb({
+                    "type": "bg_started", "session_id": session_id,
+                    "task_id": task_id, "command": command, "description": description,
+                    "started_at": started_at, **limits.model_dump(),
+                    "work_id": work_id,
+                })
+        except Exception:
+            logger.exception("bg_started broadcast failed for %s", task_id)
+        finally:
+            rt.started_notice.set()
+        return creation
 
     async def cancel_task(self, task_id: str) -> bool:
         """Best-effort cancel. Returns True if a live task was signalled,
@@ -305,9 +422,18 @@ class BgTaskManager:
         rt = self._running.get(task_id)
         if rt is None:
             return False
-        rt.cancel_requested = True
-        await self._terminate_proc(rt)
-        return True
+        return await self._terminate_proc(rt, reason="user_cancel")
+
+    async def cancel_work(self, work_id: str) -> None:
+        """Retire captured processes and startup reservations owned by a round."""
+        starting = [item for item in self._starting.values() if item.work_id == work_id]
+        running = [item for item in self._running.values() if item.record.work_id == work_id]
+        for item in starting:
+            item.stop_reason = item.stop_reason or "work_cancelled"
+            if item.running is not None:
+                running.append(item.running)
+        for task in running:
+            await self._terminate_proc(task, reason="work_cancelled")
 
     async def list_tasks(self, session_id: str) -> list[BgTaskRecord]:
         assert self._db is not None
@@ -326,6 +452,10 @@ class BgTaskManager:
                 truncated=r["truncated"],
                 started_at=r["started_at"],
                 completed_at=r["completed_at"],
+                idle_timeout_seconds=r["idle_timeout_seconds"],
+                timeout_seconds=r["timeout_seconds"],
+                stop_reason=r["stop_reason"],
+                work_id=r["work_id"],
             )
             for r in rows
         ]
@@ -348,6 +478,10 @@ class BgTaskManager:
             truncated=r["truncated"],
             started_at=r["started_at"],
             completed_at=r["completed_at"],
+            idle_timeout_seconds=r["idle_timeout_seconds"],
+            timeout_seconds=r["timeout_seconds"],
+            stop_reason=r["stop_reason"],
+            work_id=r["work_id"],
         )
 
     # ------------------------------------------------------------------ orchestration
@@ -365,18 +499,19 @@ class BgTaskManager:
             detail={"exit_code": getattr(rt.record, "exit_code", None)},
         ))
 
-    async def _run_task(self, rt: _RunningTask, timeout_seconds: int) -> None:
+    async def _run_task(self, rt: _RunningTask) -> None:
         """Read stdout/stderr concurrently, enforce timeout, persist on exit."""
         assert self._db is not None
         proc = rt.proc
+        timeout_seconds = rt.limits.timeout_seconds
+        idle_timeout_seconds = rt.limits.idle_timeout_seconds
 
         # Tracks the wall-clock time of the most recent byte we read
         # on either stdio pipe. Read by the idle watchdog below to
         # decide whether the command has gone quiet for too long. We
-        # set `first_byte_at` on the first byte so commands that
+        # set `first_byte_seen` on the first byte so commands that
         # legitimately produce no output (e.g. `sleep 300`) are not
         # killed by the idle rule.
-        import time
         last_byte_at = time.monotonic()
         first_byte_seen = False
 
@@ -408,72 +543,57 @@ class BgTaskManager:
             asyncio.create_task(reader(proc.stderr, rt.stderr_buf, "stderr")),
         ]
 
-        # Idle watchdog: if the proc has produced *any* output and
-        # then goes quiet for IDLE_AFTER_OUTPUT_SECS while still alive,
-        # SIGTERM the pgrp. Catches the wedge we hit on pytest runs
-        # where the command's visible work is done but the process
-        # won't actually return to the OS (e.g. atexit hangs on
-        # aiosqlite worker threads — see commit history). Mirrors VM0's
-        # pattern of arming a forced-termination grace on a protocol
-        # signal (vm0/crates/guest-agent/src/cli/termination.rs); here
-        # "stdout silence after first byte" is the protocol signal we
-        # have available, since the bg command isn't an LLM and won't
-        # emit a `type=result` event.
+        # The default remains first output followed by 60s of silence on
+        # BOTH streams. A caller can explicitly select a longer interval or
+        # disable this check for a task with legitimate quiet phases.
         async def idle_watchdog() -> None:
-            while proc.returncode is None:
-                await asyncio.sleep(IDLE_CHECK_INTERVAL_SECS)
+            tick = min(IDLE_CHECK_INTERVAL_SECS, max(0.05, idle_timeout_seconds / 4))
+            while True:
+                await asyncio.sleep(tick)
                 if not first_byte_seen:
                     # The command may legitimately be quiet (e.g.
                     # `sleep 60` with no output). Don't apply the
                     # idle rule until we've seen at least one byte.
                     continue
                 idle_for = time.monotonic() - last_byte_at
-                if idle_for > IDLE_AFTER_OUTPUT_TIMEOUT_SECS and proc.returncode is None:
+                if idle_for > idle_timeout_seconds:
                     logger.warning(
                         "bg task %s: idle watchdog tripped — proc silent "
                         "for %.1fs after producing output (>%.0fs threshold), "
                         "SIGTERMing pgid",
-                        rt.record.id, idle_for, IDLE_AFTER_OUTPUT_TIMEOUT_SECS,
+                        rt.record.id, idle_for, idle_timeout_seconds,
                     )
-                    # Don't set cancel_requested — this is a force-
-                    # cleanup, not a user cancel. The status mapping
-                    # in finally will land on "interrupted" because
-                    # the proc gets killed by signal.
-                    await self._terminate_proc(rt)
+                    await self._terminate_proc(rt, reason="idle_timeout")
                     return
 
         idle_task = asyncio.create_task(
             idle_watchdog(), name=f"bg-{rt.record.id}-idle-watchdog"
-        )
+        ) if idle_timeout_seconds > 0 else None
 
         timed_out = False
+        async def process_and_output() -> None:
+            await proc.wait()
+            await asyncio.gather(*readers)
+
+        completion = asyncio.create_task(process_and_output(), name=f"bg-{rt.record.id}-completion")
         try:
             try:
-                await asyncio.wait_for(proc.wait(), timeout=timeout_seconds)
+                remaining = max(0.0, timeout_seconds - (time.monotonic() - rt.started_monotonic))
+                await asyncio.wait_for(asyncio.shield(completion), timeout=remaining)
             except TimeoutError:
                 timed_out = True
                 logger.warning(
                     "bg task %s timed out after %ds", rt.record.id, timeout_seconds
                 )
-                rt.cancel_requested = False  # distinct from user-initiated cancel
-                await self._terminate_proc(rt)
+                await self._terminate_proc(rt, reason="total_timeout")
                 try:
-                    await asyncio.wait_for(proc.wait(), timeout=5.0)
+                    await asyncio.wait_for(asyncio.shield(completion), timeout=6.0)
                 except TimeoutError:
                     pass
 
-            # Drain readers — wait_for returns when proc exits, but
-            # readers may still be flushing the last chunk.
-            for r in readers:
-                try:
-                    await asyncio.wait_for(r, timeout=2.0)
-                except (TimeoutError, Exception):
-                    r.cancel()
-
         except asyncio.CancelledError:
             # Shutdown path. Make sure proc is gone.
-            rt.cancel_requested = True
-            await self._terminate_proc(rt)
+            await self._terminate_proc(rt, reason="server_shutdown")
             try:
                 await asyncio.wait_for(proc.wait(), timeout=2.0)
             except TimeoutError:
@@ -486,6 +606,9 @@ class BgTaskManager:
             # after the watchdog itself triggered, this cancels the
             # already-returned task (no-op).
             await drain_cancelled(idle_task, f"bg task {rt.record.id} idle watchdog")
+            await drain_cancelled(completion, f"bg task {rt.record.id} completion")
+            for reader_task in readers:
+                await drain_cancelled(reader_task, f"bg task {rt.record.id} reader")
 
             # The reader set {stdout,stderr}_truncated when it had to
             # drop head bytes — finalize stamps a visible marker on
@@ -500,36 +623,27 @@ class BgTaskManager:
             # from "the command itself ran and exited non-zero", since
             # those are very different user-facing things.
             killed_by_signal = exit_code is not None and exit_code < 0
-            if rt.cancel_requested:
+            if rt.stop_reason is None and killed_by_signal:
+                rt.stop_reason = "external_signal"
+            if rt.stop_reason in {"user_cancel", "work_cancelled"}:
                 status = "cancelled"
-            elif timed_out:
-                status = "failed"  # surface timeout as failure; output explains
+            elif rt.stop_reason in {"idle_timeout", "total_timeout"}:
+                status = "failed"
+            elif rt.stop_reason in {"server_shutdown", "external_signal"}:
+                status = "interrupted"
             elif exit_code == 0:
                 status = "completed"
-            elif killed_by_signal:
-                # Process died from a SIGTERM/SIGKILL we did not
-                # initiate (none of our paths reach here without
-                # setting cancel_requested or timed_out first).
-                # That's most often the FastAPI server itself being
-                # restarted (uvicorn --reload, systemd KillMode=
-                # control-group, manual `pkill uvicorn`, etc.) — the
-                # bg shell inherits the SIGTERM via process-group
-                # propagation even though our own start_new_session=
-                # True normally isolates it. Label as "interrupted"
-                # so the chip doesn't claim the *command* failed;
-                # the user can read the captured stdout to see
-                # whatever the command printed before dying.
-                status = "interrupted"
             else:
                 status = "failed"
+                rt.stop_reason = "exit_nonzero"
             # Persistent breadcrumb — next time this fires, the log
             # tells us exactly which branch we hit and why.
             logger.info(
                 "bg task %s terminal state: status=%s exit_code=%s "
-                "cancel_requested=%s timed_out=%s killed_by_signal=%s "
+                "cancel_requested=%s timed_out=%s killed_by_signal=%s stop_reason=%s "
                 "stdout_bytes=%d stderr_bytes=%d",
                 rt.record.id, status, exit_code,
-                rt.cancel_requested, timed_out, killed_by_signal,
+                rt.cancel_requested, timed_out, killed_by_signal, rt.stop_reason,
                 len(stdout_bytes), len(stderr_bytes),
             )
 
@@ -538,81 +652,120 @@ class BgTaskManager:
             completed_at = _now_iso()
             truncated = rt.stdout_truncated or rt.stderr_truncated
 
-            await self._db.update_bg_task(
-                rt.record.id,
-                status=status,
-                exit_code=exit_code,
-                stdout=stdout_str,
-                stderr=stderr_str,
-                truncated=truncated,
-                completed_at=completed_at,
-            )
-
-            rt.record.status = status
-            rt.record.exit_code = exit_code
-            rt.record.stdout = stdout_str
-            rt.record.stderr = stderr_str
-            rt.record.truncated = truncated
-            rt.record.completed_at = completed_at
-
-            self._running.pop(rt.record.id, None)
-
-            if self._broadcast_cb:
-                try:
-                    await self._broadcast_cb(
-                        {
-                            "type": "bg_completed",
-                            "session_id": rt.record.session_id,
-                            "task_id": rt.record.id,
-                            "status": status,
-                            "exit_code": exit_code,
-                            "truncated": truncated,
-                            "completed_at": completed_at,
-                        }
+            try:
+                await rt.registration_done.wait()
+                if rt.registered:
+                    await self._publish_terminal(
+                        rt, status=status, exit_code=exit_code, stdout_str=stdout_str,
+                        stderr_str=stderr_str, truncated=truncated, completed_at=completed_at,
                     )
-                except Exception:
-                    logger.exception("bg_completed broadcast failed")
+            finally:
+                self._running.pop(rt.record.id, None)
 
-            if self._deliver_cb:
-                try:
-                    await self._deliver_cb(rt.record)
-                except Exception:
-                    logger.exception("bg delivery callback failed for %s", rt.record.id)
+    async def _publish_terminal(
+        self, rt: _RunningTask, *, status: str, exit_code: int | None,
+        stdout_str: str, stderr_str: str, truncated: bool, completed_at: str,
+    ) -> None:
+        assert self._db is not None
+        await self._db.update_bg_task(
+            rt.record.id,
+            status=status,
+            exit_code=exit_code,
+            stdout=stdout_str,
+            stderr=stderr_str,
+            truncated=truncated,
+            completed_at=completed_at,
+            stop_reason=rt.stop_reason,
+        )
 
-    async def _terminate_proc(self, rt: _RunningTask) -> None:
+        rt.record.status = status
+        rt.record.exit_code = exit_code
+        rt.record.stdout = stdout_str
+        rt.record.stderr = stderr_str
+        rt.record.truncated = truncated
+        rt.record.completed_at = completed_at
+        rt.record.stop_reason = rt.stop_reason
+
+        # Preserve started/completed event order while allowing the
+        # process and its watchdogs to run independently of notification.
+        await rt.started_notice.wait()
+        self._running.pop(rt.record.id, None)
+
+        if self._broadcast_cb:
+            try:
+                await self._broadcast_cb(
+                    {
+                        "type": "bg_completed",
+                        "session_id": rt.record.session_id,
+                        "task_id": rt.record.id,
+                        "status": status,
+                        "exit_code": exit_code,
+                        "truncated": truncated,
+                        "completed_at": completed_at,
+                        "idle_timeout_seconds": rt.record.idle_timeout_seconds,
+                        "timeout_seconds": rt.record.timeout_seconds,
+                        "stop_reason": rt.record.stop_reason,
+                    "work_id": rt.record.work_id,
+                    }
+                )
+            except Exception:
+                logger.exception("bg_completed broadcast failed")
+
+        if self._deliver_cb:
+            try:
+                await self._deliver_cb(rt.record)
+            except Exception:
+                logger.exception("bg delivery callback failed for %s", rt.record.id)
+
+    async def _terminate_proc(self, rt: _RunningTask, *, reason: str) -> bool:
         """SIGTERM the whole process group; 5s grace; SIGKILL if needed.
 
         We spawned with start_new_session=True, so killing the group
         sweeps up any children the model's shell command forked off
         (e.g. `bash -c "long_running &"`).
         """
-        proc = rt.proc
-        if proc.returncode is not None:
-            return
+        if rt.stop_reason is not None:
+            return False
+        pgid = rt.pgid
         try:
-            import os
-            pgid = os.getpgid(proc.pid)
+            # The first stopping action owns the cause. A later cancel or
+            # deadline cannot relabel a task already being terminated.
             # Audit trail: which path called the SIGTERM, and on what
             # task. Pairs with the terminal-state log line so the
             # forensics for an "exit -15" task are local to this file.
             logger.info(
-                "bg task %s: SIGTERM pgid=%s cancel_requested=%s",
-                rt.record.id, pgid, rt.cancel_requested,
+                "bg task %s: SIGTERM pgid=%s stop_reason=%s",
+                rt.record.id, pgid, reason,
             )
             os.killpg(pgid, signal.SIGTERM)
-        except (ProcessLookupError, PermissionError):
-            return
+            rt.stop_reason = reason
+            rt.cancel_requested = reason == "user_cancel"
+        except ProcessLookupError:
+            if reason in {"idle_timeout", "total_timeout"}:
+                rt.stop_reason = reason
+            return False
+        except PermissionError:
+            logger.exception("bg task %s: signal denied for pgid=%s", rt.record.id, pgid)
+            if reason in {"idle_timeout", "total_timeout"}:
+                rt.stop_reason = reason
+            return False
         # Don't await here — let the wait_for in _run_task notice the exit.
         # Schedule a SIGKILL fallback if the process resists SIGTERM.
         async def _kill_later() -> None:
             await asyncio.sleep(5.0)
-            if proc.returncode is None:
-                try:
-                    import os as _os
-                    _os.killpg(_os.getpgid(proc.pid), signal.SIGKILL)
-                except (ProcessLookupError, PermissionError):
-                    pass
-        asyncio.create_task(_kill_later(), name=f"bg-kill-{rt.record.id}")
+            # The shell may have exited while a descendant ignores TERM and
+            # still holds the output pipes. Reap the captured GROUP, not the
+            # shell's current pid/returncode (which no longer identifies it).
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                logger.exception("bg task %s: SIGKILL denied for pgid=%s", rt.record.id, pgid)
+        cleanup = asyncio.create_task(_kill_later(), name=f"bg-kill-{rt.record.id}")
+        self._cleanup_tasks.add(cleanup)
+        cleanup.add_done_callback(self._cleanup_tasks.discard)
+        return True
 
 
 class BgTaskError(Exception):
@@ -635,6 +788,9 @@ def render_delivery_prompt(rec: BgTaskRecord) -> str:
         f"[bg-task-result] Background task `{rec.id}`{desc} finished with "
         f"status `{rec.status}` (exit code {rec.exit_code})."
     )
+    lines.append(f"Limits: {describe_limits(rec.idle_timeout_seconds, rec.timeout_seconds)}.")
+    if rec.stop_reason is not None:
+        lines.append(f"Stop reason: {rec.stop_reason}.")
     # Show the literal command so the model has full context even if
     # the original tool_use is far up the chat history.
     lines.append("")

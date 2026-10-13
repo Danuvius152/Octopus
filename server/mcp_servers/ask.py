@@ -78,11 +78,10 @@ def _env_or_log(name: str) -> str | None:
     return v
 
 
-# Outer ceiling for a single ask_user call. The session-level auto-
-# answer (default 30 min) handles "user never replies"; this cap is a
-# safety net for a hung host. Re-loops the 60s long-polls until met.
-_MAX_WAIT_SECONDS = 35 * 60  # 35 min — a bit larger than auto-answer.
+# The host owns question expiry, including an administrator disabling it.
+# A successful 408 is evidence that it still accepts this pending question.
 _PER_POLL_TIMEOUT = 60.0
+_MAX_CONSECUTIVE_COMMUNICATION_FAILURES = 3
 
 
 @mcp.tool(name="user")
@@ -138,49 +137,74 @@ def ask_user(questions: list[dict[str, Any]]) -> str:
         return f"Error: Octopus didn't return a question_id: {r.text[:300]}"
     logger.info("created question %s", qid)
 
-    # Step 2: long-poll for the answer, looping per-call timeouts
-    # until we get one or hit the outer wait cap.
-    deadline = time.monotonic() + _MAX_WAIT_SECONDS
-    while time.monotonic() < deadline:
-        try:
-            r = httpx.get(
-                f"{api}/api/sessions/{sid}/questions/{qid}/answer",
-                params={"timeout": _PER_POLL_TIMEOUT},
-                headers=hdrs,
-                # +5 s padding on httpx-side timeout so we always get
-                # the host's 408 rather than tripping our own timeout
-                # mid-flight.
-                timeout=_PER_POLL_TIMEOUT + 5.0,
-            )
-        except httpx.HTTPError as e:
-            logger.warning("long-poll failed transiently: %s", e)
-            continue  # try again
-        if r.status_code == 200:
-            ans = r.json().get("answer")
-            if ans is None:
-                return f"Error: host returned 200 with no answer body: {r.text[:300]}"
-            logger.info("question %s answered (%d chars)", qid, len(ans))
-            return ans
-        if r.status_code == 408:
-            # Expected — host had no answer within this window. Loop.
-            continue
-        if r.status_code == 404:
-            # Session went away while we were waiting (deleted,
-            # archived). Surface so the model knows.
-            return (
-                f"Error: question {qid} disappeared while waiting "
-                f"(session may have been reset or deleted)."
-            )
-        # Anything else: bail with a clear message.
-        return f"Error long-polling answer ({r.status_code}): {r.text[:300]}"
-
-    return (
-        f"Error: gave up waiting for an answer after "
-        f"{_MAX_WAIT_SECONDS} seconds. The user never replied and "
-        "the session-level auto-answer didn't fire either. Proceed "
-        "autonomously with the most reasonable choice."
-    )
-
+    # Step 2: long-poll until the host resolves or closes the question.
+    communication_failures = 0
+    question_resolved = False
+    try:
+        while True:
+            try:
+                r = httpx.get(
+                    f"{api}/api/sessions/{sid}/questions/{qid}/answer",
+                    params={"timeout": _PER_POLL_TIMEOUT},
+                    headers=hdrs,
+                    # +5 s padding on httpx-side timeout so we always get
+                    # the host's 408 rather than tripping our own timeout
+                    # mid-flight.
+                    timeout=_PER_POLL_TIMEOUT + 5.0,
+                )
+            except httpx.HTTPError as e:
+                communication_failures += 1
+                logger.warning("long-poll failed transiently: %s", e)
+                if communication_failures >= _MAX_CONSECUTIVE_COMMUNICATION_FAILURES:
+                    return (
+                        "Error: communication with Octopus failed repeatedly while "
+                        "waiting for the user's answer. No answer was received."
+                    )
+                time.sleep(float(communication_failures))
+                continue
+            if r.status_code >= 500:
+                communication_failures += 1
+                if communication_failures >= _MAX_CONSECUTIVE_COMMUNICATION_FAILURES:
+                    return (
+                        "Error: communication with Octopus failed repeatedly while "
+                        "waiting for the user's answer. No answer was received."
+                    )
+                time.sleep(float(communication_failures))
+                continue
+            communication_failures = 0
+            if r.status_code == 200:
+                ans = r.json().get("answer")
+                if ans is None:
+                    return f"Error: host returned 200 with no answer body: {r.text[:300]}"
+                question_resolved = True
+                logger.info("question %s answered (%d chars)", qid, len(ans))
+                return ans
+            if r.status_code == 408:
+                # Expected — host had no answer within this window. Loop.
+                continue
+            if r.status_code == 404:
+                question_resolved = True
+                # Session went away while we were waiting (deleted,
+                # archived). Surface so the model knows.
+                return (
+                    f"Error: question {qid} disappeared while waiting "
+                    f"(session may have been reset or deleted)."
+                )
+            # Anything else: bail with a clear message.
+            return f"Error long-polling answer ({r.status_code}): {r.text[:300]}"
+    finally:
+        if not question_resolved:
+            # Stop waiving the host's idle deadline when this tool no longer
+            # has a communication path that can receive a human answer.
+            try:
+                httpx.delete(
+                    f"{api}/api/sessions/{sid}/questions/{qid}",
+                    params={"reason": "communication_failure"},
+                    headers=hdrs,
+                    timeout=10.0,
+                )
+            except httpx.HTTPError:
+                logger.warning("could not close abandoned question %s", qid)
 
 if __name__ == "__main__":
     mcp.run()

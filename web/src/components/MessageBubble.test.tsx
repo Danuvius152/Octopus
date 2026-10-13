@@ -11,8 +11,70 @@ import { afterEach, describe, expect, it } from "vitest";
 import { cleanup, render } from "@testing-library/react";
 
 import { MessageBubble } from "./MessageBubble";
+import { useSessionStore } from "../stores/sessionStore";
 
 afterEach(cleanup);
+
+it("renders a failed result with its cause instead of Done", () => {
+  const { getByText, queryByText } = render(
+    <MessageBubble sessionId="s1" message={{
+      role: "system", type: "result", is_error: true,
+      content: "Selected model is at capacity",
+    }} />
+  );
+  expect(getByText("Failed")).toBeTruthy();
+  expect(getByText("Selected model is at capacity")).toBeTruthy();
+  expect(queryByText(/Done/)).toBeNull();
+});
+
+it.each([
+  ["success", "Done"], ["interrupted", "Interrupted"], ["unknown", "Ended · outcome not recorded"],
+])("shows %s outcomes honestly after loading history", (status, label) => {
+  useSessionStore.getState().setMessages("result-display", [{
+    role: "system", type: "result",
+    content: status === "unknown" ? null : {
+      kind: "outcome", status, request_id: "r1", recovery: { transient: 1 },
+      message: status === "interrupted" ? "(interrupted by user)" : null,
+    },
+  }]);
+  const { getByText, queryByText } = render(<MessageBubble sessionId="result-display"
+    message={useSessionStore.getState().messages["result-display"][0]} />);
+  expect(getByText(label)).toBeTruthy();
+  if (status !== "unknown") expect(getByText("1 recovery")).toBeTruthy();
+  if (status !== "success") expect(queryByText(/^Done/)).toBeNull();
+});
+
+it("keeps recovery details expandable while showing its attempt count", () => {
+  useSessionStore.getState().setMessages("recovery-display", [{
+    role: "system", type: "recovery", content: {
+      kind: "recovery", phase: "retrying", code: "transient_retry",
+      message: "Provider temporarily unavailable", attempt: 1, maximum: 2,
+    },
+  }]);
+  const { container, getByText } = render(<MessageBubble sessionId="recovery-display"
+    message={useSessionStore.getState().messages["recovery-display"][0]} />);
+  expect(getByText("Recovering · attempt 1/2")).toBeTruthy();
+  expect(getByText("Provider temporarily unavailable")).toBeTruthy();
+  expect(container.querySelector("details")?.hasAttribute("open")).toBe(false);
+});
+
+it("honors human source metadata when a typed message resembles an automatic result", () => {
+  const { container, getByText } = render(<MessageBubble sessionId="source-test" message={{
+    role: "user", type: "text", content: "[bg-task-result] I typed this",
+    tool_input: { request_context: { request_id: "human-1", source: "human" } },
+  }} />);
+  expect(getByText("[bg-task-result] I typed this")).toBeTruthy();
+  expect(container.querySelector(".msg-user")).toBeTruthy();
+  expect(container.querySelector(".msg-bg-result")).toBeNull();
+});
+
+it("does not offer a human rewind target for a structured automatic result", () => {
+  const { queryByTestId } = render(<MessageBubble sessionId="source-test" onFork={() => {}} message={{
+    role: "user", type: "text", content: "Research completed", seq: 4,
+    tool_input: { request_context: { request_id: "research-1", source: "research" } },
+  }} />);
+  expect(queryByTestId("fork-from-here")).toBeNull();
+});
 
 const streaming = "# Heading\n\n```js\nconst x = 1;";
 

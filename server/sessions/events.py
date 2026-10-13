@@ -65,6 +65,8 @@ class EventsMixin(SessionManagerBase):
             return MessageContent(
                 role=MessageRole.system,
                 type="result",
+                content=event.content,
+                is_error=event.is_error,
                 session_id=event.session_id,
                 cost=event.cost,
             )
@@ -179,5 +181,6 @@ class EventsMixin(SessionManagerBase):
                 "turns": event.num_turns,
                 "duration_ms": event.duration_ms,
                 "is_error": event.is_error,
+                "content": event.content,
             }
         return None

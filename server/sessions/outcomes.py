@@ -14,7 +14,6 @@ from typing import Any
 
 from ..config import settings
 from ..harness import HarnessRun
-from ..models import MessageContent, MessageRole
 from ..oauth_errors import RefreshErrorCode
 from .base import (
     Session,
@@ -49,7 +48,7 @@ class OutcomesMixin(SessionManagerBase):
                 now = time.monotonic()
                 if overall > 0 and now - started > overall:
                     state["tripped"] = ("overall", overall)
-                elif idle > 0 and now - state["last"] > idle:
+                elif idle > 0 and not state.get("waiting_questions") and now - state["last"] > idle:
                     state["tripped"] = ("idle", idle)
                 else:
                     continue
@@ -68,7 +67,7 @@ class OutcomesMixin(SessionManagerBase):
     async def _surface_turn_timeout(
         self, session: Session, *, reason: str, limit: int, backend: str, retries: int = 0
     ) -> dict[str, Any]:
-        """Persist + return the error for a watchdog-stopped turn
+        """Build the failure explanation for a watchdog-stopped turn
         (turn-safety.md §3)."""
         display = self._BACKEND_DISPLAY.get(backend, backend)
         if reason == "idle":
@@ -85,44 +84,21 @@ class OutcomesMixin(SessionManagerBase):
                 f"This turn hit the {limit}s maximum duration and was stopped. "
                 "Try again or break the work into smaller steps."
             )
-        seq = await self._persist_message(
-            session,
-            MessageContent(
-                role=MessageRole.system, type="error", content=human, is_error=True
-            ),
-        )
         event: dict[str, Any] = {
             "type": "error",
             "session_id": session.id,
             "message": human,
             "code": "turn_timeout",
         }
-        if seq is not None:
-            event["seq"] = seq
         return event
 
     async def _surface_idle_retry(
         self, session: Session, *, limit: int, attempt: int, max_attempts: int
     ) -> dict[str, Any]:
-        """Record recovery without announcing a terminal turn failure."""
-        marker = MessageContent(
-            role=MessageRole.system,
-            type="error",
-            content=(
-                f"(no backend activity for {limit}s — automatically continuing, "
-                f"attempt {attempt}/{max_attempts})"
-            ),
-        )
-        seq = await self._persist_message(session, marker)
-        return self._tag_persisted(
-            {
-                "type": "error",
-                "session_id": session.id,
-                "message": marker.content,
-                "code": "turn_timeout_retry",
-            },
-            seq,
-            marker,
+        return await self._recovery_frame(
+            session, code="turn_timeout_retry",
+            message=f"No backend activity for {limit}s — automatically continuing",
+            attempt=attempt, maximum=max_attempts,
         )
 
     async def _surface_auth_expiry(
@@ -130,9 +106,9 @@ class OutcomesMixin(SessionManagerBase):
     ) -> dict[str, Any]:
         """Flag the bound credential needs_reconnect (if any) and build the
         re-authorize chat event for a mid-turn 401 (harness-credential-reauth.md
-        §4). Persists a human-readable system error so it survives reload; the
-        returned WS event additionally carries `code`/`credential_id`/`backend`
-        so the client can refresh the sidebar and light up the re-auth badge.
+        §4). The logical outcome includes this explanation and additionally
+        carries `code`/`credential_id`/`backend` so the client can refresh the
+        sidebar and light up the re-auth badge.
         """
         label: str | None = None
         if cred_id is not None:
@@ -158,12 +134,6 @@ class OutcomesMixin(SessionManagerBase):
                 "sign-in has expired — re-authorize the backend, then resend "
                 "your message."
             )
-        seq = await self._persist_message(
-            session,
-            MessageContent(
-                role=MessageRole.system, type="error", content=human, is_error=True
-            ),
-        )
         event: dict[str, Any] = {
             "type": "error",
             "session_id": session.id,
@@ -172,8 +142,6 @@ class OutcomesMixin(SessionManagerBase):
             "credential_id": cred_id,
             "backend": backend,
         }
-        if seq is not None:
-            event["seq"] = seq
         return event
 
     async def _surface_stale_session(
@@ -197,19 +165,7 @@ class OutcomesMixin(SessionManagerBase):
                 f"({backend} lost this conversation's history and there was "
                 f"nothing to replay — starting a fresh engine session)"
             )
-        seq = await self._persist_message(
-            session,
-            MessageContent(role=MessageRole.system, type="error", content=human),
-        )
-        event: dict[str, Any] = {
-            "type": "error",
-            "session_id": session.id,
-            "message": human,
-            "code": "stale_session",
-        }
-        if seq is not None:
-            event["seq"] = seq
-        return event
+        return await self._recovery_frame(session, code="stale_session", message=human)
 
     async def _surface_transient_retry(
         self, session: Session, *, attempt: int, max_attempts: int, delay: float
@@ -221,24 +177,15 @@ class OutcomesMixin(SessionManagerBase):
             f"(transient backend error — retrying in {delay:.0f}s, "
             f"attempt {attempt}/{max_attempts})"
         )
-        seq = await self._persist_message(
-            session,
-            MessageContent(role=MessageRole.system, type="error", content=human),
+        return await self._recovery_frame(
+            session, code="transient_retry", message=human,
+            attempt=attempt, maximum=max_attempts, delay=delay,
         )
-        event: dict[str, Any] = {
-            "type": "error",
-            "session_id": session.id,
-            "message": human,
-            "code": "transient_retry",
-        }
-        if seq is not None:
-            event["seq"] = seq
-        return event
 
     async def _surface_transient_exhausted(
         self, session: Session, *, backend: str, attempts: int
     ) -> dict[str, Any]:
-        """Persist + return a clear error once transient retries are exhausted,
+        """Build a clear failure explanation once transient retries are exhausted,
         so a provider-side blip doesn't read as a silent failure of the user's
         request (harness-transient-retry.md §4)."""
         display = self._BACKEND_DISPLAY.get(backend, backend)
@@ -253,18 +200,10 @@ class OutcomesMixin(SessionManagerBase):
             f"The {display} backend {tail}. This is a provider-side issue, not "
             "your request — please try again in a moment."
         )
-        seq = await self._persist_message(
-            session,
-            MessageContent(
-                role=MessageRole.system, type="error", content=human, is_error=True
-            ),
-        )
         event: dict[str, Any] = {
             "type": "error",
             "session_id": session.id,
             "message": human,
             "code": "transient_exhausted",
         }
-        if seq is not None:
-            event["seq"] = seq
         return event

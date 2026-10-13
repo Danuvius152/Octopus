@@ -25,12 +25,15 @@ import {
 } from "./AgentDelegationEventCard";
 import { AgentDelegationRequestCard } from "./AgentDelegationRequestCard";
 import { SubagentCard } from "./SubagentCard";
+import { requestSource } from "../lib/injectedTurns";
 
 // Marker the backend prepends to the synthesized user message it
 // injects when a bg task completes. Used to render those messages
 // with a distinct "auto" badge so the user knows they didn't type it.
 // Source of truth: server/bg_tasks.py render_delivery_prompt.
 const BG_TASK_RESULT_PREFIX = "[bg-task-result]";
+
+import { normalizeMessage } from "../lib/turnOutcome";
 
 interface MessageBubbleProps {
   message: Message;
@@ -51,6 +54,32 @@ interface MessageBubbleProps {
   // user messages when set + the message has a known seq. Called with the
   // rewind target seq.
   onFork?: (seq: number) => void;
+}
+
+function OutcomeResult({ message }: { message: Message }) {
+  const outcome = normalizeMessage(message).outcome!;
+  const labels = { success: "Done", failed: "Failed", interrupted: "Interrupted", unknown: "Ended · outcome not recorded" };
+  const retries = Object.values(outcome.recovery).reduce((sum, count) => sum + count, 0);
+  return <div className="msg msg-system flex flex-col items-center gap-1 py-1">
+    <span className={`result-badge rounded-full px-3 py-1 font-mono text-[11px] uppercase tracking-wider ${
+      outcome.status === "failed" ? "bg-danger-bg text-destructive" : "bg-gray-100 text-gray-700"
+    }`}>
+      {labels[outcome.status]}{message.cost != null ? ` · $${message.cost.toFixed(4)}` : ""}
+    </span>
+    {retries > 0 && <span className="text-xs text-muted-foreground">{retries} {retries === 1 ? "recovery" : "recoveries"}</span>}
+    {outcome.message && <div className="max-w-[85%] whitespace-pre-wrap break-words text-sm">{outcome.message}</div>}
+  </div>;
+}
+
+function RecoveryMessage({ message }: { message: Message }) {
+  const recovery = normalizeMessage(message).recovery!;
+  return <details className="msg msg-recovery rounded-lg border border-border px-3 py-2 text-xs text-muted-foreground">
+    <summary className="cursor-pointer">
+      {recovery.phase === "retrying" ? "Recovering" : recovery.phase === "recovered" ? "Recovered" : "Backend notification"}
+      {recovery.attempt != null && recovery.maximum != null ? ` · attempt ${recovery.attempt}/${recovery.maximum}` : ""}
+    </summary>
+    <div className="mt-2 whitespace-pre-wrap break-words">{recovery.message}</div>
+  </details>;
 }
 
 function formatBytes(n: number): string {
@@ -129,9 +158,10 @@ export function MessageBubble({
   switch (message.type) {
     case "text":
       if (message.role === "user") {
-        const isBgResult =
+        const source = requestSource(message);
+        const isBgResult = source === "bg" || (source === undefined &&
           typeof message.content === "string" &&
-          message.content.startsWith(BG_TASK_RESULT_PREFIX);
+          message.content.startsWith(BG_TASK_RESULT_PREFIX));
         if (isBgResult) {
           return (
             <BgTaskResultMessage
@@ -143,7 +173,7 @@ export function MessageBubble({
         // Agent-to-agent delegation injection (reply / question /
         // error). The DelegationManager injects these as user-message
         // turns starting with a `[agent-…:<name> delegation=…]` prefix.
-        const delegationEvent = parseDelegationEvent(
+        const delegationEvent = (source === undefined || source === "delegation") && parseDelegationEvent(
           typeof message.content === "string" ? message.content : undefined
         );
         if (delegationEvent) {
@@ -155,7 +185,10 @@ export function MessageBubble({
              a long transcript. Rewind stays, revealed on hover. */
           <div className="msg msg-user group flex justify-end">
             <div className="max-w-[64%] space-y-1">
-              {onFork && typeof message.seq === "number" && (
+              {source && source !== "human" && <div className="msg-source-badge text-right text-xs text-muted-foreground">
+                Auto · {source}
+              </div>}
+              {onFork && typeof message.seq === "number" && (source === undefined || source === "human") && (
                 /* `pr-12` reserves the corner the hover timestamp occupies —
                    the two used to overlap, with the time drawn over the label. */
                 <div className="flex justify-end pr-12">
@@ -237,6 +270,13 @@ export function MessageBubble({
     case "question_request":
       return null; // handled by ToolApproval / QuestionPrompt component
 
+    case "question_closed":
+      return (
+        <div className="msg msg-question-closed px-4 py-2 text-xs text-muted-foreground">
+          {message.content}
+        </div>
+      );
+
     case "question_answer":
       return (
         <div className="msg msg-user flex justify-end">
@@ -252,13 +292,10 @@ export function MessageBubble({
       );
 
     case "result":
-      return (
-        <div className="msg msg-system flex justify-center py-1">
-          <span className="result-badge rounded-full bg-gray-100 px-3 py-1 font-mono text-[11px] uppercase tracking-wider text-gray-700">
-            Done{message.cost != null ? ` · $${message.cost.toFixed(4)}` : ""}
-          </span>
-        </div>
-      );
+      return <OutcomeResult message={message} />;
+
+    case "recovery":
+      return <RecoveryMessage message={message} />;
 
     // Ephemeral, client-side system note (e.g. the /schedule command's
     // confirmation or a parse-error hint). Centered pill, not attributed to

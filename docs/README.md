@@ -74,6 +74,7 @@ fails if it has drifted. The hand-written version of this list had reached 13 of
 | [Three small affordances: message time, composer history, `/model`](plans/composer-and-time.md) | shipped | hover a message for its time, ArrowUp for what you sent, `/model` to switch model for one session. |
 | [Turn safety (Layer 1): timeout + process-group reaping](plans/turn-safety.md) | shipped | Bounded automatic recovery after idle stops, an optional whole-turn duration cap, and process-group reaping. |
 | [本地共享 Wiki：实施审查](plans/local-shared-wiki-review.md) | shipped | a85582f 基础版六项问题已修复并限定复核；不代表 Q53 后优化已审查。 |
+| [运行日志缺陷修复：设计访谈与行为契约](plans/runtime-log-repair-20261013.md) | shipped | Q12 修复及本地 Codex 验收已完成；Stop 暂停内存积压、人工纠偏优先、明确恢复；保留主要框架，Q11 持久队列不实施。 |
 | [Octopus 本地共享 Wiki：已确认规格](plans/local-shared-wiki-spec.md) | superseded by ../plans_new/local-shared-wiki-spec-v2.md | 保留 Q53/W 阶段历史；当前行为以 v2 spec、Q54～60 及 Library 全量授权为准。 |
 | [本地共享 Wiki：补充访谈记录](plans/local-shared-wiki-grill-round2.md) | superseded by local-shared-wiki-spec.md | 保留 Q17–Q36 的历史访谈；最终规则已在 Q53 收束，样稿已接受。 |
 

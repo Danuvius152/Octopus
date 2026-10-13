@@ -21,6 +21,7 @@ import {
 import { ForkDialog } from "./ForkDialog";
 import { ResearchCard } from "./ResearchCard";
 import { MessageBubble } from "./MessageBubble";
+import { DispatchQueue } from "./DispatchQueue";
 import { MessageTime } from "./MessageTime";
 import { ModelPickerDialog } from "./ModelPickerDialog";
 import { isImeComposing } from "../lib/composerKeys";
@@ -104,7 +105,6 @@ interface Props {
   onOpenSchedules: () => void;
 }
 
-const EMPTY_QUEUE: string[] = [];
 const EMPTY_QUESTIONS: PendingQuestion[] = [];
 
 export function ChatView({
@@ -175,9 +175,8 @@ export function ChatView({
   const agentLabel = activeAgent?.name || "Assistant";
   const isArchived = !!activeSession?.archived;
   const pendingQueueMap = useSessionStore((s) => s.pendingQueue);
-  const pendingQueue = activeSessionId
-    ? (pendingQueueMap[activeSessionId] ?? EMPTY_QUEUE)
-    : EMPTY_QUEUE;
+  const dispatchStates = useSessionStore((s) => s.dispatchStates);
+  const dispatchPaused = activeSessionId ? dispatchStates[activeSessionId]?.paused ?? false : false;
   const pendingQuestionsMap = useSessionStore((s) => s.pendingQuestions);
   const pendingQuestions = activeSessionId
     ? (pendingQuestionsMap[activeSessionId] ?? EMPTY_QUESTIONS)
@@ -807,14 +806,17 @@ export function ChatView({
       const label = trimmed.slice("/fork".length).trim() || undefined;
       const busy = isSessionBusy(
         activeSession?.status,
-        pendingQueueMap[sid]?.length ?? 0,
-        pendingQuestionsMap[sid]?.length ?? 0
+        dispatchStates[sid]?.items.length ?? pendingQueueMap[sid]?.length ?? 0,
+        pendingQuestionsMap[sid]?.length ?? 0,
+        dispatchStates[sid]?.paused ?? false,
       );
       store.setPendingFork(sid, label ?? null);
       store.addMessage(sid, {
         role: "system",
         type: "notice",
-        content: busy
+        content: dispatchStates[sid]?.paused
+          ? "⑂ Fork queued — it will run after processing resumes and this session is idle."
+          : busy
           ? "⑂ Fork queued — it'll run when this session goes idle."
           : "⑂ Forking — copying the working directory…",
       });
@@ -1461,8 +1463,9 @@ export function ChatView({
       }
       const busy = isSessionBusy(
         sess.status,
-        pendingQueueMap[sid]?.length ?? 0,
-        pendingQuestionsMap[sid]?.length ?? 0
+        dispatchStates[sid]?.items.length ?? pendingQueueMap[sid]?.length ?? 0,
+        pendingQuestionsMap[sid]?.length ?? 0,
+        dispatchStates[sid]?.paused ?? false,
       );
       if (busy) continue;
       forksInFlight.current.add(sid);
@@ -1508,7 +1511,7 @@ export function ChatView({
         .finally(() => forksInFlight.current.delete(sid));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingForksMap, sessions, pendingQueueMap, pendingQuestionsMap, forkRetryTick]);
+  }, [pendingForksMap, sessions, pendingQueueMap, pendingQuestionsMap, dispatchStates, forkRetryTick]);
 
   // Clear any outstanding fork-retry timers on unmount.
   useEffect(() => {
@@ -1703,25 +1706,7 @@ export function ChatView({
         </div>
       )}
 
-      {pendingQueue.length > 0 && (
-        <div
-          className="queue-list shrink-0 border-t border-border bg-muted/30 px-4 py-2 text-xs space-y-1"
-          aria-label="Queued messages"
-        >
-          <div className="queue-list-label text-muted-foreground mb-2">
-            Queued ({pendingQueue.length}) — will fire after the current turn
-          </div>
-          {pendingQueue.map((q, i) => (
-            <div
-              className="queue-item flex items-start gap-2 text-foreground"
-              key={i}
-            >
-              <span className="queue-dot text-muted-foreground shrink-0">›</span>
-              <span className="queue-content truncate">{q}</span>
-            </div>
-          ))}
-        </div>
-      )}
+      {activeSessionId && <DispatchQueue key={activeSessionId} sessionId={activeSessionId} readOnly={isArchived} />}
 
       {isArchived ? (
         <div className="chat-archived-banner px-4 py-3 border-t border-border bg-muted/40 text-sm text-muted-foreground flex items-center justify-between gap-3 shrink-0">
@@ -1733,6 +1718,9 @@ export function ChatView({
         </div>
       ) : (
         <div className="chat-input-bar shrink-0 bg-background px-6 pb-5 pt-2">
+          {dispatchPaused && <p className="dispatch-pause-hint mb-2 text-xs text-muted-foreground">
+            Your next message takes priority. Pending results stay paused until you resume processing.
+          </p>}
           {/* `relative` anchors the slash-command menu, which floats just
               above the composer (bottom-full) like the Claude Code CLI. */}
           <div className="relative">

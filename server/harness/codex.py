@@ -50,7 +50,7 @@ _OCTOPUS_SYSTEM_PROMPT_CODEX = """\
 You have access to extra tools injected by the Octopus controller. They are \
 first-class — call them whenever appropriate, not as a fallback.
 
-[1] `mcp__bg__run(command, description?)` — fire-and-forget a shell command \
+[1] `mcp__bg__run(command, description?, idle_timeout_seconds?, timeout_seconds?)` — fire-and-forget a shell command \
 that runs in the BACKGROUND across turns. Returns a task_id immediately; when \
 the bg task finishes, Octopus injects a follow-up turn with the captured \
 output. Use it for anything long-running or unbounded — test suites, builds, \
@@ -58,6 +58,12 @@ package installs, sleeps, large fetches. Start it, tell the user briefly what \
 you started, then end your turn; a new turn arrives with the result \
 (prefixed `[bg-task-result]`). Related: `mcp__bg__cancel(task_id)`, \
 `mcp__bg__list()`.
+
+Background commands stop by default after 60 seconds of silence following \
+output. For long quiet tests or model calls, explicitly pass \
+`idle_timeout_seconds=0`; a positive value sets this task's silence limit. \
+`timeout_seconds` is a positive total time limit, default 1800 seconds. \
+These task-level choices do not disable cancellation or the total limit.
 
 [2] `mcp__ask__user(questions)` — ask the user clarification questions and \
 BLOCK until they answer. Use it when a real choice depends on the user and \
@@ -222,6 +228,8 @@ def _mcp_config_args(ctx: TurnContext) -> list[str]:
     args: list[str] = []
     for e in ctx.mcp_servers:
         base = f"mcp_servers.{e.key}"
+        if e.tool_timeout_seconds is not None:
+            args += ["-c", f"{base}.tool_timeout_sec={e.tool_timeout_seconds}"]
         if e.is_http:
             # Codex takes a URL plus the NAME OF AN ENV VAR to read the bearer
             # from — `--env` is stdio-only here, so unlike Claude there is no
@@ -337,6 +345,17 @@ def _short_thread(thread_id: str) -> str:
     return f"agent {thread_id[:8]}" if thread_id else ""
 
 
+def _provider_code(error: Any) -> str | None:
+    if not isinstance(error, dict):
+        return None
+    code = error.get("codex_error_info") or error.get("code")
+    if isinstance(code, str):
+        return code
+    if isinstance(code, dict) and len(code) == 1:
+        return next(iter(code))
+    return None
+
+
 class CodexEventParser(EventParser):
     """Normalize `codex exec --json` into HarnessEvents. Holds the captured
     thread id (the resume id), surfaced early on `session_started`."""
@@ -388,6 +407,7 @@ class CodexEventParser(EventParser):
                         type="result",
                         session_id=self._captured_thread_id,
                         is_error=True,
+                        error_code=_provider_code(err),
                         content=msg or "Turn failed",
                         raw=obj,
                     )
@@ -402,6 +422,7 @@ class CodexEventParser(EventParser):
                         type="error",
                         is_error=True,
                         content=obj.get("message") or obj.get("error") or "Unknown error",
+                        error_code=_provider_code(obj),
                         raw=obj,
                     )
                 ]
@@ -905,6 +926,7 @@ _CODEX_AUTH_ERROR_PATTERNS = (
 # connection only — NO "rate limit" / "429" / "quota" (the user's limit) and
 # no auth phrases (handled above).
 _CODEX_TRANSIENT_ERROR_PATTERNS = (
+    "selected model is at capacity",
     "overloaded",
     "error 500",
     "error 502",
@@ -937,6 +959,7 @@ CODEX = RuntimeProfile(
     premature_exit_recovery=False,
     auth_error_patterns=_CODEX_AUTH_ERROR_PATTERNS,
     transient_error_patterns=_CODEX_TRANSIENT_ERROR_PATTERNS,
+    transient_error_codes=("server_overloaded",),
     # Single combined search-and-read tool, enabled per-leaf via the
     # web_research render path (-c tools.web_search=true). native-deep-research.md §4.
     web=WebCapability(tool_names=("web_search",), combined=True),

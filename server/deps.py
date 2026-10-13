@@ -26,6 +26,7 @@ from typing import Annotated, Any
 from fastapi import Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
+from .mcp_identity import scope_is_authorized
 from .mcp_identity import verify as verify_mcp_scope
 from .sessions import SessionManager
 from .sessions import session_manager as _singleton
@@ -178,7 +179,11 @@ async def scope_user_id(
     # bearer is the MCP scope the CLI was given; `auth._allowed` has already
     # accepted it, and this is the same claim read for the same request.
     scope = verify_mcp_scope(presented)
-    return scope.user_id if scope else None
+    if scope is not None and await scope_is_authorized(scope):
+        return scope.user_id
+    if await accounts_exist():
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
+    return None
 
 
 ScopeUser = Annotated[str | None, Depends(scope_user_id)]
@@ -203,7 +208,9 @@ async def scope_user_id_for(token: str) -> tuple[bool, str | None]:
     if user is not None:
         return True, user["id"]
     scope = verify_mcp_scope(token)
-    return True, (scope.user_id if scope else None)
+    if scope is not None and await scope_is_authorized(scope):
+        return True, scope.user_id
+    return (False, None) if await accounts_exist() else (True, None)
 
 
 async def data_key_for(user_id: str | None) -> str:

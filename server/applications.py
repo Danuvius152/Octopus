@@ -455,7 +455,7 @@ class ApplicationManager:
             instructions=instructions,
         )
         try:
-            await self.session_mgr.start_message(session.id, prompt)
+            await self.session_mgr.start_message(session.id, prompt, source="application")
         except Exception as exc:
             logger.exception("Failed to start build session for application %s", app_id)
             await db.update_application(
@@ -527,7 +527,7 @@ class ApplicationManager:
         )
         updated = await db.get_application(app_id)
         await self._broadcast_application("application_updated", updated)
-        await self.session_mgr.start_message(session.id, body)
+        await self.session_mgr.start_message(session.id, body, source="application")
         assert updated is not None  # written immediately above
         return updated
 
@@ -855,7 +855,7 @@ class ApplicationManager:
                     await self._broadcast_application("application_updated", updated)
                 elif kind == "result":
                     err = (
-                        "The build turn ended with an error."
+                        str(msg.get("message") or "The build turn ended with an error.")
                         if msg.get("is_error")
                         else None
                     )

@@ -29,6 +29,37 @@ from dataclasses import dataclass
 # an argument through; and a ContextVar is task-local, so concurrent turns from
 # different sessions cannot observe each other's scope.
 _current: ContextVar[McpScope | None] = ContextVar("octopus_mcp_scope", default=None)
+_closed_works: set[str] = set()
+_run_leases: dict[str, tuple[str, str | None, str | None]] = {}
+
+
+def work_is_open(work_id: str | None) -> bool:
+    """Work closure is monotonic for this server process's lifetime."""
+    return work_id is None or work_id not in _closed_works
+
+
+def close_work(work_id: str) -> None:
+    _closed_works.add(work_id)
+    for lease, (_, _, owner) in list(_run_leases.items()):
+        if owner == work_id:
+            _run_leases.pop(lease, None)
+
+
+def register_run(run_lease_id: str, session_id: str, user_id: str | None, work_id: str | None) -> None:
+    if work_is_open(work_id):
+        _run_leases[run_lease_id] = (session_id, user_id, work_id)
+
+
+def revoke_run(run_lease_id: str | None) -> None:
+    if run_lease_id:
+        _run_leases.pop(run_lease_id, None)
+
+
+def revoke_ownerless_runs() -> None:
+    """Retire the pre-accounts authority at the install's one-way upgrade."""
+    for lease, (_, user_id, _) in list(_run_leases.items()):
+        if user_id is None:
+            _run_leases.pop(lease, None)
 
 
 @dataclass(frozen=True)
@@ -44,6 +75,35 @@ class McpScope:
     # stops a bearer being edited into somebody else's.
     user_id: str | None = None
     wiki_task_id: str | None = None
+    run_lease_id: str | None = None
+    work_id: str | None = None
+
+
+def scope_is_live(scope: McpScope) -> bool:
+    """Check the signed owner against the actual selected run, never a session's
+    current request. Legacy diagnostic scopes carry no work authority.
+    """
+    if not work_is_open(scope.work_id):
+        return False
+    if scope.run_lease_id is None:
+        return scope.work_id is None
+    return _run_leases.get(scope.run_lease_id) == (
+        scope.session_id, scope.user_id, scope.work_id,
+    )
+
+
+async def scope_is_authorized(scope: McpScope) -> bool:
+    """A live claim also has to belong to the install's current identity era."""
+    from .deps import accounts_exist
+
+    return scope_is_live(scope) and (scope.user_id is not None or not await accounts_exist())
+
+
+def require_live_scope(scope: McpScope | None, session_id: str) -> None:
+    if scope is not None and (
+        scope.run_lease_id is None or scope.session_id != session_id or not scope_is_live(scope)
+    ):
+        raise ValueError("Model run is no longer active")
 
 
 def _sign(payload: str) -> str:
@@ -68,7 +128,10 @@ def _payload(scope: McpScope) -> str:
     payload = (
         f"mcp:{scope.session_id}:{scope.installation_id or ''}:{scope.user_id or ''}"
     )
-    return payload + (f":wiki:{scope.wiki_task_id}" if scope.wiki_task_id else "")
+    payload += f":wiki:{scope.wiki_task_id}" if scope.wiki_task_id else ""
+    if scope.run_lease_id or scope.work_id:
+        payload += f":run:{scope.run_lease_id or ''}:{scope.work_id or ''}"
+    return payload
 
 
 def mint(
@@ -76,6 +139,8 @@ def mint(
     installation_id: str | None = None,
     user_id: str | None = None,
     wiki_task_id: str | None = None,
+    run_lease_id: str | None = None,
+    work_id: str | None = None,
 ) -> str:
     """The bearer for one session (and one connector installation, if any).
 
@@ -83,7 +148,12 @@ def mint(
     tell *which* session is calling without a lookup table, while the signature
     is what makes the claim trustworthy. Nothing here is stored.
     """
-    scope = McpScope(session_id, installation_id, user_id, wiki_task_id)
+    scope = McpScope(session_id, installation_id, user_id, wiki_task_id, run_lease_id, work_id)
+    if run_lease_id or work_id:
+        return ".".join((
+            session_id, installation_id or "", user_id or "", wiki_task_id or "",
+            run_lease_id or "", work_id or "", _sign(_payload(scope)),
+        ))
     return (
         f"{scope.session_id}.{scope.installation_id or ''}."
         f"{scope.user_id or ''}."
@@ -100,14 +170,18 @@ def verify(bearer: str | None) -> McpScope | None:
     if not bearer:
         return None
     parts = bearer.split(".")
-    if len(parts) not in (4, 5):
+    if len(parts) not in (4, 5, 7):
         return None
     session_id, installation_id, user_id = parts[:3]
     signature = parts[-1]
-    wiki_task_id = parts[3] if len(parts) == 5 else None
+    wiki_task_id = (parts[3] or None) if len(parts) in (5, 7) else None
     if not session_id:
         return None
-    scope = McpScope(session_id, installation_id or None, user_id or None, wiki_task_id)
+    scope = McpScope(
+        session_id, installation_id or None, user_id or None, wiki_task_id,
+        (parts[4] or None) if len(parts) == 7 else None,
+        (parts[5] or None) if len(parts) == 7 else None,
+    )
     if not hmac.compare_digest(signature, _sign(_payload(scope))):
         return None
     return scope

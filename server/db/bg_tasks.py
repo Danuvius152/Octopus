@@ -25,14 +25,18 @@ class BgTasksMixin(DatabaseBase):
         description: str | None,
         working_dir: str,
         started_at: str,
+        idle_timeout_seconds: int | None = None,
+        timeout_seconds: int | None = None,
+        work_id: str | None = None,
     ) -> None:
         await self._ensure_connected()
         await self.conn.execute(
             "INSERT INTO bg_tasks "
             "(id, session_id, command, description, working_dir, status, "
-            " stdout, stderr, truncated, started_at) "
-            "VALUES (?, ?, ?, ?, ?, 'running', '', '', 0, ?)",
-            (task_id, session_id, command, description, working_dir, started_at),
+            " stdout, stderr, truncated, started_at, idle_timeout_seconds, timeout_seconds, work_id) "
+            "VALUES (?, ?, ?, ?, ?, 'running', '', '', 0, ?, ?, ?, ?)",
+            (task_id, session_id, command, description, working_dir, started_at,
+             idle_timeout_seconds, timeout_seconds, work_id),
         )
         await self.conn.commit()
 
@@ -46,6 +50,7 @@ class BgTasksMixin(DatabaseBase):
             "stderr",
             "truncated",
             "completed_at",
+            "stop_reason",
         }
         updates: dict[str, Any] = {}
         for k, v in fields.items():
@@ -83,7 +88,8 @@ class BgTasksMixin(DatabaseBase):
         """
         await self._ensure_connected()
         cursor = await self.conn.execute(
-            "UPDATE bg_tasks SET status = 'interrupted', completed_at = ? "
+            "UPDATE bg_tasks SET status = 'interrupted', completed_at = ?, "
+            "stop_reason = 'server_restart' "
             "WHERE status IN ('running', 'pending')",
             (completed_at,),
         )

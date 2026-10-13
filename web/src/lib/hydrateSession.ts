@@ -1,5 +1,8 @@
 import type { SessionInfo } from "../stores/sessionStore";
 import { useSessionStore } from "../stores/sessionStore";
+import { applyTranscript } from "./transcript";
+import { readDispatchState } from "./sessionDispatch";
+import type { PendingQuestion, SubagentRun } from "../stores/sessionStore";
 
 const API = window.location.origin;
 
@@ -7,6 +10,7 @@ const API = window.location.origin;
 const DETAIL_ONLY_FIELDS = [
   "messages",
   "pending_queue",
+  "dispatch_state",
   "pending_questions",
   "subagents",
   "next_message_seq",
@@ -37,10 +41,56 @@ export async function hydrateSession(sessionId: string): Promise<void> {
       headers: { Authorization: `Bearer ${store.token}` },
     });
     if (!res.ok) return;
-    addSessionInfo(sessionInfoFromDetail(await res.json()));
+    const data = await res.json();
+    if (applySessionSnapshot(sessionId, data, store.dispatchGeneration)) {
+      addSessionInfo(sessionInfoFromDetail(data));
+    }
   } catch {
     // The mount fetch / reconnect refetch will pick it up.
   }
+}
+
+/** One queue-state path for selection, archived viewing and reconnect. */
+export function applyDispatchSnapshot(
+  sessionId: string, detail: Record<string, unknown>, expectedGeneration?: string | null,
+): boolean {
+  const store = useSessionStore.getState();
+  if (detail.dispatch_state) {
+    const snapshot = readDispatchState(detail.dispatch_state);
+    if (!snapshot || store.retiredDispatchGenerations.includes(snapshot.generation) ||
+        (expectedGeneration !== undefined && expectedGeneration !== store.dispatchGeneration &&
+         snapshot.generation !== store.dispatchGeneration)) return false;
+    store.applyDispatchState(sessionId, detail.dispatch_state, expectedGeneration);
+  } else {
+    if (expectedGeneration !== undefined && expectedGeneration !== store.dispatchGeneration) return false;
+    if (!store.dispatchStates[sessionId]) store.setPendingQueue(sessionId, (detail.pending_queue as string[]) || []);
+  }
+  return true;
+}
+
+/** Reject a retired service before any part of its detail can be rehydrated. */
+export function applySessionSnapshot(
+  sessionId: string, detail: Record<string, unknown>, expectedGeneration?: string | null,
+): boolean {
+  if (!applyDispatchSnapshot(sessionId, detail, expectedGeneration)) return false;
+  applyTranscript(sessionId, detail);
+  const store = useSessionStore.getState();
+  const snapshotMessages = (detail.messages as { seq?: number }[]) || [];
+  const snapshotHigh = typeof detail.next_message_seq === "number"
+    ? detail.next_message_seq - 1 : Math.max(-1, ...snapshotMessages.map((message) => message.seq ?? -1));
+  const newerRequests = new Set((store.messages[sessionId] || []).filter((message) =>
+    message.type === "question_request" && typeof message.seq === "number" && message.seq > snapshotHigh
+  ).map((message) => message.tool_use_id));
+  // The transcript already retains newer WS rows; their live forms must
+  // survive the same older snapshot. A generation change clears live state
+  // before this merge, and the store still filters resolved question ids.
+  const newerPending = (store.pendingQuestions[sessionId] || []).filter((question) =>
+    newerRequests.has(question.question_id));
+  const pending = new Map([...(detail.pending_questions as PendingQuestion[] || []), ...newerPending]
+    .map((question) => [question.question_id, question]));
+  store.setPendingQuestions(sessionId, [...pending.values()]);
+  store.setSubagents(sessionId, (detail.subagents as SubagentRun[]) || []);
+  return true;
 }
 
 /** Append a session to the list unless it's already there (a concurrent

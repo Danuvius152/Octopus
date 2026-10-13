@@ -24,3 +24,18 @@ export function isAutoInjectedPrompt(content: unknown): boolean {
   const t = content.trimStart();
   return AUTO_INJECTED_PREFIXES.some((p) => t.startsWith(p));
 }
+
+export function requestSource(message: { tool_input?: Record<string, unknown> }): string | undefined {
+  const context = message.tool_input?.request_context;
+  if (!context || typeof context !== "object") return undefined;
+  const source = (context as Record<string, unknown>).source;
+  return typeof source === "string" ? source : undefined;
+}
+
+/** Structured provenance wins; prefixes only recognize older history. */
+export function isAutoInjectedMessage(message: {
+  content?: unknown; tool_input?: Record<string, unknown>;
+}): boolean {
+  const source = requestSource(message);
+  return source === undefined ? isAutoInjectedPrompt(message.content) : source !== "human";
+}

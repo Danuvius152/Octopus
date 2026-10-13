@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..config import settings
 from ..database import Database
@@ -157,6 +158,15 @@ class QueuedPrompt:
     prompt: str
     attachment_ids: list[str]
     wiki_mode: str | None = None
+    source: str = "human"
+    priority: bool = False
+    request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    delivery_id: str | None = None
+    started: bool = False
+    work_id: str | None = None
+    order: int = 0
+    question_session_id: str | None = None
+    question_id: str | None = None
 
 
 @dataclass
@@ -185,6 +195,11 @@ class PendingQuestion:
 
     question_id: str
     questions: list[dict[str, Any]]
+    deadline: str | None = None
+    expires_at: float | None = None
+    request_id: str | None = None
+    attempt_id: str | None = None
+    work_id: str | None = None
 
 
 @dataclass
@@ -254,6 +269,10 @@ class Session:
     # Per-prompt task that interrupt() targets; the outer _active_task is
     # the orchestrator loop and survives interrupts so it can drain the queue.
     _inner_task: asyncio.Task | None = field(default=None, repr=False)
+    # The accepted request's once-only outcome, including initialization and
+    # cancellation. Owned by TurnsMixin; queue dispatch may supply its identity.
+    _settlement: Any | None = field(default=None, repr=False)
+    _work_id: str | None = field(default=None, repr=False)
     _backend: HarnessRun | None = field(default=None, repr=False)
     # When the held CLI process last finished a turn — the reaper's clock
     # (inline-steering.md §7). None whenever no process is being held.
@@ -274,10 +293,21 @@ class Session:
     # hack that exposed us to the CLI's premature-exit bug.
     _pending_question_events: dict[str, asyncio.Event] = field(default_factory=dict, repr=False)
     _pending_question_answers: dict[str, str] = field(default_factory=dict, repr=False)
+    _question_answer_attempts: dict[str, str | None] = field(default_factory=dict, repr=False)
+    _question_attempt_id: str | None = field(default=None, repr=False)
+    _question_watchdog: dict[str, Any] | None = field(default=None, repr=False)
+    _question_publications: set[asyncio.Task[None]] = field(default_factory=set, repr=False)
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _wiki_task_id: str | None = field(default=None, repr=False)
     _wiki_mode: str | None = field(default=None, repr=False)
     _pending_queue: list[QueuedPrompt] = field(default_factory=list, repr=False)
+    _dispatch_paused: bool = field(default=False, repr=False)
+    _dispatch_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    _archive_reservation: object | None = field(default=None, repr=False)
+    _dispatch_revision: int = field(default=0, repr=False)
+    _dispatch_order: int = field(default=0, repr=False)
+    _current_request: QueuedPrompt | None = field(default=None, repr=False)
+    _seen_delivery_ids: set[str] = field(default_factory=set, repr=False)
     # Steers: messages typed while THIS turn is running, to be handed to the
     # CLI mid-turn rather than queued behind the turn (inline-steering.md §8).
     # The turn's writer task drains this; `_steer_ready` is how it learns
@@ -324,6 +354,27 @@ class SessionManagerBase:
     def _cancel_all_question_timers(self, session: Session) -> None:
         raise NotImplementedError  # provided by a mixin
 
+    def dispatch_snapshot(self, session_id: str) -> dict[str, Any]:
+        raise NotImplementedError  # provided by a mixin
+
+    def has_pending_question(self, session_id: str, question_id: str) -> bool:
+        raise NotImplementedError  # provided by a mixin
+
+    async def resume_dispatch(self, session_id: str) -> bool:
+        raise NotImplementedError  # provided by a mixin
+
+    async def _begin_question_attempt(self, session: Session, attempt_id: str, state: dict[str, Any]) -> None:
+        raise NotImplementedError
+
+    async def _end_question_attempt(self, session: Session, attempt_id: str | None, *, reason: str = "attempt_ended") -> None:
+        raise NotImplementedError
+
+    async def _close_session_questions(self, session: Session, *, reason: str) -> None:
+        raise NotImplementedError
+
+    def _register_pending_question(self, session: Session, question_id: str, questions: list[dict[str, Any]]) -> PendingQuestion:
+        raise NotImplementedError
+
     async def _clear_fork_first_turn_state(self, session: Session) -> None:
         raise NotImplementedError  # provided by a mixin
 
@@ -349,7 +400,7 @@ class SessionManagerBase:
     ) -> dict[str, Any] | None:
         raise NotImplementedError  # provided by a mixin
 
-    def _forget_backend(self, session: Session) -> None:
+    def _forget_backend(self, session: Session, expected: HarnessRun | None = None) -> None:
         raise NotImplementedError  # provided by a mixin
 
     async def _load_agent(self, session: Session) -> dict[str, Any] | None:
@@ -431,6 +482,14 @@ class SessionManagerBase:
     ) -> dict[str, Any]:
         raise NotImplementedError  # provided by a mixin
 
+    async def _recovery_frame(
+        self, session: Session, *, code: str, message: str,
+        phase: Literal["diagnostic", "retrying", "recovered"] = "retrying",
+        attempt: int | None = None, maximum: int | None = None,
+        delay: float | None = None,
+    ) -> dict[str, Any]:
+        raise NotImplementedError  # provided by a mixin
+
     async def _surface_turn_timeout(
         self, session: Session, *, reason: str, limit: int, backend: str, retries: int = 0
     ) -> dict[str, Any]:
@@ -442,6 +501,9 @@ class SessionManagerBase:
         raise NotImplementedError  # provided by a mixin
 
     async def auto_archive_scheduled_session(self, session_id: str) -> bool:
+        raise NotImplementedError  # provided by a mixin
+
+    async def interrupt(self, session_id: str) -> bool:
         raise NotImplementedError  # provided by a mixin
 
     async def resolve_credential_by_id(
@@ -478,6 +540,7 @@ class SessionManagerBase:
 
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
+        self._dispatch_generation = uuid.uuid4().hex
         # Short configuration operations share a lock, independently of turn
         # execution. Read/validate/write and turn snapshots must agree.
         self.configuration_lock = asyncio.Lock()
@@ -565,7 +628,7 @@ class SessionManagerBase:
         """
         if user_id is not None:
             return user_id
-        sid = message.get("session_id")
+        sid = message.get("session_id") or message.get("old_session_id")
         if isinstance(sid, str):
             session = self.sessions.get(sid)
             if session is not None:
@@ -581,7 +644,16 @@ class SessionManagerBase:
         wrong, since nothing errors and both tabs look plausible.
         """
         audience = self._audience(message, user_id)
+        sid = message.get("session_id") or message.get("old_session_id")
         for cb, subscriber in list(self._broadcast_callbacks.values()):
+            if subscriber is not None and audience is None and isinstance(sid, str):
+                # An await in an earlier callback can cross account adoption.
+                # Unknown session ownership never becomes install-wide access.
+                audience = self._audience(message, user_id)
+                if audience is None and self.db and await self.db.count_users() > 0:
+                    audience = await self.db.get_session_owner(sid)
+                    if audience is None:
+                        continue
             if subscriber is not None and audience is not None and subscriber != audience:
                 continue
             try:
@@ -634,9 +706,12 @@ class SessionManagerBase:
         reads the same field). Called by `bootstrap_first_account`, so the two
         halves happen together.
         """
+        from ..mcp_identity import revoke_run
+
         adopted = 0
         for session in self.sessions.values():
             if session.user_id is None:
+                revoke_run(getattr(session._backend, "run_lease_id", None))
                 session.user_id = user_id
                 adopted += 1
         return adopted
@@ -699,7 +774,7 @@ class SessionManagerBase:
         Best-effort: any failure inside a notifier is logged by the
         manager. Skipped if no manager is wired (tests, etc.).
         """
-        if self._notifier_manager is None:
+        if self._notifier_manager is None or session._dispatch_paused or session._pending_queue:
             return
         try:
             from ..notifiers import NotifierEvent

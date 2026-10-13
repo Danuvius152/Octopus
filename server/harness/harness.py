@@ -54,13 +54,19 @@ class Harness:
         """Build the per-turn streaming run engine for this harness."""
         return HarnessRun(self.profile, config)
 
-    def is_auth_error(self, text: str) -> bool:
+    def is_auth_error(self, text: str, *, code: str | None = None) -> bool:
         """Whether `text` (a failed turn's combined error output + stderr)
         looks like this backend's auth-credential rejection — a 401 / expired
         or revoked token (harness-credential-reauth.md §3). Case-insensitive
         substring match over the profile's `auth_error_patterns`; pure, no I/O.
         Callers gate on the turn actually having failed so a tool that merely
         returns a 401 to the model can't trip it."""
+        if code in {"unauthorized", "auth_error"}:
+            return True
+        if code in self.profile.transient_error_codes or code in {
+            "usage_limit_reached", "usage_limit_exceeded", "quota_exceeded",
+        }:
+            return False
         if not text or not self.profile.auth_error_patterns:
             return False
         low = text.lower()
@@ -77,14 +83,19 @@ class Harness:
         low = text.lower()
         return any(p in low for p in self.profile.stale_session_patterns)
 
-    def is_transient_error(self, text: str) -> bool:
+    def is_transient_error(self, text: str, *, code: str | None = None) -> bool:
         """Whether `text` (a failed turn's combined error output + stderr) looks
         like a TRANSIENT provider-reliability failure — a 5xx / overloaded /
         dropped-connection / timeout that a bounded retry can ride out
         (harness-transient-retry.md §3). Case-insensitive substring match over
         the profile's `transient_error_patterns`; pure. Mutually exclusive with
         `is_auth_error`, and excludes quota/credit (never retried). Callers gate
-        on the turn having failed with no output yet."""
+        on the attempt having failed; resuming partial work also requires a
+        captured conversation id."""
+        if code in {"usage_limit_reached", "usage_limit_exceeded", "quota_exceeded", "unauthorized", "auth_error"}:
+            return False
+        if code and code in self.profile.transient_error_codes:
+            return True
         if not text or not self.profile.transient_error_patterns:
             return False
         low = text.lower()

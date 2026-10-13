@@ -91,7 +91,8 @@ def sent(mgr, monkeypatch):
     """Capture `start_message` calls instead of spawning a harness."""
     calls: list[tuple[str, str]] = []
 
-    async def fake_start_message(session_id, prompt, attachment_ids=None):
+    async def fake_start_message(session_id, prompt, attachment_ids=None, *, source):
+        assert source == "application"
         calls.append((session_id, prompt))
 
     monkeypatch.setattr(mgr, "start_message", fake_start_message)
@@ -262,7 +263,8 @@ async def test_create_rejects_escaping_entrypoint(am, db, sent):
 async def test_create_marks_failed_when_the_build_session_wont_start(
     am, db, mgr, monkeypatch
 ):
-    async def boom(session_id, prompt, attachment_ids=None):
+    async def boom(session_id, prompt, attachment_ids=None, *, source):
+        assert source == "application"
         raise RuntimeError("harness exploded")
 
     monkeypatch.setattr(mgr, "start_message", boom)
@@ -583,7 +585,8 @@ async def client(apps_root, monkeypatch):
 
     calls: list[tuple[str, str]] = []
 
-    async def fake_start_message(session_id, prompt, attachment_ids=None):
+    async def fake_start_message(session_id, prompt, attachment_ids=None, *, source):
+        assert source == "application"
         calls.append((session_id, prompt))
 
     monkeypatch.setattr(session_manager, "start_message", fake_start_message)

@@ -1,11 +1,11 @@
 import { useCallback, useEffect, useRef } from "react";
 import {
   addSessionInfo,
+  applySessionSnapshot,
   hydrateSession,
   sessionInfoFromDetail,
 } from "../lib/hydrateSession";
 import { refreshSchedules } from "../lib/refreshSchedules";
-import { applyTranscript } from "../lib/transcript";
 import type { WikiMessageMode } from "../lib/wikiComposer";
 import {
   useSessionStore,
@@ -56,8 +56,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
   const {
     addMessage: addMessageRaw,
     updateSessionStatus,
-    enqueuePending,
-    dequeuePending,
+    applyDispatchState,
     addPendingQuestion,
     removePendingQuestion,
     setLastAppliedSeq,
@@ -77,6 +76,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
   const addMessage: typeof addMessageRaw = (sid, msg) =>
     addMessageRaw(sid, {
       ...msg,
+      seq: msg.seq ?? seq ?? undefined,
       created_at:
         msg.created_at ??
         (typeof data.created_at === "string"
@@ -91,12 +91,17 @@ export function handleWsMessage(data: Record<string, unknown>) {
   }
 
   switch (type) {
-    case "queued":
-      enqueuePending(sessionId, data.content as string);
+    case "dispatch_state":
+      applyDispatchState(sessionId, data.dispatch_state);
       break;
 
+    case "queued":
     case "dequeued":
-      dequeuePending(sessionId);
+      applyDispatchState(sessionId, data.dispatch_state);
+      break;
+
+    case "delivery_notice":
+      addMessage(sessionId, { role: "system", type: "notice", content: data.content ?? data.message });
       break;
 
     // Partial text, still being written. `addMessage` drops the buffer when
@@ -186,17 +191,21 @@ export function handleWsMessage(data: Record<string, unknown>) {
 
     case "question_request": {
       const questionId = data.question_id as string;
+      if (getState().closedQuestionIds[sessionId]?.[questionId]) break;
       const questions = (data.questions as PendingQuestion["questions"]) || [];
       addMessage(sessionId, {
         role: "assistant",
         type: "question_request",
         tool_name: "AskUserQuestion",
-        tool_input: { questions },
+        tool_input: { questions, deadline: data.deadline ?? null },
         tool_use_id: questionId,
       });
       addPendingQuestion(sessionId, {
         question_id: questionId,
         questions,
+        deadline: data.deadline as string | null | undefined,
+        request_id: data.request_id as string | null | undefined,
+        attempt_id: data.attempt_id as string | null | undefined,
       });
       break;
     }
@@ -213,8 +222,25 @@ export function handleWsMessage(data: Record<string, unknown>) {
       break;
     }
 
+    case "question_closed": {
+      const questionId = data.question_id as string;
+      addMessage(sessionId, {
+        role: "system",
+        type: "question_closed",
+        content: data.message as string,
+        tool_use_id: questionId,
+        tool_input: { reason: data.reason },
+      });
+      removePendingQuestion(sessionId, questionId);
+      break;
+    }
+
     case "status":
       updateSessionStatus(sessionId, data.status as SessionStatus);
+      break;
+
+    case "recovery":
+      addMessage(sessionId, { role: "system", type: "recovery", content: data.content ?? data.message });
       break;
 
     case "result":
@@ -225,9 +251,18 @@ export function handleWsMessage(data: Record<string, unknown>) {
       addMessage(sessionId, {
         role: "system",
         type: "result",
+        content: data.content ?? data.message,
+        is_error: data.is_error as boolean | undefined,
         cost: data.cost as number,
         session_id: data.claude_session_id as string,
       });
+      if (data.code === "auth_expired") {
+        const t = getState().token;
+        if (t) void fetch(`${window.location.origin}/api/credentials`, {
+          headers: { Authorization: `Bearer ${t}` },
+        }).then((r) => r.ok ? r.json() : null)
+          .then((creds) => creds && getState().setCredentials(creds)).catch(() => {});
+      }
       break;
 
     // A message handed to the turn already running, rather than queued behind
@@ -238,6 +273,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
         type: "text",
         content: data.content as string,
         steered: true,
+        tool_input: data.tool_input as Message["tool_input"],
         seq: seq ?? undefined,
       });
       break;
@@ -248,6 +284,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
         type: "text",
         content: data.content as string,
         attachments: (data.attachments as Message["attachments"]) ?? undefined,
+        tool_input: data.tool_input as Message["tool_input"],
         // Carry the row seq so "Fork from here" can target a just-sent
         // message without waiting for a detail reload (the event always
         // includes it for persisted rows).
@@ -346,6 +383,9 @@ export function handleWsMessage(data: Record<string, unknown>) {
         truncated: false,
         started_at: data.started_at as string,
         completed_at: null,
+        idle_timeout_seconds: (data.idle_timeout_seconds as number | null) ?? null,
+        timeout_seconds: (data.timeout_seconds as number | null) ?? null,
+        stop_reason: null,
       });
       break;
     }
@@ -366,6 +406,11 @@ export function handleWsMessage(data: Record<string, unknown>) {
           exit_code: (data.exit_code as number | null) ?? null,
           truncated: !!data.truncated,
           completed_at: data.completed_at as string,
+          idle_timeout_seconds: (data.idle_timeout_seconds as number | null)
+            ?? current.idle_timeout_seconds ?? null,
+          timeout_seconds: (data.timeout_seconds as number | null)
+            ?? current.timeout_seconds ?? null,
+          stop_reason: (data.stop_reason as string | null) ?? null,
         });
       }
       break;
@@ -507,11 +552,12 @@ export function useWebSocket() {
       wsRef.current = ws;
 
       ws.onopen = () => {
+        if (wsRef.current !== ws) return;
         getState().setConnected(true);
         if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
 
         // Re-fetch state after reconnect
-        const { activeSessionId, token: t } = getState();
+        const { activeSessionId, token: t, dispatchGeneration } = getState();
         if (t) {
           fetch(`${window.location.origin}/api/sessions`, {
             headers: { Authorization: `Bearer ${t}` },
@@ -537,15 +583,7 @@ export function useWebSocket() {
               .then((r) => (r.ok ? r.json() : null))
               .then((data) => {
                 if (!data) return;
-                applyTranscript(activeSessionId, data);
-                getState().setPendingQueue(
-                  activeSessionId,
-                  data.pending_queue || []
-                );
-                getState().setPendingQuestions(
-                  activeSessionId,
-                  data.pending_questions || []
-                );
+                applySessionSnapshot(activeSessionId, data, dispatchGeneration);
               })
               .catch(() => {});
             // Bg tasks: same reload, independent endpoint. Chat history
@@ -577,6 +615,7 @@ export function useWebSocket() {
       };
 
       ws.onclose = (event) => {
+        if (wsRef.current !== ws) return;
         getState().setConnected(false);
         // 4001 is the server saying this token is not accepted (it was
         // rotated while we were away, or revoked). Reconnecting every three
@@ -595,6 +634,7 @@ export function useWebSocket() {
       };
 
       ws.onmessage = (e) => {
+        if (wsRef.current !== ws) return;
         try {
           handleWsMessage(JSON.parse(e.data));
         } catch {

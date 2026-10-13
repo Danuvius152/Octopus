@@ -120,6 +120,18 @@ class TestAssemblyEmitsHttpEntries:
 
 
 class TestRendering:
+    @pytest.mark.parametrize("question_timeout, expected", [(1800, 1860), (4000, 4060), (0, 2147483647)])
+    def test_codex_question_transport_outlives_the_host_deadline(self, monkeypatch, question_timeout, expected):
+        from server.config import settings
+        from server.harness import RunConfig, get_harness
+
+        monkeypatch.setattr(settings, "ask_user_question_timeout_seconds", question_timeout)
+        run = get_harness("codex").create_run(RunConfig(session_id="question-transport", mcp_servers=["ask", "bg"]))
+        argv, _ = run.build_argv("Ask a question", "/tmp", None)
+        assert f"mcp_servers.ask.tool_timeout_sec={expected}" in argv
+        assert not any("mcp_servers.bg.tool_timeout_sec=" in arg for arg in argv)
+        assert argv[:3] == ["codex", "exec", "--json"]
+
     def test_claude_renders_http_with_the_bearer_inline(self):
         from server.harness import claude_code
 

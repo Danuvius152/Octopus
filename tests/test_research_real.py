@@ -78,52 +78,57 @@ async def test_real_codex_deep_research_end_to_end(tmp_path, monkeypatch):
     cred_id = _usable_codex_credential()
     db = Database(":memory:")
     await db.initialize()
-    mgr = SessionManager()
-    await mgr.initialize(db)
-    rm = ResearchManager()
-    rm.bind(session_mgr=mgr, db=db)
+    try:
+        mgr = SessionManager()
+        await mgr.initialize(db)
+        rm = ResearchManager()
+        rm.bind(session_mgr=mgr, db=db)
 
-    injected: list[str] = []
+        injected: list[str] = []
 
-    async def fake_start_message(session_id, prompt):
-        injected.append(prompt)
+        async def fake_start_message(session_id, prompt, *, source, delivery_id):
+            assert source == "research"
+            assert delivery_id.startswith("research:")
+            injected.append(prompt)
 
-    monkeypatch.setattr(mgr, "start_message", fake_start_message)
+        monkeypatch.setattr(mgr, "start_message", fake_start_message)
 
-    # Shrink limits hard for speed — still REAL web searches.
-    async def small_run(question, **kw):
-        kw["limits"] = ResearchLimits(
-            max_angles=1, max_findings_per_angle=3, max_claims=2,
-            votes_per_claim=1, concurrency=2, leaf_timeout=180, reason_timeout=120,
+        # Shrink limits hard for speed — still REAL web searches.
+        async def small_run(question, **kw):
+            kw["limits"] = ResearchLimits(
+                max_angles=1, max_findings_per_angle=3, max_claims=2,
+                votes_per_claim=1, concurrency=2, leaf_timeout=180, reason_timeout=120,
+            )
+            return await _real_run(question, **kw)
+
+        monkeypatch.setattr(rm_mod, "run_research", small_run)
+
+        agent = await db.get_system_agent()
+        # Bind the session to the directory-backed codex credential id — the
+        # manager resolves it to its CODEX_HOME (no DB row needed).
+        session = await mgr.create_session(
+            agent["id"], "Research", str(tmp_path), backend="codex",
+            credential_id=cred_id,
         )
-        return await _real_run(question, **kw)
+        row = await rm.start(
+            session.id,
+            "What is the latest stable version of Python 3? Cite python.org.",
+        )
+        await asyncio.wait_for(rm._tasks[row["id"]], timeout=360)
 
-    monkeypatch.setattr(rm_mod, "run_research", small_run)
+        final = await db.get_research_job(row["id"])
+        assert final["status"] == "completed", f"job did not complete: {final}"
+        assert final["injection_status"] == "delivered"
+        assert len(injected) == 1
+        assert injected[0].startswith(f"[deep-research:{row['id']}]")
+        assert final["report_path"], "no report file written"
 
-    agent = await db.get_system_agent()
-    # Bind the session to the directory-backed codex credential id — the
-    # manager resolves it to its CODEX_HOME (no DB row needed).
-    session = await mgr.create_session(
-        agent["id"], "Research", str(tmp_path), backend="codex",
-        credential_id=cred_id,
-    )
-    row = await rm.start(
-        session.id,
-        "What is the latest stable version of Python 3? Cite python.org.",
-    )
-    await asyncio.wait_for(rm._tasks[row["id"]], timeout=360)
-
-    final = await db.get_research_job(row["id"])
-    assert final["status"] == "completed", f"job did not complete: {final}"
-    assert final["injection_status"] == "delivered"
-    assert final["report_path"], "no report file written"
-
-    # Prove REAL research happened (not a degraded empty run): a substantial,
-    # source-citing report read from the FILE (not the question-bearing
-    # injection prefix, which would hollow-pass on the echoed question).
-    with open(final["report_path"], encoding="utf-8") as fh:
-        report = fh.read()
-    assert len(report) > 120, f"report too short — degraded run?\n{report}"
-    assert "http" in report.lower(), f"report cites no source:\n{report}"
-
-    await db.close()
+        # Prove REAL research happened (not a degraded empty run): a substantial,
+        # source-citing report read from the FILE (not the question-bearing
+        # injection prefix, which would hollow-pass on the echoed question).
+        with open(final["report_path"], encoding="utf-8") as fh:
+            report = fh.read()
+        assert len(report) > 120, f"report too short — degraded run?\n{report}"
+        assert "http" in report.lower(), f"report cites no source:\n{report}"
+    finally:
+        await db.close()

@@ -1,7 +1,117 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { act, renderHook } from "@testing-library/react";
 
-import { handleWsMessage, shouldApplyWsEvent } from "./useWebSocket";
+import { handleWsMessage, shouldApplyWsEvent, useWebSocket } from "./useWebSocket";
 import { useSessionStore } from "../stores/sessionStore";
+
+it("applies the nested server dispatch frame for an idle Stop and a remote Resume", () => {
+  useSessionStore.setState({ dispatchStates: {}, dispatchGeneration: null, retiredDispatchGenerations: [], pendingQueue: {} });
+  const paused = { generation: "server-wire", revision: 1, paused: true, active_request_id: null, items: [] };
+  handleWsMessage({ type: "dispatch_state", session_id: "idle-stop", dispatch_state: paused });
+  expect(useSessionStore.getState().dispatchStates["idle-stop"]).toEqual(paused);
+  const resumed = { ...paused, revision: 2, paused: false };
+  handleWsMessage({ type: "dispatch_state", session_id: "idle-stop", dispatch_state: resumed });
+  expect(useSessionStore.getState().dispatchStates["idle-stop"]).toEqual(resumed);
+});
+
+it("ignores a superseded socket's close and open after a new bearer connects", () => {
+  class Socket {
+    static OPEN = 1;
+    static CONNECTING = 0;
+    static instances: Socket[] = [];
+    readyState = 0;
+    onopen: (() => void) | null = null;
+    onclose: ((event: { code: number }) => void) | null = null;
+    onerror: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    constructor() { Socket.instances.push(this); }
+    close() { this.readyState = 3; }
+  }
+  vi.stubGlobal("WebSocket", Socket);
+  vi.stubGlobal("fetch", vi.fn(async () => new Response("[]")));
+  useSessionStore.setState({ token: "first-bearer", activeSessionId: null, connected: false });
+  const hook = renderHook(() => useWebSocket());
+  const old = Socket.instances[0];
+  act(() => useSessionStore.getState().setToken("second-bearer"));
+  expect(Socket.instances).toHaveLength(2);
+  act(() => old.onclose?.({ code: 4001 }));
+  expect(useSessionStore.getState().token).toBe("second-bearer");
+  act(() => old.onopen?.());
+  expect(useSessionStore.getState().connected).toBe(false);
+  hook.unmount();
+  vi.unstubAllGlobals();
+});
+
+it("uses authoritative queue snapshots and rejects duplicate or older revisions", () => {
+  useSessionStore.setState({ pendingQueue: {} });
+  const snapshot = {
+    generation: "service-a", revision: 3, paused: true, active_request_id: null,
+    items: [{ request_id: "bg-1", source: "bg", summary: "completed command", priority: false }],
+  };
+  handleWsMessage({ type: "queued", session_id: "dispatch-test", content: "legacy event text", dispatch_state: snapshot });
+  expect(useSessionStore.getState().pendingQueue["dispatch-test"]).toEqual(["completed command"]);
+  handleWsMessage({ type: "queued", session_id: "dispatch-test", content: "duplicate", dispatch_state: snapshot });
+  handleWsMessage({ type: "dequeued", session_id: "dispatch-test", dispatch_state: { ...snapshot, revision: 2, paused: false, items: [] } });
+  expect(useSessionStore.getState().pendingQueue["dispatch-test"]).toEqual(["completed command"]);
+});
+
+it("preserves the server's request source instead of treating marker text as identity", () => {
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {} });
+  const metadata = { request_context: { request_id: "human-1", source: "human", work_id: null } };
+  handleWsMessage({ type: "user_message", session_id: "source-test", seq: 2,
+    content: "[bg-task-result] text actually typed by a person", tool_input: metadata });
+  expect(useSessionStore.getState().messages["source-test"][0].tool_input).toEqual(metadata);
+});
+
+it("shows an expired delivery notice without fabricating a model turn", () => {
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {}, streamingText: {} });
+  handleWsMessage({ type: "delivery_notice", session_id: "notice-test", content: "The child question already closed" });
+  expect(useSessionStore.getState().messages["notice-test"]).toEqual([
+    expect.objectContaining({ role: "system", type: "notice", content: "The child question already closed" }),
+  ]);
+});
+
+it("keeps the same failed outcome through live delivery, reload and duplicate frames", () => {
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {} });
+  const outcome = {
+    kind: "outcome", request_id: "request-1", status: "failed",
+    message: "Selected model is at capacity", provider_code: "server_overloaded",
+    recovery: { transient: 2, idle: 0, stale_session: 0, premature_exit: 0 },
+  };
+  const frame = { type: "result", session_id: "outcome-test", seq: 4, is_error: true, content: outcome };
+  handleWsMessage(frame);
+  const live = useSessionStore.getState().messages["outcome-test"][0];
+  expect(live.is_error).toBe(true);
+  expect(live.content).toBe("Selected model is at capacity");
+  expect(live.outcome?.recovery.transient).toBe(2);
+  useSessionStore.getState().setMessages("outcome-test", [
+    { role: "system", type: "result", seq: 4, is_error: true, content: outcome },
+  ]);
+  expect(useSessionStore.getState().messages["outcome-test"][0]).toEqual(live);
+  handleWsMessage(frame);
+  expect(useSessionStore.getState().messages["outcome-test"]).toHaveLength(1);
+});
+
+it("preserves recovery progress through reconnect and paged history without ending streaming", () => {
+  useSessionStore.setState({ messages: {}, lastAppliedSeq: {}, oldestSeq: {}, streamingText: {} });
+  const recovery = {
+    kind: "recovery", request_id: "request-1", phase: "retrying", code: "transient_retry",
+    message: "Provider overloaded; retrying", attempt: 1, maximum: 2, delay: 1,
+  };
+  handleWsMessage({ type: "assistant_delta", session_id: "recovery-test", content: "unfinished" });
+  handleWsMessage({ type: "recovery", session_id: "recovery-test", seq: 4, content: recovery });
+  const live = useSessionStore.getState().messages["recovery-test"][0];
+  expect(useSessionStore.getState().streamingText["recovery-test"]).toBe("unfinished");
+  expect(live.recovery?.phase).toBe("retrying");
+  useSessionStore.getState().setMessages("recovery-test", [
+    { role: "assistant", type: "text", seq: 5, content: "continued" },
+  ]);
+  useSessionStore.getState().prependMessages("recovery-test", [
+    { role: "system", type: "recovery", seq: 4, content: recovery },
+  ], 4, false);
+  expect(useSessionStore.getState().messages["recovery-test"][0]).toEqual(live);
+  expect(useSessionStore.getState().messages["recovery-test"].some((m) => m.type === "result")).toBe(false);
+});
 
 /** Snapshot-baseline dedup primitive.
  *

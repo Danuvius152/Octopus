@@ -347,6 +347,10 @@ CREATE TABLE IF NOT EXISTS bg_tasks (
     truncated INTEGER NOT NULL DEFAULT 0,  -- bool: at least one stream hit the cap
     started_at TEXT NOT NULL,
     completed_at TEXT,
+    idle_timeout_seconds INTEGER,
+    timeout_seconds INTEGER,
+    stop_reason TEXT,
+    work_id TEXT,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 

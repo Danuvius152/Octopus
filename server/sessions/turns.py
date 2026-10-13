@@ -11,10 +11,11 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from .. import fork_helpers
 from .. import monitor as _monitor
@@ -31,7 +32,14 @@ from ..harness import (
     get_harness,
 )
 from ..large_prompts import spill_if_large
-from ..models import AttachmentMetadata, MessageContent, MessageRole, SessionStatus
+from ..models import (
+    AttachmentMetadata,
+    MessageContent,
+    MessageRole,
+    SessionStatus,
+    TurnOutcome,
+    TurnRecovery,
+)
 from ..monitor import Event as _MonEvent
 from .base import (
     _DELTA_FLUSH_SECONDS,
@@ -46,6 +54,18 @@ from .base import (
     _split_tool_list,
     logger,
 )
+from .diagnostics import safe_diagnostic
+
+
+@dataclass
+class _Settlement:
+    request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    work_id: str | None = None
+    recovery: dict[str, int] = field(default_factory=lambda: {
+        "transient": 0, "idle": 0, "stale_session": 0, "premature_exit": 0,
+    })
+    final_task: asyncio.Task[dict[str, Any]] | None = None
+    cost: float | None = None
 
 
 @dataclass
@@ -67,17 +87,17 @@ class _Attempt:
     # True when the process was already holding this conversation, so the
     # prompt goes in as the next message rather than a fresh invocation.
     reused: bool
+    attempt_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     saw_result: bool = False
+    result: HarnessEvent | None = None
     saw_tool_use: bool = False
     # Whether any assistant text streamed, including unfinished delta blocks.
     # Once output exists, recovery requires the captured conversation.
     saw_text: bool = False
-    # Terminal-error signal for post-turn auth-expiry classification.
+    # Error notifications are diagnostic until the final result is known.
     saw_error_event: bool = False
+    error_code: str | None = None
     error_text: str = ""
-    # Failed results cannot be announced as terminal until the retry decision
-    # is known: delegation and app callers use these frames to finish a job.
-    failure_frames: list[dict[str, Any]] = field(default_factory=list)
     # Streaming-text coalescing (inline-steering.md §4 S1). The CLI emits one
     # delta per token; forwarding each as its own WS frame would be a frame
     # per token and a React render per token. We batch them into at most one
@@ -105,7 +125,11 @@ class _Attempt:
     @property
     def failed(self) -> bool:
         """A turn that errored, or ended without ever saying it was done."""
-        return self.saw_error_event or not self.saw_result
+        return self.result is None or self.result.is_error
+
+    @property
+    def failure_code(self) -> str | None:
+        return (self.result.error_code if self.result else None) or self.error_code
 
     @property
     def produced_output(self) -> bool:
@@ -138,6 +162,7 @@ class _Turn:
     # `--resume <failed-id>` of the same prompt (Vera review,
     # harness-transient-retry.md §4).
     resume_at_turn_start: str | None
+    settlement: _Settlement = field(default_factory=_Settlement)
     recovery_attempts: int = 0
     transient_attempts: int = 0
     # A dangling resume id is recoverable exactly once per turn: clear it,
@@ -185,6 +210,102 @@ class QuotaExceeded(Exception):
 
 
 class TurnsMixin(SessionManagerBase):
+
+    def dispatch_snapshot(self, session_id: str) -> dict[str, Any]:
+        return self._session_dispatch_snapshot(self.sessions[session_id])
+
+    def _session_dispatch_snapshot(self, session: Session) -> dict[str, Any]:
+        return {
+            "generation": self._dispatch_generation,
+            "revision": session._dispatch_revision,
+            "paused": session._dispatch_paused,
+            "active_request_id": (
+                session._current_request.request_id if session._current_request else None
+            ),
+            "items": [{
+                "request_id": item.request_id, "source": item.source,
+                "summary": item.prompt[:1000], "priority": item.priority,
+            } for item in session._pending_queue],
+        }
+
+    def _dispatch_event(self, session: Session) -> dict[str, Any]:
+        session._dispatch_revision += 1
+        return {
+            "type": "dispatch_state", "session_id": session.id,
+            "dispatch_state": self._session_dispatch_snapshot(session),
+        }
+
+    async def _settle_turn(
+        self, session: Session, settlement: _Settlement, *,
+        status: Literal["success", "failed", "interrupted"],
+        message: str | None = None, code: str | None = None,
+        result: HarnessEvent | None = None, metadata: dict[str, Any] | None = None,
+        provider_code: str | None = None,
+    ) -> dict[str, Any]:
+        """Reserve, persist and broadcast one final outcome, even during Stop.
+
+        Reservation happens before the first await. Shielding the publication
+        lets the cancelled producer finish its record and delivery; a racing
+        interrupt observes that same task instead of publishing a second result.
+        """
+        if settlement.final_task is None:
+            outcome = TurnOutcome(
+                request_id=settlement.request_id, status=status,
+                message=safe_diagnostic(message), code=code,
+                provider_code=getattr(result, "error_code", None) or provider_code,
+                recovery=dict(settlement.recovery),
+            )
+
+            async def publish() -> dict[str, Any]:
+                stored = MessageContent(
+                    role=MessageRole.system, type="result",
+                    content=outcome.model_dump(), is_error=status != "success",
+                    session_id=result.session_id if result else session.claude_session_id,
+                    cost=settlement.cost,
+                )
+                seq = await self._persist_message(session, stored)
+                event = {
+                    "type": "result", "session_id": session.id,
+                    "request_id": settlement.request_id,
+                    "work_id": settlement.work_id,
+                    "claude_session_id": stored.session_id,
+                    "content": stored.content, "is_error": stored.is_error,
+                    "cost": stored.cost, "code": code,
+                    "message": outcome.message, "terminal": True,
+                    "turns": result.num_turns if result else None,
+                    "duration_ms": result.duration_ms if result else None,
+                }
+                if metadata:
+                    for key in ("credential_id", "backend"):
+                        if key in metadata:
+                            event[key] = metadata[key]
+                self._tag_persisted(event, seq, stored)
+                await self._broadcast(event, user_id=session.user_id)
+                return event
+
+            settlement.final_task = asyncio.create_task(publish())
+        return await asyncio.shield(settlement.final_task)
+
+    async def _recovery_frame(
+        self, session: Session, *, code: str, message: str,
+        phase: Literal["diagnostic", "retrying", "recovered"] = "retrying",
+        attempt: int | None = None, maximum: int | None = None,
+        delay: float | None = None,
+    ) -> dict[str, Any]:
+        settlement = session._settlement
+        payload = TurnRecovery(
+            request_id=settlement.request_id if settlement else "untracked",
+            phase=phase, code=code, message=safe_diagnostic(message) or "Backend notification",
+            attempt=attempt, maximum=maximum, delay=delay,
+        )
+        stored = MessageContent(role=MessageRole.system, type="recovery", content=payload.model_dump())
+        seq = await self._persist_message(session, stored)
+        return self._tag_persisted(
+            {"type": "recovery", "session_id": session.id,
+             "request_id": payload.request_id, "content": stored.content,
+             "message": payload.message, "code": code, "terminal": False,
+             "retrying": phase == "retrying"}, seq, stored,
+        )
 
     @staticmethod
     def _tag_persisted(
@@ -306,6 +427,23 @@ class TurnsMixin(SessionManagerBase):
                 "or interrupt it."
             )
 
+    @staticmethod
+    def _eligible_request(session: Session) -> int | None:
+        return next((
+            i for i, item in enumerate(session._pending_queue)
+            if not session._dispatch_paused or item.priority
+        ), None)
+
+    def _schedule_dispatch(self, session: Session) -> bool:
+        """Claim the driver synchronously; its short lock never spans I/O."""
+        if session._active_task and not session._active_task.done():
+            return False
+        if self._eligible_request(session) is None:
+            return False
+        self._check_turn_quota(session)
+        session._active_task = asyncio.create_task(self._drive_messages(session.id))
+        return True
+
     async def start_message(
         self,
         session_id: str,
@@ -314,128 +452,226 @@ class TurnsMixin(SessionManagerBase):
         *,
         steerable: bool = False,
         wiki_mode: str | None = None,
+        source: str = "human",
+        delivery_id: str | None = None,
+        work_id: str | None = None,
+        question_session_id: str | None = None,
+        question_id: str | None = None,
     ) -> None:
-        """Kick off a message, or queue it if the session is already running.
+        """Accept a request through the in-memory dispatch gate.
 
-        `attachment_ids` are previously-uploaded files (see
-        `POST /api/sessions/{id}/attachments`). They're carried with the
-        prompt through the queue and resolved to absolute paths at spawn
-        time so the agent's `Read` tool can open them.
-
-        `steerable` says this message may be handed to a turn already running
-        instead of queueing behind it (inline-steering.md §8). It defaults to
-        **False** and only the WebSocket composer passes True, because this is
-        the injection path for bg-task results, delegation replies, schedules,
-        application builds and research reports — each of which is a turn in
-        its own right, with a marker prefix the model is expected to read as a
-        fresh instruction. Steering one of those into the middle of an
-        unrelated turn delivers it somewhere it was never meant to land.
+        Only the composer is steerable. Internal callers supply their source
+        and delivery identity; markers remain part of the model's transcript.
+        Stop preserves older work; humans accepted afterwards have priority
+        until explicit resume, without reopening automatic dispatch.
         """
         session = self.sessions.get(session_id)
         if session is None:
             raise ValueError(f"Session {session_id} not found")
-
-        if attachment_ids and len(attachment_ids) > MAX_ATTACHMENTS_PER_MESSAGE:
-            raise ValueError(
-                f"too many attachments: max {MAX_ATTACHMENTS_PER_MESSAGE}"
-            )
-
-        self._check_turn_quota(session)
-
-        queued = QueuedPrompt(prompt=prompt, attachment_ids=list(attachment_ids or []), wiki_mode=wiki_mode)
-
-        # Busy path. First chance: steer — hand the message to the turn that's
-        # already running instead of queueing behind it (inline-steering.md §8).
-        # A fork can never be in flight here, because fork_session only sets
-        # `_forking` against a quiescent parent (no `_active_task`), so a
-        # running turn implies not-forking — no `_forking` check needed.
-        if session._active_task and not session._active_task.done():
-            if steerable and await self._try_steer(session, queued):
-                return
-            session._pending_queue.append(queued)
-            await self._broadcast(
-                {
-                    "type": "queued",
-                    "session_id": session_id,
-                    "content": prompt,
-                    "queue_length": len(session._pending_queue),
-                }
-            )
+        from ..mcp_identity import work_is_open
+        if not work_is_open(work_id):
             return
-
-        # Idle path: the session lock is free (send_message only holds it during
-        # a turn), so acquiring it here is non-blocking and gives a real mutex
-        # against a racing fork_session (session-rewind.md §5.4). Under the
-        # lock: refuse if a fork is mid-saga, re-check for a turn another
-        # coroutine may have started while we waited, then claim `_active_task`.
-        async with session._lock:
+        if attachment_ids and len(attachment_ids) > MAX_ATTACHMENTS_PER_MESSAGE:
+            raise ValueError(f"too many attachments: max {MAX_ATTACHMENTS_PER_MESSAGE}")
+        queued = QueuedPrompt(
+            prompt=prompt, attachment_ids=list(attachment_ids or []),
+            wiki_mode=wiki_mode, source=source, delivery_id=delivery_id, work_id=work_id,
+            question_session_id=question_session_id, question_id=question_id,
+        )
+        # Stop closes the steering window synchronously before yielding. A
+        # correction may steer another correction, but never the retired turn.
+        if (
+            source == "human" and steerable
+            and session._active_task and not session._active_task.done()
+            and (not session._dispatch_paused or (
+                session._current_request is not None and session._current_request.priority
+            ))
+            and await self._try_steer(session, queued)
+        ):
+            return
+        async with session._dispatch_lock:
+            if self.sessions.get(session_id) is not session:
+                raise ValueError(f"Session {session_id} not found")
+            if not work_is_open(work_id):
+                return
             if session._forking:
                 raise ValueError(f"Session {session_id} is busy (forking)")
-            if session._active_task and not session._active_task.done():
-                session._pending_queue.append(queued)
-                await self._broadcast(
-                    {
-                        "type": "queued",
-                        "session_id": session_id,
-                        "content": prompt,
-                        "queue_length": len(session._pending_queue),
-                    }
-                )
+            if delivery_id and delivery_id in session._seen_delivery_ids:
                 return
-            session._active_task = asyncio.create_task(
-                self._drive_messages(session_id, queued)
-            )
+            queued.priority = session._dispatch_paused and source == "human"
+            if source == "human":
+                self._check_turn_quota(session)
+            session._dispatch_order += 1
+            queued.order = session._dispatch_order
+            session._pending_queue.append(queued)
+            if delivery_id:
+                session._seen_delivery_ids.add(delivery_id)
+            try:
+                launched = self._schedule_dispatch(session)
+            except QuotaExceeded:
+                # An automatic return has already been accepted. Another
+                # driver's release wakes this queue when capacity is free.
+                launched = False
+            event = self._dispatch_event(session)
+            queue_length = len(session._pending_queue)
+        await self._broadcast(event, user_id=session.user_id)
+        if not launched:
+            await self._broadcast({
+                "type": "queued", "session_id": session_id,
+                "content": prompt, "request_id": queued.request_id,
+                "queue_length": queue_length, "dispatch_state": event["dispatch_state"],
+            }, user_id=session.user_id)
 
-    async def _drive_messages(
-        self, session_id: str, initial: QueuedPrompt
+    async def _run_claim(
+        self, session_id: str, queued: QueuedPrompt, gate: asyncio.Event
     ) -> None:
-        """Run the initial prompt, then drain any queued prompts.
+        await gate.wait()
+        from ..mcp_identity import work_is_open
+        if not work_is_open(queued.work_id):
+            return
+        queued.started = True
+        session = self.sessions.get(session_id)
+        if session is not None:
+            session._settlement = _Settlement(request_id=queued.request_id, work_id=queued.work_id)
+        await self._consume_message(session_id, queued)
 
-        Each prompt runs as an inner task that interrupt() can cancel
-        independently, so cancelling one prompt doesn't stop the queue.
-        """
+    async def _drive_messages(self, session_id: str) -> None:
         session = self.sessions.get(session_id)
         if session is None:
             return
+        driver = asyncio.current_task()
+        try:
+            while True:
+                async with session._dispatch_lock:
+                    eligible = self._eligible_request(session)
+                    if eligible is None:
+                        if session._active_task is driver:
+                            session._active_task = None
+                        break
+                    current = session._pending_queue.pop(eligible)
+                    gate = asyncio.Event()
+                    inner = asyncio.create_task(self._run_claim(session_id, current, gate))
+                    session._current_request = current
+                    session._inner_task = inner
+                    claimed_event = self._dispatch_event(session)
+                try:
+                    # A claim is visible before it starts. Stop can cancel
+                    # the registered inner task and restore an unstarted item.
+                    await self._broadcast(claimed_event, user_id=session.user_id)
+                    await self._broadcast({
+                        "type": "dequeued", "session_id": session_id,
+                        "request_id": current.request_id,
+                        "queue_length": len(claimed_event["dispatch_state"]["items"]),
+                        "dispatch_state": claimed_event["dispatch_state"],
+                    }, user_id=session.user_id)
+                    gate.set()
+                    await inner
+                except asyncio.CancelledError:
+                    if driver is not None and driver.cancelling():
+                        inner.cancel()
+                        await drain_cancelled(inner, f"session {session_id} inner turn")
+                        raise
+                except Exception:
+                    logger.exception("Background task error for session %s", session_id)
+                finally:
+                    async with session._dispatch_lock:
+                        if session._inner_task is inner:
+                            session._inner_task = None
+                        if session._current_request is current:
+                            session._current_request = None
+                        finished_event = self._dispatch_event(session)
+                    if self.sessions.get(session_id) is session:
+                        await self._broadcast(finished_event, user_id=session.user_id)
+        finally:
+            if session._active_task is driver:
+                session._active_task = None
+        # A paused session has stopped executing, but its pending work is not
+        # finished. Completion notifications and transient archival must wait.
+        if not session._dispatch_paused and not session._pending_queue and not session._active_task:
+            await self._fire_session_idle_notification(session)
+            if session.origin in self._AUTO_ARCHIVE_ORIGINS:
+                await self.auto_archive_scheduled_session(session_id)
+        for waiting in list(self.sessions.values()):
+            if waiting is session:
+                continue
+            async with waiting._dispatch_lock:
+                try:
+                    self._schedule_dispatch(waiting)
+                except QuotaExceeded:
+                    pass
 
-        current: QueuedPrompt | None = initial
-        while current is not None:
-            inner = asyncio.create_task(self._consume_message(session_id, current))
-            session._inner_task = inner
-            try:
-                await inner
-            except asyncio.CancelledError:
-                pass  # interrupt() cancelled the inner task; continue draining
-            except Exception:
-                logger.exception(
-                    "Background task error for session %s", session_id
-                )
-            finally:
-                session._inner_task = None
-
+    async def resume_dispatch(self, session_id: str) -> bool:
+        session = self.sessions.get(session_id)
+        if session is None:
+            return False
+        async with session._dispatch_lock:
+            if self.sessions.get(session_id) is not session:
+                return False
             if session._pending_queue:
-                current = session._pending_queue.pop(0)
-                await self._broadcast(
-                    {
-                        "type": "dequeued",
-                        "session_id": session_id,
-                        "queue_length": len(session._pending_queue),
-                    }
+                self._check_turn_quota(session)
+            session._dispatch_paused = False
+            self._schedule_dispatch(session)
+            event = self._dispatch_event(session)
+        await self._broadcast(event, user_id=session.user_id)
+        return True
+
+    def has_pending_or_active_work(self, session_id: str, work_id: str) -> bool:
+        """Whether dispatch accepted this work before its caller stopped waiting."""
+        session = self.sessions.get(session_id)
+        if session is None:
+            return False
+        current = session._current_request
+        return (current is not None and current.work_id == work_id) or any(
+            request.work_id == work_id for request in (*session._pending_queue, *session._steer_queue)
+        )
+
+    def close_work(self, work_id: str) -> list[tuple[Session, _Settlement | None, str | None]]:
+        """Close one owner before yielding, retaining independent requests.
+
+        The captured task/process references are retired here; cleanup never
+        looks up a replacement process that could belong to a newer request.
+        """
+        from ..mcp_identity import close_work
+
+        close_work(work_id)
+        affected = []
+        for session in self.sessions.values():
+            pending = len(session._pending_queue)
+            session._pending_queue[:] = [q for q in session._pending_queue if q.work_id != work_id]
+            session._steer_queue[:] = [q for q in session._steer_queue if q.work_id != work_id]
+            current = session._current_request
+            settlement = None
+            question_attempt_id = None
+            owned_current = current is not None and current.work_id == work_id
+            if owned_current:
+                settlement = session._settlement
+                if settlement is not None and settlement.request_id != current.request_id:
+                    settlement = None
+                question_attempt_id = session._question_attempt_id
+                inner = session._inner_task
+                if inner is not None and not inner.done():
+                    inner.cancel()
+                session._steer_open = False
+            if session._work_id == work_id and session._backend is not None:
+                backend = session._backend
+                self._forget_backend(session)
+                asyncio.create_task(self._safe_backend_interrupt(backend))
+            if owned_current or pending != len(session._pending_queue):
+                affected.append((session, settlement, question_attempt_id))
+        return affected
+
+    async def finish_work_cancellation(
+        self, affected: list[tuple[Session, _Settlement | None, str | None]]
+    ) -> None:
+        for session, settlement, question_attempt_id in affected:
+            if question_attempt_id is not None:
+                await self._end_question_attempt(session, question_attempt_id, reason="work_cancelled")
+            if settlement is not None:
+                await self._settle_turn(
+                    session, settlement, status="interrupted",
+                    message="(delegated work cancelled)", code="work_cancelled",
                 )
-            else:
-                current = None
-
-        # Queue is drained — fire the session-idle notifier (future-
-        # features #5). Detached because notifier sends do network I/O.
-        await self._fire_session_idle_notification(session)
-
-        # Schedule-origin and delegation-origin sessions hide themselves
-        # once idle so heavy fan-out doesn't pile up the active list
-        # (agent-refactor.md §5.6 + agent-collaboration.md §5.2). The
-        # archived rows are still browsable via the account-menu manage
-        # page or the sidebar's "show delegations" toggle.
-        if session.origin in self._AUTO_ARCHIVE_ORIGINS:
-            await self.auto_archive_scheduled_session(session_id)
+            await self._broadcast(self._dispatch_event(session), user_id=session.user_id)
 
     async def deliver_bg_result(self, rec) -> bool:  # type: ignore[no-untyped-def]
         """Inject a synthesized user message into a session when a bg
@@ -467,7 +703,11 @@ class TurnsMixin(SessionManagerBase):
             return False
         prompt = render_delivery_prompt(rec)
         try:
-            await self.start_message(rec.session_id, prompt, attachment_ids=None)
+            await self.start_message(
+                rec.session_id, prompt, attachment_ids=None,
+                source="bg", delivery_id=f"bg:{rec.id}",
+                work_id=getattr(rec, "work_id", None),
+            )
         except Exception:
             logger.exception(
                 "Failed to inject bg result for task %s into session %s",
@@ -480,8 +720,28 @@ class TurnsMixin(SessionManagerBase):
     async def _consume_message(
         self, session_id: str, queued: QueuedPrompt
     ) -> None:
+        if queued.question_session_id and queued.question_id:
+            if not self.has_pending_question(queued.question_session_id, queued.question_id):
+                session = self.sessions.get(session_id)
+                if session is not None:
+                    notice = MessageContent(
+                        role=MessageRole.system, type="text",
+                        content=f"[agent-question-expired] Question {queued.question_id} is already closed; no answer turn was started.",
+                        tool_input={"request_context": {
+                            "request_id": queued.request_id, "source": queued.source,
+                        }},
+                    )
+                    seq = await self._persist_message(session, notice)
+                    await self._broadcast(self._tag_persisted({
+                        "type": "delivery_notice", "session_id": session_id,
+                        "content": notice.content, "request_id": queued.request_id,
+                    }, seq, notice), user_id=session.user_id)
+                return
         async for _event in self.send_message(
-            session_id, queued.prompt, queued.attachment_ids, **({"wiki_mode": queued.wiki_mode} if queued.wiki_mode else {})
+            session_id, queued.prompt, queued.attachment_ids,
+            request_id=queued.request_id,
+            source=queued.source, work_id=queued.work_id,
+            **({"wiki_mode": queued.wiki_mode} if queued.wiki_mode else {})
         ):
             pass  # send_message persists + broadcasts each event
 
@@ -492,20 +752,37 @@ class TurnsMixin(SessionManagerBase):
         attachment_ids: list[str] | None = None,
         *,
         wiki_mode: str | None = None,
+        request_id: str | None = None,
+        source: str = "human",
+        work_id: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         session = self.sessions.get(session_id)
         if session is None:
             raise ValueError(f"Session {session_id} not found")
 
+        from ..mcp_identity import work_is_open
+        if not work_is_open(work_id):
+            return
+
         try:
             await asyncio.wait_for(session._lock.acquire(), timeout=5.0)
         except TimeoutError:
             raise ValueError(f"Session {session_id} is busy")
+        if not work_is_open(work_id):
+            session._lock.release()
+            return
 
         from ..wiki.tasks import tasks as wiki_tasks
+        session._work_id = work_id
+        settlement = session._settlement
+        if settlement is None or request_id is None or settlement.request_id != request_id:
+            settlement = _Settlement(work_id=work_id, **({"request_id": request_id} if request_id else {}))
+        session._settlement = settlement
+        wiki_task_id = None
         try:
             session._wiki_mode = wiki_mode
             session._wiki_task_id = wiki_tasks.open(session, wiki_mode, prompt) if wiki_mode else None
+            wiki_task_id = session._wiki_task_id
             # Resolve attachment ids → on-disk paths so the prompt can
             # cite absolute paths the agent's `Read` tool will open.
             # Missing files are dropped (with a logged warning) rather
@@ -549,6 +826,9 @@ class TurnsMixin(SessionManagerBase):
                 type="text",
                 content=prompt,
                 attachments=attachments_meta,
+                tool_input={"request_context": {
+                    "request_id": settlement.request_id, "source": source, "work_id": work_id,
+                }},
             )
             seq = await self._persist_message(
                 session,
@@ -560,16 +840,18 @@ class TurnsMixin(SessionManagerBase):
                 "type": "user_message",
                 "session_id": session_id,
                 "content": prompt,
+                "tool_input": user_msg.tool_input,
             }
             if attachments_meta:
                 event["attachments"] = [a.model_dump() for a in attachments_meta]
             self._tag_persisted(event, seq, user_msg)
-            await self._broadcast(event)
+            await self._broadcast(event, user_id=session.user_id)
             yield event
 
             session.status = SessionStatus.running
             await self._broadcast(
-                {"type": "status", "session_id": session_id, "status": "running"}
+                {"type": "status", "session_id": session_id, "status": "running"},
+                user_id=session.user_id,
             )
 
             # Attachments wrap the raw prompt; the `/showme` viewer flow now
@@ -616,40 +898,48 @@ class TurnsMixin(SessionManagerBase):
 
             try:
                 async for ws_event in self._run_backend(session, backend_dispatch_prompt):
-                    await self._broadcast(ws_event)
+                    ws_event.setdefault("request_id", settlement.request_id)
+                    ws_event.setdefault("work_id", settlement.work_id)
+                    if ws_event["type"] != "result":
+                        await self._broadcast(ws_event, user_id=session.user_id)
                     yield ws_event
             except Exception as e:
                 logger.exception("Backend error in session %s", session_id)
-                error_msg = MessageContent(
-                    role=MessageRole.system,
-                    type="error",
-                    content=str(e),
+                event = await self._settle_turn(
+                    session, settlement, status="failed", message=str(e), code="backend_exception",
                 )
-                err_seq = await self._persist_message(session, error_msg)
-                event = {
-                    "type": "error",
-                    "session_id": session_id,
-                    "message": str(e),
-                }
-                self._tag_persisted(event, err_seq, error_msg)
-                await self._broadcast(event)
                 yield event
-            finally:
+        except asyncio.CancelledError:
+            await self._settle_turn(
+                session, settlement, status="interrupted", message="(interrupted by user)",
+                code="interrupted",
+            )
+            raise
+        except Exception as exc:
+            logger.exception("Request initialization failed in session %s", session_id)
+            yield await self._settle_turn(
+                session, settlement, status="failed", message=str(exc), code="initialization_error",
+            )
+        finally:
+            wiki_tasks.close(wiki_task_id)
+            if session._settlement is settlement:
+                session._wiki_task_id = None
+                session._wiki_mode = None
+                session.status = SessionStatus.idle
+            try:
                 if self.db:
                     await self.db.flush()
-                session.status = SessionStatus.idle
-                await self._broadcast(
-                    {"type": "status", "session_id": session_id, "status": "idle"}
-                )
-        finally:
-            wiki_tasks.close(session._wiki_task_id)
-            session._wiki_task_id = None
-            session._wiki_mode = None
-            session._lock.release()
+                if session._settlement is settlement:
+                    await self._broadcast(
+                        {"type": "status", "session_id": session_id, "status": "idle"},
+                        user_id=session.user_id,
+                    )
+            finally:
+                session._lock.release()
 
     async def interrupt(self, session_id: str) -> bool:
         _monitor.record(_MonEvent(kind="turn_interrupt", session_id=session_id))
-        """Cancel the currently running prompt. Queued prompts continue.
+        """Pause dispatch and cancel the request captured before any await.
 
         Best-effort: if the backend subprocess is wedged (e.g. waiting on
         a control_response we'll never send), interrupt still releases the
@@ -661,6 +951,20 @@ class TurnsMixin(SessionManagerBase):
         session = self.sessions.get(session_id)
         if session is None:
             return False
+
+        session._dispatch_paused = True
+        session._steer_open = False
+        for pending in (*session._pending_queue, *session._steer_queue):
+            pending.priority = False
+        current = session._current_request
+        unstarted = current is not None and not current.started
+        if unstarted:
+            assert current is not None
+            current.priority = False
+            if not any(item.request_id == current.request_id for item in session._pending_queue):
+                session._pending_queue.append(current)
+                session._pending_queue.sort(key=lambda item: item.order)
+        pause_event = self._dispatch_event(session)
 
         # Fire backend teardown in the background and return fast. The
         # inner task cancellation below releases session._lock via
@@ -676,6 +980,12 @@ class TurnsMixin(SessionManagerBase):
             asyncio.create_task(self._safe_backend_interrupt(backend))
 
         inner = session._inner_task
+        settlement = session._settlement
+        if current is not None and (
+            settlement is None or settlement.request_id != current.request_id
+        ):
+            settlement = None
+        question_attempt = session._question_attempt_id
         had_active = inner is not None and not inner.done()
         if had_active:
             inner.cancel()
@@ -691,14 +1001,27 @@ class TurnsMixin(SessionManagerBase):
                 pass
             session.status = SessionStatus.idle
             await self._broadcast(
-                {"type": "status", "session_id": session_id, "status": "idle"}
+                {"type": "status", "session_id": session_id, "status": "idle"},
+                user_id=session.user_id,
             )
         else:
             # Truly idle — nothing to interrupt.
+            await self._end_question_attempt(session, question_attempt, reason="interrupted")
+            await self._broadcast(pause_event, user_id=session.user_id)
             return False
 
-        session._pending_questions.clear()
-        self._cancel_all_question_timers(session)
+        await self._end_question_attempt(session, question_attempt, reason="interrupted")
+        await self._broadcast(pause_event, user_id=session.user_id)
+
+        if unstarted:
+            return True  # The retained request has no execution outcome yet.
+
+        if settlement is not None:
+            await self._settle_turn(
+                session, settlement, status="interrupted", message="(interrupted by user)",
+                code="interrupted",
+            )
+            return True
 
         marker = MessageContent(
             role=MessageRole.system,
@@ -712,7 +1035,7 @@ class TurnsMixin(SessionManagerBase):
             "message": "(interrupted by user)",
         }
         self._tag_persisted(event, marker_seq, marker)
-        await self._broadcast(event)
+        await self._broadcast(event, user_id=session.user_id)
         return True
 
     async def reset_session(self, session_id: str) -> None:
@@ -721,6 +1044,7 @@ class TurnsMixin(SessionManagerBase):
         if session is None:
             raise ValueError(f"Session {session_id} not found")
         session._pending_queue.clear()
+        session._dispatch_paused = False
         if session._inner_task and not session._inner_task.done():
             session._inner_task.cancel()
         if session._active_task and not session._active_task.done():
@@ -734,11 +1058,12 @@ class TurnsMixin(SessionManagerBase):
             session._lock.release()
         session.status = SessionStatus.idle
         session._pending_approvals.clear()
-        session._pending_questions.clear()
-        self._cancel_all_question_timers(session)
+        await self._close_session_questions(session, reason="reset")
         await self._broadcast(
             {"type": "status", "session_id": session_id, "status": "idle"}
         )
+        if self.sessions.get(session_id) is session:
+            await self._broadcast(self._dispatch_event(session), user_id=session.user_id)
 
     # ------------------------------------------------------------------ #
     # One CLI invocation: acquire a process, start it, retire it
@@ -833,9 +1158,15 @@ class TurnsMixin(SessionManagerBase):
         turn is not dropped — it becomes a normal queued prompt and runs next
         (inline-steering.md §9).
         """
-        async with session._steer_lock:
+        current_task = asyncio.current_task()
+        if current_task is not None and current_task.cancelling():
             session._steer_open = False
-        await drain_cancelled(steer_writer, f"session {session.id} steer writer")
+            await drain_cancelled(steer_writer, f"session {session.id} steer writer")
+        else:
+            async with session._steer_lock:
+                session._steer_open = False
+            await drain_cancelled(steer_writer, f"session {session.id} steer writer")
+        dispatch_event = None
         async with session._steer_lock:
             if session._steer_queue:
                 logger.info(
@@ -843,9 +1174,14 @@ class TurnsMixin(SessionManagerBase):
                     session.id,
                     len(session._steer_queue),
                 )
-                session._pending_queue.extend(session._steer_queue)
-                session._steer_queue.clear()
+                async with session._dispatch_lock:
+                    session._pending_queue.extend(session._steer_queue)
+                    session._pending_queue.sort(key=lambda item: item.order)
+                    session._steer_queue.clear()
+                    dispatch_event = self._dispatch_event(session)
             session._steer_ready.clear()
+        if dispatch_event and self.sessions.get(session.id) is session:
+            await self._broadcast(dispatch_event, user_id=session.user_id)
 
     async def _stop_watchdog(self, watchdog: asyncio.Task | None) -> None:
         """Cancel the turn watchdog and wait for it to finish unwinding."""
@@ -864,7 +1200,7 @@ class TurnsMixin(SessionManagerBase):
             attempt.backend.reusable
             and attempt.backend.is_alive()
             and attempt.saw_result
-            and not attempt.saw_error_event
+            and not attempt.failed
             and attempt.timeout is None
         )
 
@@ -872,7 +1208,7 @@ class TurnsMixin(SessionManagerBase):
         self, session: Session, attempt: _Attempt
     ) -> None:
         """Hold the process for the next turn, or shut it down now."""
-        if self._turn_ended_cleanly(attempt):
+        if self._turn_ended_cleanly(attempt) and session._backend is attempt.backend:
             session._held_run_at = time.monotonic()
             # Enforce the cap HERE, not only on the reaper's tick. The reaper
             # is a background task that doesn't exist in tests and runs every
@@ -881,13 +1217,15 @@ class TurnsMixin(SessionManagerBase):
             # the backend suite got OOM-killed.
             await self._enforce_held_cap(keep_session_id=session.id)
             return
+        from ..mcp_identity import revoke_run
+        revoke_run(getattr(attempt.backend, "run_lease_id", None))
         try:
             await attempt.backend.stop()
         except Exception:
             logger.exception(
                 "backend.stop() failed cleanly for session %s", session.id
             )
-        self._forget_backend(session)
+        self._forget_backend(session, expected=attempt.backend)
 
     # ------------------------------------------------------------------ #
     # One event off the stream
@@ -917,19 +1255,18 @@ class TurnsMixin(SessionManagerBase):
 
     def _note_question_request(
         self, session: Session, question_id: str, tool_input: dict[str, Any] | None
-    ) -> None:
+    ) -> PendingQuestion:
         """Track pending question state for reconnect re-render."""
-        session._pending_questions[question_id] = PendingQuestion(
-            question_id=question_id,
-            questions=(tool_input or {}).get("questions") or [],
-        )
+        pending = self._register_pending_question(session, question_id, (tool_input or {}).get("questions") or [])
         self._schedule_question_timeout(session, question_id)
+        return pending
 
     async def _handle_result_event(
         self, session: Session, attempt: _Attempt, event: HarnessEvent
     ) -> None:
         """The turn said it was done: record it and settle the session."""
         attempt.saw_result = True
+        attempt.result = event
         _monitor.record(_MonEvent(
             kind="turn",
             session_id=session.id,
@@ -959,6 +1296,8 @@ class TurnsMixin(SessionManagerBase):
         (harness-credential-reauth.md §4). `tool_result` errors never get here
         — a tool failing isn't the turn failing."""
         attempt.saw_error_event = True
+        if event.error_code:
+            attempt.error_code = event.error_code
         if event.content:
             attempt.error_text += event.content + "\n"
         if event.raw:
@@ -1014,24 +1353,42 @@ class TurnsMixin(SessionManagerBase):
         # Persist whichever message shape this event maps to. The returned seq
         # goes onto the WS event so reconnecting clients can dedupe against
         # their snapshot.
+        if event.type == "result":
+            await self._handle_result_event(session, attempt, event)
+            if event.is_error:
+                self._capture_error_text(attempt, event)
+            return frames
+        if event.type == "error":
+            self._capture_error_text(attempt, event)
+            frames.append(await self._recovery_frame(
+                session, code="backend_diagnostic", phase="diagnostic",
+                message=event.content or "Backend notification",
+            ))
+            return frames
+        pending_question = None
+        if event.type == "question_request" and event.tool_use_id:
+            pending_question = self._note_question_request(session, event.tool_use_id, event.tool_input)
         msg_content = self._event_to_message_content(event)
         msg_seq: int | None = None
         if msg_content is not None:
+            if pending_question is not None:
+                msg_content.tool_input = {
+                    **(msg_content.tool_input or {}),
+                    "deadline": pending_question.deadline,
+                    "request_id": pending_question.request_id,
+                    "attempt_id": pending_question.attempt_id,
+                    "work_id": pending_question.work_id,
+                }
             msg_seq = await self._persist_message(session, msg_content)
-
-        if event.type == "question_request" and event.tool_use_id:
-            self._note_question_request(
-                session, event.tool_use_id, event.tool_input
-            )
-        if event.type == "result":
-            await self._handle_result_event(session, attempt, event)
-        # A failed `result` or an `error` event is the turn failing; a
-        # `tool_result` error is not.
-        if event.type in ("result", "error") and event.is_error:
-            self._capture_error_text(attempt, event)
-
         # Translate into the WS message shape the front-end expects.
         ws_event = self._event_to_ws_message(session.id, event)
+        if ws_event is not None and pending_question is not None:
+            ws_event.update(
+                deadline=pending_question.deadline,
+                request_id=pending_question.request_id,
+                attempt_id=pending_question.attempt_id,
+                work_id=pending_question.work_id,
+            )
         if ws_event is not None and msg_content is not None:
             self._tag_persisted(ws_event, msg_seq, msg_content)
         if ws_event is not None:
@@ -1072,6 +1429,7 @@ class TurnsMixin(SessionManagerBase):
             and (not turn.produced_output or session.claude_session_id)
         ):
             turn.idle_timeout_retries += 1
+            turn.settlement.recovery["idle"] = turn.idle_timeout_retries
             if turn.produced_output:
                 next_prompt = (
                     "The previous attempt stopped after a period without backend "
@@ -1105,7 +1463,7 @@ class TurnsMixin(SessionManagerBase):
         )
 
     async def _auth_decision(
-        self, session: Session, turn: _Turn, blob: str
+        self, session: Session, turn: _Turn, blob: str, *, error_code: str | None = None
     ) -> _Decision | None:
         """Reactive auth-expiry: a failed turn whose error text matches this
         backend's auth-rejection patterns means the bound credential is dead
@@ -1113,7 +1471,7 @@ class TurnsMixin(SessionManagerBase):
         Flag it needs_reconnect and surface a re-authorize prompt, then STOP —
         re-auth won't fix itself, and a retry just burns the budget
         (harness-credential-reauth.md §4)."""
-        if not turn.harness.is_auth_error(blob):
+        if not turn.harness.is_auth_error(blob, code=error_code):
             return None
         return _Decision.stop(
             await self._surface_auth_expiry(
@@ -1141,6 +1499,7 @@ class TurnsMixin(SessionManagerBase):
         ):
             return None
         turn.stale_session_retries += 1
+        turn.settlement.recovery["stale_session"] = turn.stale_session_retries
         logger.warning(
             "Session %s: resume id %s is gone from the engine; "
             "clearing it and starting a fresh conversation",
@@ -1183,7 +1542,7 @@ class TurnsMixin(SessionManagerBase):
         )
 
     async def _transient_decision(
-        self, session: Session, turn: _Turn, blob: str
+        self, session: Session, turn: _Turn, blob: str, *, error_code: str | None = None
     ) -> _Decision | None:
         """Transient provider-reliability failure (5xx / overloaded / dropped
         connection / server-side throttle) → bounded retry.
@@ -1202,7 +1561,7 @@ class TurnsMixin(SessionManagerBase):
         Quota/credit errors match no pattern here → they surface as-is
         (harness-transient-retry.md §4).
         """
-        if not turn.harness.is_transient_error(blob):
+        if not turn.harness.is_transient_error(blob, code=error_code):
             return None
         can_retry = turn.transient_attempts < self._MAX_TRANSIENT_RETRIES and (
             not turn.produced_output or bool(session.claude_session_id)
@@ -1220,6 +1579,7 @@ class TurnsMixin(SessionManagerBase):
             )
 
         turn.transient_attempts += 1
+        turn.settlement.recovery["transient"] = turn.transient_attempts
         delay = self._TRANSIENT_RETRY_BASE_DELAY * (2 ** (turn.transient_attempts - 1))
         logger.warning(
             "Session %s: transient backend error; retrying in "
@@ -1233,7 +1593,12 @@ class TurnsMixin(SessionManagerBase):
         if turn.produced_output:
             # Continue the in-progress conversation from its captured resume
             # id — no re-run, no duplication.
-            next_prompt = "continue"
+            next_prompt = (
+                "Continue the user's unfinished request from this conversation. "
+                "Check existing files and tool outcomes before repeating operations: "
+                "interrupted tools may already have changed things. Keep existing "
+                "delegations and background jobs; do not duplicate them."
+            )
         else:
             next_prompt = turn.prompt  # original invocation
             if session.claude_session_id != turn.resume_at_turn_start:
@@ -1283,26 +1648,16 @@ class TurnsMixin(SessionManagerBase):
             return _Decision.stop()
 
         turn.recovery_attempts += 1
+        turn.settlement.recovery["premature_exit"] = turn.recovery_attempts
         logger.warning(
             "Session %s: detected CLI premature-exit after tool_use; "
             "auto-respawning with 'continue' (attempt %d/%d)",
             session.id, turn.recovery_attempts, self._MAX_RECOVERY_ATTEMPTS,
         )
-        # Persist a discreet system marker so the UI / transcript records that
-        # a recovery happened. Uses the same shape as the (interrupted by user)
-        # marker in interrupt().
-        marker = MessageContent(
-            role=MessageRole.system,
-            type="error",
-            content="(auto-resumed after CLI exited mid-turn)",
+        marker_event = await self._recovery_frame(
+            session, code="premature_exit", message="(auto-resumed after CLI exited mid-turn)",
+            attempt=turn.recovery_attempts, maximum=self._MAX_RECOVERY_ATTEMPTS,
         )
-        marker_seq = await self._persist_message(session, marker)
-        marker_event: dict[str, Any] = {
-            "type": "error",
-            "session_id": session.id,
-            "message": "(auto-resumed after CLI exited mid-turn)",
-        }
-        self._tag_persisted(marker_event, marker_seq, marker)
         return _Decision.again("continue", marker_event)
 
     async def _after_attempt(
@@ -1317,23 +1672,43 @@ class TurnsMixin(SessionManagerBase):
         Premature-exit recovery is last and always answers, because "the CLI
         just stopped" is only knowable once nothing else claimed the failure.
         """
+        if self._remaining_turn_time(turn) == 0 and attempt.timeout is None:
+            attempt.watchdog["tripped"] = ("overall", settings.turn_max_seconds)
+            if session._backend is attempt.backend:
+                await self._retire_or_hold_process(session, attempt)
         decision = await self._timeout_decision(session, turn, attempt)
         if decision is not None:
             return decision
 
         if attempt.failed:
             blob = self._failure_blob(attempt)
-            decision = await self._auth_decision(session, turn, blob)
+            decision = await self._auth_decision(session, turn, blob, error_code=attempt.failure_code)
             if decision is not None:
                 return decision
             decision = await self._stale_session_decision(session, turn, blob)
             if decision is not None:
                 return decision
-            decision = await self._transient_decision(session, turn, blob)
+            decision = await self._transient_decision(
+                session, turn, blob, error_code=attempt.failure_code,
+            )
             if decision is not None:
                 return decision
 
         return await self._premature_exit_decision(session, turn, attempt)
+
+    @staticmethod
+    def _remaining_turn_time(turn: _Turn) -> float | None:
+        limit = settings.turn_max_seconds
+        return max(0.0, limit - (time.monotonic() - turn.started_at)) if limit > 0 else None
+
+    async def _settle_overall_timeout(self, session: Session, turn: _Turn) -> dict[str, Any]:
+        detail = await self._surface_turn_timeout(
+            session, reason="overall", limit=settings.turn_max_seconds, backend=turn.harness.backend,
+        )
+        return await self._settle_turn(
+            session, turn.settlement, status="failed", message=detail["message"],
+            code="turn_timeout",
+        )
 
     async def _run_backend(
         self, session: Session, prompt: str
@@ -1365,6 +1740,10 @@ class TurnsMixin(SessionManagerBase):
             if catalog.service_tiers and tier not in catalog.tiers_for(model):
                 raise ValueError("Fast speed is unavailable for this model. Choose Normal speed.")
         connectors = await self._load_connectors(agent)
+        settlement = session._settlement
+        if settlement is None or settlement.final_task is not None:
+            settlement = _Settlement()
+            session._settlement = settlement
         # A setting saved while this turn is running belongs to the next turn,
         # including when the current one needs an automatic retry.
         turn = _Turn(
@@ -1374,15 +1753,20 @@ class TurnsMixin(SessionManagerBase):
             cred_id=configured_session.credential_id
             or (agent.get("credential_id") if agent else None),
             resume_at_turn_start=session.claude_session_id,
+            settlement=settlement,
         )
 
         while True:
+            if self._remaining_turn_time(turn) == 0:
+                yield await self._settle_overall_timeout(session, turn)
+                return
             backend, reused = await self._acquire_backend(
                 session, credential, agent, connectors, configured_session
             )
             attempt = _Attempt(
                 backend=backend, prompt=turn.current_prompt, reused=reused
             )
+            await self._begin_question_attempt(session, attempt.attempt_id, attempt.watchdog)
             watchdog = self._start_turn_watchdog(
                 backend, attempt.watchdog, started_at=turn.started_at
             )
@@ -1392,6 +1776,9 @@ class TurnsMixin(SessionManagerBase):
             steer_writer: asyncio.Task[int] | None = None
 
             try:
+                if self._remaining_turn_time(turn) == 0:
+                    yield await self._settle_overall_timeout(session, turn)
+                    return
                 await self._start_attempt(session, attempt, credential)
                 steer_writer = await self._open_steering_window(session, backend)
                 async for event in backend.stream():
@@ -1399,31 +1786,54 @@ class TurnsMixin(SessionManagerBase):
                     for frame in await self._handle_stream_event(
                         session, attempt, event
                     ):
-                        if frame["type"] == "error" or (
-                            frame["type"] == "result" and frame.get("is_error")
-                        ):
-                            attempt.failure_frames.append(frame)
-                        else:
-                            yield frame
+                        yield frame
+            except asyncio.CancelledError:
+                task = asyncio.current_task()
+                if attempt.timeout is None or task is None or task.cancelling():
+                    raise
+                # A watchdog may retire a run while its spawn is returning.
+                # That run's synthetic cancellation retains the timeout cause.
             finally:
                 # Close the steering window and stop the writer before anything
                 # else touches the process (§9), then decide the process's fate.
                 await self._close_steering_window(session, steer_writer)
                 await self._stop_watchdog(watchdog)
+                await self._end_question_attempt(session, attempt.attempt_id)
+                if self._remaining_turn_time(turn) == 0:
+                    attempt.watchdog["tripped"] = ("overall", settings.turn_max_seconds)
                 await self._retire_or_hold_process(session, attempt)
 
             turn.produced_output = turn.produced_output or attempt.produced_output
+            if attempt.result is not None and attempt.result.cost is not None:
+                settlement.cost = (settlement.cost or 0) + attempt.result.cost
             decision = await self._after_attempt(session, turn, attempt)
-            for frame in [*attempt.failure_frames, *decision.events]:
-                if decision.retry:
-                    frame["retrying"] = True
-                yield frame
             if not decision.retry:
+                detail = decision.events[-1] if decision.events else {}
+                failed = attempt.failed or attempt.timeout is not None
+                reason = detail.get("message")
+                raw_reason = attempt.result.content if attempt.result else attempt.error_text
+                if failed and raw_reason:
+                    reason = f"{reason}\n{raw_reason}" if reason else raw_reason
+                if failed and not reason:
+                    reason = safe_diagnostic(getattr(backend, "stderr_text", "")) or "Backend ended without a terminal result"
+                yield await self._settle_turn(
+                    session, settlement, status="failed" if failed else "success",
+                    message=reason, code=detail.get("code"), result=attempt.result,
+                    metadata=detail, provider_code=attempt.failure_code,
+                )
                 return
+            if attempt.failed and attempt.error_text:
+                yield await self._recovery_frame(
+                    session, code="attempt_failed", phase="diagnostic", message=attempt.error_text,
+                )
+            for frame in decision.events:
+                frame["retrying"] = True
+                yield frame
             if decision.prompt is not None:
                 turn.current_prompt = decision.prompt
             if decision.delay:
-                await asyncio.sleep(decision.delay)
+                remaining = self._remaining_turn_time(turn)
+                await asyncio.sleep(decision.delay if remaining is None else min(decision.delay, remaining))
 
     async def _load_agent(self, session: Session) -> dict[str, Any] | None:
         """Fetch the session's owning agent row (or None for legacy/no-DB)."""
@@ -1467,11 +1877,13 @@ class TurnsMixin(SessionManagerBase):
         # when it lands. Those events belong to the session
         # (native-subagents.md §7).
         run.set_idle_handler(
-            lambda event, sid=session.id: self._handle_idle_event(sid, event)
+            lambda event, sid=session.id: self._handle_idle_event(sid, event, backend=run)
         )
         return run
 
-    async def _handle_idle_event(self, session_id: str, event: HarnessEvent) -> None:
+    async def _handle_idle_event(
+        self, session_id: str, event: HarnessEvent, *, backend: HarnessRun | None = None,
+    ) -> None:
         """An event that arrived on a held process with no turn in flight.
 
         The CLI can produce a turn's worth of work nobody asked for at that
@@ -1490,6 +1902,13 @@ class TurnsMixin(SessionManagerBase):
         session = self.sessions.get(session_id)
         if session is None:
             return
+        if backend is not None:
+            from ..mcp_identity import McpScope, scope_is_live
+            if session._backend is not backend or not scope_is_live(McpScope(
+                session_id, user_id=session.user_id, run_lease_id=backend.run_lease_id,
+                work_id=backend.work_id,
+            )):
+                return
 
         # Token deltas are a live view of a block that is about to arrive
         # complete. Out of turn there is nothing live to view — the turn's
@@ -1519,6 +1938,8 @@ class TurnsMixin(SessionManagerBase):
         if ws_event is not None and msg_content is not None:
             self._tag_persisted(ws_event, msg_seq, msg_content)
         if ws_event is not None:
+            if backend is not None:
+                ws_event["work_id"] = backend.work_id
             await self._broadcast(ws_event)
 
     async def _try_steer(self, session: Session, queued: QueuedPrompt) -> bool:
@@ -1540,6 +1961,9 @@ class TurnsMixin(SessionManagerBase):
                     "session %s: steer backlog full, queueing instead", session.id
                 )
                 return False
+            session._dispatch_order += 1
+            queued.order = session._dispatch_order
+            queued.priority = session._dispatch_paused and queued.source == "human"
             session._steer_queue.append(queued)
             session._steer_ready.set()
         return True
@@ -1584,18 +2008,22 @@ class TurnsMixin(SessionManagerBase):
                 written += 1
                 # Persist + broadcast only once it's actually been handed over,
                 # so the transcript order matches what the engine saw.
-                await self._persist_message(
-                    session,
-                    MessageContent(
-                        role=MessageRole.user, type="text", content=queued.prompt
-                    ),
+                message = MessageContent(
+                    role=MessageRole.user, type="text", content=queued.prompt,
+                    tool_input={"request_context": {
+                        "request_id": queued.request_id, "source": queued.source,
+                        "work_id": queued.work_id,
+                    }},
                 )
+                seq = await self._persist_message(session, message)
                 await self._broadcast(
-                    {
+                    self._tag_persisted({
                         "type": "steered",
                         "session_id": session.id,
                         "content": queued.prompt,
-                    }
+                        "tool_input": message.tool_input,
+                    }, seq, message),
+                    user_id=session.user_id,
                 )
         return written
 
@@ -1670,6 +2098,7 @@ class TurnsMixin(SessionManagerBase):
             user_id=session.user_id,
             wiki_task_id=session._wiki_task_id,
             wiki_mode=session._wiki_mode,
+            work_id=session._work_id,
             system_prompt=system_prompt,
             model=model,
             reasoning_effort=reasoning_effort,

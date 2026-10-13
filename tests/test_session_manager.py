@@ -220,7 +220,7 @@ async def test_start_message_queues_when_busy(manager, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_interrupt_cancels_current_and_advances_queue(manager, monkeypatch):
+async def test_interrupt_cancels_current_and_pauses_queue_until_resume(manager, monkeypatch):
     session = await _new(manager,"I")
     started: list[str] = []
     cancelled: list[str] = []
@@ -250,7 +250,14 @@ async def test_interrupt_cancels_current_and_advances_queue(manager, monkeypatch
     ok = await manager.interrupt(session.id)
     assert ok is True
 
-    # Allow the orchestrator to pick up the dequeued prompt
+    await asyncio.sleep(0.05)
+    assert started == ["first"]
+    assert cancelled == ["first"]
+    assert [qp.prompt for qp in session._pending_queue] == ["second"]
+    assert manager.dispatch_snapshot(session.id)["paused"] is True
+    await manager.resume_dispatch(session.id)
+
+    # Explicit resume allows the preserved next prompt to start.
     for _ in range(50):
         if "second" in started:
             break
@@ -261,9 +268,10 @@ async def test_interrupt_cancels_current_and_advances_queue(manager, monkeypatch
     assert session._pending_queue == []
 
     # Cleanup: cancel the second so the test doesn't hang
+    active = session._active_task
     await manager.interrupt(session.id)
     try:
-        await asyncio.wait_for(session._active_task, timeout=1)
+        await asyncio.wait_for(active, timeout=1)
     except (TimeoutError, asyncio.CancelledError):
         pass
 
@@ -298,6 +306,8 @@ async def test_interrupt_twice_in_a_row_each_works(manager, monkeypatch):
 
     # First interrupt
     assert await manager.interrupt(session.id) is True
+    assert manager.dispatch_snapshot(session.id)["paused"] is True
+    await manager.resume_dispatch(session.id)
 
     # Wait for the queue to advance and "second" to start
     for _ in range(100):
@@ -308,6 +318,7 @@ async def test_interrupt_twice_in_a_row_each_works(manager, monkeypatch):
     assert cancelled == ["first"]
 
     # Second interrupt — this is the bug repro: must also succeed
+    active = session._active_task
     assert await manager.interrupt(session.id) is True
 
     for _ in range(100):
@@ -318,7 +329,7 @@ async def test_interrupt_twice_in_a_row_each_works(manager, monkeypatch):
     assert session._pending_queue == []
 
     try:
-        await asyncio.wait_for(session._active_task, timeout=1)
+        await asyncio.wait_for(active, timeout=1)
     except (TimeoutError, asyncio.CancelledError):
         pass
 
@@ -365,6 +376,7 @@ async def test_interrupt_does_not_wedge_on_slow_backend_stop(manager, monkeypatc
     session._backend = HangingBackend()  # type: ignore[assignment]
 
     # interrupt() must return within the backend-interrupt timeout (2s) + a margin
+    active = session._active_task
     try:
         ok = await asyncio.wait_for(manager.interrupt(session.id), timeout=4.0)
     except TimeoutError:
@@ -373,7 +385,7 @@ async def test_interrupt_does_not_wedge_on_slow_backend_stop(manager, monkeypatc
     assert ok is True
 
     try:
-        await asyncio.wait_for(session._active_task, timeout=2)
+        await asyncio.wait_for(active, timeout=2)
     except (TimeoutError, asyncio.CancelledError):
         pass
 
@@ -1106,7 +1118,7 @@ async def test_run_backend_auto_respawns_on_premature_exit_after_tool(manager):
     # First invocation's events, then a recovery marker, then the
     # second invocation's events. session_started is internal-only and
     # does not appear in the broadcast stream.
-    assert types == ["tool_use", "tool_result", "error", "assistant_text", "result"]
+    assert types == ["tool_use", "tool_result", "recovery", "assistant_text", "result"]
     assert ws_msgs[2]["message"] == "(auto-resumed after CLI exited mid-turn)"
     assert ws_msgs[3]["content"] == "continuing where I left off"
     assert ws_msgs[4]["claude_session_id"] == "claude-sid-recover"
@@ -1172,10 +1184,10 @@ async def test_run_backend_bounds_recovery_to_single_retry(manager):
     assert invocations[1]["prompt"] == "continue"
 
     # Events from both invocations are surfaced, with the recovery
-    # marker between them. No final `result` event since the recovery
-    # also failed — the turn just ends.
+    # marker between them and one final failed logical result because the
+    # recovery also failed.
     types = [m["type"] for m in ws_msgs]
-    assert types == ["tool_use", "tool_result", "error", "tool_use", "tool_result"]
+    assert types == ["tool_use", "tool_result", "recovery", "tool_use", "tool_result", "result"]
     assert ws_msgs[2]["message"] == "(auto-resumed after CLI exited mid-turn)"
 
 
@@ -1857,7 +1869,7 @@ async def test_transient_error_after_output_resumes_with_continue(manager, monke
     assert not any(e.get("code") == "transient_exhausted" for e in events)
     # The retry RESUMED the conversation: "continue" against the captured id,
     # not a re-run of the original prompt.
-    assert attempt2.started_with == "continue"
+    assert attempt2.started_with.startswith("Continue the user")
     assert attempt2.started_resume == "sid1"
 
 
@@ -2007,7 +2019,7 @@ async def test_idle_recovery_retries_original_without_duplicate_user_messages(
     assert first.stopped
     messages = await manager.db.load_messages(session.id)
     assert [m["content"] for m in messages if m["role"] == "user"] == ["original request"]
-    assert any(m["content"] == retry["message"] for m in messages)
+    assert any(m["type"] == "recovery" and m["content"]["message"] == retry["message"] for m in messages)
 
 
 @pytest.mark.parametrize("backend_kind", ["claude-code", "codex"])
@@ -2141,10 +2153,11 @@ async def test_user_interrupt_stops_idle_recovery(manager, monkeypatch):
     manager.on_broadcast("second-attempt", watch)
     await manager.start_message(session.id, "request")
     await asyncio.wait_for(started_second.wait(), timeout=1)
+    active = session._active_task
     assert await manager.interrupt(session.id)
-    await asyncio.wait_for(session._active_task, timeout=1)
+    await asyncio.wait_for(active, timeout=1)
     messages = await manager.db.load_messages(session.id)
-    assert sum(m["content"] == "(interrupted by user)" for m in messages) == 1
+    assert sum(m["type"] == "result" and m["content"]["status"] == "interrupted" for m in messages) == 1
     assert session.status == SessionStatus.idle
 
 
@@ -2598,8 +2611,12 @@ async def test_writer_delivers_steers_and_persists_them_after_the_write():
         persisted.append(content.content)
         return len(persisted)
 
+    async def fake_broadcast(event, *, user_id=None):
+        assert user_id == sess.user_id
+        broadcast.append(event)
+
     mgr._persist_message = fake_persist
-    mgr._broadcast = lambda ev: broadcast.append(ev) or asyncio.sleep(0)
+    mgr._broadcast = fake_broadcast
 
     await mgr._try_steer(sess, QueuedPrompt(prompt="stop that", attachment_ids=[]))
     task = asyncio.create_task(mgr._steer_writer(sess, _Backend()))
@@ -2607,14 +2624,13 @@ async def test_writer_delivers_steers_and_persists_them_after_the_write():
     async with sess._steer_lock:
         sess._steer_open = False
     task.cancel()
-    try:
+    with pytest.raises(asyncio.CancelledError):
         await task
-    except (asyncio.CancelledError, Exception):
-        pass
 
     assert written == ["stop that"]
     assert persisted == ["stop that"]
     assert [e["type"] for e in broadcast] == ["steered"]
+    assert broadcast[0]["tool_input"]["request_context"]["source"] == "human"
 
 
 async def test_writer_wakes_without_waiting_for_an_event():

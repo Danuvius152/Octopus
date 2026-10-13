@@ -54,6 +54,7 @@ class McpServerEntry:
     env: dict[str, str] = field(default_factory=dict)
     url: str = ""
     credential: str = ""
+    tool_timeout_seconds: int | None = None
 
     @property
     def is_http(self) -> bool:
@@ -200,6 +201,7 @@ class RuntimeProfile:
     # as an expired/invalid credential; `Harness.is_auth_error` matches them.
     # Empty tuple = no reactive auth detection for this backend.
     auth_error_patterns: tuple[str, ...] = ()
+    transient_error_codes: tuple[str, ...] = ()
     # Web search/fetch capability for native deep research (§4); None = the
     # backend has no web tools, so research is gated off on it.
     web: WebCapability | None = None

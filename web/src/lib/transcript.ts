@@ -1,4 +1,5 @@
 import { useSessionStore, type Message } from "../stores/sessionStore";
+import type { MessageInput } from "./turnOutcome";
 
 const API = window.location.origin;
 
@@ -15,12 +16,24 @@ export function applyTranscript(
   data: Record<string, unknown>
 ): void {
   const store = useSessionStore.getState();
-  const messages = (data.messages as Message[]) || [];
-  store.setMessages(sessionId, messages);
+  const messages = (data.messages as MessageInput[]) || [];
+  const snapshotHigh = typeof data.next_message_seq === "number"
+    ? data.next_message_seq - 1 : Math.max(-1, ...messages.map((m) => m.seq ?? -1));
+  const currentHigh = store.lastAppliedSeq[sessionId] ?? -1;
+  const oldest = typeof data.oldest_loaded_seq === "number" ? data.oldest_loaded_seq : null;
+  const currentOldest = store.oldestSeq[sessionId];
+  const preservePrefix = typeof oldest === "number" && typeof currentOldest === "number" && currentOldest < oldest;
+  const retained = (store.messages[sessionId] ?? []).filter((m) => typeof m.seq === "number" &&
+    (m.seq > snapshotHigh || (preservePrefix && m.seq < oldest!)));
+  const merged = [...retained, ...messages];
+  const sequenced = new Map(merged.filter((m) => typeof m.seq === "number").map((m) => [m.seq!, m]));
+  const rows = [...sequenced.values()].sort((a, b) => a.seq! - b.seq!);
+  rows.push(...messages.filter((m) => typeof m.seq !== "number"));
+  store.setMessages(sessionId, rows, currentHigh >= snapshotHigh && Boolean(store.streamingText[sessionId]));
   store.setMessageWindow(
     sessionId,
-    typeof data.oldest_loaded_seq === "number" ? data.oldest_loaded_seq : null,
-    Boolean(data.has_more_messages)
+    preservePrefix ? currentOldest : oldest,
+    preservePrefix ? Boolean(store.hasMoreMessages[sessionId]) : Boolean(data.has_more_messages)
   );
   // Any WS event at or below the snapshot's high-water mark is already in the
   // messages above, so the handler must drop it rather than render it twice.

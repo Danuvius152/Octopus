@@ -559,6 +559,23 @@ export interface paths {
         patch: operations["update_session_api_sessions__session_id__patch"];
         trace?: never;
     };
+    "/api/sessions/{session_id}/dispatch/resume": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Resume Dispatch */
+        post: operations["resume_dispatch_api_sessions__session_id__dispatch_resume_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/import": {
         parameters: {
             query?: never;
@@ -957,8 +974,9 @@ export interface paths {
         /**
          * Cancel Delegation
          * @description Best-effort cancel. Idempotent — cancelling a finished
-         *     delegation returns the existing terminal record without touching
-         *     anything. The parent gets an `[agent-error:…]` injection on the
+         *     delegation preserves its terminal record and parent reply while cleaning
+         *     up that round's remaining background work and descendants. The parent
+         *     gets an `[agent-error:…]` injection on the
          *     transition from running → cancelled.
          */
         post: operations["cancel_delegation_api_sessions__session_id__delegations__delegation_id__cancel_post"];
@@ -1593,6 +1611,23 @@ export interface paths {
          */
         post: operations["submit_answer_api_sessions__session_id__questions__question_id__answer_post"];
         delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/questions/{question_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Close Question */
+        delete: operations["close_question_api_sessions__session_id__questions__question_id__delete"];
         options?: never;
         head?: never;
         patch?: never;
@@ -3036,6 +3071,8 @@ export interface components {
         CancelDelegationRequest: {
             /** Reason */
             reason?: string | null;
+            /** Work Id */
+            work_id?: string | null;
         };
         /** CodexLoginCancelRequest */
         CodexLoginCancelRequest: {
@@ -3384,6 +3421,42 @@ export interface components {
             client_id: string;
             /** Client Secret */
             client_secret: string;
+        };
+        /** DispatchQueueItem */
+        DispatchQueueItem: {
+            /** Request Id */
+            request_id: string;
+            /** Source */
+            source: string;
+            /** Summary */
+            summary: string;
+            /**
+             * Priority
+             * @default false
+             */
+            priority: boolean;
+        };
+        /** DispatchState */
+        DispatchState: {
+            /** Generation */
+            generation: string;
+            /**
+             * Revision
+             * @default 0
+             */
+            revision: number;
+            /**
+             * Paused
+             * @default false
+             */
+            paused: boolean;
+            /** Active Request Id */
+            active_request_id?: string | null;
+            /**
+             * Items
+             * @default []
+             */
+            items: components["schemas"]["DispatchQueueItem"][];
         };
         /**
          * DuplicateSessionRequest
@@ -3848,6 +3921,12 @@ export interface components {
             questions: {
                 [key: string]: unknown;
             }[];
+            /** Deadline */
+            deadline?: string | null;
+            /** Request Id */
+            request_id?: string | null;
+            /** Attempt Id */
+            attempt_id?: string | null;
         };
         /**
          * PinOrderRequest
@@ -4214,6 +4293,7 @@ export interface components {
              * @default []
              */
             pending_queue: string[];
+            dispatch_state?: components["schemas"]["DispatchState"] | null;
             /**
              * Pending Questions
              * @default []
@@ -4382,6 +4462,16 @@ export interface components {
         };
         /** StartBgTaskRequest */
         StartBgTaskRequest: {
+            /**
+             * Idle Timeout Seconds
+             * @default 60
+             */
+            idle_timeout_seconds: number;
+            /**
+             * Timeout Seconds
+             * @default 1800
+             */
+            timeout_seconds: number;
             /** Command */
             command: string;
             /** Description */
@@ -5987,6 +6077,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SessionInfo"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    resume_dispatch_api_sessions__session_id__dispatch_resume_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DispatchState"];
                 };
             };
             /** @description Validation Error */
@@ -8006,6 +8129,43 @@ export interface operations {
                 content: {
                     "application/json": {
                         [key: string]: unknown;
+                    };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    close_question_api_sessions__session_id__questions__question_id__delete: {
+        parameters: {
+            query?: {
+                reason?: "cancelled" | "communication_failure";
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+                question_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": {
+                        [key: string]: boolean;
                     };
                 };
             };

@@ -327,9 +327,13 @@ async def test_answer_long_poll_timeout_is_not_recorded_as_an_error(client, monk
     monkeypatch.setattr(main, "_mon_record", events.append)
     created = await client.post("/api/sessions", headers=HEADERS, json={"name": "Asker"})
     sid = created.json()["id"]
-
+    question = await client.post(
+        f"/api/sessions/{sid}/questions", headers=HEADERS,
+        json={"questions": [{"question": "Choose", "options": [{"label": "A"}]}]},
+    )
+    qid = question.json()["question_id"]
     resp = await client.get(
-        f"/api/sessions/{sid}/questions/q-unknown/answer?timeout=1", headers=HEADERS
+        f"/api/sessions/{sid}/questions/{qid}/answer?timeout=1", headers=HEADERS
     )
     assert resp.status_code == 408
     poll = [e for e in events if e.detail["route"].endswith("/answer")]
