@@ -11,13 +11,17 @@ AI 后端使用已经登录 ChatGPT 的 Linux 版 Codex。`.env` 设置
 
 ## 配置和数据
 
-- 项目目录：`/home/jack/Octopus`。
+- 开发目录：`/home/jack/Octopus`。
+- 服务代码：`/home/jack/.octopus/releases/main-<commit>`，是已验证提交的独立
+  Git 工作树；`/home/jack/.octopus/releases/current` 指向正在使用的版本。
+  开发目录中尚未验收的改动不会随服务重启上线。
 - 本地配置：项目根目录的 `.env`，权限为 `0600`，已由 Git 忽略。
 - 数据库：`/home/jack/.octopus/octopus.db`。
 - 监控数据库：`/home/jack/.octopus/octopus-metrics.db`。
 - 初始工作目录：`/home/jack/.octopus/workspace`。创建账户后，项目按账户分配工作目录。
 - 代理记忆、应用、附件、账户目录等持久数据：`/home/jack/.octopus/`。
 - 用户服务：`/home/jack/.config/systemd/user/octopus.service`。
+- 服务代码覆盖配置：`/home/jack/.config/systemd/user/octopus.service.d/runtime-release.conf`。
 - 服务代理配置：`/home/jack/.octopus/proxy.env`，权限 `0600`。
 - 服务时区：`Asia/Shanghai`。
 
@@ -150,6 +154,18 @@ journalctl --user -u octopus -n 100 --no-pager
 服务通过用户级 systemd 启动。WSL 关闭时服务也停止；它不会自动启动 Windows
 或阻止 WSL 关闭。
 
+服务的工作目录是 `releases/current`，入口是现有虚拟环境中的
+`python -m server.cli serve`。这个入口从服务工作目录导入源码，避免 editable
+安装的 `octopus` 入口重新导入开发目录中的未提交改动。服务工作树的 `.env`、
+`.venv` 和 `web/node_modules` 复用开发目录中的本机配置与依赖；账户数据和
+Codex 登录位置不变。修改这些共享配置或依赖仍会影响正式服务。
+
+2026-10-13 的日志修复以 `b083efe599402836f7787319bb4a364f4a975cd3` 合并到
+main，并单独上线到服务工作树。这次部署仅交付日志修复，没有创建版本 tag
+或 GitHub Release；整个版本的 release 仍需等待 Wiki 验收。Wiki 未提交代码
+与测试仍保留在开发目录；线上 Wiki 数据结构保持 schema 7，没有上线
+`readable_body` 升级。目录名 `releases` 只用于隔离服务源码。
+
 ## 同步原作者更新
 
 本仓库 `Danuvius152/Octopus` 已解除 GitHub 的 fork 关系，独立维护；
@@ -163,8 +179,18 @@ git merge upstream/main
 ```
 
 合并时保留本机 `.env`、持久数据和定制行为，处理冲突后执行 `AGENTS.md`
-要求的测试。部署有前端变化的更新时，按项目规定先重启后端、等待 `/health`
-正常，再执行 `cd web && bun run build`，随后刷新浏览器。
+要求的测试。部署前创建并验证一个只包含目标提交的服务工作树，准备本机配置、
+依赖及 `web/dist`，再更新 `releases/current`。不要把开发目录中尚未验收的
+改动混入服务目录。部署有前端变化的更新时，按项目规定先重启后端、等待
+`/health` 正常，再在实际服务目录构建前端，随后刷新浏览器：
+
+```bash
+# 在新后端 /health 确认正常后执行。
+octopus_release_dir=$(readlink -f /home/jack/.octopus/releases/current)
+cd "$octopus_release_dir/web"
+bun run build
+```
 
 本地开发使用 `bun run dev` 的 5173 端口；后台服务的 8000 端口提供构建后的
-`web/dist`，源码修改需要重新构建才能在 8000 端口看到。
+服务工作树中的 `web/dist`；开发目录源码修改需完成验收、部署和服务构建后，
+才会在 8000 端口看到。
