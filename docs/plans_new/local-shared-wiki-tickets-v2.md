@@ -1,13 +1,13 @@
 # Octopus 本地共享 Wiki：开发任务与接手指令 v2
 
-> **Status:** in-progress — V2-01～03 与 V2-04 框架代码已实现，真实 Weber 配置、部署和内容试点由 Octo 接续；见[核心交接](local-shared-wiki-implementation-v2.md)。\
+> **Status:** in-progress — 核心和既有 Weber 配置已上线，首两篇通过；当前修复两项 Codex 实机失败、完整试点和全量待收口；见[当前进度](local-shared-wiki-progress-v2.md)。\
 > **版本：** 2.1；修订 2026-10-13（Asia/Shanghai）；保留 v2 文件名与 V2 任务编号。\
 > **审阅基线：** `Danuvius152/Octopus` commit `453a7995bd6c54df33b0fc41dec09d370b4b40aa`，以及 2026-10-12 提供的 `.octopus.zip`。\
 > **分工：** Octo 实现；Vera 独立验证；Weber 参与知识维护与阅读写作效果验收；SmartReader 承担后续阅读讨论，Sapphire 承担后续库浏览/标签/编辑。
 
 ## 1. 接手范围与共同约定
 
-先读[协同总纲](local-shared-wiki-v2.md)和[知识积累](local-shared-wiki-knowledge-v2.md)，再按改动范围读[内容合约](local-shared-wiki-content-v2.md)、[检索协议](local-shared-wiki-retrieval-v2.md)、[prompt 方案](local-shared-wiki-prompts-v2.md)、[迁移计划](local-shared-wiki-migration-v2.md)和[验收方案](local-shared-wiki-evaluation-v2.md)。后续应用按 [Sapphire](local-shared-wiki-sapphire-v2.md)与 [SmartReader](local-shared-wiki-smartreader-v2.md)计划执行。本文件安排完整变更集及其依赖，不另立第二套字段或工作流。
+先读[当前进度与执行计划](local-shared-wiki-progress-v2.md)和[当前 spec](local-shared-wiki-spec-v2.md)，再按[协同总纲](local-shared-wiki-v2.md)和[知识积累](local-shared-wiki-knowledge-v2.md)理解设计，按改动范围读[内容合约](local-shared-wiki-content-v2.md)、[检索协议](local-shared-wiki-retrieval-v2.md)、[prompt 方案](local-shared-wiki-prompts-v2.md)、[迁移计划](local-shared-wiki-migration-v2.md)和[验收方案](local-shared-wiki-evaluation-v2.md)。后续应用按 [Sapphire](local-shared-wiki-sapphire-v2.md)与 [SmartReader](local-shared-wiki-smartreader-v2.md)计划执行。本文件保留完整任务和依赖，既定核心不因旧问题描述被重复开发。
 
 执行开发时先重新确认当前仓库 commit、工作区已有修改、主库绑定与接口版本。本文代码定位基于审阅提交；若仓库已变化，先定位等价函数，再判断哪些目标已经完成。不要覆盖用户未提交的工作，也不要重复部署、排队或运行已完成的维护任务。
 
@@ -50,7 +50,7 @@
 | V2-01～03 | 兼容旧 Markdown；统一格式解析、读写位置、版本与历史、写入回执、索引及检索工具 | 保持已有文件可读可搜；准备新版模板与试点清单 |
 | V2-04 | 合并既有 Weber 的本地知识规则，接通实际工具 capability、维护与共享 writing 指南；确认 worker 确实使用 Weber | 工具与配置上线、对应检查通过后，具备开始真实少量模板化试点的条件 |
 | V2-06 | 真实 Weber 完整读文、复用或提取 Key note，经受控工具写回，完成索引及后续查询/纠正 | 仅处理已确定的少量代表文章；检查产物与正文差异，形成批次放行记录 |
-| V2-08 | 沿已验证的同一 Weber/job/写入链路分批执行与恢复 | 原位模板化当前 pika_vault 中获准文章，保留正文措辞；已有好 Key note 复用 |
+| V2-08 | 沿已验证的同一 Weber/job/写入链路分批执行与恢复 | pika_vault 优先，覆盖当前 Library 全部 Markdown，含已有 assets MD；按类型整理/真实 no_change 和逐篇检索，保留正文表达 |
 
 实际执行链为：明确目标的维护请求 → 服务端 durable job 与 assignment → 既有 Weber worker → 当前正文读取与内容判断 → organize/restructure/revise 等已实现的受控工具 → 原子写入、history、任务回执与索引 → 当前 agent 后续查询。具体写工具按动作选用，普通查询无需转发 Weber。
 
@@ -421,11 +421,11 @@ Octo 负责代码和自测，Vera 对具体差异做独立复核。让当前 age
 
 Q60 最终维护合同不按 AI／人工作者或人工修改历史判资格。完整来源根、深层传播和自动证据计数按 Q57 属总纲 §10 条件项，核心实现不得把它们重新放进放行门槛。
 
-当前旧文档声明 W01–W05 已实现/部署，W06 有实际 Weber 查询/维护补验未完成，真实快照退役与 W07 旧库整理尚未执行。[R7] 本套 v2.1 是对知识积累、检索、格式消费、prompt、旧资料适配和后续 app 的新增设计，不追认旧验收，也不使旧计划中的执行范围自动变成当前任务。
+旧历史文档在2026-10-12记载 W01–W05 已实现/部署，W06 的实际补验、快照退役及 W07 旧库整理尚未完成。[R7] 这些不是当前状态；本套 v2.1 的新增合同和后续实际进度分别记录，旧快照仍有独立前提，不追认旧验收或把旧执行范围自动扩张。
 
 开发中保持三份记录：旧计划的未完事项、v2 各票的真实状态、本次实际授权的执行范围。三者可以有重合，但不能互相替代。已实现的权限、原文保护、历史与幂等机制继续复用；新索引/格式方案替换的实现细节在相关文档标明。
 
-本次交付止于设计 Markdown/ZIP。v2.1 明确把应用新功能放在 V2-05 / V2-09 后续规划，并新增 V2-08 适配已有/库外资料；这不抹掉旧计划已实现内容，也不把设计当作已执行迁移。未来落地时，部署与当前配置以当轮核对为准；来源/导航修复与旧库整理按明确文件范围推进。有授权的工作持续完成；没有实际生产证据时不宣称上线成功。
+最初设计交付止于 Markdown/ZIP；后续已授权开发、Octo 协调真实 Weber/Vera，以及当前 Library 全量整理，不能把当时的交付边界当今天的停止指令。v2.1 将应用新功能放在 V2-05 / V2-09 后续规划，并新增 V2-08 适配已有/库外资料；这不抹掉旧计划已实现内容，也不把设计当作已执行迁移。实际阶段见[当前进度](local-shared-wiki-progress-v2.md)，部署与配置以当轮核对为准，来源/导航修复与旧库整理按明确文件范围推进。
 
 ### 来源与证据
 

@@ -1,6 +1,6 @@
 # 本地共享 Wiki v2：Agent 分工与任务 prompt
 
-> **Status: proposed — 设计稿，尚未替换线上 prompt 或部署新接口。**
+> **Status:** in-progress — 既有 Weber 知识段和核心任务指南已上线；worker 按需 article/writing 已实现，通用写作自动装配与拟议 subtype 仍是后续范围，见[当前进度](local-shared-wiki-progress-v2.md)。
 >
 > 修订：v2.1，2026-10-13（Asia/Shanghai）。保留 Octo 开发、Vera 验证、Weber 智者与知识整理者的分工，保留 /wiki 前端和显式知识任务边界。写作指南改为按写作任务复用的共享模块；SmartReader 与 Sapphire 新功能按后续计划实施。内容格式见 [内容与迁移方案](local-shared-wiki-content-v2.md)。
 
@@ -10,13 +10,13 @@
 
 当前基础已经合理：
 
-- 普通消息不加载 Wiki 指南，显式 read 加载 query。
+- 普通消息不加载 Wiki 指南，显式 read 加载 query-v2 + retrieval-v2。
 - maintain 提交入口只加载 entry，由持久 curator worker 完成整理。
-- worker 当前加载 maintenance + writing + query。
-- 实际 Weber system prompt 只有 901 字符，已经保留智者、读书伙伴、作者/用户/自身解释区分。无需把它换成长管理条例。
+- 有效 worker 加载 maintenance-v2 + retrieval-v2，按需 load_guide(article|writing)，不无条件加载整套个人查询/写作规则。
+- 设计审阅时实际 Weber persona 为 901 字符；其后知识段已合并，仍保留智者、读书伙伴和观点归属。具体当前配置以真实读取与版本记录为准。
 - 普通 agent 可以直接完成授权知识查询；不需要一律转交 Weber。
 
-当前可减少的开销主要是 worker 无条件加载全部查询指南、重复个人事实规则、maintenance 与 writing 重复语义要求，以及操作卡和 worker briefing 重复目标清单。实际 maintenance/query/writing 合计 3,522 字符；这不是 token 测量，部署时应记录真实模型用量。
+设计基线的主要开销是 worker 无条件加载全部查询/写作指南及重复目标。v2 已拆分核心装配；当时 maintenance/query/writing 合计 3,522 字符的记录是历史字符计数，不是当前 token 测量。当前质量、重复工具上下文与实际 usage 仍按真实任务观察。
 
 这里的“system prompt”指用户可配置的 agent persona 与框架装配文本；当前 Codex 路径最终使用 developer_instructions 传递，并不表示可以修改模型提供方的隐藏系统规则。优化以实际发出的装配文本和任务结果为准，不只看配置文件字数。
 
@@ -38,6 +38,8 @@ Weber 的深入讨论价值保留。省 token 的重点是少传重复材料、�
 ## 3. 运行时装配矩阵
 
 既有 entry/query/maintenance/writing 文件保留，职责缩小且权威位置唯一。当前真实结构化模式只有 read / maintain；下面的 personal、overview/compare、full-read 等属于拟议 task subtype 和条件装配，尚无对应自动加载能力。
+
+以下是目标矩阵，不能整表标为已实现。当前已实现的是上述 query/retrieval、entry、worker 与 worker 内部按需 article/writing；普通 Octopus 写作及 SmartReader 条件自动装配尚未接通。任务权限由真实入口产生，新增文字规则不授予 Wiki 写权。
 
 | 任务 | 装配内容 | 主要工具 |
 | --- | --- | --- |
@@ -73,9 +75,9 @@ AppAgent/harness 必须真正接收并装配这项任务信息。若增加结构
 
 ## 4. 能力协商、任务卡与 worker briefing
 
-### 拟议接口兼容
+### 核心接口兼容与后续能力
 
-现有 `search/read/info/list_documents/graph/maintain/organize/publish` 保留。拟议增强为：
+现有 `search/read/info/list_documents/graph/maintain/organize/publish` 保留。intent、compact、read_many、raw blocks/revise 和 targeted_revision 已由核心交付，tags/client_apps 等后续能力分别保留拟议状态：
 
 - search 增加 `intent="lookup"|"question"|"overview"|"compare"`。
 - search 增加 `view="compact"`；旧调用省略 view 时保持兼容 full。

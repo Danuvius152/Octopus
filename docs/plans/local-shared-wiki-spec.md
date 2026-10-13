@@ -1,8 +1,10 @@
 # Octopus 本地共享 Wiki：已确认规格
 
-> **Status:** in-progress — Q53 规格保持；W01–W05 已实现并部署，W06 补验、真实迁移与 W07 尚未完成。
+> **Status:** superseded by ../plans_new/local-shared-wiki-spec-v2.md — 保留 Q53/W 阶段历史；当前行为以 v2 spec、Q54～60 及 Library 全量授权为准。
 
-更新：2026-10-12。用户确认 Q53，文档交接后已明确授权按 W01–W07 开发，并完成 Vera 方案讨论。本文件是目标行为的权威规格；部分框架能力已上线，不能据此把下述全部目标当作已验收。用户当前优先交接已做/未做状态，旧库整理按其节奏推进。现状、证据与缺口见[实施交接](local-shared-wiki-implementation-handoff.md)，开发顺序见[任务拆分](local-shared-wiki-ticket-proposal.md)，任务指令见[prompt 设计](local-shared-wiki-prompt-proposal.md)。
+当前执行入口为[v2 spec](../plans_new/local-shared-wiki-spec-v2.md)和[当前进度与计划](../plans_new/local-shared-wiki-progress-v2.md)。下文保留2026-10-12行为记录；作者/ownership编辑门槛、一般资产排除及旧整理范围已由后续决定覆盖，旧W状态不代替最新验收。
+
+历史更新：2026-10-12。用户确认 Q53，文档交接后授权按 W01–W07 开发，并完成 Vera 方案讨论。下文是当时行为规格，部分框架已上线不表示所有目标均已验收；当时现状见[历史实施交接](local-shared-wiki-implementation-handoff.md)，当前执行以开头v2入口为准。
 
 Q1–Q36 的基础实现已提交为 `a85582f`，部署过框架与实际 Weber。Q37–Q53 的最终决定覆盖旧文档中全库二进制快照、普通编辑必须重新整理、无上限保留冲突等旧约束。三篇样稿已经接受，Q35 风格确认已完成；首次旧库批量整理尚未执行。
 

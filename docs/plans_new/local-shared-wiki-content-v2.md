@@ -1,6 +1,6 @@
 # 本地共享 Wiki v2：内容格式、来源与兼容迁移
 
-> **Status: proposed — 设计稿，尚未实现或部署。**
+> **Status:** in-progress — OKF、角色/身份、frontmatter_patch 和定点维护核心已实现并上线；全量内容验收及资产 Markdown/表示选择修复仍在进行，见[当前进度](local-shared-wiki-progress-v2.md)。
 >
 > 修订：v2.1，2026-10-13（Asia/Shanghai）。本文延续已确定的 **OKF v0.2 + article-v1**，定义文章、研究综合、个人资料和导航如何被同一套解析与检索组件消费。现有 /wiki、主 Vault 与 Sapphire 保留；SmartReader 后续承担阅读讨论。与检索接口、prompt 和验收文档一起实施，不能仅替换提示词就宣称完成。
 
@@ -10,7 +10,7 @@
 
 目标是让日常入库后的文章既便于阅读，也能被准确定位、按需展开和追溯。小库先解决内容角色、文档身份、来源和当前版本；规模扩大后沿用同一契约，不依赖全库总结。
 
-本次附件的真实主副本是 `applications/sapphire.data/vaults/obv/repo`。Library 有 133 个文件，其中 37 份 Markdown、9 份 HTML、3 份 PDF、43 份 TXT；按当前排除规则保留 42 份 Library 文本，即 35 MD + 7 HTML。整个 Vault 还有 421 份 Codex Skills 文件，不能算作普通知识文章。
+设计附件的真实主副本是 `applications/sapphire.data/vaults/obv/repo`。当时 Library 有 133 个文件，其中 37 份 Markdown、9 份 HTML、3 份 PDF、43 份 TXT；按当时默认候选排除规则保留 42 份 Library 文本，即 35 MD + 7 HTML。整个 Vault 另有 421 份 Codex Skills 文件。这些是静态附件盘点，不是当前生产数量或最终整理范围；当前用户要求 Library 全部 Markdown，含已有资产 Markdown，见[当前 spec](local-shared-wiki-spec-v2.md)。
 
 附件内只看到文章模板已填写完整 OKF 字段；三篇示例原文仍主要只有 tags，Vidu 报告和 Me 资料没有 frontmatter。附件没有 Wiki 的 config/index 数据，不能据此确认在线绑定、ownership 或索引状态。本方案从 **旧内容仍可搜、新整理内容符合模板** 的兼容状态开始。
 
@@ -190,11 +190,11 @@ Vidu 报告这类综合有独立价值：能解释方法差异与测量边界。
 | SmartReader | 阅读材料、选区讨论、草稿与明确入库，后续映射主库 id/revision | 浏览器 UUID、DOM range 与草稿不得冒充 Wiki 身份、坐标和当前正文 |
 | Sapphire | 库浏览、标签/搜索、来源与版本展示、普通编辑 | 不维护与 /wiki 不同的标题/别名/链接解析规则 |
 
-现有 store.py 只读取 YAML tags/aliases，并另读 octopus-wiki 注释；curation.py 用 octopus-section 包裹新增区。v2 应增加统一 OKF 解析与兼容适配层，供所有组件消费。读写 revision、任务范围与历史继续保留；旧 owned-region 记录作兼容和恢复信息，不决定正文编辑资格。新内容不再需要用私有注释替代公开来源信息。
+设计基线仅消费 YAML tags/aliases 和旧 octopus-wiki/octopus-section 注释；v2 已实现统一 OKF 解析和兼容适配供核心组件消费。读写 revision、任务范围与历史继续保留；旧 owned-region 记录作兼容和恢复信息，不决定正文编辑资格。应用新功能仍按对应 feature plan 接入。
 
 ### 当前和拟议接口
 
-现有 search/read/info/list_documents/graph/maintain/organize/publish 保留。查询侧拟增加：
+现有 search/read/info/list_documents/graph/maintain/organize/publish 保留。以下查询增强已实现：
 
 - `search(intent="lookup"|"question"|"overview"|"compare", view="compact")`。
 - 旧调用省略 view 时保持兼容 full。
@@ -202,21 +202,21 @@ Vidu 报告这类综合有独立价值：能解释方法差异与测量边界。
 
 内容格式与这些接口协同：compact 返回 title、description、doc_role、命中位置和必要来源状态；实际出处与已知直接依赖按需提供详情，不能把综合使用的多份资料压成单一作品。read/read_many 返回当前正文与准确 revision。新增能力必须通过任务卡 capabilities 和真实 tool schema 声明，未上线时继续使用既有工具。
 
-### 写入端的最小适配
+### 写入端的统一适配
 
-当前 organize 没有 title、description、type 或 profile 参数，prompt 要求生成这些字段也无法使其写入。拟为现有写入接口增加可选 `frontmatter_patch`，只允许 `title`、`description`、`type` 及明确支持的 `x_wiki.profile` / `x_wiki.body_dialect`；原有 tags、aliases 参数继续作为唯一输入，不在 patch 中双写。服务端校验 profile 与实际正文结构一致，再原子更新获准元数据与内容。该能力须由 capabilities 和真实 schema 声明，未开放时继续旧流程并报告未完成的格式项。
+v2 写入接口已提供可选 `frontmatter_patch`，允许 `title`、`description`、`type` 及明确支持的 `x_wiki.profile` / `x_wiki.body_dialect`；原有 tags、aliases 参数继续作为唯一输入，不在 patch 中双写。服务端校验 profile 与实际正文结构一致，再原子更新获准元数据与内容。新版 organize 显式传该参数选择保全路径，能力以运行时 capabilities 和真实 schema 为准。
 
 uid 由服务端分配或保持，generated 由实际执行身份和整理时刻生成；模型不能通过 patch 设置 verified、改写 uid 或提升核验状态。既有未知字段与真实核验记录按保全规则保留。提供文章来源时，服务端适配实际资源及来源标签与脚注；运行态输入身份、revision 和阅读记录用于机械一致性，不强制全部写成公开 sources，也不因既有文章未填出处拒绝模板化。这里的校验不等于事实核验。
 
 保留两种来源对象的区别：当前工具 `sources` 使用 `{doc, revision, location}` 表达运行态来源定位；OKF 文件使用 `{id, resource, ...}` 表达可移植来源与脚注标签。不能把 `sources.resource` 直接传给当前工具，相关链接也不自动编译成支持来源。该适配不扩大可写范围，不将 publish 改为已有页面整页替换；已有内容按下述定点维护合同处理，旧工具保留兼容。
 
-既有工具还包括 `blocks/restructure`。获准旧页的纯追加先完整读取当前目标并满足 read ledger，再保留全部原块及原顺序，插入新的研究问题、解释或更正段；organize 管理其已支持的生成区，publish 只建新页。restructure 当前新增区使用私有 sources 注释，V2-02 应将其新增说明与来源输出纳入同一 OKF 适配，不能让这条正式写入路径继续产生格式孤岛。此处不把纯追加能力描述成任意替换受保护正文。
+既有工具还包括 `blocks/restructure`。获准旧页的纯追加先完整读取当前目标并满足 read ledger，再保留全部原块及原顺序，插入新的研究问题、解释或更正段；publish 只建新页。旧生成区和私有来源注释保持兼容，新版受控写入共用元数据/来源适配与持久回执；正常维护不是删除旧生成区后整篇重建。
 
 ### 正文的定点维护
 
-Q60 最终取消以 AI／人类作者、人工编辑历史或可信生成区作为正文编辑门槛。当前缺少的是局部纠错与补充协议，不能靠原来的 organize 生成区重建、restructure 仅追加或人类全文保存补足，也不把 publish 改为整页覆盖。
+Q60 最终取消以 AI／人类作者、人工编辑历史或可信生成区作为正文编辑门槛。v2 已提供独立的局部纠错与补充协议，不靠原 organize 生成区重建、人类全文保存或 publish 整页覆盖替代。
 
-V2-02 新增拟议 revise 工具，绑定真实任务、文档身份、当前 revision 和已读取的原始位置，接受具体纠错或插入补丁；服务端保留未选中字节，核对实际原字句、范围及读取覆盖。read/search 的提取坐标不直接用于原文件写入，BOM、CRLF、HTML 和 Unicode 映射需明确验证。历史人工编辑不是冲突，读取之后再次改变才是并发冲突。
+V2-02 已实现 revise，绑定真实任务、文档身份、当前 revision 和已读取的原始位置，接受具体纠错或插入补丁；服务端保留未选中字节，核对实际原字句、范围及读取覆盖。read/search 的提取坐标不直接用于原文件写入，BOM、CRLF、HTML 和 Unicode 映射需按实际用例验证。历史人工编辑不是冲突，读取之后再次改变才是并发冲突。
 
 旧 ownership 记录保留必要历史信息，涉及本次修改时更新或撤销过期定位，不作为拒绝维护的理由。现有 organize 的 original_text 生成区清理不能进入新修订路线，也不能顺带删改未请求处理的正文、Key note、标签、关联或来源。正文作者类别不影响规则；思想、观点、反例、判断条件和风格表达的保全由实际差异、自检、冷读和内容验收共同验证。
 
@@ -238,9 +238,9 @@ V2-02 新增拟议 revise 工具，绑定真实任务、文档身份、当前 re
 
 可加入 MetaHuman runtime 报告形成约 6 份代表试点，覆盖不同长度、文体和中英术语。先稳定实际工具、来源、原文和有限写入行为；persona 的风格措辞可以在试点中继续调整，不等待“最终完美 prompt”。结构或内容错误只重做受影响项目，风格变化不自动触发全库重新生成。
 
-### 第三阶段：按用户需要迁移
+### 第三阶段：当前 Library 全量迁移
 
-新入库的来源文章默认 article-v1，其他类型按自身用途组织；旧文仅在明确整理或维护时补齐。人工普通编辑不触发再次入库。已有来源、原始正文与媒体由当前库继续持有。用户已一次选定某批材料时，队列可在范围内持续完成，无需逐篇重新询问。
+新入库的来源文章默认 article-v1，其他类型按自身用途组织；用户已明确选定当前 Library 全部 Markdown，pika_vault 优先，包含已有 assets Markdown。Octo 落成具体批次清单，Weber 经受控任务整理或真实 no_change，逐篇验证当前检索；资产角色保持并用显式范围/include_assets 检查。人工普通编辑不自动触发再次入库，原始正文与媒体继续由当前库持有。
 
 根 `知识库导航.md` 当前有失效链接与历史 generated_by 字段，应作为导航维护任务单独处理，不能在一次文章入库中顺手改全库。对缺失目标保留状态，不能生成虚构页面来让链接检查变绿。
 
@@ -267,8 +267,8 @@ V2-02 新增拟议 revise 工具，绑定真实任务、文档身份、当前 re
 
 ## 10. 实施边界与交付状态
 
-本稿依赖统一解析、registry 与检索/写入适配，属于待实施方案。Octo 负责把格式、索引、API 与 prompt 一起改；Vera 对身份、旧库兼容、同源去重和真实查询结果验证；Weber 负责入库语义和有用综合。SmartReader 后续承担阅读讨论与写作，Sapphire 负责库浏览与编辑，/wiki 继续是 agent 的知识任务入口。
+统一解析、registry、核心检索和受控写入已实现，实际首批文章已由 Weber 整理并经 Vera 验收；当前资产资格/表示选择修复和完整试点/全量的未完成项见[当前进度](local-shared-wiki-progress-v2.md)。Octo 统一组织，Vera 验证，Weber 负责入库语义和有用综合。SmartReader、Sapphire 新功能保留后续范围。
 
-依据：上传的 .octopus.zip 静态内容、当前仓库 `server/wiki/store.py`、`curation.py`、`sections.py`、`search_index.py`，以及既定文章模板与上述固定 OKF 规范。本次未对在线 Wiki 执行迁移或做事实核验。
+设计依据：当时上传的 .octopus.zip、审阅基线代码、既定文章模板及固定 OKF 规范；这些静态事实不替代当前版本和生产证据。本次文档核对没有启动新的生产维护或事实核验。
 
 完整来源谱系与自动独立证据计数按 Q57 不作为本期核心要求，待实际使用缺口再设计；正常入库与维护的正文整页重新生成不在本合同内。

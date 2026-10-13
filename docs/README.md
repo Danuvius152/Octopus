@@ -5,7 +5,9 @@ system works today; the rest is design history and reference.
 
 ## Current
 
-- **[共享 Wiki v2 核心交接](plans_new/local-shared-wiki-implementation-v2.md)** — 本轮框架实现、验证与停止位置；由 Octo 接续部署、既有 Weber 配置合并、真实试点和批量模板化。
+- **[共享 Wiki v2 当前进度与执行计划](plans_new/local-shared-wiki-progress-v2.md)** — 当前代码/上线/真实试点及检查证据；明确修复收口 → 完整试点/Q58 → Library 全量的退出条件。
+- **[共享 Wiki v2 当前 spec](plans_new/local-shared-wiki-spec-v2.md)** — 已确认范围、按类型整理、可信提交、正文保全、资产 Markdown、表示选择与验收合同。
+- **[共享 Wiki v2 核心交接与完整 prompt](plans_new/local-shared-wiki-implementation-v2.md)** — 最初核心交付历史和给 Octo 的当前续接指令；最新事实看进度页。
 - **[前期本地 Wiki 开发交接](plans/local-shared-wiki-implementation-handoff.md)** — W01–W07 历史实施和上线记录；本轮最新决策与交付以 v2 文档为准。
 - **[user-guide.md](user-guide.md)** — practical instructions for this local
   WSL + Codex installation: startup, agents, and phone access with the
@@ -41,10 +43,9 @@ fails if it has drifted. The hand-written version of this list had reached 13 of
 | Plan | Status | What |
 |---|---|---|
 | [Multi-tenancy, second pass: Connectors, Schedules, Harness](plans/multi-tenancy-gaps.md) | in-progress | Proposal: close the gaps a read-only review found where accounts can reach each other's work through the Manage surfaces, and make each class of gap structurally impossible. |
-| [Octopus 本地共享 Wiki：已确认规格](plans/local-shared-wiki-spec.md) | in-progress | Q53 规格保持；W01–W05 已实现并部署，W06 补验、真实迁移与 W07 尚未完成。 |
 | [Octopus 本地共享 Wiki：开发任务与验收](plans/local-shared-wiki-ticket-proposal.md) | in-progress | W01–W05 已实现并部署；W06 实际 Weber 补验、真实快照退役与 W07 旧库整理尚未完成。 |
 | [本地共享 Wiki：Weber 与任务 prompt 设计](plans/local-shared-wiki-prompt-proposal.md) | in-progress | 任务指南分层已上线，Weber persona 保留；r6 职业字段与零基全文分页修正待实机补验/复核。 |
-| [本地共享 Wiki：实施交接](plans/local-shared-wiki-implementation-handoff.md) | in-progress | W01–W05 已实现并部署；W06 尚有实际 Weber 补验，真实快照退役与 W07 旧库整理未执行。 |
+| [本地共享 Wiki：实施交接](plans/local-shared-wiki-implementation-handoff.md) | in-progress | W01–W07 历史交接；当前核心、真实试点及 Library 全量执行进度以 v2 进度页为准，旧快照等独立事项保留历史记录。 |
 | [/fork — duplicate a session onto a copied working directory](plans/session-fork.md) | shipped | Duplicate a session onto an independent full copy of its working directory. |
 | [Agent Collaboration — Tech Plan (agent-to-agent delegation)](plans/agent-collaboration.md) | shipped | Agent-to-agent delegation — the `mcp__ask_agent__*` tools, one hop, replies injected as follow-up turns. Reverses the "no A2A" carve-out in `agent-refactor.md` §40-41. |
 | [Agent Memory — Tech Plan (native, agent-written, per-agent)](plans/memory.md) | shipped | Per-agent native memory: one markdown directory per agent, shared by both harnesses. |
@@ -73,6 +74,7 @@ fails if it has drifted. The hand-written version of this list had reached 13 of
 | [Three small affordances: message time, composer history, `/model`](plans/composer-and-time.md) | shipped | hover a message for its time, ArrowUp for what you sent, `/model` to switch model for one session. |
 | [Turn safety (Layer 1): timeout + process-group reaping](plans/turn-safety.md) | shipped | Bounded automatic recovery after idle stops, an optional whole-turn duration cap, and process-group reaping. |
 | [本地共享 Wiki：实施审查](plans/local-shared-wiki-review.md) | shipped | a85582f 基础版六项问题已修复并限定复核；不代表 Q53 后优化已审查。 |
+| [Octopus 本地共享 Wiki：已确认规格](plans/local-shared-wiki-spec.md) | superseded by ../plans_new/local-shared-wiki-spec-v2.md | 保留 Q53/W 阶段历史；当前行为以 v2 spec、Q54～60 及 Library 全量授权为准。 |
 | [本地共享 Wiki：补充访谈记录](plans/local-shared-wiki-grill-round2.md) | superseded by local-shared-wiki-spec.md | 保留 Q17–Q36 的历史访谈；最终规则已在 Q53 收束，样稿已接受。 |
 
 <!-- END plans-index -->

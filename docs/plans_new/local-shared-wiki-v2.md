@@ -1,12 +1,12 @@
 # Octopus 本地共享 Wiki v2：协同设计与实施总纲
 
-> **Status:** in-progress — V2-01～03 与 V2-04 框架代码已实现，真实 Weber 配置、部署和内容试点由 Octo 接续；见[核心交接](local-shared-wiki-implementation-v2.md)。\
+> **Status:** in-progress — 核心与既有 Weber 配置已上线，首两篇真实试点通过；完整试点和 Library 全量未放行，当前修复仍有两项 Codex 实机失败；见[当前进度](local-shared-wiki-progress-v2.md)。\
 > **修订：** v2.1，2026-10-13（Asia/Shanghai）；保留 v2 文件名与开发票编号。\
 > **审阅基线：** Octopus commit `453a7995bd6c54df33b0fc41dec09d370b4b40aa`；用户于 2026-10-12 提供的 `.octopus.zip`。\
 > **适用对象：** Octo 开发，Vera 验证，Weber 作为智者与知识库 curator；SmartReader 作为阅读讨论入口，Sapphire 作为库浏览与编辑应用。\
 > **决策：** 以可理解、可查证、可复用、可持续维护的个人知识为目标；保留 SQLite 检索底座，补知识积累闭环。先完成核心和小样本入库，再分批整理旧材料；应用新功能列后续计划，语义后端按实测缺口引入。
 
-**本版阅读顺序：** 先读本总纲与[知识积累](local-shared-wiki-knowledge-v2.md)，开发按[任务票](local-shared-wiki-tickets-v2.md)推进；旧材料整理看[迁移计划](local-shared-wiki-migration-v2.md)。设计正文现为十一份 Markdown，补入 SmartReader、迁移与知识价值设计，替代上一版同名计划的相关安排。
+**本版阅读顺序：** 接手先读[当前进度与执行计划](local-shared-wiki-progress-v2.md)及[当前 spec](local-shared-wiki-spec-v2.md)，再按本总纲与[知识积累](local-shared-wiki-knowledge-v2.md)理解设计；开发按[任务票](local-shared-wiki-tickets-v2.md)，旧材料整理按[迁移计划](local-shared-wiki-migration-v2.md)。原设计专题文件及最初核心交付保留为依据，事实时间与适用范围分别标注。
 
 **本轮设计访谈（2026-10-13）：** 用户指定本目录为最新拟实施方案，本文件为总览；App 相关开发作为后续 feature plan。旧版 Q53 已确认约束继续作为设计依据，新增或改变旧规则的取舍在[设计访谈与决策树](local-shared-wiki-grill-v2.md)中逐项收束；设计正文之外，另维护访谈记录与根目录 [GLOSSARY.md](../../GLOSSARY.md)。既有接口兼容仍属核心责任，后续 Sapphire/SmartReader 功能不成为核心验收前提。
 
@@ -24,9 +24,11 @@
 
 **当前没有 QMD 集成。** QMD 是候选语义适配器，不是当前系统的事实前提。既有 `docs/plans/local-shared-wiki-*` 文档含目标、历史验收与未完事项；不能把计划中的保证全部当作已运行事实。
 
-本轮重新核对 origin/main，仍是上述 commit。LLM-Wiki 的可取之处是将有用的综合与联系持久化；my-wiki 把 Reference、Concept、工作流与应用连接起来。本项目吸收这些结构，不复制全局目录预读、固定原子化数量或整套应用。[S4][S5]
+设计审阅时的代码基线为上述 `453a799`，不是最新 HEAD。LLM-Wiki 的可取之处是将有用的综合与联系持久化；my-wiki 把 Reference、Concept、工作流与应用连接起来。本项目吸收这些结构，不复制全局目录预读、固定原子化数量或整套应用。[S4][S5]
 
-### 1.2 本次发现
+### 1.2 设计审阅时的发现
+
+以下表格定位最初改造问题，部分已经由 v2 核心解决；当前源码、部署和未完成检查以[进度表](local-shared-wiki-progress-v2.md)为准，不重复按旧行号开发。
 
 | 观察 | 证据位置 | 对设计的影响 |
 | --- | --- | --- |
@@ -47,7 +49,7 @@
 
 Sapphire 主库工作副本位于 `applications/sapphire.data/vaults/obv/repo`。附件里整个 Vault 有 578 个文件，其中 `Codex Skills` 占 421 个；`Library` 有 133 个文件、37 篇 Markdown。37 篇中包含两份 assets 项目说明，不能等同于 37 篇默认知识候选。资料还包括 HTML、PDF、TXT；现有 PDF 不提取约定保留。
 
-真实的 `Library/Me/information.md` 仅记录院校、在读身份和学科。它未明确记录职业、研究课题、联系方式或个人偏好。库中收藏的数学作者文章，也不是用户的个人资料。
+设计附件中的 `Library/Me/information.md` 仅记录院校、在读身份和学科，未明确记录职业、研究课题、联系方式或个人偏好。这是旧输入的事实；生产 Me 后续已变化，每次执行从当前文件重建 gold，不把旧缺字段列表当永久答案。库中收藏的数学作者文章也不是用户的个人资料。
 
 附件没有 Wiki 的 `config.json`、`index.sqlite3`、ownership 或任务状态；因此本次不能证明线上 /wiki 的实际绑定和索引状态。仓库代码、附件内容、已有计划、下面的目标行为各自独立标注。
 
@@ -260,13 +262,13 @@ SmartReader 是引用直达、“问这篇/选区”和阅读中与 Weber 讨论
 
 ## 10. What this defers
 
-- 当前任务交付设计文件；未修改线上配置、Weber persona、文章、索引或 Sapphire。
+- 原设计阶段仅交付设计文件；其后的核心实现、上线和真实首批见[当前进度](local-shared-wiki-progress-v2.md)，不能继续称全部尚未实施。
 - 不启动附件中的程序、不恢复认证/会话数据，不将旧计划中的部署/GC 记载视为本次执行动作。
 - PDF OCR/抽取、视频蒸馏、跨账户知识共享及操作系统级强制隔离仍需要独立需求。
 - 大规模语义检索不是遗漏的基础保证；其启动条件是可测的检索缺口，而非文档数量达到一个任意数字。
 - 完整来源根闭包、深层依赖传播和自动独立证据计数按 Q57 不作为核心门槛；实际出处与确知的直接依赖先满足回查、提醒和重复控制。
 - 旧导航维护、文章模板落地和来源补全必须对当前文件再次核对；索引适配可以先覆盖旧格式，不等待整库重写。
-- SmartReader 与 Sapphire 新功能均已写入后续任务；本轮不执行应用修改、跨 app 授权配置或旧材料批量入库。
+- SmartReader 与 Sapphire 新功能、跨 app 授权配置保持后续任务；Library 全量整理已获用户授权，由 Octo 按真实试点放行和明确批次推进。
 
 ### 参考与证据
 

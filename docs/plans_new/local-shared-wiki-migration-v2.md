@@ -1,8 +1,8 @@
 # Octopus 本地共享 Wiki：旧资料整理与分批迁移方案 v2.1
 
-> **Status:** proposed。修订：2026-10-13，Asia/Shanghai。设计版本为 v2.1，沿用 `v2` 文件名。本文规定接下来如何开展试点与迁移；尚未整理生产库、运行语言对照或完成迁移验收。
+> **Status:** in-progress — 真实首两篇已通过，第二个 job 两项待当前版本验收；完整试点/Q58/全量未放行，见[当前进度与执行计划](local-shared-wiki-progress-v2.md)。修订：2026-10-13，Asia/Shanghai，保留 v2 文件名。
 
-适用基线：`Danuvius152/Octopus` commit `453a7995bd6c54df33b0fc41dec09d370b4b40aa` 及本次附件中可安全审阅的知识资料。内容格式见[内容合约](local-shared-wiki-content-v2.md)，工具与版本语义见[检索协议](local-shared-wiki-retrieval-v2.md)，任务依赖见[开发票据](local-shared-wiki-tickets-v2.md)，查询集见[评估方案](local-shared-wiki-evaluation-v2.md)。
+原设计审阅基线：`Danuvius152/Octopus` commit `453a7995bd6c54df33b0fc41dec09d370b4b40aa` 及当时附件；当前冻结源码、服务与资料版本见进度页。内容格式见[内容合约](local-shared-wiki-content-v2.md)，工具与版本语义见[检索协议](local-shared-wiki-retrieval-v2.md)，任务依赖见[开发票据](local-shared-wiki-tickets-v2.md)，查询集见[评估方案](local-shared-wiki-evaluation-v2.md)。
 
 ## 1. 决策：先让小样本闭环工作，再逐批整理
 
@@ -18,7 +18,7 @@ Q54/Q59 确认当前 pika_vault 以旧模板为参考、按最新需求原位规
 
 ## 2. “未入库”先分成三类
 
-当前代码可以索引普通 Markdown；旧文没有新模板，并不等于它不可搜索。当前附件没有线上 Wiki 绑定和生产索引状态，因此“文件已在 Vault”只能证明文件存在，实际可搜索仍需在当前绑定下验证。[当前索引入口][repo-store]、[检索实现][repo-search]
+普通 Markdown 无新模板也可索引。设计附件没有生产绑定/索引，不能由当时文件存在推断可查；本次当前核对已有 Library 42/42 索引，但实际整理及逐篇检索仍需独立验收。[历史索引入口][repo-store]、[历史检索实现][repo-search]；当前状态与执行顺序见进度页。
 
 | 材料现状 | 首要动作 | 何时需要模型 |
 | --- | --- | --- |
@@ -84,10 +84,10 @@ V2-01 至 V2-04 应提供以下可用行为；这比统一所有 prompt 的措�
 
 | 材料 | 试点动作 | 主要检查 |
 | --- | --- | --- |
-| `Library/Me/information.md` | 个人路径与身份定位；至多补确有必要的最小元数据 | 当前只支持院校、博士在读身份和学科；不能补职业、研究课题或偏好，不套 Reference |
+| `Library/Me/information.md` | 当前个人记录完整复核；必要元数据或真实 no_change | 个人 gold 按当前版本重建；不猜缺失职业、课题或偏好，不套 Reference；旧回执不能覆盖后来编辑 |
 | `Library/pika_vault/思考随笔/对笔记写作的理解.md` | 按外部文章来源和实际已有结构整理 | Key note 帮人读文；作者的“我”不进入用户画像，原有人工内容保留 |
 | `Library/pika_vault/思考随笔/AI越擅长，我们就必须要撤退？.md` | 整理题名、description、来源和必要要点 | 保留“可能”、条件与讨论对象，不把作者判断变成已证实事实 |
-| `Library/pika_vault/编程与开发/AI agent skill的一些开发经验.md` | 整理外部文章，同时保留代码/链接/反例 | 不删除 LaTeX 工作流反例的上下文，不把反例提炼成推荐原则 |
+| `Library/pika_vault/编程与开发/AI agent skill的一些开发经验.md` | 整理外部文章，同时保留当前代码/链接/条件与反例 | 核对当前否定流程、风险、程序验收边界和双版本同步；实际反例按当前revision，不能恢复不存在的旧LaTeX案例或把反例转为推荐 |
 | `Library/Research/vidu_realtime_report/技术报告.md` | 正确识别本地分析报告；检验长文段落定位，按需补元数据 | 精确 Vidu、TTFF、SRF 等问法读到当前论述，摘要不代替长文；Synthesis 不自动核验 |
 | `Library/Research/models_runtime_deep_dive.md` | 与 Vidu 一起检验宽泛选材和跨文档比较 | “数字人研究”可覆盖两种真实方向；有处理历史不能推成 RNN，来源/推断边界保留 |
 
@@ -160,7 +160,7 @@ V2-05 的 Sapphire 标签过滤和 V2-09 的 SmartReader 功能属于后续应�
 
 拟议标签接口采用 `tags: string[]`、`tag_match: 'any' | 'all'`，默认 `all`；标签目录为 `GET /api/wiki/tags` 与 app `wiki/tags`。这些是待实现合同。统计按当前范围内去重后的 doc ID 计算，多个章节不多计，同源多文档的标签计数也不等于独立来源数。SmartReader 的交互范围与具体功能见后续应用方案，不借迁移之名提前执行。
 
-本轮完成的是迁移决策、清单、代表样本和验收依据。实施时，每批留下完成/跳过/冲突项、当前结果、修正原因和恢复记录；不声称设计稿已经改变线上 persona、工具、内容或应用。无需等待全部主题页、完美 prompt、多语种胜者或语义后端，核心闭环通过就可以开始下一批有价值的材料。
+原设计阶段完成迁移决策和代表样本；后续已有真实 persona/上线/首批及当前修复检查，具体范围见[当前进度](local-shared-wiki-progress-v2.md)。每批留下完成/无变化/冲突项、当前结果、原因和恢复引用；已索引不计为已整理，旧版本回执不直接计新版本通过。先收口当前两项实机失败和修复部署、完整试点/Q58，再覆盖全部 Library；不等待后续 App、语言或可选语义实验。
 
 ### 官方与原始来源
 

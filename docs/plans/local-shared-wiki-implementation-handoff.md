@@ -1,6 +1,8 @@
 # 本地共享 Wiki：实施交接
 
-> **Status:** in-progress — W01–W05 已实现并部署；W06 尚有实际 Weber 补验，真实快照退役与 W07 旧库整理未执行。
+> **Status:** in-progress — W01–W07 历史交接；当前核心、真实试点及 Library 全量执行进度以 v2 进度页为准，旧快照等独立事项保留历史记录。
+
+本文保留2026-10-12的实施事实，不再是最新执行状态。先读[v2当前进度](../plans_new/local-shared-wiki-progress-v2.md)和[已确认spec](../plans_new/local-shared-wiki-spec-v2.md)，不得依据旧停止位置、作者门槛或资料范围重复开发/排队。
 
 更新：2026-10-12。本文记录当前已做和未做的工作，不把代码实现、测试通过、上线和实际整理混为完成。最终行为以 spec 为准。
 

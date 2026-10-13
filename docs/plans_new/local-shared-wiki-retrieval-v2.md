@@ -1,6 +1,6 @@
 # Octopus 本地共享 Wiki v2：检索、索引与证据接口
 
-> **Status:** proposed — 对 commit `453a7995bd6c54df33b0fc41dec09d370b4b40aa` 的增量设计，接口新增项尚未实现。\
+> **Status:** in-progress — intent/compact/read_many/cursor 与增量索引核心已实现并上线；当前表示选择/sections-v5 修复及完整真实验收待收口，见[当前进度](local-shared-wiki-progress-v2.md)。\
 > **修订：** v2.1，2026-10-13（Asia/Shanghai）；文件名保留 v2。\
 > 关联：[总纲](local-shared-wiki-v2.md) · [内容合约](local-shared-wiki-content-v2.md) · [prompt](local-shared-wiki-prompts-v2.md) · [验收](local-shared-wiki-evaluation-v2.md)
 
@@ -16,6 +16,8 @@
 6. 后端可增加语义能力，文档身份、权限与证据协议不跟随供应商改变。
 
 本文的 WikiService 指现有 Wiki 模块的统一内部接口，不要求拆进程。现有原文、任务、ownership、身份及恢复表保留。
+
+下文保留原设计的动机、协议和示意；审阅缺口以 `453a799` 为历史基线。当前行为入口为[spec](local-shared-wiki-spec-v2.md)，tags/client_apps/可选语义仍属后续，不能把核心接口与这些拟议字段混称全部已实现或全部未实现。
 
 ## 2. 先修复请求热路径
 
@@ -306,7 +308,7 @@ compact 导航卡示意，数值只是协议例子，不是当前报告的真实
 - 当前文件变化返回 409/changed 信息；旧坐标不得直接套在新版上；
 - 读到主库中的来源快照与读到主文章正文是不同身份，引用分别标明。
 
-`read_many` 对应拟议 `POST /api/wiki/read-many`，app 使用 `POST wiki/read-many`。合法批次返回 HTTP 200 与逐项状态；一个 item 版本变化时该项为 changed 并带 409 含义，其他成功项可用。请求 schema/总体授权错误仍返回请求级 4xx。单文档 read 继续沿用 HTTP 409 的既有行为。
+`read_many` 已对应 `POST /api/wiki/read-many`，app 使用 `POST wiki/read-many`。合法批次返回 HTTP 200 与逐项状态；一个 item 版本变化时该项为 changed 并带 409 含义，其他成功项可用。请求 schema/总体授权错误仍返回请求级 4xx。单文档 read 继续沿用 HTTP 409 的既有行为。
 
 原始论文不可用时，工具不用自动上网。用户若问综述自身观点，直接引用综述当前内容；若问原实验事实，标明本地转述层级。
 
@@ -327,7 +329,7 @@ compact 导航卡示意，数值只是协议例子，不是当前报告的真实
 
 ### 6.4 分页与上下文稳定性
 
-保留 offset 兼容旧接口；拟议新增可选 cursor 参数，与 offset 互斥，新客户端可使用包含 `index_epoch + filters + stable_sort_key` 的不透明 cursor。索引代变化时返回需要重启该列表的状态，避免重复或遗漏；不要悄悄用旧 offset 继续遍历变化集合。cursor 是新增 capability，旧端不假定它已经存在。
+保留 offset 兼容旧接口；已实现可选 cursor，与非零 offset 互斥，cursor 绑定 index_epoch、过滤及稳定排序。索引代变化返回 409 并重启枚举，过滤变化/不合法组合返回 422，不沿旧分页继续以免遗漏；运行版本通过 capability 声明。
 
 范围/过滤作用于候选集合本身，不能先全库取 top-k 再过滤 Library/Me。此要求同样适用于未来向量 backend。返回 total 的代价若过高，可在新视图用 has_more；不要为每问算不需要的全量总数。
 
