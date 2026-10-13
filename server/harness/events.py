@@ -135,6 +135,7 @@ class HarnessEvent:
     tool_input: dict[str, Any] | None = None
     tool_use_id: str | None = None
     is_error: bool = False
+    error_code: str | None = None
     cost: float | None = None
     session_id: str | None = None  # backend's resume id (carried on `result`)
     duration_ms: int | None = None

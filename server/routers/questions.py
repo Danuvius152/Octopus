@@ -1,6 +1,6 @@
 """REST endpoints for the MCP-based AskUserQuestion flow.
 
-Three endpoints:
+Question endpoints:
 
   POST /api/sessions/{id}/questions
       Called by the `ask` MCP server (server/mcp_servers/ask.py) when
@@ -8,7 +8,8 @@ Three endpoints:
       Octopus generates a question_id, persists the question into the
       session's chat history (so reload re-renders the form), and
       broadcasts the `question_request` WS event to the frontend.
-      Returns `{question_id: "..."}`.
+      Returns `{question_id: "...", deadline: "..." | null}`. The host
+      owns expiry; null means that auto-answer is disabled.
 
   GET  /api/sessions/{id}/questions/{question_id}/answer
       Long-polled by the ask MCP server. Blocks on an asyncio.Event
@@ -23,6 +24,10 @@ Three endpoints:
       that unblocks the long-poll, persists the answer, and
       broadcasts the question_answer WS event.
 
+  DELETE /api/sessions/{id}/questions/{question_id}
+      Closes an abandoned tool wait, wakes its pollers with 404 and
+      broadcasts a persisted question_closed event to remove the form.
+
 Auth: same bearer-token model as every other API surface. The MCP
 server holds OCTOPUS_AUTH_TOKEN; the frontend sends the user's
 bearer.
@@ -34,13 +39,15 @@ exposing us to the CLI's premature-exit bug at large context scale.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 
 from ..auth import verify_token
 from ..deps import ScopeUser, SessionMgr
+from ..mcp_identity import verify
+from ..sessions.questions import QuestionClosedError
 
 router = APIRouter(prefix="/api/sessions", tags=["questions"])
 
@@ -81,12 +88,19 @@ async def create_question(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "questions must be non-empty")
     if session_manager.get_session(session_id, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-    qid = await session_manager.create_pending_question(session_id, req.questions)
+    try:
+        qid = await session_manager.create_pending_question(
+            session_id, req.questions, scope=verify(_),
+        )
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     if qid is None:
         # The session existed at check time but vanished — race with
         # delete. Surface as 404 so the MCP server can report cleanly.
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-    return {"question_id": qid}
+    session = session_manager.get_session(session_id, user_id)
+    pending = session._pending_questions.get(qid) if session else None
+    return {"question_id": qid, "deadline": pending.deadline if pending else None}
 
 
 @router.get("/{session_id}/questions/{question_id}/answer")
@@ -110,9 +124,12 @@ async def wait_for_answer(
     # Cap timeout so a misbehaving MCP server can't park a connection
     # forever. 5 min is plenty given the auto-answer default is 30 min.
     timeout = min(max(timeout, 1.0), 300.0)
-    answer = await session_manager.wait_for_question_answer(
-        session_id, question_id, timeout=timeout
-    )
+    try:
+        answer = await session_manager.wait_for_question_answer(
+            session_id, question_id, timeout=timeout
+        )
+    except QuestionClosedError as exc:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, str(exc))
     if answer is None:
         # Distinguishable status code so the MCP server loops vs. errors.
         raise HTTPException(status.HTTP_408_REQUEST_TIMEOUT, "no answer yet")
@@ -144,4 +161,20 @@ async def submit_answer(
             status.HTTP_404_NOT_FOUND,
             "Question not found or already answered",
         )
+    return {"ok": True}
+
+
+@router.delete("/{session_id}/questions/{question_id}")
+async def close_question(
+    session_manager: SessionMgr,
+    session_id: str,
+    question_id: str,
+    reason: Literal["cancelled", "communication_failure"] = Query("cancelled"),
+    user_id: ScopeUser = None,
+    _: str = Depends(verify_token),
+) -> dict[str, bool]:
+    if session_manager.get_session(session_id, user_id) is None:
+        raise HTTPException(404, "Session not found")
+    if not await session_manager.close_pending_question(session_id, question_id, reason=reason):
+        raise HTTPException(404, "Question not found or closed")
     return {"ok": True}

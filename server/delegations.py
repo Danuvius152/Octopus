@@ -42,8 +42,10 @@ to invoke this yet — only the REST API does.
 
 from __future__ import annotations
 
+import asyncio
 import logging
-from dataclasses import dataclass, field
+import uuid
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -51,6 +53,8 @@ if TYPE_CHECKING:
     from .database import Database
     from .session_manager import SessionManager
 
+from .bg_tasks import bg_task_manager
+from .mcp_identity import McpScope, close_work, require_live_scope, work_is_open
 from .monitor import Event as _MonEvent
 from .monitor import record as _mon_record
 
@@ -88,6 +92,10 @@ class DelegationRunState:
     target_agent_id: str
     target_agent_name: str
     request: str
+    # One immutable round in the reusable child conversation. Follow-up makes
+    # a new record, so an in-flight cancellation retains its original target.
+    work_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    parent_work_id: str | None = None
     wiki_mode: str | None = None
     created_at: str = field(
         default_factory=lambda: datetime.now(UTC).isoformat()
@@ -123,6 +131,7 @@ class DelegationRunState:
             "target_agent_id": self.target_agent_id,
             "target_agent_name": self.target_agent_name,
             "request": self.request,
+            "work_id": self.work_id,
             "state": self.state,
             "created_at": self.created_at,
             "finished_at": self.finished_at,
@@ -148,6 +157,7 @@ class DelegationManager:
         # policy can trim this, but at single-user scale a flat dict
         # is fine.
         self._records: dict[str, DelegationRunState] = {}
+        self._rounds: dict[str, DelegationRunState] = {}
         self.session_mgr: SessionManager | None = None
         self.db: Database | None = None
 
@@ -173,6 +183,7 @@ class DelegationManager:
         agent_name: str,
         request: str,
         files: list[str] | None = None,
+        scope: McpScope | None = None,
     ) -> DelegationRunState:
         """Create a child session under the named target agent and kick
         off its first turn. Returns immediately with the record — the
@@ -194,7 +205,11 @@ class DelegationManager:
                 status_code=404,
             )
 
+        parent_work_id = scope.work_id if scope is not None else parent._work_id
+        self._require_caller(scope, parent_session_id, parent_work_id)
+
         target = await self._resolve_target_agent(agent_name, parent.user_id)
+        self._require_caller(scope, parent_session_id, parent_work_id)
         if target is None:
             raise DelegationError(
                 f"No agent named {agent_name!r}", status_code=404
@@ -216,6 +231,7 @@ class DelegationManager:
             else None
         )
         parent_name = (parent_agent or {}).get("name") or "another agent"
+        self._require_caller(scope, parent_session_id, parent_work_id)
 
         child_backend = (target.get("backend") or "claude-code")
         child_name = f"{target['name']} ← {parent_name}"
@@ -228,6 +244,11 @@ class DelegationManager:
             parent_session_id=parent.id,
             delegation_request=request,
         )
+        try:
+            self._require_caller(scope, parent_session_id, parent_work_id)
+        except DelegationError:
+            await self.session_mgr.auto_archive_scheduled_session(child.id)
+            raise
 
         rec = DelegationRunState(
             delegation_id=child.id,
@@ -235,6 +256,7 @@ class DelegationManager:
             target_agent_id=target["id"],
             target_agent_name=target["name"],
             request=request,
+            parent_work_id=parent_work_id,
             wiki_mode=parent._wiki_mode,
         )
         # Register BEFORE start_message: the broadcast may fire
@@ -242,12 +264,13 @@ class DelegationManager:
         # (test fakes, especially), and the listener needs to find
         # us in _records.
         self._records[child.id] = rec
+        self._rounds[rec.work_id] = rec
         # The caller may itself be a delegation child (Octo → Vera → Pete).
         # If so, whatever it says in THIS turn is "I've asked Pete", not its
         # answer — hold its terminal injection until it has taken the turn
         # that Pete's reply wakes it for.
         caller_rec = self._records.get(parent.id)
-        if caller_rec is not None and caller_rec.state == "running":
+        if caller_rec is not None and caller_rec.state == "running" and caller_rec.work_id == parent_work_id:
             caller_rec._awaiting_sub_relay = True
 
         composed = self._compose_initial_prompt(
@@ -258,7 +281,7 @@ class DelegationManager:
             working_dir=parent.working_dir,
         )
         try:
-            await self.session_mgr.start_message(child.id, composed, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {}))
+            await self.session_mgr.start_message(child.id, composed, source="delegation", work_id=rec.work_id, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {}))
         except Exception as exc:
             # Surface as failure on the record so the parent still
             # gets a terminal injection rather than a phantom run.
@@ -276,57 +299,54 @@ class DelegationManager:
         return rec
 
     async def cancel_delegation(
-        self, delegation_id: str, *, reason: str | None = None
+        self, delegation_id: str, *, reason: str | None = None,
+        work_id: str | None = None,
+        scope: McpScope | None = None,
     ) -> DelegationRunState:
-        """Stop a running delegation. Idempotent — cancelling a finished
-        delegation is a no-op that returns the existing record.
+        """Close the selected immutable round and its owned work branch.
 
-        Also CASCADE-CANCELS any running descendants whose
-        ``parent_session_id`` chain leads to this delegation. Without
-        the cascade, an Octo-cancels-Vera while Vera-asked-Pete
-        scenario would leak Pete: Pete keeps burning tokens and his
-        eventual reply lands on a missing/cancelled parent and is
-        silently dropped. Cascade unwinds the chain top-down so the
-        terminal injections to each parent stay meaningful.
+        A supplied work_id can select a retained older round. It never drifts
+        to the conversation's latest follow-up. Completed answers remain
+        completed while their residual processes are retired. Only a valid
+        caller receives a terminal cancellation; descendants cannot wake a
+        branch that this operation has already closed.
         """
         if self.session_mgr is None:
             raise DelegationError(
                 "DelegationManager not bound", status_code=500
             )
-        rec = self._records.get(delegation_id)
+        rec = self._rounds.get(work_id) if work_id else self._records.get(delegation_id)
+        if rec is not None and rec.delegation_id != delegation_id:
+            rec = None
         if rec is None:
             raise DelegationError(
                 f"No delegation {delegation_id!r}", status_code=404
             )
-        if rec.state != "running":
-            return rec
-
-        # CRITICAL: transition the record state BEFORE calling
-        # `interrupt()`. The interrupt broadcasts an `error` event
-        # that our own `_on_broadcast` would otherwise turn into a
-        # spurious `[agent-error reason=child error]` injection,
-        # which would race with the `[agent-error reason=cancelled]`
-        # we inject below — the parent would see two terminal turns
-        # for one cancellation. The `_on_broadcast` running-check
-        # guards against that as long as we flip state first.
-        rec.state = "cancelled"
-        rec.error = reason or "cancelled by caller"
-        rec.finished_at = datetime.now(UTC).isoformat()
-        try:
-            await self.session_mgr.interrupt(delegation_id)
-        except Exception:
-            logger.exception(
-                "interrupt(%s) raised during cancellation", delegation_id
-            )
-        # Cascade BEFORE injecting our own terminal turn into the
-        # parent: child terminal injections target our own session
-        # id (which is still alive — auto-archive runs after the
-        # parent inject), so cancelling them now keeps the chain's
-        # invariant that a parent always learns its child's outcome.
-        await self._cascade_cancel_descendants(
-            delegation_id, root_reason=rec.error or "cancelled by caller"
-        )
-        await self._inject_terminal(rec)
+        self._require_caller(scope, rec.parent_session_id, scope.work_id if scope else None)
+        # Fix the complete ownership branch before the first await. A later
+        # follow-up replaces the registry record, never these captured objects.
+        branch = [rec]
+        owned = {rec.work_id}
+        for item in branch:
+            for child in list(self._rounds.values()):
+                if child.parent_work_id == item.work_id and child.work_id not in owned:
+                    branch.append(child)
+                    owned.add(child.work_id)
+        affected = []
+        for item in branch:
+            if item.state == "running":
+                item.state = "cancelled"
+                item.error = (reason or "cancelled by caller") if item is rec else f"parent delegation cancelled ({reason or 'cancelled by caller'})"
+                item.finished_at = datetime.now(UTC).isoformat()
+            # Even completed rounds may still own background work. Closing
+            # them retires that work without rewriting their final answer.
+            affected.extend(self.session_mgr.close_work(item.work_id))
+        for item in branch:
+            await bg_task_manager.cancel_work(item.work_id)
+        await self.session_mgr.finish_work_cancellation(affected)
+        for item in reversed(branch):
+            if item.state == "cancelled":
+                await self._inject_terminal(item)
         return rec
 
     async def follow_up_delegation(
@@ -335,6 +355,7 @@ class DelegationManager:
         parent_session_id: str,
         delegation_id: str,
         request: str,
+        scope: McpScope | None = None,
     ) -> DelegationRunState:
         """Continue a prior delegation with a new request in the SAME
         child session — so the target agent keeps her in-session
@@ -388,115 +409,72 @@ class DelegationManager:
                 f"wait for its reply before following up",
                 status_code=409,
             )
-
-        child = self.session_mgr.get_session(rec.delegation_id)
-        if child is None:
-            # Try unarchive — the round-2 auto-archive policy means
-            # any terminal delegation child sits in the archived
-            # state by the time we get here.
-            try:
-                child = await self.session_mgr.unarchive_session(
-                    rec.delegation_id
-                )
-            except ValueError as exc:
-                raise DelegationError(
-                    f"Child session {rec.delegation_id!r} is gone and "
-                    f"can't be reused; start a fresh delegation",
-                    status_code=409,
-                ) from exc
-
-        # Round-reset the record. Update last-write fields so the
-        # registry view (and any /list_agent_tasks consumer) reflects
-        # the new round's ask without losing the chain identity.
-        rec.state = "running"
-        rec.captured_text = []
-        rec.error = None
-        rec.finished_at = None
-        rec._terminal_injected = False
-        rec._awaiting_sub_relay = False
-        rec.request = request
-
-        # Compose a thin reopen-the-conversation prompt. We don't
-        # repeat the original briefing — the child already has it in
-        # her transcript. We just frame the new turn as a follow-up.
         parent = self.session_mgr.get_session(parent_session_id)
-        parent_agent = (
-            await self.db.get_agent(parent.agent_id)
-            if parent and parent.agent_id
-            else None
+        parent_work_id = scope.work_id if scope else (parent._work_id if parent else None)
+        self._require_caller(scope, parent_session_id, parent_work_id)
+
+        previous = rec
+        rec = replace(
+            rec, work_id=uuid.uuid4().hex, parent_work_id=parent_work_id,
+            state="running", captured_text=[], error=None, finished_at=None,
+            _terminal_injected=False, _awaiting_sub_relay=False, request=request,
+            wiki_mode=parent._wiki_mode if parent else None,
+            created_at=datetime.now(UTC).isoformat(),
         )
-        parent_name = (parent_agent or {}).get("name") or "another agent"
-        composed = (
-            f"Agent **{parent_name}** has a follow-up for you in the "
-            f"same line of work — your previous reply is above in "
-            f"this transcript. Their new request follows.\n\n"
-            f"---\n{request.strip()}"
-        )
+        self._records[delegation_id] = rec
+        self._rounds[rec.work_id] = rec
+        child = self.session_mgr.get_session(rec.delegation_id)
+        reopening = child is None
+
+        async def rollback_setup() -> None:
+            assert self.session_mgr is not None
+            if rec.state != "running" or self.session_mgr.has_pending_or_active_work(delegation_id, rec.work_id):
+                return
+            close_work(rec.work_id)
+            if self._records.get(delegation_id) is rec:
+                self._records[delegation_id] = previous
+            self._rounds.pop(rec.work_id, None)
+            if reopening:
+                await self.session_mgr.auto_archive_scheduled_session(delegation_id)
+
         try:
-            rec.wiki_mode = parent._wiki_mode if parent else None
-            await self.session_mgr.start_message(rec.delegation_id, composed, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {}))
+            if reopening:
+                try:
+                    child = await self.session_mgr.unarchive_session(rec.delegation_id)
+                except ValueError as exc:
+                    raise DelegationError(
+                        f"Child session {rec.delegation_id!r} is gone and "
+                        f"can't be reused; start a fresh delegation", status_code=409,
+                    ) from exc
+            parent = self.session_mgr.get_session(parent_session_id)
+            parent_agent = await self.db.get_agent(parent.agent_id) if parent and parent.agent_id else None
+            parent_name = (parent_agent or {}).get("name") or "another agent"
+            composed = (
+                f"Agent **{parent_name}** has a follow-up for you in the "
+                f"same line of work — your previous reply is above in "
+                f"this transcript. Their new request follows.\n\n"
+                f"---\n{request.strip()}"
+            )
+            self._require_caller(scope, parent_session_id, parent_work_id)
+            if rec.state != "running" or not work_is_open(rec.work_id) or self._records.get(delegation_id) is not rec:
+                return rec
+            await self.session_mgr.start_message(rec.delegation_id, composed, source="delegation", work_id=rec.work_id, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {}))
+        except asyncio.CancelledError:
+            await asyncio.shield(rollback_setup())
+            raise
+        except DelegationError:
+            await rollback_setup()
+            raise
         except Exception as exc:
             logger.exception(
                 "Failed to start follow-up turn on child %s", rec.delegation_id
             )
-            rec.state = "failed"
-            rec.error = f"failed to start follow-up: {exc}"
-            rec.finished_at = datetime.now(UTC).isoformat()
-            await self._inject_terminal(rec)
+            await rollback_setup()
             raise DelegationError(
                 f"failed to start follow-up: {exc}", status_code=500
             ) from exc
 
         return rec
-
-    async def _cascade_cancel_descendants(
-        self, parent_delegation_id: str, *, root_reason: str
-    ) -> None:
-        """Cancel every running delegation that descends from this one
-        via ``parent_session_id``. Walks breadth-first; each
-        descendant is cancelled with a reason that names the
-        originating root cancel so the parent's `[agent-error]`
-        injection is informative."""
-        # Snapshot the running records up front; we'll mutate state
-        # as we walk.
-        running = [
-            r
-            for r in self._records.values()
-            if r.state == "running"
-            and r.delegation_id != parent_delegation_id
-        ]
-        # Build adjacency: parent_session_id → child delegation_ids.
-        children_of: dict[str, list[DelegationRunState]] = {}
-        for r in running:
-            children_of.setdefault(r.parent_session_id, []).append(r)
-        # BFS from the cancelled delegation downward.
-        frontier: list[str] = [parent_delegation_id]
-        while frontier:
-            next_frontier: list[str] = []
-            for sid in frontier:
-                for child_rec in children_of.get(sid, []):
-                    if child_rec.state != "running":
-                        continue
-                    cancel_reason = (
-                        f"parent delegation cancelled "
-                        f"({root_reason})"
-                    )
-                    try:
-                        # Recurse via the public cancel path so each
-                        # descendant gets the same state-flip-first,
-                        # interrupt, terminal-inject treatment — and
-                        # in turn cascades to its own children.
-                        await self.cancel_delegation(
-                            child_rec.delegation_id,
-                            reason=cancel_reason,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "cascade-cancel of %s failed",
-                            child_rec.delegation_id,
-                        )
-                    next_frontier.append(child_rec.delegation_id)
-            frontier = next_frontier
 
     def list_delegations(
         self, parent_session_id: str, *, limit: int = 25
@@ -504,7 +482,7 @@ class DelegationManager:
         """Recent delegations spawned by a parent session, newest first."""
         rows = [
             r
-            for r in self._records.values()
+            for r in self._rounds.values()
             if r.parent_session_id == parent_session_id
         ]
         rows.sort(key=lambda r: r.created_at, reverse=True)
@@ -524,6 +502,15 @@ class DelegationManager:
         )
 
     # ----------------------------------------------------------- internals
+
+    @staticmethod
+    def _require_caller(scope: McpScope | None, session_id: str, work_id: str | None) -> None:
+        try:
+            require_live_scope(scope, session_id)
+        except ValueError as exc:
+            raise DelegationError(str(exc), status_code=409) from exc
+        if not work_is_open(work_id):
+            raise DelegationError("Caller work is closed", status_code=409)
 
     async def _resolve_target_agent(
         self, name: str, user_id: str | None = None
@@ -749,7 +736,7 @@ class DelegationManager:
 
     # ----------------------------------------------- broadcast → injection
 
-    def _has_running_children(self, session_id: str) -> bool:
+    def _has_running_children(self, session_id: str, work_id: str) -> bool:
         """Does `session_id` have a delegation of its own still in flight?
 
         One level is enough: a grandchild keeps ITS parent running by the same
@@ -757,6 +744,7 @@ class DelegationManager:
         """
         return any(
             rec.parent_session_id == session_id and rec.state == "running"
+            and rec.parent_work_id == work_id
             for rec in self._records.values()
         )
 
@@ -774,6 +762,8 @@ class DelegationManager:
         if rec is None or rec.state != "running":
             return
 
+        if "work_id" in msg and msg["work_id"] != rec.work_id:
+            return
         kind = msg.get("type")
         if kind in ("result", "error") and msg.get("retrying"):
             return  # the logical turn is still running its recovery attempts
@@ -787,7 +777,7 @@ class DelegationManager:
             return
         if kind == "result":
             if not msg.get("is_error") and (
-                self._has_running_children(sid) or rec._awaiting_sub_relay
+                self._has_running_children(sid, rec.work_id) or rec._awaiting_sub_relay
             ):
                 # This child kicked off a delegation of its own and ended its
                 # turn immediately — that's the async `ask_agent` contract, not
@@ -816,7 +806,7 @@ class DelegationManager:
                 return
             if msg.get("is_error"):
                 rec.state = "failed"
-                rec.error = "child session reported an error result"
+                rec.error = str(msg.get("message") or "child session reported an error result")
             else:
                 rec.state = "completed"
             rec.finished_at = datetime.now(UTC).isoformat()
@@ -856,7 +846,11 @@ class DelegationManager:
         )
         try:
             await self.session_mgr.start_message(
-                rec.parent_session_id, prompt, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {})
+                rec.parent_session_id, prompt, source="delegation",
+                delivery_id=f"agent-question:{rec.work_id}:{question_id}",
+                work_id=rec.parent_work_id,
+                question_session_id=rec.delegation_id, question_id=question_id,
+                **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {})
             )
         except Exception:
             logger.exception(
@@ -977,6 +971,10 @@ class DelegationManager:
         assert self.session_mgr is not None
         if rec._terminal_injected:
             return
+        from .mcp_identity import work_is_open
+        if not work_is_open(rec.parent_work_id):
+            rec._terminal_injected = True
+            return
         rec._terminal_injected = True
         # How a delegation ENDED, not just how long it took — the question that
         # matters when a chain misbehaves (§9 G1).
@@ -1004,7 +1002,9 @@ class DelegationManager:
             )
         try:
             await self.session_mgr.start_message(
-                rec.parent_session_id, prompt, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {})
+                rec.parent_session_id, prompt, source="delegation",
+                delivery_id=f"agent-terminal:{rec.work_id}", work_id=rec.parent_work_id,
+                **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {})
             )
         except Exception:
             # The parent may have been deleted while the child was
@@ -1027,6 +1027,8 @@ class DelegationManager:
         # on idle would break the nested chain (Vera would vanish
         # before Pete's reply could reach her).
         try:
+            if self._records.get(rec.delegation_id) is not rec:
+                return
             await self.session_mgr.auto_archive_scheduled_session(
                 rec.delegation_id
             )

@@ -219,7 +219,7 @@ def ask_agent(
         did = data.get("delegation_id", delegation_id)
         target = data.get("target_agent_name") or "the other agent"
         return (
-            f"Continued delegation `{did}` with {target} in the same "
+            f"Continued delegation `{did}` with {target}. work_id={data.get('work_id', 'unknown')}. In the same "
             f"session — they have the previous round in their "
             f"transcript. Tell the user briefly what you asked, then "
             f"end your turn. The reply will arrive as a follow-up "
@@ -251,7 +251,7 @@ def ask_agent(
     did = data.get("delegation_id", "?")
     target = data.get("target_agent_name") or name
     return (
-        f"Started delegation `{did}` to {target}. They are working "
+        f"Started delegation `{did}` to {target}. work_id={data.get('work_id', 'unknown')}. They are working "
         f"on it in the background. Tell the user briefly what you "
         f"asked, then end your turn — don't wait. A follow-up turn "
         f"prefixed `[agent-reply:{target} delegation={did}]` (or "
@@ -260,15 +260,18 @@ def ask_agent(
 
 
 @mcp.tool(name="cancel")
-def cancel_agent_task(delegation_id: str, reason: str | None = None) -> str:
-    """Cancel a running delegation. Idempotent — cancelling a
-    finished delegation is a no-op that returns ok-ish text. The
-    other agent's in-flight turn is interrupted; an
+def cancel_agent_task(
+    delegation_id: str, reason: str | None = None, work_id: str | None = None,
+) -> str:
+    """Cancel one delegation round and its background work. A completed
+    answer is retained while any residual work is stopped. Use the work_id
+    from its receipt/list to select that round across later follow-ups. An
     `[agent-error:…reason=cancelled…]` follow-up turn is injected
     into this session so you (and the user) see the terminal state.
 
     Args:
         delegation_id: The id returned by an earlier `ask_agent` call.
+        work_id: Optional round identity from its receipt/list.
         reason: Optional short reason for the cancel (shown in the
             error injection so the user / next turn understands why).
 
@@ -284,6 +287,8 @@ def cancel_agent_task(delegation_id: str, reason: str | None = None) -> str:
         f"{api}/api/sessions/{sid}/delegations/{delegation_id}/cancel"
     )
     body = {"reason": reason} if reason else {}
+    if work_id is not None:
+        body["work_id"] = work_id
     try:
         r = httpx.post(url, json=body, headers=hdrs, timeout=10.0)
     except httpx.HTTPError as e:

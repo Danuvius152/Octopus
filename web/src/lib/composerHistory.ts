@@ -1,3 +1,5 @@
+import { requestSource } from "./injectedTurns";
+
 /**
  * Shell-style history for the composer: ArrowUp walks back through what you
  * sent, ArrowDown walks forward, and coming back past the newest entry restores
@@ -31,14 +33,15 @@ export interface Recall {
  * duplicates collapse, the way a shell's history does.
  */
 export function historyFromMessages(
-  messages: { role?: string; type?: string; content?: unknown }[],
+  messages: { role?: string; type?: string; content?: unknown; tool_input?: Record<string, unknown> }[],
   isInjected: (text: string) => boolean = () => false
 ): string[] {
   const out: string[] = [];
   for (const m of messages) {
     if (m.role !== "user" || m.type !== "text") continue;
     const text = typeof m.content === "string" ? m.content : "";
-    if (!text.trim() || isInjected(text)) continue;
+    const source = requestSource(m);
+    if (!text.trim() || (source === undefined ? isInjected(text) : source !== "human")) continue;
     if (out[out.length - 1] === text) continue;
     out.push(text);
   }

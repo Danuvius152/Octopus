@@ -219,6 +219,11 @@ class ForkingMixin(SessionManagerBase):
 
         # 2. Acquire the lock, validate no live parent work, claim `_forking`.
         async with parent._lock:
+            if parent._dispatch_paused:
+                raise ForkError(
+                    "Parent session dispatch is paused; resume it before forking",
+                    reason="fork_blocked_parent_turn_active", status_code=409,
+                )
             if parent._forking:
                 raise ForkError(
                     "Another fork is already in progress for this session",
@@ -492,6 +497,11 @@ class ForkingMixin(SessionManagerBase):
         # Same idle guard as fork_session — a copy of a mid-turn workspace would
         # be inconsistent, and the resume artifact needs a settled transcript.
         async with parent._lock:
+            if parent._dispatch_paused:
+                raise ForkError(
+                    "Parent session dispatch is paused; resume it before forking",
+                    reason="fork_blocked_parent_turn_active", status_code=409,
+                )
             if parent._forking:
                 raise ForkError("Another fork is already in progress for this session",
                                 reason="fork_blocked_parent_turn_active", status_code=409)

@@ -2,6 +2,9 @@ import { describe, it, expect } from "vitest";
 import { isSessionBusy } from "./deferredFork";
 
 describe("isSessionBusy", () => {
+  it("waits for explicit resume even when the paused queue is empty", () => {
+    expect(isSessionBusy("idle", 0, 0, true)).toBe(true);
+  });
   it("is false only when idle with an empty queue and no open questions", () => {
     expect(isSessionBusy("idle", 0, 0)).toBe(false);
   });

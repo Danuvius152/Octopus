@@ -188,21 +188,15 @@ async def test_webhook_skips_when_no_url(caplog):
 @pytest.mark.asyncio
 async def test_session_manager_fires_idle_notification(monkeypatch):
     """When a session's queue drains, the wired notifier_manager is called."""
-    from server.session_manager import SessionManager
+    from server.session_manager import Session, SessionManager
 
     sm = SessionManager()
     fake_mgr = AsyncMock()
     sm.set_notifier_manager(fake_mgr)
 
-    class _Sess:
-        id = "s-1"
-        name = "My session"
-        # The owner is part of the event's address now (multi-tenancy.md §7):
-        # a webhook is somebody's endpoint off this box, and firing every
-        # event at every target would tell everyone when anyone is working.
-        user_id = "u-1"
-
-    await sm._fire_session_idle_notification(_Sess())  # type: ignore[arg-type]
+    # The webhook belongs to this owner, including when dispatch is paused.
+    session = Session(id="s-1", name="My session", working_dir="/tmp", user_id="u-1")
+    await sm._fire_session_idle_notification(session)
 
     fake_mgr.fire.assert_awaited_once()
     fired_event = fake_mgr.fire.call_args.args[0]

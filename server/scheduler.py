@@ -160,7 +160,7 @@ class ScheduleRunner:
                 try:
                     # Queue-aware: appends to the live session, waiting its turn if
                     # the user is mid-conversation rather than failing on a held lock.
-                    await self._session_mgr.start_message(origin_session_id, body, **wiki_kwargs)
+                    await self._session_mgr.start_message(origin_session_id, body, source="schedule", **wiki_kwargs)
                     await self._db.update_schedule(
                         schedule_id,
                         last_run_at=now,

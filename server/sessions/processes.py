@@ -12,7 +12,7 @@ import asyncio
 import time
 from typing import Any
 
-from ..aio import drain_cancelled
+from ..aio import drain_cancelled, stopped_within
 from ..harness import HarnessRun, SubagentUpdate
 from .base import (
     _HELD_PROCESS_IDLE_SECONDS,
@@ -26,6 +26,23 @@ from .base import (
 
 
 class ProcessesMixin(SessionManagerBase):
+
+    async def retire_ownerless_runs(self) -> None:
+        """Stop old execution before account adoption, keeping queued work."""
+        from ..mcp_identity import revoke_ownerless_runs
+
+        revoke_ownerless_runs()
+        retiring = [
+            (session, session._backend, session._active_task)
+            for session in list(self.sessions.values())
+            if session.user_id is None and (session._backend or session._active_task)
+        ]
+        for session, backend, driver in retiring:
+            await self.interrupt(session.id)
+            if backend is not None:
+                await stopped_within(backend.stop(), f"pre-accounts run {session.id}", timeout=4.0)
+            if driver is not None:
+                await stopped_within(asyncio.shield(driver), f"pre-accounts request {session.id}", timeout=5.0)
 
     async def _safe_backend_interrupt(self, backend: HarnessRun) -> None:
         """Best-effort background teardown of a wedged backend subprocess.
@@ -213,7 +230,7 @@ class ProcessesMixin(SessionManagerBase):
             return None
         return held
 
-    def _forget_backend(self, session: Session) -> None:
+    def _forget_backend(self, session: Session, expected: HarnessRun | None = None) -> None:
         """Detach a session from its CLI process and close out what that
         process was still doing.
 
@@ -221,6 +238,11 @@ class ProcessesMixin(SessionManagerBase):
         marked running is over, and saying so beats a card that spins for the
         rest of the session (native-subagents.md §7).
         """
+        from ..mcp_identity import revoke_run
+        if expected is not None and session._backend is not expected:
+            revoke_run(getattr(expected, "run_lease_id", None))
+            return
+        revoke_run(getattr(session._backend, "run_lease_id", None))
         session._backend = None
         session._held_run_at = None
         for key, run in list(session._subagents.items()):

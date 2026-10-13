@@ -173,9 +173,10 @@ async def test_owned_fork_survives_interrupt_refresh_and_restart(
         monkeypatch.setattr(session_manager, "_run_backend", stalled_turn)
         fork = session_manager.get_session(fork_id, owner)
         await session_manager.start_message(fork_id, "new request")
+        active = fork._active_task
         await asyncio.wait_for(entered.wait(), timeout=1)
         assert await session_manager.interrupt(fork_id)
-        await asyncio.wait_for(fork._active_task, timeout=1)
+        await asyncio.wait_for(active, timeout=1)
 
         # Reload from persisted rows as a restart would, then use the browser's
         # account-scoped list/detail paths. Neither path may hide this fork.
@@ -190,7 +191,14 @@ async def test_owned_fork_survives_interrupt_refresh_and_restart(
         assert detail.json()["reasoning_effort"] == "high"
         contents = [m["content"] for m in detail.json()["messages"]]
         assert contents[:2] == ["first", "answer"]
-        assert contents[-2:] == ["new request", "(interrupted by user)"]
+        assert contents[-2] == "new request"
+        outcome = detail.json()["messages"][-1]
+        assert outcome["type"] == "result" and outcome["is_error"] is True
+        assert outcome["content"]["kind"] == "outcome"
+        assert outcome["content"]["status"] == "interrupted"
+        assert outcome["content"]["code"] == "interrupted"
+        assert outcome["content"]["message"] == "(interrupted by user)"
+        assert outcome["content"]["request_id"]
         foreign = await ctx["client"].get(
             f"/api/sessions/{fork_id}", headers=_as(ctx["vera"]["token"])
         )

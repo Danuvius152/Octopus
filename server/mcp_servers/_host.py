@@ -44,7 +44,7 @@ def bearer() -> str:
     s = current_scope()
     if s is None:
         return os.environ.get("OCTOPUS_AUTH_TOKEN") or settings.auth_token
-    return mint(s.session_id, s.installation_id, s.user_id, s.wiki_task_id)
+    return mint(s.session_id, s.installation_id, s.user_id, s.wiki_task_id, s.run_lease_id, s.work_id)
 
 
 def headers() -> dict[str, str]:

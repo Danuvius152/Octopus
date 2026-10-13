@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { normalizeMessage, type MessageInput } from "../lib/turnOutcome";
+import { readDispatchState, type DispatchState } from "../lib/sessionDispatch";
 import type {
   AgentRead as ApiAgentRead,
   ApplicationRead as ApiApplicationRead,
@@ -38,6 +40,8 @@ export interface Message {
   role: "user" | "assistant" | "system" | "tool";
   type: string;
   content?: string;
+  outcome?: import("../lib/turnOutcome").TurnOutcome;
+  recovery?: import("../lib/turnOutcome").TurnRecovery;
   tool_name?: string;
   tool_input?: Record<string, unknown>;
   tool_use_id?: string;
@@ -79,6 +83,9 @@ export interface QuestionItem {
 export interface PendingQuestion {
   question_id: string;
   questions: QuestionItem[];
+  deadline?: string | null;
+  request_id?: string | null;
+  attempt_id?: string | null;
 }
 
 /** Return `map` without `key`, or `map` itself when the key isn't there.
@@ -220,8 +227,8 @@ interface SessionStore {
   setActiveSessionId: (id: string | null) => void;
 
   messages: Record<string, Message[]>;
-  addMessage: (sessionId: string, msg: Message) => void;
-  setMessages: (sessionId: string, msgs: Message[]) => void;
+  addMessage: (sessionId: string, msg: MessageInput) => void;
+  setMessages: (sessionId: string, msgs: MessageInput[], preserveStreaming?: boolean) => void;
   // The transcript arrives windowed to the most recent messages
   // (polish-2026-09.md §4 B2): `oldestSeq` is the lowest seq held for a
   // session and the cursor the next page asks from, `hasMoreMessages` whether
@@ -239,7 +246,7 @@ interface SessionStore {
   // its scroll position across the prepend.
   prependMessages: (
     sessionId: string,
-    msgs: Message[],
+    msgs: MessageInput[],
     oldestSeq: number | null,
     hasMore: boolean
   ) => number;
@@ -286,12 +293,14 @@ interface SessionStore {
   upsertSubagent: (sessionId: string, run: SubagentRun) => void;
   setSubagents: (sessionId: string, runs: SubagentRun[]) => void;
 
-  // Per-session queue of messages waiting for the current run to finish.
-  // Mirrored from server `queued` / `dequeued` events; not persisted.
+  dispatchStates: Record<string, DispatchState>;
+  dispatchGeneration: string | null;
+  retiredDispatchGenerations: string[];
+  applyDispatchState: (sessionId: string, state: unknown, expectedGeneration?: string | null) => boolean;
+  // Compatibility for older servers. Current queue state is replaced from
+  // the authoritative dispatch snapshot, never inferred from queue events.
   pendingQueue: Record<string, string[]>;
   setPendingQueue: (sessionId: string, queue: string[]) => void;
-  enqueuePending: (sessionId: string, content: string) => void;
-  dequeuePending: (sessionId: string) => void;
   clearPending: (sessionId: string) => void;
 
   // Deferred /fork requests (session-fork.md). When `/fork` is typed
@@ -305,6 +314,7 @@ interface SessionStore {
 
   // Active AskUserQuestion prompts waiting for the user's answer.
   pendingQuestions: Record<string, PendingQuestion[]>;
+  closedQuestionIds: Record<string, Record<string, true>>;
   setPendingQuestions: (sessionId: string, qs: PendingQuestion[]) => void;
   addPendingQuestion: (sessionId: string, q: PendingQuestion) => void;
   removePendingQuestion: (sessionId: string, questionId: string) => void;
@@ -399,6 +409,9 @@ export interface BgTask {
   truncated: boolean;
   started_at: string;
   completed_at: string | null;
+  idle_timeout_seconds?: number | null;
+  timeout_seconds?: number | null;
+  stop_reason?: string | null;
 }
 
 // Live record of an agent-to-agent delegation, mirrored from
@@ -412,6 +425,7 @@ export interface Delegation {
   target_agent_id: string;
   target_agent_name: string;
   request: string;
+  work_id?: string;
   state: "running" | "completed" | "failed" | "cancelled";
   created_at: string;
   finished_at: string | null;
@@ -425,7 +439,10 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   token: localStorage.getItem("octopus_token") || "",
   setToken: (t) => {
     localStorage.setItem("octopus_token", t);
-    set({ token: t });
+    set(t ? { token: t } : {
+      token: t, dispatchStates: {}, dispatchGeneration: null,
+      retiredDispatchGenerations: [], pendingQueue: {},
+    });
   },
 
   agents: [],
@@ -564,17 +581,26 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       return {
         messages: {
           ...s.messages,
-          [sessionId]: [...(s.messages[sessionId] || []), msg],
+          [sessionId]: [...(s.messages[sessionId] || []), normalizeMessage(msg)],
         },
         streamingText: streaming,
       };
     }),
-  setMessages: (sessionId, msgs) =>
+  setMessages: (sessionId, msgs, preserveStreaming = false) =>
     set((s) => ({
-      messages: { ...s.messages, [sessionId]: msgs },
+      messages: { ...s.messages, [sessionId]: msgs.map(normalizeMessage) },
+      closedQuestionIds: {
+        ...s.closedQuestionIds,
+        [sessionId]: {
+          ...s.closedQuestionIds[sessionId],
+          ...Object.fromEntries(msgs.filter((m) =>
+            (m.type === "question_answer" || m.type === "question_closed") && m.tool_use_id
+          ).map((m) => [m.tool_use_id!, true as const])),
+        },
+      },
       // A snapshot reload is authoritative; any half-streamed text it doesn't
       // contain is stale by definition.
-      streamingText: dropKey(s.streamingText, sessionId),
+      streamingText: preserveStreaming ? s.streamingText : dropKey(s.streamingText, sessionId),
     })),
 
   oldestSeq: {},
@@ -607,7 +633,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     set((cur) => ({
       messages: {
         ...cur.messages,
-        [sessionId]: [...fresh, ...(cur.messages[sessionId] || [])],
+        [sessionId]: [...fresh.map(normalizeMessage), ...(cur.messages[sessionId] || [])],
       },
       oldestSeq: {
         ...cur.oldestSeq,
@@ -712,28 +738,40 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       agentConnectorIds: { ...s.agentConnectorIds, [agentId]: ids },
     })),
 
+  dispatchStates: {},
+  dispatchGeneration: null,
+  retiredDispatchGenerations: [],
+  applyDispatchState: (sessionId, value, expectedGeneration) => {
+    const snapshot = readDispatchState(value);
+    if (!snapshot) return false;
+    let applied = false;
+    set((s) => {
+      if (s.retiredDispatchGenerations.includes(snapshot.generation)) return s;
+      if (expectedGeneration !== undefined && expectedGeneration !== s.dispatchGeneration &&
+          snapshot.generation !== s.dispatchGeneration) return s;
+      const changed = s.dispatchGeneration !== null && s.dispatchGeneration !== snapshot.generation;
+      const previous = changed ? undefined : s.dispatchStates[sessionId];
+      if (previous && snapshot.revision <= previous.revision) return s;
+      applied = true;
+      return {
+        dispatchGeneration: snapshot.generation,
+        ...(changed ? { closedQuestionIds: {}, pendingQuestions: {} } : {}),
+        retiredDispatchGenerations: changed
+          ? [...s.retiredDispatchGenerations, s.dispatchGeneration!] : s.retiredDispatchGenerations,
+        dispatchStates: { ...(changed ? {} : s.dispatchStates), [sessionId]: snapshot },
+        pendingQueue: { ...(changed ? {} : s.pendingQueue), [sessionId]: snapshot.items.map((item) => item.summary) },
+      };
+    });
+    return applied;
+  },
   pendingQueue: {},
   setPendingQueue: (sessionId, queue) =>
     set((s) => {
+      if (s.dispatchStates[sessionId]) return s;
       const next = { ...s.pendingQueue };
       if (queue.length === 0) delete next[sessionId];
       else next[sessionId] = queue;
       return { pendingQueue: next };
-    }),
-  enqueuePending: (sessionId, content) =>
-    set((s) => ({
-      pendingQueue: {
-        ...s.pendingQueue,
-        [sessionId]: [...(s.pendingQueue[sessionId] || []), content],
-      },
-    })),
-  dequeuePending: (sessionId) =>
-    set((s) => {
-      const cur = s.pendingQueue[sessionId] || [];
-      if (cur.length === 0) return s;
-      return {
-        pendingQueue: { ...s.pendingQueue, [sessionId]: cur.slice(1) },
-      };
     }),
   clearPending: (sessionId) =>
     set((s) => {
@@ -757,20 +795,27 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     }),
 
   pendingQuestions: {},
+  closedQuestionIds: {},
   setPendingQuestions: (sessionId, qs) =>
     set((s) => {
+      const pending = qs.filter((q) => !s.closedQuestionIds[sessionId]?.[q.question_id]);
       const next = { ...s.pendingQuestions };
-      if (qs.length === 0) delete next[sessionId];
-      else next[sessionId] = qs;
+      if (pending.length === 0) delete next[sessionId];
+      else next[sessionId] = pending;
       return { pendingQuestions: next };
     }),
   addPendingQuestion: (sessionId, q) =>
-    set((s) => ({
-      pendingQuestions: {
-        ...s.pendingQuestions,
-        [sessionId]: [...(s.pendingQuestions[sessionId] || []), q],
-      },
-    })),
+    set((s) => {
+      if (s.closedQuestionIds[sessionId]?.[q.question_id]) return s;
+      return {
+        pendingQuestions: {
+          ...s.pendingQuestions,
+          [sessionId]: [...(s.pendingQuestions[sessionId] || []).filter((current) =>
+            current.question_id !== q.question_id
+          ), q],
+        },
+      };
+    }),
   removePendingQuestion: (sessionId, questionId) =>
     set((s) => {
       const cur = s.pendingQuestions[sessionId] || [];
@@ -778,7 +823,13 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const next = { ...s.pendingQuestions };
       if (filtered.length === 0) delete next[sessionId];
       else next[sessionId] = filtered;
-      return { pendingQuestions: next };
+      return {
+        pendingQuestions: next,
+        closedQuestionIds: {
+          ...s.closedQuestionIds,
+          [sessionId]: { ...s.closedQuestionIds[sessionId], [questionId]: true },
+        },
+      };
     }),
 
   connected: false,
@@ -829,7 +880,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   upsertDelegation: (parentSessionId, d) =>
     set((s) => {
       const current = s.delegations[parentSessionId] || [];
-      const idx = current.findIndex((x) => x.delegation_id === d.delegation_id);
+      const idx = current.findIndex((x) => x.delegation_id === d.delegation_id && x.work_id === d.work_id);
       const next =
         idx >= 0
           ? [

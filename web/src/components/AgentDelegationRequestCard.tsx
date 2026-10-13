@@ -10,8 +10,9 @@
  * populated by either the snapshot fetch (on session load) or the
  * REST round-trip the tool_use kicked off. Once the sibling
  * tool_result arrives, we match the live record by the
- * `delegation_id` parsed from "Started delegation `<id>`". Before
- * that, we briefly fall back to (target_agent_name, request).
+ * `delegation_id` and `work_id` captured in its own tool receipt.
+ * Name/request and legacy receipts can display a session; cancelling
+ * requires the receipt's exact work identity.
  */
 
 import { useEffect, useMemo, useState } from "react";
@@ -69,20 +70,21 @@ export function AgentDelegationRequestCard({
   const wantName = (agentName || "").toLowerCase();
 
   // Server-truth path: the tool_result for THIS tool_use carries
-  // "Started delegation `<id>`" — that id is the canonical identity
-  // of the delegation. We match by it whenever the tool_result has
+  // "Started delegation `<id>`" plus its work_id. The session id alone
+  // cannot authorize cancellation of a subsequent round. We match it when the tool_result has
   // already arrived; that's robust to any request-string round-trip
   // differences between what the model wrote and what the server
   // stored (which was tripping the (name,request) match in real
   // browser runs).
-  const delegationIdFromResult = useMemo(() => {
+  const identityFromResult = useMemo(() => {
     if (!toolUseId || !messages) return null;
     const tr = messages.find(
       (m) => m.type === "tool_result" && m.tool_use_id === toolUseId
     );
     if (!tr || typeof tr.content !== "string") return null;
-    const m = tr.content.match(/Started delegation `([A-Za-z0-9]+)`/);
-    return m ? m[1] : null;
+    const m = tr.content.match(/(?:Started|Continued) delegation `([A-Za-z0-9]+)`/);
+    const work = tr.content.match(/work_id=([A-Za-z0-9-]+)/);
+    return m ? { delegationId: m[1], workId: work?.[1] } : null;
   }, [messages, toolUseId]);
 
   // Fall back to (name, request) match only when the tool_result
@@ -95,8 +97,9 @@ export function AgentDelegationRequestCard({
   // applies, render the card in a starting-state with no controls.
   const match = useSessionStore((s) => {
     const list = s.delegations[sessionId] || [];
-    if (delegationIdFromResult) {
-      return list.find((d) => d.delegation_id === delegationIdFromResult);
+    if (identityFromResult) {
+      return list.find((d) => d.delegation_id === identityFromResult.delegationId &&
+        (!identityFromResult.workId || d.work_id === identityFromResult.workId));
     }
     return [...list]
       .reverse()
@@ -189,7 +192,7 @@ export function AgentDelegationRequestCard({
   };
 
   const cancel = async () => {
-    if (!match) return;
+    if (!match || !identityFromResult?.workId || match.work_id !== identityFromResult.workId) return;
     setCancelling(true);
     const url = `${window.location.origin}/api/sessions/${encodeURIComponent(
       sessionId
@@ -201,7 +204,7 @@ export function AgentDelegationRequestCard({
           Authorization: `Bearer ${token}`,
           "Content-Type": "application/json",
         },
-        body: JSON.stringify({ reason: "cancelled from UI" }),
+        body: JSON.stringify({ reason: "cancelled from UI", work_id: match.work_id }),
       });
     } finally {
       setCancelling(false);
@@ -261,7 +264,7 @@ export function AgentDelegationRequestCard({
             <IconExternalLink size={12} />
           </button>
         )}
-        {state === "running" && match && (
+        {state === "running" && match && identityFromResult?.workId && identityFromResult.workId === match.work_id && (
           <button
             type="button"
             onClick={cancel}

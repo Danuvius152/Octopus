@@ -8,6 +8,7 @@
  */
 
 import { describe, expect, it } from "vitest";
+import { isAutoInjectedPrompt } from "./injectedTurns";
 
 import {
   IDLE,
@@ -20,6 +21,12 @@ import {
 const H = ["first", "second", "third"];
 
 describe("historyFromMessages", () => {
+  it("uses request provenance before textual injection markers", () => {
+    expect(historyFromMessages([
+      { role: "user", type: "text", content: "machine result without a marker", tool_input: { request_context: { source: "research" } } },
+      { role: "user", type: "text", content: "[bg-task-result] typed by a person", tool_input: { request_context: { source: "human" } } },
+    ], isAutoInjectedPrompt)).toEqual(["[bg-task-result] typed by a person"]);
+  });
   it("keeps the user's own text turns, oldest first", () => {
     expect(
       historyFromMessages([

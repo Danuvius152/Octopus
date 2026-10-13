@@ -2,7 +2,8 @@
 
 The `bg` server exposes three tools to the model:
 
-  - `bg_run(command, description?)` — start a fire-and-forget bg task,
+  - `bg_run(command, description?, idle_timeout_seconds?, timeout_seconds?)`
+    — start a fire-and-forget bg task,
     returns task_id immediately. Use this for anything that may take
     longer than ~30 seconds (long build, test suite, npm install) so
     the user's turn can end while the work proceeds. When the task
@@ -15,18 +16,10 @@ The `bg` server exposes three tools to the model:
     Useful on a resumed turn if the model needs to check the state of
     something it queued before.
 
-Channel: this process is a child of the `claude` CLI, NOT of Octopus's
-FastAPI server. We can't reach the BgTaskManager singleton directly —
-we have to go over HTTP. The parent Octopus process injects three env
-vars when spawning us:
-
-  OCTOPUS_API_BASE     e.g. "http://127.0.0.1:8000"
-  OCTOPUS_AUTH_TOKEN   the same bearer token everything else uses
-  OCTOPUS_SESSION_ID   the session this CLI invocation is bound to
-
-The session id is what scopes "this bg task belongs to that chat" — we
-don't trust the model to pass it correctly, so it's not a tool
-parameter.
+Channel: this namespace runs in Octopus's in-process HTTP MCP service.
+Its HTTP shim calls the session API with the verified MCP bearer scope;
+the model supplies commands and limits, while the scope supplies session,
+owner and logical work identity. The session id is never a tool parameter.
 """
 
 from __future__ import annotations
@@ -34,6 +27,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
+from typing import Annotated
 
 # Keep the import-path mirror from viewer.py — claude spawns us with
 # arbitrary cwd, so import-style "server.foo" needs the repo root on
@@ -44,7 +38,15 @@ if str(_REPO_ROOT) not in sys.path:
 
 import httpx  # noqa: E402
 from mcp.server.fastmcp import FastMCP
+from pydantic import Field, ValidationError
 
+from ..bg_tasks import (  # noqa: E402
+    DEFAULT_TIMEOUT_SECONDS,
+    IDLE_AFTER_OUTPUT_TIMEOUT_SECS,
+    MAX_TIMEOUT_SECONDS,
+    BgTaskLimits,
+    describe_limits,
+)
 from . import _host  # noqa: E402
 
 logging.basicConfig(
@@ -84,7 +86,12 @@ def _headers() -> dict[str, str] | None:
 
 
 @mcp.tool(name="run")
-def bg_run(command: str, description: str | None = None) -> str:
+def bg_run(
+    command: str,
+    description: str | None = None,
+    idle_timeout_seconds: Annotated[int, Field(strict=True, ge=0, le=MAX_TIMEOUT_SECONDS)] = IDLE_AFTER_OUTPUT_TIMEOUT_SECS,
+    timeout_seconds: Annotated[int, Field(strict=True, gt=0, le=MAX_TIMEOUT_SECONDS)] = DEFAULT_TIMEOUT_SECONDS,
+) -> str:
     """Start a background shell command in this session's working
     directory. Returns immediately with a task id; the command runs
     asynchronously and Octopus will inject a follow-up turn into this
@@ -104,6 +111,11 @@ def bg_run(command: str, description: str | None = None) -> str:
             in the follow-up turn (e.g. "running pytest"). The model
             should include this for any task it expects to outlast
             the current turn.
+        idle_timeout_seconds: After the first stdout/stderr byte, stop if both
+            streams stay silent this long. Default 60. Set 0 explicitly for a
+            test/build with long quiet phases; no command-name exemption exists.
+        timeout_seconds: Maximum total runtime, including quiet phases. Default
+            1800; must be a positive integer even when the idle check is disabled.
 
     Returns:
         A short string explaining what was started, including the
@@ -116,8 +128,15 @@ def bg_run(command: str, description: str | None = None) -> str:
         return "Error: bg server is misconfigured (env vars missing); cannot start."
     if not command.strip():
         return "Error: command must be a non-empty shell command string."
+    try:
+        limits = BgTaskLimits(
+            idle_timeout_seconds=idle_timeout_seconds, timeout_seconds=timeout_seconds,
+        )
+    except ValidationError:
+        return ("Error: idle_timeout_seconds must be a non-negative integer; "
+                "timeout_seconds must be a positive integer.")
     url = f"{api}/api/sessions/{sid}/bg-tasks"
-    body = {"command": command, "description": description}
+    body = {"command": command, "description": description, **limits.model_dump()}
     try:
         r = httpx.post(url, json=body, headers=hdrs, timeout=10.0)
     except httpx.HTTPError as e:
@@ -128,8 +147,9 @@ def bg_run(command: str, description: str | None = None) -> str:
     task_id = data.get("id", "?")
     desc = data.get("description")
     desc_part = f" ({desc})" if desc else ""
+    actual_limits = describe_limits(data.get("idle_timeout_seconds"), data.get("timeout_seconds"))
     return (
-        f"Started bg task `{task_id}`{desc_part}. The command is running in "
+        f"Started bg task `{task_id}`{desc_part} ({actual_limits}). The command is running in "
         f"the background; when it finishes you'll receive a follow-up turn "
         f"with the output. Tell the user briefly what's running, then end "
         f"your turn — don't wait."
@@ -206,6 +226,9 @@ def bg_list() -> str:
         line = f"  • {item['id']}  [{item['status']}]{desc}"
         if item.get("exit_code") is not None:
             line += f"  (exit={item['exit_code']})"
+        line += f"  ({describe_limits(item.get('idle_timeout_seconds'), item.get('timeout_seconds'))})"
+        if item.get("stop_reason") is not None:
+            line += f"  reason={item['stop_reason']}"
         lines.append(line)
     return "\n".join(lines)
 

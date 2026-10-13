@@ -249,6 +249,13 @@ class SessionsMixin(DatabaseBase):
         self._pending_appends += 1
         await self._maybe_flush()
 
+    async def get_session_owner(self, session_id: str) -> str | None:
+        """Resolve an event's owner even after its session leaves the live map."""
+        await self._ensure_connected()
+        cursor = await self.conn.execute("SELECT user_id FROM sessions WHERE id = ?", (session_id,))
+        row = await cursor.fetchone()
+        return row[0] if row else None
+
     async def load_messages(
         self,
         session_id: str,

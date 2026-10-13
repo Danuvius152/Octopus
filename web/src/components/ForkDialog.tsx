@@ -4,7 +4,7 @@ import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 // Which user-role messages the user never typed (bg-task results, delegation
 // replies, scheduled fires). Shared with the composer's history, because two
 // copies of that list drift and the drift is invisible until a marker is added.
-import { isAutoInjectedPrompt } from "../lib/injectedTurns";
+import { isAutoInjectedMessage } from "../lib/injectedTurns";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 
@@ -227,10 +227,10 @@ export function ForkDialog({
         if (cancelled) return;
         const msgs: UserMsg[] = (data.messages || [])
           .filter(
-            (mm: { role: string; type: string; content: unknown }) =>
+            (mm: { role: string; type: string; content: unknown; tool_input?: Record<string, unknown> }) =>
               mm.role === "user" &&
               mm.type === "text" &&
-              !isAutoInjectedPrompt(mm.content)
+              !isAutoInjectedMessage(mm)
           )
           .map((mm: { seq: number; content: unknown }) => ({
             seq: mm.seq,

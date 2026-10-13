@@ -8,6 +8,7 @@ so no call site moved.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
 from datetime import UTC, datetime
@@ -222,8 +223,7 @@ class LifecycleMixin(SessionManagerBase):
             )
             self._forget_backend(old)
         old._pending_queue.clear()
-        old._pending_questions.clear()
-        self._cancel_all_question_timers(old)
+        await self._close_session_questions(old, reason="archived")
 
         # Mark the DB row archived; drop it from the in-memory dict so
         # subsequent list/get calls don't surface it.
@@ -238,7 +238,7 @@ class LifecycleMixin(SessionManagerBase):
                     "old_session_id": old.id,
                     "new_session_id": None,
                     "name": old.name,
-                }
+                }, user_id=old.user_id,
             )
             return None
 
@@ -283,7 +283,7 @@ class LifecycleMixin(SessionManagerBase):
                 "old_session_id": old.id,
                 "new_session_id": new.id,
                 "name": new.name,
-            }
+            }, user_id=old.user_id,
         )
         return new
 
@@ -308,18 +308,49 @@ class LifecycleMixin(SessionManagerBase):
             or session.origin not in self._AUTO_ARCHIVE_ELIGIBLE
         ):
             return False
-        if session._active_task and not session._active_task.done():
-            return False  # still working — don't yank it
-        if self.db:
-            await self.db.update_session_field(session_id, archived=True)
-        self.sessions.pop(session_id, None)
+        def idle() -> bool:
+            return (
+                self.sessions.get(session_id) is session
+                and not session._dispatch_paused
+                and not session._pending_queue
+                and session._current_request is None
+                and not (session._active_task and not session._active_task.done())
+            )
+
+        reservation = object()
+        async with session._dispatch_lock:
+            if not idle() or session._archive_reservation is not None:
+                return False
+            session._archive_reservation = reservation
+            revision = session._dispatch_revision
+
+        async def restore_live_row() -> None:
+            if self.db and self.sessions.get(session_id) is session:
+                await self.db.update_session_field(session_id, archived=False)
+
+        try:
+            if self.db:
+                await self.db.update_session_field(session_id, archived=True)
+            async with session._dispatch_lock:
+                archived = idle() and session._dispatch_revision == revision
+                if archived:
+                    self.sessions.pop(session_id)
+            if not archived:
+                await restore_live_row()
+                return False
+        except BaseException:
+            await asyncio.shield(restore_live_row())
+            raise
+        finally:
+            if session._archive_reservation is reservation:
+                session._archive_reservation = None
         await self._broadcast(
             {
                 "type": "session_archived",
                 "old_session_id": session_id,
                 "new_session_id": None,
                 "name": session.name,
-            }
+            }, user_id=session.user_id,
         )
         return True
 
@@ -521,8 +552,7 @@ class LifecycleMixin(SessionManagerBase):
         if session is None:
             return False
         session._pending_queue.clear()
-        session._pending_questions.clear()
-        self._cancel_all_question_timers(session)
+        await self._close_session_questions(session, reason="deleted")
         if session._inner_task and not session._inner_task.done():
             session._inner_task.cancel()
         if session._active_task and not session._active_task.done():

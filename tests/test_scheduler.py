@@ -111,7 +111,8 @@ async def test_fire_appends_into_live_origin_session(setup, monkeypatch):
 
     started: dict = {}
 
-    async def fake_start(session_id, prompt):
+    async def fake_start(session_id, prompt, *, source):
+        assert source == "schedule"
         started["session_id"] = session_id
         started["prompt"] = prompt
 
@@ -345,7 +346,8 @@ async def test_run_at_schedule_deleted_after_fire_with_origin_session(setup, mon
 
     started: dict = {}
 
-    async def fake_start(session_id, prompt):
+    async def fake_start(session_id, prompt, *, source):
+        assert source == "schedule"
         started["session_id"] = session_id
 
     monkeypatch.setattr(mgr, "start_message", fake_start)
@@ -667,7 +669,8 @@ async def test_a_fire_does_not_pile_up_behind_another_fire_in_a_chat(
 
     started: list[str] = []
 
-    async def fake_start(session_id, prompt):
+    async def fake_start(session_id, prompt, *, source):
+        assert source == "schedule"
         started.append(prompt)
 
     monkeypatch.setattr(mgr, "start_message", fake_start)

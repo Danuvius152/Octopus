@@ -4,7 +4,8 @@ import uuid
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
-from ..deps import SessionMgr, scope_user_id_for
+from ..config import settings
+from ..deps import SessionMgr, accounts_exist, scope_user_id_for
 from ..sessions.turns import QuotaExceeded
 
 logger = logging.getLogger(__name__)
@@ -35,9 +36,41 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
     logger.info("WebSocket client connected")
 
     conn_id = uuid.uuid4().hex
+    socket_token = token
+    legacy_access_token = token == settings.auth_token
+    closed = False
+
+    async def still_authorized(message: dict | None = None) -> bool:
+        nonlocal socket_token, closed
+        if closed:
+            return False
+        valid, owner = await scope_user_id_for(socket_token)
+        if closed:
+            return False
+        if valid and owner == user_id:
+            return True
+        # Rotation deliberately hands a still-connected legacy client its new
+        # credential. Only this trusted server frame may bridge that change;
+        # account adoption never does.
+        if (
+            message is not None and message.get("type") == "auth_token_rotated"
+            and legacy_access_token and user_id is None and not await accounts_exist()
+        ):
+            replacement = message.get("token")
+            if replacement is None:
+                return True  # Deliver the server's explicit revocation notice.
+            if isinstance(replacement, str) and replacement == settings.auth_token:
+                socket_token = replacement
+                return True
+        closed = True
+        session_manager.remove_broadcast(conn_id)
+        await ws.close(code=4001, reason="Unauthorized")
+        return False
 
     async def broadcast(msg: dict):
         try:
+            if not await still_authorized(msg):
+                return
             await ws.send_json(msg)
         except (WebSocketDisconnect, RuntimeError):
             # The client is gone, or Starlette already sent the close frame.
@@ -52,8 +85,10 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
     session_manager.on_broadcast(conn_id, broadcast, user_id)
 
     try:
-        while True:
+        while not closed:
             raw = await ws.receive_text()
+            if not await still_authorized():
+                return
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
@@ -109,13 +144,24 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
 
             elif msg_type == "interrupt":
                 session_id = data.get("session_id")
-                if session_id:
+                session = session_manager.get_session(session_id) if session_id else None
+                if session is not None and session.user_id == user_id:
                     await session_manager.interrupt(session_id)
+
+            elif msg_type == "resume_dispatch":
+                session_id = data.get("session_id")
+                session = session_manager.get_session(session_id) if session_id else None
+                if session is not None and session.user_id == user_id:
+                    try:
+                        await session_manager.resume_dispatch(session_id)
+                    except QuotaExceeded as exc:
+                        await ws.send_json({"type": "error", "session_id": session_id, "message": str(exc)})
 
             elif msg_type == "approve_tool":
                 session_id = data.get("session_id")
                 tool_use_id = data.get("tool_use_id")
-                if session_id and tool_use_id:
+                session = session_manager.get_session(session_id) if session_id else None
+                if session is not None and session.user_id == user_id and tool_use_id:
                     ok = await session_manager.approve_tool(session_id, tool_use_id)
                     if not ok:
                         await ws.send_json(
@@ -130,7 +176,8 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                 session_id = data.get("session_id")
                 tool_use_id = data.get("tool_use_id")
                 reason = data.get("reason", "")
-                if session_id and tool_use_id:
+                session = session_manager.get_session(session_id) if session_id else None
+                if session is not None and session.user_id == user_id and tool_use_id:
                     ok = await session_manager.deny_tool(
                         session_id, tool_use_id, reason
                     )
@@ -147,7 +194,8 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                 session_id = data.get("session_id")
                 question_id = data.get("question_id")
                 answers = data.get("answers")
-                if session_id and question_id and isinstance(answers, list):
+                session = session_manager.get_session(session_id) if session_id else None
+                if session is not None and session.user_id == user_id and question_id and isinstance(answers, list):
                     ok = await session_manager.answer_question(
                         session_id, question_id, answers
                     )

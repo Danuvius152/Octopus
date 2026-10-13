@@ -101,6 +101,10 @@ class DatabaseBase:
             "truncated": bool(row[9]),
             "started_at": row[10],
             "completed_at": row[11],
+            "idle_timeout_seconds": row[12],
+            "timeout_seconds": row[13],
+            "stop_reason": row[14],
+            "work_id": row[15],
         }
     @staticmethod
     def _row_to_connector(row: sqlite3.Row) -> dict[str, Any]:
@@ -190,7 +194,8 @@ class DatabaseBase:
     )
     _BG_TASK_COLS = (
         "id, session_id, command, description, working_dir, status, "
-        "exit_code, stdout, stderr, truncated, started_at, completed_at"
+        "exit_code, stdout, stderr, truncated, started_at, completed_at, "
+        "idle_timeout_seconds, timeout_seconds, stop_reason, work_id"
     )
     _RESEARCH_COLS = (
         "id, session_id, question, status, phase, error, report_path, cost, "
@@ -215,6 +220,13 @@ class DatabaseBase:
     # `schedules` columns are applied after the schedule migrations, which
     # rebuild that table.
     _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+        # Old bg records never stored their effective limits or stop cause.
+        ("bg_tasks", "idle_timeout_seconds",
+         "ALTER TABLE bg_tasks ADD COLUMN idle_timeout_seconds INTEGER"),
+        ("bg_tasks", "timeout_seconds",
+         "ALTER TABLE bg_tasks ADD COLUMN timeout_seconds INTEGER"),
+        ("bg_tasks", "stop_reason", "ALTER TABLE bg_tasks ADD COLUMN stop_reason TEXT"),
+        ("bg_tasks", "work_id", "ALTER TABLE bg_tasks ADD COLUMN work_id TEXT"),
         # Per-backend auth.
         ("sessions", "credential_id", "ALTER TABLE sessions ADD COLUMN credential_id TEXT"),
         # /archive — hides the row from the default list, keeps it in the DB.

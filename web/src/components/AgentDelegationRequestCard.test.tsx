@@ -32,6 +32,7 @@ beforeEach(() => {
     token: "tok",
     sessions: [],
     delegations: {},
+    messages: {},
     activeAgentId: null,
     activeSessionId: null,
   });
@@ -47,7 +48,7 @@ afterEach(() => {
 });
 
 describe("AgentDelegationRequestCard", () => {
-  it("renders 'running' when a matching delegation is in the store", () => {
+  it("renders 'running' when a matching delegation is in the store", async () => {
     useSessionStore.getState().upsertDelegation("parent", makeDelegation());
     render(
       <AgentDelegationRequestCard
@@ -60,7 +61,8 @@ describe("AgentDelegationRequestCard", () => {
     );
     expect(screen.getByText(/Asked Vera/)).toBeInTheDocument();
     expect(screen.getByText("running")).toBeInTheDocument();
-    expect(screen.getByTitle(/cancel delegation/i)).toBeInTheDocument();
+    expect(screen.queryByTitle(/cancel delegation/i)).toBeNull();
+    await act(async () => {});
   });
 
   it("renders 'replied' on completed state and hides the cancel button", () => {
@@ -147,7 +149,7 @@ describe("AgentDelegationRequestCard", () => {
     expect(screen.queryByTitle(/cancel delegation/i)).toBeNull();
   });
 
-  it("matches by lowercase name (so 'vera' tool_input finds 'Vera' record)", () => {
+  it("matches by lowercase name (so 'vera' tool_input finds 'Vera' record)", async () => {
     useSessionStore.getState().upsertDelegation("parent", makeDelegation());
     render(
       <AgentDelegationRequestCard
@@ -162,6 +164,7 @@ describe("AgentDelegationRequestCard", () => {
     // surfaces the canonical name from the record.
     expect(screen.getByText(/Asked vera/)).toBeInTheDocument();
     expect(screen.getByText("running")).toBeInTheDocument();
+    await act(async () => {});
   });
 
   it("renders a placeholder state while the matching record is absent", () => {
@@ -194,7 +197,7 @@ describe("AgentDelegationRequestCard", () => {
     expect(screen.getByText(/a\.tsx, b\.tsx/)).toBeInTheDocument();
   });
 
-  it("the open-child button switches active session + agent", () => {
+  it("the open-child button switches active session + agent", async () => {
     useSessionStore.setState({
       sessions: [
         {
@@ -231,10 +234,15 @@ describe("AgentDelegationRequestCard", () => {
     fireEvent.click(screen.getByTitle(/open vera's session/i));
     expect(useSessionStore.getState().activeSessionId).toBe("deleg-001");
     expect(useSessionStore.getState().activeAgentId).toBe("vera-id");
+    await act(async () => {});
   });
 
   it("the cancel button POSTs to the cancel route", async () => {
-    useSessionStore.getState().upsertDelegation("parent", makeDelegation());
+    useSessionStore.getState().upsertDelegation("parent", makeDelegation({ delegation_id: "abc001", work_id: "observed-round" }));
+    useSessionStore.getState().setMessages("parent", [{
+      role: "assistant", type: "tool_result", tool_use_id: "tool-cancel",
+      content: "Started delegation `abc001` to Vera. work_id=observed-round",
+    }]);
     const fetchMock = vi.fn(
       async () => new Response("{}", { status: 200 })
     );
@@ -242,7 +250,7 @@ describe("AgentDelegationRequestCard", () => {
     render(
       <AgentDelegationRequestCard
         sessionId="parent"
-        toolUseId={undefined}
+        toolUseId="tool-cancel"
         agentName="Vera"
         request="review the readme"
         files={undefined}
@@ -253,9 +261,47 @@ describe("AgentDelegationRequestCard", () => {
     });
     expect(fetchMock).toHaveBeenCalledWith(
       expect.stringContaining(
-        "/api/sessions/parent/delegations/deleg-001/cancel"
+        "/api/sessions/parent/delegations/abc001/cancel"
       ),
-      expect.anything()
+      expect.objectContaining({ body: JSON.stringify({ reason: "cancelled from UI", work_id: "observed-round" }) })
     );
+  });
+
+  it("keeps an old tool card attached to its round after a follow-up", () => {
+    useSessionStore.setState({
+      delegations: { parent: [
+        makeDelegation({ delegation_id: "abc001", work_id: "newround", request: "follow up" }),
+        makeDelegation({ delegation_id: "abc001", work_id: "oldround", state: "completed" }),
+      ] },
+      messages: { parent: [{
+        role: "assistant", type: "tool_result", tool_use_id: "tool-old",
+        content: "Started delegation `abc001` to Vera. work_id=oldround",
+      }] },
+    });
+    render(<AgentDelegationRequestCard
+      sessionId="parent" toolUseId="tool-old" agentName="Vera"
+      request="review the readme" files={undefined}
+    />);
+    expect(screen.getByText("replied")).toBeInTheDocument();
+    expect(screen.queryByTitle(/cancel delegation/i)).toBeNull();
+  });
+
+  it("does not give a legacy receipt permission to cancel a newer round", async () => {
+    useSessionStore.setState({
+      delegations: { parent: [
+        makeDelegation({ delegation_id: "abc001", work_id: "newround", request: "follow up" }),
+        makeDelegation({ delegation_id: "abc001", work_id: "oldround", state: "completed" }),
+      ] },
+      messages: { parent: [{
+        role: "assistant", type: "tool_result", tool_use_id: "tool-legacy",
+        content: "Started delegation `abc001` to Vera.",
+      }] },
+    });
+    render(<AgentDelegationRequestCard
+      sessionId="parent" toolUseId="tool-legacy" agentName="Vera"
+      request="review the readme" files={undefined}
+    />);
+    expect(screen.queryByTitle(/cancel delegation/i)).toBeNull();
+    await act(async () => {});
   });
 });

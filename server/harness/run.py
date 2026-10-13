@@ -169,6 +169,7 @@ class RunConfig:
     user_id: str | None = None
     wiki_task_id: str | None = None
     wiki_mode: str | None = None
+    work_id: str | None = None
     system_prompt: str | None = None   # agent persona
     model: str | None = None
     reasoning_effort: str | None = None
@@ -201,6 +202,11 @@ class HarnessRun:
     def __init__(self, profile: RuntimeProfile, config: RunConfig | None = None) -> None:
         self._profile = profile
         self._config = config or RunConfig()
+        self.run_lease_id = uuid_module.uuid4().hex
+        self.work_id = self._config.work_id
+        self._lease_closed = False
+        self._spawn_task: asyncio.Task[asyncio.subprocess.Process] | None = None
+        self._spawn_cleanup: asyncio.Task[None] | None = None
         self._parser = profile.new_event_parser()
         self._process: asyncio.subprocess.Process | None = None
         self._event_queue: asyncio.Queue[HarnessEvent | object] = asyncio.Queue()
@@ -253,6 +259,8 @@ class HarnessRun:
             session_id=self._config.session_id,
             user_id=self._config.user_id,
             wiki_task_id=self._config.wiki_task_id,
+            run_lease_id=self.run_lease_id,
+            work_id=self.work_id,
         )
         system_prompt = assembly.compose_system_prompt(
             self._config.system_prompt,
@@ -305,20 +313,65 @@ class HarnessRun:
     ) -> None:
         if self._process is not None:
             raise RuntimeError("HarnessRun already started")
+        if self._lease_closed:
+            raise RuntimeError("HarnessRun has been retired")
+
+        from ..mcp_identity import work_is_open
+        if not work_is_open(self.work_id):
+            raise RuntimeError("Delegated work is closed")
 
         ctx = self._make_context(prompt, working_dir, resume_id, credential)
         argv, kwargs = self._profile.build_turn_argv(ctx)
         argv, kwargs = prepare_spawn(argv, kwargs)
 
+        from ..mcp_identity import register_run
+        if self._config.session_id:
+            register_run(self.run_lease_id, self._config.session_id, self._config.user_id, self.work_id)
+
         logger.info("Spawning harness %s: %s (cwd=%s)", self._profile.backend, argv, kwargs.get("cwd"))
-        self._process = await asyncio.create_subprocess_exec(
+        spawn = asyncio.create_task(asyncio.create_subprocess_exec(
             *argv,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             limit=_STDOUT_LINE_LIMIT_BYTES,
             **kwargs,
-        )
+        ))
+        self._spawn_task = spawn
+        try:
+            process = await asyncio.shield(spawn)
+        except asyncio.CancelledError:
+            # A transport can have spawned the process before returning its
+            # handle. Keep that reservation alive until the captured group is
+            # reaped; cancellation must not lose the process reference.
+            self._lease_closed = True
+            from ..mcp_identity import revoke_run
+            revoke_run(self.run_lease_id)
+
+            async def reap_aborted_spawn() -> None:
+                try:
+                    abandoned = await spawn
+                    _terminate_process_group(abandoned, signal.SIGKILL)
+                    await asyncio.wait_for(abandoned.wait(), timeout=4.0)
+                except Exception:
+                    logger.exception("Failed to reap aborted harness startup")
+                finally:
+                    self._spawn_task = None
+            self._spawn_cleanup = asyncio.create_task(reap_aborted_spawn(), name="harness-startup-cleanup")
+            raise
+        except Exception:
+            self._lease_closed = True
+            from ..mcp_identity import revoke_run
+            revoke_run(self.run_lease_id)
+            raise
+        finally:
+            if spawn.done():
+                self._spawn_task = None
+        if self._lease_closed or not work_is_open(self.work_id):
+            _terminate_process_group(process, signal.SIGKILL)
+            await asyncio.wait_for(process.wait(), timeout=4.0)
+            raise asyncio.CancelledError
+        self._process = process
         self._stdout_task = asyncio.create_task(
             self._read_stdout(), name=f"{self._profile.backend}-stdout"
         )
@@ -393,6 +446,7 @@ class HarnessRun:
         """
         parts = [
             self._profile.backend,
+            self.work_id or "",
             self._config.wiki_task_id or "",
             self._config.wiki_mode or "",
             self._config.system_prompt or "",
@@ -479,6 +533,9 @@ class HarnessRun:
 
     async def stop(self) -> None:
         """Terminate the subprocess, drain reader tasks. Idempotent."""
+        self._lease_closed = True
+        from ..mcp_identity import revoke_run
+        revoke_run(self.run_lease_id)
         proc = self._process
         if proc is None:
             return

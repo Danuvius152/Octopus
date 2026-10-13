@@ -189,6 +189,15 @@ async def bootstrap_first_account(
 
     summary: dict[str, Any] = {"user_id": user["id"], "username": user["username"]}
 
+    # Ownership changes invalidate the authority baked into a running CLI.
+    # Stop old requests before the re-key/adoption awaits; new turns resume
+    # their transcripts with the account's freshly scoped runtime.
+    if session_manager is not None:
+        await session_manager.retire_ownerless_runs()
+    else:
+        from .mcp_identity import revoke_ownerless_runs
+        revoke_ownerless_runs()
+
     # Secrets before rows: a failure here must not leave rows pointing at an
     # account whose credentials do not open.
     summary["reencrypted"] = await _rekey_secrets(

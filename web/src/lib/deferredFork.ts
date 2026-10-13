@@ -12,7 +12,8 @@
 export function isSessionBusy(
   status: string | undefined,
   queueLen: number,
-  questionsLen: number
+  questionsLen: number,
+  dispatchPaused = false,
 ): boolean {
-  return status !== "idle" || queueLen > 0 || questionsLen > 0;
+  return dispatchPaused || status !== "idle" || queueLen > 0 || questionsLen > 0;
 }

@@ -1,0 +1,192 @@
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { act, cleanup, render, screen } from "@testing-library/react";
+import { VirtuosoMockContext } from "react-virtuoso";
+import { ChatView } from "./ChatView";
+import { handleWsMessage, useWebSocket } from "../hooks/useWebSocket";
+import { applyTranscript } from "../lib/transcript";
+import { applySessionSnapshot } from "../lib/hydrateSession";
+import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
+
+const sid = "question-lifecycle";
+const question = { question: "Proceed?", options: [{ label: "Yes" }, { label: "No" }] };
+const requested = {
+  type: "question_request", session_id: sid, seq: 1, question_id: "q1",
+  questions: [question], deadline: "2026-10-13T08:30:00Z", request_id: "r1", attempt_id: "a1",
+};
+const closed = {
+  type: "question_closed", session_id: sid, seq: 2, question_id: "q1",
+  reason: "interrupted", message: "Question closed: interrupted. No answer was received.",
+};
+
+beforeEach(() => useSessionStore.setState({
+  activeSessionId: sid,
+  sessions: [{ id: sid, name: "Question", working_dir: "/tmp", created_at: "2026-10-13", status: "running" } as SessionInfo],
+  agents: [], messages: {}, lastAppliedSeq: {}, pendingQuestions: {}, pendingQueue: {}, closedQuestionIds: {},
+  streamingText: {}, pendingForks: {}, credentials: [], backendModels: {},
+  dispatchGeneration: null, retiredDispatchGenerations: [], dispatchStates: {},
+}));
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+function renderChat() {
+  return render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
+    <ChatView sendMessage={vi.fn()} interrupt={vi.fn()} approveTool={vi.fn()} denyTool={vi.fn()}
+      answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />
+  </VirtuosoMockContext.Provider>);
+}
+
+it("closes the live form and renders the same closure after history reload and replay", async () => {
+  handleWsMessage(requested);
+  renderChat();
+  expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
+  expect(useSessionStore.getState().pendingQuestions[sid][0]).toMatchObject({
+    deadline: requested.deadline, request_id: "r1", attempt_id: "a1",
+  });
+  act(() => handleWsMessage(closed));
+  expect(screen.queryByRole("button", { name: "Submit" })).toBeNull();
+  expect(await screen.findByText(closed.message)).toBeTruthy();
+  const live = useSessionStore.getState().messages[sid];
+  act(() => {
+    applyTranscript(sid, { messages: live, next_message_seq: 3 });
+    useSessionStore.getState().setPendingQuestions(sid, []);
+    handleWsMessage(requested);
+    handleWsMessage(closed);
+  });
+  expect(screen.queryByRole("button", { name: "Submit" })).toBeNull();
+  expect(screen.getAllByText(closed.message)).toHaveLength(1);
+  expect(useSessionStore.getState().messages[sid]).toHaveLength(2);
+});
+
+it("keeps an already closed question closed when an old pending snapshot arrives", async () => {
+  const dispatch = { generation: "service-a", revision: 1, paused: false, items: [], active_request_id: "r1" };
+  handleWsMessage({ type: "dispatch_state", session_id: sid, dispatch_state: dispatch });
+  handleWsMessage(requested);
+  renderChat();
+  expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
+  act(() => handleWsMessage(closed));
+  expect(await screen.findByText(closed.message)).toBeTruthy();
+  act(() => {
+    applySessionSnapshot(sid, {
+      dispatch_state: dispatch, next_message_seq: 2,
+      messages: [{ role: "assistant", type: "question_request", seq: 1, tool_use_id: "q1", tool_input: { questions: [question] } }],
+      pending_questions: [{ question_id: "q1", questions: [question] }],
+    }, "service-a");
+    handleWsMessage({ ...requested, seq: undefined });
+  });
+  expect(screen.queryByRole("button", { name: "Submit" })).toBeNull();
+  expect(await screen.findByText(closed.message)).toBeTruthy();
+  expect(useSessionStore.getState().messages[sid]).toHaveLength(2);
+});
+
+it("closes a form when history records its resolution before the pending snapshot is applied", async () => {
+  handleWsMessage(requested);
+  renderChat();
+  expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
+  act(() => {
+    applySessionSnapshot(sid, {
+      next_message_seq: 3,
+      messages: [
+        { role: "assistant", type: "question_request", seq: 1, tool_use_id: "q1", tool_input: { questions: [question] } },
+        { role: "user", type: "question_answer", seq: 2, tool_use_id: "q1", content: "Q: Proceed?\nA: Yes" },
+      ],
+      pending_questions: [{ question_id: "q1", questions: [question] }],
+    });
+  });
+  expect(screen.queryByRole("button", { name: "Submit" })).toBeNull();
+  expect(await screen.findByText(/A: Yes/)).toBeTruthy();
+});
+
+it("keeps a newer WebSocket question answerable when the earlier HTTP refetch completes", async () => {
+  class Socket {
+    static OPEN = 1;
+    static CONNECTING = 0;
+    static instances: Socket[] = [];
+    readyState = 0;
+    onopen: (() => void) | null = null;
+    onclose: ((event: { code: number }) => void) | null = null;
+    onerror: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    constructor() { Socket.instances.push(this); }
+    close() { this.readyState = 3; }
+  }
+  let resolveDetail!: (response: Response) => void;
+  const detail = new Promise<Response>((resolve) => { resolveDetail = resolve; });
+  vi.stubGlobal("WebSocket", Socket);
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => url.endsWith(`/api/sessions/${sid}`)
+    ? detail : new Response(JSON.stringify(url.endsWith("/api/sessions")
+      ? useSessionStore.getState().sessions : []))));
+  useSessionStore.setState({ token: "question-test-token" });
+  const dispatch = { generation: "service-a", revision: 1, paused: false, items: [], active_request_id: "r1" };
+  handleWsMessage({ type: "dispatch_state", session_id: sid, dispatch_state: dispatch });
+
+  function ConnectedChat() {
+    useWebSocket();
+    return <ChatView sendMessage={vi.fn()} interrupt={vi.fn()} approveTool={vi.fn()} denyTool={vi.fn()}
+      answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />;
+  }
+  render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
+    <ConnectedChat />
+  </VirtuosoMockContext.Provider>);
+  const socket = Socket.instances[0];
+  act(() => { socket.readyState = Socket.OPEN; socket.onopen?.(); });
+  act(() => socket.onmessage?.({ data: JSON.stringify(requested) }));
+  expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
+  await act(async () => {
+    resolveDetail(new Response(JSON.stringify({
+      dispatch_state: dispatch, messages: [], next_message_seq: 1, pending_questions: [],
+    })));
+    await detail;
+  });
+  expect(screen.getByRole("button", { name: "Submit" })).toBeTruthy();
+  expect(useSessionStore.getState().pendingQuestions[sid]).toHaveLength(1);
+  expect(useSessionStore.getState().pendingQuestions[sid][0]).toMatchObject({
+    question_id: "q1", deadline: requested.deadline, request_id: "r1", attempt_id: "a1",
+  });
+  expect(useSessionStore.getState().messages[sid]).toHaveLength(1);
+});
+
+it("retains the newer live form while keeping a resolved question out of an older pending snapshot", async () => {
+  handleWsMessage(requested);
+  renderChat();
+  expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
+  act(() => {
+    handleWsMessage(closed);
+    handleWsMessage({ ...requested, seq: 3, question_id: "q2", attempt_id: "a2" });
+  });
+  expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
+  act(() => applySessionSnapshot(sid, {
+    next_message_seq: 2,
+    messages: [{ role: "assistant", type: "question_request", seq: 1,
+      tool_use_id: "q1", tool_input: { questions: [question] } }],
+    pending_questions: [{ question_id: "q1", questions: [question] }],
+  }));
+  expect(screen.getAllByRole("button", { name: "Submit" })).toHaveLength(1);
+  expect(useSessionStore.getState().pendingQuestions[sid].map((pending) => pending.question_id)).toEqual(["q2"]);
+  expect(screen.getByText(closed.message)).toBeTruthy();
+  expect(useSessionStore.getState().messages[sid]).toHaveLength(3);
+});
+
+it("clears live questions on a service generation change and rejects the retired snapshot", async () => {
+  const dispatch = { generation: "service-a", revision: 1, paused: false, items: [], active_request_id: "r1" };
+  handleWsMessage({ type: "dispatch_state", session_id: sid, dispatch_state: dispatch });
+  handleWsMessage(requested);
+  renderChat();
+  expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
+  act(() => applySessionSnapshot(sid, {
+    dispatch_state: { ...dispatch, generation: "service-b" },
+    next_message_seq: 1, messages: [], pending_questions: [],
+  }, "service-a"));
+  expect(screen.queryByRole("button", { name: "Submit" })).toBeNull();
+  expect(useSessionStore.getState().pendingQuestions[sid]).toBeUndefined();
+  act(() => handleWsMessage({ ...requested, seq: 3, question_id: "q2" }));
+  expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
+  act(() => {
+    expect(applySessionSnapshot(sid, {
+      dispatch_state: dispatch, next_message_seq: 5, messages: [], pending_questions: [],
+    }, "service-a")).toBe(false);
+  });
+  expect(screen.getByRole("button", { name: "Submit" })).toBeTruthy();
+  expect(useSessionStore.getState().pendingQuestions[sid][0].question_id).toBe("q2");
+});

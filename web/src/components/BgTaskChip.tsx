@@ -61,6 +61,26 @@ function lastLine(text: string): string {
   return lines[lines.length - 1]?.slice(0, 120) || "";
 }
 
+function stopDescription(task: BgTask): string | null {
+  switch (task.stop_reason) {
+    case "idle_timeout":
+      return task.idle_timeout_seconds == null
+        ? "Stopped at the idle timeout"
+        : `Stopped after ${task.idle_timeout_seconds}s without output`;
+    case "total_timeout":
+      return task.timeout_seconds == null
+        ? "Stopped at the total timeout"
+        : `Stopped at the ${task.timeout_seconds}s total timeout`;
+    case "user_cancel": return "Cancelled by the user";
+    case "work_cancelled": return "Cancelled with delegated work";
+    case "external_signal": return "Interrupted by an external signal";
+    case "server_shutdown": return "Interrupted when the server stopped";
+    case "server_restart": return "Interrupted after a server restart";
+    case "exit_nonzero": return "The command exited unsuccessfully";
+    default: return task.stop_reason ? `Stopped: ${task.stop_reason}` : null;
+  }
+}
+
 export function BgTaskChip({ sessionId, taskId }: Props) {
   const token = useSessionStore((s) => s.token);
   const upsertBgTask = useSessionStore((s) => s.upsertBgTask);
@@ -139,6 +159,10 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
   };
 
   const lastOut = lastLine(task.stdout) || lastLine(task.stderr);
+  const stopReason = stopDescription(task);
+  const idleLimit = task.idle_timeout_seconds == null
+    ? "unknown" : task.idle_timeout_seconds === 0 ? "disabled" : `${task.idle_timeout_seconds}s`;
+  const totalLimit = task.timeout_seconds == null ? "unknown" : `${task.timeout_seconds}s`;
 
   return (
     <div
@@ -192,6 +216,11 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
           </button>
         )}
       </div>
+      {stopReason && (
+        <div className="border-t border-border/60 px-3 py-1 text-[11px] text-muted-foreground">
+          {stopReason}
+        </div>
+      )}
       {!expanded && lastOut && (
         <div className="border-t border-border/60 px-3 py-1 font-mono text-[11px] text-muted-foreground truncate">
           {lastOut}
@@ -199,6 +228,13 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
       )}
       {expanded && (
         <div className="border-t border-border/60 bg-card/60 px-3 py-2 space-y-2">
+          <div className="text-[11px] text-muted-foreground">
+            Idle timeout: {idleLimit} · Total timeout: {totalLimit}
+          </div>
+          {!stopReason && task.status !== "running" && task.status !== "pending"
+            && task.status !== "completed" && (
+            <div className="text-[11px] text-muted-foreground">Stop reason not recorded</div>
+          )}
           <div className="text-[11px] text-muted-foreground">
             <span className="font-semibold">command</span>{" "}
             <code className="font-mono">{task.command}</code>

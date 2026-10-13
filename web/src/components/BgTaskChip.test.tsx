@@ -10,6 +10,7 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 
 import { BgTaskChip } from "./BgTaskChip";
 import { useSessionStore, type BgTask } from "../stores/sessionStore";
+import { handleWsMessage } from "../hooks/useWebSocket";
 
 function makeTask(overrides: Partial<BgTask> = {}): BgTask {
   return {
@@ -40,6 +41,38 @@ afterEach(() => {
 });
 
 describe("BgTaskChip", () => {
+  it("shows the live task limits and the actual timeout reason", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 404 })));
+    handleWsMessage({
+      type: "bg_started", session_id: "s1", task_id: "t1", command: "sleep 10",
+      description: "quiet phase", started_at: "2026-10-13T00:00:00Z",
+      idle_timeout_seconds: 60, timeout_seconds: 1800,
+    });
+    handleWsMessage({
+      type: "bg_completed", session_id: "s1", task_id: "t1", status: "failed",
+      exit_code: -15, stop_reason: "idle_timeout", idle_timeout_seconds: 60,
+      timeout_seconds: 1800, completed_at: "2026-10-13T00:01:01Z",
+    });
+    render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    expect(screen.getByText("Stopped after 60s without output")).toBeInTheDocument();
+    await act(async () => screen.getByRole("button", { expanded: false }).click());
+    expect(screen.getByText("Idle timeout: 60s · Total timeout: 1800s")).toBeInTheDocument();
+  });
+
+  it.each([
+    [0, 2, "Idle timeout: disabled · Total timeout: 2s"],
+    [null, null, "Idle timeout: unknown · Total timeout: unknown"],
+  ] as const)("reads limits from task details without inventing missing history", async (idle, total, label) => {
+    const task = makeTask({ status: "failed", exit_code: -15,
+      idle_timeout_seconds: idle, timeout_seconds: total, stop_reason: null });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(task), { status: 200 })));
+    render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    await waitFor(() => expect(screen.getByText(/bg · failed/i)).toBeInTheDocument());
+    await act(async () => screen.getByRole("button", { expanded: false }).click());
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.getByText("Stop reason not recorded")).toBeInTheDocument();
+  });
+
   it("shows a loading placeholder when the task isn't in the store yet", () => {
     // fetch will return null (404-ish); chip stays in placeholder state.
     vi.stubGlobal(

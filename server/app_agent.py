@@ -331,7 +331,7 @@ class AppAgentManager:
         try:
             from .wiki.tasks import explicit_mode
             mode = explicit_mode(message, wiki_mode)
-            await mgr.start_message(session.id, body, **({"wiki_mode": mode} if mode else {}))
+            await mgr.start_message(session.id, body, source="app", **({"wiki_mode": mode} if mode else {}))
         except Exception as exc:
             self._turns.pop(session.id, None)
             raise AppAgentError(
@@ -541,7 +541,7 @@ class AppAgentManager:
             return
         if kind == "result":
             if msg.get("is_error"):
-                turn.error = "the agent's turn ended with an error"
+                turn.error = str(msg.get("message") or "the agent's turn ended with an error")
                 turn.queue.put_nowait({"type": "error", "message": turn.error})
             else:
                 turn.cost = msg.get("cost")

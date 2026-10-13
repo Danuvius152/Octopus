@@ -28,7 +28,12 @@ import anyio.to_thread
 from fastapi import FastAPI
 from starlette.types import Receive, Scope, Send
 
-from .mcp_identity import reset_current_scope, set_current_scope, verify
+from .mcp_identity import (
+    reset_current_scope,
+    scope_is_authorized,
+    set_current_scope,
+    verify,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -163,8 +168,11 @@ class _ScopeMiddleware:
         if raw.lower().startswith("bearer "):
             bearer = raw[7:].strip()
         resolved = verify(bearer)
-        if resolved is None:
+        if resolved is None or not await scope_is_authorized(resolved):
             logger.warning("mcp/%s: call carried no verifiable scope", self.name)
+            await send({"type": "http.response.start", "status": 401, "headers": []})
+            await send({"type": "http.response.body", "body": b"Model run is no longer active"})
+            return
         token = set_current_scope(resolved)
         try:
             await self.app(scope, receive, self._log_bad_request(scope, headers, send))

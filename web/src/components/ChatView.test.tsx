@@ -15,10 +15,61 @@ beforeEach(() => {
   useSessionStore.setState({
     activeSessionId: session.id, sessions: [session], agents: [],
     messages: {}, streamingText: {}, pendingQueue: {}, pendingQuestions: {},
+    dispatchStates: {}, dispatchGeneration: null, retiredDispatchGenerations: [],
     pendingForks: {}, credentials: [], backendModels: {},
   });
 });
 afterEach(cleanup);
+
+it("keeps correction separate from paused results and resumes only on the explicit button", async () => {
+  const paused = {
+    generation: "service-ui", revision: 1, paused: true, active_request_id: "correction",
+    items: [{ request_id: "bg-1", source: "bg", summary: "background result", priority: false }],
+  };
+  useSessionStore.getState().applyDispatchState(session.id, paused);
+  const resume = vi.fn(async () => new Response(JSON.stringify({ ...paused, revision: 2, paused: false })));
+  vi.stubGlobal("fetch", resume);
+  const { input, send, sendMessage } = setup();
+  expect(screen.getByText("Paused · 1 pending")).toBeTruthy();
+  expect(screen.getByText("Background task")).toBeTruthy();
+  fireEvent.change(input, { target: { value: "correct the direction" } });
+  fireEvent.click(send);
+  expect(sendMessage).toHaveBeenCalledWith(session.id, "correct the direction", undefined, undefined);
+  expect(useSessionStore.getState().dispatchStates[session.id].paused).toBe(true);
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Resume processing" })));
+  expect(useSessionStore.getState().dispatchStates[session.id].paused).toBe(false);
+  expect(resume).toHaveBeenCalledWith(expect.stringContaining(`/api/sessions/${session.id}/dispatch/resume`),
+    expect.objectContaining({ method: "POST" }));
+  vi.unstubAllGlobals();
+});
+
+it("shows pause independently while a correction runs, including an empty pending queue", () => {
+  useSessionStore.setState({ sessions: [{ ...session, status: "running" }] });
+  useSessionStore.getState().applyDispatchState(session.id, {
+    generation: "service-ui", revision: 1, paused: true, active_request_id: "correction", items: [],
+  });
+  const sendMessage = vi.fn();
+  render(<ChatView sendMessage={sendMessage} interrupt={vi.fn()} approveTool={vi.fn()} denyTool={vi.fn()}
+    answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />);
+  expect(screen.getByText("running")).toBeTruthy();
+  expect(screen.getByText("Paused · 0 pending")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Resume processing" })).toBeTruthy();
+  expect(screen.getByText(/Your next message takes priority/)).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+});
+
+it("keeps the queue paused and reports a failed resume", async () => {
+  useSessionStore.getState().applyDispatchState(session.id, {
+    generation: "service-ui", revision: 1, paused: true, active_request_id: null, items: [],
+  });
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ detail: "Turn quota exceeded" }), { status: 429 })));
+  setup();
+  await act(async () => fireEvent.click(screen.getByRole("button", { name: "Resume processing" })));
+  expect(screen.getByRole("alert")).toHaveTextContent("Turn quota exceeded");
+  expect(useSessionStore.getState().dispatchStates[session.id].paused).toBe(true);
+  expect(screen.getByRole("button", { name: "Resume processing" })).not.toBeDisabled();
+  vi.unstubAllGlobals();
+});
 
 function setup() {
   const sendMessage = vi.fn();
