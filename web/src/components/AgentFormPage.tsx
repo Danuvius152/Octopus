@@ -15,6 +15,7 @@ import { EmojiPicker } from "./EmojiPicker";
 import { ItemLibrary, type LibraryItem } from "./ItemLibrary";
 import { PageHeader } from "./PageHeader";
 import { ReasoningEffortSelect } from "./ReasoningEffortSelect";
+import { ServiceTierSelect } from "./ServiceTierSelect";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
@@ -23,6 +24,39 @@ const API = `${window.location.origin}/api/agents`;
 
 /** Built-in MCP servers every agent gets unless told otherwise. */
 const BUILTIN_MCP = ["ask", "bg", "ask_agent", "research", "schedule"] as const;
+
+type AgentDraft = {
+  name: string;
+  description: string;
+  avatar: string;
+  systemPrompt: string;
+  credentialId: string;
+  model: string;
+  reasoningEffort: string;
+  serviceTier: string;
+  backend: string;
+  toolAllow: string;
+  toolDeny: string;
+  subagents: SubagentDefinition[];
+};
+
+function agentFields(draft: AgentDraft) {
+  return {
+    name: draft.name.trim(),
+    description: draft.description.trim(),
+    avatar: draft.avatar.trim() || null,
+    system_prompt: draft.systemPrompt,
+    credential_id: draft.credentialId || null,
+    model: draft.model.trim() || null,
+    reasoning_effort: draft.backend === "codex" ? draft.reasoningEffort || null : null,
+    service_tier: draft.backend === "codex" ? draft.serviceTier : null,
+    backend: draft.backend,
+    tool_allow: draft.toolAllow,
+    tool_deny: draft.toolDeny,
+    // Unnamed rows are drafts the user never filled in, not definitions.
+    subagents: draft.subagents.filter((sa) => sa.name.trim()),
+  };
+}
 
 /** The Agents page — "Agents › All", "Agents › New Agent", "Agents › <name>".
  *
@@ -67,6 +101,7 @@ export function AgentFormPage({
   const [credentialId, setCredentialId] = useState("");
   const [model, setModel] = useState("");
   const [reasoningEffort, setReasoningEffort] = useState("");
+  const [serviceTier, setServiceTier] = useState("default");
   const { catalog, error: catalogError } = useModelSettings(backend, credentialId, tab === "form");
   const [toolAllow, setToolAllow] = useState("");
   const [toolDeny, setToolDeny] = useState("");
@@ -76,6 +111,7 @@ export function AgentFormPage({
   const [subagents, setSubagents] = useState<SubagentDefinition[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const initialFields = useRef<ReturnType<typeof agentFields> | null>(null);
 
   const headers = {
     Authorization: `Bearer ${token}`,
@@ -85,18 +121,37 @@ export function AgentFormPage({
   // Seed the form from whichever agent we're editing (or blank for a draft).
   // Keyed on the id so switching agents from the sidebar refills it.
   useEffect(() => {
-    setName(editing?.name ?? "");
-    setDescription(editing?.description ?? "");
-    setAvatar(editing?.avatar ?? "");
-    setSystemPrompt(editing?.system_prompt ?? "");
+    const draft: AgentDraft = {
+      name: editing?.name ?? "",
+      description: editing?.description ?? "",
+      avatar: editing?.avatar ?? "",
+      systemPrompt: editing?.system_prompt ?? "",
+      backend: editing?.backend ?? useSessionStore.getState().defaultBackend,
+      credentialId: editing?.credential_id ?? "",
+      model: editing?.model ?? "",
+      reasoningEffort: editing?.reasoning_effort ?? "",
+      serviceTier: editing?.service_tier ?? "default",
+      toolAllow: editing?.tool_allow ?? "",
+      toolDeny: editing?.tool_deny ?? "",
+      subagents: editing?.subagents ?? [],
+    };
+    // Keep the opening values: store updates from another client must not turn
+    // untouched draft fields into changes. Null speed displays as Normal but
+    // remains untouched unless the user changes it or the engine.
+    initialFields.current = agentFields(draft);
+    setName(draft.name);
+    setDescription(draft.description);
+    setAvatar(draft.avatar);
+    setSystemPrompt(draft.systemPrompt);
     backendChosen.current = false;
-    setBackend(editing?.backend ?? useSessionStore.getState().defaultBackend);
-    setCredentialId(editing?.credential_id ?? "");
-    setModel(editing?.model ?? "");
-    setReasoningEffort(editing?.reasoning_effort ?? "");
-    setToolAllow(editing?.tool_allow ?? "");
-    setToolDeny(editing?.tool_deny ?? "");
-    setSubagents(editing?.subagents ?? []);
+    setBackend(draft.backend);
+    setCredentialId(draft.credentialId);
+    setModel(draft.model);
+    setReasoningEffort(draft.reasoningEffort);
+    setServiceTier(draft.serviceTier);
+    setToolAllow(draft.toolAllow);
+    setToolDeny(draft.toolDeny);
+    setSubagents(draft.subagents);
     setError(null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [editingAgentId]);
@@ -138,21 +193,20 @@ export function AgentFormPage({
     if (!name.trim() || busy) return;
     setBusy(true);
     setError(null);
-    const body = {
-      name: name.trim(),
-      description: description.trim(),
-      avatar: avatar.trim() || null,
-      system_prompt: systemPrompt,
-      credential_id: credentialId || null,
-      model: model.trim() || null,
-      reasoning_effort: backend === "codex" ? reasoningEffort || null : null,
-      backend,
-      tool_allow: toolAllow,
-      tool_deny: toolDeny,
-      // Unnamed rows are drafts the user never filled in, not definitions.
-      subagents: subagents.filter((sa) => sa.name.trim()),
-      ...(editing ? {} : { mcp_servers: [...BUILTIN_MCP] }),
-    };
+    const fields = agentFields({
+      name, description, avatar, systemPrompt, credentialId, model,
+      reasoningEffort, serviceTier, backend, toolAllow, toolDeny, subagents,
+    });
+    const initial = initialFields.current;
+    const backendChanged = initial && fields.backend !== initial.backend;
+    const body = editing
+      ? Object.fromEntries(Object.entries(fields).filter(([key, value]) =>
+        JSON.stringify(value) !== JSON.stringify(initial?.[key as keyof typeof fields])
+        // Changing the engine intentionally resets its associated settings,
+        // including values that another client may have changed in the meantime.
+        || (backendChanged && ["credential_id", "model", "reasoning_effort", "service_tier"].includes(key))
+      ))
+      : { ...fields, mcp_servers: [...BUILTIN_MCP] };
     try {
       const res = await fetch(editing ? `${API}/${editing.id}` : API, {
         method: editing ? "PATCH" : "POST",
@@ -399,11 +453,12 @@ export function AgentFormPage({
                           } ${usable ? "" : "opacity-50"}`}
                           onClick={() => {
                             backendChosen.current = true;
-                            setBackend(b);
-                            setCredentialId("");
                             if (b !== backend) {
+                              setBackend(b);
+                              setCredentialId("");
                               setModel("");
                               setReasoningEffort("");
+                              setServiceTier("default");
                             }
                           }}
                           role="radio"
@@ -451,6 +506,12 @@ export function AgentFormPage({
                   <datalist id="agent-model-options">
                     {catalog?.models?.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
                   </datalist>
+                  {backend === "codex" && (
+                    <ServiceTierSelect
+                      id="agent-service-tier" value={serviceTier} onChange={setServiceTier}
+                      model={model} catalog={catalog} disabled={busy}
+                    />
+                  )}
                   {backend === "codex" && (
                     <ReasoningEffortSelect
                       id="agent-reasoning-effort" value={reasoningEffort} onChange={setReasoningEffort}

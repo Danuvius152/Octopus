@@ -1351,18 +1351,27 @@ class TurnsMixin(SessionManagerBase):
         # Load the owning agent fresh each turn — this is the live-reference
         # point: editing an agent's prompt/model/tools/MCP affects its
         # already-open sessions on their next turn (agent-refactor.md §5.2).
-        agent = await self._load_agent(session)
-        harness = get_harness(session.backend)
-        credential = await self._resolve_credential(session, agent, harness)
+        async with self.configuration_lock:
+            configured_session = replace(session)
+            agent = await self._load_agent(configured_session)
+        harness = get_harness(configured_session.backend)
+        credential = await self._resolve_credential(configured_session, agent, harness)
+        # Defend the invocation boundary too: a refreshed catalog or an
+        # internal caller can change availability without going through PATCH.
+        tier = configured_session.service_tier or (agent or {}).get("service_tier")
+        if tier == "fast":
+            catalog = harness.model_settings(credential)
+            model = configured_session.model or (agent or {}).get("model")
+            if catalog.service_tiers and tier not in catalog.tiers_for(model):
+                raise ValueError("Fast speed is unavailable for this model. Choose Normal speed.")
         connectors = await self._load_connectors(agent)
         # A setting saved while this turn is running belongs to the next turn,
         # including when the current one needs an automatic retry.
-        configured_session = replace(session)
         turn = _Turn(
             prompt=prompt,
             current_prompt=prompt,
             harness=harness,
-            cred_id=session.credential_id
+            cred_id=configured_session.credential_id
             or (agent.get("credential_id") if agent else None),
             resume_at_turn_start=session.claude_session_id,
         )
@@ -1604,6 +1613,7 @@ class TurnsMixin(SessionManagerBase):
         system_prompt: str | None = None
         model: str | None = None
         reasoning_effort: str | None = None
+        service_tier: str | None = None
         mcp_servers: list[str] | None = None
         tool_allow: list[str] | None = None
         tool_deny: list[str] | None = None
@@ -1611,6 +1621,7 @@ class TurnsMixin(SessionManagerBase):
             system_prompt = agent.get("system_prompt") or None
             model = agent.get("model") or None
             reasoning_effort = agent.get("reasoning_effort") or None
+            service_tier = agent.get("service_tier") or None
             servers = agent.get("mcp_servers")
             mcp_servers = list(servers) if servers is not None else None
             tool_allow = _split_tool_list(agent.get("tool_allow"))
@@ -1621,6 +1632,8 @@ class TurnsMixin(SessionManagerBase):
             model = session.model
         if session.reasoning_effort:
             reasoning_effort = session.reasoning_effort
+        if session.service_tier:
+            service_tier = session.service_tier
 
         # Per-agent native memory (docs/plans/memory.md): derive the agent's
         # canonical memory dir and ensure it exists. None when there's no agent
@@ -1660,6 +1673,7 @@ class TurnsMixin(SessionManagerBase):
             system_prompt=system_prompt,
             model=model,
             reasoning_effort=reasoning_effort,
+            service_tier=service_tier,
             mcp_servers=mcp_servers,
             tool_allow=tool_allow,
             tool_deny=tool_deny,

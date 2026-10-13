@@ -1,4 +1,4 @@
-"""Account-scoped discovery of models and reasoning controls."""
+"""Account-scoped discovery of models, reasoning and speed controls."""
 
 from fastapi import APIRouter, Depends, HTTPException
 
@@ -41,6 +41,19 @@ def validate_reasoning(settings: ModelSettings, model: str | None, effort: str |
             f"Reasoning effort {effort!r} is unavailable for this model. "
             f"Choose one of: {', '.join(allowed)}."
             if allowed else "This backend does not offer reasoning effort controls."
+        )
+        raise HTTPException(400, detail)
+
+
+def validate_service_tier(settings: ModelSettings, model: str | None, tier: str | None) -> None:
+    if tier is None:
+        return
+    allowed = settings.tiers_for(model)
+    if tier not in allowed:
+        detail = (
+            f"Speed {tier!r} is unavailable for this model. "
+            f"Choose one of: {', '.join(allowed)}."
+            if allowed else "This backend does not offer speed controls."
         )
         raise HTTPException(400, detail)
 

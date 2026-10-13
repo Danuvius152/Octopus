@@ -50,6 +50,8 @@ class SessionUpdate(BaseModel):
     model: str | None = Field(default=None)
     # Independent of the model override; null inherits the agent/CLI setting.
     reasoning_effort: str | None = Field(default=None, min_length=1, max_length=32)
+    # null inherits the agent; default means normal speed, fast opts in.
+    service_tier: Literal["default", "fast"] | None = None
 
 
 class ForkSessionRequest(BaseModel):
@@ -113,6 +115,7 @@ class SessionInfo(BaseModel):
     # force without a second request.
     model: str | None = None
     reasoning_effort: str | None = None
+    service_tier: Literal["default", "fast"] | None = None
     # Agent-to-agent: set on delegation sessions to point at the parent
     # session that spawned them; NULL elsewhere. The verbatim original
     # delegation prompt is kept alongside for UI display.
@@ -419,6 +422,7 @@ class AgentRead(BaseModel):
     system_prompt: str = ""
     model: str | None = None
     reasoning_effort: str | None = None
+    service_tier: Literal["default", "fast"] | None = None
     credential_id: str | None = None
     # Default AI backend for this agent's new sessions (codex-backend.md §4.1).
     # Per-session overrides still win; this is the inherited default.
@@ -474,6 +478,7 @@ class AgentCreate(BaseModel):
     system_prompt: str = ""
     model: str | None = None
     reasoning_effort: str | None = Field(default=None, min_length=1, max_length=32)
+    service_tier: Literal["default", "fast"] | None = None
     credential_id: str | None = None
     backend: BackendKind = Field(
         default_factory=lambda: BackendKind(settings.default_backend),
@@ -500,6 +505,7 @@ class AgentUpdate(BaseModel):
     system_prompt: str | None = None
     model: str | None = None
     reasoning_effort: str | None = Field(default=None, min_length=1, max_length=32)
+    service_tier: Literal["default", "fast"] | None = None
     credential_id: str | None = None
     backend: BackendKind | None = None
     mcp_servers: list[str] | None = None

@@ -101,6 +101,40 @@ async def test_fork_codex_history_replay(manager):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("full_copy", [False, True])
+async def test_fork_settings_snapshot_matches_database_during_parent_update(manager, tmp_path, monkeypatch, full_copy):
+    parent_dir = tmp_path / "parent"
+    parent_dir.mkdir()
+    parent = await _seed_parent(manager, backend="codex", working_dir=str(parent_dir))
+    parent.model = "original-model"
+    parent.reasoning_effort = "low"
+    parent.service_tier = "fast"
+    original = manager.db.create_fork_session
+
+    async def mutate_after_insert(**kwargs):
+        await original(**kwargs)
+        # A successful concurrent PATCH can change the parent while the fork
+        # saga is awaiting DB or filesystem work.
+        async with manager.configuration_lock:
+            parent.model = "updated-model"
+            parent.reasoning_effort = "high"
+            parent.service_tier = "default"
+            await manager.db.update_session_field(
+                parent.id, model=parent.model, reasoning_effort=parent.reasoning_effort,
+                service_tier=parent.service_tier,
+            )
+
+    monkeypatch.setattr(manager.db, "create_fork_session", mutate_after_insert)
+    monkeypatch.setattr(manager, "_fork_copy_base", lambda: str(tmp_path / "forks"))
+    fork = await manager.duplicate_session(parent.id) if full_copy else await manager.fork_session(parent.id, 2)
+    assert (fork.model, fork.reasoning_effort, fork.service_tier) == ("original-model", "low", "fast")
+    restored = SessionManager()
+    await restored.initialize(manager.db)
+    loaded = restored.get_session(fork.id)
+    assert (loaded.model, loaded.reasoning_effort, loaded.service_tier) == (fork.model, fork.reasoning_effort, fork.service_tier)
+
+
+@pytest.mark.asyncio
 async def test_codex_fork_resume_id_null_survives_restart(manager):
     # Vera review BLOCKING #1: a HISTORY_REPLAY fork must NOT keep the
     # pre-minted resume-id hint in the DB, else a restart before the first

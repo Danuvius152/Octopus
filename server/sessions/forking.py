@@ -13,6 +13,7 @@ import json
 import os
 import shutil
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -249,6 +250,8 @@ class ForkingMixin(SessionManagerBase):
                     status_code=409,
                 )
             parent._forking = True
+            async with self.configuration_lock:
+                source = replace(parent)
 
         fork_id = uuid.uuid4().hex[:12]
         # Pre-mint the backend resume id BEFORE the INSERT so startup recovery
@@ -274,11 +277,12 @@ class ForkingMixin(SessionManagerBase):
                 created_at=now,
                 parent_id=parent_id,
                 backend=parent.backend,
-                model=parent.model,
-                reasoning_effort=parent.reasoning_effort,
+                model=source.model,
+                reasoning_effort=source.reasoning_effort,
+                service_tier=source.service_tier,
                 user_id=parent.user_id,
                 agent_id=parent.agent_id,
-                credential_id=parent.credential_id,
+                credential_id=source.credential_id,
                 resume_id=resume_id_hint,
                 fork_after_seq=fork_after_seq,
             )
@@ -288,9 +292,10 @@ class ForkingMixin(SessionManagerBase):
                 working_dir=parent.working_dir,
                 created_at=now,
                 claude_session_id=resume_id_hint,
-                credential_id=parent.credential_id,
-                model=parent.model,
-                reasoning_effort=parent.reasoning_effort,
+                credential_id=source.credential_id,
+                model=source.model,
+                reasoning_effort=source.reasoning_effort,
+                service_tier=source.service_tier,
                 agent_id=parent.agent_id,
                 origin="fork",
                 backend=parent.backend,
@@ -503,6 +508,8 @@ class ForkingMixin(SessionManagerBase):
                 raise ForkError("Parent session has an active delegation",
                                 reason="fork_blocked_parent_turn_active", status_code=409)
             parent._forking = True
+            async with self.configuration_lock:
+                source = replace(parent)
 
         fork_id = uuid.uuid4().hex[:12]
         resume_id_hint = str(uuid.uuid4())
@@ -520,7 +527,7 @@ class ForkingMixin(SessionManagerBase):
             # require_auth=False: the rollout must be locatable even if the login
             # later lapses, and we make no API call here (Vera review).
             agent = await self._load_agent(parent)
-            eff_cred_id = parent.credential_id or (
+            eff_cred_id = source.credential_id or (
                 agent.get("credential_id") if agent else None
             )
             parent_cred = await self.resolve_credential_by_id(
@@ -566,10 +573,11 @@ class ForkingMixin(SessionManagerBase):
                 await self.db.create_fork_session(
                     fork_id=fork_id, name=fork_name, working_dir=dest,
                     created_at=now, parent_id=parent_id, backend=parent.backend,
-                    model=parent.model,
-                    reasoning_effort=parent.reasoning_effort,
+                    model=source.model,
+                    reasoning_effort=source.reasoning_effort,
+                    service_tier=source.service_tier,
                     user_id=parent.user_id,
-                    agent_id=parent.agent_id, credential_id=parent.credential_id,
+                    agent_id=parent.agent_id, credential_id=source.credential_id,
                     resume_id=resume_id_hint, fork_after_seq=last_seq,
                     fork_metadata=fork_meta,
                 )
@@ -578,10 +586,11 @@ class ForkingMixin(SessionManagerBase):
                 raise
             fork = Session(
                 id=fork_id, name=fork_name, working_dir=dest, created_at=now,
-                claude_session_id=resume_id_hint, credential_id=parent.credential_id,
+                claude_session_id=resume_id_hint, credential_id=source.credential_id,
                 agent_id=parent.agent_id, origin="fork", backend=parent.backend,
-                model=parent.model,
-                reasoning_effort=parent.reasoning_effort,
+                model=source.model,
+                reasoning_effort=source.reasoning_effort,
+                service_tier=source.service_tier,
                 user_id=parent.user_id,
                 forked_from_session_id=parent_id, fork_after_seq=last_seq,
                 fork_metadata=fork_meta, fork_status="initializing",

@@ -74,6 +74,7 @@ class SessionsMixin(DatabaseBase):
         backend: str,
         model: str | None = None,
         reasoning_effort: str | None = None,
+        service_tier: str | None = None,
         user_id: str | None = None,
         agent_id: str | None,
         credential_id: str | None,
@@ -99,13 +100,14 @@ class SessionsMixin(DatabaseBase):
                 "(id, name, working_dir, created_at, claude_session_id, "
                 " credential_id, agent_id, origin, backend, model, user_id, "
                 " forked_from_session_id, fork_after_seq, fork_needs_replay, "
-                " fork_status, fork_metadata, reasoning_effort) "
+                " fork_status, fork_metadata, reasoning_effort, service_tier) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, 'fork', ?, ?, ?, ?, ?, 0, "
-                " 'initializing', ?, ?)",
+                " 'initializing', ?, ?, ?)",
                 (
                     fork_id, name, working_dir, created_at, resume_id,
                     credential_id, agent_id, backend, model, user_id, parent_id,
                     fork_after_seq, fork_metadata, reasoning_effort,
+                    service_tier,
                 ),
             )
             await self.conn.execute(
@@ -144,7 +146,7 @@ class SessionsMixin(DatabaseBase):
             "credential_id, archived, agent_id, origin, backend, "
             "parent_session_id, delegation_request, forked_from_session_id, "
             "fork_after_seq, fork_needs_replay, fork_metadata, "
-            "fork_revert_record, fork_status, app_id, model, user_id, reasoning_effort "
+            "fork_revert_record, fork_status, app_id, model, user_id, reasoning_effort, service_tier "
             "FROM sessions"
         )
         clauses = [] if include_archived else ["archived = 0"]
@@ -180,6 +182,7 @@ class SessionsMixin(DatabaseBase):
                 "model": row[19],
                 "user_id": row[20],
                 "reasoning_effort": row[21],
+                "service_tier": row[22],
             }
             for row in rows
         ]
@@ -383,6 +386,7 @@ class SessionsMixin(DatabaseBase):
             "backend",
             "model",
             "reasoning_effort",
+            "service_tier",
             # Fork columns (session-rewind.md §4). fork_metadata is
             # nullable+clearable (set to None to clear after first turn);
             # the others are written across the §5.1 saga.
@@ -401,7 +405,7 @@ class SessionsMixin(DatabaseBase):
         # (Vera review BLOCKING #1). Other columns omitted by the caller are
         # left untouched. Model, effort and credential overrides clear to
         # NULL to restore inheritance.
-        nullable = {"fork_metadata", "claude_session_id", "model", "reasoning_effort", "credential_id"}
+        nullable = {"fork_metadata", "claude_session_id", "model", "reasoning_effort", "credential_id", "service_tier"}
         bool_fields = {"archived", "fork_needs_replay"}
         updates: dict[str, Any] = {}
         for k, v in fields.items():

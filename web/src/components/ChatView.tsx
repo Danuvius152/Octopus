@@ -1244,11 +1244,12 @@ export function ChatView({
           {activeSession && (
             <Button
               className="btn-model-settings" variant="ghost" size="sm"
-              title="Model and reasoning settings" aria-label="Model and reasoning settings"
+              title="Model, reasoning and speed settings" aria-label="Model, reasoning and speed settings"
               onClick={() => setModelPickerOpen(true)}
             >
               <IconCpu size={16} />
               <span className="hidden sm:inline">Model{activeSession.reasoning_effort || activeAgent?.reasoning_effort ? ` · ${activeSession.reasoning_effort || activeAgent?.reasoning_effort}` : " & reasoning"}</span>
+              {activeSession.backend === "codex" && (activeSession.service_tier || activeAgent?.service_tier) === "fast" && <span className="font-mono text-xs">Fast</span>}
             </Button>
           )}
           {activeSession && <CredentialPicker session={activeSession} />}
@@ -1637,7 +1638,7 @@ export function ChatView({
             useSessionStore.getState().addMessage(activeSessionId, {
               role: "system",
               type: "notice",
-              content: `Model for this session: ${updated.model || "the agent's default"}${updated.backend === "codex" ? `; reasoning effort: ${updated.reasoning_effort || "the agent's default"}` : ""} — from the next turn.`,
+              content: `Model for this session: ${updated.model || "the agent's default"}${updated.backend === "codex" ? `; reasoning effort: ${updated.reasoning_effort || "the agent's default"}; speed: ${(updated.service_tier || activeAgent?.service_tier) === "fast" ? "Fast" : "Normal"}` : ""} — from the next turn.`,
             })
           }
         />

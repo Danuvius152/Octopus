@@ -93,6 +93,7 @@ class AgentsMixin(DatabaseBase):
             "pin_order": row[17],
             "user_id": row[18],
             "reasoning_effort": row[19],
+            "service_tier": row[20],
         }
         # The active-session count that `load_agents` / `get_agent` append
         # after the columns. Derived from the column list rather than written
@@ -116,6 +117,7 @@ class AgentsMixin(DatabaseBase):
         system_prompt: str = "",
         model: str | None = None,
         reasoning_effort: str | None = None,
+        service_tier: str | None = None,
         credential_id: str | None = None,
         backend: str | None = None,
         mcp_servers: list[str] | None = None,
@@ -134,14 +136,15 @@ class AgentsMixin(DatabaseBase):
             "(id, name, description, avatar, system_prompt, model, "
             " credential_id, backend, mcp_servers, tool_allow, tool_deny, "
             " is_system, archived, created_at, updated_at, subagents, user_id, "
-            " reasoning_effort, pinned, pin_order) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, 1, "
+            " reasoning_effort, service_tier, pinned, pin_order) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 1, "
             f" {self._NEXT_PIN_ORDER.format(table='agents')})",
             (
                 agent_id, name, description, avatar, system_prompt, model,
                 credential_id, backend or settings.default_backend, servers_json,
                 tool_allow, tool_deny, int(bool(is_system)),
                 created_at, updated_at, json.dumps(subagents or []), user_id, reasoning_effort,
+                service_tier,
             ),
         )
         await self.conn.commit()
@@ -251,13 +254,13 @@ class AgentsMixin(DatabaseBase):
         await self._ensure_connected()
         allowed = {
             "name", "description", "avatar", "system_prompt", "model",
-            "reasoning_effort",
+            "reasoning_effort", "service_tier",
             "credential_id", "backend", "mcp_servers", "tool_allow", "tool_deny",
             "subagents",
             "archived",
         }
         # credential_id / model / avatar are nullable and may be cleared.
-        nullable = {"credential_id", "model", "avatar", "reasoning_effort"}
+        nullable = {"credential_id", "model", "avatar", "reasoning_effort", "service_tier"}
         updates: dict[str, Any] = {}
         for k, v in fields.items():
             if k not in allowed:

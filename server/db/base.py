@@ -180,7 +180,7 @@ class DatabaseBase:
         "mcp_servers, tool_allow, tool_deny, is_system, archived, "
         "created_at, updated_at, backend, subagents, pinned, pin_order, "
         # Appended, never inserted: `_row_to_agent` maps by position.
-        "user_id, reasoning_effort"
+        "user_id, reasoning_effort, service_tier"
     )
     # Subquery counting live (non-archived) sessions for an agent — shared
     # by load_agents and get_agent so the UI can show "3 sessions".
@@ -249,6 +249,8 @@ class DatabaseBase:
         ("sessions", "reasoning_effort",
          "ALTER TABLE sessions ADD COLUMN reasoning_effort TEXT"),
         ("agents", "reasoning_effort", "ALTER TABLE agents ADD COLUMN reasoning_effort TEXT"),
+        ("sessions", "service_tier", "ALTER TABLE sessions ADD COLUMN service_tier TEXT"),
+        ("agents", "service_tier", "ALTER TABLE agents ADD COLUMN service_tier TEXT"),
         # sidebar-pins.md — the sidebar shows pinned applications. DEFAULT 1
         # pins every existing app, so the sidebar looks the same the day this
         # lands; `pin_order` is backfilled in `_backfill_pin_order`.

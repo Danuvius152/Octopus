@@ -72,6 +72,7 @@ def _to_session_info(
         backend=s.backend,
         model=s.model,
         reasoning_effort=s.reasoning_effort,
+        service_tier=s.service_tier,
         parent_session_id=s.parent_session_id,
         delegation_request=s.delegation_request,
         app_id=s.app_id,
@@ -135,7 +136,7 @@ async def update_session(
     session_id: str, req: SessionUpdate, user_id: ScopeUser = None,
     _: str = Depends(verify_token)
 ):
-    """Update a session's credential, name, model or reasoning effort.
+    """Update a session's credential, name, model, reasoning effort or speed.
 
     The credential is the point: it used to be fixed at creation, so a lapsed
     or deleted sign-in stranded the conversation with no way back. The
@@ -143,6 +144,13 @@ async def update_session(
     session), and an unknown credential id is refused rather than silently
     stored, because a dangling id is exactly the state this route exists to
     get out of."""
+    async with session_manager.configuration_lock:
+        return await _update_session_settings(session_manager, session_id, req, user_id)
+
+
+async def _update_session_settings(
+    session_manager, session_id: str, req: SessionUpdate, user_id: str | None,
+) -> SessionInfo:
     session = session_manager.get_session(session_id, user_id)
     if session is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
@@ -171,15 +179,22 @@ async def update_session(
 
     if "reasoning_effort" in fields:
         updates["reasoning_effort"] = fields["reasoning_effort"]
-    if {"model", "reasoning_effort", "credential_id"} & updates.keys():
-        from .backends import model_settings_for, validate_reasoning
+    if "service_tier" in fields:
+        updates["service_tier"] = fields["service_tier"]
+    if {"model", "reasoning_effort", "service_tier", "credential_id"} & updates.keys():
+        from .backends import (
+            model_settings_for,
+            validate_reasoning,
+            validate_service_tier,
+        )
 
         agent = (
             await session_manager.db.get_agent(session.agent_id, user_id)
             if session.agent_id else None
         ) or {}
         effort = updates.get("reasoning_effort", session.reasoning_effort) or agent.get("reasoning_effort")
-        if effort is not None:
+        tier = updates.get("service_tier", session.service_tier) or agent.get("service_tier")
+        if effort is not None or tier is not None:
             catalog = await model_settings_for(
                 session_manager, session.backend,
                 updates.get("credential_id", session.credential_id) or agent.get("credential_id"),
@@ -187,6 +202,9 @@ async def update_session(
             )
             validate_reasoning(
                 catalog, updates.get("model", session.model) or agent.get("model"), effort,
+            )
+            validate_service_tier(
+                catalog, updates.get("model", session.model) or agent.get("model"), tier,
             )
 
     if "name" in fields and fields["name"] is not None:
@@ -282,6 +300,7 @@ async def import_session(
         backend=s.backend,
         model=s.model,
         reasoning_effort=s.reasoning_effort,
+        service_tier=s.service_tier,
         parent_session_id=s.parent_session_id,
         delegation_request=s.delegation_request,
         app_id=s.app_id,
@@ -330,6 +349,7 @@ async def get_session(
             backend=s.backend,
             model=s.model,
             reasoning_effort=s.reasoning_effort,
+            service_tier=s.service_tier,
             parent_session_id=s.parent_session_id,
             delegation_request=s.delegation_request,
             app_id=s.app_id,

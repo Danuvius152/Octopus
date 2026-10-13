@@ -213,6 +213,7 @@ class Session:
     # means the backend's own default. Same shape as `backend` above.
     model: str | None = None
     reasoning_effort: str | None = None
+    service_tier: str | None = None
     # Who owns this conversation (multi-tenancy.md §5). Denormalised from the
     # agent on purpose: `agent_id` is nullable, and the WebSocket fan-out has
     # to route by owner on every frame.
@@ -477,6 +478,9 @@ class SessionManagerBase:
 
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
+        # Short configuration operations share a lock, independently of turn
+        # execution. Read/validate/write and turn snapshots must agree.
+        self.configuration_lock = asyncio.Lock()
         # key -> (callback, subscriber user_id or None for internal)
         self._broadcast_callbacks: dict[str, tuple[Callable, str | None]] = {}
         self.db: Database | None = None
@@ -499,6 +503,7 @@ class SessionManagerBase:
         self._schedule_runner = runner
 
     async def initialize(self, db: Database) -> None:
+        self.configuration_lock = asyncio.Lock()
         self.db = db
         # Turns in flight unwind before this connection does (see
         # `drain_turns`). Registered here rather than in the lifespan so a test
@@ -519,6 +524,7 @@ class SessionManagerBase:
                 backend=row.get("backend") or "claude-code",
                 model=row.get("model") or None,
                 reasoning_effort=row.get("reasoning_effort") or None,
+                service_tier=row.get("service_tier") or None,
                 user_id=row.get("user_id") or None,
                 parent_session_id=row.get("parent_session_id"),
                 delegation_request=row.get("delegation_request"),

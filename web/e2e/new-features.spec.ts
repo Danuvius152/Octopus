@@ -2715,6 +2715,57 @@ test.describe("Composer history", () => {
 });
 
 test.describe("/model", () => {
+  test("switches Fast and Normal independently and preserves history after reload", async ({ page, request }) => {
+    await page.route("**/api/backends/codex/models*", (route) => route.fulfill({
+      json: {
+        models: [], reasoning_efforts: ["low", "medium", "high", "xhigh"],
+        service_tiers: ["default", "fast"], default_service_tier: "default",
+      },
+    }));
+    const imported = await request.post(`${API}/sessions/import`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+      data: {
+        name: "Speed Session", working_dir: "/tmp", backend: "codex", claude_session_id: "speed-thread",
+        messages: [{ role: "user", type: "text", content: "Keep this speed conversation" }],
+      },
+    });
+    expect(imported.ok()).toBeTruthy();
+    const { id } = await imported.json();
+    await login(page);
+    await page.locator(".session-item .session-name", { hasText: "Speed Session" }).click();
+    await page.locator(".btn-model-settings").click();
+    const dialog = page.locator(".model-picker-dialog");
+    await expect(dialog.getByLabel("Speed")).toBeEnabled();
+    await expect(dialog.getByLabel("Speed")).toHaveValue("");
+    await expect(dialog.getByLabel("Speed").locator("option:checked")).toHaveText("Agent default (Normal)");
+    await dialog.getByLabel("Speed").selectOption("fast");
+    await dialog.getByRole("button", { name: "Save settings" }).click();
+    await expect(dialog).toBeHidden();
+    await page.reload();
+    await openSessionRail(page);
+    await page.locator(".session-item .session-name", { hasText: "Speed Session" }).click();
+    await expect(page.locator(".btn-model-settings")).toContainText("Fast");
+    await expect(page.locator(".msg", { hasText: "Keep this speed conversation" })).toBeVisible();
+    const saved = await (await request.get(`${API}/sessions/${id}`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    })).json();
+    expect(saved.service_tier).toBe("fast");
+    expect(saved.model).toBeNull();
+    expect(saved.reasoning_effort).toBeNull();
+    expect(saved.claude_session_id).toBe("speed-thread");
+    await page.locator(".btn-model-settings").click();
+    await expect(dialog.getByLabel("Speed")).toHaveValue("fast");
+    await dialog.getByLabel("Speed").selectOption("default");
+    await dialog.getByRole("button", { name: "Save settings" }).click();
+    await expect(dialog).toBeHidden();
+    await expect(page.locator(".btn-model-settings")).not.toContainText("Fast");
+    const normal = await (await request.get(`${API}/sessions/${id}`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    })).json();
+    expect(normal.service_tier).toBe("default");
+    expect(normal.claude_session_id).toBe("speed-thread");
+  });
+
   test("changes reasoning from the visible chat control and preserves history after reload", async ({ page, request }) => {
     await page.route("**/api/backends/codex/models*", (route) => route.fulfill({
       json: {
@@ -2735,7 +2786,7 @@ test.describe("/model", () => {
     const { id } = await imported.json();
     await login(page);
     await page.locator(".session-item .session-name", { hasText: "Reasoning Session" }).click();
-    await page.getByRole("button", { name: "Model and reasoning settings" }).click();
+    await page.getByRole("button", { name: "Model, reasoning and speed settings" }).click();
     const dialog = page.locator(".model-picker-dialog");
     await expect(dialog.getByLabel("Reasoning effort")).toBeEnabled();
     await dialog.getByLabel("Reasoning effort").selectOption("high");

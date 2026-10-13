@@ -6,6 +6,7 @@ normalization — plus the new D2 one-shot (codex exec → final agent_message).
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from server.harness import assembly
@@ -84,7 +85,7 @@ def test_turn_argv_new_turn_and_no_home(tmp_path):
     assert argv[:3] == ["codex", "exec", "--json"]
     assert "resume" not in argv  # new turn
     assert argv[-2:] == ["--", "p"]
-    assert "CODEX_HOME" not in kw["env"]  # no home_dir → inherit host default
+    assert kw["env"].get("CODEX_HOME") == os.environ.get("CODEX_HOME")  # inherit ambient home
 
 
 # --------------------------------------------------------------------------- #
@@ -150,7 +151,9 @@ def test_oneshot_argv(tmp_path):
     )
     assert argv[:3] == ["codex", "exec", "--json"]
     assert "-C" in argv and argv[argv.index("-C") + 1] == str(tmp_path)
-    assert argv[-4:] == ["-m", "gpt-5.5", "--", "parse this"]
+    assert argv[argv.index("-m") + 1] == "gpt-5.5"
+    assert argv[-2:] == ["--", "parse this"]
+    assert 'service_tier="default"' in argv
     assert kw["env"]["CODEX_HOME"] == home
 
 

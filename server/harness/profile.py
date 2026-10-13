@@ -105,6 +105,7 @@ class TurnContext:
     # A profile without a surface for them simply doesn't render them.
     subagents: list[dict[str, Any]] = field(default_factory=list)
     reasoning_effort: str | None = None
+    service_tier: str | None = None
 
 
 @dataclass
@@ -116,6 +117,7 @@ class OneShotContext:
     credential: HarnessCredential | None = None
     working_dir: str | None = None
     reasoning_effort: str | None = None
+    service_tier: str | None = None
 
 
 @dataclass

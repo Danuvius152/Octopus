@@ -623,6 +623,7 @@ async def parse_schedule_text(
     now_iso: str | None = None,
     model: str | None = None,
     reasoning_effort: str | None = None,
+    service_tier: str | None = None,
     credential: HarnessCredential | None = None,
     working_dir: str | None = None,
     runner=None,
@@ -651,6 +652,7 @@ async def parse_schedule_text(
     ctx = OneShotContext(
         prompt=prompt, model=model, credential=credential, working_dir=working_dir,
         reasoning_effort=reasoning_effort,
+        service_tier=service_tier,
     )
     try:
         model_text = await run(ctx)

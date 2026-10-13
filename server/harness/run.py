@@ -172,6 +172,7 @@ class RunConfig:
     system_prompt: str | None = None   # agent persona
     model: str | None = None
     reasoning_effort: str | None = None
+    service_tier: str | None = None
     mcp_servers: list[str] | None = None
     tool_allow: list[str] | None = None
     tool_deny: list[str] | None = None
@@ -271,6 +272,7 @@ class HarnessRun:
             system_prompt=system_prompt,
             model=self._config.model,
             reasoning_effort=self._config.reasoning_effort,
+            service_tier=self._config.service_tier,
             tool_allow=self._config.tool_allow,
             tool_deny=self._config.tool_deny,
             mcp_servers=mcp_servers,
@@ -396,6 +398,7 @@ class HarnessRun:
             self._config.system_prompt or "",
             self._config.model or "",
             self._config.reasoning_effort or "",
+            self._config.service_tier or "default",
             ",".join(sorted(self._config.mcp_servers or [])),
             # WHERE those namespaces are served, and with what credential. Since
             # they moved in-process (polish-2026-09.md §4 B1) each entry's URL

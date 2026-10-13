@@ -16,7 +16,7 @@ from ..models import (
     ScheduleInfo,
     SessionInfo,
 )
-from .backends import model_settings_for, validate_reasoning
+from .backends import model_settings_for, validate_reasoning, validate_service_tier
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -68,11 +68,12 @@ async def list_agents(
 async def create_agent(
     session_manager: SessionMgr, req: AgentCreate, user_id: ScopeUser = None, _: str = Depends(verify_token)
 ):
-    if req.reasoning_effort is not None:
+    if req.reasoning_effort is not None or req.service_tier is not None:
         catalog = await model_settings_for(
             session_manager, req.backend, req.credential_id, user_id,
         )
         validate_reasoning(catalog, req.model, req.reasoning_effort)
+        validate_service_tier(catalog, req.model, req.service_tier)
     try:
         # The owner, which is the whole point of the `ScopeUser` above: it was
         # declared and never passed, so every agent created through this route
@@ -126,22 +127,47 @@ async def update_agent(
     # exclude_unset so omitting a field leaves it untouched while explicitly
     # passing null clears a nullable field (model/credential_id/avatar).
     fields = req.model_dump(exclude_unset=True)
-    if {"model", "reasoning_effort", "backend", "credential_id"} & fields.keys():
+    async with session_manager.configuration_lock:
+        agent = await _update_agent_settings(session_manager, agent_id, fields, user_id)
+    await _publish(session_manager, "agent_updated", agent)
+    return AgentRead(**agent)
+
+
+async def _update_agent_settings(session_manager, agent_id: str, fields: dict, user_id: str | None) -> dict:
+    if {"model", "reasoning_effort", "service_tier", "backend", "credential_id"} & fields.keys():
         current = await session_manager.db.get_agent(agent_id, user_id)
         if current is None:
             raise HTTPException(404, "Agent not found")
         merged = {**current, **fields}
-        if merged.get("reasoning_effort") is not None:
+        if merged.get("reasoning_effort") is not None or merged.get("service_tier") is not None:
             catalog = await model_settings_for(
                 session_manager, merged["backend"], merged.get("credential_id"), user_id,
             )
-            validate_reasoning(catalog, merged.get("model"), merged["reasoning_effort"])
+            validate_reasoning(catalog, merged.get("model"), merged.get("reasoning_effort"))
+            validate_service_tier(catalog, merged.get("model"), merged.get("service_tier"))
+        # Existing sessions may override the model or credential while
+        # inheriting speed. Reject a default change that would strand them.
+        for session in await session_manager.db.load_sessions(include_archived=True, user_id=user_id):
+            if session["agent_id"] != agent_id:
+                continue
+            tier = session.get("service_tier") or merged.get("service_tier")
+            if tier != "fast":
+                continue
+            catalog = await model_settings_for(
+                session_manager, session["backend"],
+                session.get("credential_id") or merged.get("credential_id"), user_id,
+            )
+            if not catalog.service_tiers:
+                continue  # This backend does not consume inherited speed.
+            try:
+                validate_service_tier(catalog, session.get("model") or merged.get("model"), tier)
+            except HTTPException as exc:
+                raise HTTPException(400, f"Session {session['name']!r}: {exc.detail}") from exc
     try:
         agent = await _get_manager().update_agent(agent_id, user_id, **fields)
     except AgentError as e:
         raise _agent_http_error(e)
-    await _publish(session_manager, "agent_updated", agent)
-    return AgentRead(**agent)
+    return agent
 
 
 @router.post("/{agent_id}/archive", response_model=AgentRead)
@@ -349,6 +375,7 @@ async def create_agent_schedule_from_text(
             now_iso=req.now,
             model=agent.get("model") or None,
             reasoning_effort=agent.get("reasoning_effort") or None,
+            service_tier=agent.get("service_tier") or None,
             credential=credential,
         )
     except ScheduleParseError as e:

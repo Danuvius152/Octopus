@@ -2203,13 +2203,16 @@ async def test_turn_overall_cap_trips_even_with_steady_events(manager, monkeypat
 
 
 @pytest.mark.asyncio
-async def test_effort_saved_during_recovery_applies_on_the_next_turn(manager, monkeypatch):
+@pytest.mark.parametrize("field, before, after", [
+    ("reasoning_effort", "low", "high"), ("service_tier", "default", "fast"),
+])
+async def test_setting_saved_during_recovery_applies_on_the_next_turn(manager, monkeypatch, field, before, after):
     from server.harness import HarnessEvent
 
     monkeypatch.setattr(manager, "_TRANSIENT_RETRY_BASE_DELAY", 0)
     session = await _new(manager, "Reasoning")
     session.backend = "codex"
-    session.reasoning_effort = "low"
+    setattr(session, field, before)
     settings_seen = []
     attempt_count = 0
 
@@ -2219,7 +2222,7 @@ async def test_effort_saved_during_recovery_applies_on_the_next_turn(manager, mo
                 nonlocal attempt_count
                 attempt_count += 1
                 if attempt_count == 1:
-                    session.reasoning_effort = "high"
+                    setattr(session, field, after)
                     yield HarnessEvent(type="error", content="stream disconnected", is_error=True)
                     yield HarnessEvent(type="result", is_error=True)
                 else:
@@ -2228,14 +2231,14 @@ async def test_effort_saved_during_recovery_applies_on_the_next_turn(manager, mo
             return events()
 
     def factory(configured, agent=None, connectors=None):
-        settings_seen.append(configured.reasoning_effort)
+        settings_seen.append(getattr(configured, field))
         return Scripted([])
 
     monkeypatch.setattr(manager, "_make_run", factory)
     events = [event async for event in manager._run_backend(session, "work")]
-    assert settings_seen == ["low", "low"], events
+    assert settings_seen == [before, before], events
     _ = [event async for event in manager._run_backend(session, "next")]
-    assert settings_seen == ["low", "low", "high"]
+    assert settings_seen == [before, before, after]
 
 
 def test_text_delta_broadcasts_but_never_persists():

@@ -547,7 +547,7 @@ export interface paths {
         head?: never;
         /**
          * Update Session
-         * @description Update a session's credential, name, model or reasoning effort.
+         * @description Update a session's credential, name, model, reasoning effort or speed.
          *
          *     The credential is the point: it used to be fixed at creation, so a lapsed
          *     or deleted sign-in stranded the conversation with no way back. The
@@ -2549,6 +2549,8 @@ export interface components {
             model?: string | null;
             /** Reasoning Effort */
             reasoning_effort?: string | null;
+            /** Service Tier */
+            service_tier?: ("default" | "fast") | null;
             /** Credential Id */
             credential_id?: string | null;
             backend?: components["schemas"]["BackendKind"];
@@ -2598,6 +2600,8 @@ export interface components {
             model?: string | null;
             /** Reasoning Effort */
             reasoning_effort?: string | null;
+            /** Service Tier */
+            service_tier?: ("default" | "fast") | null;
             /** Credential Id */
             credential_id?: string | null;
             /** @default claude-code */
@@ -2694,6 +2698,8 @@ export interface components {
             model?: string | null;
             /** Reasoning Effort */
             reasoning_effort?: string | null;
+            /** Service Tier */
+            service_tier?: ("default" | "fast") | null;
             /** Credential Id */
             credential_id?: string | null;
             backend?: components["schemas"]["BackendKind"] | null;
@@ -3671,6 +3677,8 @@ export interface components {
             reasoning_efforts?: string[];
             /** Default Reasoning Effort */
             default_reasoning_effort?: string | null;
+            /** Service Tiers */
+            service_tiers?: string[];
         };
         /** ModelSettings */
         ModelSettings: {
@@ -3682,6 +3690,10 @@ export interface components {
             default_model?: string | null;
             /** Default Reasoning Effort */
             default_reasoning_effort?: string | null;
+            /** Service Tiers */
+            service_tiers?: string[];
+            /** Default Service Tier */
+            default_service_tier?: string | null;
         };
         /** NoChangeRevision */
         NoChangeRevision: {
@@ -4150,6 +4162,8 @@ export interface components {
             model?: string | null;
             /** Reasoning Effort */
             reasoning_effort?: string | null;
+            /** Service Tier */
+            service_tier?: ("default" | "fast") | null;
             /** Parent Session Id */
             parent_session_id?: string | null;
             /** Delegation Request */
@@ -4249,6 +4263,8 @@ export interface components {
             model?: string | null;
             /** Reasoning Effort */
             reasoning_effort?: string | null;
+            /** Service Tier */
+            service_tier?: ("default" | "fast") | null;
             /** Parent Session Id */
             parent_session_id?: string | null;
             /** Delegation Request */
@@ -4306,6 +4322,8 @@ export interface components {
             model?: string | null;
             /** Reasoning Effort */
             reasoning_effort?: string | null;
+            /** Service Tier */
+            service_tier?: ("default" | "fast") | null;
         };
         /** SetAgentConnectorsRequest */
         SetAgentConnectorsRequest: {

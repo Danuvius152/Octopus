@@ -16,10 +16,14 @@ Confirmed against codex 0.132.0 in this session:
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+from pathlib import Path
 
 import pytest
 
 from server.harness import HarnessEvent, RunConfig, get_harness
+from server.harness.codex import _find_rollout
 
 pytestmark = [pytest.mark.real, pytest.mark.real_codex]
 
@@ -94,8 +98,8 @@ async def test_real_command_execution(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_real_resume_across_two_subprocesses(tmp_path):
-    b1 = _codex_run(session_id="r1", mcp_servers=[], reasoning_effort="low")
+async def test_real_resume_across_speed_changes(tmp_path):
+    b1 = _codex_run(session_id="r1", mcp_servers=[], reasoning_effort="low", service_tier="default")
     await b1.start(
         "Remember this exact word for later: MARIGOLD. Reply only with OK.",
         str(tmp_path),
@@ -107,7 +111,7 @@ async def test_real_resume_across_two_subprocesses(tmp_path):
     sid = next(e for e in e1 if e.type == "result").session_id
     assert sid, "turn 1 didn't yield a resumable thread id"
 
-    b2 = _codex_run(session_id="r2", mcp_servers=[], reasoning_effort="high")
+    b2 = _codex_run(session_id="r2", mcp_servers=[], reasoning_effort="high", service_tier="fast")
     await b2.start(
         "What exact word did I ask you to remember? Reply only with that word.",
         str(tmp_path),
@@ -120,3 +124,33 @@ async def test_real_resume_across_two_subprocesses(tmp_path):
     text = "".join(e.content or "" for e in e2 if e.type == "text")
     assert "MARIGOLD" in text.upper(), f"resume didn't recall the word; got {text!r}"
     assert next(e for e in e2 if e.type == "result").session_id == sid
+
+    b3 = _codex_run(session_id="r3", mcp_servers=[], reasoning_effort="low", service_tier="default")
+    await b3.start(
+        "What exact word did I ask you to remember? Reply only with that word.",
+        str(tmp_path), resume_id=sid,
+    )
+    try:
+        e3 = await _drain(b3)
+    finally:
+        await b3.stop()
+    text = "".join(e.content or "" for e in e3 if e.type == "text")
+    assert "MARIGOLD" in text.upper(), f"normal speed resume didn't recall the word; got {text!r}"
+    assert next(e for e in e3 if e.type == "result").session_id == sid
+    # The CLI emits these when it applies resumed thread settings. Check
+    # applied Fast -> Normal, rather than only the flags we constructed.
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    rollout = _find_rollout(home / "sessions", sid)
+    assert rollout is not None
+    records = [json.loads(line) for line in rollout.read_text().splitlines() if line]
+    applied = [
+        row["payload"]["thread_settings"] for row in records
+        if row.get("type") == "event_msg" and row.get("payload", {}).get("type") == "thread_settings_applied"
+    ]
+    # The CLI may repeat an event; order and values are the contract.
+    changes = []
+    for settings in applied:
+        setting = (settings["service_tier"], settings["reasoning_effort"])
+        if not changes or changes[-1] != setting:
+            changes.append(setting)
+    assert changes == [("priority", "high"), ("default", "low")], applied

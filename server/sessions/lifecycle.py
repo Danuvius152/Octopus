@@ -258,9 +258,11 @@ class LifecycleMixin(SessionManagerBase):
         )
         new.model = old.model
         new.reasoning_effort = old.reasoning_effort
+        new.service_tier = old.service_tier
         if self.db:
             await self.db.update_session_field(
                 new.id, model=new.model, reasoning_effort=new.reasoning_effort,
+                service_tier=new.service_tier,
             )
 
         # Schedules are agent-owned, so ownership needs no repoint.
@@ -389,6 +391,7 @@ class LifecycleMixin(SessionManagerBase):
                     "backend": row.get("backend") or "claude-code",
                     "model": row.get("model"),
                     "reasoning_effort": row.get("reasoning_effort"),
+                    "service_tier": row.get("service_tier"),
                     "parent_session_id": row.get("parent_session_id"),
                     "delegation_request": row.get("delegation_request"),
                     "archived": True,
@@ -441,6 +444,7 @@ class LifecycleMixin(SessionManagerBase):
             backend=match.get("backend") or "claude-code",
             model=match.get("model"),
             reasoning_effort=match.get("reasoning_effort"),
+            service_tier=match.get("service_tier"),
             parent_session_id=match.get("parent_session_id"),
             delegation_request=match.get("delegation_request"),
             **fork_info_fields(
@@ -491,6 +495,7 @@ class LifecycleMixin(SessionManagerBase):
             backend=match.get("backend") or "claude-code",
             model=match.get("model"),
             reasoning_effort=match.get("reasoning_effort"),
+            service_tier=match.get("service_tier"),
             user_id=match.get("user_id"),
             # Preserve the delegation chain fields when unarchiving —
             # without these, an unarchived delegation child would lose

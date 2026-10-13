@@ -150,6 +150,7 @@ async def resolve_showme_reference(
     messages: list[dict[str, Any]],
     session_name: str | None = None,
     reasoning_effort: str | None = None,
+    service_tier: str | None = None,
 ) -> ShowMeResolution:
     """Resolve a human file reference to a concrete path. See module docstring
     for the three layers (exact-path short-circuit, model call, path-shaped
@@ -166,6 +167,7 @@ async def resolve_showme_reference(
     ctx = OneShotContext(
         prompt=prompt, model=model, credential=credential, working_dir=working_dir,
         reasoning_effort=reasoning_effort,
+        service_tier=service_tier,
     )
     out = await harness.run_oneshot(ctx)
 

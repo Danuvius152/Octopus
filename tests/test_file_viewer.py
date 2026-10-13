@@ -351,10 +351,14 @@ async def _patch_showme(monkeypatch):
     """Capture the credential argument the resolver was called with."""
     captured: dict = {}
 
-    async def _fake_resolve(text, *, harness, model, credential, working_dir, messages, session_name=None, reasoning_effort=None):
+    async def _fake_resolve(
+        text, *, harness, model, credential, working_dir, messages,
+        session_name=None, reasoning_effort=None, service_tier=None,
+    ):
         captured["credential"] = credential
         captured["model"] = model
         captured["reasoning_effort"] = reasoning_effort
+        captured["service_tier"] = service_tier
         captured["working_dir"] = working_dir
         from server.showme_ai import ShowMeResolution
 
@@ -380,6 +384,24 @@ async def test_showme_resolve_no_credential_passes_none(
     # No credential on the agent → resolver should receive None (the CLI
     # falls back to whatever host auth it finds).
     assert captured["credential"] is None
+
+
+@pytest.mark.parametrize("override, expected", [(None, "fast"), ("default", "default"), ("fast", "fast")])
+async def test_showme_resolve_inherits_speed_independently(
+    client, session_with_files, monkeypatch, override, expected,
+):
+    captured = await _patch_showme(monkeypatch)
+    sid, _ = session_with_files
+    session = session_manager.get_session(sid)
+    session.backend = "codex"
+    session.service_tier = override
+    await session_manager.db.update_agent(session.agent_id, service_tier="fast")
+    response = await client.post(
+        f"/api/sessions/{sid}/showme/resolve", json={"text": "the plan"}, headers=HEADERS,
+    )
+    assert response.status_code == 200, response.text
+    assert captured["service_tier"] == expected
+    assert captured["reasoning_effort"] is None
     assert captured["reasoning_effort"] is None
 
 

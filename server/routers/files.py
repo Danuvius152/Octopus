@@ -107,6 +107,7 @@ async def resolve_showme(
             harness=harness,
             model=session.model or agent.get("model"),
             reasoning_effort=session.reasoning_effort or agent.get("reasoning_effort"),
+            service_tier=session.service_tier or agent.get("service_tier"),
             credential=credential,
             working_dir=session.working_dir,
             messages=await session_manager.db.load_messages(session_id),

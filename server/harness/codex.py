@@ -145,6 +145,9 @@ def read_model_settings(credential: HarnessCredential | None = None) -> ModelSet
         default_model=default_model if isinstance(default_model, str) else None,
         default_reasoning_effort=default_effort if isinstance(default_effort, str) else None,
         reasoning_efforts=["low", "medium", "high", "xhigh"],
+        service_tiers=["default", "fast"],
+        # Octopus defaults to normal speed independently of CLI preferences.
+        default_service_tier="default",
     )
     try:
         cached = json.loads((home / "models_cache.json").read_text())
@@ -159,8 +162,7 @@ def read_model_settings(credential: HarnessCredential | None = None) -> ModelSet
         slug = entry.get("slug")
         if not isinstance(slug, str) or not slug:
             continue
-        if entry.get("visibility") != "list" and slug != result.default_model:
-            continue
+        visible = entry.get("visibility") == "list" or slug == result.default_model
         levels = entry.get("supported_reasoning_levels", [])
         efforts = [
             level["effort"] for level in levels
@@ -168,15 +170,36 @@ def read_model_settings(credential: HarnessCredential | None = None) -> ModelSet
         ] if isinstance(levels, list) else []
         default = entry.get("default_reasoning_level")
         name = entry.get("display_name")
-        result.models.append(ModelOption(
+        tiers = ["default"]
+        advertised = entry.get("service_tiers", [])
+        speeds = entry.get("additional_speed_tiers", [])
+        if (
+            isinstance(advertised, list) and any(
+                isinstance(tier, dict) and tier.get("id") in ("fast", "priority")
+                for tier in advertised
+            )
+            or isinstance(speeds, list) and "fast" in speeds
+        ):
+            tiers.append("fast")
+        result.add_model(ModelOption(
             id=slug, name=name if isinstance(name, str) else slug,
             reasoning_efforts=efforts,
             default_reasoning_effort=default if isinstance(default, str) else None,
-        ))
-        for effort in efforts:
+            service_tiers=tiers,
+        ), visible=visible)
+        for effort in efforts if visible else []:
             if effort not in result.reasoning_efforts:
                 result.reasoning_efforts.append(effort)
     return result
+
+
+def _service_tier_args(tier: str | None) -> list[str]:
+    # Explicit normal speed also clears Fast saved in CLI config or a resumed
+    # thread. These per-invocation overrides never rewrite the user's config.
+    return [
+        "-c", f"service_tier={_toml_basic_string(tier or 'default')}",
+        "-c", "features.fast_mode=true",
+    ]
 
 
 def _apply_mcp_bearers(env: dict[str, str], ctx: TurnContext) -> None:
@@ -258,6 +281,7 @@ def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
         argv += ["-m", ctx.model]
     if ctx.reasoning_effort:
         argv += ["-c", f"model_reasoning_effort={_toml_basic_string(ctx.reasoning_effort)}"]
+    argv += _service_tier_args(ctx.service_tier)
     if ctx.resume_id:
         argv += ["resume", ctx.resume_id, "--", ctx.prompt]
     else:
@@ -611,6 +635,7 @@ def build_oneshot_argv(ctx: OneShotContext) -> tuple[list[str], dict[str, Any]]:
         argv += ["-m", ctx.model]
     if ctx.reasoning_effort:
         argv += ["-c", f"model_reasoning_effort={_toml_basic_string(ctx.reasoning_effort)}"]
+    argv += _service_tier_args(ctx.service_tier)
     argv += ["--", ctx.prompt]
     env = os.environ.copy()
     _apply_home_dir(env, ctx.credential)

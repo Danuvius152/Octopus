@@ -4,6 +4,7 @@ import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { buildModelOptions } from "../lib/modelOptions";
 import { useModelSettings } from "../hooks/useModelSettings";
 import { ReasoningEffortSelect } from "./ReasoningEffortSelect";
+import { ServiceTierSelect } from "./ServiceTierSelect";
 import {
   Dialog,
   DialogContent,
@@ -46,6 +47,7 @@ export function ModelPickerDialog({
   const backendModels = useSessionStore((s) => s.backendModels);
   const [typed, setTyped] = useState("");
   const [effort, setEffort] = useState("");
+  const [serviceTier, setServiceTier] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -57,9 +59,10 @@ export function ModelPickerDialog({
     if (open) {
       setTyped(session.model ?? "");
       setEffort(session.reasoning_effort ?? "");
+      setServiceTier(session.service_tier ?? "");
       setError(null);
     }
-  }, [open, session.id, session.model, session.reasoning_effort]);
+  }, [open, session.id, session.model, session.reasoning_effort, session.service_tier]);
   const options = useMemo(
     () =>
       buildModelOptions({
@@ -80,6 +83,7 @@ export function ModelPickerDialog({
     const changes: Record<string, string | null> = {};
     if (model !== (session.model ?? null)) changes.model = model;
     if (reasoning !== (session.reasoning_effort ?? null)) changes.reasoning_effort = reasoning;
+    if ((serviceTier || null) !== (session.service_tier ?? null)) changes.service_tier = serviceTier || null;
     setBusy(true);
     setError(null);
     try {
@@ -116,7 +120,7 @@ export function ModelPickerDialog({
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="model-picker-dialog max-w-md">
         <DialogHeader>
-          <DialogTitle>Model and reasoning</DialogTitle>
+          <DialogTitle>Model, reasoning and speed</DialogTitle>
           <DialogDescription>
             Choose settings for this conversation. Changes apply from the next turn and keep its history.
           </DialogDescription>
@@ -164,6 +168,13 @@ export function ModelPickerDialog({
           />
         </form>
 
+        {session.backend === "codex" && (
+          <ServiceTierSelect
+            id="session-service-tier" value={serviceTier} onChange={setServiceTier}
+            model={typed || agent?.model} catalog={catalog} disabled={busy}
+            inherited={`Agent default (${agent?.service_tier === "fast" ? "Fast" : "Normal"})`}
+          />
+        )}
         {session.backend === "codex" && (
           <ReasoningEffortSelect
             id="session-reasoning-effort" value={effort} onChange={setEffort}
