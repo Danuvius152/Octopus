@@ -120,9 +120,10 @@ class _Attempt:
         default_factory=lambda: {"last": time.monotonic(), "tripped": None}
     )
 
-    def touch(self) -> None:
-        """Mark progress, so the idle watchdog doesn't trip on a live turn."""
-        self.watchdog["last"] = time.monotonic()
+    def touch(self, timestamp: float | None = None) -> None:
+        """A late native observation cannot grant a fresh idle window."""
+        now = time.monotonic() if timestamp is None else timestamp
+        self.watchdog["last"] = max(self.watchdog["last"], now)
 
     @property
     def timeout(self) -> tuple[str, int] | None:
@@ -492,6 +493,9 @@ class TurnsMixin(SessionManagerBase):
         captured = session._backend_retirements.get(id(backend))
         if captured is not None and captured[0] is backend:
             return captured[1]
+        invalidate = getattr(backend, "invalidate_activity", None)
+        if invalidate is not None:
+            invalidate()
         self._forget_backend(session, backend)
 
         async def retire() -> None:
@@ -2026,6 +2030,20 @@ class TurnsMixin(SessionManagerBase):
             )
             if hasattr(backend, "bind_tool_context"):
                 backend.bind_tool_context(turn.settlement.request_id, attempt.attempt_id)
+            def touch_current_attempt(
+                timestamp: float | None = None,
+                captured_backend: HarnessRun = backend,
+                captured_attempt: _Attempt = attempt,
+                captured_settlement: _Settlement = turn.settlement,
+            ) -> None:
+                if (session._backend is captured_backend and captured_attempt.timeout is None
+                        and captured_settlement.final_task is None):
+                    captured_attempt.touch(timestamp)
+
+            activity_token = (
+                backend.bind_activity(touch_current_attempt)
+                if hasattr(backend, "bind_activity") else None
+            )
             await self._begin_question_attempt(session, attempt.attempt_id, attempt.watchdog)
             watchdog = self._start_turn_watchdog(
                 backend, attempt.watchdog, started_at=turn.started_at
@@ -2042,7 +2060,9 @@ class TurnsMixin(SessionManagerBase):
                 await self._start_attempt(session, attempt, credential)
                 steer_writer = await self._open_steering_window(session, backend)
                 async for event in backend.stream():
-                    attempt.touch()
+                    if activity_token is None:
+                        # Scripted/in-process backends still use their declared event seam.
+                        attempt.touch()
                     for frame in await self._handle_stream_event(
                         session, attempt, event
                     ):
@@ -2054,6 +2074,8 @@ class TurnsMixin(SessionManagerBase):
                 # A watchdog may retire a run while its spawn is returning.
                 # That run's synthetic cancellation retains the timeout cause.
             finally:
+                if activity_token is not None:
+                    backend.unbind_activity(activity_token)
                 # Close the steering window and stop the writer before anything
                 # else touches the process (§9), then decide the process's fate.
                 await self._close_steering_window(session, steer_writer)

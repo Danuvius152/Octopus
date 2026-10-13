@@ -154,3 +154,27 @@ async def test_real_resume_across_speed_changes(tmp_path):
         if not changes or changes[-1] != setting:
             changes.append(setting)
     assert changes == [("priority", "high"), ("default", "low")], applied
+
+
+@pytest.mark.asyncio
+async def test_real_native_activity_identity_and_metadata_format(tmp_path):
+    """Installed exec diagnostics and metadata prove the exact current native turn."""
+    backend = _codex_run(session_id="native_activity_acceptance", mcp_servers=[])
+    ticks: list[float | None] = []
+    backend.bind_activity(ticks.append)
+    await backend.start(
+        "Silently work out 1234567 times 7654321. Use the shell to run exactly: "
+        "sleep 2; printf 'NATIVE_ACTIVITY_ACCEPTED\\n'. Then reply with the product. "
+        "Do not use any other tools.", str(tmp_path),
+    )
+    try:
+        events = await _drain(backend)
+        observer = backend._activity_observer
+        assert observer.identity_confirmed, "Installed CLI native identity was not verified"
+        assert observer.matched_records > 0, "Installed CLI emitted no accepted native activity metadata"
+        assert ticks
+        assert any(event.type == "result" and not event.is_error for event in events)
+        assert "Sent prompt with event ID:" not in backend.stderr_text
+        assert "SessionConfiguredEvent" not in backend.stderr_text
+    finally:
+        await backend.stop()

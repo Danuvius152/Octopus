@@ -703,6 +703,8 @@ async def test_retirement_owns_late_spawn_after_start_and_waiter_cancel(tmp_path
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
     run = Harness(_mode_profile("sleep-then", "60")).create_run()
+    ticks = []
+    run.bind_activity(ticks.append)
     starting = asyncio.create_task(run.start("prompt", str(tmp_path)))
     await entered.wait()
     starting.cancel()
@@ -715,3 +717,44 @@ async def test_retirement_owns_late_spawn_after_start_and_waiter_cancel(tmp_path
     release.set()
     await asyncio.wait_for(run.stop(), 4)
     assert len(spawned) == 1 and spawned[0].returncode is not None
+    assert ticks == []
+
+
+@pytest.mark.asyncio
+async def test_native_reader_drain_does_not_keep_cli_alive(tmp_path):
+    from dataclasses import replace
+
+    close_entered = asyncio.Event()
+    allow_close = asyncio.Event()
+
+    class WaitingObserver:
+        def observe_stdout(self, obj):
+            pass
+
+        def consume_stderr(self, line):
+            return False
+
+        async def start(self):
+            pass
+
+        def invalidate(self):
+            pass
+
+        async def close(self):
+            close_entered.set()
+            await allow_close.wait()
+
+    profile = replace(_mode_profile("sleep-then", "60"),
+                      activity_observer=lambda *args, **kwargs: WaitingObserver())
+    run = Harness(profile).create_run()
+    run.bind_activity(lambda _: None)
+    await run.start("prompt", str(tmp_path))
+    stopping = asyncio.create_task(run.stop())
+    try:
+        await asyncio.wait_for(close_entered.wait(), 5)
+        assert not run.is_alive()
+        assert [event async for event in run.stream()] == []
+        assert not stopping.done()
+    finally:
+        allow_close.set()
+        await asyncio.wait_for(stopping, 2)

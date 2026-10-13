@@ -28,7 +28,7 @@ from typing import Any
 from ..aio import drain_cancelled
 from . import assembly
 from .events import HarnessCredential, HarnessEvent
-from .profile import RuntimeProfile, StdinMode, TurnContext
+from .profile import ActivityObserver, RuntimeProfile, StdinMode, TurnContext
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +210,7 @@ class HarnessRun:
         self._spawn_task: asyncio.Task[asyncio.subprocess.Process] | None = None
         self._spawn_cleanup: asyncio.Task[None] | None = None
         self._stop_task: asyncio.Task[None] | None = None
+        self._activity_observer: ActivityObserver | None = None
         self._parser = profile.new_event_parser()
         self._process: asyncio.subprocess.Process | None = None
         self._event_queue: asyncio.Queue[HarnessEvent | object] = asyncio.Queue()
@@ -217,6 +218,8 @@ class HarnessRun:
         self._stderr_task: asyncio.Task[None] | None = None
         self._stderr_lines: list[str] = []
         self._stream_closed: bool = False
+        self._activity_generation = 0
+        self._activity_callback: Callable[[float | None], None] | None = None
         # The uuid of this run's opening prompt frame, remembered so S3 can
         # tell the CLI's echo of our own prompt from a genuine user message.
         #
@@ -326,6 +329,19 @@ class HarnessRun:
         ctx = self._make_context(prompt, working_dir, resume_id, credential)
         argv, kwargs = self._profile.build_turn_argv(ctx)
         argv, kwargs = prepare_spawn(argv, kwargs)
+        if self._profile.activity_observer is not None:
+            generation = self._activity_generation
+            self._activity_observer = self._profile.activity_observer(
+                kwargs.get("env") or os.environ,
+                lambda timestamp: self._activity(timestamp, generation=generation),
+                resume_id=resume_id,
+            )
+            if self._activity_callback is not None:
+                try:
+                    await self._activity_observer.start()
+                except BaseException:
+                    self._begin_retirement()
+                    raise
         if self._lease_closed:
             raise asyncio.CancelledError
 
@@ -540,6 +556,7 @@ class HarnessRun:
     def _begin_retirement(self) -> asyncio.Task[None]:
         self._lease_closed = True
         self._tool_context = None
+        self.invalidate_activity()
         from ..mcp_identity import revoke_run
         revoke_run(self.run_lease_id)
         if self._stop_task is None:
@@ -565,6 +582,8 @@ class HarnessRun:
         proc = self._process
         if proc is None:
             self._close_stream()
+            if self._activity_observer is not None:
+                await self._activity_observer.close()
             return
 
         # Closing stdin lets the CLI exit gracefully (flush its result first).
@@ -609,6 +628,8 @@ class HarnessRun:
         self._process = None
         self._stdout_task = None
         self._stderr_task = None
+        if self._activity_observer is not None:
+            await self._activity_observer.close()
 
     async def interrupt(self) -> None:
         """Best-effort cancel of the in-flight turn. stop() does
@@ -658,11 +679,40 @@ class HarnessRun:
             self._tool_identity_tracker = ToolIdentityTracker()
         self._tool_context = (request_id, attempt_id)
 
+    def bind_activity(self, callback: Callable[[float | None], None]) -> int:
+        """Attach one attempt clock; no display, database or network awaits."""
+        self._activity_generation += 1
+        self._activity_callback = callback
+        return self._activity_generation
+
+    def unbind_activity(self, token: int) -> None:
+        if token == self._activity_generation:
+            self.invalidate_activity()
+
+    def invalidate_activity(self) -> None:
+        """Revoke liveness synchronously, before cancellation can await cleanup."""
+        self._activity_generation += 1
+        self._activity_callback = None
+        if self._activity_observer is not None:
+            self._activity_observer.invalidate()
+
+    def _activity(self, timestamp: float | None = None, *, generation: int | None = None) -> None:
+        if (self._lease_closed or self._stream_closed
+                or (generation is not None and generation != self._activity_generation)):
+            return
+        callback = self._activity_callback
+        if callback is not None:
+            callback(timestamp)
+
     async def _handle_line(self, line: str) -> None:
         obj = parse_json_line(line)
         if obj is None:
             return
+        if self._activity_observer is not None:
+            self._activity_observer.observe_stdout(obj)
         out = self._parser.parse(obj)
+        if out.activity is True or (out.activity is None and out.events):
+            self._activity()
         context = self._tool_context
         if self._tool_identity_tracker is not None:
             for event in out.events:
@@ -672,6 +722,7 @@ class HarnessRun:
                     self._tool_identity_tracker.normalize_idle(event)
         if out.end_of_stream:
             self._tool_context = None
+            self.invalidate_activity()
         for event in out.events:
             if self._stream_closed and self._idle_handler is not None:
                 # Out of turn: hand it to the session rather than dropping it.
@@ -715,6 +766,8 @@ class HarnessRun:
             async for raw in self._process.stderr:
                 line = raw.decode(errors="replace").rstrip("\r\n")
                 if line:
+                    if self._activity_observer is not None and self._activity_observer.consume_stderr(line):
+                        continue
                     self._stderr_lines.append(line)
                     logger.debug("CLI stderr: %s", line)
         except asyncio.CancelledError:

@@ -2876,6 +2876,106 @@ async def test_the_ws_event_carries_the_row_it_was_persisted_as(manager):
 
 
 @pytest.mark.asyncio
+async def test_hidden_activity_and_true_silence_keep_cumulative_recovery_budget(manager, monkeypatch):
+    """Drive the actual parser, attempt clock, watchdog and logical recovery with a controlled clock."""
+    import importlib
+    import json
+    from types import SimpleNamespace
+
+    from server.harness.codex import CODEX
+    from server.harness.run import HarnessRun
+
+    class Clock:
+        now = 0.0
+
+        def __init__(self):
+            self.ready = asyncio.Queue()
+            self.waiter = None
+
+        async def sleep(self, _seconds):
+            self.waiter = asyncio.get_running_loop().create_future()
+            self.ready.put_nowait(None)
+            await self.waiter
+
+    class Run(HarnessRun):
+        def __init__(self):
+            super().__init__(CODEX)
+            self.timeout_stops = 0
+
+        async def start(self, prompt, working_dir, resume_id=None, **kwargs):
+            self.prompt = prompt
+
+        async def stop(self):
+            self.invalidate_activity()
+            self.timeout_stops += 1
+            self._close_stream()
+
+    clock = Clock()
+    outcomes = importlib.import_module("server.sessions.outcomes")
+    turns = importlib.import_module("server.sessions.turns")
+    from server.config import settings as cfg
+    monkeypatch.setattr(cfg, "turn_idle_timeout_seconds", 1.0)
+    monkeypatch.setattr(cfg, "turn_max_seconds", 0)
+    monkeypatch.setattr(cfg, "turn_idle_max_retries", 2)
+    monkeypatch.setattr(outcomes, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(turns, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    questions = importlib.import_module("server.sessions.questions")
+    monkeypatch.setattr(questions, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(outcomes, "asyncio", SimpleNamespace(sleep=clock.sleep, create_task=asyncio.create_task))
+    runs = [Run() for _ in range(3)]
+    monkeypatch.setattr(manager, "_make_run", _seq_factory(runs))
+    agent = await manager.db.get_system_agent()
+    session = await manager.create_session(agent["id"], "Hidden activity", backend="codex")
+
+    async def collect():
+        return [event async for event in manager._execute_claimed_request(session.id, "original request")]
+
+    task = asyncio.create_task(collect())
+    async def clock_ready():
+        waiting = asyncio.create_task(clock.ready.get())
+        try:
+            done, _ = await asyncio.wait({task, waiting}, timeout=2, return_when=asyncio.FIRST_COMPLETED)
+            if task in done:
+                await task
+                pytest.fail("turn completed before the next watchdog tick")
+            assert waiting in done, "watchdog did not reach the controlled clock"
+        finally:
+            if not waiting.done():
+                waiting.cancel()
+            await asyncio.gather(waiting, return_exceptions=True)
+
+    try:
+        await clock_ready()
+        for n in range(8):
+            clock.now += 0.25
+            await runs[0]._handle_line(json.dumps({"type": "item.completed", "item": {
+                "id": f"reasoning_{n}", "type": "reasoning", "text": "",
+            }}))
+            clock.waiter.set_result(None)
+            await clock_ready()
+        assert not task.done() and runs[0].timeout_stops == 0
+        for index in range(3):
+            clock.now += 1.25
+            clock.waiter.set_result(None)
+            if index < 2:
+                await clock_ready()
+                # A retired attempt's late no-summary event cannot renew its successor.
+                await runs[index]._handle_line(json.dumps({"type": "item.completed", "item": {
+                    "id": "late", "type": "reasoning", "text": "",
+                }}))
+        events = await asyncio.wait_for(task, 1)
+        assert len([e for e in events if e.get("code") == "turn_timeout_retry"]) == 2
+        assert len([e for e in events if e.get("code") == "turn_timeout"]) == 1
+        messages = await manager.db.load_messages(session.id)
+        assert [m["content"] for m in messages if m["role"] == "user"] == ["original request"]
+        assert not any(m["type"] == "thinking" for m in messages)
+        assert all(run.timeout_stops >= 1 for run in runs)
+    finally:
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
 async def test_failed_attempt_retirement_blocks_recovery_and_next_request(manager, monkeypatch):
     """An unconfirmed writer cannot be replaced after ordinary attempt cleanup."""
     from server.harness import HarnessEvent

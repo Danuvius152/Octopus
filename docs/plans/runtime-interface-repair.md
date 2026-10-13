@@ -1,8 +1,6 @@
 # 运行时接口修补：接管、记录与调用身份
 
-> **Status:** completed — Q13–Q15 与通用运行清理已实施并通过独立基础验收；R01 活动修补另行提交，尚未部署。
-
-本基础提交完成请求接管、终态记录、调用身份、连接发送和通用资源清理。Q17/Q18 的独立活动通道、Codex 原生轮次绑定与观察者由后续 R01 提交承载，不包含在基础源码投影中。第 9 节将独立基础提交和完整联合栈的验收证据分别标明，不把联合栈的原生活动验收当作基础提交单独运行的结果。
+> **Status:** completed — Q13–Q15、Q17、Q18 已实施并通过本机验收；运行时基础修补与 Vera 活动修补独立提交，尚未部署。
 
 ## 1. 依据和判断
 
@@ -19,10 +17,15 @@
 | A04：None 返回混淆 accepted/duplicate/closed | 真方法探针；closed bg 投递返回 True，但未入队 | 提交返回明确回执，投递方按实际接管状态记账 |
 | A05：failed 委派指标误记成功 | 真方法探针；failed 对应 ok=True | completed 才成功，指标结算与返回接管分别记录 |
 | A06：清理/记录任务无完整 owner，取消有全历史扫描 | 源码事实；尚无全历史扫描成本测量 | 本轮补任务所有权；不据此引入大 registry 或裁剪关闭记录 |
+| R01：Vera 持续无摘要推理却三次静默终止 | 新调查、白名单原生活动元数据、真实 parser/HarnessRun/watchdog 的确定性红复现；同版本 CLI 导出省略空推理 | Harness 内独立活动信号，校验当前尝试及原生轮次，不只修改文本解析 |
 
 fork 和原生导入/导出也有仅按原生工具 ID 配对的消费者，重复 ID 风险经合成记录复现，尚不是最新日志中的新增事故。身份修补必须覆盖这些消费者，避免只修卡片留下相同歧义。
 
 整体保持单进程 FastAPI、SessionManager、Harness、BgTaskManager、DelegationManager、SQLite 和现有浏览器重连。架构上的改进是把责任交给拥有状态的模块，通过少量接口表达真实事实；不以新增层数、搬函数或替换框架作为完成标准。
+
+R01 新证据为用户工作区 `vera-idle-timeout-investigation-20261014.md`，属于新的调查窗口。三次终止距离最近原始推理完成约 10.5、19.4、24.4 秒；历史 stdout 没有保存，不把合成输入复现说成历史 stdout 重放。本机及原记录均是 Codex 0.162.1，其[同版本导出源码](https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/exec/src/event_processor_with_jsonl_output.rs#L328-L342)明确省略空摘要推理的开始和完成，所以只让 Octopus parser 接受空文本还不能覆盖该版本。
+
+红反馈已执行：`.venv/bin/python /tmp/octopus-idle-activity-debug/repro.py`，exit=1。每 0.25 秒发送无文本 reasoning，idle=1 秒仍在模拟 1.25 秒被停止；非空对照 2 秒存活，真正无活动对照停止一次。三个独立进程结果一致，根代理也复跑确认；未修改产品代码或调用模型。
 
 ## 2. 已确定的行为
 
@@ -32,8 +35,10 @@ fork 和原生导入/导出也有仅按原生工具 ID 配对的消费者，重�
 | Q13：结果保存失败 | 保留选定的执行结论，明确显示保存失败/未确认，暂停该会话自动派发；存储恢复并核验原记录后才能继续。不自动重跑模型，不产生相反的第二终态 |
 | Q14：慢浏览器 | 单连接有界发送队列满或发送超时后断开，用现有重连、历史和状态快照同步。尚未保存的实时文字可能暂时不完整；不静默丢控制事件 |
 | Q15：用户最终澄清 | 今后的任务继续使用现有可读卡片，新增调用身份和准确任务回执用于内部关联；不为旧日志/旧记录开发兼容、回填或专门静态展示。旧数据可在上线验收后清理 |
+| Q17：真实活动与静默 | 是。属于当前执行尝试的真实运行活动，包括无可读文字的推理，也刷新 300 秒静默计时。持续真实活动时不因无文字终止；保留 Stop、累计恢复预算和默认关闭的整轮总时限 |
 | 重启边界 | 不增加运行时持久 pending queue/outbox，不恢复积压、暂停或未执行工作，不自动重放。已有 Wiki 业务 job 持久化不因此删除 |
 | CLI 和超时 | 保留 Codex exec --json、模型五分钟静默及 bg 首次输出后的默认六十秒；长任务继续显式设置 idle=0 和正总时限 |
+| Codex 修改边界 | 用户再次明确 Codex 代码不能改：不修改源码、安装文件或 exec --json 协议。活动观察和生命周期修补只在 Octopus 中实现 |
 | 验收与发布 | 按本机 Codex 约定验收，Claude live 不计通过也不作为本机提交阻塞；保留 hermetic Claude 协议测试。保全并行 Wiki 工作，本设计确认不等于发布授权 |
 
 ## 3. 三个接口和状态所有者
@@ -49,6 +54,8 @@ flowchart LR
     W --> S[连接自己的 writer]
     D --> I[规范化工具调用身份和任务回执]
     I --> H[保存消息 / 实时消息 / 展示和导出]
+    D --> L[当前尝试的真实活动时钟]
+    L --> V[静默监控]
 ```
 
 | 接口 | 所有者及保证 |
@@ -143,7 +150,7 @@ Database 自身统一管理写入记账、提交和关闭的并发规则；所�
 
 已排队帧不能跨首次账户接管暴露 ownerless 数据。legacy token 轮换作为服务端可信控制交接，writer 的授权状态必须在该交接入队时安全更新，避免旧排队帧先因旧 token 失效而截断客户端收到新 token；保持帧顺序。普通撤销、账户接管不能获得这项例外。MCP scope/lease/work 验证保持独立，不以 user_id 代替活权限。
 
-## 8. 取消、停机与资源所有权
+## 8. 取消、停机与活动监控
 
 SessionManager 持有并观察 driver、执行、旧 backend 清理、尚未结束的最终记录/通知任务；连接持有 writer；BgTaskManager 和 HarnessRun 继续持有各自进程和清理。复用现有受管任务集合模式即可，异常可见、完成摘除、停机可等待。
 
@@ -159,14 +166,37 @@ SessionManager 持有并观察 driver、执行、旧 backend 清理、尚未结�
 
 保留关闭 work 的 tombstone：当前“未关闭即开放”的定义下，TTL 删除会重新开放旧 work。本轮不裁剪它，也不因为看见扫描代码就新增另一套可变工作所有者。
 
+### 8.1 R01：Harness 拥有独立活动通道
+
+运行活动与展示事件分开。parser 输出可包含已识别活动，即使没有可显示文本；Harness 的读取/观察边界更新捕获尝试的活动时钟，不等消息存储、业务回调或浏览器发送。未知 JSON、stderr 噪声、文件 mtime、进程仍存在、定时器 tick 都不算模型进展。
+
+保留同一个 HarnessRun 引擎，Codex profile 仅提供其原生活动来源，不新建另一套轮次管理器。0.162.1 的 stdout 不含空摘要推理，需要由 Octopus 在实际 spawn 环境解析出的 CODEX_HOME（凭据覆盖或宿主回退）中观察准确 thread 的 rollout 完成元数据；源事件携带 thread_id、native turn_id、item 身份和完成时间，不发布或另存推理正文。
+
+活动绑定同时捕获 Octopus request/attempt/run 和原生 thread/turn。当前 CLI 的 stdout turn.started 没有原生 turn ID；不能把第一条新增 task_started 当作当前尝试。必须获得当前子进程的明确原生轮次身份，并与 rollout 对照；未能证明归属时拒绝活动，不凭当前 session、相同 thread 或读到的新行猜测。
+
+采用当前 CLI 已有的 stderr 诊断作为准确身份入口：[0.162.1 exec 源码](https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/exec/src/lib.rs#L1187-L1226)从 `TurnStartResponse.turn.id` 输出固定 INFO 消息。仅在 Octopus 拉起的该子进程环境中启用 `codex_exec=info`，其它目标维持 error 并关闭不需要的 telemetry 诊断，不改用户配置文件、登录身份、模型或 JSON stdout。reader 严格匹配目标、级别、固定消息及合法 UUID，保存到捕获的 HarnessRun；再与 stdout thread.started、rollout session_meta 和当前完成事件交叉校验。
+
+新增 INFO/WARN 在 stderr reader 入口消费或丢弃，不进入 `_stderr_lines`、原始 debug 日志、数据库或聊天；原有 ERROR 与既有 CLI 诊断继续走其路径。只保留关联元数据，初始化线程名/路径、任意错误详情不能随新增诊断扩散。身份 INFO 只用于启动关联，不算持续运行活动。身份日志缺失、变形或产生不同 ID 时显式报告观测不可用，不回退到“首个新轮次”推断；准确 ID 不依赖 rollout 保存成功，所以也不会把外部 writer 的轮次当作本次执行。
+
+此入口已经完成同版本源码审查、安装二进制常量核对和最终集成版本的 Codex 真 CLI 格式验收：子进程诊断的 thread/turn 与 rollout 原生活动元数据准确一致。原生身份关联验收已经通过，不只依赖合成 parser 测试。
+
+观察者只增量读取，文件定位限制在捕获的 home/thread，目录查找、单次读取、未完成行及去重状态都有边界。已确认的完成活动按 item/lifecycle 去重，用事件完成时间处理新鲜度；历史积压、重复事件、写入时间变化不能重新赠送五分钟。文件替换/截断、格式不支持、绑定冲突或读取失败显式记观测问题；不能用本地心跳掩盖。
+
+旧观察者在 Stop、取消、正常结束、恢复或停机时先同步失效，再由 Harness owner 取消和 drain。活动回调引用捕获的尝试，不能读取后来替换的 session.current；同一热进程的新轮次也必须重新绑定活动代次。
+
+同一原生 thread 再启动前，等待捕获旧运行的完整退休，包括在途 spawn、其补偿清理和真正进程回收；只等 interrupt 协程返回不够。等待在新 attempt/watchdog 建立之前，有界并遵守显式剩余整轮总时限；未确认退休时不启动新的同 thread CLI，明确诊断且保留清理 owner。Stop 本身继续快速接管暂停，人工纠偏优先级不变，只有同 thread 实际启动等待旧进程清理。不能先启动新 CLI 再确认旧 writer 退出，也不能让取消等待者遗失清理 owner。
+
+保持 idle=300、默认 overall=0、每逻辑轮次累计 idle recovery=2、有效问题豁免及 bg 默认静默=60 的原规则。仅更新活动来源和归属，不靠提高时限、降低 max 推理或清零恢复预算规避 bug。超时文案改为“指定时间未检测到有效运行活动”，不把工具或子任务卡住当作已证实原因；观测不可用时单独说明。
+
 ## 9. 实施顺序与验收
 
-整体已确认，按以下四个边界实施和审查；相互依赖的运行时改动组成完整的基础提交，每部分完成必要清理和验证：
+整体已确认，按以下五个边界实施和审查；相互依赖的运行时改动可组成完整的基础提交，R01 保持独立提交，每部分完成必要清理和验证：
 
 1. 调用身份、类型回执和所有身份消费者；新卡片保留现有可读展示，去掉猜测关联，不开发旧记录兼容。
 2. 接管回执、私有执行器、全部生产调用方适配；完整处理完成等待/steering/Wiki 取消，修正委派指标。
 3. 幂等终态保存、确定提交与存储失败核验恢复；受管记录任务和 DB 并发记账同时完成。
 4. 连接有界 writer、鉴权去重、剩余清理 owner；验证重连、撤销、账户接管和 legacy 轮换。
+5. R01 活动通道、Codex 原生轮次绑定与观察者；复用已完成的运行清理 owner，验证活动、真实静默及旧尝试隔离，不修改 Codex。
 
 具体回归先证明修复前失败，再验证修复后契约；使用真实 manager、生产组件和 SQLite 边界，脚本化 CLI 控制竞态，不 mock 掉正在验证的接口：
 
@@ -180,25 +210,28 @@ SessionManager 持有并观察 driver、执行、旧 backend 清理、尚未结�
 | 存储 | append 失败、append 后 commit 失败、commit 成功但包装报错、Stop 竞争；只有一项选定结论和一条终态；存储核验不重跑模型、不丢其他会话写入 |
 | 网络与安全 | 一个 ASGI send 永久阻塞，另一连接和 Stop 继续；队列字节/帧有界；满队列重连同步；排队时 revoke/disable/adopt 拒绝，轮换可信交接可达 |
 | 生命周期 | 捕获旧 backend 后新请求开始不被旧清理误停；停机 owner 排空且 DB 不被迟到写；普通 Stop 保留独立 bg，委派 cancel 只影响旧轮分支 |
+| R01 活动 | stdout 无文字活动、实际原生元数据超过 idle 仍存活；工具返回后推理不被误杀；真实无活动仍停止；DB/WS 处理阻塞不拖延时钟；同一 request 恢复/新纠偏/热复用的旧活动不延长新尝试；历史积压和重复事件不续命 |
+| R01 来源与清理 | 当前进程明确的 native turn ID 与文件一致；外部 writer、多候选、原生保存失败、旧 spawn 迟到、元数据缺失/变形、文件截断/替换拒绝假活动；取消/停机观察者排空，单次读取与去重有界；不新增推理正文日志 |
+| R01 既有规则 | 最后问题解决后重新计 idle，显式 overall 包含等待和恢复；Stop 不启动恢复，恢复预算不因活动清零；正常结果仍唯一结算；bg 60 秒独立不变 |
 | 指标与鉴权 | completed/failed/cancelled 精确映射且每轮一次，closed-parent 不隐藏终态；普通出站鉴权至多一次 SELECT、零活动 UPDATE，计数不冒充延迟提升 |
 
-2026-10-14 独立基础提交已完成全量 hermetic 后端、前端单测、lint、类型、生成契约、文档索引和前端 build。完整联合栈另外完成包含 R01 的全量 hermetic、纯 UI E2E 和 Codex real-CLI/browser 验收。下表明确两种范围：联合栈 checkout 为 `/tmp/octopus-runtime-repair-20261014`，独立基础提交投影为 `/tmp/octopus-runtime-core-split-20261014`。
+2026-10-14 已完成本机要求的全量 hermetic 后端、前端单测、`bun run typecheck`、纯 UI E2E、可用 Codex real-CLI/browser、lint、生成契约、文档索引和前端 build。验收 checkout 为 `/tmp/octopus-runtime-repair-20261014`，独立基础提交投影为 `/tmp/octopus-runtime-core-split-20261014`。
 
 | 检查 | 最终结果 | 证据 |
 | --- | --- | --- |
-| 完整联合栈后端 hermetic | 2546 passed，45 real deselected，262.63 秒；零失败、零跳过 | `/tmp/octopus-runtime-final-hermetic-green.log` |
+| 完整版本后端 hermetic | 2546 passed，45 real deselected，262.63 秒；零失败、零跳过 | `/tmp/octopus-runtime-final-hermetic-green.log` |
 | 独立基础提交后端 hermetic | 2529 passed，44 real deselected，260.96 秒；零失败、零跳过 | `/tmp/octopus-runtime-core-final-hermetic-green.log` |
 | 前端单测 | 45 个文件、390 项通过；基础提交与完整版本前端一致 | `/tmp/octopus-runtime-commit-split-20261014/core-offline-gates.json` |
-| 联合栈纯 UI E2E | 76 passed，41.4 秒，零跳过 | `/tmp/octopus-runtime-final-e2e-fast-green.log` |
-| 联合栈 Codex real-CLI | 20 个不同用例全部覆盖并通过，包括原生 thread/turn 格式与归属验收；首次 17 passed、3 failed，修复后相关 4 项复验全部通过，其中 1 项重复 | `/tmp/octopus-runtime-final-codex-real.log`、`/tmp/octopus-runtime-final-codex-recheck.log` |
-| 联合栈 Codex 浏览器 | 1 passed，14.5 秒 | `/tmp/octopus-runtime-final-codex-browser.log` |
-| Ruff / Mypy / ESLint / TypeScript / build | 基础提交和完整联合栈均通过；基础 Mypy 160 个源文件，联合栈 161 个源文件 | `/tmp/octopus-runtime-final-ruff-green.log`、`/tmp/octopus-runtime-final-mypy-green.log`、`/tmp/octopus-runtime-commit-split-20261014/core-offline-gates.json` |
+| 纯 UI E2E | 76 passed，41.4 秒，零跳过 | `/tmp/octopus-runtime-final-e2e-fast-green.log` |
+| Codex real-CLI | 20 个不同用例全部覆盖并通过，包括原生 thread/turn 格式与归属验收；首次 17 passed、3 failed，修复后相关 4 项复验全部通过，其中 1 项重复 | `/tmp/octopus-runtime-final-codex-real.log`、`/tmp/octopus-runtime-final-codex-recheck.log` |
+| Codex 浏览器 | 1 passed，14.5 秒 | `/tmp/octopus-runtime-final-codex-browser.log` |
+| Ruff / Mypy / ESLint / TypeScript / build | 基础提交和完整版本均通过；完整版本 Mypy 检查 161 个源文件 | `/tmp/octopus-runtime-final-ruff-green.log`、`/tmp/octopus-runtime-final-mypy-green.log`、`/tmp/octopus-runtime-commit-split-20261014/core-offline-gates.json` |
 | 生成契约 / 文档索引 | 通过；最终状态文档更新后再次核对索引 | `/tmp/octopus-runtime-final-contracts-green.log`、`/tmp/octopus-runtime-final-docsindex-green.log` |
 | Claude 实机 | 按用户要求未运行，不计作通过 | 用户明确“claude依旧不测，发布由我来定” |
 
 初次全量检查和 Codex 实机暴露的失败均已调查并修正。Wiki worker 两种真实执行路径与离线回归共同验证了归档竞争修复；职业回答检查原先误判“个人资料里没有记载你的职业”，现补齐明确职业缺失表述及拒绝据教育背景推断职业的离线回归，仅调整测试判断，不改变 Wiki 产品或 prompt。最终全量离线和受影响实机复验均通过，没有将失败视为随机或既有问题而忽略。
 
-本基础提交保留在 `fix/runtime-interface-repair` 修补分支，R01 活动来源、绑定与观察者由独立提交交付；两个提交不混入并行 Wiki 功能或 prompt 改动。用户明确发布和部署由本人决定，本轮不合并发布 main、不重启正式服务、不创建版本标签。Claude 实机测试依用户要求不运行，离线协议回归已纳入本机门禁。
+交付保留在 `fix/runtime-interface-repair` 修补分支，分为完整运行时基础提交与独立 R01 提交，不混入并行 Wiki 功能或 prompt 改动。用户明确发布和部署由本人决定，本轮不合并发布 main、不重启正式服务、不创建版本标签。Claude 实机测试依用户要求不运行，离线协议回归已纳入本机门禁。
 
 ## 10. What this defers
 
@@ -207,5 +240,6 @@ SessionManager 持有并观察 driver、执行、旧 backend 清理、尚未结�
 - closed-work TTL、历史轮次裁剪、永久完整轮次状态、新的公平派发：需要不同生命周期/产品合同及实测压力，不借维护名义改变已接受行为。
 - children/leases 的额外反向索引或通用 WorkRegistry：先测实际扫描成本或找到重复写入责任；现有 owner 内的正确取消和受管清理本轮完成，不以未测性能为由增加状态副本。
 - Codex 协议迁移、自动换模型、新队列服务、Wiki 业务架构变化、Claude live 本机验收：均超出本次已确定范围。
+- Codex 源码/安装文件修改，以及无原生轮次身份情况下猜测活动：不实施。Q17 的已验证活动通道、归属校验和完整清理属于本轮，不能只做 parser 就宣称修复。
 
 本节不用于搁置当前合同必需的清理、错误处理、可读性或验收。

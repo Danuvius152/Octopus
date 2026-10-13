@@ -15,6 +15,7 @@ the neutral `TurnContext`.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -23,6 +24,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .codex_activity import CodexActivityObserver, diagnostic_environment
 from .events import HarnessCredential, HarnessEvent, SubagentUpdate
 from .harness import Harness
 from .login import LoginMethod
@@ -298,6 +300,7 @@ def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
     env = os.environ.copy()
     _apply_home_dir(env, ctx.credential)
     _apply_mcp_bearers(env, ctx)
+    diagnostic_environment(env)
     return argv, {"cwd": ctx.working_dir, "env": env}
 
 
@@ -365,6 +368,8 @@ class CodexEventParser(EventParser):
         # child thread id -> the `spawn_agent` item that created it, so every
         # later `wait` / `send_input` on that thread updates the same card.
         self._collab_owner: dict[str, str] = {}
+        self._activity_seen: set[tuple[str, str, str]] = set()
+        self._activity_exhausted = False
 
     def parse(self, obj: dict[str, Any]) -> ParseOutput:
         kind = obj.get("type")
@@ -379,7 +384,10 @@ class CodexEventParser(EventParser):
             return ParseOutput()
 
         if kind == "turn.started":
-            return ParseOutput()
+            identity = (kind, "", "")
+            first = identity not in self._activity_seen
+            self._activity_seen.add(identity)
+            return ParseOutput(activity=first)
 
         if kind == "turn.completed":
             usage = obj.get("usage") or {}
@@ -428,8 +436,28 @@ class CodexEventParser(EventParser):
                 ]
             )
 
-        if isinstance(kind, str) and kind.startswith("item."):
-            return ParseOutput(events=self._item_events(kind, obj))
+        if kind in ("item.started", "item.updated", "item.completed"):
+            item = obj.get("item")
+            known = isinstance(item, dict) and item.get("type") in {
+                "reasoning", "agent_message", "mcp_tool_call", "command_execution",
+                "collab_tool_call", "file_edit", "file_write", "file_read", "file_change",
+                "web_search", "todo_list",
+            } and isinstance(item.get("id"), str) and bool(item["id"])
+            activity = False
+            if known and isinstance(item, dict) and not self._activity_exhausted:
+                fingerprint = (
+                    hashlib.sha256(json.dumps(item, sort_keys=True).encode()).hexdigest()
+                    if kind == "item.updated" else ""
+                )
+                identity = (kind, item["id"], fingerprint)
+                if identity not in self._activity_seen:
+                    if len(self._activity_seen) >= 4096:
+                        self._activity_exhausted = True
+                        logger.warning("Codex stdout activity deduplication limit reached")
+                    else:
+                        self._activity_seen.add(identity)
+                        activity = True
+            return ParseOutput(events=self._item_events(kind, obj), activity=activity)
 
         logger.debug("Unhandled codex event type: %s", kind)
         return ParseOutput()
@@ -965,6 +993,7 @@ CODEX = RuntimeProfile(
     web=WebCapability(tool_names=("web_search",), combined=True),
     stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
     build_turn_argv=build_turn_argv,
+    activity_observer=CodexActivityObserver,
     new_event_parser=CodexEventParser,
     build_oneshot_argv=build_oneshot_argv,
     parse_oneshot_stdout=parse_oneshot_stdout,
