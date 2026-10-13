@@ -25,6 +25,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
+from .aio import drain_cancelled
 from .applications import (
     app_scope_token,
     backend_script,
@@ -242,9 +243,7 @@ class BackendSupervisor:
             self._log(st, st.error)
             return False
         finally:
-            pump.cancel()
-            with contextlib.suppress(Exception):
-                await pump
+            await drain_cancelled(pump, f"application {st.app_id} install output")
 
         if code != 0:
             st.state = FAILED
@@ -365,9 +364,7 @@ class BackendSupervisor:
         st.port = None
         st.started_at = None
         for task in st._readers:
-            task.cancel()
-            with contextlib.suppress(Exception):
-                await task
+            await drain_cancelled(task, f"application {st.app_id} backend output")
         st._readers = []
         if st.state not in (FAILED, ABSENT):
             st.state = STOPPED
@@ -450,10 +447,7 @@ class BackendSupervisor:
     async def shutdown(self) -> None:
         task = self._reaper
         self._reaper = None
-        if task and not task.done():
-            task.cancel()
-            with contextlib.suppress(Exception):
-                await task
+        await drain_cancelled(task, "application backend reaper")
         await self.stop_all()
 
 
