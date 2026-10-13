@@ -3,12 +3,14 @@
 > **Status:** in-progress — 核心与既有 Weber 配置已上线，首两篇真实试点通过；完整试点和 Library 全量未放行，当前修复仍有两项 Codex 实机失败；见[当前进度](local-shared-wiki-progress-v2.md)。\
 > **修订：** v2.1，2026-10-13（Asia/Shanghai）；保留 v2 文件名与开发票编号。\
 > **审阅基线：** Octopus commit `453a7995bd6c54df33b0fc41dec09d370b4b40aa`；用户于 2026-10-12 提供的 `.octopus.zip`。\
-> **适用对象：** Octo 开发，Vera 验证，Weber 作为智者与知识库 curator；SmartReader 作为阅读讨论入口，Sapphire 作为库浏览与编辑应用。\
+> **适用对象：** Octo 开发与组织，Vera 验证，Weber 作为智者与知识库 curator；SmartReader 阅读讨论、Sapphire 库浏览与编辑均属后续 App feature plan。\
 > **决策：** 以可理解、可查证、可复用、可持续维护的个人知识为目标；保留 SQLite 检索底座，补知识积累闭环。先完成核心和小样本入库，再分批整理旧材料；应用新功能列后续计划，语义后端按实测缺口引入。
 
 **本版阅读顺序：** 接手先读[当前进度与执行计划](local-shared-wiki-progress-v2.md)及[当前 spec](local-shared-wiki-spec-v2.md)，再按本总纲与[知识积累](local-shared-wiki-knowledge-v2.md)理解设计；开发按[任务票](local-shared-wiki-tickets-v2.md)，旧材料整理按[迁移计划](local-shared-wiki-migration-v2.md)。原设计专题文件及最初核心交付保留为依据，事实时间与适用范围分别标注。
 
 **本轮设计访谈（2026-10-13）：** 用户指定本目录为最新拟实施方案，本文件为总览；App 相关开发作为后续 feature plan。旧版 Q53 已确认约束继续作为设计依据，新增或改变旧规则的取舍在[设计访谈与决策树](local-shared-wiki-grill-v2.md)中逐项收束；设计正文之外，另维护访谈记录与根目录 [GLOSSARY.md](../../GLOSSARY.md)。既有接口兼容仍属核心责任，后续 Sapphire/SmartReader 功能不成为核心验收前提。
+
+**核心独立于 App：** 本轮查询、文章整理入库和持续维护直接通过 Octopus 原生 `/wiki` 与核心 `/api/wiki` 完成；框架的 durable job 将目标交给既有 Weber worker。Octo 组织，Vera 验收，Sapphire/SmartReader 不参与执行。核心只需账户、Vault root 与 curator，`app_id` 可空；现有 root 位于 `sapphire.data` 是存储安排，不要求启动 App 或搬迁主库。App 网关保留既有兼容，新接入、界面和客户端授权全部留在后续应用票。
 
 **Q54–Q60 最新结论：** 以现有 pika_vault 文章模板为参考，按最新需求原位模板化，保持当前正文措辞，开头元数据用于维护、普通阅读隐藏；正式文章不另存原稿副本，当前 sources 可空。以后维护不按 AI／人类作者或人工编辑历史分类，保护核心思想、论证和有风格的观点，允许局部纠错与补充，不重写正文。来源只要求可选出处、回查、已知直接依赖提醒及明确重复归并，完整来源根和自动证据计数不作核心门槛。复核后无需改字也可完成，至少一个真实问题验证知识建立→复用→纠正。落实合同见[定点维护](local-shared-wiki-maintenance-v2.md)，整体共同理解记录在访谈中。
 
@@ -16,7 +18,7 @@
 
 ## 1. 问题与当前事实
 
-这次优化的对象是一条完整链路：文件组织决定可检索的身份与概念，索引决定候选是否可靠，接口决定模型看到多少内容，任务 prompt 决定读什么与何时停止，SmartReader 与 Sapphire 让人阅读、核对、选择沉淀并持续维护。单独换一个 embedding 或重写 Weber persona，无法解决现有链路里的问题。
+这次优化的对象是一条完整链路：文件组织决定可检索的身份与概念，索引决定候选是否可靠，接口决定模型看到多少内容，任务 prompt 决定读什么与何时停止，Weber 执行明确范围的整理与持续维护。用户通过 Octopus 原生会话查询、讨论和选择沉淀；后续 SmartReader/Sapphire 再作为客户端接入。单独换一个 embedding 或重写 Weber persona，无法解决现有链路里的问题。
 
 ### 1.1 已经具备的能力
 
@@ -43,7 +45,7 @@
 | Weber 的常驻 persona 已短且有用，worker 却总加载完整 query+maintenance+writing | 附件 agents 非敏感配置；`workflow.py` | 保留人格，压缩任务规则并按任务加载 |
 | SmartReader 已有材料对话、SSE、选区与摘录，但每轮 context 附带最多 150,000 个 JS 字符串单位正文 | 附件 `smartreader/lib/content.js::readingContext`、`app.js` | 后续采用问题相关片段/按需阅读，不把整篇反复送入上下文 |
 | SmartReader 材料使用浏览器 UUID、localStorage/IndexedDB，没有 Wiki id/revision 绑定 | 附件 SmartReader 源码 | 浏览器材料、app 草稿和已入库文章要明确映射 |
-| Wiki 配置目前只有一个 app_id，app_wiki 要求匹配；AppAgent 的 wiki_mode 入口另建任务 | `registry.py`、`routers/wiki.py`、`app_agent.py` | 多 app 共库需要真实客户端权限适配，不能直接换掉原 app_id 或只放行一个路由 |
+| Wiki 配置的 app_id 可空；配置时只有一个可选 app 绑定，app_wiki 要求匹配；AppAgent 另有任务入口 | `registry.py`、`routers/wiki.py`、`app_agent.py` | 独立核心不依赖 App；后续多 app 共库需要真实客户端权限适配，不能直接换掉原 app_id 或只放行一个路由 |
 
 ### 1.3 附件内容与审阅限制
 
@@ -91,32 +93,37 @@ Sapphire 主库工作副本位于 `applications/sapphire.data/vaults/obv/repo`�
 ```mermaid
 flowchart TD
     A["当前 agent 的 /wiki 查询"] --> W["共享 WikiService"]
-    B["Weber 维护任务"] --> W
-    C["Sapphire 浏览、标签与编辑"] --> W
-    D["SmartReader 阅读与讨论"] --> G["获准 app 客户端入口"]
-    G --> W
+    B["原生 /wiki maintain 或获授权核心 API"] --> J["durable job 与 assignment"]
+    J --> K["既有 Weber worker"]
+    K --> W
+    subgraph APPS["后续 App feature plan"]
+        C["Sapphire 库浏览与编辑"]
+        D["SmartReader 阅读与讨论"]
+    end
+    C -.-> W
+    D -.-> W
     W --> R["身份、元数据与链接索引"]
     W --> S["词法检索与候选选择"]
     W --> E["当前文件证据读取"]
-    S --> V["可选语义适配器"]
+    S -.-> V["按真实缺口加入的语义适配器"]
     F["一份权威 Vault"] --> U["单文档变更与后台对账"]
     U --> R
     U --> S
     E --> F
-    B --> P["受控发布与文本历史"]
+    K --> P["受控发布、回执与文本历史"]
     P --> F
 ```
 
-图中 WikiService 是对现有 `registry/store/search_index/curation/history/tasks` 的共同边界命名，不要求新建微服务。SQLite 仍可放在当前状态目录。SmartReader 对库外材料的阅读缓存与写作草稿还未成为 Wiki 内容；明确入库后才取得主库身份。多 app 入口是拟议功能，不能认为当前已经支持。
+图中 WikiService 是对现有 `registry/store/search_index/curation/history/tasks` 的共同边界命名，不要求新建微服务。实线是本轮独立核心，虚线表示后续 App 接入或按条件加入的语义能力；App 不介于 `/wiki` 与 Weber 之间。SQLite 仍可放在当前状态目录。未来 SmartReader 的库外缓存与草稿须经明确入库才取得主库身份；多 app 入口是拟议功能。
 
 ### 2.1 保留、替换、按条件加入
 
 | 决策 | 内容 |
 | --- | --- |
 | 保留 | 当前主库、文件路径、原文、现有受控写入、Me 路由、章节搜索、中文处理、显式 Wiki 任务 |
-| 优先替换 | 每请求构造迁移、同步全库 refresh、候选全文/来源校验、全库 graph 解析、Sapphire 独立搜索 |
+| 优先替换 | 每请求构造迁移、同步全库 refresh、候选全文/来源校验、全库 graph 解析 |
 | 核心计划 | OKF 适配、文档角色、已有来源副本分类、compact、批量证据读取、实际出处与直接依赖、主题覆盖、定点维护与知识复用 |
-| 后续应用计划 | SmartReader 引用定位、阅读对话、草稿/入库；Sapphire 共享搜索与标签筛选；二者不阻塞首批旧材料整理 |
+| 后续应用计划 | SmartReader 引用定位、阅读对话、草稿/入库；Sapphire 独立搜索改用共享服务与标签筛选；均不参与本轮核心、试点或全量整理 |
 | 有证据再加 | 多语言 embedding、有限 reranker、QMD 适配器、更大候选池 |
 | 当前不增加 | 每问自动三 agent 接力、每次全库总结、强制逐段 QA 生成、无限查询改写、GraphRAG 全库建图 |
 
@@ -129,8 +136,8 @@ flowchart TD
 | Weber | 理解文章、发展想法、按需写作、有限范围内整理与综合 | 可修改草稿、有用的长期知识页、原文保留的 OKF 文章和实际发布回执 |
 | /wiki | 本次任务入口、当前 agent 的查证工作流 | 有范围和证据的回答，或持久维护任务 |
 | WikiService | 身份、内容分类、检索、证据位置、读写一致性 | 小型导航卡、当前证据片段、变更与索引状态 |
-| SmartReader | 文章/选区阅读、与 Weber 讨论、引用定位、按需写作与入库 | 有范围的阅读上下文、草稿或明确维护提交；不默认反复注入全文 |
-| Sapphire | 库目录、标签、搜索、正文编辑、来源与版本查看 | 可定位文档、过滤结果与单次保存；需要深读时打开 SmartReader |
+| SmartReader（后续 App） | 文章/选区阅读、与 Weber 讨论、引用定位、按需写作与入库 | 有范围的阅读上下文、草稿或明确维护提交；不默认反复注入全文 |
+| Sapphire（后续 App） | 库目录、标签、搜索、正文编辑、来源与版本查看 | 可定位文档、过滤结果与单次保存；需要深读时打开 SmartReader |
 
 **普通查询不转发给 Weber 再转 Vera。** 当前接收问题的 agent 直接调用同一个 WikiService；只有显式维护建立 Weber job。复杂研究的独立复核可沿既有协作机制发起，但不作为读一份 Me 文件的固定步骤。
 
@@ -218,7 +225,7 @@ Vidu 可以作为数字人实时视频能力的相关研究材料，但不能因
 
 prompt 默认采用便于用户维护的中文语义/写作规则，参数名、术语与代码保持原语言；不常驻两份中英重复规则。英文是否更好属于特定模型与任务的实测问题。语言对照是可选优化，不是启动旧材料迁移的前置门槛，见[prompt 方案](local-shared-wiki-prompts-v2.md)与[评估方案](local-shared-wiki-evaluation-v2.md)。
 
-## 7. prompt、SmartReader 与 Sapphire 协同
+## 7. 核心 prompt 与后续 App 接入
 
 prompt、工具描述和代码各管一层：
 

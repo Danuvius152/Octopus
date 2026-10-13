@@ -4,6 +4,8 @@
 
 核对窗口：2026-10-13 15:13～15:25，Asia/Shanghai。本页记录这个时间窗口的证据，不保证此后代码、资料和服务保持不变。执行行为以[当前 spec](local-shared-wiki-spec-v2.md)为准，详细任务仍沿用 V2 编号；[核心交接](local-shared-wiki-implementation-v2.md)保留最初交付时的验证与停止位置。
 
+**执行范围澄清：** A～C 直接使用 Octopus 原生 `/wiki`、核心 `/api/wiki` 与既有 Weber worker。Octo 组织，Weber 整理，Vera 验收；Sapphire/SmartReader 只保留后续 feature plan。主库在 `sapphire.data` 的物理位置和旧可选 app 绑定保留，不需要启动、开发或经由 App 提交任务。
+
 ## 1. 阅读入口和事实来源
 
 | 要回答的问题 | 文档 |
@@ -35,7 +37,7 @@
 | Git | HEAD `e7259b4`；Wiki 核心 `ca45ffc`，工具/交接 `73ea9cd`，Library 全量范围 `4534c4b` 已提交 | HEAD 后两次提交是模型速度/应用退出修复，没有新增已提交 Wiki 核心 |
 | 新 Wiki 修复 | 9 个 Wiki 模块和 2 个新增测试未提交；assets Markdown 资格、直接表示选择回退及 sections-v5 已在工作树 | 尚未提交，整版运行验收尚未完成，不由源码存在推断整版已采用 |
 | 当前服务 | user service active，13:28:41 启动；health 200，OpenAPI 有 read-many/revise | 生产仍 sections-v4，无 readable_body；新 fallback/v5 未迁移，assets 单项运行资格尚需核对 |
-| 绑定 | account/vault/owner app/既有 Weber 与交接一致 | 执行前继续核对，不能照旧记录重置配置 |
+| 核心配置 | account/vault/root/既有 Weber 与交接一致；旧可选 app 绑定仍保留 | 执行核对核心配置；App 绑定和运行不是前提，不能照旧记录重置配置 |
 | 真实 agents | Octo `98905a679ddf`、Weber `f37612d667ec`、Vera `f97a9e992aee`，均未归档 | 隔离测试的 stand-in 不算实际执行者 |
 | Weber persona | 知识段已实际合并，SHA 与应用记录一致 | 当前 reasoning/tier 与首 job 已不同，保留当前用户配置，不恢复旧 ultra/fast |
 | 索引状态 | durable schema 7；336 indexed documents，当前 sections-v4；epoch 340，15:25:23 对账无 error | 336 是整个索引集合，不是本轮 Library Markdown 的分母；sections-v5 不是 durable schema8 |
@@ -96,7 +98,7 @@
 | Vera 旧状态升级 | 3 个实际旧 schema7/sections-v4 状态场景通过 | 隔离升级，不是生产已迁移 |
 | integrated fast-gates | exit0，1780 hermetic passed/43 real deselected，344 frontend，其余八关通过 | 当前冻结源码 |
 | pure UI | 72 passed，exit0 | 当前冻结源码 |
-| Codex browser | 1 passed，exit0 | 当前冻结源码与隔离服务 |
+| Codex browser | 1 passed，exit0 | Octopus 原生聊天与隔离服务；不是 Sapphire/SmartReader 验收 |
 | Codex real | **16 passed / 2 failed / 0 skipped，exit1** | 当前冻结源码，完整本机门槛尚未通过 |
 | Claude live | 本轮未执行 | 旧 provider 402 记录单列，不计通过、不掩盖 Codex 失败 |
 
@@ -137,7 +139,7 @@
 
 先 pika_vault，再 Me/Research/course/Guides、导航、模板和其余目录，包含两个已有 assets Markdown。每批通常 5～10 篇，按长度/上下文负载调整，明确 paths、当前版本、动作和幂等键。
 
-**提交路线：**已执行试点使用真实 Octo turn 首行 `/wiki maintain` 的六个 shlex 路径选择，job actor 为 Octo、实际 changes actor 为 Weber。后续若继续 MCP，首行明确每批文件；正文或 scope 的“全 Library”不替代 selection。也可在用户既有授权下使用合法账户/绑定 app direct API 或本机 operator/helper，将 manifest 转为明确 paths 并记录入口、账户、actor；复用现有 WikiJobs 和锁/恢复合同，不假定未实现的自动目录 scope。
+**提交路线：**已执行试点使用真实 Octo turn 首行 `/wiki maintain` 的六个 shlex 路径选择，经 MCP 与核心 `/api/wiki/maintain` 创建 job，job actor 为 Octo、实际 changes actor 为 Weber。后续沿这条独立链路，首行明确每批文件；正文或 scope 的“全 Library”不替代 selection。也可在用户既有授权下使用已认证账户的核心 `POST /api/wiki/maintain` 或本机 operator/helper，将 manifest 转为明确 paths 并记录入口、账户、actor；复用现有 WikiJobs 和锁/恢复合同，不假定未实现的自动目录 scope。
 
 Octo 逐篇检查当前身份/revision、整理或真实 no_change、回执、索引、精确定位/当前内容读取及适用的内容检索。资产使用 include_assets 和直接读取，模板按角色查询。Vera 分类语义抽查；坏规则暂停受影响项并扩大复核，修正后只续未完成或版本变化项。
 
@@ -145,7 +147,7 @@ Octo 逐篇检查当前身份/revision、整理或真实 no_change、回执、�
 
 ### D. 之后才启动的条件项
 
-V2-05 Sapphire、V2-09 SmartReader 在用户启动应用开发时实施。V2-07 以真实可复现的词法漏召回为前提。语言对照、规模扩容、完整来源谱系、旧快照退役/GC 保留各自条件，不作为 A～C 的隐含工作，也不因接口标记 deprecated 就认定旧数据已清理。
+V2-05 Sapphire、V2-09 SmartReader 在用户启动应用开发时实施，包括 App 入口、客户端权限和界面验收；A～C 不分派 App 开发或接入任务。V2-07 以真实可复现的词法漏召回为前提。语言对照、规模扩容、完整来源谱系、旧快照退役/GC 保留各自条件，不作为 A～C 的隐含工作，也不因接口标记 deprecated 就认定旧数据已清理。
 
 ## 5. 文档维护与下一次交付
 

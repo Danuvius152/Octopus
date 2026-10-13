@@ -35,7 +35,9 @@ V2-02 的独立受任务约束修订分支不经过 `original_text → 删除旧
 
 ## 4. 工具与原始位置协议
 
-已实现 REST `POST /api/wiki/revise`、MCP `revise`，已有 app 网关转发同一合同。consumer app 仍只提交限定维护任务，不直接取得 curator 写权限。能力标识 targeted_revision 由实际运行版本声明，旧工具保留兼容，未实现的 region_updates 草案由本合同替代。MCP 参数为 request 对象，REST 直接接收该对象。
+已实现核心 REST `POST /api/wiki/revise`、MCP `revise`，由有效 Weber worker 直接调用。本轮入库与维护经独立 `/wiki`/核心 API 的持久任务执行，不要求 App 绑定或运行。能力标识 targeted_revision 由实际运行版本声明，旧工具保留兼容，未实现的 region_updates 草案由本合同替代。MCP 参数为 request 对象，REST 直接接收该对象。
+
+既有可选 app 网关的转发保留兼容；Sapphire/SmartReader 的客户端接入及权限按后续 feature plan 处理，不作为本轮维护入口。
 
 `blocks` 扩展可选定位视图与指定块读取：默认旧响应保持；新视图返回当前版本的原始块定位、hash、标题和范围，按需读取正文。块定位绑定文档身份及 revision，不把当前数组序号当长期身份；实际返回的原始区间进入任务阅读记录。
 

@@ -2,7 +2,7 @@
 
 > **Status:** in-progress — OKF、角色/身份、frontmatter_patch 和定点维护核心已实现并上线；全量内容验收及资产 Markdown/表示选择修复仍在进行，见[当前进度](local-shared-wiki-progress-v2.md)。
 >
-> 修订：v2.1，2026-10-13（Asia/Shanghai）。本文延续已确定的 **OKF v0.2 + article-v1**，定义文章、研究综合、个人资料和导航如何被同一套解析与检索组件消费。现有 /wiki、主 Vault 与 Sapphire 保留；SmartReader 后续承担阅读讨论。与检索接口、prompt 和验收文档一起实施，不能仅替换提示词就宣称完成。
+> 修订：v2.1，2026-10-13（Asia/Shanghai）。本文延续已确定的 **OKF v0.2 + article-v1**，定义文章、研究综合、个人资料和导航如何被同一套解析与检索组件消费。现有 /wiki 与主 Vault 保留，由既有 Weber 独立执行整理维护；Sapphire/SmartReader 接入仅为后续 App feature plan。与检索接口、prompt 和验收文档一起实施，不能仅替换提示词就宣称完成。
 
 **本轮答复优先：** Q54/Q59 确认当前 pika_vault 以旧模板为参考、按最新需求原位模板化，保持正文措辞，不另存原稿副本，sources 可空。Q60 确认未来维护不区分 AI／人类作者，不因人工编辑拒绝更新；保护核心思想、论证和有风格的观点，允许原位纠错与补充，正常维护不重写正文。Q56 允许复核后不改字，Q58 要求真实知识闭环。Q57 将来源收敛为可选出处、回查、已知直接依赖提醒与明确重复归并，完整来源根闭包和自动证据计数不作为核心门槛。最终操作合同见[定点维护](local-shared-wiki-maintenance-v2.md)。
 
@@ -79,7 +79,7 @@ article-v1 是来源文章的整理约定，适用于这次讨论的三篇参考
 
 ## 3. 统一 doc_role，避免 AI 摘要淹没检索
 
-doc_role 是服务端对公开 type 的归一化投影，便于索引、prompt 和 Sapphire 一致理解文档用途。它不应成为另一份与 YAML type 竞争的人工字段。OKF 没有以下强制枚举；这是本项目的本地类型表。
+doc_role 是服务端对公开 type 的归一化投影，便于索引、prompt 及后续 App 客户端一致理解文档用途。它不应成为另一份与 YAML type 竞争的人工字段。OKF 没有以下强制枚举；这是本项目的本地类型表。
 
 | 公开 type 示例 | doc_role | 默认用途 |
 | --- | --- | --- |
@@ -187,8 +187,8 @@ Vidu 报告这类综合有独立价值：能解释方法差异与测量边界。
 | 索引器 | 文档级预览 + 正文段落；内容角色/直接来源关系 | 不把摘要、原文、HTML 三份都计为独立证据 |
 | 查询服务 | 按 intent 选择粒度；返回当前可定位的候选 | 不用排名认证事实正确 |
 | Weber | 阅读与综合；按模板整理指定内容 | 不在 prompt 中重做全库身份和来源推断 |
-| SmartReader | 阅读材料、选区讨论、草稿与明确入库，后续映射主库 id/revision | 浏览器 UUID、DOM range 与草稿不得冒充 Wiki 身份、坐标和当前正文 |
-| Sapphire | 库浏览、标签/搜索、来源与版本展示、普通编辑 | 不维护与 /wiki 不同的标题/别名/链接解析规则 |
+| SmartReader（后续 App） | 阅读材料、选区讨论、草稿与明确入库，后续映射主库 id/revision | 浏览器 UUID、DOM range 与草稿不得冒充 Wiki 身份、坐标和当前正文 |
+| Sapphire（后续 App） | 库浏览、标签/搜索、来源与版本展示、普通编辑 | 不维护与 /wiki 不同的标题/别名/链接解析规则 |
 
 设计基线仅消费 YAML tags/aliases 和旧 octopus-wiki/octopus-section 注释；v2 已实现统一 OKF 解析和兼容适配供核心组件消费。读写 revision、任务范围与历史继续保留；旧 owned-region 记录作兼容和恢复信息，不决定正文编辑资格。应用新功能仍按对应 feature plan 接入。
 

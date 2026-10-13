@@ -159,3 +159,11 @@ Weber 负责全文理解、Key note 和有用关联；服务端负责范围、�
 当前树的已完成分支是核心上线、persona合并和前两篇真实验收；尚未完成分支为当前修复版两项Codex失败及实际部署、第二批当前验收/Me版本对账、两个Research、Q58和全量覆盖。已有完整本机检查记录，但不能因多数通过忽略两项失败。
 
 本轮没有新的用户取舍frontier。下一步先取证、诊断并按既定合同由Octo落实，具体退出条件见[当前执行计划](local-shared-wiki-progress-v2.md)，已确认行为集中于[spec](local-shared-wiki-spec-v2.md)。这次核对与文档整理没有启动生产维护、重置真实agent或代替Vera验收。
+
+## 9. `/wiki` 独立于 App 的范围纠正
+
+用户再次明确：当前完善 `/wiki` 与让 Weber 整理文章入库不需要 App 参与，App 相关开发只写今后 feature plan。这是原有范围的重申，不是新增需要再确认的设计取舍。
+
+本轮直接由 Octo 组织，原生 `/wiki maintain` 或获授权核心 `/api/wiki/maintain` 提交持久任务，框架启动既有 Weber worker，完成受控维护、回执、索引和后续检索；现有 Vera 按已确认时点验收。App 网关或 app-agent 不在执行路线中。源码的 `WikiConfig.app_id` 与 registry.configure 的 app_id 均可空，MCP 调用核心 `/api/wiki`，worker 直接使用 curator_agent_id；现有主库存放在 `sapphire.data` 不意味着依赖 App 运行。
+
+保留旧可选绑定、现有文件位置和兼容代码，不因此搬库、解绑或开发应用。总览、当前 spec、执行计划及 Octo/Weber/Vera 提示已按这条边界统一；App 接入与界面留在 V2-05/09。此次文档纠正不启动生产写入或部署。

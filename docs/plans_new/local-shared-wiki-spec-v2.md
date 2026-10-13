@@ -6,6 +6,8 @@
 
 ## 1. 目标、范围与完成含义
 
+本轮完整交付独立的 `/wiki` 查询、整理入库与持续维护，由框架的 Wiki 服务和既有 Weber 执行。核心配置需要账户、Vault root 和 `curator_agent_id`；`app_id` 可空。Sapphire/SmartReader 接入属于后续 feature plan，不参与本轮任务提交、内容处理或功能验收。现有 root 位于 `sapphire.data` 是文件存放位置，不要求 App 启动，也不要求搬迁主库。
+
 当前主库 `Library/` 下所有 Markdown 递归纳入整理、入库与逐篇检索验证，兼容服务已支持的 Markdown 后缀及大小写。pika_vault 优先，随后覆盖 Me、Research、课程笔记、导航、模板和其余目录；优先顺序不缩小最终范围。已有 `assets` 内 Markdown 也在当前范围，文件角色与维护资格分开。
 
 全量文件清单记录实际路径、服务身份、输入/输出 revision、类型、动作、job/item/receipt、索引和检索结果。某时刻的文件数量只作基线；结束前重新盘点新增、移动、删除或修改，逐项对账。发现被当前规则拒绝的范围内 Markdown，记录并解决，不静默排除后宣称全量完成。
@@ -25,17 +27,17 @@
 
 Octo 统一组织部署、配置、清单、提交、跟踪、问题修正与放行；既有 Weber 执行内容理解和受控维护；现有 Vera 独立核对真实产物与验收证据。向委托 session 传完整背景、范围和版本，不假设其继承父对话。
 
-实际修改链路为：明确维护意图与目标 → durable job/assignment → 当前绑定 Weber worker → 当前内容读取 → 受控工具 → history/receipt/索引 → 后续检索。普通 query 只读，普通保存更新索引，不自动发起整理。日常查询无需固定三 agent 接力。
+实际修改链路为：Octopus 原生聊天中的 `/wiki maintain` → MCP maintain → 核心 `POST /api/wiki/maintain` → durable job/assignment → 当前绑定 Weber worker → 当前内容读取 → 受控工具 → history/receipt/索引 → 后续 `/wiki` 检索。获授权的账户 direct API/operator 提交也进入同一 job 协议。普通 query 只读，普通保存更新索引，不自动发起整理。日常查询无需固定三 agent 接力。
 
 目录授权由 Octo 落成明确路径清单，提交入口必须如实记录：
 
 | 已有入口 | 现有文件的范围合同 |
 | --- | --- |
 | 用户 `/wiki maintain` turn → MCP maintain | 每个 paths 位于可信请求首行的 shlex tokens；含空格的路径正确引用，正文中的清单不自动产生授权 |
-| 已认证账户或绑定 owner app 的 direct maintain API | 合法身份确定账户及绑定，JSON 明确 paths/scope/idempotency_key，复用既有 WikiJobs |
+| 已认证账户的核心 `POST /api/wiki/maintain` | 合法身份确定账户，JSON 明确 paths/scope/idempotency_key，复用既有 WikiJobs |
 | 明确获授权的本机 operator/helper | 固定正确账户与清单，复用公共 WikiJobs.maintain 及既有锁、恢复和幂等协议，记录真实 actor/提交依据 |
 
-接口不会自行递归展开目录。普通 delegation 即使继承 maintain mode，也不继承 writer assignment，其包装正文不是可信首行 selection；app-agent 对话同样不能被假设为现有文件的 MCP 提交入口。可以沿已有合法 operator/direct API 完成调度，无需为本轮新造队列或提前开发 App 功能。
+接口不会自行递归展开目录。普通 delegation 即使继承 maintain mode，也不继承 writer assignment，其包装正文不是可信首行 selection。Octo 使用以上核心入口提交和跟踪，由框架直接创建 Weber worker 会话，不通过 App 网关或 app-agent 对话。
 
 只指定一个批次提交方，固定幂等键；已有文章用 paths 维护，material 留空，不重复导入主文。Worker 不扩张 assignment、不递归提交后续维护；异步任务 ID 仅表示排队。实际 worker 必须是当前绑定 Weber，不能以临时测试 agent 或开发者代写冒充。
 
@@ -86,7 +88,7 @@ Vera 在首次生产写入前讨论样本、基线、问题与证据；首个 1�
 | 编号 | 必须实际通过的合同 | 证据 |
 | --- | --- | --- |
 | AC-01 | 全 Library Markdown 范围覆盖 | 最终枚举与 manifest 逐项对应，无静默遗漏 |
-| AC-02 | 可信提交和实际 Weber | 账户/入口/paths、durable job、worker/assignment |
+| AC-02 | 独立核心入口、可信提交和实际 Weber | 核心 API/MCP 的账户/入口/paths、durable job、worker/assignment；不要求 App 绑定或启动 |
 | AC-03 | 完整当前阅读 | 实际 read/read_many/raw 返回范围连续覆盖，revision 一致 |
 | AC-04 | 按类型整理、思想与措辞保全 | 当前前后正文/diff、条件/反例/公式/代码/媒体 |
 | AC-05 | 摘要复用及 no_change | 阅读、判断、实际回执；不用循环生成摘要 |
@@ -102,4 +104,4 @@ Vera 在首次生产写入前讨论样本、基线、问题与证据；首个 1�
 
 ## 8. 当前不作为前置条件
 
-Sapphire/SmartReader 新 UI、client_apps、tags 筛选/列表、通用写作自动装配属于对应后续票。语义适配器只由稳定、可复现的真实词法缺口触发；语言对照、大规模扩容、完整来源闭包/独立证据计数及旧快照 GC 有各自前提，不借全量整理自动启动。具体下一步与失败项处理见[执行计划](local-shared-wiki-progress-v2.md#4-之后的执行计划)。
+Sapphire/SmartReader 接入、新 UI、client_apps、tags 筛选/列表、通用写作自动装配属于对应后续票。现有可选 `app_id`、App 网关和 app_bridge 保留兼容；它们不是本轮执行入口或功能验收依赖。仓库既有隔离兼容测试可以照常运行，不要求实际 App 参与。语义适配器只由稳定、可复现的真实词法缺口触发；语言对照、大规模扩容、完整来源闭包/独立证据计数及旧快照 GC 有各自前提，不借全量整理自动启动。具体下一步与失败项处理见[执行计划](local-shared-wiki-progress-v2.md#4-之后的执行计划)。

@@ -11,6 +11,8 @@
 
 执行开发时先重新确认当前仓库 commit、工作区已有修改、主库绑定与接口版本。本文代码定位基于审阅提交；若仓库已变化，先定位等价函数，再判断哪些目标已经完成。不要覆盖用户未提交的工作，也不要重复部署、排队或运行已完成的维护任务。
 
+本轮只推进独立 `/wiki` 核心及 V2-06/08：原生会话或获授权核心 `/api/wiki` 提交 → durable job/assignment → 既有 Weber worker → 受控维护与索引 → `/wiki` 查询验收。`app_id` 可空，App 运行、网关或 app-agent 不是执行依赖。已有兼容代码和隔离测试保留；App 开发与接入仅在用户启动 V2-05/09 时进行。
+
 以下契约贯穿所有任务：
 
 - 一份 Vault 正文是内容权威；现有服务 `id` 是运行时稳定文档身份。OKF 扩展 `uid` 是可移植身份别名，不能自行授权、抢占现有文档或替代 revision。
@@ -34,7 +36,7 @@
 | V2-03 | intent、compact、覆盖选择与 read_many | V2-01、V2-02 |
 | V2-04 | 工具 capability 与分层 prompt、Weber 配置合并 | V2-02、V2-03 的真实契约 |
 | V2-05 | 后续 Sapphire 共享搜索、标签过滤、库浏览与单次保存 | V2-03；不阻塞 V2-06 / V2-08 |
-| V2-06 | 核心端到端、真实 Codex 与少量入库试点 | 仅 V2-01～04；不等待新 app UI |
+| V2-06 | 核心端到端、真实 Codex 与少量入库试点 | 仅 V2-01～04；不需要 App 绑定、运行或 UI |
 | V2-07 | 有明确触发条件的语义适配器 | V2-06 / V2-08 的真实检索缺口；不依赖应用功能 |
 | V2-08 | 已有未规范文章与库外资料分批适配、去重和有用途的知识积累 | V2-06 的真实小样本闭环 |
 | V2-09 | 后续 SmartReader 客户端授权、阅读/引用/讨论、草稿与按需入库 | 共享协议与任务能力；不阻塞 V2-06 / V2-08 |
@@ -52,7 +54,7 @@
 | V2-06 | 真实 Weber 完整读文、复用或提取 Key note，经受控工具写回，完成索引及后续查询/纠正 | 仅处理已确定的少量代表文章；检查产物与正文差异，形成批次放行记录 |
 | V2-08 | 沿已验证的同一 Weber/job/写入链路分批执行与恢复 | pika_vault 优先，覆盖当前 Library 全部 Markdown，含已有 assets MD；按类型整理/真实 no_change 和逐篇检索，保留正文表达 |
 
-实际执行链为：明确目标的维护请求 → 服务端 durable job 与 assignment → 既有 Weber worker → 当前正文读取与内容判断 → organize/restructure/revise 等已实现的受控工具 → 原子写入、history、任务回执与索引 → 当前 agent 后续查询。具体写工具按动作选用，普通查询无需转发 Weber。
+实际执行链为：原生 `/wiki maintain` → MCP maintain → 核心 `POST /api/wiki/maintain` → durable job 与 assignment → 既有 Weber worker → 当前正文读取与内容判断 → organize/restructure/revise 等已实现的受控工具 → 原子写入、history、任务回执与索引 → 当前 agent 后续查询。获授权的账户 direct API/operator 也复用同一 job；具体写工具按动作选用，普通查询无需转发 Weber。
 
 Weber 负责理解与生成 Key note、必要关联和局部维护文字；程序处理可确定的格式字段并验证范围、版本与写入事实。禁止用固定脚本摘要或由开发 agent 手工编写结果代替 Weber 的真实内容验收。第一批生产文章从 V2-06 开始；批量模板化从 V2-06 通过、V2-08 启动时开始。放行条件见[迁移计划](local-shared-wiki-migration-v2.md#31-真实-weber-链路与模板化放行)。App 新功能、可选语义检索及 prompt 语言实验不属于该前提。
 
@@ -142,16 +144,16 @@ Weber 负责理解与生成 Key note、必要关联和局部维护文字；程�
 1. `search` 支持统一 intent：`lookup/question/overview/compare`。完整路径、现有 id、无歧义 uid 别名、真实题名和可靠 aliases 走精确查找；目录或命名对象在用户/上下文明确时约束候选，歧义时返回有限选择。
 2. 保留现有词法、中文、跨章节覆盖与文档去重。overview 对当前主题候选做资料角色、主题分面与来源重合选择；已有导航提出候选时，仍检索当前文档索引补充未收录资料。compare 分别取得各对象证据，缺项明示。有独立用途的当前 Concept/综合页可复用已有解释或比较；重要事实仍按其来源与当前版本查证，不简单把所有生成页降权到不可用。
 3. 新增 `view=compact`，旧省略 view 的调用仍按 full 兼容。compact 字段以检索协议为准：保留身份、当前路径、标题、description、角色、revision、命中位置与必要状态；完整 sources、诊断和历史按需取。检索候选不逐篇读取原文件或核验所有来源。
-4. 新增批量 `read_many`，MCP 工具名为 `read_many`，REST 为 `POST /api/wiki/read-many`，app 路径为 `POST wiki/read-many`；items 使用 `{doc,start,length,expected_revision}`，整体 `budget_chars`。按请求顺序稳定返回；同一文档重叠范围可以合并读取，但保持 item 对应关系和真实原文范围。每项独立携带冲突、失踪、截断与 continuation，不因一项失败抹掉其他成功结果。
+4. 新增批量 `read_many`，MCP 工具名为 `read_many`，核心 REST 为 `POST /api/wiki/read-many`；items 使用 `{doc,start,length,expected_revision}`，整体 `budget_chars`。按请求顺序稳定返回；同一文档重叠范围可以合并读取，但保持 item 对应关系和真实原文范围。每项独立携带冲突、失踪、截断与 continuation，不因一项失败抹掉其他成功结果。既有可选 app 网关的 `POST wiki/read-many` 已保留兼容，核心执行直接使用 REST/MCP。
 5. read_many 与现有 read 使用相同的当前文件校验和读覆盖记录。代码层严格使用 Python 字符坐标；前端不能用 JavaScript 字符串长度替换。全文评价从 0 按返回位置读至结束，预算不足只表示下一批，不是完成全文。
 6. 分页在同一索引代保持确定顺序；索引代变化、scope 不可用、部分抽取失败、空结果、预算截断和旧 revision 使用各自状态，不统一伪装为“没有知识”。详细状态以检索协议为唯一字段定义。
-7. 所有新增参数和响应同时经过 REST、app 网关手工参数转发、MCP 和 OpenAPI。`app_wiki` 当前显式拆 query params，漏加 intent/view 会使 Sapphire 与 `/wiki` 产生无声差异；新增 read_many 还必须加入 app handler 与任务工具白名单。
+7. 核心参数和响应贯穿 REST、MCP、OpenAPI 和任务工具白名单。已交付的 `app_wiki` intent/view/read_many 转发保留兼容，用隔离路由测试核对；不要求安装、启动 App 或开发其功能。后续应用票接入时再验真实 App 客户端。
 8. 以 capability 宣告已实现版本；旧客户端和旧 prompt 继续使用旧参数。新增只读工具继承当前账户/会话任务范围，不能用 uid 或来源链接扩大授权。
 9. 后续标签过滤遵循同一 search/documents 字段与派生元数据契约，接口定义参见检索协议；实际标签面板及 tags facets 扩展随 V2-05 交付。多 app client policy 随 V2-09 完整接入。未完成时不在核心 capability 中提前宣告，V2-06 不等待这两项 UI 扩展。
 
 ### 验收
 
-- 同一 query、intent、scope、view 从 REST、MCP、当前已绑定 app 网关得到等价候选与位置；旧 full 客户端继续工作。这个网关契约检查不要求先完成 Sapphire 新 UI。
+- 同一 query、intent、scope、view 从核心 REST、MCP 得到等价候选与位置；旧 full 调用继续工作。既有可选 app 网关隔离兼容测试照常运行，实际 App 客户端验收留在后续应用票。
 - Me 查询不将转载作者当用户；Vidu lookup 唯一命中不再注入模板/导航作为其他证据；Vidu 局部问题读到具体条件。
 - overview 能覆盖真实存在的不同资料方向；新增而未进入旧导航的文章仍可发现；同源总结增多不挤掉独立方向。
 - read_many 覆盖混合成功/changed/not_found、中文与 emoji、重叠范围、预算刚好耗尽、长文续读和版本变化；单文档 read 保留 HTTP 409，批量请求按检索协议返回逐项状态。引用可由身份、revision 与原文位置机械回查；跨应用阅读 UI 在 V2-09 验证。
@@ -239,13 +241,13 @@ Weber 负责理解与生成 Key note、必要关联和局部维护文字；程�
 
 ### 代码与材料定位
 
-`tests/test_wiki_*`、`web/e2e/wiki-composer.spec.ts`、`scripts/evaluate-wiki-search.py`、当前 Octopus `/wiki` / Weber 入口；`docs/plans/local-shared-wiki-implementation-handoff.md`。使用已可用 REST/MCP/当前绑定 app gateway 检查契约，不要求新标签面板或 SmartReader 功能。语料、失败样例和配置记录留在适当私有位置，不将个人正文提交到公开仓库。
+`tests/test_wiki_*`、`web/e2e/wiki-composer.spec.ts`、`scripts/evaluate-wiki-search.py`、当前 Octopus 原生 `/wiki` / Weber 入口；`docs/plans/local-shared-wiki-implementation-handoff.md`。使用核心 REST/MCP 检查契约，真实试点不经 App gateway 或 app-agent。语料、失败样例和配置记录留在适当私有位置，不将个人正文提交到公开仓库。
 
 ### 完整范围
 
 1. Vera 按评估文档固定当前语料、gold 文档/章节、可回答性和禁止错误断言；先在隔离副本测试模板噪声、重复 uid、20 份同源摘要、导航遗漏、来源删除、正文版本变化及目录不可用。
 2. 对相同问题和配置比较旧实现与各完整变更集，分开测服务、IO、工具输出和真实 Codex 的 token/首响应/完整回答时间。不能将跳过、脚本正常退出或 schema 通过算成行为通过。
-3. 在实际当前绑定与已配置 Codex 下，至少覆盖 Me 正向/缺失字段、Vidu 精确局部/全篇、数字人宽主题、一次版本变化重读、一次少量材料维护与随后检索。引用通过服务身份、当前正文和位置核查；新 SmartReader 引用 UI 留在 V2-09。
+3. 在实际账户、Vault、既有 Weber 与已配置 Codex 下，直接通过核心 `/wiki` 链路覆盖 Me 正向/缺失字段、Vidu 精确局部/全篇、数字人宽主题、一次版本变化重读、一次少量材料维护与随后检索。引用通过服务身份、当前正文和位置核查；新 SmartReader 引用 UI 留在 V2-09。
 4. 选择已获准的少量真实资料作为试点，优先包含一篇保留原文的旧文章适配和一份有真实来源的待入库材料；数量与具体文件以当轮任务范围为准。先核对现有文件与接受模板，旧文不因格式缺少字段而全量重写。
 5. 检查试点是否形成可用 description/Key note、可靠名称/标签、可追溯来源与必要关联；确有重复使用价值时才形成少量 Concept/Topic 或补充已有知识页。没有独立价值的新页面不计为完成量。
    Key note 的提取、已有摘要是否适用的判断及明确维护由实际绑定的 Weber worker 完成。至少一篇现有 MD 走真实 `/wiki` 维护提交→Weber 全文阅读→模板化写回→当前索引→后续查询的完整链；记录实际 agent/session、job 与产物身份。脚本生成摘要、开发 agent 代写和仅成功调用 Codex CLI 均不代替此项。
@@ -259,7 +261,7 @@ Weber 负责理解与生成 Key note、必要关联和局部维护文字；程�
 - 核心评估的必要契约通过，阻塞失败有修复与复验；后续 app UI 和条件语义单独记录，不因未开始这些票判定核心失败。相同证据质量下才能声明更省 token。
 - 实际 Codex 的工具参数、当前 revision、引用范围及回答可回查；完整评价覆盖字符 0 至结尾，缺失职业明确说明。
 - 试点维护实际生成/更新受保护的产物并完成索引；后续问题能复用已组织知识，来源/条件与纠正可信；普通改动没有变成再次总结，持续冲突有明确结果而不无限重试。
-- 新旧文章、旧 full、新 compact、既有 app gateway 与 MCP 同时可用；原文、用户编辑区与无关配置不受损。未实现新 UI 如实保持 proposed。
+- 新旧文章、旧 full、新 compact 在核心 REST/MCP 同时可用；原文、用户编辑区与无关配置不受损。既有可选 app gateway 保留隔离兼容检查，实际 App 功能仍保持后续 planned。
 - 最终交接分别列出 implemented、validated、deployed、未验证环境和仍待用户范围的旧文处理。
 
 ### 依赖与完成条件
@@ -370,7 +372,7 @@ SmartReader 已有材料×agent 会话、SSE、选区和摘录，但每轮重复
 下面是用户日后主动发起开发时可复制的完整提示。它现在只是交付文本，不触发本轮开发、配置变更、部署或旧库维护。
 
 ```text
-请基于当前 Octopus 实现，按本轮范围落地 docs/plans/local-shared-wiki-v2.md 的 v2.1 修订及其配套 knowledge、content、retrieval、prompts、migration、evaluation 和 tickets；SmartReader / Sapphire 新功能是其中明确列出的后续应用票。
+请基于当前 Octopus 实现，按本轮范围落地 docs/plans_new/local-shared-wiki-v2.md 的 v2.1 修订及其配套 knowledge、content、retrieval、prompts、migration、evaluation 和 tickets。核心 /wiki 独立完成查询、入库和维护，直接经 REST/MCP 与 durable job 调用既有 Weber；不经 App gateway 或 app-agent。SmartReader / Sapphire 开发与接入只保留后续应用票，本轮不实施，不要求 App 绑定或运行。
 
 先读取当前 AGENTS.md 和实际分支/commit/工作区；保留用户未提交修改。本文设计基线是 453a7995bd6c54df33b0fc41dec09d370b4b40aa，但不要假设仓库仍在这个提交。先核对已有实现和旧 handoff，列出本轮真正需要补的差异，然后继续完成工作，不重做已验收能力。
 
@@ -406,7 +408,7 @@ Octo 负责代码和自测，Vera 对具体差异做独立复核。让当前 age
 
 核查性能是否来自减少工作：真实 API/MCP 路径不重复迁移或全库 stat，单篇保存只索引变化文件，compact 不现读每个候选，read_many 预算与字符坐标正确。同一问题和证据质量下比较工具轮次、工具输出 token、模型 usage 和冷热时间；不得把缩短答案或漏读必要段落当优化。
 
-验证 API 贯穿 REST、app_wiki 手工转发、MCP、OpenAPI 和实际 prompt；旧 full 调用继续兼容，capability 不提前宣告。核心 V2-06 只依赖 01～04，以真实 Codex 和少量维护试点闭环；V2-08 再看获准旧资料/库外材料小批适配，不机械重写。V2-05 / V2-09 属后续规划，未开始时不成为核心验收失败。
+验证独立核心 API 贯穿 REST、MCP、OpenAPI 和实际 prompt；旧 full 调用继续兼容，capability 不提前宣告。核心 V2-06 只依赖 01～04，以真实 Codex、既有 Weber 和少量维护试点闭环，App 绑定或运行不是前提；V2-08 再看获准旧资料/库外材料小批适配，不机械重写。既有 app_wiki 隔离兼容测试保留，不以实际 App 代替核心验证。V2-05 / V2-09 属后续规划，本轮不实施，未开始时不成为核心验收失败。
 
 应用票启动时，验证 Sapphire tags any/all、目录/角色交集、facet 计数与先过滤后分页，保持 Git/附件/回收站和其他 vault。SmartReader 验证 client_apps 同时覆盖直接 wiki、agent/chat/ask 与手写 /wiki；不改变 owner app_id，不让 read/submit 变成直接发布权。验证浏览器-only 与 Wiki-bound 材料可达、DOM/Wiki 坐标、连续三轮不重复 150k、旧引用重定位。普通解释、reader 草稿、明确入库触发不同且同范围写改不重复确认。
 

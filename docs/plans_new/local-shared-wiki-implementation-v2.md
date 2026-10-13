@@ -6,12 +6,13 @@
 
 ## 接手指令（完整 prompt）
 
-> Octo 统一组织，先收口当前修复版本的两项 Codex 失败、提交/部署及派生索引升级，再补第二批当前验收、两个 Research 和 Q58，请既有 Vera 放行完整试点后覆盖 Library 全量。已有首批及配置事实复用，当前 Me 已变化须重读，旧回执和旧版检查不冒充当前通过。
+> Octo 统一组织独立的 `/wiki` 核心链路，既有 Weber 执行，现有 Vera 验收；本轮不经由 App。先收口当前修复版本的两项 Codex 失败、提交/部署及派生索引升级，再补第二批当前验收、两个 Research 和 Q58，完整试点放行后覆盖 Library 全量。已有首批及配置事实复用，当前 Me 已变化须重读，旧回执和旧版检查不冒充当前通过。
 
 以下完整 prompt 包含用户后续确认的 Library 全量范围及现有 Vera 的验收时点，可直接复制给 Octo：
 
 ```text
 Octo，请作为总负责人，组织本地共享 Wiki v2 从接手、上线、真实试点到全量整理入库与检索验收。你负责范围、部署、分派、跟踪、问题处理和放行；既有 Weber 负责内容理解与受控维护，现有 Vera 负责独立验收。以下范围内自主推进，无需让我逐批确认。
+本轮直接使用 Octopus 原生 /wiki、核心 /api/wiki 与既有 Weber worker。Sapphire/SmartReader 相关开发和接入仅为后续 feature plan，不经由 App 网关或 app-agent 提交整理任务，不把 App 绑定、启动或界面验收作为核心完成条件。
 
 一、接受交付
 仓库：/home/jack/Octopus。
@@ -21,12 +22,13 @@ Octo，请作为总负责人，组织本地共享 Wiki v2 从接手、上线、�
 
 二、完整范围与顺序
 Vault 根目录：/home/jack/.octopus/users/f527ad605dd4/applications/sapphire.data/vaults/obv/repo。
+这个路径是现有主库的物理存放位置，独立 Wiki 服务直接读写；无需启动 Sapphire 或迁移目录，保留已有可选 App 绑定即可。
 本轮范围是 Library 下所有 Markdown，递归枚举并兼容 .MD 等大小写后缀。pika_vault 优先，随后覆盖 Me、Research、课程笔记、导航、模板及其余目录；Me 和 Research 同样需要最终整理入库，按真实类型处理。
 建立全量文件清单，记录路径、服务身份、revision、类型、动作、任务/回执和检索结果。批次明确到具体文件；目录授权由你落实为清单，再通过实际维护入口纳入任务范围。
 已符合要求的文件真实完整复核后记录 no_change，也检查索引和检索。最终所有文件都有整理或复核、实际入库状态及检索验证；未处理、冲突、失败或不可检索项不计完成。
 
 三、上线和配置准备
-重新通过框架核实绑定：account f527ad605dd4，Weber f37612d667ec，vault 6bdb9fe5-3453-47a8-8510-9a892c510346，owner app 3e7830a1336b。
+重新通过框架核实核心配置：account f527ad605dd4，Weber f37612d667ec，vault 6bdb9fe5-3453-47a8-8510-9a892c510346，以及上述 root。app_id 是可选兼容配置，不作为本轮执行前提，不为开始整理而新增、替换或清除 App 绑定。
 新代码未上线时按交接文档部署。在没有在途写入时留下一致的配置、Wiki durable state 与 Vault 恢复点，保留身份、历史和回执。使用现有 venv、pip、本机设置及登录。
 本机以 systemctl --user 管理 octopus；更新后端并确认健康，再构建需要更新的前端。核对实际 capabilities、绑定、索引状态、当前 revision、compact 和 read-many，不能仅凭 health 判断完成。
 既有 Weber 知识段已合并，先核对当前配置；确有必要时只修订知识段，保留思考伙伴身份及其他定制。backend、model、reasoning、tier、凭据、memory 等维持当前用户设置；仓库参考 prompt 与实际配置分别核对，不恢复旧运行参数。
@@ -37,9 +39,9 @@ Vault 根目录：/home/jack/.octopus/users/f527ad605dd4/applications/sapphire.d
 向 Weber、Vera 分派时完整提供背景、文档、明确范围和版本，不假设子会话继承你的上下文。普通 ask_agent 可用于讨论与验收；实际 Wiki 写权限由框架的任务上下文提供。
 
 五、由你统一提交维护任务
-真实链路为：明确 /wiki maintain → durable job/assignment → 既有 Weber worker → 当前全文读取 → 受控写入 → history/receipt/索引 → 当前查询验收。
+真实链路为：原生聊天明确 /wiki maintain → MCP maintain → 核心 POST /api/wiki/maintain → durable job/assignment → 既有 Weber worker → 当前全文读取 → 受控写入 → history/receipt/索引 → 后续 /wiki 查询验收。
 同一批指定一个提交者，固定 idempotency_key，明确 paths 和 scope，避免重复排队。已有 MD 用现有路径维护，material 留空，不重复导入成新文章。普通 /wiki 查询不自动整理。
-沿实际可信入口提交：MCP 路线每个文件须位于可信 /wiki maintain 请求首行的 shlex tokens，含空格正确引用；正文清单或scope字段不产生权限。也可在既有授权的本机 operator/direct账户或绑定app API上下文中提交明确JSON paths，记录入口、账户和actor，复用现有WikiJobs、锁和恢复；不假定未实现的自动目录scope，也不伪造凭据。
+沿实际可信入口提交：MCP 路线每个文件须位于可信 /wiki maintain 请求首行的 shlex tokens，含空格正确引用；正文清单或 scope 字段不产生权限。也可在既有授权下，通过已认证账户的核心 POST /api/wiki/maintain 或本机 operator/helper 提交明确 JSON paths，记录入口、账户和 actor，复用现有 WikiJobs、锁和恢复；不假定未实现的自动目录 scope，也不伪造凭据。
 保留真实 delegation/session/job/item 标识，跟踪实际完成。异步返回任务 ID 仅表示已提交；后续批次由你调度，worker 完成自己的 assignment。
 
 六、每批给 Weber 的内容规则
@@ -98,9 +100,11 @@ Library/pika_vault/编程与开发/00-文章入库模板.md 只作参考，采�
 | account | `f527ad605dd4` |
 | curator_agent_id | `f37612d667ec`，现有 Weber，Codex，未归档 |
 | vault_id | `6bdb9fe5-3453-47a8-8510-9a892c510346` |
-| owner app_id | `3e7830a1336b` |
+| 既有可选 app_id（兼容记录） | `3e7830a1336b`；独立 `/wiki` 不依赖此值或 App 运行 |
 | root | `/home/jack/.octopus/users/f527ad605dd4/applications/sapphire.data/vaults/obv/repo` |
 | 当前整理入库目标目录 | `Library/` 下所有 Markdown，pika_vault 优先，以逐批明确文件范围执行 |
+
+Wiki 核心配置的 `app_id` 可空；现有 root 在 Sapphire data 目录不产生运行依赖。保留当前存储位置与可选绑定，实际维护直接经核心 API/MCP 调用 Weber。
 
 主库目录存在，运行服务 `/health` 正常；这些只证明现有服务可达，**不证明本次代码已上线**。当前开发对话没有 Octopus 委托工具及会话授权，因此没有伪造实际账户凭据或直接写生产数据库来代替框架协作。Octo 在自己的真实会话中使用现有任务入口。
 
@@ -189,7 +193,7 @@ start/end 在对应原始块内，必须与实际字句和 hash 一致；上例�
 1. 读取本提交及工作区状态，保护用户未提交修改。先检查已有 job，避免重复排队。确定没有进行中的写入后，通过既有框架保存主库配置、Wiki durable state 与 Vault 的一致恢复点；不删除 `index.sqlite3` 或旧历史来“重建”。
 2. 按 [本地 WSL 安装](../local-wsl.md) 使用现有 `.venv`、pip 与本机 constraints；新增依赖为 `markdown-it-py>=3.0,<5`，本轮安装并验证 4.2.0。不使用 uv，不重做登录，不把认证或个人正文提交进仓库。
 3. 由 Octo 在实际获准部署时执行 `systemctl --user restart octopus`，等待 `/health`；如果需要更新 SPA，再执行 `cd web && bun run build`。本机是 user service，后端先于前端构建更新。本文没有执行这些生产命令。
-4. 新进程启动进行事务化 schema migration 与后台对账。核对 `/api/wiki/info` 的 vault/curator、capabilities、index_status/index_errors/index_epoch；检查新 read-many、compact、guide 与当前 revision，不只看 health。保存原有 owner app 绑定，不添加未实现 client_apps。
+4. 新进程启动进行事务化 schema migration 与后台对账。核对 `/api/wiki/info` 的 vault/curator、capabilities、index_status/index_errors/index_epoch；检查新 read-many、compact、guide 与当前 revision，不只看 health。原有可选 app 绑定只保留兼容，本轮不部署 App 或添加 client_apps。
 5. 通过真实 agent 管理接口合并 Weber persona，再提交一个明确范围的小样本 job；验证 worker session 的 agent_id 确实为既有 Weber，任务指南与工具来自新能力。
 
 回滚代码与回滚内容分开处理。新版 schema 检测比自身更高的版本并拒绝继续，保留账本；旧版本没有新写入协议的保证，不能直接启动旧 writer 接管迁移后的状态。部署前留一致恢复点，出现问题先停止新的维护，在当前版本检查 prepared recovery 或索引错误。确需回到旧版时，协调恢复匹配的代码与一致 state/Vault，保留期间新产物供核对；不要用旧备份直接覆盖之后的用户编辑。派生索引可重建，身份/历史/回执不可当缓存删除。

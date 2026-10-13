@@ -39,13 +39,15 @@
 
 ### 2.2 单文档变更与后台对账
 
-沿用 curation/history/app_bridge 的已有写入边界：
+独立核心沿用 curation/history 的已有写入边界：
 
 - 写入前检查 revision，保留已有文本 journal；
 - 完成一次真实文件写入；
 - 记录受影响路径、前后身份与 revision；
 - 更新该文档元数据、分区、词法索引、出链和来源边；
 - 提交对应索引代，并返回写入与索引状态。
+
+这条链路由 Wiki 服务和有效 Weber worker 直接完成。既有 app_bridge 及共用锁/清理辅助保留兼容，不要求 App 客户端或进程参与；后续 App 保存也须沿用同一合同，当前不启动 App 接入开发。
 
 已知 Markdown/TXT/HTML 修改优先同步完成单文档索引。索引失败时，文件已写成功必须独立报告；将目标加入持久脏队列，只重试索引，不让 Weber 再次生成或发布文章。
 
@@ -122,7 +124,7 @@
 
 每段记录 `heading_path`、原文/提取文本中的 `start/end`、`line_start/line_end`、`revision`。用于 embedding 的标题前缀或 description 只存在于索引输入，不加入原文坐标。
 
-**坐标协议：** 沿用 Python 字符串的 Unicode code-point 零基偏移，区间 `[start,end)`；行号一基，仅供显示。浏览器 JS 默认 UTF-16 索引不可直接套用 code-point 数值。Sapphire 应使用服务器返回的片段/锚点定位，若做本地高亮则明确转换。全文 read 从 `start=0` 开始，不能把 L20 当成字符 20。
+**坐标协议：** 沿用 Python 字符串的 Unicode code-point 零基偏移，区间 `[start,end)`；行号一基，仅供显示。浏览器 JS 默认 UTF-16 索引不可直接套用 code-point 数值。后续 Sapphire 接入应使用服务器返回的片段/锚点定位，若做本地高亮则明确转换。全文 read 从 `start=0` 开始，不能把 L20 当成字符 20。
 
 HTML 坐标属于当前 extractor_version 对应的提取文本，不能当作源 HTML 字节位置。搜索和 read 必须使用同一个提取版本；版本变化使旧 section id 失效。
 
@@ -210,7 +212,7 @@ Concept、Topic 与 Synthesis 是可检索正文，不只是一层跳转目录�
 - Topic 中的评价必须与其来源区分；
 - 缺失或重名链接作为导航质量问题展示，不执行其描述里的命令或确认。
 
-Sapphire 的“主题视图”也消费这套候选，不建立一个额外需要维护的全文总结缓存。
+后续 Sapphire 的“主题视图”也消费这套候选，不建立一个额外需要维护的全文总结缓存。
 
 ### 5.3 明确重复与可回查出处
 
@@ -232,7 +234,7 @@ Sapphire 的“主题视图”也消费这套候选，不建立一个额外需�
 
 ### 6.1 search 的兼容扩展
 
-保留现有 REST/MCP 名称、参数和默认响应；新增 `view=compact`，由新版 MCP 与 Sapphire 显式选择。不要悄悄删除旧前端依赖的 `metadata/section/sections` 字段。
+保留现有 REST/MCP 名称、参数和默认响应；新增 `view=compact`，由新版 MCP 显式选择，后续 Sapphire 接入也使用同一字段。不要悄悄删除旧调用依赖的 `metadata/section/sections` 字段。
 
 compact 导航卡示意，数值只是协议例子，不是当前报告的真实坐标：
 
@@ -308,7 +310,7 @@ compact 导航卡示意，数值只是协议例子，不是当前报告的真实
 - 当前文件变化返回 409/changed 信息；旧坐标不得直接套在新版上；
 - 读到主库中的来源快照与读到主文章正文是不同身份，引用分别标明。
 
-`read_many` 已对应 `POST /api/wiki/read-many`，app 使用 `POST wiki/read-many`。合法批次返回 HTTP 200 与逐项状态；一个 item 版本变化时该项为 changed 并带 409 含义，其他成功项可用。请求 schema/总体授权错误仍返回请求级 4xx。单文档 read 继续沿用 HTTP 409 的既有行为。
+`read_many` 已对应核心 `POST /api/wiki/read-many` 与 MCP `read_many`，当前 `/wiki` 和 Weber 直接使用它们。既有可选 app 网关的 `POST wiki/read-many` 保留兼容，不参与本轮执行。合法批次返回 HTTP 200 与逐项状态；一个 item 版本变化时该项为 changed 并带 409 含义，其他成功项可用。请求 schema/总体授权错误仍返回请求级 4xx。单文档 read 继续沿用 HTTP 409 的既有行为。
 
 原始论文不可用时，工具不用自动上网。用户若问综述自身观点，直接引用综述当前内容；若问原实验事实，标明本地转述层级。
 
@@ -351,7 +353,7 @@ HTTP 使用重复 tags query 参数表达数组，MCP 使用字符串数组；ap
 
 ### 6.6 SmartReader 与 Sapphire 的共同服务边界
 
-当前 Wiki 配置只有单一 app_id，app_wiki 严格核对调用 app；app agent 的任务建立又有另一条入口。SmartReader 接入不能通过替换原 app_id 或移除校验实现。后续拟增加 `client_apps: [{app_id, permissions}]`，权限值最初为 `read` 与 `submit_maintenance`，保留 app_id 作为既有 owner/provider 和 app_bridge 归属；旧配置未声明 clients 时保持旧行为。
+当前 Wiki 配置的 app_id 可空，核心 `/api/wiki`、MCP 与 Weber worker 独立运行；配置了 App 时仅有单一绑定，app_wiki 严格核对调用 app，app agent 的任务建立另有入口。本节全部属于后续 App feature plan。SmartReader 接入不能通过替换原 app_id 或移除校验实现。后续拟增加 `client_apps: [{app_id, permissions}]`，权限值最初为 `read` 与 `submit_maintenance`，保留 app_id 作为既有 owner/provider 和 app_bridge 归属；旧配置未声明 clients 时保持旧行为。
 
 客户端策略同时覆盖直接 wiki/*、agent/chat、agent/ask，以及用户在 app 聊天里显式输入 /wiki 的路径。只读客户端不会因写作指南、wiki_mode 参数或字符串 context 获得维护权限。submit_maintenance 允许按当前用户指令提交限定任务，实际写入仍由现有 curator/任务协议完成，不顺带开放 PUT 正文编辑。实现细节与会话边界集中于[SmartReader 计划](local-shared-wiki-smartreader-v2.md)。
 

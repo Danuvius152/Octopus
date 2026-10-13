@@ -10,6 +10,8 @@
 
 知识库长期使用还要回答：旧知识能否在新问题中复用；一次整理需要多少人工改正；用户、外部作者与模型推断的归属是否明确；改正一处信息是否引发不必要的多篇重写。Concept 和 Topic 以实际复用价值评价，不按新增页数评价。首批整理不等待完美 persona、语言实验或 app UI，执行顺序见[迁移方案](local-shared-wiki-migration-v2.md)。
 
+V2-06/08 直接验收独立核心：Octopus 原生 `/wiki`/核心 REST/MCP → durable job/assignment → 实际 Weber → 全文阅读及受控维护 → 回执/索引 → 当前检索。App 绑定、启动、网关和 app-agent 不作为执行入口或功能放行条件。仓库原有隔离兼容测试和 Octopus 原生前端门禁照常运行；Sapphire/SmartReader 真实客户端验收只在后续应用票启动时进行。
+
 设计附件盘点时 `Library` 下约 37 份 Markdown，包含个人信息、长报告、课程与文章，其中两份是 assets 项目说明；该数字和当时默认候选资格均属历史。当前全量基线为 42 份 Library Markdown，两个资产 Markdown 也需整理验收。原隔离基线提取 40 份 Markdown、628,455 字节，不是生产全量副本，不能继承为当前 gold。
 
 设计基线已有中文分词、连续中文 bigram、大小写与全角规范化、章节定位、跨章节词组覆盖、文档级去重、目录过滤和当前 revision 读取。以下是当时缺口，前两项已由核心实现解决；当前未通过项见[验证与失败](local-shared-wiki-progress-v2.md#3-当前版本验证与明确失败)：
