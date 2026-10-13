@@ -14,7 +14,7 @@ from .app_bridge import complete_cleanup
 from .curation import WikiCuration
 from .history import WikiHistory
 from .registry import registry
-from .store import WikiError, asset_reason
+from .store import WikiError, asset_reason, is_maintainable_text
 
 
 async def _io(function, *args, **kwargs):
@@ -207,7 +207,7 @@ class WikiJobs:
         for path in dict.fromkeys(paths):
             self.store.path(path)
             document = self.store.read(path, length=1)
-            if document["kind"] == "asset":
+            if not is_maintainable_text(document["path"]):
                 raise WikiError(f"This is an excluded asset: {path}", 422)
             if created_changes:
                 WikiHistory(self.store)

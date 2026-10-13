@@ -1,8 +1,8 @@
 # 共享 Wiki v2：当前进度与执行计划
 
-> **Status:** in-progress — 核心已上线，42 份 Library Markdown 已索引；真实试点前两篇通过，完整试点和全量未放行；新修复仍有两项 Codex 实机检查失败。
+> **Status:** in-progress — 当前 sections-v7/html-body-v3 修复已通过完整本机门禁和独立源码审查，待提交、部署与生产复验。Library 当前为 43 份 Markdown；真实首两篇结果复用，完整试点和全量仍未放行。
 
-核对窗口：2026-10-13 15:13～15:25，Asia/Shanghai。本页记录这个时间窗口的证据，不保证此后代码、资料和服务保持不变。执行行为以[当前 spec](local-shared-wiki-spec-v2.md)为准，详细任务仍沿用 V2 编号；[核心交接](local-shared-wiki-implementation-v2.md)保留最初交付时的验证与停止位置。
+原核对窗口：2026-10-13 15:13～15:25，Asia/Shanghai；下面 §1～4 保留该窗口及其下一步基线，晚间续接事实见 §5。执行行为以[当前 spec](local-shared-wiki-spec-v2.md)为准，详细任务仍沿用 V2 编号；[核心交接](local-shared-wiki-implementation-v2.md)保留最初交付时的验证与停止位置。
 
 **执行范围澄清：** A～C 直接使用 Octopus 原生 `/wiki`、核心 `/api/wiki` 与既有 Weber worker。Octo 组织，Weber 整理，Vera 验收；Sapphire/SmartReader 只保留后续 feature plan。主库在 `sapphire.data` 的物理位置和旧可选 app 绑定保留，不需要启动、开发或经由 App 提交任务。
 
@@ -119,7 +119,7 @@
 2. 核对资产资格、直接表示选择和可读结构边界：修正合同范围内问题、补对应回归；有新改动时更新冻结版和受影响审查。
 3. 在最终代码上完成 AGENTS 的本机必需检查：scripts/check.sh、pure UI、可用 Codex CLI/browser。Claude unavailable 单列；任何必需项失败仍需解决，旧版结果不算当前通过。
 4. Vera 结论与最终冻结版对应后，聚焦提交/推送当前 Wiki 修复，保留其他工作区内容；记录 commit 和部署版本。
-5. 用一致恢复点和既有服务流程部署，核对资产显式读写/检索、生产 sections-v5/readable_body、身份/历史/回执保全及实际 capabilities。durable schema7 与派生版本分开记录。
+5. 用一致恢复点和既有服务流程部署，核对资产显式读写/检索、生产最终派生版本/readable_body、身份/历史/回执保全及实际 capabilities。durable schema7 与派生版本分开记录。
 
 **退出条件：**当前必需项零失败，修复已提交且实际部署，生产升级和关键回归有证据。源码审查或 isolated 升级成功不能提前退出。
 
@@ -149,7 +149,43 @@ Octo 逐篇检查当前身份/revision、整理或真实 no_change、回执、�
 
 V2-05 Sapphire、V2-09 SmartReader 在用户启动应用开发时实施，包括 App 入口、客户端权限和界面验收；A～C 不分派 App 开发或接入任务。V2-07 以真实可复现的词法漏召回为前提。语言对照、规模扩容、完整来源谱系、旧快照退役/GC 保留各自条件，不作为 A～C 的隐含工作，也不因接口标记 deprecated 就认定旧数据已清理。
 
-## 5. 文档维护与下一次交付
+## 5. 2026-10-13 晚间续接 A 阶段
+
+开发 HEAD 为 `b54786c`，实际服务工作树为 `b083efe`，20:13 重启；服务源码与开发目录隔离。生产仍为 schema7/sections-v4、没有 readable_body，不能以开发修改或本轮复验推断已升级。晚间只读对账 Library 为 43 份 Markdown，43/43 当前 hash 与索引相符；新增材料纳入最终范围。原四个真实回执保留，既有 Weber 知识 persona SHA 与已应用记录相同，当前 max/default 等用户配置保持。
+
+原两项 Codex 失败沿原测试与原断言复验 **2 passed / 0 failed / 0 skipped**，253.41 秒，源码 fingerprint 前后一致。Me 成功读取 31 个合成文件且仅个人范围；报告单 revision 连续覆盖 0→16000→32000→35263，并保留末尾限制。长报告旧失败的原生记录为 server_overloaded；职业旧错误的 stdout 缺失，原因仍不推断。当前职业复验也经历两次容量错误后续跑成功，以及一次 read-many 超过20项限制后拆批成功；专项通过不等于运行从未出错。
+
+首次复验启动因中文参数 node ID 未按 pytest 转义而退出4，实际未运行测试；原输出保留，修正启动器后先 collect-only 确认精确两项。私有 observer 装配时序未捕获框架 events，已用精确匹配的合成原生 rollout 与 probe 成功返回补证；其中个人工具输出有截断，不能声称完整原生 events 或全部模型可见字节已留存。去重用量 273,883 tokens，含失败及续跑，未推算金额。完整当前门禁仍须在最终结构修复源码上重新完成。
+
+结构资格探针复现内联 script/style/noscript 错计正文、HTML 单图漏计，以及物理 HTML 先丢标题/媒体结构的差异。当前工作树统一支持的结构规则，保留原文和提取坐标；HTML 派生标记缺失时重新提取。现有 Vera 早期只读审查 `8ce5e397180a` 进行中，最终冻结版审查、本机门禁、提交/推送与实际部署仍待完成；A、完整试点与全量门禁未放行。本轮尚未新增生产整理任务。
+
+私有证据为 `wiki-v2-rollout-20261013/evidence/stage-a-takeover-20261013/`：takeover-baseline、original-failures、launch-error-exit4、current-query-recheck、current-query-recheck-native 与 Vera 早期基线。源码/指南 fingerprint、实际提交和检查结果继续在此记录；生产正文及会话不写入仓库。
+
+### 晚间审查后的修正候选（v6 检查版本）
+
+用户后续明确本轮只入库/维护 MD，HTML 转换入库留后续；MD 内嵌 HTML 和媒体仍保全。Vera 早期审查提出 F1～F4，原候选专项440、八关与纯UI通过记录保留，但发现新问题后停止尚在运行的隔离实机检查，避免混用源码；没有取消生产任务。
+
+新候选从完整 Markdown token 流保持隐藏包围与标题角色，再投影到原始分区/窗口；相关/整理区依标题层级继承。最终派生版本改为 sections-v6、HTML 结构标记 html-body-v2，durable 仍7；独立实建的旧 v5 状态重开和 refresh 均正确回退摘要。QueryProbe 保留原断言并加强同请求唯一成功终态校验；13 项隔离回放通过，失败/中断/缺失/重复/跨请求终态不能用部分答案冒充成功。原六份试点、Q58 和全量状态未变。
+
+复用 Vera 同一结构矩阵，当前 93 次选择偏差为0；三个缓存/恢复相关短回归通过。最终专项、整版本机门禁、Vera 同委托续审、提交与部署仍需以新冻结版完成。证据新增 `review-fix-rechecks/`，完整当前检查结果随后记录，不提前放行。
+
+### v6 完整检查与嵌套标题回归
+
+v6 冻结版完成专项594、八关（2398 hermetic、379 frontend）、76纯UI、19 Codex实机和1 browser，均通过、无跳过，源码前后稳定。六个真实Wiki查询均保存同请求唯一成功框架终态；完整报告覆盖35263字符，成功续跑中的recovery如实保留。
+
+独立新样本又复现引用/列表内部规范标题改变页面角色：引用整理说明使外部正文不可检索，引用正文使外部整理记录被错计。此发现影响Markdown，必须修正，旧门禁只证明v6。当前v7/html-body-v3限定引用与列表标题不能改变外部角色，保留引用、代码和媒体；短隔离124结构样本及20MD原分区样本无偏差。新的冻结检查、Vera同委托复核及实际部署仍待完成，生产仍v4，未新增生产整理。
+
+### v7 冻结版门禁与独立审查完成
+
+23:00（Asia/Shanghai）完成的最终冻结版为 sections-v7/html-body-v3，durable schema 仍7。专项 **630 passed**，八关检查全部通过（2434 hermetic、379 frontend），纯 UI **76 passed**，可用 Codex CLI **19 passed / 0 failed / 0 skipped**，Codex browser **1 passed**；源码检查前后无漂移。Claude live 未运行，provider 不可用的历史证据单列，不算通过。证据为私有 `stage-a-takeover-20261013/final-gates-20261013T143257Z/`。
+
+既有 Vera 同委托已通过这版 22 文件独立源码审查，F1～F5 关闭：589 项短回归、原 F5 的60行矩阵及24例实际 WikiStore 复验均通过；100个角色边界、20项渲染/坐标、8个实际旧v5/v6升级和4个既有HTML兼容升级通过。六张非空持久表逐行保全，原文、身份、revision及恢复结果保持。源码审查结果和冻结 SHA 在 `vera-nested-fix/`，不把旧v6门禁转算为新版通过。
+
+当前清单再枚举仍43份MD（pika31、Research6、course4、Me1、Guides1），43项当前hash与索引匹配；仅3个回执匹配当前版本、2个已有通过复核可复用，Me旧回执仍是历史。课程一个旧路径消失，另一个当前路径及不同身份/内容出现；不推断编辑者或纯重命名，后续按当前文件全文复核。全量清单是动态范围，索引覆盖不等于整理或逐篇检索验收。
+
+下一步只提交本轮修复文件，保护用户另外两份未提交文档，再建立当前配置、Wiki durable state与Vault一致恢复点并部署已验证提交。准备脚本和独立审查只写私有执行目录；尚未创建生产维护任务或升级生产索引。部署后仍须核对实际版本、capabilities、资产资格、compact/read-many与身份/回执保全，之后才继续剩余试点和全量，A、V2-06、V2-08仍未放行。
+
+## 6. 文档维护与下一次交付
 
 本页更新事实时间、对应版本、失败原因和证据位置；spec 只在行为决定变化时修订。格式/接口设计中的审阅基线、旧测试数据及个人信息 gold 标明历史，不重新冒充生产事实。执行产物仍留账户 workspace，仓库仅存非敏感结论。
 

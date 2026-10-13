@@ -11,20 +11,14 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from .store import WikiError, asset_reason, revision
+from .store import WikiError, is_maintainable_text, revision
 
 _owners = threading.local()
 _UNCHANGED = object()
 
 
 def history_text(path: str) -> bool:
-    return Path(path).suffix.lower() in {
-        ".md",
-        ".markdown",
-        ".txt",
-        ".html",
-        ".htm",
-    } and not asset_reason(path)
+    return is_maintainable_text(path)
 
 
 def atomic(path: Path, raw: bytes) -> None:

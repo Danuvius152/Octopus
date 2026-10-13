@@ -19,7 +19,7 @@ import yaml
 
 from . import catalog, search_index
 from . import format as document_format
-from .extract import SUPPORTED, extract
+from .extract import HTML_BODY_VERSION, SUPPORTED, extract
 
 
 class WikiError(Exception):
@@ -45,6 +45,27 @@ def asset_reason(relative: str) -> str | None:
     ):
         return "Temporary extraction or supporting static asset"
     return None
+
+
+def is_maintainable_text(relative: str) -> bool:
+    """Text qualification, independent of navigation class and file existence.
+
+    Explicitly assigned Library Markdown in an assets directory remains a note
+    for maintenance/history. Temporary and agent tool resources remain excluded;
+    this predicate grants neither a task assignment nor permission to create.
+    """
+    path = PurePosixPath(relative)
+    if path.suffix.lower() not in {".md", ".markdown", ".txt", ".html", ".htm"}:
+        return False
+    if not asset_reason(relative):
+        return True
+    directories = {part.casefold() for part in path.parts[:-1]}
+    return (
+        path.parts[0] == "Library"
+        and path.suffix.lower() in {".md", ".markdown"}
+        and "assets" in directories
+        and not directories.intersection({"tmp", "temp", "static", "node_modules", "codex skills"})
+    )
 
 
 def enumeration_error(error: OSError) -> None:
@@ -324,13 +345,16 @@ class WikiStore:
         existing = db.execute(
             "SELECT * FROM documents WHERE path=?", (relative,)
         ).fetchone()
+        previous_metadata = json.loads(existing["metadata"]) if existing is not None else {}
         if (
             existing is not None
             and existing["signature"]
             and existing["revision"] == digest
-            and json.loads(existing["metadata"]).get("pipeline_version")
+            and previous_metadata.get("pipeline_version")
             == "octopus-extract-v3"
-            and json.loads(existing["metadata"]).get("format_version") == document_format.VERSION
+            and previous_metadata.get("format_version") == document_format.VERSION
+            and (path.suffix.lower() not in {".html", ".htm"}
+                 or previous_metadata.get("html_body_version") == HTML_BODY_VERSION)
         ):
             from . import materials
 
@@ -500,9 +524,9 @@ class WikiStore:
                     found.add(relative)
                     stat = path.stat()
                     old = db.execute(
-                        "SELECT d.signature,n.version,p.revision,p.ownership,coalesce(m.regions,''),NOT EXISTS(SELECT 1 FROM search_sections s WHERE s.doc_id=d.id) OR EXISTS(SELECT 1 FROM search_sections s LEFT JOIN search_fts f ON f.rowid=s.id WHERE s.doc_id=d.id AND f.rowid IS NULL),json_extract(d.metadata,'$.format_version') FROM documents d LEFT JOIN search_documents n ON n.doc_id=d.id LEFT JOIN raw_materials p ON p.doc_id=d.id LEFT JOIN managed_notes m ON m.path=d.path WHERE d.path=?", (relative,)
+                        "SELECT d.signature,n.version,p.revision,p.ownership,coalesce(m.regions,''),NOT EXISTS(SELECT 1 FROM search_sections s WHERE s.doc_id=d.id) OR EXISTS(SELECT 1 FROM search_sections s LEFT JOIN search_fts f ON f.rowid=s.id WHERE s.doc_id=d.id AND f.rowid IS NULL),json_extract(d.metadata,'$.format_version'),json_extract(d.metadata,'$.html_body_version') FROM documents d LEFT JOIN search_documents n ON n.doc_id=d.id LEFT JOIN raw_materials p ON p.doc_id=d.id LEFT JOIN managed_notes m ON m.path=d.path WHERE d.path=?", (relative,)
                     ).fetchone()
-                    if relative in queued.written or old is None or old[0] != f"{stat.st_mtime_ns}:{stat.st_size}:v3" or old[1] != search_index.VERSION or old[5] or old[6] != document_format.VERSION or (not asset_reason(relative) and (old[2] is None or old[3] != old[4])):
+                    if relative in queued.written or old is None or old[0] != f"{stat.st_mtime_ns}:{stat.st_size}:v3" or old[1] != search_index.VERSION or old[5] or old[6] != document_format.VERSION or (path.suffix.lower() in {".html", ".htm"} and old[7] != HTML_BODY_VERSION) or (not asset_reason(relative) and (old[2] is None or old[3] != old[4])):
                         self._index(db, relative)
             # Discover moves before detaching missing paths. This also covers
             # missing files when only the durable ledger survived a rebuild.

@@ -4,6 +4,7 @@ All evidence is synthetic; no real personal notes are used by this suite.
 """
 
 import asyncio
+import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -44,6 +45,9 @@ class QueryProbe:
     root: Path
     requests: list[tuple[str, dict]] = field(default_factory=list)
     responses: list[tuple[str, dict]] = field(default_factory=list)
+    last_session_id: str | None = None
+    last_request_id: str | None = None
+    last_events: list[dict] = field(default_factory=list)
 
     async def ask(self, question):
         self.requests.clear()
@@ -51,9 +55,21 @@ class QueryProbe:
         session = await self.manager.create_session(
             self.agent_id, "Wiki query acceptance", str(self.root.parent), backend="codex"
         )
+        self.last_session_id = session.id
+        self.last_request_id = uuid.uuid4().hex
+        self.last_events = []
         async with asyncio.timeout(240):
-            events = [event async for event in self.manager.send_message(session.id, question, wiki_mode="read")]
+            async for event in self.manager.send_message(session.id, question, wiki_mode="read", request_id=self.last_request_id):
+                self.last_events.append(event)
+        events = self.last_events
         assert not any(event.get("type") == "error" for event in events), events
+        outcomes = [event for event in events if event.get("type") == "result"]
+        assert len(outcomes) == 1, events
+        outcome = outcomes[0]
+        assert outcome.get("terminal") is True and outcome.get("is_error") is False, outcome
+        assert outcome.get("session_id") == session.id and outcome.get("request_id") == self.last_request_id, outcome
+        assert isinstance(outcome.get("content"), dict), outcome
+        assert outcome["content"].get("status") == "success" and outcome["content"].get("request_id") == self.last_request_id, outcome
         answer = "\n".join(event.get("content", "") for event in events if event.get("type") == "assistant_text")
         assert answer.strip(), events
         return answer

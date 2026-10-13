@@ -94,6 +94,10 @@ class WikiTasks:
             raise WikiError("This maintenance assignment is no longer active", 403)
         target = store.path(path)
         if path in task.writable:
+            from .store import is_maintainable_text
+
+            if not is_maintainable_text(path):
+                raise WikiError("This is an excluded maintenance asset", 422)
             selected = next((item for item in job["items"] if item["path"] == path), None)
             paired = next((item for item in job["items"] if item["path"] + ".md" == path), None)
             expected_id = selected["doc"] if selected else paired.get("paired_doc") if paired else None

@@ -1,6 +1,6 @@
 """Current evidence batches with shared content ranges and truthful receipts."""
 
-from .store import WikiError
+from .store import WikiError, is_maintainable_text
 
 
 def _end(start, end, covered, budget):
@@ -55,7 +55,7 @@ def read_many(store, requests, budget_chars, task=None):
                 if request.expected_revision and request.expected_revision != document["revision"]:
                     items.append(item | {"status": "changed", "error": "Read the current revision"})
                     continue
-                if document["kind"] == "asset":
+                if not is_maintainable_text(document["path"]):
                     items.append(item | {"status": "excluded", "error": document["metadata"].get("asset_reason", "Excluded asset")})
                     continue
                 start = min(request.start, len(text))

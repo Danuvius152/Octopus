@@ -9,7 +9,7 @@ from urllib.parse import quote
 from .history import WikiHistory
 from .links import anchor_exists, local_links, resolve_link, source_span
 from .sections import original_text, region, top_offset
-from .store import WikiError, revision
+from .store import WikiError, is_maintainable_text, revision
 
 
 class WikiCuration:
@@ -149,7 +149,7 @@ class WikiCuration:
             source = self.store.read(
                 path, length=1, expected_revision=expected_revision
             )
-            if source["kind"] == "asset":
+            if not is_maintainable_text(source["path"]):
                 raise WikiError("Excluded assets are not note templates", 422)
             refs = self.sources(sources)
             linked = self.sources(relations)

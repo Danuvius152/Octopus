@@ -5,7 +5,7 @@ from urllib.parse import quote
 
 from . import format, operations
 from .sections import top_offset
-from .store import WikiError
+from .store import WikiError, is_maintainable_text
 
 
 def organize(curation, path, expected_revision, key_note, tags, aliases, relations, sources, actor, reason, fields, task=None, item_doc=None, reuse=False):
@@ -16,7 +16,7 @@ def organize(curation, path, expected_revision, key_note, tags, aliases, relatio
         tasks.require_path(task, store, path)
         tasks.require_read(task, store, path, expected_revision)
         source = store.read(path, length=1, expected_revision=expected_revision)
-        if source["kind"] == "asset":
+        if not is_maintainable_text(source["path"]):
             raise WikiError("Excluded assets are not articles", 422)
         destination = path
         if Path(path).suffix.lower() not in {".md", ".markdown"}:

@@ -6,11 +6,17 @@ import json
 import logging
 import re
 import unicodedata
+from typing import cast
 
 import jieba
+from markdown_it import MarkdownIt
+from markdown_it.renderer import RendererHTML
 
-VERSION = "sections-v4"
+from .extract import HTML_BODY_VERSION, HTMLBodyAnalyzer, html_has_readable_body
+
+VERSION = "sections-v7"
 _tokenizer = jieba.Tokenizer()
+_markdown = MarkdownIt("commonmark")
 jieba.setLogLevel(logging.WARNING)
 _letter = r"(?:(?![\u3400-\u9fff])[^\W_])"
 _pieces = re.compile(rf"[\u3400-\u9fff]+|{_letter}+(?:[-+]{_letter}+)*", re.UNICODE)
@@ -106,24 +112,70 @@ def sections(text: str, title: str) -> list[dict]:
     from .format import parse
 
     parsed = parse(text)
+    # Keep the rendered container/heading state across all Markdown tokens.
+    # A fence creates a source partition, not a fresh HTML context.
+    body = text[parsed.body_start:]
+    line_offsets = [parsed.body_start]
+    for line in body.splitlines(keepends=True):
+        line_offsets.append(line_offsets[-1] + len(line))
+    env: dict = {}
+    stream = _markdown.parse(body, env)
+    renderer = cast(RendererHTML, _markdown.renderer)
+    analyzer = HTMLBodyAnalyzer()
+    evidence_ranges = []
+    active_range = (parsed.body_start, len(text))
+    for token_index, token in enumerate(stream):
+        if token.map is not None:
+            active_range = (line_offsets[token.map[0]], line_offsets[token.map[1]])
+        if token.type == "inline":
+            html = renderer.renderInline(token.children or [], _markdown.options, env)
+        elif token.type in renderer.rules:
+            html = renderer.rules[token.type](stream, token_index, _markdown.options, env)
+        else:
+            html = renderer.renderToken(stream, token_index, _markdown.options, env)
+        before = analyzer.qualifying_events
+        analyzer.feed(html)
+        if analyzer.qualifying_events > before:
+            evidence_ranges.append(active_range)
+    before = analyzer.qualifying_events
+    analyzer.close()
+    if analyzer.qualifying_events > before:
+        evidence_ranges.append(active_range)
     boundaries = [(part["start"], part["title"] or title, part["role"]) for part in parsed.sections]
     if not boundaries:
         boundaries = [(parsed.body_start, title, "body")]
     result = []
     for index, (start, heading, role) in enumerate(boundaries):
         end = boundaries[index + 1][0] if index + 1 < len(boundaries) else len(text)
+        # Project actual qualifying token ranges onto the established source
+        # partitions before windowing; wrappers/metadata alone cannot qualify.
+        usable = any(left < end and right > start for left, right in evidence_ranges)
         while start < end:
             stop = min(start + 6000, end)
             if stop < end:
                 newline = text.rfind("\n", start + 3000, stop)
                 if newline >= 0:
                     stop = newline + 1
-            result.append({"title": heading, "start": start, "end": stop, "section_role": role})
+            result.append({"title": heading, "start": start, "end": stop, "section_role": role, "readable_body": usable})
             # A query is at most 1000 characters. Overlap keeps any bounded
             # term/Chinese adjacency phrase intact even in unbroken prose.
             # Coordinates remain literal slices of the current extracted text.
             start = stop if stop == end else stop - min(1000, (stop - start) // 2)
-    return result or [{"title": title, "start": parsed.body_start, "end": parsed.body_start, "section_role": "body"}]
+    return result or [{"title": title, "start": parsed.body_start, "end": parsed.body_start, "section_role": "body", "readable_body": False}]
+
+
+def readable_body(content: str, part: dict) -> bool:
+    # Fenced examples inherit their surrounding section's heading. A code
+    # block inside a bookkeeping/related region cannot make it evidence.
+    if part["section_role"] in {"related_notes", "curator_note"} or (
+        part["section_role"] == "example"
+        and normalize(part["title"]) in {"相关笔记", "整理说明"}
+    ):
+        return False
+    # Render the complete logical region before inspecting its structure.
+    # Inline and block HTML share hidden/media rules; escaped literal code
+    # remains data. Neither this rendering nor the flag changes read offsets.
+    return html_has_readable_body(_markdown.render(content))
 
 
 def initialize(db) -> None:
@@ -140,13 +192,16 @@ def initialize(db) -> None:
     db.execute("""CREATE TABLE IF NOT EXISTS search_sections (
       id INTEGER PRIMARY KEY,doc_id TEXT NOT NULL,title TEXT NOT NULL,
       start INTEGER NOT NULL,end INTEGER NOT NULL,line_start INTEGER NOT NULL,
-      line_end INTEGER NOT NULL,section_role TEXT NOT NULL DEFAULT 'body'
+      line_end INTEGER NOT NULL,section_role TEXT NOT NULL DEFAULT 'body',
+      readable_body INTEGER NOT NULL DEFAULT 0
     )""")
     db.execute(
         "CREATE INDEX IF NOT EXISTS search_sections_doc ON search_sections(doc_id)"
     )
     if "section_role" not in {column[1] for column in db.execute("PRAGMA table_info(search_sections)")}:
         db.execute("ALTER TABLE search_sections ADD COLUMN section_role TEXT NOT NULL DEFAULT 'body'")
+    if "readable_body" not in {column[1] for column in db.execute("PRAGMA table_info(search_sections)")}:
+        db.execute("ALTER TABLE search_sections ADD COLUMN readable_body INTEGER NOT NULL DEFAULT 0")
     db.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
       title,path,aliases,tags,key_note,heading,body,tokenize='unicode61'
     )""")
@@ -187,6 +242,12 @@ def index(db, row, metadata) -> None:
         aliases = [*aliases, *supplied.get("aliases", [])]
         tags = [*tags, *supplied.get("tags", [])]
     chunks = sections(text, row["title"])
+    if row["path"].rsplit(".", 1)[-1].casefold() in {"html", "htm"} and metadata.get("html_body_version") == HTML_BODY_VERSION:
+        # HTML extraction preserves its historical text coordinates. Its
+        # original structure, including media-only body, was inspected once
+        # by the extractor; headings cannot become plain-text body evidence.
+        for part in chunks:
+            part["readable_body"] = metadata["html_body_readable"]
     fields = [
         tokens(row["title"]),
         tokens(row["path"]),
@@ -203,7 +264,7 @@ def index(db, row, metadata) -> None:
         if part["section_role"] in {"related_notes", "curator_note"}:
             prose = ""
         cursor = db.execute(
-            "INSERT INTO search_sections(doc_id,title,start,end,line_start,line_end,section_role) VALUES(?,?,?,?,?,?,?)",
+            "INSERT INTO search_sections(doc_id,title,start,end,line_start,line_end,section_role,readable_body) VALUES(?,?,?,?,?,?,?,?)",
             (
                 doc_id,
                 part["title"],
@@ -212,6 +273,7 @@ def index(db, row, metadata) -> None:
                 text.count("\n", 0, part["start"]) + 1,
                 text.count("\n", 0, part["end"]) + 1,
                 part["section_role"],
+                int(part["readable_body"]),
             ),
         )
         db.execute(
@@ -255,6 +317,11 @@ def select(db, query, kind, include_assets, offset, limit, directory=None, exclu
         arguments.extend([len(prefix), prefix])
     if exclude_roles:
         filters.append("coalesce(json_extract(d.metadata,'$.doc_role'),'unknown') NOT IN ('template','source_snapshot')")
+    if deduplicate:
+        # A matching title/alias cannot make an unreadable representation
+        # target usable. Decide from the index, without opening vault files.
+        filters.append("d.quality NOT IN ('error','excluded')")
+        filters.append("EXISTS(SELECT 1 FROM search_sections usable WHERE usable.doc_id=d.id AND usable.readable_body=1)")
     predicate = " AND " + " AND ".join(filters) if filters else ""
     # Metadata names break ranking ties; body coverage keeps precedence and
     # every matching body candidate remains available to the reader.
@@ -335,10 +402,18 @@ def select(db, query, kind, include_assets, offset, limit, directory=None, exclu
         total = count(required)
     chosen = "SELECT * FROM ranked WHERE position=1"
     if deduplicate:
-        chosen = """SELECT * FROM (SELECT ranked.*,row_number() OVER (
-            PARTITION BY coalesce((SELECT target_doc FROM wiki_edges WHERE source_doc=ranked.doc_id AND relation='representation_of' AND target_doc IS NOT NULL LIMIT 1),ranked.doc_id)
-            ORDER BY exact DESC,covered DESC,local_doc_coverage DESC,name_hit DESC,cost,doc_id) AS duplicate_position
-            FROM ranked WHERE position=1) WHERE duplicate_position=1"""
+        # Direct, resolved identities alone define a representation group.
+        # If its source survived the same lexical/scope/readability filters,
+        # keep that source's own evidence ahead of a shorter summary. Missing
+        # or filtered sources leave a deterministically ranked summary; do not
+        # expand relationships or borrow the source's identity/coordinates.
+        chosen = """SELECT * FROM (SELECT candidate.*,row_number() OVER (
+            PARTITION BY representation_group
+            ORDER BY (doc_id=representation_group) DESC,exact DESC,covered DESC,local_doc_coverage DESC,name_hit DESC,cost,doc_id) AS duplicate_position
+            FROM (SELECT ranked.*,coalesce((SELECT target_doc FROM wiki_edges
+                WHERE source_doc=ranked.doc_id AND relation='representation_of' AND target_doc IS NOT NULL
+                ORDER BY ordinal LIMIT 1),ranked.doc_id) AS representation_group
+                FROM ranked WHERE position=1) candidate) WHERE duplicate_position=1"""
         total = db.execute(prefix + "SELECT count(*) FROM (" + chosen + ")", parameters(required)).fetchone()[0]
     order = "exact DESC,covered DESC,local_doc_coverage DESC,name_hit DESC,cost,doc_id"
     if comparison or diversify:

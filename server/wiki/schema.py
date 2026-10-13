@@ -96,8 +96,13 @@ def initialize(store):
             db.execute("UPDATE index_state SET checked_at=NULL")
             db.execute("INSERT INTO wiki_schema VALUES(7,?)", (datetime.now(UTC).isoformat(),))
         available = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if not {"search_documents", "search_sections", "search_fts"}.issubset(available):
-            search_index.initialize(db)
+        search_missing = not {"search_documents", "search_sections", "search_fts"}.issubset(available)
+        search_changed = search_missing or (
+            "readable_body" not in {column[1] for column in db.execute("PRAGMA table_info(search_sections)")}
+            or db.execute("SELECT 1 FROM search_documents WHERE version<>? LIMIT 1", (search_index.VERSION,)).fetchone()
+        )
+        search_index.initialize(db)
+        if search_changed:
             db.execute("UPDATE index_state SET checked_at=NULL")
         if "raw_materials" not in available:
             materials.initialize(db)
