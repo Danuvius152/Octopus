@@ -45,6 +45,7 @@ from server.main import app
 from server.routers import agents as agents_mod
 from server.routers import applications as applications_mod
 from server.session_manager import SessionManager, session_manager
+from tests.submission import accepted_receipt
 
 TOKEN = "changeme"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
@@ -94,6 +95,7 @@ def sent(mgr, monkeypatch):
     async def fake_start_message(session_id, prompt, attachment_ids=None, *, source):
         assert source == "application"
         calls.append((session_id, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", fake_start_message)
     return calls
@@ -111,6 +113,16 @@ async def _create_app(am, db, *, name="Todo App", **extra) -> dict:
         agent_id=agent["id"],
         **extra,
     )
+
+
+@pytest.mark.asyncio
+async def test_application_creation_reports_failed_build_when_admission_is_closed(am, db, mgr):
+    mgr._admission_closed = True
+    row = await _create_app(am, db)
+    assert row["status"] == "failed"
+    assert "closed" in row["error"].lower()
+    assert (await db.get_application(row["id"]))["status"] == "failed"
+    assert mgr.get_session(row["session_id"])._active_task is None
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +278,7 @@ async def test_create_marks_failed_when_the_build_session_wont_start(
     async def boom(session_id, prompt, attachment_ids=None, *, source):
         assert source == "application"
         raise RuntimeError("harness exploded")
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", boom)
     agent = await _make_agent(db)
@@ -327,6 +340,80 @@ async def test_build_stays_running_through_recovery_events(am, db, mgr, sent):
     open(os.path.join(row["app_dir"], "index.html"), "w").write("<h1>recovered</h1>")
     await mgr._broadcast({"type": "result", "session_id": row["session_id"], "is_error": False})
     assert (await db.get_application(row["id"]))["status"] == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("entrypoint_exists", [True, False])
+async def test_unconfirmed_build_result_is_reported_and_original_commit_restores_status(am, db, mgr, monkeypatch, entrypoint_exists):
+    from server.harness import HarnessEvent
+
+    starts = []
+
+    class Run:
+        reusable = False
+
+        def is_alive(self):
+            return False
+
+        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+            starts.append(prompt)
+            if entrypoint_exists:
+                Path(working_dir, "index.html").write_text("<h1>Verified application</h1>")
+
+        async def stream(self):
+            yield HarnessEvent(type="result", is_error=False)
+
+        async def stop(self):
+            pass
+
+        async def interrupt(self):
+            pass
+
+    monkeypatch.setattr(mgr, "_make_run", lambda *args, **kwargs: Run())
+    record_terminal = db.record_terminal
+
+    async def lost_acknowledgement(**kwargs):
+        await record_terminal(**kwargs)
+        raise OSError("Terminal commit acknowledgement lost")
+
+    monkeypatch.setattr(db, "record_terminal", lost_acknowledgement)
+    row = await _create_app(am, db)
+    session = mgr.get_session(row["session_id"])
+    async with asyncio.timeout(2):
+        while session._recording_blocked is None:
+            await asyncio.sleep(0)
+        driver = session._active_task
+        if driver is not None:
+            await driver
+    blocked = await db.get_application(row["id"])
+    assert blocked["status"] == "failed"
+    assert "saving" in blocked["error"].lower() and "unconfirmed" in blocked["error"].lower()
+    assert blocked["last_built_at"] is None
+    assert session._recording_blocked.outcome.status == "success"
+    assert len(starts) == 1
+
+    updates = []
+
+    async def observe(message):
+        if message.get("type") == "application_updated" and message.get("application_id") == row["id"]:
+            updates.append(message)
+
+    mgr.on_broadcast("recording-recovery-observer", observe)
+    try:
+        monkeypatch.setattr(db, "record_terminal", record_terminal)
+        assert await mgr.resume_dispatch(session.id, resume_queue=False)
+        restored = await db.get_application(row["id"])
+        assert restored["status"] == ("ready" if entrypoint_exists else "failed")
+        if entrypoint_exists:
+            assert restored["error"] is None and restored["last_built_at"]
+        else:
+            assert "index.html" in restored["error"] and "unconfirmed" not in restored["error"].lower()
+        assert len(starts) == 1
+        assert len(updates) == 1
+        assert await mgr.resume_dispatch(session.id, resume_queue=False)
+        assert len(updates) == 1
+    finally:
+        mgr.remove_broadcast("recording-recovery-observer")
 
 
 @pytest.mark.asyncio
@@ -417,6 +504,21 @@ async def test_request_build_clears_a_previous_failure(am, db, mgr, sent):
     after = await db.get_application(row["id"])
     assert after["status"] == "building"
     assert after["error"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("previous_status,previous_error", [("ready", None), ("failed", "Previous build failed")])
+async def test_closed_build_request_preserves_previous_application_state(am, db, mgr, sent, monkeypatch, previous_status, previous_error):
+    row = await _create_app(am, db)
+    await db.update_application(row["id"], status=previous_status, error=previous_error)
+    monkeypatch.setattr(mgr, "start_message", SessionManager.start_message.__get__(mgr))
+    mgr._admission_closed = True
+    with pytest.raises(ApplicationError) as exc:
+        await am.request_build(row["id"], "Add a dark mode toggle")
+    assert exc.value.status_code == 409
+    assert "closed" in exc.value.message.lower()
+    stored = await db.get_application(row["id"])
+    assert (stored["status"], stored["error"]) == (previous_status, previous_error)
 
 
 @pytest.mark.asyncio
@@ -577,6 +679,7 @@ async def client(apps_root, monkeypatch):
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
 
     agents_mod.set_manager(AgentManager(db))
@@ -588,6 +691,7 @@ async def client(apps_root, monkeypatch):
     async def fake_start_message(session_id, prompt, attachment_ids=None, *, source):
         assert source == "application"
         calls.append((session_id, prompt))
+        return accepted_receipt()
 
     monkeypatch.setattr(session_manager, "start_message", fake_start_message)
 

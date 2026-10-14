@@ -291,7 +291,7 @@ async def test_old_question_cannot_exempt_new_attempt_from_idle_timeout(question
     final = await start_waiting_turn(manager, session, run, monkeypatch)
     outcome = (await asyncio.wait_for(final, timeout=1))["content"]
     assert outcome["status"] == "failed"
-    assert "no activity" in outcome["message"].lower()
+    assert "without validated activity" in outcome["message"].lower()
     assert not manager.has_pending_question(session.id, old)
     assert len([event for event in events if event["type"] == "question_closed"]) == 1
     response = await client.get(f"/api/sessions/{session.id}/questions/{old}/answer", headers=HEADERS)

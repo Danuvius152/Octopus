@@ -1,11 +1,14 @@
 """Tests for the agent-scoped ScheduleRunner (agent-refactor.md §5.3/§5.6)."""
 
+import asyncio
+
 import pytest
 
 from server.database import Database
 from server.models import SessionStatus
 from server.scheduler import ScheduleRunner
 from server.session_manager import SessionManager
+from tests.submission import accepted_receipt
 
 
 @pytest.fixture
@@ -18,7 +21,165 @@ async def setup():
     try:
         yield mgr, db, runner
     finally:
+        if runner._scheduler.running:
+            await runner.shutdown()
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_shutdown_waits_for_its_cancelled_callback_cleanup(setup):
+    mgr, db, runner = setup
+    agent = await db.get_system_agent()
+    started = asyncio.Event()
+    cleaning = asyncio.Event()
+    release = asyncio.Event()
+
+    async def scheduled_callback():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+            await db.update_schedule("shutdown-schedule", last_run_at="cleanup-confirmed")
+
+    await db.save_schedule(
+        schedule_id="shutdown-schedule", agent_id=agent["id"], name="shutdown",
+        prompt="do it", interval_seconds=3600, created_at="2026-01-01T00:00:00+00:00",
+    )
+    await runner.initialize()
+    runner._scheduler.add_job(scheduled_callback, "date", id="cleanup-test")
+    stopping = None
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        stopping = asyncio.create_task(runner.shutdown())
+        await asyncio.wait_for(cleaning.wait(), timeout=5)
+
+        assert not stopping.done(), "scheduler returned while its callback still owned a DB write"
+        release.set()
+        await stopping
+        assert (await db.load_schedules())[0]["last_run_at"] == "cleanup-confirmed"
+    finally:
+        release.set()
+        if stopping is not None:
+            await stopping
+        else:
+            await runner.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_shutdown_closes_admission_before_awaiting(setup):
+    _mgr, db, runner = setup
+    agent = await db.get_system_agent()
+    await db.save_schedule(
+        schedule_id="too-late", agent_id=agent["id"], name="late", prompt="late",
+        interval_seconds=3600, created_at="2026-01-01T00:00:00+00:00",
+    )
+
+    runner.begin_shutdown()
+
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await runner.add((await db.load_schedules())[0])
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await runner.initialize()
+    await runner.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_shutdown_timeout_retains_callback_cleanup_for_later_join(setup):
+    _mgr, _db, runner = setup
+    started = asyncio.Event()
+    cleaning = asyncio.Event()
+    release = asyncio.Event()
+    retired = asyncio.Event()
+
+    async def callback():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+            retired.set()
+
+    await runner.initialize()
+    runner._scheduler.add_job(callback, "date", id="slow-retirement")
+    await asyncio.wait_for(started.wait(), timeout=5)
+    retry = None
+    try:
+        with pytest.raises(TimeoutError, match="retirement unconfirmed"):
+            await runner.shutdown(timeout=0.01)
+        assert cleaning.is_set()
+        assert not retired.is_set()
+        retry = asyncio.create_task(runner.shutdown())
+        await asyncio.sleep(0)
+        assert not retry.done()
+
+        release.set()
+        await retry
+        assert retired.is_set()
+    finally:
+        release.set()
+        if retry is not None:
+            await retry
+        else:
+            await runner.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_shutdown_propagates_callback_cleanup_failure(setup):
+    _mgr, _db, runner = setup
+    started = asyncio.Event()
+
+    async def callback():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            raise OSError("callback DB cleanup unconfirmed")
+
+    await runner.initialize()
+    runner._scheduler.add_job(callback, "date", id="failed-retirement")
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    with pytest.raises(ExceptionGroup, match="callback cleanup failed") as error:
+        await runner.shutdown()
+    assert str(error.value.exceptions[0]) == "callback DB cleanup unconfirmed"
+
+
+@pytest.mark.asyncio
+async def test_removing_schedule_preserves_its_already_running_callback(setup):
+    _mgr, _db, runner = setup
+    started = asyncio.Event()
+    release = asyncio.Event()
+    retired = asyncio.Event()
+    was_cancelled = False
+
+    async def callback():
+        nonlocal was_cancelled
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            was_cancelled = True
+            raise
+        finally:
+            retired.set()
+
+    await runner.initialize()
+    runner._scheduler.add_job(callback, "interval", seconds=0.02, id="removed-schedule")
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await runner.remove("removed-schedule")
+        await asyncio.sleep(0)
+        assert not was_cancelled
+        assert not retired.is_set()
+
+        release.set()
+        await asyncio.wait_for(retired.wait(), timeout=5)
+    finally:
+        release.set()
+        await runner.shutdown()
 
 
 @pytest.mark.asyncio
@@ -31,13 +192,13 @@ async def test_fire_materializes_scheduled_session_and_auto_archives(
     # Stub the turn — no real backend; just record what ran.
     ran: dict = {}
 
-    async def fake_send(session_id, prompt):
+    async def fake_send(session_id, prompt, attachment_ids=None, **kwargs):
         ran["session_id"] = session_id
         ran["prompt"] = prompt
         if False:  # make this an async generator without yielding events
             yield
 
-    monkeypatch.setattr(mgr, "send_message", fake_send)
+    monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
 
     await db.save_schedule(
         schedule_id="sch1",
@@ -83,12 +244,12 @@ async def test_fire_uses_agent_id_from_job_args(setup, monkeypatch):
         created_sessions.append(sess.id)
         return sess
 
-    async def fake_send(session_id, prompt):
+    async def fake_send(session_id, prompt, attachment_ids=None, **kwargs):
         if False:
             yield
 
     monkeypatch.setattr(mgr, "create_session", tracking_create)
-    monkeypatch.setattr(mgr, "send_message", fake_send)
+    monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
 
     await runner._fire("schX", agent["id"], "first")
     await runner._fire("schX", agent["id"], "second")
@@ -115,6 +276,7 @@ async def test_fire_appends_into_live_origin_session(setup, monkeypatch):
         assert source == "schedule"
         started["session_id"] = session_id
         started["prompt"] = prompt
+        return accepted_receipt()
 
     created: list[str] = []
     orig_create = mgr.create_session
@@ -164,12 +326,12 @@ async def test_fire_falls_back_to_fresh_session_when_origin_gone(setup, monkeypa
 
     ran: dict = {}
 
-    async def fake_send(session_id, prompt):
+    async def fake_send(session_id, prompt, attachment_ids=None, **kwargs):
         ran["session_id"] = session_id
         if False:
             yield
 
-    monkeypatch.setattr(mgr, "send_message", fake_send)
+    monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
 
     await db.save_schedule(
         schedule_id="sch2",
@@ -313,11 +475,11 @@ async def test_run_at_schedule_deleted_after_fire(setup, monkeypatch):
     mgr, db, runner = setup
     agent = await db.get_system_agent()
 
-    async def fake_send(session_id, prompt):
+    async def fake_send(session_id, prompt, attachment_ids=None, **kwargs):
         if False:
             yield
 
-    monkeypatch.setattr(mgr, "send_message", fake_send)
+    monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
 
     await db.save_schedule(
         schedule_id="once2",
@@ -349,6 +511,7 @@ async def test_run_at_schedule_deleted_after_fire_with_origin_session(setup, mon
     async def fake_start(session_id, prompt, *, source):
         assert source == "schedule"
         started["session_id"] = session_id
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", fake_start)
 
@@ -593,12 +756,12 @@ async def test_a_fire_is_skipped_while_the_previous_one_is_still_running(
 
     sends: list[str] = []
 
-    async def fake_send(session_id, prompt):
+    async def fake_send(session_id, prompt, attachment_ids=None, **kwargs):
         sends.append(session_id)
         if False:
             yield
 
-    monkeypatch.setattr(mgr, "send_message", fake_send)
+    monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
     await db.save_schedule(
         schedule_id="busy1",
         agent_id=agent["id"],
@@ -637,12 +800,12 @@ async def test_a_gone_or_idle_previous_session_never_blocks(setup, monkeypatch):
 
     sends: list[str] = []
 
-    async def fake_send(session_id, prompt):
+    async def fake_send(session_id, prompt, attachment_ids=None, **kwargs):
         sends.append(session_id)
         if False:
             yield
 
-    monkeypatch.setattr(mgr, "send_message", fake_send)
+    monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
     await db.save_schedule(
         schedule_id="gone1",
         agent_id=agent["id"],
@@ -672,6 +835,7 @@ async def test_a_fire_does_not_pile_up_behind_another_fire_in_a_chat(
     async def fake_start(session_id, prompt, *, source):
         assert source == "schedule"
         started.append(prompt)
+        return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", fake_start)
     await db.save_schedule(
@@ -695,3 +859,33 @@ async def test_a_fire_does_not_pile_up_behind_another_fire_in_a_chat(
     origin._pending_queue.clear()
     await runner._fire("chat1", agent["id"], "summarize", origin.id)
     assert len(started) == 2
+
+
+async def test_fresh_fire_is_admitted_and_owned_by_dispatch(setup, monkeypatch):
+    import asyncio
+
+    from server.harness import HarnessEvent
+
+    mgr, db, runner = setup
+    agent = await db.get_system_agent()
+    entered = asyncio.Event()
+    captured = {}
+
+    async def backend(session, prompt):
+        captured.update(session_id=session.id, source=session._current_request.source,
+                        driver=session._active_task, inner=session._inner_task,
+                        request_id=session._current_request.request_id)
+        entered.set()
+        await asyncio.Event().wait()
+        if False:
+            yield HarnessEvent(type="result")
+
+    monkeypatch.setattr(mgr, "_run_backend", backend)
+    firing = asyncio.create_task(runner._fire("owned-schedule", agent["id"], "scheduled work"))
+    await asyncio.wait_for(entered.wait(), 2)
+    assert captured["source"] == "schedule"
+    assert captured["driver"] is not None and captured["inner"] is not None
+    assert mgr.running_turns_for(None) == 1
+    await mgr.drain_turns()
+    await asyncio.wait_for(firing, 2)
+    assert mgr.running_turns_for(None) == 0

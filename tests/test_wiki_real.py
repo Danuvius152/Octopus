@@ -45,7 +45,7 @@ async def test_codex_explicit_wiki_and_native_helper_then_ordinary_task(
         async with asyncio.timeout(240):
             events = [
                 event
-                async for event in manager.send_message(
+                async for event in manager._execute_claimed_request(
                     session.id,
                     "这是显式本地知识查询。请用 spawn_agent 创建一个原生助手，让它用 mcp__wiki__search 搜索工程决定，再用 mcp__wiki__read 查证，返回核验码、revision 与行号。主 agent 等待助手完成后回答。禁止 shell 读库。",
                     wiki_mode="read",
@@ -58,7 +58,7 @@ async def test_codex_explicit_wiki_and_native_helper_then_ordinary_task(
         async with asyncio.timeout(120):
             ordinary = [
                 event
-                async for event in manager.send_message(
+                async for event in manager._execute_claimed_request(
                     session.id,
                     "这是普通讨论，不查知识库，也不操作文件。只回复 ORDINARY-OK。",
                 )

@@ -4,8 +4,8 @@ import asyncio
 import logging
 from pathlib import Path
 
+from ..aio import complete_cleanup
 from ..config import settings
-from .app_bridge import complete_cleanup
 from .history import WikiHistory
 from .registry import registry
 

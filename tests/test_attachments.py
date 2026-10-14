@@ -46,6 +46,7 @@ async def client(attachments_root):
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
 
     transport = ASGITransport(app=app)
@@ -275,7 +276,7 @@ async def test_send_message_prepends_attachment_header(
     monkeypatch.setattr(session_manager, "_run_backend", fake_run)
 
     # Drive a single turn through send_message (the WS path does the same).
-    async for _evt in session_manager.send_message(
+    async for _evt in session_manager._execute_claimed_request(
         sid, "what's in this file?", attachment_ids=[aid]
     ):
         pass
@@ -309,7 +310,7 @@ async def test_send_message_no_attachments_unchanged(client, monkeypatch):
 
     monkeypatch.setattr(session_manager, "_run_backend", fake_run)
 
-    async for _evt in session_manager.send_message(sid, "hello there"):
+    async for _evt in session_manager._execute_claimed_request(sid, "hello there"):
         pass
 
     assert captured["prompt"] == "hello there"
@@ -335,7 +336,7 @@ async def test_send_message_missing_attachment_id_is_dropped(
 
     monkeypatch.setattr(session_manager, "_run_backend", fake_run)
 
-    async for _evt in session_manager.send_message(
+    async for _evt in session_manager._execute_claimed_request(
         sid, "still send", attachment_ids=["nonexistent"]
     ):
         pass
@@ -366,7 +367,7 @@ async def test_user_message_persists_attachments_metadata(
             yield {}
 
     monkeypatch.setattr(session_manager, "_run_backend", fake_run)
-    async for _evt in session_manager.send_message(
+    async for _evt in session_manager._execute_claimed_request(
         sid, "look", attachment_ids=[aid]
     ):
         pass

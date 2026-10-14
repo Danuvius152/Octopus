@@ -4,9 +4,10 @@ import uuid
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
-from ..config import settings
-from ..deps import SessionMgr, accounts_exist, scope_user_id_for
+from .. import deps
+from ..deps import SessionMgr
 from ..sessions.turns import QuotaExceeded
+from ..ws_delivery import SocketDelivery
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -28,71 +29,33 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
     # sat on an empty main view with no way to reach sign-in. Accepting first
     # lets a real 4001 close frame through, which the client turns into the
     # sign-in screen.
-    allowed, user_id = await scope_user_id_for(token)
+    principal = await deps.resolve_principal(token)
     await ws.accept()
-    if not allowed:
+    if principal is None:
         await ws.close(code=4001, reason="Unauthorized")
         return
     logger.info("WebSocket client connected")
 
+    user_id = principal.user_id
     conn_id = uuid.uuid4().hex
-    socket_token = token
-    legacy_access_token = token == settings.auth_token
-    closed = False
-
-    async def still_authorized(message: dict | None = None) -> bool:
-        nonlocal socket_token, closed
-        if closed:
-            return False
-        valid, owner = await scope_user_id_for(socket_token)
-        if closed:
-            return False
-        if valid and owner == user_id:
-            return True
-        # Rotation deliberately hands a still-connected legacy client its new
-        # credential. Only this trusted server frame may bridge that change;
-        # account adoption never does.
-        if (
-            message is not None and message.get("type") == "auth_token_rotated"
-            and legacy_access_token and user_id is None and not await accounts_exist()
-        ):
-            replacement = message.get("token")
-            if replacement is None:
-                return True  # Deliver the server's explicit revocation notice.
-            if isinstance(replacement, str) and replacement == settings.auth_token:
-                socket_token = replacement
-                return True
-        closed = True
-        session_manager.remove_broadcast(conn_id)
-        await ws.close(code=4001, reason="Unauthorized")
-        return False
+    delivery = SocketDelivery(ws, session_manager, conn_id, token, principal)
 
     async def broadcast(msg: dict):
-        try:
-            if not await still_authorized(msg):
-                return
-            await ws.send_json(msg)
-        except (WebSocketDisconnect, RuntimeError):
-            # The client is gone, or Starlette already sent the close frame.
-            # Normal: a browser tab closing mid-broadcast lands here, and the
-            # unsubscribe below is what actually cleans up.
-            pass
-        except Exception:
-            logger.debug("broadcast to %s failed", conn_id, exc_info=True)
+        delivery.offer(msg)
 
-    # Subscribed *as this account*: the bus then routes frames by owner, so a
-    # session belonging to somebody else never reaches this socket (§7).
     session_manager.on_broadcast(conn_id, broadcast, user_id)
+    delivery.start()
 
     try:
-        while not closed:
-            raw = await ws.receive_text()
-            if not await still_authorized():
+        while not delivery.closed.is_set():
+            raw = await delivery.receive()
+            if raw is None or not await delivery.authorized():
                 return
+            await delivery.record_activity()
             try:
                 data = json.loads(raw)
             except json.JSONDecodeError:
-                await ws.send_json({"type": "error", "message": "Invalid JSON"})
+                delivery.offer({"type": "error", "message": "Invalid JSON"})
                 continue
 
             msg_type = data.get("type")
@@ -109,7 +72,7 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                 # Allow attachment-only turns (no text), but require *some*
                 # signal so we don't kick a backend turn off an empty payload.
                 if not session_id or (not content and not attachment_ids):
-                    await ws.send_json(
+                    delivery.offer(
                         {"type": "error", "message": "session_id and content required"}
                     )
                     continue
@@ -134,11 +97,11 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                     # Its own branch: this is "you, shortly" rather than
                     # "that request was wrong", and the difference is what the
                     # person needs to read (multi-tenancy.md §8).
-                    await ws.send_json(
+                    delivery.offer(
                         {"type": "error", "session_id": session_id, "message": str(e)}
                     )
                 except ValueError as e:
-                    await ws.send_json(
+                    delivery.offer(
                         {"type": "error", "session_id": session_id, "message": str(e)}
                     )
 
@@ -155,7 +118,7 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                     try:
                         await session_manager.resume_dispatch(session_id)
                     except QuotaExceeded as exc:
-                        await ws.send_json({"type": "error", "session_id": session_id, "message": str(exc)})
+                        delivery.offer({"type": "error", "session_id": session_id, "message": str(exc)})
 
             elif msg_type == "approve_tool":
                 session_id = data.get("session_id")
@@ -164,7 +127,7 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                 if session is not None and session.user_id == user_id and tool_use_id:
                     ok = await session_manager.approve_tool(session_id, tool_use_id)
                     if not ok:
-                        await ws.send_json(
+                        delivery.offer(
                             {
                                 "type": "error",
                                 "session_id": session_id,
@@ -182,7 +145,7 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                         session_id, tool_use_id, reason
                     )
                     if not ok:
-                        await ws.send_json(
+                        delivery.offer(
                             {
                                 "type": "error",
                                 "session_id": session_id,
@@ -200,7 +163,7 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                         session_id, question_id, answers
                     )
                     if not ok:
-                        await ws.send_json(
+                        delivery.offer(
                             {
                                 "type": "error",
                                 "session_id": session_id,
@@ -216,4 +179,4 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
     except Exception:
         logger.exception("WebSocket error")
     finally:
-        session_manager.remove_broadcast(conn_id)
+        await delivery.aclose()

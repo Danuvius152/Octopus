@@ -19,7 +19,7 @@ from typing import Any, Literal
 
 from .. import fork_helpers
 from .. import monitor as _monitor
-from ..aio import drain_cancelled, stopped_within
+from ..aio import drain_cancelled
 from ..attachments import MAX_ATTACHMENTS_PER_MESSAGE
 from ..attachments import get_path as get_attachment_path
 from ..config import settings
@@ -42,8 +42,8 @@ from ..models import (
 )
 from ..monitor import Event as _MonEvent
 from .base import (
+    _BACKEND_RETIRE_TIMEOUT,
     _DELTA_FLUSH_SECONDS,
-    _HELD_STOP_TIMEOUT,
     _MAX_PENDING_STEERS,
     PendingQuestion,
     QueuedPrompt,
@@ -55,6 +55,7 @@ from .base import (
     logger,
 )
 from .diagnostics import safe_diagnostic
+from .submission import RequestCompletion, SubmissionReceipt
 
 
 @dataclass
@@ -66,6 +67,22 @@ class _Settlement:
     })
     final_task: asyncio.Task[dict[str, Any]] | None = None
     cost: float | None = None
+    outcome: TurnOutcome | None = None
+    recording_state: Literal["selected", "writing", "committed", "failed", "unconfirmed"] = "selected"
+    stored: MessageContent | None = None
+    seq: int | None = None
+    event: dict[str, Any] | None = None
+    publication_started: bool = False
+    interruption_cause: Literal["user", "shutdown"] | None = None
+
+    def request_interruption(self, cause: Literal["user", "shutdown"]) -> None:
+        if self.outcome is None and self.interruption_cause is None:
+            self.interruption_cause = cause
+
+    def interruption(self) -> tuple[str, str]:
+        if self.interruption_cause == "shutdown":
+            return "(interrupted by service shutdown)", "service_shutdown"
+        return "(interrupted by user)", "interrupted"
 
 
 @dataclass
@@ -113,9 +130,10 @@ class _Attempt:
         default_factory=lambda: {"last": time.monotonic(), "tripped": None}
     )
 
-    def touch(self) -> None:
-        """Mark progress, so the idle watchdog doesn't trip on a live turn."""
-        self.watchdog["last"] = time.monotonic()
+    def touch(self, timestamp: float | None = None) -> None:
+        """A late native observation cannot grant a fresh idle window."""
+        now = time.monotonic() if timestamp is None else timestamp
+        self.watchdog["last"] = max(self.watchdog["last"], now)
 
     @property
     def timeout(self) -> tuple[str, int] | None:
@@ -219,6 +237,9 @@ class TurnsMixin(SessionManagerBase):
             "generation": self._dispatch_generation,
             "revision": session._dispatch_revision,
             "paused": session._dispatch_paused,
+            "recording_failure": ({"request_id": session._recording_blocked.request_id,
+                                   "state": session._recording_blocked.recording_state}
+                                  if session._recording_blocked else None),
             "active_request_id": (
                 session._current_request.request_id if session._current_request else None
             ),
@@ -256,35 +277,93 @@ class TurnsMixin(SessionManagerBase):
                 recovery=dict(settlement.recovery),
             )
 
-            async def publish() -> dict[str, Any]:
-                stored = MessageContent(
-                    role=MessageRole.system, type="result",
-                    content=outcome.model_dump(), is_error=status != "success",
-                    session_id=result.session_id if result else session.claude_session_id,
-                    cost=settlement.cost,
-                )
-                seq = await self._persist_message(session, stored)
-                event = {
-                    "type": "result", "session_id": session.id,
-                    "request_id": settlement.request_id,
-                    "work_id": settlement.work_id,
-                    "claude_session_id": stored.session_id,
-                    "content": stored.content, "is_error": stored.is_error,
-                    "cost": stored.cost, "code": code,
-                    "message": outcome.message, "terminal": True,
-                    "turns": result.num_turns if result else None,
-                    "duration_ms": result.duration_ms if result else None,
-                }
-                if metadata:
-                    for key in ("credential_id", "backend"):
-                        if key in metadata:
-                            event[key] = metadata[key]
-                self._tag_persisted(event, seq, stored)
-                await self._broadcast(event, user_id=session.user_id)
-                return event
-
-            settlement.final_task = asyncio.create_task(publish())
+            settlement.outcome = outcome
+            settlement.stored = MessageContent(
+                role=MessageRole.system, type="result", content=outcome.model_dump(),
+                is_error=status != "success",
+                session_id=result.session_id if result else session.claude_session_id,
+                cost=settlement.cost, created_at=datetime.now(UTC).isoformat(),
+            )
+            if self.db:
+                settlement.seq = session._message_count
+                session._message_count += 1
+            event = {
+                "type": "result", "session_id": session.id,
+                "request_id": settlement.request_id, "work_id": settlement.work_id,
+                "claude_session_id": settlement.stored.session_id,
+                "content": outcome.model_dump(), "is_error": status != "success",
+                "cost": settlement.cost, "code": code, "message": outcome.message,
+                "terminal": True, "turns": result.num_turns if result else None,
+                "duration_ms": result.duration_ms if result else None,
+            }
+            if metadata:
+                for key in ("credential_id", "backend"):
+                    if key in metadata:
+                        event[key] = metadata[key]
+            settlement.event = self._tag_persisted(event, settlement.seq, settlement.stored)
+            task = asyncio.create_task(self._record_and_publish(session, settlement))
+            settlement.final_task = task
+            self._finalization_tasks.add(task)
+            task.add_done_callback(self._finalization_tasks.discard)
+            self._own_task(task)
         return await asyncio.shield(settlement.final_task)
+
+    async def _record_and_publish(self, session: Session, settlement: _Settlement) -> dict[str, Any]:
+        assert settlement.stored is not None and settlement.event is not None
+        if settlement.recording_state != "committed":
+            settlement.recording_state = "writing"
+            stored = settlement.stored
+            try:
+                if self.db:
+                    await self.db.record_terminal(
+                        request_id=settlement.request_id, session_id=session.id,
+                        seq=settlement.seq, role=stored.role.value, type=stored.type,
+                        content=stored.content, is_error=stored.is_error,
+                        session_id_ref=stored.session_id, cost=stored.cost,
+                        created_at=stored.created_at,
+                    )
+            except Exception:
+                # A commit acknowledgement may be lost after the write succeeds.
+                # Only storage reconciliation can prove which happened.
+                settlement.recording_state = "unconfirmed"
+                session._recording_blocked = settlement
+                logger.exception("Terminal recording unconfirmed session=%s request=%s",
+                                 session.id, settlement.request_id)
+                notice = {"type": "recording_failed", "session_id": session.id,
+                          "request_id": settlement.request_id,
+                          "recording_state": "unconfirmed", "terminal": False,
+                          "message": "Result saving failed or is unconfirmed. Automatic dispatch is paused.",
+                          "outcome": settlement.outcome.model_dump() if settlement.outcome else None}
+                notice["dispatch_state"] = self._dispatch_event(session)["dispatch_state"]
+                try:
+                    await self._broadcast(notice, user_id=session.user_id)
+                except Exception:
+                    logger.exception("Recording notice delivery failed session=%s", session.id)
+                return notice
+            settlement.recording_state = "committed"
+            if session._recording_blocked is settlement:
+                session._recording_blocked = None
+        if not settlement.publication_started:
+            settlement.publication_started = True
+            try:
+                await self._broadcast(settlement.event, user_id=session.user_id)
+            except Exception:
+                logger.exception("Committed terminal notification failed session=%s request=%s",
+                                 session.id, settlement.request_id)
+        return settlement.event
+
+    async def _reconcile_recording(self, session: Session) -> bool:
+        settlement = session._recording_blocked
+        if settlement is None:
+            return True
+        if settlement.final_task is not None and not settlement.final_task.done():
+            await asyncio.shield(settlement.final_task)
+        task = asyncio.create_task(self._record_and_publish(session, settlement))
+        self._finalization_tasks.add(task)
+        task.add_done_callback(self._finalization_tasks.discard)
+        self._own_task(task)
+        await asyncio.shield(task)
+        return session._recording_blocked is None
 
     async def _recovery_frame(
         self, session: Session, *, code: str, message: str,
@@ -322,6 +401,8 @@ class TurnsMixin(SessionManagerBase):
             event["seq"] = seq
         if msg.created_at:
             event["created_at"] = msg.created_at
+        if msg.runtime_metadata:
+            event["runtime_metadata"] = msg.runtime_metadata.model_dump()
         return event
 
     async def _persist_message(
@@ -364,38 +445,162 @@ class TurnsMixin(SessionManagerBase):
             git_head=git_head,
             git_status_clean=git_status_clean,
             created_at=msg.created_at,
+            runtime_metadata=msg.runtime_metadata.model_dump() if msg.runtime_metadata else None,
         )
         return seq
 
-    async def drain_turns(self, timeout: float = 5.0) -> int:
-        """Stop every turn in flight, and wait for it to finish unwinding.
+    def _own_task(self, task: asyncio.Task[Any]) -> None:
+        self._owned_tasks.add(task)
 
-        Registered as a close hook on the database (`Database.add_close_hook`),
-        so it runs on any shutdown — the server's, and every test's — before the
-        connection goes away. A turn cancelled *after* that has a `finally` that
-        flushes and broadcasts with nothing left to await, and nothing to cancel
-        it out of the attempt: the loop then stops making progress rather than
-        failing, which is what an intermittently hanging test run looked like.
+        def observed(done: asyncio.Task[Any]) -> None:
+            self._owned_tasks.discard(done)
+            if not done.cancelled() and done.exception() is not None:
+                error = done.exception()
+                assert error is not None
+                logger.error("Session-owned task %s failed", done.get_name(),
+                             exc_info=(type(error), error, error.__traceback__))
 
-        Bounded, because a wedged turn must not hold up a shutdown either.
-        """
-        tasks = [
-            s._active_task
-            for s in self.sessions.values()
-            if s._active_task is not None and not s._active_task.done()
-        ]
+        task.add_done_callback(observed)
+
+    def _notify_events(self, session: Session, events: list[dict[str, Any]]) -> None:
+        async def publish() -> None:
+            for event in events:
+                await self._broadcast(event, user_id=session.user_id)
+
+        task = asyncio.create_task(publish(), name=f"session-notice-{session.id}")
+        self._own_task(task)
+
+    @staticmethod
+    def _new_receipt(session: Session, queued: QueuedPrompt, disposition: str = "accepted") -> SubmissionReceipt:
+        future: asyncio.Future[RequestCompletion] = asyncio.get_running_loop().create_future()
+        session._request_completions[queued.request_id] = future
+        return SubmissionReceipt(disposition, queued.request_id, future)  # type: ignore[arg-type]
+
+    def _complete_request(
+        self, session: Session, queued: QueuedPrompt, *, reason: str | None = None,
+        state: str = "completed", settlement: _Settlement | None = None,
+        actual_request_id: str | None = None,
+    ) -> None:
+        future = session._request_completions.pop(queued.request_id, None)
+        if future is None or future.done():
+            return
+        outcome = settlement.outcome if settlement else None
+        recording = settlement.recording_state if settlement and outcome else "none"
+        if outcome is not None and recording != "committed":
+            state = "recording_failed"
+            recording = "unconfirmed" if recording == "unconfirmed" else "failed"
+        future.set_result(RequestCompletion(
+            input_request_id=queued.request_id,
+            request_id=actual_request_id or queued.request_id,
+            state=state, outcome=outcome, recording_state=recording, reason=reason,  # type: ignore[arg-type]
+        ))
+
+    def _withdraw_requests(self, session: Session, requests: list[QueuedPrompt], *, reason: str) -> None:
+        for request in requests:
+            self._complete_request(session, request, state=reason if reason in {"deleted", "shutdown", "expired"} else "withdrawn", reason=reason)
+
+    def _retire_backend(self, session: Session, backend: HarnessRun, *, reason: str = "process_ended") -> asyncio.Task[None]:
+        captured = session._backend_retirements.get(id(backend))
+        if captured is not None and captured[0] is backend:
+            return captured[1]
+        invalidate = getattr(backend, "invalidate_activity", None)
+        if invalidate is not None:
+            invalidate()
+        frames = self._forget_backend(session, backend, reason=reason)
+        if frames:
+            self._notify_events(session, frames)
+
+        async def retire() -> None:
+            try:
+                await backend.interrupt()
+            except Exception:
+                logger.warning("Backend interrupt failed; confirming retirement with stop", exc_info=True)
+            await backend.stop()
+
+        task = asyncio.create_task(retire(), name=f"backend-retirement-{session.id}")
+        session._backend_retirements[id(backend)] = (backend, task)
+        session._backend_cleanup_tasks.add(task)
+        self._own_task(task)
+        # Failed retirement stays attached: a subsequent attempt must not start
+        # against a writer whose exit could not be confirmed.
+        def finished(done: asyncio.Task[None]) -> None:
+            if not done.cancelled() and done.exception() is None:
+                session._backend_cleanup_tasks.discard(done)
+                captured = session._backend_retirements.get(id(backend))
+                if captured is not None and captured[1] is done:
+                    session._backend_retirements.pop(id(backend))
+        task.add_done_callback(finished)
+        return task
+
+    async def _await_backend_retirement(self, session: Session, *, timeout: float | None = None) -> None:
+        tasks = tuple(session._backend_cleanup_tasks)
         if not tasks:
-            return 0
-        for task in tasks:
-            task.cancel()
-        done, pending = await asyncio.wait(tasks, timeout=timeout)
+            return
+        limit = _BACKEND_RETIRE_TIMEOUT if timeout is None else min(_BACKEND_RETIRE_TIMEOUT, max(0.0, timeout))
+        _, pending = await asyncio.wait(tasks, timeout=limit)
         if pending:
-            logger.warning(
-                "%d turn(s) did not stop within %.0fs; abandoning them",
-                len(pending),
-                timeout,
+            raise RuntimeError("Previous backend retirement remains unconfirmed")
+        for task in tasks:
+            await asyncio.shield(task)
+
+    def close_admission(self) -> None:
+        """Seal request admission synchronously before other owners stop."""
+        self._admission_closed = True
+
+    async def drain_turns(self, timeout: float = 5.0) -> int:
+        """Close admission before draining execution and manager-owned cleanup."""
+        self.close_admission()
+        deadline = time.monotonic() + max(0.0, timeout)
+        tasks: list[asyncio.Task[Any]] = []
+        drivers: list[asyncio.Task[Any]] = []
+        questions: list[asyncio.Task[None]] = []
+        for session in list(self.sessions.values()):
+            current, settlement = session._current_request, session._settlement
+            if settlement is not None and (current is None or current.request_id == settlement.request_id):
+                settlement.request_interruption("shutdown")
+            self._withdraw_requests(session, [*session._pending_queue, *session._steer_queue], reason="shutdown")
+            session._pending_queue.clear()
+            session._steer_queue.clear()
+            session._steer_open = False
+            if session._backend is not None:
+                self._retire_backend(session, session._backend, reason="service_shutdown")
+            if session._active_task is not None and not session._active_task.done():
+                if not session._active_task.cancelling():
+                    session._active_task.cancel("shutdown")
+                tasks.append(session._active_task)
+                drivers.append(session._active_task)
+        for session in list(self.sessions.values()):
+            question_cleanup = asyncio.create_task(
+                self._close_session_questions(session, reason="shutdown"),
+                name=f"shutdown-questions-{session.id}",
             )
-        return len(done)
+            self._own_task(question_cleanup)
+            tasks.append(question_cleanup)
+            questions.append(question_cleanup)
+        # A cancelling driver may create its final recorder while it unwinds.
+        # Refresh the owned set until all producers retire within one budget.
+        while True:
+            owned = {*tasks, *self._owned_tasks, *self._finalization_tasks}
+            pending = {task for task in owned if not task.done()}
+            if not pending:
+                break
+            remaining = max(0.0, deadline - time.monotonic())
+            if remaining == 0:
+                logger.error("Shutdown teardown remains unconfirmed: %d task(s)", len(pending))
+                raise RuntimeError("Session teardown remains unconfirmed")
+            await asyncio.wait(pending, timeout=remaining)
+        for task in questions:
+            try:
+                await asyncio.shield(task)
+            except (asyncio.CancelledError, Exception) as error:
+                raise RuntimeError("Question teardown remains unconfirmed") from error
+        for session in list(self.sessions.values()):
+            await self._await_backend_retirement(session, timeout=0)
+            if session._recording_blocked is not None:
+                logger.error("Shutdown with unconfirmed result session=%s request=%s",
+                             session.id, session._recording_blocked.request_id)
+                raise RuntimeError("Session result recording remains unconfirmed")
+        return sum(task.done() for task in drivers)
 
     def running_turns_for(self, user_id: str | None) -> int:
         """How many of this account's sessions are mid-turn."""
@@ -429,6 +634,8 @@ class TurnsMixin(SessionManagerBase):
 
     @staticmethod
     def _eligible_request(session: Session) -> int | None:
+        if session._admission_closed or session._recording_blocked is not None:
+            return None
         return next((
             i for i, item in enumerate(session._pending_queue)
             if not session._dispatch_paused or item.priority
@@ -436,6 +643,8 @@ class TurnsMixin(SessionManagerBase):
 
     def _schedule_dispatch(self, session: Session) -> bool:
         """Claim the driver synchronously; its short lock never spans I/O."""
+        if self._admission_closed or session._admission_closed:
+            return False
         if session._active_task and not session._active_task.done():
             return False
         if self._eligible_request(session) is None:
@@ -457,7 +666,7 @@ class TurnsMixin(SessionManagerBase):
         work_id: str | None = None,
         question_session_id: str | None = None,
         question_id: str | None = None,
-    ) -> None:
+    ) -> SubmissionReceipt:
         """Accept a request through the in-memory dispatch gate.
 
         Only the composer is steerable. Internal callers supply their source
@@ -469,10 +678,15 @@ class TurnsMixin(SessionManagerBase):
         if session is None:
             raise ValueError(f"Session {session_id} not found")
         from ..mcp_identity import work_is_open
-        if not work_is_open(work_id):
-            return
         if attachment_ids and len(attachment_ids) > MAX_ATTACHMENTS_PER_MESSAGE:
             raise ValueError(f"too many attachments: max {MAX_ATTACHMENTS_PER_MESSAGE}")
+        if delivery_id and delivery_id in session._delivery_receipts:
+            return replace(session._delivery_receipts[delivery_id], disposition="duplicate")
+        if self._admission_closed or session._admission_closed or not work_is_open(work_id):
+            queued = QueuedPrompt(prompt="", attachment_ids=[])
+            receipt = self._new_receipt(session, queued, "closed")
+            self._withdraw_requests(session, [queued], reason="shutdown" if self._admission_closed else "withdrawn")
+            return receipt
         queued = QueuedPrompt(
             prompt=prompt, attachment_ids=list(attachment_ids or []),
             wiki_mode=wiki_mode, source=source, delivery_id=delivery_id, work_id=work_id,
@@ -486,26 +700,30 @@ class TurnsMixin(SessionManagerBase):
             and (not session._dispatch_paused or (
                 session._current_request is not None and session._current_request.priority
             ))
+            and session._recording_blocked is None
             and await self._try_steer(session, queued)
         ):
-            return
+            return self._new_receipt(session, queued, "steered")
         async with session._dispatch_lock:
             if self.sessions.get(session_id) is not session:
                 raise ValueError(f"Session {session_id} not found")
-            if not work_is_open(work_id):
-                return
+            if delivery_id and delivery_id in session._delivery_receipts:
+                return replace(session._delivery_receipts[delivery_id], disposition="duplicate")
+            if self._admission_closed or session._admission_closed or not work_is_open(work_id):
+                receipt = self._new_receipt(session, queued, "closed")
+                self._withdraw_requests(session, [queued], reason="shutdown" if self._admission_closed else "withdrawn")
+                return receipt
             if session._forking:
                 raise ValueError(f"Session {session_id} is busy (forking)")
-            if delivery_id and delivery_id in session._seen_delivery_ids:
-                return
             queued.priority = session._dispatch_paused and source == "human"
-            if source == "human":
+            if source == "human" and session._recording_blocked is None:
                 self._check_turn_quota(session)
             session._dispatch_order += 1
             queued.order = session._dispatch_order
             session._pending_queue.append(queued)
+            receipt = self._new_receipt(session, queued)
             if delivery_id:
-                session._seen_delivery_ids.add(delivery_id)
+                session._delivery_receipts[delivery_id] = receipt
             try:
                 launched = self._schedule_dispatch(session)
             except QuotaExceeded:
@@ -514,26 +732,38 @@ class TurnsMixin(SessionManagerBase):
                 launched = False
             event = self._dispatch_event(session)
             queue_length = len(session._pending_queue)
-        await self._broadcast(event, user_id=session.user_id)
+        events = [event]
         if not launched:
-            await self._broadcast({
+            events.append({
                 "type": "queued", "session_id": session_id,
                 "content": prompt, "request_id": queued.request_id,
                 "queue_length": queue_length, "dispatch_state": event["dispatch_state"],
-            }, user_id=session.user_id)
+            })
+        self._notify_events(session, events)
+        return receipt
 
     async def _run_claim(
         self, session_id: str, queued: QueuedPrompt, gate: asyncio.Event
     ) -> None:
         await gate.wait()
         from ..mcp_identity import work_is_open
+        session = self.sessions.get(session_id)
+        if session is None:
+            return
         if not work_is_open(queued.work_id):
+            self._withdraw_requests(session, [queued], reason="withdrawn")
             return
         queued.started = True
-        session = self.sessions.get(session_id)
-        if session is not None:
-            session._settlement = _Settlement(request_id=queued.request_id, work_id=queued.work_id)
-        await self._consume_message(session_id, queued)
+        settlement = _Settlement(request_id=queued.request_id, work_id=queued.work_id)
+        session._settlement = settlement
+        try:
+            await self._consume_message(session_id, queued)
+        finally:
+            state = "completed" if settlement.outcome is not None else "withdrawn"
+            self._complete_request(session, queued, state=state, settlement=settlement,
+                                   reason="request_not_executed" if settlement.outcome is None else None)
+            for inline in session._inline_requests.pop(queued.request_id, []):
+                self._complete_request(session, inline, state=state, settlement=settlement, actual_request_id=queued.request_id)
 
     async def _drive_messages(self, session_id: str) -> None:
         session = self.sessions.get(session_id)
@@ -570,6 +800,8 @@ class TurnsMixin(SessionManagerBase):
                     if driver is not None and driver.cancelling():
                         inner.cancel()
                         await drain_cancelled(inner, f"session {session_id} inner turn")
+                        if not current.started:
+                            self._withdraw_requests(session, [current], reason="shutdown")
                         raise
                 except Exception:
                     logger.exception("Background task error for session %s", session_id)
@@ -587,7 +819,8 @@ class TurnsMixin(SessionManagerBase):
                 session._active_task = None
         # A paused session has stopped executing, but its pending work is not
         # finished. Completion notifications and transient archival must wait.
-        if not session._dispatch_paused and not session._pending_queue and not session._active_task:
+        if (not session._dispatch_paused and session._recording_blocked is None
+                and not session._pending_queue and not session._active_task):
             await self._fire_session_idle_notification(session)
             if session.origin in self._AUTO_ARCHIVE_ORIGINS:
                 await self.auto_archive_scheduled_session(session_id)
@@ -600,16 +833,20 @@ class TurnsMixin(SessionManagerBase):
                 except QuotaExceeded:
                     pass
 
-    async def resume_dispatch(self, session_id: str) -> bool:
+    async def resume_dispatch(self, session_id: str, *, resume_queue: bool = True) -> bool:
         session = self.sessions.get(session_id)
         if session is None:
+            return False
+        if session._recording_blocked is not None and not await self._reconcile_recording(session):
+            await self._broadcast(self._dispatch_event(session), user_id=session.user_id)
             return False
         async with session._dispatch_lock:
             if self.sessions.get(session_id) is not session:
                 return False
             if session._pending_queue:
                 self._check_turn_quota(session)
-            session._dispatch_paused = False
+            if resume_queue:
+                session._dispatch_paused = False
             self._schedule_dispatch(session)
             event = self._dispatch_event(session)
         await self._broadcast(event, user_id=session.user_id)
@@ -637,6 +874,8 @@ class TurnsMixin(SessionManagerBase):
         affected = []
         for session in self.sessions.values():
             pending = len(session._pending_queue)
+            removed = [q for q in (*session._pending_queue, *session._steer_queue) if q.work_id == work_id]
+            self._withdraw_requests(session, removed, reason="withdrawn")
             session._pending_queue[:] = [q for q in session._pending_queue if q.work_id != work_id]
             session._steer_queue[:] = [q for q in session._steer_queue if q.work_id != work_id]
             current = session._current_request
@@ -649,13 +888,14 @@ class TurnsMixin(SessionManagerBase):
                     settlement = None
                 question_attempt_id = session._question_attempt_id
                 inner = session._inner_task
+                if current is not None and not current.started:
+                    self._withdraw_requests(session, [current], reason="withdrawn")
                 if inner is not None and not inner.done():
                     inner.cancel()
                 session._steer_open = False
             if session._work_id == work_id and session._backend is not None:
                 backend = session._backend
-                self._forget_backend(session)
-                asyncio.create_task(self._safe_backend_interrupt(backend))
+                self._retire_backend(session, backend, reason="work_cancelled")
             if owned_current or pending != len(session._pending_queue):
                 affected.append((session, settlement, question_attempt_id))
         return affected
@@ -703,7 +943,7 @@ class TurnsMixin(SessionManagerBase):
             return False
         prompt = render_delivery_prompt(rec)
         try:
-            await self.start_message(
+            receipt = await self.start_message(
                 rec.session_id, prompt, attachment_ids=None,
                 source="bg", delivery_id=f"bg:{rec.id}",
                 work_id=getattr(rec, "work_id", None),
@@ -715,7 +955,7 @@ class TurnsMixin(SessionManagerBase):
                 rec.session_id,
             )
             return False
-        return True
+        return receipt.accepted
 
     async def _consume_message(
         self, session_id: str, queued: QueuedPrompt
@@ -736,16 +976,17 @@ class TurnsMixin(SessionManagerBase):
                         "type": "delivery_notice", "session_id": session_id,
                         "content": notice.content, "request_id": queued.request_id,
                     }, seq, notice), user_id=session.user_id)
+                self._withdraw_requests(session, [queued], reason="expired")
                 return
-        async for _event in self.send_message(
+        async for _event in self._execute_claimed_request(
             session_id, queued.prompt, queued.attachment_ids,
             request_id=queued.request_id,
             source=queued.source, work_id=queued.work_id,
             **({"wiki_mode": queued.wiki_mode} if queued.wiki_mode else {})
         ):
-            pass  # send_message persists + broadcasts each event
+            pass  # The executor persists and broadcasts each event.
 
-    async def send_message(
+    async def _execute_claimed_request(
         self,
         session_id: str,
         prompt: str,
@@ -900,7 +1141,7 @@ class TurnsMixin(SessionManagerBase):
                 async for ws_event in self._run_backend(session, backend_dispatch_prompt):
                     ws_event.setdefault("request_id", settlement.request_id)
                     ws_event.setdefault("work_id", settlement.work_id)
-                    if ws_event["type"] != "result":
+                    if ws_event["type"] not in ("result", "recording_failed"):
                         await self._broadcast(ws_event, user_id=session.user_id)
                     yield ws_event
             except Exception as e:
@@ -910,9 +1151,9 @@ class TurnsMixin(SessionManagerBase):
                 )
                 yield event
         except asyncio.CancelledError:
+            message, code = settlement.interruption()
             await self._settle_turn(
-                session, settlement, status="interrupted", message="(interrupted by user)",
-                code="interrupted",
+                session, settlement, status="interrupted", message=message, code=code,
             )
             raise
         except Exception as exc:
@@ -968,7 +1209,7 @@ class TurnsMixin(SessionManagerBase):
 
         # Fire backend teardown in the background and return fast. The
         # inner task cancellation below releases session._lock via
-        # send_message's finally clause, so new turns become possible
+        # The executor's finally clause, so new turns become possible
         # even before the subprocess actually exits.
         if session._backend:
             backend = session._backend
@@ -976,8 +1217,7 @@ class TurnsMixin(SessionManagerBase):
             # reference, but the session must not: an interrupted process is
             # being torn down, and with reuse a next turn that found it still
             # briefly alive would hand its prompt to a dying CLI.
-            self._forget_backend(session)
-            asyncio.create_task(self._safe_backend_interrupt(backend))
+            self._retire_backend(session, backend, reason="user_stop")
 
         inner = session._inner_task
         settlement = session._settlement
@@ -988,6 +1228,8 @@ class TurnsMixin(SessionManagerBase):
         question_attempt = session._question_attempt_id
         had_active = inner is not None and not inner.done()
         if had_active:
+            if settlement is not None:
+                settlement.request_interruption("user")
             inner.cancel()
         elif session._lock.locked():
             # Wedged state: no live task to cancel but the lock is still
@@ -1017,9 +1259,9 @@ class TurnsMixin(SessionManagerBase):
             return True  # The retained request has no execution outcome yet.
 
         if settlement is not None:
+            message, code = settlement.interruption()
             await self._settle_turn(
-                session, settlement, status="interrupted", message="(interrupted by user)",
-                code="interrupted",
+                session, settlement, status="interrupted", message=message, code=code,
             )
             return True
 
@@ -1038,22 +1280,51 @@ class TurnsMixin(SessionManagerBase):
         await self._broadcast(event, user_id=session.user_id)
         return True
 
+    async def cancel_request(
+        self, session_id: str, request_id: str, *, cause: Literal["user", "shutdown"] = "user",
+    ) -> bool:
+        session = self.sessions.get(session_id)
+        if session is None:
+            return False
+        removed = [q for q in (*session._pending_queue, *session._steer_queue) if q.request_id == request_id]
+        session._pending_queue[:] = [q for q in session._pending_queue if q.request_id != request_id]
+        session._steer_queue[:] = [q for q in session._steer_queue if q.request_id != request_id]
+        self._withdraw_requests(session, removed, reason="shutdown" if cause == "shutdown" else "withdrawn")
+        current = session._current_request
+        if current is None or current.request_id != request_id:
+            return bool(removed)
+        session._steer_open = False
+        settlement = session._settlement
+        if settlement is not None and settlement.request_id == request_id:
+            settlement.request_interruption(cause)
+        if not current.started:
+            self._withdraw_requests(session, [current], reason="shutdown" if cause == "shutdown" else "withdrawn")
+        backend = session._backend
+        if backend is not None:
+            self._retire_backend(session, backend, reason="service_shutdown" if cause == "shutdown" else "user_stop")
+        task = session._inner_task
+        if task is not None and not task.done():
+            task.cancel()
+            await drain_cancelled(task, f"cancel request {request_id}")
+        await self._await_backend_retirement(session)
+        return True
+
     async def reset_session(self, session_id: str) -> None:
         """Force-reset a stuck session."""
         session = self.sessions.get(session_id)
         if session is None:
             raise ValueError(f"Session {session_id} not found")
+        self._withdraw_requests(session, [*session._pending_queue, *session._steer_queue], reason="withdrawn")
         session._pending_queue.clear()
+        session._steer_queue.clear()
         session._dispatch_paused = False
         if session._inner_task and not session._inner_task.done():
             session._inner_task.cancel()
         if session._active_task and not session._active_task.done():
             session._active_task.cancel()
         if session._backend:
-            await stopped_within(
-                session._backend.stop(), f"session {session.id} backend"
-            )
-            self._forget_backend(session)
+            self._retire_backend(session, session._backend)
+        await self._await_backend_retirement(session)
         if session._lock.locked():
             session._lock.release()
         session.status = SessionStatus.idle
@@ -1076,6 +1347,7 @@ class TurnsMixin(SessionManagerBase):
         agent: dict[str, Any] | None,
         connectors: list[tuple[Any, Any]] | None,
         configured_session: Session | None = None,
+        *, retirement_timeout: float | None = None,
     ) -> tuple[HarnessRun, bool]:
         """The process this attempt runs in, and whether it already holds the
         conversation.
@@ -1086,6 +1358,8 @@ class TurnsMixin(SessionManagerBase):
         process that nothing points at any more, so neither the reaper nor
         shutdown can ever reach it. Let it go properly first.
         """
+        retirement_deadline = None if retirement_timeout is None else time.monotonic() + retirement_timeout
+        await self._await_backend_retirement(session, timeout=retirement_timeout)
         configured = configured_session or session
         configured._backend = session._backend
         configured._steer_open = session._steer_open
@@ -1094,13 +1368,9 @@ class TurnsMixin(SessionManagerBase):
         )
         if reused is None and session._backend is not None:
             stale = session._backend
-            self._forget_backend(session)
-            try:
-                await asyncio.wait_for(stale.stop(), timeout=_HELD_STOP_TIMEOUT)
-            except (TimeoutError, Exception):
-                logger.warning(
-                    "session %s: abandoning a process we couldn't stop", session.id
-                )
+            self._retire_backend(session, stale)
+            remaining = None if retirement_deadline is None else max(0.0, retirement_deadline - time.monotonic())
+            await self._await_backend_retirement(session, timeout=remaining)
         backend = reused or self._make_run(configured, agent, connectors)
         session._backend = backend
         return backend, reused is not None
@@ -1205,7 +1475,7 @@ class TurnsMixin(SessionManagerBase):
         )
 
     async def _retire_or_hold_process(
-        self, session: Session, attempt: _Attempt
+        self, session: Session, attempt: _Attempt, *, retirement_timeout: float | None = None
     ) -> None:
         """Hold the process for the next turn, or shut it down now."""
         if self._turn_ended_cleanly(attempt) and session._backend is attempt.backend:
@@ -1217,15 +1487,26 @@ class TurnsMixin(SessionManagerBase):
             # the backend suite got OOM-killed.
             await self._enforce_held_cap(keep_session_id=session.id)
             return
-        from ..mcp_identity import revoke_run
-        revoke_run(getattr(attempt.backend, "run_lease_id", None))
+        deadline = None if retirement_timeout is None else time.monotonic() + retirement_timeout
+        if session._backend is attempt.backend:
+            if attempt.timeout is not None:
+                reason = "parent_timeout"
+            elif attempt.saw_error_event or (attempt.result is not None and attempt.result.is_error):
+                reason = "parent_error"
+            elif attempt.saw_result:
+                reason = "parent_done"
+            else:
+                reason = "process_ended"
+            self._retire_backend(session, attempt.backend, reason=reason)
         try:
-            await attempt.backend.stop()
+            await self._await_backend_retirement(session, timeout=retirement_timeout)
         except Exception:
-            logger.exception(
-                "backend.stop() failed cleanly for session %s", session.id
-            )
-        self._forget_backend(session, expected=attempt.backend)
+            if deadline is not None and time.monotonic() >= deadline:
+                # The captured retirement stays owned and gates successors;
+                # reaching the logical turn cap retains its existing outcome.
+                attempt.watchdog["tripped"] = ("overall", settings.turn_max_seconds)
+                return
+            raise
 
     # ------------------------------------------------------------------ #
     # One event off the stream
@@ -1315,6 +1596,15 @@ class TurnsMixin(SessionManagerBase):
         normalized and enumerated in `harness/events.py`, so this branches on a
         contract rather than on whatever a CLI happened to print.
         """
+        if event.type == "subagent" and session._backend is not attempt.backend:
+            return []
+        from ..harness.tool_identity import ToolIdentityTracker
+        tracker = getattr(attempt.backend, "_tool_identity_tracker", None)
+        if tracker is None:
+            tracker = ToolIdentityTracker()
+            attempt.backend._tool_identity_tracker = tracker
+        tracker.normalize(event, session._settlement.request_id if session._settlement else "untracked",
+                          attempt.attempt_id)
         if event.type == "text_delta":
             if event.content and event.content.strip():
                 attempt.saw_text = True
@@ -1675,7 +1965,9 @@ class TurnsMixin(SessionManagerBase):
         if self._remaining_turn_time(turn) == 0 and attempt.timeout is None:
             attempt.watchdog["tripped"] = ("overall", settings.turn_max_seconds)
             if session._backend is attempt.backend:
-                await self._retire_or_hold_process(session, attempt)
+                await self._retire_or_hold_process(
+                    session, attempt, retirement_timeout=self._remaining_turn_time(turn)
+                )
         decision = await self._timeout_decision(session, turn, attempt)
         if decision is not None:
             return decision
@@ -1760,11 +2052,34 @@ class TurnsMixin(SessionManagerBase):
             if self._remaining_turn_time(turn) == 0:
                 yield await self._settle_overall_timeout(session, turn)
                 return
-            backend, reused = await self._acquire_backend(
-                session, credential, agent, connectors, configured_session
-            )
+            try:
+                backend, reused = await self._acquire_backend(
+                    session, credential, agent, connectors, configured_session,
+                    retirement_timeout=self._remaining_turn_time(turn),
+                )
+            except RuntimeError:
+                if self._remaining_turn_time(turn) == 0:
+                    yield await self._settle_overall_timeout(session, turn)
+                    return
+                raise
             attempt = _Attempt(
                 backend=backend, prompt=turn.current_prompt, reused=reused
+            )
+            if hasattr(backend, "bind_tool_context"):
+                backend.bind_tool_context(turn.settlement.request_id, attempt.attempt_id)
+            def touch_current_attempt(
+                timestamp: float | None = None,
+                captured_backend: HarnessRun = backend,
+                captured_attempt: _Attempt = attempt,
+                captured_settlement: _Settlement = turn.settlement,
+            ) -> None:
+                if (session._backend is captured_backend and captured_attempt.timeout is None
+                        and captured_settlement.final_task is None):
+                    captured_attempt.touch(timestamp)
+
+            activity_token = (
+                backend.bind_activity(touch_current_attempt)
+                if hasattr(backend, "bind_activity") else None
             )
             await self._begin_question_attempt(session, attempt.attempt_id, attempt.watchdog)
             watchdog = self._start_turn_watchdog(
@@ -1782,7 +2097,9 @@ class TurnsMixin(SessionManagerBase):
                 await self._start_attempt(session, attempt, credential)
                 steer_writer = await self._open_steering_window(session, backend)
                 async for event in backend.stream():
-                    attempt.touch()
+                    if activity_token is None:
+                        # Scripted/in-process backends still use their declared event seam.
+                        attempt.touch()
                     for frame in await self._handle_stream_event(
                         session, attempt, event
                     ):
@@ -1794,6 +2111,8 @@ class TurnsMixin(SessionManagerBase):
                 # A watchdog may retire a run while its spawn is returning.
                 # That run's synthetic cancellation retains the timeout cause.
             finally:
+                if activity_token is not None:
+                    backend.unbind_activity(activity_token)
                 # Close the steering window and stop the writer before anything
                 # else touches the process (§9), then decide the process's fate.
                 await self._close_steering_window(session, steer_writer)
@@ -1801,7 +2120,9 @@ class TurnsMixin(SessionManagerBase):
                 await self._end_question_attempt(session, attempt.attempt_id)
                 if self._remaining_turn_time(turn) == 0:
                     attempt.watchdog["tripped"] = ("overall", settings.turn_max_seconds)
-                await self._retire_or_hold_process(session, attempt)
+                await self._retire_or_hold_process(
+                    session, attempt, retirement_timeout=self._remaining_turn_time(turn)
+                )
 
             turn.produced_output = turn.produced_output or attempt.produced_output
             if attempt.result is not None and attempt.result.cost is not None:
@@ -1954,7 +2275,7 @@ class TurnsMixin(SessionManagerBase):
         if queued.attachment_ids or queued.wiki_mode or session._wiki_mode:
             return False
         async with session._steer_lock:
-            if not session._steer_open:
+            if self._admission_closed or session._admission_closed or not session._steer_open:
                 return False
             if len(session._steer_queue) >= _MAX_PENDING_STEERS:
                 logger.info(
@@ -2005,6 +2326,9 @@ class TurnsMixin(SessionManagerBase):
                         # normal pending queue, so the message still runs.
                         return written
                     session._steer_queue.pop(0)
+                    owner = session._settlement
+                    if owner is not None:
+                        session._inline_requests.setdefault(owner.request_id, []).append(queued)
                 written += 1
                 # Persist + broadcast only once it's actually been handed over,
                 # so the transcript order matches what the engine saw.

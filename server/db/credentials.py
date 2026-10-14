@@ -11,7 +11,7 @@ from __future__ import annotations
 import sqlite3
 from typing import Any
 
-from .base import DatabaseBase
+from .base import DatabaseBase, serialized_write
 
 
 class CredentialsMixin(DatabaseBase):
@@ -31,6 +31,7 @@ class CredentialsMixin(DatabaseBase):
             "user_id": row[10],
         }
 
+    @serialized_write
     async def save_credential(
         self,
         credential_id: str,
@@ -108,6 +109,7 @@ class CredentialsMixin(DatabaseBase):
             return None
         return self._row_to_credential(row)
 
+    @serialized_write
     async def update_credential(self, credential_id: str, **fields: Any) -> None:
         await self._ensure_connected()
         meta_allowed = {
@@ -159,6 +161,7 @@ class CredentialsMixin(DatabaseBase):
         if meta_updates or secret_value is not None:
             await self.conn.commit()
 
+    @serialized_write
     async def delete_credential(self, credential_id: str) -> bool:
         await self._ensure_connected()
         # ON DELETE CASCADE on credential_secrets handles the secret row.

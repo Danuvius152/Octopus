@@ -106,9 +106,9 @@ async def run_research(
         if on_progress is not None:
             await on_progress(ResearchProgress(phase=phase, detail=detail, counts=counts))
 
-    async def _bounded(coro: Awaitable[LeafResult]) -> LeafResult:
+    async def _bounded(call: LeafCallable, prompt: str) -> LeafResult:
         async with sem:
-            return await coro
+            return await call(prompt)
 
     # 1. Scope -----------------------------------------------------------------
     await _emit("scope", "Decomposing the question into search angles…")
@@ -118,10 +118,16 @@ async def run_research(
 
     # 2. Search (parallel web leaves, bounded) ---------------------------------
     await _emit("search", f"Searching {len(angles)} angle(s)…", angles=len(angles))
-    search_results = await asyncio.gather(
-        *(_bounded(search(search_prompt(a, question, limits.max_findings_per_angle)))
-          for a in angles)
-    )
+    # Each fan-out scope owns its leaves until every finally block retires.
+    # gather may surface the first cancellation/error before siblings unwind.
+    async with asyncio.TaskGroup() as search_group:
+        search_tasks = [
+            search_group.create_task(_bounded(
+                search, search_prompt(a, question, limits.max_findings_per_angle),
+            ))
+            for a in angles
+        ]
+    search_results = [task.result() for task in search_tasks]
     findings: list[Finding] = []
     for angle, res in zip(angles, search_results, strict=True):
         cost += res.cost or 0.0
@@ -138,17 +144,23 @@ async def run_research(
     kill_threshold = limits.votes_per_claim // 2 + 1
 
     async def _verify(f: Finding) -> tuple[bool, float]:
-        votes = await asyncio.gather(
-            *(_bounded(search(verify_prompt(f.claim, f.url, question)))
-              for _ in range(limits.votes_per_claim))
-        )
+        async with asyncio.TaskGroup() as vote_group:
+            vote_tasks = [
+                vote_group.create_task(_bounded(
+                    search, verify_prompt(f.claim, f.url, question),
+                ))
+                for _ in range(limits.votes_per_claim)
+            ]
+        votes = [task.result() for task in vote_tasks]
         refutes = sum(1 for v in votes if not v.error and parse_verdict(v.text))
         leaf_cost = sum(v.cost or 0.0 for v in votes)
         return refutes < kill_threshold, leaf_cost
 
     survivors: list[Finding] = []
     if claims:
-        verdicts = await asyncio.gather(*(_verify(f) for f in claims))
+        async with asyncio.TaskGroup() as claim_group:
+            claim_tasks = [claim_group.create_task(_verify(f)) for f in claims]
+        verdicts = [task.result() for task in claim_tasks]
         for f, (survived, c) in zip(claims, verdicts, strict=True):
             cost += c
             if survived:

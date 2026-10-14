@@ -60,6 +60,7 @@ async def client():
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     agents_mod.set_manager(AgentManager(db))
     connectors_mod.set_manager(ConnectorManager(db))

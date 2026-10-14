@@ -36,6 +36,8 @@ export type AgentConnectorsResponse = components["schemas"]["AgentConnectorsResp
 // definition an agent carries.
 export type SubagentRun = components["schemas"]["SubagentRun"];
 export type SubagentDefinition = components["schemas"]["SubagentDefinition"];
+export type RuntimeMetadata = components["schemas"]["RuntimeMetadata"];
+export type ToolReceipt = components["schemas"]["ToolReceipt"];
 export type MessageContent = components["schemas"]["MessageContent"];
 // A page of older transcript (polish-2026-09.md §4 B2).
 export type MessagePage = components["schemas"]["MessagePage"];

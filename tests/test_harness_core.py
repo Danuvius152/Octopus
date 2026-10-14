@@ -527,6 +527,109 @@ async def test_run_oneshot_reaps_group_on_cancel(monkeypatch):
     assert _signal.SIGKILL in calls
 
 
+@pytest.mark.asyncio
+async def test_cancelled_oneshot_reports_unconfirmed_process_retirement(tmp_path, monkeypatch):
+    import os
+    import signal
+
+    import server.harness.run as run_mod
+
+    pid_file = tmp_path / "oneshot.pid"
+
+    def alive(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def argv(context):
+        script = f"import os,time;open({str(pid_file)!r},'w').write(str(os.getpid()));time.sleep(60)"
+        return [sys.executable, "-u", "-c", script], {}
+
+    profile = RuntimeProfile(**{**_stream_profile().__dict__, "build_oneshot_argv": argv})
+    monkeypatch.setattr(run_mod, "_terminate_process_group", lambda *args: None)
+    task = asyncio.create_task(Harness(profile).run_oneshot(OneShotContext(prompt="synthetic")))
+    pid = None
+    try:
+        async with asyncio.timeout(3):
+            while not pid_file.exists() or not pid_file.read_text():
+                await asyncio.sleep(.01)
+        pid = int(pid_file.read_text())
+        task.cancel("shutdown")
+        with pytest.raises(RuntimeError, match="retirement.*unconfirmed"):
+            await asyncio.wait_for(asyncio.shield(task), 4)
+        assert alive(pid), "the fault gate must leave the captured process unretired"
+    finally:
+        if pid is not None and alive(pid):
+            os.killpg(pid, signal.SIGKILL)
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_wait", ["confirmed", "cancelled", "timeout"])
+async def test_cancelled_oneshot_retires_process_delivered_after_cancellation(
+    tmp_path, monkeypatch, cleanup_wait
+):
+    import os
+    import signal
+
+    original_spawn = asyncio.create_subprocess_exec
+    spawned = asyncio.get_running_loop().create_future()
+    release_handle = asyncio.Event()
+
+    async def delayed_handle(*argv, **kwargs):
+        process = await original_spawn(*argv, **kwargs)
+        spawned.set_result(process)
+        await release_handle.wait()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_handle)
+
+    def oneshot_argv(context):
+        return [sys.executable, str(FAKE_CLI), "sleep-then", "60"], {"cwd": str(tmp_path)}
+
+    profile = RuntimeProfile(**{
+        **_stream_profile().__dict__, "build_oneshot_argv": oneshot_argv,
+    })
+    invocation = asyncio.create_task(Harness(profile).run_oneshot(OneShotContext(prompt="late handle")))
+    process = await asyncio.wait_for(spawned, timeout=3)
+    try:
+        invocation.cancel("shutdown")
+        await asyncio.sleep(0)
+        assert not invocation.done(), "cancelled one-shot surrendered its pending process handle"
+
+        if cleanup_wait == "confirmed":
+            release_handle.set()
+            with pytest.raises(asyncio.CancelledError) as error:
+                async with asyncio.timeout(3):
+                    await invocation
+            assert error.value.args == ("shutdown",)
+        else:
+            if cleanup_wait == "cancelled":
+                invocation.cancel("second shutdown")
+            with pytest.raises(RuntimeError, match="retirement.*unconfirmed"):
+                async with asyncio.timeout(3):
+                    await invocation
+            assert process.returncode is None
+            # The failed public call retains its local retirement owner: a
+            # late handle still gets reaped without calling the harness again.
+            release_handle.set()
+            async with asyncio.timeout(3):
+                await process.wait()
+        assert process.returncode is not None
+        with pytest.raises(ProcessLookupError):
+            os.kill(process.pid, 0)
+    finally:
+        release_handle.set()
+        if process.returncode is None:
+            os.killpg(process.pid, signal.SIGKILL)
+        await process.wait()
+        await asyncio.gather(invocation, return_exceptions=True)
+
+
 # --------------------------------------------------------------------------- #
 # stdin as an input channel (inline-steering.md §6)
 # --------------------------------------------------------------------------- #
@@ -684,3 +787,77 @@ def test_spawn_signature_follows_where_the_mcp_namespaces_are_served():
         assert stdio.spawn_signature("/tmp", None) != before
     finally:
         settings.port = original_port
+
+
+@pytest.mark.asyncio
+async def test_retirement_owns_late_spawn_after_start_and_waiter_cancel(tmp_path, monkeypatch):
+    """A cancelled start/stop caller cannot leave a writer alive for the next attempt."""
+    original_spawn = asyncio.create_subprocess_exec
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    spawned = []
+
+    async def delayed_spawn(*argv, **kwargs):
+        entered.set()
+        await release.wait()
+        process = await original_spawn(*argv, **kwargs)
+        spawned.append(process)
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
+    run = Harness(_mode_profile("sleep-then", "60")).create_run()
+    ticks = []
+    run.bind_activity(ticks.append)
+    starting = asyncio.create_task(run.start("prompt", str(tmp_path)))
+    await entered.wait()
+    starting.cancel()
+    await asyncio.gather(starting, return_exceptions=True)
+    waiting = asyncio.create_task(run.stop())
+    await asyncio.sleep(0)
+    assert not waiting.done()
+    waiting.cancel()
+    await asyncio.gather(waiting, return_exceptions=True)
+    release.set()
+    await asyncio.wait_for(run.stop(), 4)
+    assert len(spawned) == 1 and spawned[0].returncode is not None
+    assert ticks == []
+
+
+@pytest.mark.asyncio
+async def test_native_reader_drain_does_not_keep_cli_alive(tmp_path):
+    from dataclasses import replace
+
+    close_entered = asyncio.Event()
+    allow_close = asyncio.Event()
+
+    class WaitingObserver:
+        def observe_stdout(self, obj):
+            pass
+
+        def consume_stderr(self, line):
+            return False
+
+        async def start(self):
+            pass
+
+        def invalidate(self):
+            pass
+
+        async def close(self):
+            close_entered.set()
+            await allow_close.wait()
+
+    profile = replace(_mode_profile("sleep-then", "60"),
+                      activity_observer=lambda *args, **kwargs: WaitingObserver())
+    run = Harness(profile).create_run()
+    run.bind_activity(lambda _: None)
+    await run.start("prompt", str(tmp_path))
+    stopping = asyncio.create_task(run.stop())
+    try:
+        await asyncio.wait_for(close_entered.wait(), 5)
+        assert not run.is_alive()
+        assert [event async for event in run.stream()] == []
+        assert not stopping.done()
+    finally:
+        allow_close.set()
+        await asyncio.wait_for(stopping, 2)

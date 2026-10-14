@@ -10,12 +10,13 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import DatabaseBase
+from .base import DatabaseBase, serialized_write
 
 
 class ApplicationsMixin(DatabaseBase):
 
 
+    @serialized_write
     async def save_application(
         self,
         *,
@@ -124,6 +125,7 @@ class ApplicationsMixin(DatabaseBase):
         row = await cursor.fetchone()
         return self._row_to_application(row) if row else None
 
+    @serialized_write
     async def update_application(self, app_id: str, **fields: Any) -> None:
         """Patch any of: name, description, icon, icon_src, agent_id,
         session_id, entrypoint, status, error, updated_at, last_built_at.
@@ -157,6 +159,7 @@ class ApplicationsMixin(DatabaseBase):
         """The sidebar order of the pinned applications — see `_reorder_pins`."""
         await self._reorder_pins("applications", ordered_ids)
 
+    @serialized_write
     async def delete_application(self, app_id: str) -> bool:
         await self._ensure_connected()
         cursor = await self.conn.execute(

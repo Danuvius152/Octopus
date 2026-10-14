@@ -4,6 +4,7 @@ The real `codex login --device-auth` is replaced by a fake CLI fixture, so
 these run anywhere (no codex binary, no ChatGPT account). The fake emits the
 same URL + code shape and writes auth.json on the success path."""
 
+import asyncio
 import os
 import sys
 
@@ -91,6 +92,105 @@ async def test_cancel_kills_and_cleans(monkeypatch):
     await mgr.cancel(session.id)
     assert session.state == codex_login.CodexLoginState.cancelled
     assert not os.path.exists(session.codex_home)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_joins_login_and_watchdog_before_releasing_session(monkeypatch):
+    monkeypatch.setenv("CODEX_FAKE_LOGIN_MODE", "hang")
+    mgr = codex_login.CodexLoginManager()
+    session = await mgr.start("shutdown")
+    try:
+        await mgr.shutdown()
+        assert session._proc.returncode is not None
+        assert session._task.done() and session._watchdog.done()
+        assert session.state == codex_login.CodexLoginState.cancelled
+        assert mgr.get(session.id) is None
+        with pytest.raises(RuntimeError, match="shutting down"):
+            await mgr.start("too late")
+        await mgr.shutdown()
+    finally:
+        codex_login._kill_process_group(session._proc)
+        await asyncio.gather(session._task, session._watchdog, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_retains_a_login_until_its_process_exit_is_confirmed(monkeypatch):
+    class UnconfirmedProcess:
+        pid = 2**30
+        returncode = None
+
+        def __init__(self):
+            self.stdout = asyncio.StreamReader()
+            self.exited = asyncio.Event()
+
+        def kill(self):
+            pass
+
+        async def wait(self):
+            await self.exited.wait()
+            return self.returncode
+
+    proc = UnconfirmedProcess()
+
+    async def spawn(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(codex_login.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(codex_login, "_REAP_TIMEOUT_SECONDS", 0.03, raising=False)
+    mgr = codex_login.CodexLoginManager()
+    session = await mgr.start("unconfirmed")
+    try:
+        with pytest.raises(RuntimeError, match="did not confirm process exit"):
+            await asyncio.wait_for(mgr.shutdown(), 0.3)
+        assert mgr.get(session.id) is session
+        assert not session._task.done()
+        proc.returncode = -9
+        proc.stdout.feed_eof()
+        proc.exited.set()
+        await mgr.shutdown()
+        assert mgr.get(session.id) is None
+    finally:
+        proc.stdout.feed_eof()
+        proc.exited.set()
+        await asyncio.gather(session._task, session._watchdog, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_owns_login_spawn_before_its_process_handle_arrives(monkeypatch):
+    monkeypatch.setenv("CODEX_FAKE_LOGIN_MODE", "hang")
+    real_spawn = asyncio.create_subprocess_exec
+    spawned = asyncio.Event()
+    release_handle = asyncio.Event()
+    processes = []
+
+    async def delayed_spawn(*args, **kwargs):
+        proc = await real_spawn(*args, **kwargs)
+        processes.append(proc)
+        spawned.set()
+        await release_handle.wait()
+        return proc
+
+    monkeypatch.setattr(codex_login.asyncio, "create_subprocess_exec", delayed_spawn)
+    mgr = codex_login.CodexLoginManager()
+    login = asyncio.create_task(mgr.start("spawning"))
+    cleanup = None
+    try:
+        await spawned.wait()
+        mgr.begin_shutdown()
+        cleanup = asyncio.create_task(mgr.shutdown())
+        await asyncio.sleep(0)
+        assert not cleanup.done()
+        release_handle.set()
+        await cleanup
+        session = await login
+        assert session._task.done() and session._watchdog.done()
+        assert processes[0].returncode is not None
+        assert mgr.get(session.id) is None
+    finally:
+        release_handle.set()
+        for proc in processes:
+            codex_login._kill_process_group(proc)
+        await asyncio.gather(login, *(task for task in [cleanup] if task is not None), return_exceptions=True)
 
 
 # --- route tests -----------------------------------------------------------

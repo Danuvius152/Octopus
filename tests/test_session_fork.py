@@ -560,7 +560,7 @@ async def test_codex_first_turn_wraps_dispatch_only(manager, monkeypatch):
     fake = _FakeRun()
     monkeypatch.setattr(manager, "_make_run", lambda *a, **k: fake)
 
-    async for _ in manager.send_message(fork.id, "edited prompt"):
+    async for _ in manager._execute_claimed_request(fork.id, "edited prompt"):
         pass
 
     # Dispatch prompt was wrapped with the fork history…
@@ -582,12 +582,12 @@ async def test_codex_turn_two_not_wrapped(manager, monkeypatch):
     fork = await manager.fork_session(parent.id, 2)
     fake = _FakeRun()
     monkeypatch.setattr(manager, "_make_run", lambda *a, **k: fake)
-    async for _ in manager.send_message(fork.id, "turn one"):
+    async for _ in manager._execute_claimed_request(fork.id, "turn one"):
         pass
     # Turn 2: replay flag cleared → no wrap.
     fake2 = _FakeRun()
     monkeypatch.setattr(manager, "_make_run", lambda *a, **k: fake2)
-    async for _ in manager.send_message(fork.id, "turn two"):
+    async for _ in manager._execute_claimed_request(fork.id, "turn two"):
         pass
     assert "<fork-history" not in fake2.started_prompt
     assert fake2.started_prompt == "turn two"

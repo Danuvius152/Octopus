@@ -35,6 +35,7 @@ async def client(tmp_path, monkeypatch):
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     auth_router.set_db(db)
     # The routes these tests reach through, bound the way main.py binds them.
@@ -48,6 +49,7 @@ async def client(tmp_path, monkeypatch):
         yield c, users, db
     await db.close()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
 
 
 def _bearer(token: str) -> dict[str, str]:

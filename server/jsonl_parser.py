@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .models import MessageContent, MessageRole
+from .tool_pairs import pair_tool_records
 
 
 @dataclass
@@ -62,6 +63,7 @@ def _convert_line(data: dict[str, Any]) -> list[MessageContent] | None:
                             type="tool_result",
                             content=block.get("content"),
                             tool_use_id=block.get("tool_use_id"),
+                            runtime_metadata=block.get("octopusRuntime") or data.get("octopusRuntime"),
                             is_error=block.get("is_error") or None,
                         )
                     )
@@ -90,6 +92,7 @@ def _convert_line(data: dict[str, Any]) -> list[MessageContent] | None:
                             tool_name=block.get("name"),
                             tool_input=block.get("input"),
                             tool_use_id=block.get("id"),
+                            runtime_metadata=block.get("octopusRuntime") or data.get("octopusRuntime"),
                         )
                     )
             return results if results else None
@@ -168,21 +171,18 @@ def _consolidate_messages(messages: list[MessageContent]) -> list[MessageContent
     if not messages:
         return []
 
-    # First pass: build a lookup of tool_use_id -> tool_result
-    result_by_id: dict[str, MessageContent] = {}
-    for msg in messages:
-        if msg.type == "tool_result" and msg.tool_use_id:
-            result_by_id[msg.tool_use_id] = msg
+    pairs = pair_tool_records([msg.model_dump() for msg in messages], native=True)
+    folded_results = set(pairs.values())
 
     consolidated: list[MessageContent] = []
-    for msg in messages:
+    for index, msg in enumerate(messages):
         # Skip standalone tool_results — they'll be folded into tool_use
-        if msg.type == "tool_result" and msg.tool_use_id in result_by_id:
+        if index in folded_results:
             continue
 
         # For tool_use, attach a content summary from its result
         if msg.type == "tool_use" and msg.tool_use_id:
-            result = result_by_id.get(msg.tool_use_id)
+            result = messages[pairs[index]] if index in pairs else None
             result_preview = None
             if result and result.content:
                 preview = str(result.content)[:200]
@@ -197,6 +197,7 @@ def _consolidate_messages(messages: list[MessageContent]) -> list[MessageContent
                 tool_name=msg.tool_name,
                 tool_input=msg.tool_input,
                 tool_use_id=msg.tool_use_id,
+                runtime_metadata=result.runtime_metadata if result and result.runtime_metadata else msg.runtime_metadata,
                 created_at=msg.created_at,
             ))
             continue

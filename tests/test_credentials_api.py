@@ -597,6 +597,7 @@ async def test_delete_unbinds_the_sessions_that_pinned_it(client):
 
     c, db = client
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     agent = await AgentManager(db).create_agent(name="Binder")
 
@@ -628,6 +629,7 @@ async def test_delete_unbinds_the_sessions_that_pinned_it(client):
     # Sessions that never used it are untouched.
     assert rows[free.id]["credential_id"] is None
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
 
 
 @pytest.mark.asyncio
@@ -639,6 +641,7 @@ async def test_a_session_can_be_repointed_at_another_credential(client):
 
     c, db = client
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     agent = await AgentManager(db).create_agent(name="Swapper")
     session = await session_manager.create_session(agent_id=agent["id"], name="s")
@@ -693,6 +696,7 @@ async def test_a_session_can_be_repointed_at_another_credential(client):
     assert res.status_code == 400
     assert "does not match" in res.json()["detail"]
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
 
 
 @pytest.mark.asyncio
@@ -702,6 +706,7 @@ async def test_patch_renames_a_session_and_rejects_an_empty_name(client):
 
     c, db = client
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     agent = await AgentManager(db).create_agent(name="Renamer")
     session = await session_manager.create_session(agent_id=agent["id"], name="old")
@@ -718,6 +723,7 @@ async def test_patch_renames_a_session_and_rejects_an_empty_name(client):
     assert res.status_code == 400
     assert (await c.patch("/api/sessions/ghost", json={"name": "x"}, headers=AUTH)).status_code == 404
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
 
 
 @pytest.mark.asyncio
@@ -733,6 +739,7 @@ async def test_patch_sets_a_per_session_model_and_clears_it(client):
 
     c, db = client
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     agent = await AgentManager(db).create_agent(name="Modeller", model="sonnet")
     session = await session_manager.create_session(agent_id=agent["id"], name="s")
@@ -762,6 +769,7 @@ async def test_patch_sets_a_per_session_model_and_clears_it(client):
         assert res.status_code == 200
         assert res.json()["model"] is None, blank
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
 
 
 @pytest.mark.asyncio

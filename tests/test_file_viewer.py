@@ -175,6 +175,7 @@ async def client(tmp_path):
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test") as c:

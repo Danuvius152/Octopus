@@ -53,6 +53,7 @@ async def _bootstrap(tmp_path, monkeypatch):
     await db.initialize()
 
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
 
     runner = ScheduleRunner(session_manager, db)
@@ -83,7 +84,7 @@ async def _bootstrap(tmp_path, monkeypatch):
 
 
 async def _turn(session_id: str, prompt: str) -> None:
-    async for _event in session_manager.send_message(session_id, prompt):
+    async for _event in session_manager._execute_claimed_request(session_id, prompt):
         pass
 
 

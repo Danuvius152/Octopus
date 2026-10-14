@@ -1,0 +1,225 @@
+{
+  "codex_version": "0.162.1",
+  "captured_at": "2026-10-14T07:56:12Z",
+  "source": "isolated real CLI, one child followed up once",
+  "sanitization": "Only session identity, turn identity, allowlisted function headers and SubAgentActivity metadata. Arguments and native content omitted. Exec stdout parent reply text replaced with a redaction marker; all event and collaboration field names retained.",
+  "records": [
+    {
+      "type": "session_meta",
+      "payload": {
+        "id": "01a13969-6a7f-7dc0-8b8f-8b5655bebbb3"
+      }
+    },
+    {
+      "timestamp": "2026-10-14T07:56:12.342Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "task_started",
+        "turn_id": "01a13969-6ab4-7d50-bc30-9949a44e0578"
+      }
+    },
+    {
+      "timestamp": "2026-10-14T07:56:22.669Z",
+      "ordinal": 10,
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "id": "fc_08324dbde70e345b016acf35a73d7c81919a790552bc22f6ce",
+        "name": "spawn_agent",
+        "namespace": "collaboration",
+        "arguments": "[redacted]",
+        "call_id": "call_a965539f5f964ea185e033f6eec17b52"
+      }
+    },
+    {
+      "timestamp": "2026-10-14T07:56:22.706Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "item_completed",
+        "thread_id": "01a13969-6a7f-7dc0-8b8f-8b5655bebbb3",
+        "turn_id": "01a13969-6ab4-7d50-bc30-9949a44e0578",
+        "started_at_ms": 1791964582705,
+        "completed_at_ms": 1791964582705,
+        "item": {
+          "type": "SubAgentActivity",
+          "id": "call_a965539f5f964ea185e033f6eec17b52",
+          "kind": "started",
+          "agent_thread_id": "01a13969-9310-7071-8417-04b08e38b486",
+          "agent_path": "/root/wire_probe"
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-14T07:56:29.079Z",
+      "ordinal": 16,
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "id": "fc_08324dbde70e345b016acf35ae14688191b6415a8850723d66",
+        "name": "wait_agent",
+        "namespace": "collaboration",
+        "arguments": "[redacted]",
+        "call_id": "call_90d2f24ff4d344a6a7b788bc1ce69346"
+      }
+    },
+    {
+      "timestamp": "2026-10-14T07:56:30.392Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "item_completed",
+        "thread_id": "01a13969-6a7f-7dc0-8b8f-8b5655bebbb3",
+        "turn_id": "01a13969-6ab4-7d50-bc30-9949a44e0578",
+        "started_at_ms": 1791964590392,
+        "completed_at_ms": 1791964590392,
+        "item": {
+          "type": "SubAgentActivity",
+          "id": "subagent-completed-01a13969-9331-7d11-b38b-d4be2b88caf0",
+          "kind": "completed",
+          "agent_thread_id": "01a13969-9310-7071-8417-04b08e38b486",
+          "agent_path": "/root/wire_probe"
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-14T07:56:34.606Z",
+      "ordinal": 24,
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "id": "fc_08324dbde70e345b016acf35b3543c819189589d7678dea2e3",
+        "name": "followup_task",
+        "namespace": "collaboration",
+        "arguments": "[redacted]",
+        "call_id": "call_8cde9c27be634cfd9ff28d91becceb72"
+      }
+    },
+    {
+      "timestamp": "2026-10-14T07:56:34.608Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "item_completed",
+        "thread_id": "01a13969-6a7f-7dc0-8b8f-8b5655bebbb3",
+        "turn_id": "01a13969-6ab4-7d50-bc30-9949a44e0578",
+        "started_at_ms": 1791964594608,
+        "completed_at_ms": 1791964594608,
+        "item": {
+          "type": "SubAgentActivity",
+          "id": "call_8cde9c27be634cfd9ff28d91becceb72",
+          "kind": "interacted",
+          "agent_thread_id": "01a13969-9310-7071-8417-04b08e38b486",
+          "agent_path": "/root/wire_probe"
+        }
+      }
+    },
+    {
+      "timestamp": "2026-10-14T07:56:38.091Z",
+      "ordinal": 29,
+      "type": "response_item",
+      "payload": {
+        "type": "function_call",
+        "id": "fc_08324dbde70e345b016acf35b716e0819189ddf9db0ab4a045",
+        "name": "wait_agent",
+        "namespace": "collaboration",
+        "arguments": "[redacted]",
+        "call_id": "call_3b3725811b1740068f1c796ece31b9bb"
+      }
+    },
+    {
+      "timestamp": "2026-10-14T07:56:38.639Z",
+      "type": "event_msg",
+      "payload": {
+        "type": "item_completed",
+        "thread_id": "01a13969-6a7f-7dc0-8b8f-8b5655bebbb3",
+        "turn_id": "01a13969-6ab4-7d50-bc30-9949a44e0578",
+        "started_at_ms": 1791964598639,
+        "completed_at_ms": 1791964598639,
+        "item": {
+          "type": "SubAgentActivity",
+          "id": "subagent-completed-01a13969-c1b0-74b3-a5bd-9de3af38f8b4",
+          "kind": "completed",
+          "agent_thread_id": "01a13969-9310-7071-8417-04b08e38b486",
+          "agent_path": "/root/wire_probe"
+        }
+      }
+    }
+  ],
+  "stdout": [
+    {
+      "type": "thread.started",
+      "thread_id": "01a13969-6a7f-7dc0-8b8f-8b5655bebbb3"
+    },
+    {
+      "type": "turn.started"
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_0",
+        "type": "collab_tool_call",
+        "tool": "wait",
+        "sender_thread_id": "01a13969-6a7f-7dc0-8b8f-8b5655bebbb3",
+        "receiver_thread_ids": [],
+        "prompt": null,
+        "agents_states": {},
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_0",
+        "type": "collab_tool_call",
+        "tool": "wait",
+        "sender_thread_id": "01a13969-6a7f-7dc0-8b8f-8b5655bebbb3",
+        "receiver_thread_ids": [],
+        "prompt": null,
+        "agents_states": {},
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.started",
+      "item": {
+        "id": "item_1",
+        "type": "collab_tool_call",
+        "tool": "wait",
+        "sender_thread_id": "01a13969-6a7f-7dc0-8b8f-8b5655bebbb3",
+        "receiver_thread_ids": [],
+        "prompt": null,
+        "agents_states": {},
+        "status": "in_progress"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_1",
+        "type": "collab_tool_call",
+        "tool": "wait",
+        "sender_thread_id": "01a13969-6a7f-7dc0-8b8f-8b5655bebbb3",
+        "receiver_thread_ids": [],
+        "prompt": null,
+        "agents_states": {},
+        "status": "completed"
+      }
+    },
+    {
+      "type": "item.completed",
+      "item": {
+        "id": "item_2",
+        "type": "agent_message",
+        "text": "[redacted parent reply]"
+      }
+    },
+    {
+      "type": "turn.completed",
+      "usage": {
+        "input_tokens": 75432,
+        "cached_input_tokens": 69120,
+        "cache_write_input_tokens": 0,
+        "output_tokens": 128,
+        "reasoning_output_tokens": 0
+      }
+    }
+  ]
+}

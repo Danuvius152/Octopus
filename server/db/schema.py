@@ -69,7 +69,7 @@ CREATE TABLE IF NOT EXISTS sessions (
                                            -- name kept for back-compat — codex-backend.md §4.3)
     archived INTEGER NOT NULL DEFAULT 0,   -- hidden from default list; row kept for history
     agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,  -- owner; nullable in SQLite, required by API
-    origin TEXT NOT NULL DEFAULT 'user',   -- 'user' | 'schedule' | 'delegation' | 'fork' | 'application' | 'app'
+    origin TEXT NOT NULL DEFAULT 'user',   -- 'user' | 'schedule' | 'wiki' | 'delegation' | 'fork' | 'application' | 'app'
     backend TEXT NOT NULL DEFAULT 'claude-code',  -- 'claude-code' | 'codex' (codex-backend.md §4.1)
     model TEXT,                            -- per-session override (`/model`); NULL = use
                                            -- the agent's, whose NULL means backend default
@@ -82,6 +82,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- render "Octo asked: «…»" without rummaging through the first message.
     -- NULL on every non-delegation session.
     delegation_request TEXT,
+    -- Latest future-format delegation round; NULL histories are not recovered.
+    delegation_state TEXT,
     -- The application this session belongs to, for the two kinds a running
     -- app owns: its build session and the conversations the app itself holds
     -- with an agent (origin='app'). It's what lets a route prove a
@@ -136,6 +138,8 @@ CREATE TABLE IF NOT EXISTS messages (
     -- (session-rewind.md §4 + §5.6.3). Powers the safe-revert preflight.
     git_head TEXT,                          -- `git rev-parse HEAD`; NULL when not a git repo
     git_status_clean INTEGER,               -- 1 iff `git status --porcelain` was empty
+    runtime_metadata TEXT,
+    terminal_request_id TEXT,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 

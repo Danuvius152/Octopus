@@ -14,6 +14,7 @@ import type {
   SubagentDefinition as ApiSubagentDefinition,
   SubagentRun as ApiSubagentRun,
   SessionStatus as ApiSessionStatus,
+  RuntimeMetadata,
 } from "../api";
 
 // Re-export contract types under the names the rest of the frontend
@@ -45,6 +46,7 @@ export interface Message {
   tool_name?: string;
   tool_input?: Record<string, unknown>;
   tool_use_id?: string;
+  runtime_metadata?: RuntimeMetadata | null;
   is_error?: boolean;
   session_id?: string;
   cost?: number;
@@ -426,7 +428,7 @@ export interface Delegation {
   target_agent_name: string;
   request: string;
   work_id?: string;
-  state: "running" | "completed" | "failed" | "cancelled";
+  state: "running" | "completed" | "failed" | "cancelled" | "interrupted";
   created_at: string;
   finished_at: string | null;
   error: string | null;
@@ -666,7 +668,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   subagents: {},
   upsertSubagent: (sessionId, run) =>
     set((s) => {
-      const key = run.tool_use_id || run.task_id;
+      const key = run.tool_call_id;
       if (!key) return s;
       const forSession = s.subagents[sessionId] || {};
       const prev = forSession[key];
@@ -690,7 +692,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       subagents: {
         ...s.subagents,
         [sessionId]: Object.fromEntries(
-          runs.map((r) => [r.tool_use_id || r.task_id, r])
+          runs.filter((r) => r.tool_call_id).map((r) => [r.tool_call_id!, r])
         ),
       },
     })),

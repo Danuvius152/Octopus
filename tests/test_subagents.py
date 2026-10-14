@@ -273,11 +273,10 @@ def test_codex_collab_calls_track_one_sub_agent_across_items():
     updates = _subagent_events(parser, CODEX_RUN)
 
     # `spawn_agent` and `wait` are separate tool calls describing the SAME
-    # sub-agent, so they must land on one card — keyed by the spawn.
-    assert {u.task_id for u in updates} == {"item_0"}
+    # sub-agent, so they retain one exact child identity and spawning call.
+    assert {u.task_id for u in updates} == {"01a0ad62-b228-74d1-a2c3-1328858cca57"}
+    assert {u.tool_use_id for u in updates} == {"item_0"}
     assert [u.status for u in updates] == [
-        "running",
-        "running",
         "running",
         "completed",
     ]
@@ -298,7 +297,7 @@ def test_codex_collab_calls_are_also_real_tool_calls():
     assert results[-1].content == "./notes.txt"
 
 
-def test_codex_owner_map_is_bounded():
+def test_codex_late_child_result_keeps_original_spawn_after_many_agents():
     parser = CodexEventParser()
     for i in range(200):
         parser.parse(
@@ -313,7 +312,21 @@ def test_codex_owner_map_is_bounded():
                 },
             }
         )
-    assert len(parser._collab_owner) <= 64
+    updates = _subagent_events(parser, [{
+        "type": "item.completed",
+        "item": {
+            "id": "item_200",
+            "type": "collab_tool_call",
+            "tool": "wait",
+            "receiver_thread_ids": ["thread-0"],
+            "agents_states": {"thread-0": {"status": "completed", "message": "late result"}},
+        },
+    }])
+    assert len(updates) == 1
+    assert updates[0].task_id == "thread-0"
+    assert updates[0].tool_use_id == "item_0"
+    assert updates[0].status == "completed"
+    assert updates[0].summary == "late result"
 
 
 # ------------------------------------------------------- session bookkeeping
@@ -335,7 +348,7 @@ def test_observations_merge_onto_the_run():
         session,
         SubagentUpdate(
             task_id="t1",
-            tool_use_id="tu1",
+            tool_use_id="tu1", tool_call_id="tu1",
             name="Explore",
             description="searching",
             prompt="find it",
@@ -344,7 +357,7 @@ def test_observations_merge_onto_the_run():
     )
     SessionManager._record_subagent(
         session,
-        SubagentUpdate(task_id="t1", tool_use_id="tu1", status="completed", summary="done"),
+        SubagentUpdate(task_id="t1", tool_use_id="tu1", tool_call_id="tu1", status="completed", summary="done"),
     )
 
     (run,) = session._subagents.values()
@@ -363,7 +376,7 @@ def test_runs_are_bounded_per_session():
     session = _session()
     for i in range(_MAX_SUBAGENTS_PER_SESSION + 20):
         SessionManager._record_subagent(
-            session, SubagentUpdate(task_id=f"t{i}", tool_use_id=f"tu{i}")
+            session, SubagentUpdate(task_id=f"t{i}", tool_use_id=f"tu{i}", tool_call_id=f"tu{i}")
         )
     assert len(session._subagents) == _MAX_SUBAGENTS_PER_SESSION
     # Oldest dropped, newest kept.
@@ -387,7 +400,7 @@ def test_subagent_events_broadcast_but_never_persist():
         type="subagent",
         subagent=SubagentUpdate(
             task_id="t1",
-            tool_use_id="tu1",
+            tool_use_id="tu1", tool_call_id="tu1",
             status="running",
             name="Explore",
             description="searching",
@@ -405,7 +418,9 @@ def test_subagent_events_broadcast_but_never_persist():
         "session_id": "s1",
         "task_id": "t1",
         "tool_use_id": "tu1",
+        "tool_call_id": "tu1",
         "status": "running",
+        "stop_reason": None,
         "name": "Explore",
         "description": "searching",
         "prompt": "",
@@ -432,6 +447,7 @@ async def client():
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     agents_mod.set_manager(AgentManager(db))
 
@@ -497,7 +513,7 @@ async def test_the_session_snapshot_carries_live_runs(client):
     SessionManager._record_subagent(
         session_manager.sessions[sid],
         SubagentUpdate(
-            task_id="t1", tool_use_id="tu1", name="Explore", description="searching"
+            task_id="t1", tool_use_id="tu1", tool_call_id="tu1", name="Explore", description="searching"
         ),
     )
 
@@ -508,7 +524,9 @@ async def test_the_session_snapshot_carries_live_runs(client):
         {
             "task_id": "t1",
             "tool_use_id": "tu1",
+            "tool_call_id": "tu1",
             "status": "running",
+            "stop_reason": None,
             "name": "Explore",
             "description": "searching",
             "prompt": "",
@@ -556,7 +574,7 @@ async def test_events_after_a_turn_reach_the_session(client):
                 type="subagent",
                 subagent=SubagentUpdate(
                     task_id="t1",
-                    tool_use_id="tu1",
+                    tool_use_id="tu1", tool_call_id="tu1",
                     status="completed",
                     name="general-purpose",
                     summary="2 files",
@@ -606,12 +624,12 @@ def test_losing_the_process_ends_its_sub_agents():
     mgr = SessionManager()
     session = _session()
     SessionManager._record_subagent(
-        session, SubagentUpdate(task_id="t1", tool_use_id="tu1", name="Explore")
+        session, SubagentUpdate(task_id="t1", tool_use_id="tu1", tool_call_id="tu1", name="Explore")
     )
     SessionManager._record_subagent(
         session,
         SubagentUpdate(
-            task_id="t2", tool_use_id="tu2", status="completed", summary="done"
+            task_id="t2", tool_use_id="tu2", tool_call_id="tu2", status="completed", summary="done"
         ),
     )
     session._held_run_at = 1.0
@@ -619,8 +637,8 @@ def test_losing_the_process_ends_its_sub_agents():
     mgr._forget_backend(session)
 
     assert session._backend is None and session._held_run_at is None
-    assert session._subagents["tu1"].status == "failed"
-    assert "interrupted" in session._subagents["tu1"].description
+    assert session._subagents["tu1"].status == "interrupted"
+    assert session._subagents["tu1"].stop_reason == "process_ended"
     # A run that already finished keeps its result.
     assert session._subagents["tu2"].status == "completed"
     assert session._subagents["tu2"].summary == "done"
@@ -679,7 +697,7 @@ def test_the_trail_records_each_new_step_once():
     for description in ("Searching the web", "Searching the web", "Fetching a page"):
         SessionManager._record_subagent(
             session,
-            SubagentUpdate(task_id="t1", tool_use_id="tu1", description=description),
+            SubagentUpdate(task_id="t1", tool_use_id="tu1", tool_call_id="tu1", description=description),
         )
     (run,) = session._subagents.values()
     assert run.steps == ["Searching the web", "Fetching a page"]
@@ -693,7 +711,7 @@ def test_the_trail_is_bounded():
     for i in range(MAX_SUBAGENT_STEPS + 25):
         SessionManager._record_subagent(
             session,
-            SubagentUpdate(task_id="t1", tool_use_id="tu1", description=f"step {i}"),
+            SubagentUpdate(task_id="t1", tool_use_id="tu1", tool_call_id="tu1", description=f"step {i}"),
         )
     (run,) = session._subagents.values()
     assert len(run.steps) == MAX_SUBAGENT_STEPS

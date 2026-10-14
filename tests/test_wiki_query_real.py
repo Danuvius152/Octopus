@@ -4,6 +4,7 @@ All evidence is synthetic; no real personal notes are used by this suite.
 """
 
 import asyncio
+import re
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -28,14 +29,25 @@ PERSONAL = "Library/Me/information.md"
 
 
 def states_career_is_unrecorded(answer):
-    # Explicit phrases avoid matching across a turn such as “没有履历，但
-    # 职业明确是…”. This is a mechanical cue, not a semantic certification.
+    # Associate the absence with the career field, rather than another field
+    # elsewhere in the answer. This is a mechanical cue, not a semantic judge.
     missing = (
-        "未记载", "未记录", "没有记录", "没有提到", "未提供", "未说明",
+        "未记载", "未记录", "没有记录", "没有记载", "没有提到", "未提供", "未说明",
         "无法确定", "未明确", "不足以确定", "不足以判断", "无法判断",
-        "没有明确记录", "没有明确记载", "没有职业记录", "没有职业记载",
+        "不能确定", "不能判断", "没有明确记录", "没有明确记载",
     )
-    return "职业" in answer and any(term in answer for term in missing)
+    # Only field qualifiers may join the field and its absence. In particular,
+    # punctuation and unrelated 学历/履历 fields cannot bridge the two cues.
+    qualifiers = (
+        r"(?:(?:你|我|用户|本人)的|的|目前|当前|尚|仍|还|暂时|具体|明确|实际|"
+        r"相关|任何|记录|记载|信息|字段|背景|资料|是|为|[:：]|\s)*"
+    )
+    absence = "(?:" + "|".join(re.escape(term) for term in missing) + ")"
+    text = re.sub(r"[*_`]", "", answer)
+    return bool(re.search(
+        rf"职业{qualifiers}{absence}|{absence}{qualifiers}职业|没有职业(?:记录|记载)",
+        text,
+    ))
 
 
 @dataclass
@@ -59,7 +71,7 @@ class QueryProbe:
         self.last_request_id = uuid.uuid4().hex
         self.last_events = []
         async with asyncio.timeout(240):
-            async for event in self.manager.send_message(session.id, question, wiki_mode="read", request_id=self.last_request_id):
+            async for event in self.manager._execute_claimed_request(session.id, question, wiki_mode="read", request_id=self.last_request_id):
                 self.last_events.append(event)
         events = self.last_events
         assert not any(event.get("type") == "error" for event in events), events

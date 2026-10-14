@@ -1,307 +1,156 @@
-/**
- * Renderer tests for AgentDelegationRequestCard. The card lives next
- * to a `mcp__ask_agent__ask` tool_use and surfaces the live delegation
- * state — running / completed / failed / cancelled — by matching
- * (target_agent_name, request) into the store's `delegations` map.
- */
-
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+/** Readable delegation cards associate only with their canonical call and round receipt. */
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 
 import { AgentDelegationRequestCard } from "./AgentDelegationRequestCard";
-import { useSessionStore, type Delegation } from "../stores/sessionStore";
+import { MessageBubble } from "./MessageBubble";
+import { useSessionStore, type Delegation, type Message, type SessionInfo } from "../stores/sessionStore";
 
-function makeDelegation(overrides: Partial<Delegation> = {}): Delegation {
-  return {
-    delegation_id: "deleg-001",
-    sub_session_id: "deleg-001",
-    parent_session_id: "parent",
-    target_agent_id: "vera-id",
-    target_agent_name: "Vera",
-    request: "review the readme",
-    state: "running",
-    created_at: "2026-05-29T00:00:00Z",
-    finished_at: null,
-    error: null,
-    ...overrides,
-  };
-}
+const metadata = (call = "call-current", work = "round-current", receipt = true) => ({
+  request_id: `request-${call}`, attempt_id: `attempt-${call}`, tool_call_id: call,
+  receipt: receipt ? { kind: "delegation" as const, delegation_id: "child", work_id: work } : null,
+});
+const toolUse = (call = "call-current"): Message => ({
+  role: "assistant", type: "tool_use", tool_use_id: "item_0", tool_name: "mcp__ask_agent__ask",
+  tool_input: { name: "Vera", request: "review the readme" }, runtime_metadata: metadata(call, "", false),
+});
+const result = (call = "call-current", work = "round-current"): Message => ({
+  role: "tool", type: "tool_result", tool_use_id: "item_0", runtime_metadata: metadata(call, work),
+  content: "Readable delegation accepted receipt",
+});
+const delegation = (overrides: Partial<Delegation> = {}): Delegation => ({
+  delegation_id: "child", sub_session_id: "child", parent_session_id: "parent", work_id: "round-current",
+  target_agent_id: "vera-agent", target_agent_name: "Vera", request: "review the readme", state: "running",
+  created_at: "2026-10-14T00:00:00Z", finished_at: null, error: null, ...overrides,
+});
+const card = (message = toolUse(), agentName = "Vera", files?: string[]) => <AgentDelegationRequestCard
+  sessionId="parent" message={message} agentName={agentName} request="review the readme" files={files} />;
 
 beforeEach(() => {
-  useSessionStore.setState({
-    token: "tok",
-    sessions: [],
-    delegations: {},
-    messages: {},
-    activeAgentId: null,
-    activeSessionId: null,
-  });
-  vi.stubGlobal(
-    "fetch",
-    vi.fn(async () => new Response("[]", { status: 200 }))
-  );
+  useSessionStore.setState({ token: "token", sessions: [], delegations: {}, messages: {}, activeAgentId: null, activeSessionId: null });
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify([delegation()]))));
+});
+afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
+
+it("shows a running exact round and sends its captured work on cancellation", async () => {
+  useSessionStore.getState().setMessages("parent", [toolUse(), result()]);
+  useSessionStore.getState().setDelegations("parent", [delegation()]);
+  render(card());
+  expect(screen.getByText("Asked Vera")).toBeTruthy();
+  expect(screen.getByText("running")).toBeTruthy();
+  await act(async () => fireEvent.click(screen.getByTitle("Cancel delegation")));
+  expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/sessions/parent/delegations/child/cancel"),
+    expect.objectContaining({ method: "POST", body: JSON.stringify({ reason: "cancelled from UI", work_id: "round-current" }) }));
 });
 
-afterEach(() => {
-  cleanup();
-  vi.restoreAllMocks();
+it.each([["completed", "replied"], ["failed", "failed"], ["cancelled", "cancelled"]] as const)(
+  "shows the exact %s terminal without a cancel control", (state, label) => {
+    useSessionStore.getState().setMessages("parent", [toolUse(), result()]);
+    useSessionStore.getState().setDelegations("parent", [delegation({ state })]);
+    render(card());
+    expect(screen.getByText(label)).toBeTruthy();
+    expect(screen.queryByTitle("Cancel delegation")).toBeNull();
+  },
+);
+
+it("uses the receipt even when readable names, request text and result text differ", () => {
+  const accepted = result();
+  accepted.content = "Started delegation `wrong-child` to another agent. work_id=wrong-round";
+  useSessionStore.getState().setMessages("parent", [toolUse(), accepted]);
+  useSessionStore.getState().setDelegations("parent", [
+    delegation({ delegation_id: "wrong-child", work_id: "wrong-round" }),
+    delegation({ target_agent_name: "Vera", request: "normalized request", state: "completed" }),
+  ]);
+  render(card(toolUse(), "model-spelled-name"));
+  expect(screen.getByText("Asked Vera")).toBeTruthy();
+  expect(screen.getByText("replied")).toBeTruthy();
+  expect(screen.queryByTitle("Cancel delegation")).toBeNull();
 });
 
-describe("AgentDelegationRequestCard", () => {
-  it("renders 'running' when a matching delegation is in the store", async () => {
-    useSessionStore.getState().upsertDelegation("parent", makeDelegation());
-    render(
-      <AgentDelegationRequestCard
-        sessionId="parent"
-        toolUseId={undefined}
-        agentName="Vera"
-        request="review the readme"
-        files={undefined}
-      />
-    );
-    expect(screen.getByText(/Asked Vera/)).toBeInTheDocument();
-    expect(screen.getByText("running")).toBeInTheDocument();
-    expect(screen.queryByTitle(/cancel delegation/i)).toBeNull();
-    await act(async () => {});
+it("keeps repeated provider IDs and an earlier round away from a running continuation", async () => {
+  useSessionStore.getState().setMessages("parent", [toolUse("call-old"), result("call-old", "round-old"), toolUse(), result()]);
+  useSessionStore.getState().setDelegations("parent", [delegation(), delegation({ work_id: "round-old", state: "completed" })]);
+  const { container } = render(<>{card(toolUse("call-old"))}{card()}</>);
+  const cards = container.querySelectorAll(".agent-delegation-request");
+  expect(cards[0]).toHaveAttribute("data-delegation-state", "completed");
+  expect(cards[1]).toHaveAttribute("data-delegation-state", "running");
+  expect(screen.getAllByTitle("Cancel delegation")).toHaveLength(1);
+  await act(async () => {});
+});
+
+it("keeps an interrupted round readable without letting it cancel the new continuation", async () => {
+  const previous = toolUse("call-before-restart");
+  const continued = { ...toolUse(), tool_input: { delegation_id: "child", request: "review again" } };
+  const records = [
+    delegation({ work_id: "round-before-restart", state: "interrupted", finished_at: "2026-10-14T00:01:00Z", error: "Service shutdown interrupted the delegation" }),
+    delegation({ request: "review again" }),
+  ];
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(records))));
+  useSessionStore.getState().setMessages("parent", [previous, result("call-before-restart", "round-before-restart"), continued, result()]);
+  useSessionStore.getState().setDelegations("parent", records);
+  await act(async () => {
+    render(<><MessageBubble sessionId="parent" message={previous} /><MessageBubble sessionId="parent" message={continued} /></>);
   });
 
-  it("renders 'replied' on completed state and hides the cancel button", () => {
-    useSessionStore
-      .getState()
-      .upsertDelegation(
-        "parent",
-        makeDelegation({ state: "completed", finished_at: "x" })
-      );
-    render(
-      <AgentDelegationRequestCard
-        sessionId="parent"
-        toolUseId={undefined}
-        agentName="Vera"
-        request="review the readme"
-        files={undefined}
-      />
-    );
-    expect(screen.getByText("replied")).toBeInTheDocument();
-    expect(screen.queryByTitle(/cancel delegation/i)).toBeNull();
-  });
+  expect(screen.getByText("interrupted")).toBeTruthy();
+  expect(screen.getByText("“review the readme”")).toBeTruthy();
+  expect(screen.getByText("Continued Vera")).toBeTruthy();
+  expect(screen.getByText("“review again”")).toBeTruthy();
+  expect(screen.getAllByTitle("Cancel delegation")).toHaveLength(1);
+  await act(async () => fireEvent.click(screen.getByTitle("Cancel delegation")));
+  expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/sessions/parent/delegations/child/cancel"),
+    expect.objectContaining({ method: "POST", body: JSON.stringify({ reason: "cancelled from UI", work_id: "round-current" }) }));
+  expect(screen.getByText("interrupted")).toBeTruthy();
+});
 
-  it("matches by delegation_id parsed from the sibling tool_result (server truth)", () => {
-    // Two delegations to the same target with DIFFERENT requests:
-    // by-id matching must pick the one the tool_result names, NOT
-    // the one whose request happens to equal the tool_input.request.
-    // This is the fan-out invariant Vera flagged: matching by name
-    // alone (or even by name+request after a model round-trip
-    // mismatch) can bind the card to the wrong delegation.
-    // Production delegation_ids are 12-char hex strings (matching the
-    // `[A-Za-z0-9]+` regex the card uses to parse the tool_result).
-    // Test ids mirror that shape so the regex actually accepts them.
-    useSessionStore.getState().upsertDelegation(
-      "parent",
-      makeDelegation({
-        delegation_id: "aaaaaaaaaaaa",
-        request: "review the dashboard",
-      })
-    );
-    useSessionStore.getState().upsertDelegation(
-      "parent",
-      makeDelegation({
-        delegation_id: "bbbbbbbbbbbb",
-        request: "review the sidebar",
-        state: "completed",
-        finished_at: "x",
-      })
-    );
-    // Seed the message history: the model's tool_input.request differs
-    // from BOTH stored requests (post-round-trip drift), but the
-    // tool_result for our toolUseId names the right delegation_id.
-    useSessionStore.getState().setMessages("parent", [
-      {
-        role: "assistant",
-        type: "tool_use",
-        tool_name: "mcp__ask_agent__ask",
-        tool_use_id: "tu-1",
-        tool_input: {
-          name: "Vera",
-          request: "review the sidebar — the EXACT round-trip text differs",
-        },
-      },
-      {
-        role: "user",
-        type: "tool_result",
-        tool_use_id: "tu-1",
-        content: "Started delegation `bbbbbbbbbbbb` to Vera. …",
-      },
-    ]);
+it("renders the continuation without requiring a name argument", () => {
+  const continued = { ...toolUse(), tool_input: { delegation_id: "child", request: "review again" } };
+  useSessionStore.getState().setMessages("parent", [continued, result()]);
+  useSessionStore.getState().setDelegations("parent", [delegation({ state: "completed" })]);
+  render(<MessageBubble sessionId="parent" message={continued} />);
+  expect(screen.getByText("Continued Vera")).toBeTruthy();
+  expect(screen.getByText("“review again”")).toBeTruthy();
+  expect(screen.getByText("replied")).toBeTruthy();
+});
 
-    render(
-      <AgentDelegationRequestCard
-        sessionId="parent"
-        toolUseId="tu-1"
-        agentName="Vera"
-        request="review the sidebar — the EXACT round-trip text differs"
-        files={undefined}
-      />
-    );
-    // State of the RIGHT delegation surfaces; the wrong-one is
-    // ignored entirely.
-    expect(screen.getByText("replied")).toBeInTheDocument();
-    // No cancel button — the matched record is `completed`.
-    expect(screen.queryByTitle(/cancel delegation/i)).toBeNull();
-  });
+it("waits for a receipt without borrowing a name/request match or claiming running", () => {
+  useSessionStore.getState().setDelegations("parent", [delegation()]);
+  render(card());
+  expect(screen.getByText("awaiting receipt")).toBeTruthy();
+  expect(screen.queryByText("running")).toBeNull();
+  expect(screen.queryByTitle("Cancel delegation")).toBeNull();
+  expect(fetch).not.toHaveBeenCalled();
+});
 
-  it("matches by lowercase name (so 'vera' tool_input finds 'Vera' record)", async () => {
-    useSessionStore.getState().upsertDelegation("parent", makeDelegation());
-    render(
-      <AgentDelegationRequestCard
-        sessionId="parent"
-        toolUseId={undefined}
-        agentName="vera"
-        request="review the readme"
-        files={undefined}
-      />
-    );
-    // Same record found despite case mismatch — the card still
-    // surfaces the canonical name from the record.
-    expect(screen.getByText(/Asked vera/)).toBeInTheDocument();
-    expect(screen.getByText("running")).toBeInTheDocument();
-    await act(async () => {});
-  });
+it("keeps a failed call readable without trusting its receipt", () => {
+  useSessionStore.getState().setMessages("parent", [toolUse(), { ...result(), is_error: true, content: "Delegation refused" }]);
+  useSessionStore.getState().setDelegations("parent", [delegation()]);
+  render(card());
+  expect(screen.getByText("failed to start")).toBeTruthy();
+  expect(screen.queryByTitle("Cancel delegation")).toBeNull();
+});
 
-  it("renders a placeholder state while the matching record is absent", () => {
-    render(
-      <AgentDelegationRequestCard
-        sessionId="parent"
-        toolUseId={undefined}
-        agentName="Vera"
-        request="review the readme"
-        files={undefined}
-      />
-    );
-    // No matched record: state defaults to running with the spinner
-    // and no delegation-id badge appears.
-    expect(screen.getByText(/Asked Vera/)).toBeInTheDocument();
-    expect(screen.getByText("running")).toBeInTheDocument();
-    expect(screen.queryByTitle(/cancel delegation/i)).toBeNull();
-  });
+it("reports unavailable exact-round state and stops polling a missing round", async () => {
+  vi.useFakeTimers();
+  useSessionStore.getState().setMessages("parent", [toolUse("call-old"), result("call-old", "round-no-longer-retained")]);
+  useSessionStore.getState().setDelegations("parent", [delegation()]);
+  render(card(toolUse("call-old")));
+  expect(screen.getByText("status unavailable")).toBeTruthy();
+  expect(screen.queryByText("running")).toBeNull();
+  expect(screen.queryByTitle("Cancel delegation")).toBeNull();
+  await act(async () => { await Promise.resolve(); await Promise.resolve(); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(10000); });
+  expect(fetch).toHaveBeenCalledTimes(1);
+});
 
-  it("renders the file list when files were passed", () => {
-    render(
-      <AgentDelegationRequestCard
-        sessionId="parent"
-        toolUseId={undefined}
-        agentName="Vera"
-        request="review"
-        files={["a.tsx", "b.tsx"]}
-      />
-    );
-    expect(screen.getByText(/a\.tsx, b\.tsx/)).toBeInTheDocument();
-  });
-
-  it("the open-child button switches active session + agent", async () => {
-    useSessionStore.setState({
-      sessions: [
-        {
-          id: "deleg-001",
-          name: "Vera ← Octo",
-          working_dir: "/tmp",
-          status: "idle",
-          created_at: "2026-05-29T00:00:00Z",
-          message_count: 0,
-          claude_session_id: null,
-          credential_id: null,
-          agent_id: "vera-id",
-          origin: "delegation",
-          parent_session_id: "parent",
-          delegation_request: "review the readme",
-          backend: "claude-code",
-          can_fork: true,
-          can_steer: false,
-          fork_is_full_copy: false,
-          archived: false,
-        },
-      ],
-    });
-    useSessionStore.getState().upsertDelegation("parent", makeDelegation());
-    render(
-      <AgentDelegationRequestCard
-        sessionId="parent"
-        toolUseId={undefined}
-        agentName="Vera"
-        request="review the readme"
-        files={undefined}
-      />
-    );
-    fireEvent.click(screen.getByTitle(/open vera's session/i));
-    expect(useSessionStore.getState().activeSessionId).toBe("deleg-001");
-    expect(useSessionStore.getState().activeAgentId).toBe("vera-id");
-    await act(async () => {});
-  });
-
-  it("the cancel button POSTs to the cancel route", async () => {
-    useSessionStore.getState().upsertDelegation("parent", makeDelegation({ delegation_id: "abc001", work_id: "observed-round" }));
-    useSessionStore.getState().setMessages("parent", [{
-      role: "assistant", type: "tool_result", tool_use_id: "tool-cancel",
-      content: "Started delegation `abc001` to Vera. work_id=observed-round",
-    }]);
-    const fetchMock = vi.fn(
-      async () => new Response("{}", { status: 200 })
-    );
-    vi.stubGlobal("fetch", fetchMock);
-    render(
-      <AgentDelegationRequestCard
-        sessionId="parent"
-        toolUseId="tool-cancel"
-        agentName="Vera"
-        request="review the readme"
-        files={undefined}
-      />
-    );
-    await act(async () => {
-      fireEvent.click(screen.getByTitle(/cancel delegation/i));
-    });
-    expect(fetchMock).toHaveBeenCalledWith(
-      expect.stringContaining(
-        "/api/sessions/parent/delegations/abc001/cancel"
-      ),
-      expect.objectContaining({ body: JSON.stringify({ reason: "cancelled from UI", work_id: "observed-round" }) })
-    );
-  });
-
-  it("keeps an old tool card attached to its round after a follow-up", () => {
-    useSessionStore.setState({
-      delegations: { parent: [
-        makeDelegation({ delegation_id: "abc001", work_id: "newround", request: "follow up" }),
-        makeDelegation({ delegation_id: "abc001", work_id: "oldround", state: "completed" }),
-      ] },
-      messages: { parent: [{
-        role: "assistant", type: "tool_result", tool_use_id: "tool-old",
-        content: "Started delegation `abc001` to Vera. work_id=oldround",
-      }] },
-    });
-    render(<AgentDelegationRequestCard
-      sessionId="parent" toolUseId="tool-old" agentName="Vera"
-      request="review the readme" files={undefined}
-    />);
-    expect(screen.getByText("replied")).toBeInTheDocument();
-    expect(screen.queryByTitle(/cancel delegation/i)).toBeNull();
-  });
-
-  it("does not give a legacy receipt permission to cancel a newer round", async () => {
-    useSessionStore.setState({
-      delegations: { parent: [
-        makeDelegation({ delegation_id: "abc001", work_id: "newround", request: "follow up" }),
-        makeDelegation({ delegation_id: "abc001", work_id: "oldround", state: "completed" }),
-      ] },
-      messages: { parent: [{
-        role: "assistant", type: "tool_result", tool_use_id: "tool-legacy",
-        content: "Started delegation `abc001` to Vera.",
-      }] },
-    });
-    render(<AgentDelegationRequestCard
-      sessionId="parent" toolUseId="tool-legacy" agentName="Vera"
-      request="review the readme" files={undefined}
-    />);
-    expect(screen.queryByTitle(/cancel delegation/i)).toBeNull();
-    await act(async () => {});
-  });
+it("opens the receipt's child and keeps the task brief and files readable", async () => {
+  useSessionStore.setState({ sessions: [{ id: "child", agent_id: "vera-agent" } as SessionInfo] });
+  useSessionStore.getState().setMessages("parent", [toolUse(), result()]);
+  useSessionStore.getState().setDelegations("parent", [delegation({ state: "completed" })]);
+  render(card(toolUse(), "Vera", ["a.tsx", "b.tsx"]));
+  expect(screen.getByText("“review the readme”")).toBeTruthy();
+  expect(screen.getByText("files: a.tsx, b.tsx")).toBeTruthy();
+  await act(async () => fireEvent.click(screen.getByTitle("Open Vera's session")));
+  expect(useSessionStore.getState().activeSessionId).toBe("child");
+  expect(useSessionStore.getState().activeAgentId).toBe("vera-agent");
 });

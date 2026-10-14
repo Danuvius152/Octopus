@@ -329,7 +329,7 @@ class UserManager:
         )
         return token
 
-    async def resolve_token(self, token: str) -> dict[str, Any] | None:
+    async def resolve_token(self, token: str, *, touch: bool = True) -> dict[str, Any] | None:
         """The user this bearer belongs to, or None.
 
         None covers every way a bearer can be no good — unknown, revoked,
@@ -338,14 +338,20 @@ class UserManager:
         """
         if not token:
             return None
-        row = await self.db.get_token(token_digest(token))
+        digest = token_digest(token)
+        row = await self.db.get_token_user(digest)
         if row is None or row["revoked_at"] or _expired(row["expires_at"]):
             return None
-        user = await self.db.get_user(row["user_id"])
-        if user is None or user["disabled_at"]:
+        user = row["user"]
+        if user["disabled_at"]:
             return None
-        await self.db.touch_token(row["token_hash"], at=_now())
+        if touch:
+            await self.db.touch_token(digest, at=_now())
         return user
+
+    async def record_token_activity(self, token: str) -> None:
+        """Activity bookkeeping, after the caller has validated its bearer."""
+        await self.db.touch_token(token_digest(token), at=_now())
 
     async def revoke_token(self, token: str) -> None:
         await self.db.revoke_token(token_digest(token), at=_now())

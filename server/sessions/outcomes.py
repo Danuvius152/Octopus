@@ -72,9 +72,8 @@ class OutcomesMixin(SessionManagerBase):
         display = self._BACKEND_DISPLAY.get(backend, backend)
         if reason == "idle":
             human = (
-                f"This turn was stopped after {limit}s with no activity from "
-                f"{display} — it looked wedged (e.g. a tool or sub-task that "
-                "never returned). Conversation history and completed work "
+                f"This turn was stopped after {limit}s without validated activity from "
+                f"{display}. Conversation history and completed work "
                 "have been kept; try again, and consider narrowing the task."
             )
             if retries:
@@ -97,7 +96,7 @@ class OutcomesMixin(SessionManagerBase):
     ) -> dict[str, Any]:
         return await self._recovery_frame(
             session, code="turn_timeout_retry",
-            message=f"No backend activity for {limit}s — automatically continuing",
+            message=f"No validated backend activity for {limit}s — automatically continuing",
             attempt=attempt, maximum=max_attempts,
         )
 

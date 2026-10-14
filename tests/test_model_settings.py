@@ -122,12 +122,14 @@ async def client(catalog_home):
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     agents.set_manager(AgentManager(db))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         yield client
     await db.close()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
 
 
 @pytest.mark.asyncio

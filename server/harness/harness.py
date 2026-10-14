@@ -16,7 +16,6 @@ import asyncio
 import logging
 import signal
 
-from ..aio import stopped_within
 from .events import HarnessCredential, HarnessOneshotError
 from .login import LoginDriver
 from .model_settings import ModelOption, ModelSettings
@@ -215,40 +214,71 @@ class Harness:
         argv, kwargs = self.profile.build_oneshot_argv(ctx)
         try:
             argv, kwargs = prepare_spawn(argv, kwargs)
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                # DEVNULL so a CLI that reads stdin (codex exec) gets EOF
-                # immediately and proceeds with the argv prompt instead of
-                # blocking forever; harmless for `claude --print`.
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **kwargs,
-            )
         except FileNotFoundError:
             raise HarnessOneshotError("not_found", f"{self.profile.binary} CLI not found")
         from .run import _terminate_process_group
 
-        def _reap() -> None:
-            # Kill the whole group (run_oneshot is a session leader via
-            # prepare_spawn) so nothing lingers. turn-safety.md §2.
-            _terminate_process_group(proc, signal.SIGKILL)
+        # The transport may create its process before delivering the handle.
+        # Capture that launch before cancellation can surrender ownership.
+        spawn = asyncio.create_task(asyncio.create_subprocess_exec(
+            *argv,
+            # DEVNULL gives a stdin-reading CLI EOF immediately.
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            **kwargs,
+        ), name="one-shot-process-startup")
+        retirement: asyncio.Task[None] | None = None
+
+        async def retire_spawn() -> None:
+            try:
+                captured = await asyncio.shield(spawn)
+            except FileNotFoundError:
+                return  # launch failed before creating a process
+            _terminate_process_group(captured, signal.SIGKILL)
+            await captured.wait()
+
+        def retirement_finished(done: asyncio.Task[None]) -> None:
+            if not done.cancelled() and (error := done.exception()) is not None:
+                # Retirement can finish after the bounded caller has already
+                # reported uncertainty; still observe its actual failure.
+                logger.error("One-shot process retirement failed", exc_info=error)
+
+        async def confirm_retirement() -> None:
+            nonlocal retirement
+            if retirement is None:
+                retirement = asyncio.create_task(retire_spawn(), name="one-shot-process-retirement")
+                retirement.add_done_callback(retirement_finished)
+            try:
+                _, pending = await asyncio.wait({retirement}, timeout=2.0)
+            except asyncio.CancelledError as error:
+                # The captured wait still owns this process; a second cancel
+                # cannot turn an unconfirmed exit into a clean interruption.
+                raise RuntimeError("One-shot process retirement remains unconfirmed") from error
+            if pending:
+                raise RuntimeError("One-shot process retirement remains unconfirmed")
+            try:
+                retirement.result()
+            except (asyncio.CancelledError, Exception) as error:
+                raise RuntimeError("One-shot process retirement remains unconfirmed") from error
+
+        try:
+            proc = await asyncio.shield(spawn)
+        except FileNotFoundError:
+            raise HarnessOneshotError("not_found", f"{self.profile.binary} CLI not found")
+        except asyncio.CancelledError:
+            await confirm_retirement()
+            raise
 
         try:
             out, err = await asyncio.wait_for(proc.communicate(), timeout=timeout)
         except TimeoutError:
-            _reap()
-            try:
-                await proc.wait()  # reap the killed leader (no zombie)
-            except Exception:
-                logger.debug("run_oneshot proc.wait() after kill failed", exc_info=True)
+            await confirm_retirement()
             raise HarnessOneshotError("timeout", "one-shot call timed out")
         except asyncio.CancelledError:
             # Job cancelled (or the job-level wait_for expired) while we were in
-            # communicate() — reap the group too, else the CLI orphans (Vera
-            # review). Best-effort wait, then propagate the cancellation.
-            _reap()
-            await stopped_within(proc.wait(), "one-shot CLI", timeout=2.0)
+            # communicate() — confirm group retirement before propagating.
+            await confirm_retirement()
             raise
         if proc.returncode != 0:
             logger.warning(

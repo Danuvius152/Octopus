@@ -409,7 +409,8 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
     # A long read timeout because a backend may legitimately be slow (a clone,
     # a build); a short connect timeout because a backend we just confirmed is
     # listening should answer the socket immediately.
-    from ..wiki.app_bridge import begin, complete_cleanup
+    from ..aio import complete_cleanup
+    from ..wiki.app_bridge import begin
 
     request_body = await request.body()
     mutation = await begin(row, request.method, path, request.query_params, request_body)

@@ -127,6 +127,16 @@ class ParseOutput:
 
     events: list[HarnessEvent] = field(default_factory=list)
     end_of_stream: bool = False
+    # A recognized runtime event can carry no displayable text.
+    activity: bool | None = None
+
+
+class ActivityObserver(Protocol):
+    def observe_stdout(self, obj: dict[str, Any]) -> None: ...
+    def consume_stderr(self, line: str) -> bool: ...
+    async def start(self) -> None: ...
+    def invalidate(self) -> None: ...
+    async def close(self) -> None: ...
 
 
 class EventParser(ABC):
@@ -241,6 +251,7 @@ class RuntimeProfile:
     # call or auth refresh, and no credentials/config contents in the result.
     model_settings: Callable[[HarnessCredential | None], ModelSettings] | None = None
     # Collaborators (optional features):
+    activity_observer: Callable[..., ActivityObserver] | None = None
     login: LoginDriver | None = None
     transcript_codec: TranscriptCodec | None = None
     # Fork strategy collaborators (session-rewind.md §3). `fork_prepare`

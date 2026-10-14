@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
+from apscheduler.executors.asyncio import AsyncIOExecutor
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -25,9 +27,12 @@ logger = logging.getLogger(__name__)
 
 class ScheduleRunner:
     def __init__(self, session_mgr: SessionManager, db: Database) -> None:
-        self._scheduler = AsyncIOScheduler()
+        self._executor = AsyncIOExecutor()
+        self._scheduler = AsyncIOScheduler(executors={"default": self._executor})
         self._session_mgr = session_mgr
         self._db = db
+        self._closing = False
+        self._shutdown_tasks: tuple[asyncio.Future, ...] | None = None
 
     def next_run_at(self, schedule_id: str) -> str | None:
         """ISO timestamp of the next fire, straight from APScheduler's own
@@ -42,6 +47,8 @@ class ScheduleRunner:
         return run_time.isoformat() if run_time else None
 
     async def initialize(self) -> None:
+        if self._closing:
+            raise RuntimeError("ScheduleRunner is shutting down")
         now = datetime.now(UTC)
         for row in await self._db.load_schedules():
             if row.get("run_at"):
@@ -81,14 +88,20 @@ class ScheduleRunner:
             replace_existing=True,
             max_instances=1,
         )
+        if self._closing:
+            raise RuntimeError("ScheduleRunner is shutting down")
         self._scheduler.start()
 
     async def _prune_wiki(self):
+        if self._closing:
+            return
         from .wiki.cleanup import sweep
 
         await sweep()
 
     def _add_job(self, row: dict) -> None:
+        if self._closing:
+            raise RuntimeError("ScheduleRunner is shutting down")
         # Recurrence priority: run_at (one-time) > cron > interval.
         args = [
             row["id"],
@@ -143,6 +156,8 @@ class ScheduleRunner:
         One-time schedules (`run_at` is set) are deleted from the DB after firing
         regardless of success — APScheduler already removed the DateTrigger job.
         """
+        if self._closing:
+            return
         now = datetime.now(UTC).isoformat()
         row = await self._schedule_row(schedule_id)
         body = self._compose_prompt(row, prompt)
@@ -160,7 +175,10 @@ class ScheduleRunner:
                 try:
                     # Queue-aware: appends to the live session, waiting its turn if
                     # the user is mid-conversation rather than failing on a held lock.
-                    await self._session_mgr.start_message(origin_session_id, body, source="schedule", **wiki_kwargs)
+                    receipt = await self._session_mgr.start_message(origin_session_id, body, source="schedule", **wiki_kwargs)
+                    if not receipt.accepted:
+                        logger.info("Schedule %s suppressed: session admission is closed", schedule_id)
+                        return
                     await self._db.update_schedule(
                         schedule_id,
                         last_run_at=now,
@@ -200,8 +218,14 @@ class ScheduleRunner:
                 await self._db.update_schedule(
                     schedule_id, last_run_session_id=session.id
                 )
-                async for _event in self._session_mgr.send_message(session.id, body, **wiki_kwargs):
-                    pass
+                receipt = await self._session_mgr.start_message(session.id, body, source="schedule", **wiki_kwargs)
+                if not receipt.accepted:
+                    logger.info("Schedule %s suppressed: session admission is closed", schedule_id)
+                    return
+                completion = await receipt.wait()
+                if completion.state == "recording_failed":
+                    logger.error("Schedule %s result recording is %s (session=%s request=%s)", schedule_id, completion.recording_state, session.id, completion.request_id)
+                    return
                 await self._db.update_schedule(schedule_id, last_run_at=now)
             except ValueError as e:
                 _mon_record(_MonEvent(kind="schedule_fire", agent_id=agent_id,
@@ -220,6 +244,8 @@ class ScheduleRunner:
     async def _prune_metrics(self) -> None:
         """Drop metrics past the retention window. Best-effort: a pruning
         failure must not disturb the schedules this runner exists to fire."""
+        if self._closing:
+            return
         from . import monitor as monitor_pkg
 
         store = monitor_pkg.monitor
@@ -284,7 +310,13 @@ class ScheduleRunner:
         session = self._session_mgr.get_session(sid)
         if session is None:
             return False
-        return session.status != SessionStatus.idle or bool(session._pending_queue)
+        return (
+            session.status != SessionStatus.idle
+            or bool(session._pending_queue)
+            or session._current_request is not None
+            or bool(session._active_task and not session._active_task.done())
+            or session._recording_blocked is not None
+        )
 
     async def add(self, row: dict) -> None:
         if row["enabled"]:
@@ -303,5 +335,40 @@ class ScheduleRunner:
         if row["enabled"]:
             self._add_job(row)
 
-    async def shutdown(self) -> None:
-        self._scheduler.shutdown(wait=False)
+    def begin_shutdown(self) -> None:
+        """Stop launches and capture APScheduler's existing callback owner.
+
+        AsyncIOScheduler posts shutdown onto the loop, and its executor clears
+        the future set before cancelled callbacks finish their finally blocks.
+        Capture that set first so shutdown can join the same callbacks.
+        """
+        if self._closing:
+            return
+        self._closing = True
+        self._shutdown_tasks = tuple(getattr(self._executor, "_pending_futures", ()))
+        if self._scheduler.running:
+            self._scheduler.pause()
+            self._scheduler.shutdown(wait=False)
+
+    async def shutdown(self, *, timeout: float = 5.0) -> None:
+        """Join callbacks within the shutdown bound; keep uncertain owners."""
+        self.begin_shutdown()
+        # APScheduler's posted shutdown also retires its timer and job stores.
+        await asyncio.sleep(0)
+        tasks = self._shutdown_tasks or ()
+        if not tasks:
+            return
+        done, pending = await asyncio.wait(tasks, timeout=timeout)
+        if pending:
+            raise TimeoutError(f"scheduler shutdown retirement unconfirmed: {len(pending)} callback(s)")
+        errors: list[Exception] = []
+        for task in done:
+            if task.cancelled():
+                continue
+            # run_coroutine_job converts callback failures into job events.
+            for event in task.result():
+                error = getattr(event, "exception", None)
+                if isinstance(error, Exception):
+                    errors.append(error)
+        if errors:
+            raise ExceptionGroup("scheduler callback cleanup failed", errors)

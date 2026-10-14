@@ -19,6 +19,7 @@ async def bindings(monkeypatch):
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     manager = AgentManager(db)
     monkeypatch.setattr(agents, "_manager", manager)
@@ -36,6 +37,7 @@ async def bindings(monkeypatch):
     finally:
         await db.close()
         session_manager.sessions.clear()
+        session_manager._admission_closed = False
 
 
 async def _create_credential(client, headers, backend="codex"):

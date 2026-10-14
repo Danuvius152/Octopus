@@ -374,29 +374,48 @@ async def test_signed_work_survives_mcp_thread_and_late_loopback_is_refused(work
 
 
 async def test_shutdown_retires_in_flight_background_startup(work_runtime, monkeypatch):
+    from server import bg_tasks
+
     manager, _, parent, _ = work_runtime
     entered, release = asyncio.Event(), asyncio.Event()
     original = asyncio.create_subprocess_exec
+    processes = []
 
     async def delayed_spawn(*args, **kwargs):
         if args[0] == "/bin/sh":
             entered.set()
             await release.wait()
-        return await original(*args, **kwargs)
+        process = await original(*args, **kwargs)
+        processes.append(process)
+        return process
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_spawn)
     creating = asyncio.create_task(manager.work_test_bg.start_task(
         session_id=parent.id, command="echo starting; sleep 30", working_dir=parent.working_dir,
     ))
-    await asyncio.wait_for(entered.wait(), 3)
-    await manager.work_test_bg.shutdown()
-    release.set()
-    record = await creating
-    async with asyncio.timeout(4):
-        while (await manager.work_test_bg.get_task(record.id)).status == "running":
-            await asyncio.sleep(0.01)
-    final = await manager.work_test_bg.get_task(record.id)
-    assert final.status == "interrupted" and final.stop_reason == "server_shutdown"
+    startup_bound = bg_tasks._STARTUP_DRAIN_SECONDS
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        monkeypatch.setattr(bg_tasks, "_STARTUP_DRAIN_SECONDS", 0.03)
+        with pytest.raises(RuntimeError, match="shutdown incomplete"):
+            await asyncio.wait_for(manager.work_test_bg.shutdown(), 0.3)
+        with pytest.raises(bg_tasks.BgTaskError, match="shutting down"):
+            await manager.work_test_bg.start_task(
+                session_id=parent.id, command="echo too late", working_dir=parent.working_dir,
+            )
+        # Restore the process-reaping allowance before releasing the fault.
+        monkeypatch.setattr(bg_tasks, "_STARTUP_DRAIN_SECONDS", startup_bound)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await creating
+        await manager.work_test_bg.shutdown()
+        assert len(processes) == 1 and processes[0].returncode is not None
+        assert await manager.work_test_bg.list_tasks(parent.id) == []
+    finally:
+        monkeypatch.setattr(bg_tasks, "_STARTUP_DRAIN_SECONDS", startup_bound)
+        release.set()
+        await asyncio.gather(creating, return_exceptions=True)
+        await manager.work_test_bg.shutdown()
 
 
 async def test_aborted_start_keeps_process_handle_for_cleanup(work_runtime, monkeypatch):

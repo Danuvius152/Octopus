@@ -10,10 +10,11 @@ from __future__ import annotations
 
 import asyncio
 import time
+from dataclasses import replace
 from typing import Any
 
 from ..aio import drain_cancelled, stopped_within
-from ..harness import HarnessRun, SubagentUpdate
+from ..harness import HarnessEvent, HarnessRun
 from .base import (
     _HELD_PROCESS_IDLE_SECONDS,
     _HELD_STOP_TIMEOUT,
@@ -81,11 +82,11 @@ class ProcessesMixin(SessionManagerBase):
         stopped = 0
         for session in held[: max(0, excess)]:
             backend = session._backend
-            self._forget_backend(session)
             if backend is None:
                 continue
+            self._retire_backend(session, backend)
             try:
-                await backend.stop()
+                await self._await_backend_retirement(session)
                 stopped += 1
             except Exception:
                 logger.exception(
@@ -121,11 +122,11 @@ class ProcessesMixin(SessionManagerBase):
         stopped = 0
         for session in doomed:
             backend = session._backend
-            self._forget_backend(session)
             if backend is None:
                 continue
+            self._retire_backend(session, backend)
             try:
-                await backend.stop()
+                await self._await_backend_retirement(session)
                 stopped += 1
             except Exception:
                 logger.exception(
@@ -162,27 +163,15 @@ class ProcessesMixin(SessionManagerBase):
         stopped = 0
         for session in list(self.sessions.values()):
             backend = session._backend
-            self._forget_backend(session)
-            if backend is None:
+            if backend is not None:
+                self._retire_backend(session, backend, reason="service_shutdown")
+            if not session._backend_cleanup_tasks:
                 continue
-            try:
-                # Bounded: a CLI that won't die must not hold up shutdown.
-                # The process group gets SIGKILLed by stop()'s own escalation,
-                # and anything still alive after that is the OS's problem, not
-                # a reason to hang the server.
-                await asyncio.wait_for(backend.stop(), timeout=_HELD_STOP_TIMEOUT)
+            # Observe captured retirement under the existing sweep budget.
+            # An unconfirmed exit keeps its owner and is a shutdown failure.
+            await self._await_backend_retirement(session, timeout=_HELD_STOP_TIMEOUT)
+            if backend is not None:
                 stopped += 1
-            except TimeoutError:
-                logger.warning(
-                    "held process for session %s didn't stop in %.0fs; abandoning it",
-                    session.id,
-                    _HELD_STOP_TIMEOUT,
-                )
-            except Exception:
-                logger.exception(
-                    "failed stopping held process for session %s at shutdown",
-                    session.id,
-                )
         return stopped
 
     async def stop_reaper(self) -> None:
@@ -230,7 +219,7 @@ class ProcessesMixin(SessionManagerBase):
             return None
         return held
 
-    def _forget_backend(self, session: Session, expected: HarnessRun | None = None) -> None:
+    def _forget_backend(self, session: Session, expected: HarnessRun | None = None, *, reason: str = "process_ended") -> list[dict[str, Any]]:
         """Detach a session from its CLI process and close out what that
         process was still doing.
 
@@ -241,21 +230,16 @@ class ProcessesMixin(SessionManagerBase):
         from ..mcp_identity import revoke_run
         if expected is not None and session._backend is not expected:
             revoke_run(getattr(expected, "run_lease_id", None))
-            return
+            return []
         revoke_run(getattr(session._backend, "run_lease_id", None))
         session._backend = None
         session._held_run_at = None
+        frames = []
         for key, run in list(session._subagents.items()):
-            if run.status == "running":
-                session._subagents[key] = SubagentUpdate(
-                    task_id=run.task_id,
-                    tool_use_id=run.tool_use_id,
-                    status="failed",
-                    name=run.name,
-                    description="interrupted — the CLI process ended",
-                    prompt=run.prompt,
-                    summary=run.summary,
-                    tokens=run.tokens,
-                    tool_uses=run.tool_uses,
-                    duration_ms=run.duration_ms,
-                )
+            if run.status in {"running", "unknown"}:
+                update = replace(run, status="interrupted", stop_reason=reason)
+                session._subagents[key] = update
+                frame = self._event_to_ws_message(session.id, HarnessEvent(type="subagent", subagent=update))
+                if frame is not None:
+                    frames.append(frame)
+        return frames

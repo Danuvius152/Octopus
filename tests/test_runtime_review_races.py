@@ -258,23 +258,39 @@ async def test_account_transition_does_not_fan_out_unadopted_question_answer(run
     users = UserManager(database)
     monkeypatch.setattr(deps, "_user_manager", users)
     question = await manager.create_pending_question(session.id, [{"question": "Private choice", "options": [{"label": "A"}]}])
+    # The answer has already been recorded when account adoption crosses its
+    # publication. Do not submit a new synchronous write while a connection
+    # operation is deliberately gated: writes are now serialized.
+    publication_entered, publication_release = asyncio.Event(), asyncio.Event()
+
+    async def hold_publication(event):
+        if event["type"] == "question_answer":
+            publication_entered.set()
+            await publication_release.wait()
+
+    manager.on_broadcast("hold-answer-publication", hold_publication)
+    answer = asyncio.create_task(manager.answer_question(session.id, question, [{"question": "Private choice", "answer": "synthetic private answer"}]))
+    await asyncio.wait_for(publication_entered.wait(), 5)
     entered, release = gate_sql(monkeypatch, database, lambda sql: sql.startswith("UPDATE sessions SET user_id"))
     adoption = asyncio.create_task(bootstrap_first_account(database, username="first", password="password1", session_manager=manager))
     await asyncio.wait_for(entered.wait(), 5)
     assert session.user_id is None and await deps.accounts_exist()
-    foreign = await users.create_user(username="second", password="password2")
+    foreign = asyncio.create_task(users.create_user(username="second", password="password2"))
     foreign_events = []
 
     async def receive(event):
         foreign_events.append(event)
 
-    manager.on_broadcast("foreign-during-adoption", receive, foreign["id"])
+    manager.on_broadcast("foreign-during-adoption", receive, "unrelated-account")
     try:
-        assert await manager.answer_question(session.id, question, [{"question": "Private choice", "answer": "synthetic private answer"}])
+        publication_release.set()
+        assert await asyncio.wait_for(answer, 5)
         assert foreign_events == []
     finally:
+        publication_release.set()
         release.set()
         await adoption
+        await foreign
 
 
 async def test_archived_background_result_keeps_adopted_owner(background, runtime, monkeypatch, tmp_path):
@@ -616,6 +632,7 @@ async def test_queued_return_keeps_its_owner_when_deleted_during_dispatch_public
     await manager.interrupt(session.id)
     entered, release = asyncio.Event(), asyncio.Event()
     owned, foreign = [], []
+    published = asyncio.Event()
 
     async def slow_client(event):
         if event["type"] == "dispatch_state" and event["session_id"] == session.id and event["dispatch_state"]["items"]:
@@ -624,6 +641,8 @@ async def test_queued_return_keeps_its_owner_when_deleted_during_dispatch_public
 
     async def owned_client(event):
         owned.append(event)
+        if event["type"] == "queued":
+            published.set()
 
     async def foreign_client(event):
         foreign.append(event)
@@ -636,6 +655,7 @@ async def test_queued_return_keeps_its_owner_when_deleted_during_dispatch_public
     assert await manager.delete_session(session.id)
     release.set()
     await queuing
+    await asyncio.wait_for(published.wait(), 5)
     assert not [event for event in foreign if event.get("session_id") == session.id and event["type"] in {"dispatch_state", "queued", "dequeued"}]
     assert len([event for event in owned if event["type"] == "queued"]) == 1
 
@@ -761,7 +781,7 @@ async def test_cancelled_reopen_cannot_overwrite_a_newer_follow_up(runtime):
     assert fresh.work_id not in {original.work_id, cancelled.work_id}
 
 
-async def test_cancelled_follow_up_caller_preserves_already_accepted_child_work(runtime):
+async def test_follow_up_returns_before_blocked_notification_and_preserves_accepted_work(runtime):
     manager, _, parent, delegations, starts, _ = runtime
     original = await completed_delegation(runtime)
     entered, release = asyncio.Event(), asyncio.Event()
@@ -778,9 +798,8 @@ async def test_cancelled_follow_up_caller_preserves_already_accepted_child_work(
     await asyncio.wait_for(entered.wait(), 5)
     await asyncio.wait_for(starts.get(), 5)
     accepted = delegations.get_delegation(original.delegation_id)
-    following.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await following
+    assert await following is accepted
+    assert following.cancel() is False
     assert accepted.state == "running"
     assert delegations.get_delegation(original.delegation_id) is accepted
     assert manager.has_pending_or_active_work(original.delegation_id, accepted.work_id)

@@ -28,7 +28,7 @@ from typing import Any
 from ..aio import drain_cancelled
 from . import assembly
 from .events import HarnessCredential, HarnessEvent
-from .profile import RuntimeProfile, StdinMode, TurnContext
+from .profile import ActivityObserver, RuntimeProfile, StdinMode, TurnContext
 
 logger = logging.getLogger(__name__)
 
@@ -201,12 +201,16 @@ class HarnessRun:
 
     def __init__(self, profile: RuntimeProfile, config: RunConfig | None = None) -> None:
         self._profile = profile
+        self._tool_identity_tracker: Any | None = None
+        self._tool_context: tuple[str, str] | None = None
         self._config = config or RunConfig()
         self.run_lease_id = uuid_module.uuid4().hex
         self.work_id = self._config.work_id
         self._lease_closed = False
         self._spawn_task: asyncio.Task[asyncio.subprocess.Process] | None = None
         self._spawn_cleanup: asyncio.Task[None] | None = None
+        self._stop_task: asyncio.Task[None] | None = None
+        self._activity_observer: ActivityObserver | None = None
         self._parser = profile.new_event_parser()
         self._process: asyncio.subprocess.Process | None = None
         self._event_queue: asyncio.Queue[HarnessEvent | object] = asyncio.Queue()
@@ -214,6 +218,8 @@ class HarnessRun:
         self._stderr_task: asyncio.Task[None] | None = None
         self._stderr_lines: list[str] = []
         self._stream_closed: bool = False
+        self._activity_generation = 0
+        self._activity_callback: Callable[[float | None], None] | None = None
         # The uuid of this run's opening prompt frame, remembered so S3 can
         # tell the CLI's echo of our own prompt from a genuine user message.
         #
@@ -323,6 +329,24 @@ class HarnessRun:
         ctx = self._make_context(prompt, working_dir, resume_id, credential)
         argv, kwargs = self._profile.build_turn_argv(ctx)
         argv, kwargs = prepare_spawn(argv, kwargs)
+        if self._profile.activity_observer is not None:
+            generation = self._activity_generation
+            self._activity_observer = self._profile.activity_observer(
+                kwargs.get("env") or os.environ,
+                lambda timestamp: self._activity(timestamp, generation=generation),
+                resume_id=resume_id,
+            )
+            attach = getattr(self._activity_observer, "set_event_handler", None)
+            if attach is not None:
+                attach(lambda events: self._publish_observations(events, generation=generation))
+            if self._activity_callback is not None or self._tool_context is not None:
+                try:
+                    await self._activity_observer.start()
+                except BaseException:
+                    self._begin_retirement()
+                    raise
+        if self._lease_closed:
+            raise asyncio.CancelledError
 
         from ..mcp_identity import register_run
         if self._config.session_id:
@@ -355,19 +379,20 @@ class HarnessRun:
                     await asyncio.wait_for(abandoned.wait(), timeout=4.0)
                 except Exception:
                     logger.exception("Failed to reap aborted harness startup")
+                    raise
                 finally:
                     self._spawn_task = None
             self._spawn_cleanup = asyncio.create_task(reap_aborted_spawn(), name="harness-startup-cleanup")
+            self._begin_retirement()
             raise
         except Exception:
-            self._lease_closed = True
-            from ..mcp_identity import revoke_run
-            revoke_run(self.run_lease_id)
+            self._begin_retirement()
             raise
         finally:
             if spawn.done():
                 self._spawn_task = None
         if self._lease_closed or not work_is_open(self.work_id):
+            self._process = process
             _terminate_process_group(process, signal.SIGKILL)
             await asyncio.wait_for(process.wait(), timeout=4.0)
             raise asyncio.CancelledError
@@ -531,13 +556,37 @@ class HarnessRun:
             assert isinstance(item, HarnessEvent)
             yield item
 
-    async def stop(self) -> None:
-        """Terminate the subprocess, drain reader tasks. Idempotent."""
+    def _begin_retirement(self) -> asyncio.Task[None]:
         self._lease_closed = True
+        self._tool_context = None
+        self.invalidate_activity()
         from ..mcp_identity import revoke_run
         revoke_run(self.run_lease_id)
+        if self._stop_task is None:
+            self._stop_task = asyncio.create_task(self._stop(), name="harness-retirement")
+        return self._stop_task
+
+    async def stop(self) -> None:
+        """Owned retirement includes a late spawn; caller cancellation cannot orphan it."""
+        await asyncio.shield(self._begin_retirement())
+
+    async def _stop(self) -> None:
+        if self._spawn_cleanup is not None:
+            await self._spawn_cleanup
+            self._spawn_cleanup = None
+        elif self._spawn_task is not None:
+            try:
+                pending = await asyncio.shield(self._spawn_task)
+            except Exception:
+                pending = None
+            if pending is not None and self._process is None:
+                _terminate_process_group(pending, signal.SIGKILL)
+                await pending.wait()
         proc = self._process
         if proc is None:
+            self._close_stream()
+            if self._activity_observer is not None:
+                await self._activity_observer.close()
             return
 
         # Closing stdin lets the CLI exit gracefully (flush its result first).
@@ -582,6 +631,8 @@ class HarnessRun:
         self._process = None
         self._stdout_task = None
         self._stderr_task = None
+        if self._activity_observer is not None:
+            await self._activity_observer.close()
 
     async def interrupt(self) -> None:
         """Best-effort cancel of the in-flight turn. stop() does
@@ -625,12 +676,77 @@ class HarnessRun:
         """
         self._idle_handler = handler
 
+    def bind_tool_context(self, request_id: str, attempt_id: str) -> None:
+        from .tool_identity import ToolIdentityTracker
+        if self._tool_identity_tracker is None:
+            self._tool_identity_tracker = ToolIdentityTracker()
+        self._tool_context = (request_id, attempt_id)
+
+    def bind_activity(self, callback: Callable[[float | None], None]) -> int:
+        """Attach one attempt clock; no display, database or network awaits."""
+        self._activity_generation += 1
+        self._activity_callback = callback
+        return self._activity_generation
+
+    def unbind_activity(self, token: int) -> None:
+        if token == self._activity_generation:
+            self.invalidate_activity()
+
+    def invalidate_activity(self) -> None:
+        """Revoke liveness synchronously, before cancellation can await cleanup."""
+        self._activity_generation += 1
+        self._activity_callback = None
+        if self._activity_observer is not None:
+            self._activity_observer.invalidate()
+
+    def _activity(self, timestamp: float | None = None, *, generation: int | None = None) -> None:
+        if (self._lease_closed or self._stream_closed
+                or (generation is not None and generation != self._activity_generation)):
+            return
+        callback = self._activity_callback
+        if callback is not None:
+            callback(timestamp)
+
+    def _publish_observations(self, events: list[HarnessEvent], *, generation: int) -> None:
+        """Adapter observations share the current run's captured tool context."""
+        context = self._tool_context
+        if (self._lease_closed or self._stream_closed or context is None
+                or generation != self._activity_generation or self._tool_identity_tracker is None):
+            return
+        for event in self._tool_identity_tracker.normalize_observations(events, *context):
+            self._emit(event)
+
+    async def _drain_observations(self) -> None:
+        drain = getattr(self._activity_observer, "drain_observations", None)
+        if drain is not None and not self._lease_closed:
+            await drain()
+
     async def _handle_line(self, line: str) -> None:
         obj = parse_json_line(line)
         if obj is None:
             return
+        if self._activity_observer is not None:
+            self._activity_observer.observe_stdout(obj)
         out = self._parser.parse(obj)
+        if out.activity is True or (out.activity is None and out.events):
+            self._activity()
+        if out.end_of_stream:
+            # Consume the adapter's finite, already-written native prefix
+            # before revoking the attempt and publishing the parent result.
+            await self._drain_observations()
+        context = self._tool_context
+        if self._tool_identity_tracker is not None:
+            for event in out.events:
+                if context is not None:
+                    self._tool_identity_tracker.normalize(event, *context)
+                else:
+                    self._tool_identity_tracker.normalize_idle(event)
+        if out.end_of_stream:
+            self._tool_context = None
+            self.invalidate_activity()
         for event in out.events:
+            if self._lease_closed and event.type == "subagent":
+                continue
             if self._stream_closed and self._idle_handler is not None:
                 # Out of turn: hand it to the session rather than dropping it.
                 try:
@@ -661,11 +777,12 @@ class HarnessRun:
             logger.exception("stdout reader crashed")
         finally:
             if not self._stream_closed:
-                self._stream_closed = True
                 try:
-                    self._event_queue.put_nowait(_STREAM_END)
-                except asyncio.QueueFull:
-                    pass
+                    await self._drain_observations()
+                finally:
+                    self._tool_context = None
+                    self.invalidate_activity()
+                    self._close_stream()
 
     async def _read_stderr(self) -> None:
         assert self._process and self._process.stderr
@@ -673,6 +790,8 @@ class HarnessRun:
             async for raw in self._process.stderr:
                 line = raw.decode(errors="replace").rstrip("\r\n")
                 if line:
+                    if self._activity_observer is not None and self._activity_observer.consume_stderr(line):
+                        continue
                     self._stderr_lines.append(line)
                     logger.debug("CLI stderr: %s", line)
         except asyncio.CancelledError:

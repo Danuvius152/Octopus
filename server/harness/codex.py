@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from .codex_activity import CodexActivityObserver, diagnostic_environment
 from .events import HarnessCredential, HarnessEvent, SubagentUpdate
 from .harness import Harness
 from .login import LoginMethod
@@ -100,7 +101,19 @@ one-shot). Timezone defaults to the host's. Write `prompt` self-contained: \
 when it fires the conversation is gone and nobody can answer questions. \
 Related: `mcp__schedule__list()`, `mcp__schedule__update(schedule_id, \
 enabled=False|…)` (pause rather than delete when the user may want it \
-back), `mcp__schedule__delete(schedule_id)`."""
+back), `mcp__schedule__delete(schedule_id)`.
+
+Native helpers created by `spawn_agent` run inside this parent's current \
+turn. Collect every required result before ending the turn, or explicitly \
+cancel the helper and report what was not delivered. A mailbox wait timeout \
+does not mean a helper failed, and helper completion does not mean you have \
+read its answer. Use the existing background commands or named-agent \
+delegations for work that must continue across turns.
+
+Prefer `apply_patch` for substantial text and code edits. Keep bulk file \
+contents out of shell command arguments; use a file tool or smaller writes \
+and verify the reconstructed result. If a command fails with "argument list \
+too long", reduce the command size before retrying."""
 
 
 def _toml_basic_string(value: str) -> str:
@@ -298,6 +311,7 @@ def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
     env = os.environ.copy()
     _apply_home_dir(env, ctx.credential)
     _apply_mcp_bearers(env, ctx)
+    diagnostic_environment(env)
     return argv, {"cwd": ctx.working_dir, "env": env}
 
 
@@ -335,9 +349,18 @@ _COLLAB_DESCRIPTIONS = {
     "close_agent": "closing",
 }
 
-# Bound on the child-thread → owning-item map, for the same reason the Claude
-# parser bounds its task map: one process parses many turns.
-_MAX_TRACKED_AGENTS = 64
+_COLLAB_STATUSES = {
+    "pending_init": ("running", None),
+    "running": ("running", None),
+    "completed": ("completed", None),
+    "failed": ("failed", None),
+    "error": ("failed", None),
+    "errored": ("failed", None),
+    "interrupted": ("interrupted", "native_interrupted"),
+    "shutdown": ("interrupted", "native_shutdown"),
+    "not_found": ("unknown", "native_not_found"),
+    "cancelled": ("cancelled", "native_cancelled"),
+}
 
 
 def _short_thread(thread_id: str) -> str:
@@ -365,23 +388,34 @@ class CodexEventParser(EventParser):
         # child thread id -> the `spawn_agent` item that created it, so every
         # later `wait` / `send_input` on that thread updates the same card.
         self._collab_owner: dict[str, str] = {}
+        self._collab_status: dict[str, str] = {}
+        self._collab_completed: set[tuple[str, str]] = set()
+        self._activity_last_item = -1
+        self._activity_open_items: set[int] = set()
+        self._activity_turn_started = False
+        self._activity_schema_warned = False
 
     def parse(self, obj: dict[str, Any]) -> ParseOutput:
         kind = obj.get("type")
 
         if kind == "thread.started":
             tid = obj.get("thread_id")
+            first = self._captured_thread_id is None
             self._captured_thread_id = tid
             if tid:
                 return ParseOutput(
-                    events=[HarnessEvent(type="session_started", session_id=tid)]
+                    events=[HarnessEvent(type="session_started", session_id=tid)],
+                    activity=first,
                 )
             return ParseOutput()
 
         if kind == "turn.started":
-            return ParseOutput()
+            first = not self._activity_turn_started
+            self._activity_turn_started = True
+            return ParseOutput(activity=first)
 
         if kind == "turn.completed":
+            self._activity_open_items.clear()
             usage = obj.get("usage") or {}
             return ParseOutput(
                 events=[
@@ -397,6 +431,7 @@ class CodexEventParser(EventParser):
             )
 
         if kind == "turn.failed":
+            self._activity_open_items.clear()
             err = obj.get("error")
             msg = err if isinstance(err, str) else (
                 (err or {}).get("message") if isinstance(err, dict) else None
@@ -428,11 +463,43 @@ class CodexEventParser(EventParser):
                 ]
             )
 
-        if isinstance(kind, str) and kind.startswith("item."):
-            return ParseOutput(events=self._item_events(kind, obj))
+        if kind in ("item.started", "item.updated", "item.completed"):
+            item = obj.get("item")
+            return ParseOutput(
+                events=self._item_events(kind, obj), activity=self._item_activity(kind, item),
+            )
 
         logger.debug("Unhandled codex event type: %s", kind)
         return ParseOutput()
+
+    def _item_activity(self, kind: str, item: Any) -> bool | None:
+        if not isinstance(item, dict) or not isinstance(item.get("type"), str) or item["type"] not in {
+            "reasoning", "agent_message", "mcp_tool_call", "command_execution",
+            "collab_tool_call", "file_edit", "file_write", "file_read", "file_change",
+            "web_search", "todo_list",
+        }:
+            return False
+        # Updates carry no revision or event time. Keep rendering them, but
+        # only provably new lifecycle events may extend the idle clock.
+        if kind == "item.updated":
+            return False
+        identifier = item.get("id")
+        number = identifier[5:] if isinstance(identifier, str) and identifier.startswith("item_") else ""
+        ordinal = int(number) if len(number) <= 20 and number.isascii() and number.isdecimal() else None
+        if ordinal is None or identifier != f"item_{ordinal}" or ordinal >= 2**64:
+            if not self._activity_schema_warned:
+                self._activity_schema_warned = True
+                logger.warning("Codex stdout activity identity unsupported; using display activity")
+            return None
+        if ordinal > self._activity_last_item:
+            self._activity_last_item = ordinal
+            if kind == "item.started":
+                self._activity_open_items.add(ordinal)
+            return True
+        if kind == "item.completed" and ordinal in self._activity_open_items:
+            self._activity_open_items.remove(ordinal)
+            return True
+        return False
 
     def _collab_events(
         self, item: dict[str, Any], *, started: bool, completed: bool
@@ -442,13 +509,17 @@ class CodexEventParser(EventParser):
         Codex narrates multi-agent work as a sequence of tool calls against
         *child threads*: `spawn_agent` creates one, `wait` blocks on it,
         `send_input` talks to it. Several items therefore describe the same
-        sub-agent, so the card is keyed on the spawning item and the child
-        thread ids are mapped back to it (native-subagents.md §3).
+        sub-agent. Its exact child thread is the task identity, and maps back
+        to the spawning tool call for the card (native-subagents.md §3).
         """
         item_id = str(item.get("id") or "")
         tool = str(item.get("tool") or "agent")
         prompt = str(item.get("prompt") or "")
-        receivers = [str(t) for t in (item.get("receiver_thread_ids") or [])]
+        raw_receivers = item.get("receiver_thread_ids")
+        receivers = (
+            [tid for tid in raw_receivers if isinstance(tid, str) and tid]
+            if isinstance(raw_receivers, list) else []
+        )
         states = item.get("agents_states")
         states = states if isinstance(states, dict) else {}
 
@@ -487,40 +558,63 @@ class CodexEventParser(EventParser):
         if spawning:
             for tid in receivers:
                 self._collab_owner[tid] = item_id
-            targets = [(item_id, receivers[0] if receivers else "")]
+            targets = [(item_id, tid) for tid in receivers]
         else:
             targets = [
-                (self._collab_owner.get(tid, item_id), tid) for tid in receivers
-            ] or [(item_id, "")]
+                (self._collab_owner.get(tid), tid) for tid in receivers
+            ]
 
         for owner, tid in targets:
+            call = (tid, item_id)
+            if call in self._collab_completed:
+                continue
+            if completed and item_id:
+                self._collab_completed.add(call)
             raw_state = states.get(tid)
             state = raw_state if isinstance(raw_state, dict) else {}
             raw_status = str(state.get("status") or "")
-            status = (
-                "completed"
-                if raw_status == "completed"
-                else "failed"
-                if raw_status in ("failed", "error")
-                else "running"
+            status, stop_reason = _COLLAB_STATUSES.get(raw_status, ("unknown", None))
+            previous = self._collab_status.get(tid)
+            accepted_execution = (
+                completed and bool(item_id) and item.get("status") == "completed"
+                and tool in {"spawn_agent", "send_input", "resume_agent"}
             )
+            accepted_continuation = accepted_execution and not spawning
+            if accepted_execution and spawning and not raw_status:
+                status = "running"
+            elif accepted_continuation and raw_status not in {
+                "not_found", "failed", "error", "errored", "interrupted", "shutdown", "cancelled",
+            }:
+                if previous == "running":
+                    status, stop_reason = "unknown", "overlapping_execution"
+                elif previous in {"completed", "failed", "cancelled", "interrupted"}:
+                    status, stop_reason = "running", None
+                else:
+                    status, stop_reason = "unknown", None
+            elif not spawning:
+                if previous in {"completed", "failed", "cancelled", "interrupted"} and status in {"running", "unknown"}:
+                    continue
+                if not raw_status and previous is not None:
+                    continue
+                if status == "running" and previous != "running":
+                    status = "unknown"
+            self._collab_status[tid] = status
             events.append(
                 HarnessEvent(
                     type="subagent",
                     subagent=SubagentUpdate(
-                        task_id=owner,
+                        task_id=tid,
                         tool_use_id=owner,
                         status=status,
+                        stop_reason=stop_reason,
                         name=_short_thread(tid),
                         description=_COLLAB_DESCRIPTIONS.get(tool, tool),
-                        prompt=prompt if spawning and started else "",
+                        prompt=prompt if spawning else "",
                         summary=str(state.get("message") or ""),
                     ),
                     raw=item,
                 )
             )
-        while len(self._collab_owner) > _MAX_TRACKED_AGENTS:
-            self._collab_owner.pop(next(iter(self._collab_owner)))
         return events
 
     def _item_events(self, kind: str, obj: dict[str, Any]) -> list[HarnessEvent]:
@@ -693,7 +787,7 @@ async def _fork_prepare_replay(
     """No on-disk work (session-rewind.md §5.3.2). Codex's resume state is
     internal to the binary and has no transcript codec, so the first fork turn
     instead carries the truncated history wrapped into its USER PROMPT (done in
-    `SessionManager.send_message`). `thread.started` captures the real resume id
+    `SessionManager._execute_claimed_request`). `thread.started` captures the real resume id
     on turn 1; turn 2+ uses native Codex resume. The `resume_id_hint` is
     ignored."""
     from .fork import ForkArtifact
@@ -965,6 +1059,7 @@ CODEX = RuntimeProfile(
     web=WebCapability(tool_names=("web_search",), combined=True),
     stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
     build_turn_argv=build_turn_argv,
+    activity_observer=CodexActivityObserver,
     new_event_parser=CodexEventParser,
     build_oneshot_argv=build_oneshot_argv,
     parse_oneshot_stdout=parse_oneshot_stdout,

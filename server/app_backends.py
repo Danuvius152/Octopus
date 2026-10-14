@@ -64,6 +64,9 @@ MAX_RUNNING = 4
 LOG_TAIL_LINES = 200
 # A crashed backend is retried, but not in a tight loop.
 RETRY_BACKOFF_S = 30.0
+_TERM_TIMEOUT_SECONDS = 5.0
+_KILL_TIMEOUT_SECONDS = 5.0
+_TASK_DRAIN_SECONDS = 5.0
 
 
 def _free_port() -> int:
@@ -133,6 +136,9 @@ class BackendState:
     log: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_TAIL_LINES), repr=False)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _readers: list[asyncio.Task[None]] = field(default_factory=list, repr=False)
+    _waiter: asyncio.Task[int] | None = field(default=None, repr=False)
+    _operation: asyncio.Task[Any] | None = field(default=None, repr=False)
+    _spawn: asyncio.Task[asyncio.subprocess.Process] | None = field(default=None, repr=False)
 
     def public(self) -> dict[str, Any]:
         return {
@@ -154,6 +160,7 @@ class BackendSupervisor:
     def __init__(self) -> None:
         self._backends: dict[str, BackendState] = {}
         self._reaper: asyncio.Task[None] | None = None
+        self._shutting_down = False
 
     # ---------------------------------------------------------------- state
 
@@ -206,7 +213,50 @@ class BackendSupervisor:
         `failed` with the tail of the output, because "it doesn't work" with no
         log is the exact failure this feature exists to avoid.
         """
+        if self._shutting_down:
+            raise RuntimeError("Application backend supervisor is shutting down")
         st = self._state_for(app_id, app_dir)
+        async with st.lock:
+            if self._shutting_down:
+                raise RuntimeError("Application backend supervisor is shutting down")
+            st._operation = asyncio.current_task()
+            try:
+                return await self._install(st)
+            except asyncio.CancelledError:
+                await self._stop_state(st)
+                raise
+            finally:
+                st._operation = None
+
+    async def _spawn_owned(self, st: BackendState, *argv: str, **kwargs: Any) -> asyncio.subprocess.Process:
+        spawn = asyncio.create_task(asyncio.create_subprocess_exec(*argv, **kwargs))
+        st._spawn = spawn
+        adopted = False
+        try:
+            try:
+                proc = await asyncio.shield(spawn)
+            except asyncio.CancelledError:
+                # Spawn may have created the child before its handle arrives.
+                # Keep this owner alive until the captured child can be stopped.
+                proc = await asyncio.shield(spawn)
+                st.process = proc
+                st.pid = proc.pid
+                adopted = True
+                await self._stop_state(st)
+                raise
+            st.process = proc
+            st.pid = proc.pid
+            adopted = True
+            return proc
+        finally:
+            # A completed spawn can still precede cancellation of its waiter.
+            # Release it only after adopting the handle, or confirmed failure.
+            failed = spawn.done() and not spawn.cancelled() and spawn.exception() is not None
+            if (adopted or failed) and st._spawn is spawn:
+                st._spawn = None
+
+    async def _install(self, st: BackendState) -> bool:
+        app_dir = st.app_dir
         script = backend_script(app_dir, "install.sh")
         if script is None:
             st.installed = True
@@ -218,10 +268,11 @@ class BackendSupervisor:
         os.makedirs(runtime_dir_for(app_dir), exist_ok=True)
         os.makedirs(data_dir_for(app_dir), exist_ok=True)
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc = await self._spawn_owned(
+                st,
                 script,
                 cwd=app_dir,
-                env=script_env(app_id, app_dir),
+                env=script_env(st.app_id, app_dir),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
                 start_new_session=True,
@@ -234,16 +285,17 @@ class BackendSupervisor:
 
         assert proc.stdout is not None  # spawned with stdout=PIPE
         pump = asyncio.create_task(self._pump(st, proc.stdout, "install"))
-        try:
-            code = await asyncio.wait_for(proc.wait(), timeout=INSTALL_TIMEOUT_S)
-        except TimeoutError:
-            _kill_group(proc)
+        st._readers = [pump]
+        st._waiter = asyncio.create_task(proc.wait(), name=f"app-{st.app_id}-install-exit")
+        done, _ = await asyncio.wait({st._waiter}, timeout=INSTALL_TIMEOUT_S)
+        if not done:
             st.state = FAILED
             st.error = f"install.sh timed out after {INSTALL_TIMEOUT_S:.0f}s"
             self._log(st, st.error)
+            await self._stop_state(st)
             return False
-        finally:
-            await drain_cancelled(pump, f"application {st.app_id} install output")
+        code = st._waiter.result()
+        await self._stop_state(st)
 
         if code != 0:
             st.state = FAILED
@@ -263,6 +315,8 @@ class BackendSupervisor:
         Lazy by design: called from the proxy, so a backend exists only once
         something actually asks it for something.
         """
+        if self._shutting_down:
+            raise RuntimeError("Application backend supervisor is shutting down")
         st = self._state_for(app_id, app_dir)
         st.last_used = time.monotonic()
 
@@ -271,22 +325,37 @@ class BackendSupervisor:
             return st
 
         async with st.lock:
-            if st.state == RUNNING and st.process and st.process.returncode is None:
-                return st
-            if (
-                st.state == FAILED
-                and st.failed_at
-                and time.monotonic() - st.failed_at < RETRY_BACKOFF_S
-            ):
-                return st  # don't retry a crash in a tight loop
+            if self._shutting_down:
+                raise RuntimeError("Application backend supervisor is shutting down")
+            st._operation = asyncio.current_task()
+            try:
+                return await self._ensure_running(st)
+            except asyncio.CancelledError:
+                await self._stop_state(st)
+                raise
+            finally:
+                st._operation = None
 
-            if not st.installed and not await self.install(app_id, app_dir):
-                st.failed_at = time.monotonic()
-                return st
-
-            await self._evict_if_over_cap(keep=app_id)
-            await self._start_locked(st)
+    async def _ensure_running(self, st: BackendState) -> BackendState:
+        if st.state == RUNNING and st.process and st.process.returncode is None:
             return st
+        if (
+            st.state == FAILED
+            and st.failed_at
+            and time.monotonic() - st.failed_at < RETRY_BACKOFF_S
+        ):
+            return st  # don't retry a crash in a tight loop
+
+        if st.process is not None or st._readers:
+            await self._stop_state(st)
+
+        if not st.installed and not await self._install(st):
+            st.failed_at = time.monotonic()
+            return st
+
+        await self._evict_if_over_cap(keep=st.app_id)
+        await self._start_locked(st)
+        return st
 
     async def _start_locked(self, st: BackendState) -> None:
         script = backend_script(st.app_dir, "start.sh")
@@ -300,7 +369,8 @@ class BackendSupervisor:
         self._log(st, f"--- start.sh (port {port}) ---")
         os.makedirs(data_dir_for(st.app_dir), exist_ok=True)
         try:
-            proc = await asyncio.create_subprocess_exec(
+            proc = await self._spawn_owned(
+                st,
                 script,
                 cwd=st.app_dir,
                 env=script_env(st.app_id, st.app_dir, port=port),
@@ -359,24 +429,40 @@ class BackendSupervisor:
 
     async def _stop_state(self, st: BackendState) -> None:
         proc = st.process
+        if proc is not None:
+            _kill_group(proc, signal.SIGTERM)
+            if st._waiter is None or st._waiter.cancelled():
+                st._waiter = asyncio.create_task(proc.wait(), name=f"app-{st.app_id}-process-exit")
+            process_done, _ = await asyncio.wait({st._waiter}, timeout=_TERM_TIMEOUT_SECONDS)
+            if not process_done or proc.returncode is None:
+                _kill_group(proc, signal.SIGKILL)
+                process_done, _ = await asyncio.wait({st._waiter}, timeout=_KILL_TIMEOUT_SECONDS)
+            if not process_done or proc.returncode is None:
+                for task in st._readers:
+                    if not task.done() and not task.cancelling():
+                        task.cancel()
+                raise RuntimeError(f"Application {st.app_id} process exit unconfirmed")
+            st._waiter.result()
+        # Keep output draining while the child handles TERM. Cancelling the
+        # pumps first can fill a pipe and prevent its process waiter finishing.
+        for task in st._readers:
+            if not task.done() and not task.cancelling():
+                task.cancel()
+        if st._readers:
+            readers_done, pending = await asyncio.wait(st._readers, timeout=_TASK_DRAIN_SECONDS)
+            for task in readers_done:
+                await drain_cancelled(task, f"application {st.app_id} backend output")
+            st._readers = list(pending)
+            if pending:
+                raise RuntimeError(f"Application {st.app_id} output readers did not exit")
+        # Process and readers must finish before their ownership is released.
         st.process = None
         st.pid = None
         st.port = None
         st.started_at = None
-        for task in st._readers:
-            await drain_cancelled(task, f"application {st.app_id} backend output")
-        st._readers = []
+        st._waiter = None
         if st.state not in (FAILED, ABSENT):
             st.state = STOPPED
-        if proc is None or proc.returncode is not None:
-            return
-        _kill_group(proc, signal.SIGTERM)
-        try:
-            await asyncio.wait_for(proc.wait(), timeout=5.0)
-        except TimeoutError:
-            _kill_group(proc, signal.SIGKILL)
-            with contextlib.suppress(Exception):
-                await asyncio.wait_for(proc.wait(), timeout=5.0)
 
     async def on_rebuild(self, app_id: str, app_dir: str) -> None:
         """A build turn rewrote the code; the running process is still executing
@@ -439,16 +525,73 @@ class BackendSupervisor:
                 logger.exception("backend reaper iteration failed")
 
     def start_reaper(self) -> None:
+        if self._shutting_down:
+            raise RuntimeError("Application backend supervisor is shutting down")
         if self._reaper is None or self._reaper.done():
             self._reaper = asyncio.create_task(
                 self._reap_loop(), name="app-backend-reaper"
             )
 
+    def begin_shutdown(self) -> None:
+        self._shutting_down = True
+        if self._reaper is not None and not self._reaper.done() and not self._reaper.cancelling():
+            self._reaper.cancel()
+        current = asyncio.current_task()
+        for st in self._backends.values():
+            task = st._operation
+            if task is not None and task is not current and not task.done() and not task.cancelling():
+                task.cancel()
+
     async def shutdown(self) -> None:
+        self.begin_shutdown()
         task = self._reaper
-        self._reaper = None
-        await drain_cancelled(task, "application backend reaper")
-        await self.stop_all()
+        failures: list[str] = []
+        if task is not None:
+            done, _ = await asyncio.wait({task}, timeout=_TASK_DRAIN_SECONDS)
+            if done:
+                await drain_cancelled(task, "application backend reaper")
+                self._reaper = None
+            else:
+                failures.append("application backend reaper did not exit")
+        operations = {st._operation for st in self._backends.values() if st._operation is not None}
+        spawns = {st._spawn for st in self._backends.values() if st._spawn is not None}
+        owners = operations | spawns
+        pending: set[asyncio.Task[Any]] = set()
+        if owners:
+            _, pending = await asyncio.wait(
+                owners, timeout=_TERM_TIMEOUT_SECONDS + _KILL_TIMEOUT_SECONDS + _TASK_DRAIN_SECONDS,
+            )
+        for app_id in list(self._backends):
+            st = self._backends[app_id]
+            if st._operation in pending or st._spawn in pending:
+                failures.append(f"Application {app_id} startup cleanup did not exit")
+                continue
+            if st._spawn is not None:
+                # A second cancellation can retire its waiter before the
+                # process handle arrives. The state still owns that spawn.
+                if st._spawn.cancelled():
+                    failures.append(f"Application {app_id} spawn exit unconfirmed")
+                    continue
+                try:
+                    st.process = st._spawn.result()
+                    st.pid = st.process.pid
+                except Exception as exc:
+                    failures.append(f"Application {app_id} spawn failed: {exc}")
+                    continue
+                st._spawn = None
+            try:
+                await asyncio.wait_for(st.lock.acquire(), timeout=_TASK_DRAIN_SECONDS)
+            except TimeoutError:
+                failures.append(f"Application {app_id} stop lock did not become available")
+                continue
+            try:
+                await self._stop_state(st)
+            except Exception as exc:
+                failures.append(str(exc))
+            finally:
+                st.lock.release()
+        if failures:
+            raise RuntimeError("Application backend shutdown incomplete: " + "; ".join(failures))
 
 
 def _kill_group(proc: asyncio.subprocess.Process, sig: int = signal.SIGKILL) -> None:
@@ -459,7 +602,8 @@ def _kill_group(proc: asyncio.subprocess.Process, sig: int = signal.SIGKILL) -> 
     worker running with no parent.
     """
     with contextlib.suppress(Exception):
-        os.killpg(os.getpgid(proc.pid), sig)
+        # The captured pid is also its group id, even after the leader exits.
+        os.killpg(proc.pid, sig)
 
 
 backend_supervisor = BackendSupervisor()

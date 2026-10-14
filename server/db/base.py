@@ -6,9 +6,11 @@ import logging
 import sqlite3
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from typing import Any
+from functools import wraps
+from typing import Any, ParamSpec, TypeVar
 
 import aiosqlite
 
@@ -16,6 +18,20 @@ from ..config import settings
 from ..monitor import Event as _MonEvent
 from ..monitor import record as _mon_record
 from .schema import _DEFAULT_MCP_SERVERS_JSON, _SCHEMA
+
+P = ParamSpec("P")
+T = TypeVar("T")
+
+
+def serialized_write[**P, T](method: Callable[P, Awaitable[T]]) -> Callable[P, Awaitable[T]]:
+    """Keep one connection's write/commit bookkeeping in the same operation."""
+    @wraps(method)
+    async def guarded(*args: P.args, **kwargs: P.kwargs) -> T:
+        database: Any = args[0]
+        async with database._writing():
+            return await method(*args, **kwargs)
+    return guarded
+
 
 logger = logging.getLogger(__name__)
 
@@ -287,6 +303,8 @@ class DatabaseBase:
          "REFERENCES sessions(id) ON DELETE SET NULL"),
         ("sessions", "delegation_request",
          "ALTER TABLE sessions ADD COLUMN delegation_request TEXT"),
+        ("sessions", "delegation_state",
+         "ALTER TABLE sessions ADD COLUMN delegation_state TEXT"),
         # native-subagents.md §6 — '[]' means "the CLI's built-ins only".
         ("agents", "subagents",
          "ALTER TABLE agents ADD COLUMN subagents TEXT NOT NULL DEFAULT '[]'"),
@@ -360,9 +378,25 @@ class DatabaseBase:
         self._closed: bool = False
         self._pending_appends: int = 0
         self._last_flush: float = time.monotonic()
+        self._write_lock = asyncio.Lock()
+        self._close_lock = asyncio.Lock()
+        self._write_owner: asyncio.Task[Any] | None = None
         # Work that has to unwind before the connection goes away; see
         # `add_close_hook`.
         self._close_hooks: list[Callable[[], Awaitable[None]]] = []
+
+    @asynccontextmanager
+    async def _writing(self) -> AsyncIterator[None]:
+        task = asyncio.current_task()
+        if self._write_owner is task:
+            yield
+            return
+        async with self._write_lock:
+            self._write_owner = task
+            try:
+                yield
+            finally:
+                self._write_owner = None
 
     async def initialize(self) -> None:
         self._conn = await aiosqlite.connect(self._db_path)
@@ -484,6 +518,13 @@ class DatabaseBase:
 
         for table, column, ddl in self._LATE_COLUMN_MIGRATIONS:
             await self._add_column(table, column, ddl)
+
+        await self._add_column("messages", "runtime_metadata", "ALTER TABLE messages ADD COLUMN runtime_metadata TEXT")
+        await self._add_column("messages", "terminal_request_id", "ALTER TABLE messages ADD COLUMN terminal_request_id TEXT")
+        await self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS messages_terminal_request "
+            "ON messages(session_id, terminal_request_id) WHERE terminal_request_id IS NOT NULL"
+        )
 
         await self._backfill_fork_owners()
 
@@ -914,8 +955,8 @@ class DatabaseBase:
         unwinds normally.
 
         Hooks run in reverse registration order, like a stack of context
-        managers, and a hook that raises is logged rather than allowed to leave
-        the connection open.
+        managers. A failed hook keeps the resource open and remains registered
+        so a later close can confirm teardown before retiring the connection.
         """
         self._close_hooks.append(hook)
 
@@ -935,23 +976,35 @@ class DatabaseBase:
         The commit below goes through `self.conn` rather than
         `_ensure_connected`, so closing can still flush what it has to.
         """
-        hooks, self._close_hooks = list(self._close_hooks), []
-        for hook in reversed(hooks):
-            try:
-                await hook()
-            except Exception:
-                logger.exception("close hook failed")
-        self._closed = True
-        if self._conn:
-            if self._dirty:
-                await self.conn.commit()
-                self._dirty = False
-            await self.conn.close()
-            self._conn = None
+        async with self._close_lock:
+            failures: list[Exception] = []
+            for hook in reversed(tuple(self._close_hooks)):
+                try:
+                    await hook()
+                except Exception as error:
+                    logger.exception("Database teardown remains unconfirmed")
+                    failures.append(error)
+                else:
+                    self._close_hooks.remove(hook)
+            if failures:
+                raise RuntimeError("Database teardown remains unconfirmed; connection kept open") from failures[0]
+            async with self._writing():
+                if not self._conn:
+                    return
+                await self._flush_locked()
+                self._closed = True
+                await self.conn.close()
+                self._conn = None
 
     async def flush(self) -> None:
         """Commit pending writes."""
         await self._ensure_connected()
+        async with self._writing():
+            await self._ensure_connected()
+            await self._flush_locked()
+
+    async def _flush_locked(self) -> None:
+        """Acknowledge the batch while append/touch/close cannot alter it."""
         if self._dirty:
             await self.conn.commit()
             self._dirty = False
@@ -986,7 +1039,7 @@ class DatabaseBase:
             self._pending_appends >= _FLUSH_EVERY_APPENDS
             or (time.monotonic() - self._last_flush) >= _FLUSH_AFTER_SECONDS
         ):
-            await self.flush()
+            await self._flush_locked()
 
     @property
     def conn(self) -> aiosqlite.Connection:

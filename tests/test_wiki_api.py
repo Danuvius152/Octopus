@@ -77,6 +77,7 @@ async def client(tmp_path, monkeypatch):
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     app.dependency_overrides[get_session_manager] = lambda: manager
     async with AsyncClient(
@@ -1472,11 +1473,11 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
         return Runtime()
 
     monkeypatch.setattr(harness, "create_run", create)
-    async for _ in session_manager.send_message(
+    async for _ in session_manager._execute_claimed_request(
         session.id, "明确查询", wiki_mode="read"
     ):
         pass
-    async for _ in session_manager.send_message(session.id, "普通任务"):
+    async for _ in session_manager._execute_claimed_request(session.id, "普通任务"):
         pass
     assert seen == [(True, True), (False, False)]
     response = await client.get(

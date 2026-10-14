@@ -44,6 +44,7 @@ async def two_accounts(tmp_path, monkeypatch):
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
     auth_router.set_db(db)
     agents_router.set_manager(AgentManager(db))
@@ -82,6 +83,7 @@ async def two_accounts(tmp_path, monkeypatch):
         }
     await db.close()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
 
 
 def _as(token: str) -> dict[str, str]:
@@ -181,6 +183,7 @@ async def test_owned_fork_survives_interrupt_refresh_and_restart(
         # Reload from persisted rows as a restart would, then use the browser's
         # account-scoped list/detail paths. Neither path may hide this fork.
         session_manager.sessions.clear()
+        session_manager._admission_closed = False
         await session_manager.initialize(ctx["db"])
         live = (await ctx["client"].get("/api/sessions", headers=headers)).json()
         assert fork_id in {s["id"] for s in live}

@@ -49,7 +49,9 @@ class SubagentUpdate:
 
     task_id: str                     # the harness's own id for the run
     tool_use_id: str | None = None   # the parent tool call it belongs to
-    status: str = "running"          # running | completed | failed
+    tool_call_id: str | None = None
+    status: str = "running"          # running | completed | failed | cancelled | interrupted | unknown
+    stop_reason: str | None = None
     name: str = ""                   # "Explore", "general-purpose", a thread id…
     description: str = ""            # what it is doing right now
     prompt: str = ""                 # the brief (first observation only)
@@ -75,13 +77,15 @@ class SubagentUpdate:
             return SubagentUpdate(
                 **{
                     **self.__dict__,
-                    "steps": [self.description] if self.description else [],
+                    "steps": self.steps or ([self.description] if self.description else []),
                 }
             )
         return SubagentUpdate(
             task_id=self.task_id or older.task_id,
             tool_use_id=self.tool_use_id or older.tool_use_id,
+            tool_call_id=self.tool_call_id or older.tool_call_id,
             status=self.status or older.status,
+            stop_reason=self.stop_reason or older.stop_reason,
             name=self.name or older.name,
             description=self.description or older.description,
             prompt=self.prompt or older.prompt,
@@ -95,7 +99,7 @@ class SubagentUpdate:
                 if self.duration_ms is not None
                 else older.duration_ms
             ),
-            steps=_extend_steps(older.steps, self.description),
+            steps=self.steps or _extend_steps(older.steps, self.description),
         )
 
 
@@ -134,6 +138,8 @@ class HarnessEvent:
     tool_name: str | None = None
     tool_input: dict[str, Any] | None = None
     tool_use_id: str | None = None
+    runtime_metadata: dict[str, Any] | None = None
+    identity_checked: bool = field(default=False, repr=False)
     is_error: bool = False
     error_code: str | None = None
     cost: float | None = None

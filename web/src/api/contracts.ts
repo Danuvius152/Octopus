@@ -3450,6 +3450,10 @@ export interface components {
              * @default false
              */
             paused: boolean;
+            /** Recording Failure */
+            recording_failure?: {
+                [key: string]: string;
+            } | null;
             /** Active Request Id */
             active_request_id?: string | null;
             /**
@@ -3697,6 +3701,7 @@ export interface components {
             } | null;
             /** Tool Use Id */
             tool_use_id?: string | null;
+            runtime_metadata?: components["schemas"]["RuntimeMetadata"] | null;
             /** Is Error */
             is_error?: boolean | null;
             /** Session Id */
@@ -4066,6 +4071,16 @@ export interface components {
             aliases?: string[] | null;
             /** Item Doc */
             item_doc?: string | null;
+        };
+        /** RuntimeMetadata */
+        RuntimeMetadata: {
+            /** Request Id */
+            request_id: string;
+            /** Attempt Id */
+            attempt_id: string;
+            /** Tool Call Id */
+            tool_call_id: string;
+            receipt?: components["schemas"]["ToolReceipt"] | null;
         };
         /**
          * ScheduleFromTextRequest
@@ -4533,11 +4548,16 @@ export interface components {
             task_id: string;
             /** Tool Use Id */
             tool_use_id?: string | null;
+            /** Tool Call Id */
+            tool_call_id?: string | null;
             /**
              * Status
              * @default running
+             * @enum {string}
              */
-            status: string;
+            status: "running" | "completed" | "failed" | "cancelled" | "interrupted" | "unknown";
+            /** Stop Reason */
+            stop_reason?: string | null;
             /**
              * Name
              * @default
@@ -4621,6 +4641,20 @@ export interface components {
             reencrypted: {
                 [key: string]: number;
             };
+        };
+        /** ToolReceipt */
+        ToolReceipt: {
+            /**
+             * Kind
+             * @enum {string}
+             */
+            kind: "bg" | "delegation";
+            /** Task Id */
+            task_id?: string | null;
+            /** Delegation Id */
+            delegation_id?: string | null;
+            /** Work Id */
+            work_id?: string | null;
         };
         /** UpdateConnectorRequest */
         UpdateConnectorRequest: {
@@ -6093,6 +6127,7 @@ export interface operations {
     resume_dispatch_api_sessions__session_id__dispatch_resume_post: {
         parameters: {
             query?: {
+                resume_queue?: boolean;
                 token?: string | null;
             };
             header?: never;

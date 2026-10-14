@@ -17,7 +17,9 @@ def _message_to_jsonl_line(
     msg: MessageContent, session_id: str, cwd: str
 ) -> dict | None:
     """Convert a single MessageContent back to a Claude Code JSONL line."""
-    base = {"sessionId": session_id, "cwd": cwd}
+    base: dict = {"sessionId": session_id, "cwd": cwd}
+    if msg.runtime_metadata:
+        base["octopusRuntime"] = msg.runtime_metadata.model_dump()
 
     if msg.role == "user" and msg.type == "text":
         return {

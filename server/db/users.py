@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import DatabaseBase
+from .base import DatabaseBase, serialized_write
 
 
 def _row_to_user(row: Any) -> dict[str, Any]:
@@ -38,6 +38,7 @@ _USER_COLUMNS = (
 class UsersMixin(DatabaseBase):
     # -- users --------------------------------------------------------------
 
+    @serialized_write
     async def create_user(
         self,
         *,
@@ -88,6 +89,7 @@ class UsersMixin(DatabaseBase):
     async def count_users(self) -> int:
         return await self._count("SELECT COUNT(*) FROM users")
 
+    @serialized_write
     async def update_user_field(self, user_id: str, **fields: Any) -> None:
         """Set named columns. Same shape as `update_session_field` — the
         caller names what it means and the SQL is assembled once."""
@@ -103,6 +105,7 @@ class UsersMixin(DatabaseBase):
 
     # -- ownership ----------------------------------------------------------
 
+    @serialized_write
     async def adopt_orphan_rows(self, user_id: str) -> dict[str, int]:
         """Give every unowned row to `user_id`. Returns what moved, per table.
 
@@ -139,6 +142,7 @@ class UsersMixin(DatabaseBase):
 
     # -- invites ------------------------------------------------------------
 
+    @serialized_write
     async def create_invite(
         self,
         *,
@@ -190,6 +194,7 @@ class UsersMixin(DatabaseBase):
                 out.append(invite)
         return out
 
+    @serialized_write
     async def claim_invite(self, code: str) -> bool:
         """Consume one use, atomically.
 
@@ -206,6 +211,7 @@ class UsersMixin(DatabaseBase):
         await self.conn.commit()
         return (cursor.rowcount or 0) > 0
 
+    @serialized_write
     async def revoke_invite(self, code: str, *, at: str) -> None:
         await self._ensure_connected()
         await self.conn.execute(
@@ -216,6 +222,7 @@ class UsersMixin(DatabaseBase):
 
     # -- tokens -------------------------------------------------------------
 
+    @serialized_write
     async def store_token(
         self,
         *,
@@ -255,6 +262,21 @@ class UsersMixin(DatabaseBase):
             "revoked_at": row[7],
         }
 
+    async def get_token_user(self, token_hash: str) -> dict[str, Any] | None:
+        """Read the bearer and its current account together, without a write."""
+        await self._ensure_connected()
+        columns = ", ".join(f"u.{column.strip()}" for column in _USER_COLUMNS.split(","))
+        cursor = await self.conn.execute(
+            f"SELECT {columns}, t.revoked_at, t.expires_at "
+            "FROM auth_tokens AS t JOIN users AS u ON u.id = t.user_id "
+            "WHERE t.token_hash = ?",
+            (token_hash,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {"user": _row_to_user(row), "revoked_at": row[8], "expires_at": row[9]}
+
     async def list_tokens(self, user_id: str) -> list[dict[str, Any]]:
         await self._ensure_connected()
         cursor = await self.conn.execute(
@@ -270,6 +292,7 @@ class UsersMixin(DatabaseBase):
                 out.append(token)
         return out
 
+    @serialized_write
     async def touch_token(self, token_hash: str, *, at: str) -> None:
         """Record that a bearer was just used.
 
@@ -285,6 +308,7 @@ class UsersMixin(DatabaseBase):
         )
         self._dirty = True
 
+    @serialized_write
     async def revoke_token(self, token_hash: str, *, at: str) -> None:
         await self._ensure_connected()
         await self.conn.execute(
@@ -294,6 +318,7 @@ class UsersMixin(DatabaseBase):
         )
         await self.conn.commit()
 
+    @serialized_write
     async def revoke_all_tokens(self, user_id: str, *, at: str, keep: str | None = None) -> int:
         """Sign a user out everywhere. `keep` spares the caller's own bearer,
         which is what "change my password" wants: other devices out, this one

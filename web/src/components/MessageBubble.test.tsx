@@ -15,6 +15,40 @@ import { useSessionStore } from "../stores/sessionStore";
 
 afterEach(cleanup);
 
+it("keeps a native follow-up card separate from the same helper's earlier result", () => {
+  const sessionId = "native-follow-up";
+  useSessionStore.getState().setSubagents(sessionId, [
+    {
+      task_id: "child-thread", tool_call_id: "spawn-call", tool_use_id: "raw-spawn",
+      status: "completed", name: "Auditor", description: "Review complete",
+      prompt: "First review", summary: "Earlier verified answer", steps: [],
+    },
+    {
+      task_id: "child-thread", tool_call_id: "follow-up-call", tool_use_id: "native-follow-up",
+      status: "interrupted", stop_reason: "parent_done", name: "Auditor",
+      description: "Reviewing changed file", prompt: "Review the change", summary: "", steps: [],
+    },
+  ]);
+  const { getByText, getAllByText, container } = render(<>
+    <MessageBubble sessionId={sessionId} message={{
+      role: "assistant", type: "tool_use", tool_name: "subagent:spawn_agent", tool_use_id: "raw-spawn",
+      tool_input: { prompt: "First review" },
+      runtime_metadata: { request_id: "request", attempt_id: "attempt", tool_call_id: "spawn-call" },
+    }} />
+    <MessageBubble sessionId={sessionId} message={{
+      role: "assistant", type: "tool_use", tool_name: "subagent:followup_task", tool_use_id: "native-follow-up",
+      tool_input: { native_thread_id: "child-thread", agent_path: "auditor" },
+      runtime_metadata: { request_id: "request", attempt_id: "attempt", tool_call_id: "follow-up-call" },
+    }} />
+  </>);
+  expect(getByText("subagent:followup_task")).toBeTruthy();
+  expect(getAllByText("Earlier verified answer")).toHaveLength(1);
+  expect(getByText("done")).toBeTruthy();
+  expect(getByText("interrupted")).toBeTruthy();
+  expect(getByText("Parent turn ended before completion")).toBeTruthy();
+  expect(container.querySelectorAll(".subagent-card")).toHaveLength(2);
+});
+
 it("renders a failed result with its cause instead of Done", () => {
   const { getByText, queryByText } = render(
     <MessageBubble sessionId="s1" message={{

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import signal
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -94,6 +95,161 @@ async def _make_session_row(db, session_id: str, working_dir: str) -> None:
         working_dir=working_dir,
         created_at="2026-05-18T00:00:00Z",
     )
+
+
+async def test_shutdown_drains_group_kill_created_while_stopping(manager, db, tmp_path, monkeypatch):
+    from server import bg_tasks
+
+    await _make_session_row(db, "shutdown", str(tmp_path))
+    signals = []
+    real_killpg = bg_tasks.os.killpg
+
+    def signal_group(pgid, sig):
+        signals.append(sig)
+        real_killpg(pgid, sig)
+
+    monkeypatch.setattr(bg_tasks.os, "killpg", signal_group)
+    monkeypatch.setattr(bg_tasks, "_TERM_GRACE_SECONDS", 0.03, raising=False)
+    record = await manager.start_task(
+        session_id="shutdown", command="sleep 60", working_dir=str(tmp_path),
+    )
+    await manager.shutdown()
+    assert signal.SIGKILL in signals, "shutdown returned with an owned group-kill still pending"
+    assert (await manager.get_task(record.id)).status == "interrupted"
+    with pytest.raises(BgTaskError, match="shutting down"):
+        await manager.start_task(session_id="shutdown", command="true", working_dir=str(tmp_path))
+
+
+async def test_shutdown_owns_cancelled_startup_until_its_process_handle_arrives(manager, db, tmp_path, monkeypatch):
+    from server import bg_tasks
+
+    await _make_session_row(db, "spawn-race", str(tmp_path))
+    real_spawn = asyncio.create_subprocess_exec
+    spawned = asyncio.Event()
+    release_handle = asyncio.Event()
+    processes = []
+
+    async def delayed_spawn(*args, **kwargs):
+        proc = await real_spawn(*args, **kwargs)
+        processes.append(proc)
+        spawned.set()
+        await release_handle.wait()
+        return proc
+
+    monkeypatch.setattr(bg_tasks.asyncio, "create_subprocess_exec", delayed_spawn)
+    monkeypatch.setattr(bg_tasks, "_TERM_GRACE_SECONDS", 0.03)
+    startup = asyncio.create_task(manager.start_task(
+        session_id="spawn-race", command="sleep 60", working_dir=str(tmp_path),
+    ))
+    cleanup = None
+    try:
+        await spawned.wait()
+        manager.begin_shutdown()
+        cleanup = asyncio.create_task(manager.shutdown())
+        await asyncio.sleep(0)
+        assert not cleanup.done()
+        release_handle.set()
+        await cleanup
+        assert (await asyncio.gather(startup, return_exceptions=True))[0].__class__ is asyncio.CancelledError
+        assert processes[0].returncode is not None
+        assert await manager.list_tasks("spawn-race") == []
+    finally:
+        release_handle.set()
+        await asyncio.gather(startup, *(task for task in [cleanup] if task is not None), return_exceptions=True)
+
+
+async def test_shutdown_retains_background_process_until_exit_is_confirmed(manager, db, tmp_path, monkeypatch):
+    from server import bg_tasks
+
+    class UnconfirmedProcess:
+        pid = 2**30
+        returncode = None
+
+        def __init__(self):
+            self.stdout = asyncio.StreamReader()
+            self.stderr = asyncio.StreamReader()
+            self.exited = asyncio.Event()
+
+        async def wait(self):
+            await self.exited.wait()
+            return self.returncode
+
+    proc = UnconfirmedProcess()
+
+    async def spawn(*args, **kwargs):
+        return proc
+
+    monkeypatch.setattr(bg_tasks.asyncio, "create_subprocess_exec", spawn)
+    monkeypatch.setattr(bg_tasks.os, "killpg", lambda pgid, sig: None)
+    monkeypatch.setattr(bg_tasks, "_TERM_GRACE_SECONDS", 0.03)
+    monkeypatch.setattr(bg_tasks, "_ORCHESTRATION_DRAIN_SECONDS", 0.03)
+    await _make_session_row(db, "unconfirmed", str(tmp_path))
+    record = await manager.start_task(
+        session_id="unconfirmed", command="synthetic task", working_dir=str(tmp_path),
+    )
+    try:
+        with pytest.raises(RuntimeError, match="shutdown incomplete"):
+            await asyncio.wait_for(manager.shutdown(), 0.3)
+        assert (await manager.get_task(record.id)).status == "running"
+        proc.returncode = -9
+        proc.stdout.feed_eof()
+        proc.stderr.feed_eof()
+        proc.exited.set()
+        await manager.shutdown()
+        assert (await manager.get_task(record.id)).status == "interrupted"
+    finally:
+        proc.returncode = -9
+        proc.stdout.feed_eof()
+        proc.stderr.feed_eof()
+        proc.exited.set()
+
+
+@pytest.mark.parametrize("blocked_callback", ["broadcast", "delivery"])
+async def test_shutdown_retains_completed_task_until_its_callback_finishes(db, tmp_path, monkeypatch, blocked_callback):
+    from server import bg_tasks
+
+    await _make_session_row(db, "callback", str(tmp_path))
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    recorded = asyncio.Event()
+    mgr = BgTaskManager()
+
+    async def complete_callback(task_id):
+        entered.set()
+        await release.wait()
+        await db.update_bg_task(task_id, stdout="recorded after callback release")
+        recorded.set()
+
+    async def broadcast(event):
+        if blocked_callback == "broadcast" and event["type"] == "bg_completed":
+            await complete_callback(event["task_id"])
+
+    async def deliver(record):
+        if blocked_callback == "delivery":
+            await complete_callback(record.id)
+
+    mgr.bind(db, deliver, broadcast)
+    await mgr.start()
+    monkeypatch.setattr(bg_tasks, "_ORCHESTRATION_DRAIN_SECONDS", 0.03)
+    record = await mgr.start_task(
+        session_id="callback", command="printf finished", working_dir=str(tmp_path),
+    )
+    try:
+        await asyncio.wait_for(entered.wait(), 1.0)
+        completed = await mgr.get_task(record.id)
+        assert completed.status == "completed" and completed.exit_code == 0
+        with pytest.raises(RuntimeError, match="shutdown incomplete"):
+            await asyncio.wait_for(mgr.shutdown(), 0.3)
+        assert not recorded.is_set()
+        release.set()
+        await asyncio.wait_for(recorded.wait(), 1.0)
+        await mgr.shutdown()
+        completed = await mgr.get_task(record.id)
+        assert completed.status == "completed" and completed.stop_reason is None
+        assert completed.stdout == "recorded after callback release"
+    finally:
+        release.set()
+        await asyncio.wait_for(mgr.shutdown(), 1.0)
 
 
 async def test_start_task_returns_immediately_and_completes(manager, db, tmp_path):
@@ -607,6 +763,7 @@ async def api_client(tmp_path, monkeypatch):
     db = Database(":memory:")
     await db.initialize()
     session_manager.sessions.clear()
+    session_manager._admission_closed = False
     await session_manager.initialize(db)
 
     # The subprocess is the agreed system boundary. Delivery still runs the

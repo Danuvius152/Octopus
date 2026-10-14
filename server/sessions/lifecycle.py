@@ -14,12 +14,12 @@ import uuid
 from datetime import UTC, datetime
 from typing import Any
 
-from ..aio import stopped_within
 from ..attachments import delete_session_attachments
 from ..large_prompts import delete_session_large_prompts
 from ..models import MessageContent, SessionDetail, SessionStatus
 from ..workspace import confine
 from .base import (
+    _BACKEND_RETIRE_TIMEOUT,
     Session,
     SessionManagerBase,
     _session_fork_kwargs,
@@ -212,18 +212,59 @@ class LifecycleMixin(SessionManagerBase):
         if old is None:
             raise ValueError(f"Session {session_id} not found")
 
-        # Stop the live work, if any, before yanking the in-memory state.
-        if old._inner_task and not old._inner_task.done():
-            old._inner_task.cancel()
-        if old._active_task and not old._active_task.done():
-            old._active_task.cancel()
-        if old._backend:
-            await stopped_within(
-                old._backend.stop(), f"session {old.id} backend", timeout=2.0
-            )
-            self._forget_backend(old)
-        old._pending_queue.clear()
-        await self._close_session_questions(old, reason="archived")
+        task = asyncio.create_task(self._archive_live_session(old, replace=replace),
+                                   name=f"archive-session-{session_id}")
+        self._own_task(task)
+        return await asyncio.shield(task)
+
+    async def _retire_archived_session(self, session: Session, reservation: object) -> None:
+        """Close explicit admission and finish captured work before hiding it."""
+        async with session._dispatch_lock:
+            if self.sessions.get(session.id) is not session:
+                raise ValueError(f"Session {session.id} not found")
+            if session._admission_closed or session._archive_reservation is not None:
+                raise ValueError(f"Session {session.id} is already being archived")
+            if session._recording_blocked is not None:
+                raise ValueError("Result recording must be verified before archiving the session")
+            session._archive_reservation = reservation
+            session._admission_closed = True
+            session._dispatch_paused = True
+            session._steer_open = False
+            self._withdraw_requests(session, [*session._pending_queue, *session._steer_queue], reason="withdrawn")
+            session._pending_queue.clear()
+            session._steer_queue.clear()
+            current = session._current_request
+            if current is not None and not current.started:
+                self._withdraw_requests(session, [current], reason="withdrawn")
+            backend = session._backend
+            if backend is not None:
+                self._retire_backend(session, backend)
+            tasks = {task for task in (session._inner_task, session._active_task)
+                     if task is not None and task is not asyncio.current_task() and not task.done()}
+            for task in tasks:
+                task.cancel()
+        await self._close_session_questions(session, reason="archived")
+        if tasks:
+            _, pending = await asyncio.wait(tasks, timeout=_BACKEND_RETIRE_TIMEOUT)
+            if pending:
+                raise ValueError("Session execution retirement remains unconfirmed")
+        await self._await_backend_retirement(session)
+        if session._recording_blocked is not None:
+            raise ValueError("Result recording must be verified before archiving the session")
+
+    async def _archive_live_session(self, old: Session, *, replace: bool) -> Session | None:
+        reservation = object()
+        try:
+            await self._retire_archived_session(old, reservation)
+            return await self._finish_session_archive(old, replace=replace)
+        finally:
+            if old._archive_reservation is reservation:
+                old._archive_reservation = None
+                if self.sessions.get(old.id) is old:
+                    old._admission_closed = False
+
+    async def _finish_session_archive(self, old: Session, *, replace: bool) -> Session | None:
+        session_id = old.id
 
         # Mark the DB row archived; drop it from the in-memory dict so
         # subsequent list/get calls don't surface it.
@@ -312,6 +353,7 @@ class LifecycleMixin(SessionManagerBase):
             return (
                 self.sessions.get(session_id) is session
                 and not session._dispatch_paused
+                and session._recording_blocked is None
                 and not session._pending_queue
                 and session._current_request is None
                 and not (session._active_task and not session._active_task.done())
@@ -356,38 +398,39 @@ class LifecycleMixin(SessionManagerBase):
 
     async def evict_agent_sessions(self, agent_id: str) -> list[str]:
         """Drop all live sessions owned by an agent from the in-memory map
-        (used when the agent is archived — the DB rows are already flagged
-        archived by `db.archive_agent`). Stops any running turn first.
+        (used before the agent's archive is persisted). Stops any running turn
+        and confirms result recording before removing its live sessions.
         Returns the evicted session ids.
         """
-        evicted: list[str] = []
-        for sid, session in list(self.sessions.items()):
-            if session.agent_id != agent_id:
-                continue
-            if session._inner_task and not session._inner_task.done():
-                session._inner_task.cancel()
-            if session._active_task and not session._active_task.done():
-                session._active_task.cancel()
-            if session._backend:
-                await stopped_within(
-                    session._backend.stop(),
-                    f"session {session.id} backend",
-                    timeout=2.0,
+        task = asyncio.create_task(self._evict_agent_sessions(agent_id),
+                                   name=f"evict-agent-sessions-{agent_id}")
+        self._own_task(task)
+        return await asyncio.shield(task)
+
+    async def _evict_agent_sessions(self, agent_id: str) -> list[str]:
+        sessions = [session for session in self.sessions.values() if session.agent_id == agent_id]
+        if any(session._recording_blocked is not None for session in sessions):
+            raise ValueError("Result recording must be verified before archiving the agent")
+        reservations = {session.id: object() for session in sessions}
+        try:
+            for session in sessions:
+                await self._retire_archived_session(session, reservations[session.id])
+            # A storage failure in any captured request keeps every session
+            # available for verification, instead of partially evicting them.
+            for session in sessions:
+                self.sessions.pop(session.id, None)
+                await self._broadcast(
+                    {"type": "session_archived", "old_session_id": session.id,
+                     "new_session_id": None, "name": session.name},
+                    user_id=session.user_id,
                 )
-                self._forget_backend(session)
-            session._pending_queue.clear()
-            self._cancel_all_question_timers(session)
-            self.sessions.pop(sid, None)
-            evicted.append(sid)
-            await self._broadcast(
-                {
-                    "type": "session_archived",
-                    "old_session_id": sid,
-                    "new_session_id": None,
-                    "name": session.name,
-                }
-            )
-        return evicted
+            return [session.id for session in sessions]
+        finally:
+            for session in sessions:
+                if session._archive_reservation is reservations[session.id]:
+                    session._archive_reservation = None
+                    if self.sessions.get(session.id) is session:
+                        session._admission_closed = False
 
     async def list_archived_sessions(
         self, user_id: str | None = None
@@ -551,16 +594,22 @@ class LifecycleMixin(SessionManagerBase):
         session = self.sessions.pop(session_id, None)
         if session is None:
             return False
+        self._withdraw_requests(session, [*session._pending_queue, *session._steer_queue], reason="deleted")
+        if session._current_request is not None and not session._current_request.started:
+            self._withdraw_requests(session, [session._current_request], reason="deleted")
         session._pending_queue.clear()
+        session._steer_queue.clear()
         await self._close_session_questions(session, reason="deleted")
         if session._inner_task and not session._inner_task.done():
             session._inner_task.cancel()
         if session._active_task and not session._active_task.done():
             session._active_task.cancel()
         if session._backend:
-            await stopped_within(
-                session._backend.stop(), f"session {session.id} backend"
-            )
+            self._retire_backend(session, session._backend)
+        tasks = [task for task in (session._inner_task, session._active_task) if task is not None]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        await self._await_backend_retirement(session)
         # Blit attachment files into descendant forks BEFORE removing this
         # session's dir, so the read-time fallback stays valid (§5.5). Done
         # before the DB delete so the descendant message rows are still
