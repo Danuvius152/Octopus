@@ -160,11 +160,19 @@ journalctl --user -u octopus -n 100 --no-pager
 `.venv` 和 `web/node_modules` 复用开发目录中的本机配置与依赖；账户数据和
 Codex 登录位置不变。修改这些共享配置或依赖仍会影响正式服务。
 
-2026-10-13 的日志修复以 `b083efe599402836f7787319bb4a364f4a975cd3` 合并到
-main，并单独上线到服务工作树。这次部署仅交付日志修复，没有创建版本 tag
-或 GitHub Release；整个版本的 release 仍需等待 Wiki 验收。Wiki 未提交代码
-与测试仍保留在开发目录；线上 Wiki 数据结构保持 schema 7，没有上线
-`readable_body` 升级。目录名 `releases` 只用于隔离服务源码。
+2026-10-14 按 Q31 将六个已验证的运行时修补提交合并到 main，合并提交为
+`01c16a699727d46a6b70c9e1362f42abb353f3cc`。当前服务源码工作树是
+`/home/jack/.octopus/releases/main-01c16a699727`，`current` 指向它。合并保留
+main 的已提交 Wiki 开发记录，六份未提交 Wiki 文档仍在开发目录，没有纳入
+服务快照。此次没有创建版本 tag 或 GitHub Release；目录名 `releases` 只用于
+隔离服务源码，Wiki 的开发与验收状态见
+[交接记录](plans_new/local-shared-wiki-handoff-20261014.md)。
+
+上线先切换快照并重启后端，在 `/health` 正常后构建该快照的前端，再验证实际
+页面、资源和浏览器。验证通过后，按用户要求删除 `main-b083efe59940` 和
+`main-74eab95fa1f4` 两个旧工作树；`releases` 只保留当前快照与 `current`。
+历史源码仍可从 Git 提交重建。数据库、账户、工作区、Wiki、Codex 登录及共享
+配置和依赖未删除；上线前数据库备份保存在 `~/.octopus/backups/`。
 
 ## 同步原作者更新
 

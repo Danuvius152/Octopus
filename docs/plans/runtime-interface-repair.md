@@ -1,6 +1,6 @@
 # 运行时接口修补：接管、记录与调用身份
 
-> **Status:** completed — Q13–Q30 中已确认实施的修补全部通过本机验收，包括原生助手事件、调用身份与真实结束状态；Q25 脱敏未纳入，main 合并和服务发布由用户决定，尚未部署。
+> **Status:** completed — Q13–Q30 中已确认实施的修补全部通过本机验收；按 Q31 合并 main 并上线 `01c16a6` 独立服务快照，已验证并清理两个旧 release；Q25 脱敏未纳入。
 
 ## 1. 依据和判断
 
@@ -367,6 +367,24 @@ stdout 使用本机已验收格式中按分配顺序递增的 `item_N`，保留�
 | Claude 实机 | 按用户要求未运行，不计作通过 | 用户明确“claude依旧不测，发布由我来定” |
 
 当前 `origin/main` 为 `7db94a9`，相对原基线只新增 Wiki 文档，没有运行时代码变化；分支合并树预检无冲突。七份并行 Wiki 开发文档保留在工作区，不进入本次提交。提交和推送沿用 `fix/runtime-interface-repair`，不合并 main、不发布、不重启服务。Claude live 按约定未验收，不计为通过。
+
+### 9.5 Q31 main 合并、服务上线与旧快照清理
+
+用户确认：将六个已验证修补提交合并到 `/home/jack/Octopus` 的 main，保留六份未提交 Wiki 文档；推送 main，用已提交代码创建独立服务快照，切换、重启和验证；成功后清理两个旧 release，不创建版本 tag/GitHub Release，不删除数据库、Wiki、账户、登录或共享依赖。
+
+合并提交 `01c16a699727d46a6b70c9e1362f42abb353f3cc` 保留 `7db94a9` 的已提交 Wiki 记录。合并后的全部非 Wiki 源码、测试和工具与已完成验收的 `eaa8f1d` 一致，24 个最终源码/测试/fixture SHA-256 全部匹配；此前 21 项 Codex 实机和 1 项浏览器验收对应相同代码。六份用户 Wiki 文档合并前另存副本，合并及部署后逐字核验未改变，没有纳入提交或服务快照。
+
+| 检查 | 结果 | 证据 |
+| --- | --- | --- |
+| main 完整离线门禁 | 8 项全部通过；后端 2713 passed、46 real deselected，306.43 秒；前端 399 passed；类型、lint、契约和索引通过 | `/tmp/octopus-q31-main-check.log` |
+| main 纯 UI E2E | 76 passed，44.8 秒，零失败、零跳过 | `/tmp/octopus-q31-main-ui.log` |
+| 现有数据库升级演练 | 只读一致快照上执行新代码迁移；完整性、外键通过，账户、凭据、会话、消息、应用和任务数量保留 | `/tmp/octopus-q31-upgrade-rehearsal/result.json` |
+| 服务启动 | 新进程工作目录为 `releases/main-01c16a699727`；健康和认证状态端点正常，数据库完整性和外键通过 | `/tmp/octopus-q31-deployment.json` |
+| 服务前端 | 在新后端健康后构建；线上 HTML 和全部入口资源与新快照产物逐字节一致 | `/tmp/octopus-q31-service-build.log` |
+| 实际浏览器 | 现有账户登录页面正常，无 JavaScript 异常；未登录、创建账户或发送模型提示 | `/tmp/octopus-q31-live-browser.json` |
+| 旧工作树清理 | 新服务验证成功后删除 `main-b083efe59940` 与 `main-74eab95fa1f4`；仅保留新快照和 `current` | `/tmp/octopus-q31-deployment.json` |
+
+服务源码和构建产物独立，配置与依赖继续复用本机安装。数据库备份单独保存在私有 `~/.octopus/backups/`，未恢复或替换线上数据库；业务数据、登录、Wiki 和共享配置与依赖保留。部署记录的后续文档提交不改变本次已上线代码，也不创建额外 release。
 
 ## 10. What this defers
 
