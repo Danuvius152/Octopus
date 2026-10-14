@@ -88,8 +88,6 @@ class EventsMixin(SessionManagerBase):
         key = update.tool_call_id
         if not key:
             return
-        if not key:
-            return
         session._subagents[key] = update.merged_with(session._subagents.get(key))
         while len(session._subagents) > _MAX_SUBAGENTS_PER_SESSION:
             session._subagents.pop(next(iter(session._subagents)))
@@ -163,6 +161,7 @@ class EventsMixin(SessionManagerBase):
                 "tool_use_id": u.tool_use_id,
                 "tool_call_id": u.tool_call_id,
                 "status": u.status,
+                "stop_reason": u.stop_reason,
                 "name": u.name,
                 "description": u.description,
                 "prompt": u.prompt,

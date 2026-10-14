@@ -2,7 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 
 import { MessageBubble } from "./MessageBubble";
-import { useSessionStore, type BgTask, type Message } from "../stores/sessionStore";
+import { useSessionStore, type BgTask, type Message, type SubagentRun } from "../stores/sessionStore";
 import type { ToolReceipt } from "../api";
 import { handleWsMessage } from "../hooks/useWebSocket";
 
@@ -74,7 +74,7 @@ it("keeps a newly emitted bg call pending until its own receipt arrives", () => 
 it.each(["live", "snapshot"])("keeps native helpers separate under repeated provider IDs in %s state", (mode) => {
   const old = { ...toolUse("native-old"), tool_name: "subagent:spawn_agent" };
   const fresh = { ...toolUse("native-new"), tool_name: "subagent:spawn_agent" };
-  const runs = [
+  const runs: SubagentRun[] = [
     { task_id: "helper-old", tool_use_id: "item_0", tool_call_id: "native-old", status: "completed", name: "First helper", description: "First work", prompt: "First brief", summary: "First answer", steps: [] },
     { task_id: "helper-new", tool_use_id: "item_0", tool_call_id: "native-new", status: "running", name: "Second helper", description: "Second work", prompt: "Second brief", summary: "", steps: [] },
   ];

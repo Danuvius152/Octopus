@@ -118,6 +118,37 @@ describe("SubagentCard", () => {
       "failed"
     );
   });
+
+  it("keeps unfinished evidence readable and identifies a user interruption", () => {
+    useSessionStore.getState().setSubagents("s1", [run({
+      status: "interrupted", stop_reason: "user_stop", summary: "Partial evidence",
+      steps: ["Opened the file", "Compared the references"],
+    })]);
+    const { container } = render(<SubagentCard sessionId="s1" toolCallId="call-1" />);
+    expect(screen.getByText("interrupted")).toBeTruthy();
+    expect(screen.getByText("Stopped by you")).toBeTruthy();
+    expect(screen.getByText("Partial evidence")).toBeTruthy();
+    expect(container.querySelector(".subagent-spinner")).toBeNull();
+    expect(container.querySelector(".text-success")).toBeNull();
+    fireEvent.click(screen.getByRole("button"));
+    expect(screen.getByText("Compared the references")).toBeTruthy();
+  });
+
+  it.each([
+    ["interrupted", "parent_done", "interrupted", "Parent turn ended before completion"],
+    ["interrupted", "parent_error", "interrupted", "Parent execution failed before completion"],
+    ["interrupted", "parent_timeout", "interrupted", "Parent execution timed out"],
+    ["interrupted", "service_shutdown", "interrupted", "Service shut down"],
+    ["cancelled", null, "cancelled", null],
+    ["unknown", null, "unconfirmed", null],
+  ] as const)("shows %s accurately for %s", (status, stop_reason, label, explanation) => {
+    useSessionStore.getState().setSubagents("s1", [run({ status, stop_reason })]);
+    const { container } = render(<SubagentCard sessionId="s1" toolCallId="call-1" />);
+    expect(screen.getByText(label)).toBeTruthy();
+    if (explanation) expect(screen.getByText(explanation)).toBeTruthy();
+    expect(container.querySelector(".subagent-spinner")).toBeNull();
+    expect(container.querySelector(".text-success")).toBeNull();
+  });
 });
 
 describe("the store's sub-agent state", () => {

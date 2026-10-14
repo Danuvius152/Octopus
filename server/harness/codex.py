@@ -103,6 +103,13 @@ Related: `mcp__schedule__list()`, `mcp__schedule__update(schedule_id, \
 enabled=False|…)` (pause rather than delete when the user may want it \
 back), `mcp__schedule__delete(schedule_id)`.
 
+Native helpers created by `spawn_agent` run inside this parent's current \
+turn. Collect every required result before ending the turn, or explicitly \
+cancel the helper and report what was not delivered. A mailbox wait timeout \
+does not mean a helper failed, and helper completion does not mean you have \
+read its answer. Use the existing background commands or named-agent \
+delegations for work that must continue across turns.
+
 Prefer `apply_patch` for substantial text and code edits. Keep bulk file \
 contents out of shell command arguments; use a file tool or smaller writes \
 and verify the reconstructed result. If a command fails with "argument list \
@@ -342,6 +349,20 @@ _COLLAB_DESCRIPTIONS = {
     "close_agent": "closing",
 }
 
+_COLLAB_STATUSES = {
+    "pending_init": ("running", None),
+    "running": ("running", None),
+    "completed": ("completed", None),
+    "failed": ("failed", None),
+    "error": ("failed", None),
+    "errored": ("failed", None),
+    "interrupted": ("interrupted", "native_interrupted"),
+    "shutdown": ("interrupted", "native_shutdown"),
+    "not_found": ("unknown", "native_not_found"),
+    "cancelled": ("cancelled", "native_cancelled"),
+}
+
+
 def _short_thread(thread_id: str) -> str:
     """Codex names a sub-agent by its thread uuid; the card shows a handle."""
     return f"agent {thread_id[:8]}" if thread_id else ""
@@ -367,6 +388,8 @@ class CodexEventParser(EventParser):
         # child thread id -> the `spawn_agent` item that created it, so every
         # later `wait` / `send_input` on that thread updates the same card.
         self._collab_owner: dict[str, str] = {}
+        self._collab_status: dict[str, str] = {}
+        self._collab_completed: set[tuple[str, str]] = set()
         self._activity_last_item = -1
         self._activity_open_items: set[int] = set()
         self._activity_turn_started = False
@@ -486,13 +509,17 @@ class CodexEventParser(EventParser):
         Codex narrates multi-agent work as a sequence of tool calls against
         *child threads*: `spawn_agent` creates one, `wait` blocks on it,
         `send_input` talks to it. Several items therefore describe the same
-        sub-agent, so the card is keyed on the spawning item and the child
-        thread ids are mapped back to it (native-subagents.md §3).
+        sub-agent. Its exact child thread is the task identity, and maps back
+        to the spawning tool call for the card (native-subagents.md §3).
         """
         item_id = str(item.get("id") or "")
         tool = str(item.get("tool") or "agent")
         prompt = str(item.get("prompt") or "")
-        receivers = [str(t) for t in (item.get("receiver_thread_ids") or [])]
+        raw_receivers = item.get("receiver_thread_ids")
+        receivers = (
+            [tid for tid in raw_receivers if isinstance(tid, str) and tid]
+            if isinstance(raw_receivers, list) else []
+        )
         states = item.get("agents_states")
         states = states if isinstance(states, dict) else {}
 
@@ -531,33 +558,58 @@ class CodexEventParser(EventParser):
         if spawning:
             for tid in receivers:
                 self._collab_owner[tid] = item_id
-            targets = [(item_id, receivers[0] if receivers else "")]
+            targets = [(item_id, tid) for tid in receivers]
         else:
             targets = [
-                (self._collab_owner.get(tid, item_id), tid) for tid in receivers
-            ] or [(item_id, "")]
+                (self._collab_owner.get(tid), tid) for tid in receivers
+            ]
 
         for owner, tid in targets:
+            call = (tid, item_id)
+            if call in self._collab_completed:
+                continue
+            if completed and item_id:
+                self._collab_completed.add(call)
             raw_state = states.get(tid)
             state = raw_state if isinstance(raw_state, dict) else {}
             raw_status = str(state.get("status") or "")
-            status = (
-                "completed"
-                if raw_status == "completed"
-                else "failed"
-                if raw_status in ("failed", "error")
-                else "running"
+            status, stop_reason = _COLLAB_STATUSES.get(raw_status, ("unknown", None))
+            previous = self._collab_status.get(tid)
+            accepted_execution = (
+                completed and bool(item_id) and item.get("status") == "completed"
+                and tool in {"spawn_agent", "send_input", "resume_agent"}
             )
+            accepted_continuation = accepted_execution and not spawning
+            if accepted_execution and spawning and not raw_status:
+                status = "running"
+            elif accepted_continuation and raw_status not in {
+                "not_found", "failed", "error", "errored", "interrupted", "shutdown", "cancelled",
+            }:
+                if previous == "running":
+                    status, stop_reason = "unknown", "overlapping_execution"
+                elif previous in {"completed", "failed", "cancelled", "interrupted"}:
+                    status, stop_reason = "running", None
+                else:
+                    status, stop_reason = "unknown", None
+            elif not spawning:
+                if previous in {"completed", "failed", "cancelled", "interrupted"} and status in {"running", "unknown"}:
+                    continue
+                if not raw_status and previous is not None:
+                    continue
+                if status == "running" and previous != "running":
+                    status = "unknown"
+            self._collab_status[tid] = status
             events.append(
                 HarnessEvent(
                     type="subagent",
                     subagent=SubagentUpdate(
-                        task_id=owner,
+                        task_id=tid,
                         tool_use_id=owner,
                         status=status,
+                        stop_reason=stop_reason,
                         name=_short_thread(tid),
                         description=_COLLAB_DESCRIPTIONS.get(tool, tool),
-                        prompt=prompt if spawning and started else "",
+                        prompt=prompt if spawning else "",
                         summary=str(state.get("message") or ""),
                     ),
                     raw=item,

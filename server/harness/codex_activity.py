@@ -1,8 +1,9 @@
-"""Read-only Codex liveness metadata, bound to one captured subprocess.
+"""Read-only Codex activity and observations, bound to one captured subprocess.
 
 Neither tracing lines nor native item contents leave this adapter. A current
 process turn UUID, its stdout thread UUID and the rollout's own session UUID
-must agree before a fresh item completion can touch an attempt clock.
+must agree before metadata can affect the current attempt. Native observations
+carry only identities and lifecycle labels, independently of idle activity.
 """
 from __future__ import annotations
 
@@ -19,6 +20,8 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from .events import HarnessEvent, SubagentUpdate
+
 logger = logging.getLogger(__name__)
 _DIAGNOSTIC_ENV = "error,codex_exec=info,opentelemetry_sdk=off,opentelemetry_otlp=off"
 _ANSI = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -29,10 +32,14 @@ _TRACE = re.compile(
 )
 _TRACE_LEVEL = re.compile(r"^\d{4}-\d{2}-\d{2}T\S+\s+(?:TRACE|DEBUG|INFO|WARN|ERROR)\b", re.I)
 _TURN = re.compile(r"^Sent prompt with event ID: (?P<id>[0-9a-f-]{36})$")
-# Restrict decoding to envelopes known to contain activity metadata. Native
-# response_item bodies (including encrypted/raw reasoning) are never decoded.
-_METADATA = re.compile(rb'^\s*\{\s*(?:"timestamp"\s*:\s*"[^"\\]*"\s*,\s*)?(?:"ordinal"\s*:\s*\d+\s*,\s*)?"type"\s*:\s*"(?P<type>session_meta|event_msg)"')
+# Response bodies remain opaque: only their function header strings are read.
+_METADATA = re.compile(rb'^\s*\{\s*(?:"timestamp"\s*:\s*(?P<timestamp>"[^"\\]*")\s*,\s*)?(?:"ordinal"\s*:\s*\d+\s*,\s*)?"type"\s*:\s*"(?P<type>session_meta|event_msg|response_item)"')
 _ITEM_COMPLETION = re.compile(rb'\s*,\s*"payload"\s*:\s*\{\s*"type"\s*:\s*"item_completed"')
+_TURN_STARTED = re.compile(rb'\s*,\s*"payload"\s*:\s*\{\s*"type"\s*:\s*"task_started"')
+_FUNCTION = re.compile(rb'\s*,\s*"payload"\s*:\s*\{')
+_STRING = rb'"(?:[^"\\]|\\.)*"'
+_HEADER_FIELD = re.compile(rb'\s*(?P<key>' + _STRING + rb')\s*:\s*(?P<value>' + _STRING + rb'|null)\s*(?P<end>[,}])')
+_NATIVE_TOOLS = {"spawn_agent", "followup_task", "send_message", "interrupt_agent"}
 _MAX_LINE = 256 * 1024
 _MAX_READ = 1024 * 1024
 _DISCOVERY_BATCH_SIZE = 1024
@@ -79,9 +86,18 @@ class CodexActivityObserver:
         self._disabled = False
         self._warning: str | None = None
         self._task: asyncio.Task[None] | None = None
-        self._read_task: asyncio.Task[list[float]] | None = None
+        self._read_task: asyncio.Task[tuple[list[float], list[HarnessEvent]]] | None = None
+        self._cursor_lock = asyncio.Lock()
+        self._event_handler: Callable[[list[HarnessEvent]], None] | None = None
+        self._native_turn: str | None = None
+        self._function_headers: dict[str, str] = {}
+        self._observed: dict[tuple[str, str], str] = {}
         self._stderr_continuation = False
         self.matched_records = 0
+
+    def set_event_handler(self, handler: Callable[[list[HarnessEvent]], None]) -> None:
+        """Attach the current run's metadata-only normalized observation sink."""
+        self._event_handler = handler
 
     @property
     def identity_confirmed(self) -> bool:
@@ -92,7 +108,7 @@ class CodexActivityObserver:
         if self._warning is None:
             self._warning = code
             # Codes only: no thread, pathname, diagnostic or native body.
-            logger.warning("Codex supplementary activity unavailable (%s); using stdout activity", code)
+            logger.warning("Codex supplementary metadata unavailable (%s); using stdout observations and activity", code)
 
     def consume_stderr(self, line: str) -> bool:
         """Consume every newly enabled exec diagnostic before any retention."""
@@ -261,11 +277,12 @@ class CodexActivityObserver:
             if re.search(rb'"type"\s*:\s*"item_completed"', line):
                 self._disable("activity_envelope")
             return None
+        if envelope["type"] == b"response_item":
+            return self._function_header(line, envelope.end(), envelope["timestamp"])
         if envelope["type"] == b"event_msg":
-            # Only this event has the lifecycle metadata we consume. Avoid
-            # decoding chat-like agent_message/reasoning-content events.
+            # Neither chat-like messages nor reasoning bodies are decoded.
             suffix = line[envelope.end():]
-            if not _ITEM_COMPLETION.match(suffix):
+            if not (_ITEM_COMPLETION.match(suffix) or _TURN_STARTED.match(suffix)):
                 if re.search(rb'"type"\s*:\s*"item_completed"', suffix):
                     self._disable("activity_envelope")
                 return None
@@ -275,6 +292,125 @@ class CodexActivityObserver:
             self._disable("activity_json")
             return None
         return obj if isinstance(obj, dict) else None
+
+    def _function_header(self, line: bytes, offset: int, timestamp: bytes | None) -> dict[str, Any] | None:
+        payload = _FUNCTION.match(line, offset)
+        if payload is None or timestamp is None:
+            return None
+        # Walk the canonical scalar function header. The arguments string is
+        # skipped lexically, never decoded, stored or interpreted as keys.
+        position = payload.end()
+        fields: dict[str, str] = {}
+        while match := _HEADER_FIELD.match(line, position):
+            key = json.loads(match["key"])
+            if key in fields:
+                return None
+            if key in {"type", "name", "namespace", "call_id"}:
+                value = json.loads(match["value"])
+                if not isinstance(value, str):
+                    return None
+                fields[key] = value
+            if fields.get("type") not in (None, "function_call"):
+                return None
+            if {"type", "name", "namespace", "call_id"} <= fields.keys():
+                if fields["namespace"] != "collaboration" or fields["name"] not in _NATIVE_TOOLS:
+                    return None
+                return {**fields, "type": "function_header", "timestamp": json.loads(timestamp)}
+            if match["end"] == b"}":
+                return None
+            position = match.end()
+        return None
+
+    def _record_header(self, obj: dict[str, Any]) -> None:
+        if obj.get("type") == "event_msg" and obj.get("payload", {}).get("type") == "task_started":
+            self._native_turn = _uuid(obj["payload"].get("turn_id"))
+            return
+        if (obj.get("type") != "function_header" or not self.identity_confirmed
+                or self._native_turn != self._turn):
+            return
+        try:
+            timestamp = datetime.fromisoformat(obj["timestamp"].replace("Z", "+00:00")).timestamp()
+        except (AttributeError, ValueError, TypeError):
+            return
+        identifier = obj.get("call_id")
+        if (not isinstance(identifier, str) or not identifier
+                or timestamp < self._started or timestamp > self._wall() + 2):
+            return
+        name = obj["name"]
+        previous = self._function_headers.get(identifier)
+        if previous is not None and previous != name:
+            self._disable("native_call_identity_conflict")
+            return
+        self._function_headers[identifier] = name
+
+    def _observation(self, obj: dict[str, Any]) -> list[HarnessEvent]:
+        payload = obj.get("payload")
+        if (self._event_handler is None or not self.identity_confirmed
+                or obj.get("type") != "event_msg" or not isinstance(payload, dict)
+                or payload.get("type") != "item_completed"
+                or payload.get("thread_id") != self._thread or payload.get("turn_id") != self._turn):
+            return []
+        item = payload.get("item")
+        if not isinstance(item, dict) or item.get("type") != "SubAgentActivity":
+            return []
+        identifier, kind = item.get("id"), item.get("kind")
+        child = _uuid(item.get("agent_thread_id"))
+        path = item.get("agent_path")
+        started, completed = payload.get("started_at_ms"), payload.get("completed_at_ms")
+        if (not isinstance(identifier, str) or not identifier or child is None
+                or not isinstance(path, str) or not path.startswith("/root/")
+                or kind not in {"started", "interacted", "completed", "interrupted"}
+                or type(started) is not int or type(completed) is not int):
+            self._disable("native_observation_schema")
+            return []
+        if (started / 1000 < self._started or completed < started
+                or completed / 1000 > self._wall() + 2):
+            return []
+        key = (identifier, kind)
+        previous_child = self._observed.get(key)
+        if previous_child is not None:
+            if previous_child != child:
+                self._disable("native_call_identity_conflict")
+            return []
+        tool = self._function_headers.get(identifier)
+        child_turn = None
+        if kind == "completed":
+            prefix = "subagent-completed-"
+            child_turn = _uuid(identifier[len(prefix):]) if identifier.startswith(prefix) else None
+            if child_turn is None:
+                self._disable("native_completion_identity")
+                return []
+        elif kind == "started":
+            if tool not in (None, "spawn_agent"):
+                self._disable("native_call_identity_conflict")
+                return []
+            tool = "spawn_agent"
+        elif kind == "interrupted":
+            if tool != "interrupt_agent":
+                return []
+        elif tool not in {"followup_task", "send_message"}:
+            return []
+        self._observed[key] = child
+        raw = {"native_observation": True, "native_kind": kind,
+               "native_tool": tool, "native_child_turn_id": child_turn,
+               "native_parent_turn_id": self._turn}
+        events: list[HarnessEvent] = []
+        if tool:
+            events.extend([
+                HarnessEvent(type="tool_use", tool_name=f"subagent:{tool}", tool_use_id=identifier,
+                             tool_input={"agent_path": path, "native_thread_id": child}, raw=raw),
+                HarnessEvent(type="tool_result", tool_use_id=identifier,
+                             content=f"{'Started' if kind == 'started' else 'Accepted'} {path}", raw=raw),
+            ])
+        if tool != "send_message":
+            status = "completed" if kind == "completed" else "interrupted" if kind == "interrupted" else "running"
+            events.append(HarnessEvent(
+                type="subagent", subagent=SubagentUpdate(
+                    task_id=child, tool_use_id=identifier if tool else None,
+                    status=status, name=path, description=f"{kind}: {path}",
+                ), raw=raw,
+            ))
+        return events
 
     def _completion(self, obj: dict[str, Any]) -> float | None:
         payload = obj.get("payload")
@@ -310,53 +446,69 @@ class CodexActivityObserver:
                 and _ITEM_COMPLETION.match(prefix[envelope.end():])):
             self._disable("activity_line_limit")
 
-    def _read(self, *, baseline: bool = False) -> list[float]:
+    def _read(self, *, baseline: bool = False, drain: bool = False) -> tuple[list[float], list[HarnessEvent]]:
         if self._closed or self._disabled:
-            return []
+            return [], []
         fd = None
         try:
             fd = self._open()
             if fd is None:
-                return []
+                return [], []
             if baseline:
                 self._offset = os.lseek(fd, 0, os.SEEK_END)
-                return []
-            data = os.read(fd, _MAX_READ)
-            self._offset += len(data)
-            pieces = (self._partial + data).split(b"\n")
-            self._partial = pieces.pop()
-            ticks = []
-            for line in pieces:
-                if self._skipping_line:
-                    self._skipping_line = False
-                    continue
-                if len(line) > _MAX_LINE:
-                    self._discard_large_line(line[:512])
-                    continue
-                obj = self._decode_metadata(line)
-                tick = self._completion(obj) if obj else None
-                if tick is not None:
-                    ticks.append(tick)
-            if len(self._partial) > _MAX_LINE:
-                self._discard_large_line(self._partial[:512])
-                self._partial = b""
-                self._skipping_line = True
-            return ticks
+                return [], []
+            # Final convergence consumes only the already-written prefix;
+            # appenders cannot prolong it. Ordinary polls retain their budget.
+            boundary = os.fstat(fd).st_size if drain else self._offset + _MAX_READ
+            ticks: list[float] = []
+            events: list[HarnessEvent] = []
+            while self._offset < boundary and not self._closed and not self._disabled:
+                data = os.read(fd, min(_MAX_READ, boundary - self._offset))
+                if not data:
+                    break
+                self._offset += len(data)
+                pieces = (self._partial + data).split(b"\n")
+                self._partial = pieces.pop()
+                for line in pieces:
+                    if self._skipping_line:
+                        self._skipping_line = False
+                        continue
+                    if len(line) > _MAX_LINE:
+                        self._discard_large_line(line[:512])
+                        continue
+                    obj = self._decode_metadata(line)
+                    if obj is None:
+                        continue
+                    self._record_header(obj)
+                    tick = self._completion(obj)
+                    if tick is not None:
+                        ticks.append(tick)
+                    events.extend(self._observation(obj))
+                if len(self._partial) > _MAX_LINE:
+                    self._discard_large_line(self._partial[:512])
+                    self._partial = b""
+                    self._skipping_line = True
+            return ticks, events
         except (OSError, ValueError):
             self._disable("rollout_read")
-            return []
+            return [], []
         finally:
             if fd is not None:
                 os.close(fd)
 
-    async def _read_owned(self, *, baseline: bool = False) -> list[float]:
-        task = asyncio.create_task(asyncio.to_thread(self._read, baseline=baseline))
-        self._read_task = task
-        try:
-            return await asyncio.shield(task)
-        finally:
-            if task.done() and self._read_task is task:
-                self._read_task = None
+    async def _read_owned(self, *, baseline: bool = False, drain: bool = False) -> tuple[list[float], list[HarnessEvent]]:
+        async with self._cursor_lock:
+            # A cancelled waiter never permits a second worker to advance the
+            # same cursor while its shielded predecessor is still reading.
+            if self._read_task is not None:
+                await asyncio.shield(self._read_task)
+            task = asyncio.create_task(asyncio.to_thread(self._read, baseline=baseline, drain=drain))
+            self._read_task = task
+            try:
+                return await asyncio.shield(task)
+            finally:
+                if task.done() and self._read_task is task:
+                    self._read_task = None
 
     async def start(self) -> None:
         # Existing threads start at a captured EOF before the child is spawned.
@@ -366,8 +518,15 @@ class CodexActivityObserver:
             self._task = asyncio.create_task(self._watch(), name="codex-native-activity")
 
     async def poll_once(self) -> None:
+        await self._poll()
+
+    async def drain_observations(self) -> None:
+        """Converge verified metadata to a finite EOF before normal retirement."""
+        await self._poll(drain=True)
+
+    async def _poll(self, *, drain: bool = False) -> None:
         try:
-            ticks = await self._read_owned()
+            ticks, events = await self._read_owned(drain=drain)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -378,6 +537,11 @@ class CodexActivityObserver:
                 return
             self.matched_records += 1
             self._notify(tick)
+        if events and not self._closed and not self._disabled and self._event_handler is not None:
+            try:
+                self._event_handler(events)
+            except Exception:
+                self._disable("native_projection_failed")
 
     async def _watch(self) -> None:
         while not self._closed and not self._disabled:

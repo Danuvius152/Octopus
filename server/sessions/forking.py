@@ -692,7 +692,8 @@ class ForkingMixin(SessionManagerBase):
             await stopped_within(
                 parent._backend.stop(), f"session {parent.id} backend", timeout=2.0
             )
-            self._forget_backend(parent)
+            for frame in self._forget_backend(parent):
+                await self._broadcast(frame, user_id=parent.user_id)
         parent._pending_queue.clear()
         parent._pending_questions.clear()
         self._cancel_all_question_timers(parent)

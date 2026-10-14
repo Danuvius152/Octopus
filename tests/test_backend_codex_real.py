@@ -178,3 +178,38 @@ async def test_real_native_activity_identity_and_metadata_format(tmp_path):
         assert "SessionConfiguredEvent" not in backend.stderr_text
     finally:
         await backend.stop()
+
+
+@pytest.mark.asyncio
+async def test_real_native_helpers_use_verified_call_identity_across_two_rounds(tmp_path):
+    """Installed CLI lifecycle metadata reaches the public normalized stream."""
+    backend = _codex_run(session_id="native_helpers_acceptance", mcp_servers=[], reasoning_effort="low")
+    backend.bind_tool_context("native-helper-request", "native-helper-attempt")
+    backend.bind_activity(lambda timestamp: None)
+    await backend.start(
+        "Create exactly one native helper named native_card_probe. Ask it to reply "
+        "with exactly FIRST_NATIVE_ROUND, without tools. Collect that helper's result. "
+        "Then send the same helper one followup_task asking it to reply with exactly "
+        "SECOND_NATIVE_ROUND, without tools. Collect its second result before ending "
+        "your turn. Reply NATIVE_CARD_ACCEPTED after both replies. Use only the "
+        "native collaboration tools; do not create other helpers, run shell commands, "
+        "read files, or use network tools.", str(tmp_path),
+    )
+    try:
+        events = await _drain(backend, timeout=240)
+        calls = [event for event in events if event.type == "tool_use" and event.tool_name in {
+            "subagent:spawn_agent", "subagent:followup_task",
+        }]
+        assert [event.tool_name for event in calls] == ["subagent:spawn_agent", "subagent:followup_task"]
+        assert all(event.runtime_metadata["attempt_id"] == "native-helper-attempt" for event in calls)
+        finished = [event.subagent for event in events if event.type == "subagent" and event.subagent.status == "completed"]
+        assert len(finished) == 2
+        assert len({child.task_id for child in finished}) == 1
+        assert [child.tool_call_id for child in finished] == [call.runtime_metadata["tool_call_id"] for call in calls]
+        assert finished[0].tool_call_id != finished[1].tool_call_id
+        assert all(not child.summary and not child.prompt for child in finished)
+        assert "NATIVE_CARD_ACCEPTED" in "".join(event.content or "" for event in events if event.type == "text")
+        assert events[-1].type == "result" and not events[-1].is_error
+        assert "Sent prompt with event ID:" not in backend.stderr_text
+    finally:
+        await backend.stop()

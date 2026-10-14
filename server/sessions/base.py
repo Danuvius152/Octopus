@@ -363,7 +363,7 @@ class SessionManagerBase:
     def _withdraw_requests(self, session: Session, requests: list[QueuedPrompt], *, reason: str) -> None:
         raise NotImplementedError
 
-    def _retire_backend(self, session: Session, backend: HarnessRun) -> asyncio.Task[None]:
+    def _retire_backend(self, session: Session, backend: HarnessRun, *, reason: str = "process_ended") -> asyncio.Task[None]:
         raise NotImplementedError
 
     async def _await_backend_retirement(self, session: Session, *, timeout: float | None = None) -> None:
@@ -427,7 +427,7 @@ class SessionManagerBase:
     ) -> dict[str, Any] | None:
         raise NotImplementedError  # provided by a mixin
 
-    def _forget_backend(self, session: Session, expected: HarnessRun | None = None) -> None:
+    def _forget_backend(self, session: Session, expected: HarnessRun | None = None, *, reason: str = "process_ended") -> list[dict[str, Any]]:
         raise NotImplementedError  # provided by a mixin
 
     async def _load_agent(self, session: Session) -> dict[str, Any] | None:

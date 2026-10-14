@@ -276,7 +276,8 @@ class SubagentRun(BaseModel):
     task_id: str
     tool_use_id: str | None = None
     tool_call_id: str | None = None
-    status: str = "running"
+    status: Literal["running", "completed", "failed", "cancelled", "interrupted", "unknown"] = "running"
+    stop_reason: str | None = None
     name: str = ""
     description: str = ""
     prompt: str = ""

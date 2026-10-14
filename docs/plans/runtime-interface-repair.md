@@ -1,6 +1,6 @@
 # 运行时接口修补：接管、记录与调用身份
 
-> **Status:** completed — 原修补、Q19、Q20–Q24 与 Q26/Q27 已通过本机完整门禁和 Codex 实机验收；追加到修补分支，尚未部署。
+> **Status:** completed — Q13–Q30 中已确认实施的修补全部通过本机验收，包括原生助手事件、调用身份与真实结束状态；Q25 脱敏未纳入，main 合并和服务发布由用户决定，尚未部署。
 
 ## 1. 依据和判断
 
@@ -222,6 +222,19 @@ stdout 使用本机已验收格式中按分配顺序递增的 `item_N`，保留�
 
 沿用已确认的测试 seam：公开 DelegationManager/SessionManager、真实文件 SQLite 的 close/reopen、REST 账号隔离和合成子进程，以及生产任务卡。按红→绿逐项验证，再运行本机完整门禁和 Codex 实机；Claude 实机不跑，合并/发布仍由用户决定。双轴审查固定点为 `7449f12`，追加独立提交并推送。
 
+### 8.4 Q28–Q30：原生助手生命周期与交付范围
+
+新证据为 `runtime-log-review-20261014/subagent-review/report.md`。用户确认在最新修补分支独立修补，不修改 Codex 源码、安装或持久配置，保留 `codex exec --json`、bg/命名委派及现有生命周期；Claude 实机不跑，合并发布由用户决定。
+
+- 父 CLI 结束而未确认助手完成时，显示中断／未确认及父轮结束、用户 Stop、错误恢复、服务关闭等真实原因；保留调用身份、已有结果和历史步骤，并使当前浏览器与 REST 刷新一致。不改写已确认父轮结论，不自动重跑助手。
+- 原生助手在当前父轮内收齐必要结果或明确取消、说明未交付；跨回合长任务使用既有 bg/命名委派。补工具指引和真实状态，不以延长进程、强制自动续跑或新增框架代替该使用合同。模型自主创建的临时助手与用户明确请求的助手使用同一路径。
+- 空 receiver 的邮箱 wait 只是工具调用，不建立匿名助手；没有真实子状态的 wait 不覆写完成。errored、interrupted、shutdown、not_found 等真实状态单独规范化，助手执行完成不冒充父模型已收取其结果。
+- 当前真实 CLI 0.162.1 的隔离采集显示：一名助手先后完成两轮，stdout 只有两次空目标 wait、父回答及父终态，没有 spawn 或新生命周期项。原生父记录包含准确的 Started/Interacted/Completed 元数据；Started.id 等于真实 spawn call_id，Completed.id 的固定前缀后是源码确认的 child turn UUID。证据位于 `/tmp/octopus-native-subagent-probe-20261014/`，不能用猜测的 stdout 拼写代替实际格式验收。
+- 复用现有 Codex 适配器的准确父 thread/turn 与 attempt 绑定、增量游标和受管读取任务，将已验证的调用身份、子线程及状态投影到现有工具消息与卡片。仅传必要元数据；不复制诊断行、原生回复、推理或完整原生日志。没有准确关系时明确未确认，不猜 item_N、不伪造调用或心跳，不新增观察循环、队列、运行框架或数量上限。
+- 原生调用与 JSON item_N 是不同身份，必须依据同一子线程的已验证来源建立关系。真实新执行可以更新其状态；一般 interacted 或缺省 wait 不能擅自宣布新执行。重复、旧轮、取消后及终态后的观察不改变当前工作；必要的终态前已写记录通过原有受管读取收敛，不让诊断读取越过取消。
+
+沿用已确认的公开验收 seam：HarnessRun/SessionManager 的真实合成子进程与 SQLite、REST/广播和生产 SubagentCard；补当前 CLI 真实事件格式、无目标 wait、正常收尾未完成、错误恢复、Stop/关闭、重复/错身份、完成保护、明确续接和前端刷新回归。按红→绿逐项实施；双轴审查固定点 `2319324`，最终运行本机完整门禁、可用 Codex 实机和浏览器验收，再提交推送，保留并行 Wiki 文档。
+
 ## 9. 实施顺序与验收
 
 整体已确认，按以下五个边界实施和审查；相互依赖的运行时改动可组成完整的基础提交，R01 保持独立提交，每部分完成必要清理和验证：
@@ -331,6 +344,29 @@ stdout 使用本机已验收格式中按分配顺序递增的 `item_N`，保留�
 | Claude 实机 | 按用户要求未运行，不计作通过 | 用户明确“claude依旧不测，发布由我来定” |
 
 最终核验 `origin/main` 仍为 `74eab95`，修补分支包含该提交；用户并行更新的七份 Wiki 文档只保留在开发工作区，不进入本次提交。提交与推送沿用 `fix/runtime-interface-repair`，main 合并和服务发布继续由用户决定。Q25 日志认证参数脱敏未纳入范围，没有轮换 token 或修改 Codex 安装和持久配置。
+
+### 9.4 Q28–Q30 原生临时助手的事件、调用身份与真实结束状态
+
+本轮修补同样覆盖模型自动创建和用户明确要求创建的临时助手。它们仍属于一次 `codex exec --json` 的生命周期；跨回合 bg 和 Octopus 命名委派的规则保持原样。提示补上收齐必要结果或取消并说明未交付的要求，不新增框架自动续跑。
+
+真实 Codex 0.162.1 验收确认，新原生助手的 Started/Interacted/Completed 记录不出现在 exec JSON 主通道，而无目标 mailbox wait 会出现在该通道。复用现有准确 thread/turn 绑定、增量读取任务与游标锁，补读取经过身份、新鲜度和去重校验的最小调用头与生命周期元数据；参数采用词法跳过，正文、推理和诊断不进入聊天、历史或恢复提示。完成仅证明子执行完成，不冒充父模型已消费结果。正常结果或进程 EOF 前消费已写入的有限前缀，Stop、取消和终态后拒绝补充观察。
+
+同一助手的明确后续调用使用新调用身份，旧卡的已确认摘要与步骤保留。重叠或无法可靠归属的执行显示未确认；无目标 wait 不造匿名助手。开始时捕获 wait 所观察的调用身份，迟到旧 wait 只保留可读工具结果，不修改旧卡或新卡。未完成助手随父轮结束标中断，区分正常收尾、父错误、静默超时、Stop、服务关闭和委派取消。现有受管通知独立发布已选定状态，CLI 清理阻塞时浏览器和 REST 仍一致。
+
+双轴审查固定点为 `2319324`，Standards 与 Spec 未解决发现均为 0。审查发现的已完成助手清理覆盖、旧 wait 串到新调用、迟到旧 wait 改写旧结果、目标不可用误建新轮和清理阻塞期间浏览器未更新，均通过公开 HarnessRun/SessionManager、实际合成进程、SQLite、REST/广播与生产组件先复现再修正。子执行只维护一张身份/状态表，没有新增观察循环、运行框架、队列或固定数量上限。
+
+| 检查 | 最终结果 | 证据 |
+| --- | --- | --- |
+| 完整离线门禁 | 8 项全部通过；后端 2713 passed、46 real deselected，301.86 秒；前端 399 passed；Ruff、Mypy、ESLint、强制 TypeScript、生成契约和文档索引通过 | `/tmp/octopus-native-final-check.log` |
+| 纯 UI E2E | 76 passed，41.5 秒，零失败、零跳过 | `/tmp/octopus-native-final-ui.log` |
+| 真实原生助手格式 | 创建一个助手、收取后续两轮，公开流中两次独立调用准确关联同一子线程；1 passed，56.98 秒 | `/tmp/octopus-native-real-acceptance.log` |
+| Codex 全量可用实机 | 21 passed、2738 deselected，1299.93 秒，零失败、零跳过 | `/tmp/octopus-native-final-codex-reviewed.log` |
+| Codex 浏览器 | 1 passed，18.7 秒，零失败、零跳过；与实机套件串行执行 | `/tmp/octopus-native-final-codex-browser.log` |
+| 前端构建 | 通过，仅构建修补 checkout | `/tmp/octopus-native-final-build.log` |
+| 源码核验 | 最终 24 个源码/测试/fixture 文件 SHA-256 与完整门禁和实机验收开始时一致 | `/tmp/octopus-native-final-source-fingerprint.json` |
+| Claude 实机 | 按用户要求未运行，不计作通过 | 用户明确“claude依旧不测，发布由我来定” |
+
+当前 `origin/main` 为 `7db94a9`，相对原基线只新增 Wiki 文档，没有运行时代码变化；分支合并树预检无冲突。七份并行 Wiki 开发文档保留在工作区，不进入本次提交。提交和推送沿用 `fix/runtime-interface-repair`，不合并 main、不发布、不重启服务。Claude live 按约定未验收，不计为通过。
 
 ## 10. What this defers
 

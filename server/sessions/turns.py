@@ -462,12 +462,12 @@ class TurnsMixin(SessionManagerBase):
 
         task.add_done_callback(observed)
 
-    def _notify_admission(self, session: Session, events: list[dict[str, Any]]) -> None:
+    def _notify_events(self, session: Session, events: list[dict[str, Any]]) -> None:
         async def publish() -> None:
             for event in events:
                 await self._broadcast(event, user_id=session.user_id)
 
-        task = asyncio.create_task(publish(), name=f"admission-notice-{session.id}")
+        task = asyncio.create_task(publish(), name=f"session-notice-{session.id}")
         self._own_task(task)
 
     @staticmethod
@@ -499,14 +499,16 @@ class TurnsMixin(SessionManagerBase):
         for request in requests:
             self._complete_request(session, request, state=reason if reason in {"deleted", "shutdown", "expired"} else "withdrawn", reason=reason)
 
-    def _retire_backend(self, session: Session, backend: HarnessRun) -> asyncio.Task[None]:
+    def _retire_backend(self, session: Session, backend: HarnessRun, *, reason: str = "process_ended") -> asyncio.Task[None]:
         captured = session._backend_retirements.get(id(backend))
         if captured is not None and captured[0] is backend:
             return captured[1]
         invalidate = getattr(backend, "invalidate_activity", None)
         if invalidate is not None:
             invalidate()
-        self._forget_backend(session, backend)
+        frames = self._forget_backend(session, backend, reason=reason)
+        if frames:
+            self._notify_events(session, frames)
 
         async def retire() -> None:
             try:
@@ -561,7 +563,7 @@ class TurnsMixin(SessionManagerBase):
             session._steer_queue.clear()
             session._steer_open = False
             if session._backend is not None:
-                self._retire_backend(session, session._backend)
+                self._retire_backend(session, session._backend, reason="service_shutdown")
             if session._active_task is not None and not session._active_task.done():
                 if not session._active_task.cancelling():
                     session._active_task.cancel("shutdown")
@@ -737,7 +739,7 @@ class TurnsMixin(SessionManagerBase):
                 "content": prompt, "request_id": queued.request_id,
                 "queue_length": queue_length, "dispatch_state": event["dispatch_state"],
             })
-        self._notify_admission(session, events)
+        self._notify_events(session, events)
         return receipt
 
     async def _run_claim(
@@ -893,7 +895,7 @@ class TurnsMixin(SessionManagerBase):
                 session._steer_open = False
             if session._work_id == work_id and session._backend is not None:
                 backend = session._backend
-                self._retire_backend(session, backend)
+                self._retire_backend(session, backend, reason="work_cancelled")
             if owned_current or pending != len(session._pending_queue):
                 affected.append((session, settlement, question_attempt_id))
         return affected
@@ -1215,7 +1217,7 @@ class TurnsMixin(SessionManagerBase):
             # reference, but the session must not: an interrupted process is
             # being torn down, and with reuse a next turn that found it still
             # briefly alive would hand its prompt to a dying CLI.
-            self._retire_backend(session, backend)
+            self._retire_backend(session, backend, reason="user_stop")
 
         inner = session._inner_task
         settlement = session._settlement
@@ -1299,7 +1301,7 @@ class TurnsMixin(SessionManagerBase):
             self._withdraw_requests(session, [current], reason="shutdown" if cause == "shutdown" else "withdrawn")
         backend = session._backend
         if backend is not None:
-            self._retire_backend(session, backend)
+            self._retire_backend(session, backend, reason="service_shutdown" if cause == "shutdown" else "user_stop")
         task = session._inner_task
         if task is not None and not task.done():
             task.cancel()
@@ -1487,7 +1489,15 @@ class TurnsMixin(SessionManagerBase):
             return
         deadline = None if retirement_timeout is None else time.monotonic() + retirement_timeout
         if session._backend is attempt.backend:
-            self._retire_backend(session, attempt.backend)
+            if attempt.timeout is not None:
+                reason = "parent_timeout"
+            elif attempt.saw_error_event or (attempt.result is not None and attempt.result.is_error):
+                reason = "parent_error"
+            elif attempt.saw_result:
+                reason = "parent_done"
+            else:
+                reason = "process_ended"
+            self._retire_backend(session, attempt.backend, reason=reason)
         try:
             await self._await_backend_retirement(session, timeout=retirement_timeout)
         except Exception:
@@ -1586,6 +1596,8 @@ class TurnsMixin(SessionManagerBase):
         normalized and enumerated in `harness/events.py`, so this branches on a
         contract rather than on whatever a CLI happened to print.
         """
+        if event.type == "subagent" and session._backend is not attempt.backend:
+            return []
         from ..harness.tool_identity import ToolIdentityTracker
         tracker = getattr(attempt.backend, "_tool_identity_tracker", None)
         if tracker is None:

@@ -336,7 +336,10 @@ class HarnessRun:
                 lambda timestamp: self._activity(timestamp, generation=generation),
                 resume_id=resume_id,
             )
-            if self._activity_callback is not None:
+            attach = getattr(self._activity_observer, "set_event_handler", None)
+            if attach is not None:
+                attach(lambda events: self._publish_observations(events, generation=generation))
+            if self._activity_callback is not None or self._tool_context is not None:
                 try:
                     await self._activity_observer.start()
                 except BaseException:
@@ -704,6 +707,20 @@ class HarnessRun:
         if callback is not None:
             callback(timestamp)
 
+    def _publish_observations(self, events: list[HarnessEvent], *, generation: int) -> None:
+        """Adapter observations share the current run's captured tool context."""
+        context = self._tool_context
+        if (self._lease_closed or self._stream_closed or context is None
+                or generation != self._activity_generation or self._tool_identity_tracker is None):
+            return
+        for event in self._tool_identity_tracker.normalize_observations(events, *context):
+            self._emit(event)
+
+    async def _drain_observations(self) -> None:
+        drain = getattr(self._activity_observer, "drain_observations", None)
+        if drain is not None and not self._lease_closed:
+            await drain()
+
     async def _handle_line(self, line: str) -> None:
         obj = parse_json_line(line)
         if obj is None:
@@ -713,6 +730,10 @@ class HarnessRun:
         out = self._parser.parse(obj)
         if out.activity is True or (out.activity is None and out.events):
             self._activity()
+        if out.end_of_stream:
+            # Consume the adapter's finite, already-written native prefix
+            # before revoking the attempt and publishing the parent result.
+            await self._drain_observations()
         context = self._tool_context
         if self._tool_identity_tracker is not None:
             for event in out.events:
@@ -724,6 +745,8 @@ class HarnessRun:
             self._tool_context = None
             self.invalidate_activity()
         for event in out.events:
+            if self._lease_closed and event.type == "subagent":
+                continue
             if self._stream_closed and self._idle_handler is not None:
                 # Out of turn: hand it to the session rather than dropping it.
                 try:
@@ -754,11 +777,12 @@ class HarnessRun:
             logger.exception("stdout reader crashed")
         finally:
             if not self._stream_closed:
-                self._stream_closed = True
                 try:
-                    self._event_queue.put_nowait(_STREAM_END)
-                except asyncio.QueueFull:
-                    pass
+                    await self._drain_observations()
+                finally:
+                    self._tool_context = None
+                    self.invalidate_activity()
+                    self._close_stream()
 
     async def _read_stderr(self) -> None:
         assert self._process and self._process.stderr

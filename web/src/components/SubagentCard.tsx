@@ -4,10 +4,27 @@ import {
   IconChevronRight,
   IconCircleCheck,
   IconAlertTriangle,
+  IconPlayerStop,
+  IconHelpCircle,
   IconUsersGroup,
 } from "@tabler/icons-react";
 
 import { useSessionStore } from "../stores/sessionStore";
+
+const stopReasons: Record<string, string> = {
+  parent_done: "Parent turn ended before completion",
+  parent_error: "Parent execution failed before completion",
+  parent_timeout: "Parent execution timed out",
+  user_stop: "Stopped by you",
+  service_shutdown: "Service shut down",
+  work_cancelled: "Delegated work cancelled",
+  process_ended: "Execution ended without a confirmed result",
+  native_interrupted: "Helper execution was interrupted",
+  native_shutdown: "Helper execution shut down",
+  native_cancelled: "Helper execution was cancelled",
+  native_not_found: "Helper could not be found",
+  overlapping_execution: "Another execution began before a result was confirmed",
+};
 
 /** A sub-agent the model spawned inside this turn (native-subagents.md §5).
  *
@@ -35,6 +52,9 @@ export function SubagentCard({
 
   const running = run.status === "running";
   const failed = run.status === "failed";
+  const completed = run.status === "completed";
+  const unknown = run.status === "unknown";
+  const stopReason = run.stop_reason ? stopReasons[run.stop_reason] : undefined;
   const steps = run.steps ?? [];
   const meta = [
     run.tool_uses ? `${run.tool_uses} tool${run.tool_uses === 1 ? "" : "s"}` : "",
@@ -63,8 +83,12 @@ export function SubagentCard({
           <span className="subagent-spinner inline-block size-3 shrink-0 animate-spin rounded-full border-2 border-primary/30 border-t-primary" />
         ) : failed ? (
           <IconAlertTriangle size={14} className="shrink-0 text-destructive" />
-        ) : (
+        ) : completed ? (
           <IconCircleCheck size={14} className="shrink-0 text-success" />
+        ) : unknown ? (
+          <IconHelpCircle size={14} className="shrink-0 text-gray-700" />
+        ) : (
+          <IconPlayerStop size={14} className="shrink-0 text-gray-700" />
         )}
         <IconUsersGroup size={13} className="shrink-0 text-gray-700" />
         <span className="subagent-name shrink-0 font-semibold text-gray-900">
@@ -76,7 +100,11 @@ export function SubagentCard({
             ? run.description || "working"
             : failed
               ? "failed"
-              : "done"}
+              : completed
+                ? "done"
+                : unknown
+                  ? "unconfirmed"
+                  : run.status}
         </span>
         {meta.length > 0 && (
           <span className="subagent-meta ml-auto shrink-0 font-mono text-[10.5px] text-gray-700">
@@ -87,6 +115,10 @@ export function SubagentCard({
           {open ? <IconChevronDown size={13} /> : <IconChevronRight size={13} />}
         </span>
       </button>
+
+      {stopReason && (
+        <p className="subagent-stop-reason mt-1 text-[11.5px] text-gray-700">{stopReason}</p>
+      )}
 
       {/* The answer it gave, always in reach — one line closed, whole when
         * opened. While it's still working there is no answer yet, so the

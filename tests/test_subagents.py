@@ -273,11 +273,10 @@ def test_codex_collab_calls_track_one_sub_agent_across_items():
     updates = _subagent_events(parser, CODEX_RUN)
 
     # `spawn_agent` and `wait` are separate tool calls describing the SAME
-    # sub-agent, so they must land on one card — keyed by the spawn.
-    assert {u.task_id for u in updates} == {"item_0"}
+    # sub-agent, so they retain one exact child identity and spawning call.
+    assert {u.task_id for u in updates} == {"01a0ad62-b228-74d1-a2c3-1328858cca57"}
+    assert {u.tool_use_id for u in updates} == {"item_0"}
     assert [u.status for u in updates] == [
-        "running",
-        "running",
         "running",
         "completed",
     ]
@@ -324,7 +323,7 @@ def test_codex_late_child_result_keeps_original_spawn_after_many_agents():
         },
     }])
     assert len(updates) == 1
-    assert updates[0].task_id == "item_0"
+    assert updates[0].task_id == "thread-0"
     assert updates[0].tool_use_id == "item_0"
     assert updates[0].status == "completed"
     assert updates[0].summary == "late result"
@@ -421,6 +420,7 @@ def test_subagent_events_broadcast_but_never_persist():
         "tool_use_id": "tu1",
         "tool_call_id": "tu1",
         "status": "running",
+        "stop_reason": None,
         "name": "Explore",
         "description": "searching",
         "prompt": "",
@@ -526,6 +526,7 @@ async def test_the_session_snapshot_carries_live_runs(client):
             "tool_use_id": "tu1",
             "tool_call_id": "tu1",
             "status": "running",
+            "stop_reason": None,
             "name": "Explore",
             "description": "searching",
             "prompt": "",
@@ -636,8 +637,8 @@ def test_losing_the_process_ends_its_sub_agents():
     mgr._forget_backend(session)
 
     assert session._backend is None and session._held_run_at is None
-    assert session._subagents["tu1"].status == "failed"
-    assert "interrupted" in session._subagents["tu1"].description
+    assert session._subagents["tu1"].status == "interrupted"
+    assert session._subagents["tu1"].stop_reason == "process_ended"
     # A run that already finished keeps its result.
     assert session._subagents["tu2"].status == "completed"
     assert session._subagents["tu2"].summary == "done"

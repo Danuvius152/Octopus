@@ -17,6 +17,7 @@ import {
   type PendingQuestion,
   type ResearchJob,
   type SessionStatus,
+  type SubagentRun,
 } from "../stores/sessionStore";
 
 type BgTaskStatus = BgTask["status"];
@@ -149,7 +150,8 @@ export function handleWsMessage(data: Record<string, unknown>) {
         task_id: data.task_id as string,
         tool_call_id: (data.tool_call_id as string) ?? null,
         tool_use_id: (data.tool_use_id as string) ?? null,
-        status: (data.status as string) ?? "running",
+        status: (data.status as SubagentRun["status"]) ?? "running",
+        stop_reason: (data.stop_reason as string) ?? null,
         name: (data.name as string) ?? "",
         description: (data.description as string) ?? "",
         prompt: (data.prompt as string) ?? "",

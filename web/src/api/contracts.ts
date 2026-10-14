@@ -4553,8 +4553,11 @@ export interface components {
             /**
              * Status
              * @default running
+             * @enum {string}
              */
-            status: string;
+            status: "running" | "completed" | "failed" | "cancelled" | "interrupted" | "unknown";
+            /** Stop Reason */
+            stop_reason?: string | null;
             /**
              * Name
              * @default
