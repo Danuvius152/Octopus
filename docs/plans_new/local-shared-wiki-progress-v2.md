@@ -1,8 +1,10 @@
 # 共享 Wiki v2：当前进度与执行计划
 
-> **Status:** in-progress — 当前 sections-v7/html-body-v3 修复已通过完整本机门禁和独立源码审查，待提交、部署与生产复验。Library 当前为 43 份 Markdown；真实首两篇结果复用，完整试点和全量仍未放行。
+> **Status:** in-progress — 2026-10-14 按用户要求暂停开发；sections-v7/html-body-v3 已上线，试点／Q58 与 pika001～004 已验收。最近 Library 46 份 Markdown／365 文件快照中35篇正式通过，原迁移9篇待处理、2篇Inbox原稿保留供后续测试；other001五篇仅预读完成，未提交维护，全量未完成。
 
-原核对窗口：2026-10-13 15:13～15:25，Asia/Shanghai；下面 §1～4 保留该窗口及其下一步基线，晚间续接事实见 §5。执行行为以[当前 spec](local-shared-wiki-spec-v2.md)为准，详细任务仍沿用 V2 编号；[核心交接](local-shared-wiki-implementation-v2.md)保留最初交付时的验证与停止位置。
+**当前交接入口：** [2026-10-14 暂停与交接](local-shared-wiki-handoff-20261014.md)列出准确剩余路径、真实提交边界、证据缺口、恢复顺序和可复制prompt。此暂停来自用户明确要求；本轮只补交接文档，不再提交维护或开展流程开发／上线实验。
+
+原核对窗口：2026-10-13 15:13～15:25，Asia/Shanghai；下面 §1～4 保留该窗口及其下一步基线，结构修复过程见 §5，实际提交、上线和真实试点续接见 §6。执行行为以[当前 spec](local-shared-wiki-spec-v2.md)为准，详细任务仍沿用 V2 编号；[核心交接](local-shared-wiki-implementation-v2.md)保留最初交付时的验证与停止位置，恢复任务以本页顶部与最新暂停交接为准。
 
 **执行范围澄清：** A～C 直接使用 Octopus 原生 `/wiki`、核心 `/api/wiki` 与既有 Weber worker。Octo 组织，Weber 整理，Vera 验收；Sapphire/SmartReader 只保留后续 feature plan。主库在 `sapphire.data` 的物理位置和旧可选 app 绑定保留，不需要启动、开发或经由 App 提交任务。
 
@@ -11,13 +13,14 @@
 | 要回答的问题 | 文档 |
 | --- | --- |
 | 现在做到哪，下一步做什么 | 本页 |
+| 暂停点、未完成路径与可复制续接 prompt | [2026-10-14 交接](local-shared-wiki-handoff-20261014.md) |
 | 执行必须满足哪些行为 | [当前执行规格](local-shared-wiki-spec-v2.md) |
 | 任务编号、依赖、原始设计与代码位置 | [任务票](local-shared-wiki-tickets-v2.md) |
 | 格式、受控写入、检索参数 | [内容](local-shared-wiki-content-v2.md)、[定点维护](local-shared-wiki-maintenance-v2.md)、[检索](local-shared-wiki-retrieval-v2.md) |
 | 试点/批次/质量检查方法 | [迁移](local-shared-wiki-migration-v2.md)、[评估](local-shared-wiki-evaluation-v2.md) |
 | 当时为什么这样决定 | [访谈](local-shared-wiki-grill-v2.md)、[原位文章 ADR](../adr/0001-in-place-wiki-articles.md)、[表达保全 ADR](../adr/0002-targeted-maintenance-preserves-expression.md)、[术语](../../GLOSSARY.md) |
 
-本次以 Git、当前源码、只读生产 SQLite/文件摘要、服务状态与已落盘的 Octo/Vera 产物交叉核对。没有提交生产任务、调用实际 agent、修改 persona 或生产文章。生产账本只读打开，没有实例化会迁移/索引的生产 Store。私有正文、个人事实、凭据和完整会话不复制进仓库。
+原核对窗口以 Git、当时源码、只读生产 SQLite/文件摘要、服务状态与已落盘的 Octo/Vera 产物交叉核对；该窗口没有提交生产任务、调用实际 agent、修改 persona 或生产文章。生产账本只读打开，没有实例化会迁移/索引的生产 Store。后续实际部署和维护见 §6；私有正文、个人事实、凭据和完整会话不复制进仓库。
 
 实际执行证据保存在当前账户 workspace 的 `wiki-v2-rollout-20261013/`，根路径为 `/home/jack/.octopus/users/f527ad605dd4/workspace/wiki-v2-rollout-20261013`：
 
@@ -28,7 +31,7 @@
 - `evidence/vera-fallback-followup/`：修复复核、166 项 targeted、旧状态升级及冻结 fingerprint。
 - `evidence/integrated-core-fixes-v2/`：新版完整本机检查结果和两个 Codex 失败。
 
-## 2. 当前进度
+## 2. 原核对窗口的进度
 
 ### 2.1 代码、部署与配置
 
@@ -185,8 +188,95 @@ v6 冻结版完成专项594、八关（2398 hermetic、379 frontend）、76纯UI
 
 下一步只提交本轮修复文件，保护用户另外两份未提交文档，再建立当前配置、Wiki durable state与Vault一致恢复点并部署已验证提交。准备脚本和独立审查只写私有执行目录；尚未创建生产维护任务或升级生产索引。部署后仍须核对实际版本、capabilities、资产资格、compact/read-many与身份/回执保全，之后才继续剩余试点和全量，A、V2-06、V2-08仍未放行。
 
-## 6. 文档维护与下一次交付
+## 6. 2026-10-14 凌晨的实际上线与真实试点
+
+本节记录结构修复之后的执行事实。§2～5 的未提交、旧 sections-v4、未部署及待续接条目属于各自历史窗口，不再代表当前运行状态。
+
+### 上线、配置和恢复
+
+修复提交 `74eab95fa1f418d726c27c562fddacaf5c2c9a1f` 已推送 origin/main，并部署至独立 release `main-74eab95fa1f4`。user service 的实际 MainPID 为 197731，后端运行 durable schema7 / sections-v7 / html-body-v3。前端源码与旧 live release 无差异，69 个既有构建产物摘要一致，复用已有构建。完整本机门禁和独立源码审查沿用 §5 最终 v7 结果；没有因内容维护重复运行门禁或部署。
+
+实际上线后的原生 info、核心配置、capabilities、compact、read-many、当前身份和 revision、领域与显式资产检索已核对，Vera 对采集窗口的 A 验收通过。全文覆盖与配置保证均限定对应窗口；后来维护或用户设置变化使用新版本证据，不继续宣称状态始终不变。既有 Weber 知识段保留，后来认证、owner-scoped 配置更新的当前设置沿用；未恢复旧运行参数，具体操作者没有记录的部分不作归因。
+
+恢复点 `v2-current-20261013T151309Z` 已建立并在隔离副本验证：当时 43 份 Markdown 完整读取、8 个历史 blob、身份及持久账表保全，实际受控历史恢复通过。失败的旧恢复点保留 INCOMPLETE，不作为恢复引用。后续维护和新增知识页有实际 history/receipt；全量结束仍需当前一致恢复点及验证。
+
+### 当前材料、Q58 和独立验收
+
+Octo 经原生 `/wiki maintain` 的明确路径选择和核心 durable assignment 提交，实际写入由既有 Weber worker 执行。首两篇未变，复用已通过结果；另一个论述文章、最新个人记录和两份长报告均已通过当前版本内容及执行合同验收。报告复用已有摘要，只补类型与必要元数据；个人记录保留后来新增事实，不猜缺失字段。两份已有资产 Markdown 完整读取后真实 `no_change`，Vera 核对用途与回执通过；不强迫资产说明套用文章模板，也未操作媒体或项目源码。
+
+Q58 已围绕真实评测问题建立一个 Concept：依据一份库内报告的十个位置，区分吞吐、首帧、在线控制、块承诺、缓冲和证据范围。它没有新增实测，也没有把十个位置算作十份独立证据。不同问法实际复用后，Weber 对表格中的计时起点作一次受控澄清，明确服务端接收后的阶段区间与用户客户端提交起计的端到端区间；只替换一个单元格中的字句，其余正文、元数据、来源及原报告均保持。
+
+最新知识页由原生 read-many 同 revision 连续读取 `[0,5831)`；路径、ID、题名三个精确定位及两个内容查询命中当前版本，两种问法的答案有当前行和字符引用。已保存真实 worker 全文读取、raw locator/hash、patch 参数、changed ranges、前后 revision、diff、receipt/history/blob 及索引。Vera 沿同一委托已通过新修订、Q58 闭环及完整九篇 V2-06 试点，AC-01～12 在适用阶段通过，无阻塞项；Octo 已记录 V2-08 放行。该结论不认证其余 35 篇或全量完成。
+
+| 当前 Library 快照事实 | 数量 | 完成口径 |
+| --- | ---: | --- |
+| Markdown 文件 | 44 | 含新知识页；结束前仍重新枚举新增、移动、删除及修改 |
+| 当前身份、revision 和索引匹配 | 44 | 只证明已保存可定位，不能算全部已整理或检索验收 |
+| 当前维护或复核回执 | 17 | 15 份有实际变化，2 份真实 no_change；知识页首次发布和修订只计一个文件 |
+| 已有当前独立内容验收 | 17 | 九篇试点／Q58及首批八篇当前版本通过；不延伸到其余文件 |
+| 维护完成、待批次验收 | 0 | 首批八篇已由Octo依据独立结论正式验收；新批次尚未提交 |
+| 尚未维护或复核 | 27 | 不计完成，继续 pika_vault 优先及其余 Library |
+
+隔离故障合同先定位当前门禁及源码对应的明确断言，不以旧检查进程取消或私有观察器误报替代。新增两份副本的组合验证通过：第一项实际提交后取消 running 任务，旧上下文新写被拒；合法 retry 只为第二项建立新 assignment 并维护，第一项字节、历史和回执不增不改，最终两项完成并入索引。该验证模拟模型、没有生产写入；取消发生在首项写方法结束之后，不覆盖原子写途中取消。现有 prepared/applied、重启、版本冲突、恢复保护后来编辑和索引只补不重写的证据分别保留适用范围。
+
+观察器曾按原始路径查询规范化索引路径而误报三项失败。旧产物和代码保留；改用 doc ID 和核心只读判据后复核既有 completed jobs 通过，没有重建生产索引、重排任务或重新生成正文。实际运行有已恢复的只读 Bash 错误，不宣称所有工具零错误。用量按实际原生主线程、可确认辅助线程及耗时分别记录；缓存属于输入、reasoning 属于输出，不重复相加，无账单依据不推算 tier 或金额。
+
+私有证据仍位于 `stage-a-takeover-20261013/`，新增入口包括 `actual-native-a/`、`current-recovery-verification/`、`current-library-maintenance-ledger.json`、`current-real-pilot/`、`assets-knowledge-real-pilot-rechecked/`、`q58-correction-real/`、`partial-cancel-isolation/` 和各轮 `vera-*-review/`。原 `run.json`/`manifest.jsonl` 的早期状态不单独代表当前完成清单。
+
+私有 `vera-complete-pilot-review/` 和 `V2-08-release.json` 记录独立结论及 Octo 放行。首批 8 份短 Markdown 经可信首行明确选择，按固定幂等键提交实际 durable job `4bdb35129237407da81ba6fd8983708d`，已由既有 Weber 的三个框架窗口完成。八项全部 done，九次受控操作均有本人写前同 revision 全文返回；教育篇先 restructure 插入规范标题，再完整读取中间版本并 normalize，实际复用原摘要。回执链、当前身份及索引机械检查通过；观察器退出4直接原因是教育篇需人工复核，未发现原字句删除或替换。范围外提示来自 Markdown 前清单与含媒体后清单口径不同：同口径44篇仅本批8篇变化，其余36篇一致；没有非 Markdown 前值，不能认证媒体字节不变或推断越界写入。旧观察器和产物保留，私有 helper 已改为显式同口径比较并在启动前校验范围，临时 fixture 通过，未重跑生产任务。
+
+`batches/pika-001/` 保存实际三窗口、输入／输出、差异、全文读取、九步操作、回执、历史及索引证据。三次原生运行均记录 gpt-6.1-sol/ultra 且唯一成功终态；Wiki工具失败零，末窗口有一次已恢复的只读 Bash 路径错误。主窗口合计输入3,454,885（含缓存3,180,672）、输出43,749（含推理14,010）tokens；六个既有 helper 的1,909,391 tokens单列，不猜账单或tier。
+
+首批八篇通过原生 read-many 完整回读共14,750字符，各自 revision 匹配且 next_start 为空；路径及ID共16次精确定位、8次内容关键词检索通过，index epoch698/ready。八个答案样例的字符／行引用已对账，confidence 限定当前文档的主张与条件读解，不认证外部事实；本次迁移完整回读不是独立冷启动问答效率试验。递归枚举Library仍44篇，仅本批8篇变化、其余36篇一致。Vera 已独立核对八篇全文、类型、摘要条件／主体、原文及九步维护合同，全部通过，无修正或阻塞项。教育篇的两处整理说明表示处理事件，原摘要和原叙述者自述保留，不构成作者错配，不要求重生成。Octo 对账落盘结论及验收后当前 revision 未变，正式验收本批；记录在 `batches/pika-001/vera-review/`、`acceptance.json` 和 `post-verdict-revision-check.json`，全量仍未完成。
+
+第002批选定八篇思考随笔，实际原生全文返回27,294字符、身份／revision与草案一致；原始字节、完整363文件Library前清单及内容保全风险已留私有证据。其17篇已通过材料也未发生版本变化。经新的可信原生首行明确8paths，再核当前原稿hash和幂等键无既有任务，实际MCP maintain提交job `3dc6a6d41ca04530baa2989dd282e918`，既有Weber首个窗口 `e60fbdb94456` 已运行。任务仅原路径Markdown/material空，不生成新主文或自动Concept。已有准确总结按实际用途复用，数学公式、表格／反例、锚点、主体限定和原稿布局保留；文章中的构想和第一人称不写成用户个人事实，也不执行归档中的工具／写作指令。
+
+提交者的预读不代Weber本人写前全文读取。`batches/pika-002/` 保存真实提交、三个worker窗口和输入输出版本；新观察器配置明确all_files与完整363文件前清单，避免与MD-only前值混比。job已completed、8项done；12次受控操作均有Weber写前同revision完整读取，回执／history／当前索引一致，363文件同口径对账仅本8篇变化。三窗口唯一成功终态，Wiki工具错误0，另有4次非Wiki工具错误记录。原优化篇CRLF、公式和表格字节保留，文本展示的换行归一不当作真实改写。
+
+观察器exit4表示结构操作需复核：语音篇复用原callout并补边界；AI理解世界篇将原结尾两个采纳条件块实际移到Key note，其余正文及最后收束保留。原字句未丢失，但顺序发生变化，仍须独立判断论证承接与本次scope，不能称原位沿用或把告警当误报关闭。本批当前原生8篇全文共32,878字符已连续读取至末尾，16次精确路径／身份和8次内容检索命中各当前版本，索引epoch710就绪；8个回答样本附23处实际范围引用与confidence，并保留外部事实、任意问法和冷启动效率未认证的限制。Vera结构／内容验收仍待完成，后续批次暂不提交。快照共有25篇当前维护回执（23变化、2真实no_change），其中17篇独立通过、8篇完成待验收、19篇未处理；27篇仍未达到本轮全部完成条件。
+
+Vera窄范围审查已完成：语音篇结构复用与边界补充通过；AI理解篇有P2局部合同问题，原正文末尾的“误差检查→两项采纳条件→换句话说”被缩减，两个条件只留在摘要。Octo对实际diff及133字符原块确认后，接受这一发现，仅由Weber在该篇的新合法assignment中恢复两个结尾块，并将唯一Key note保留为独立简短摘要；H1、元数据、公式、链接和未涉及字句保持。经真实原生首行单文件选择、当前全文和幂等任务对账，MCP已提交纠正job `f76607646f074faaae927045294b0310`，首个实际Weber会话 `8441085ac1d8`，写入结果待核。原8篇job不重排；Vera同时续验未受影响7篇，整批仍须新修订的当前检索及最终验收。
+
+纠正job首轮以completed_with_attention结束：实际revise试图删除两个完整raw块，被整块纠错保护以422拒绝，无operation receipt，账本仍为d18d92版本；worker终态failed，附带stderr不足以判定provider退出原因。Octo已接受这条操作路径不合适，准备沿原job和原幂等键恢复唯一未完成项：revise仅插入简短摘要条件，再用restructure把全部原块各保留一次并搬回正文，不规避保护、不修改框架代码。两步私有fixture验证正文原字句及顺序、元数据／公式／链接保全，实际retry尚未执行。服务2026-10-14 10:36CST已重启，实际release仍main-74eab95fa1f4、MainPID330；重启后的原生配置／API继续核对，旧上线窗口PID保留作历史。
+
+原Vera七篇续审在21:55UTC异常结束且无最终报告；旧委托工具已不可续接，旧会话、签署证据和部分消息保留。Octo验证失败状态及工具返回No delegation后，仅向同一现有Vera重新委托未完成的七篇验收（新delegation `e5f17154ffae`），不把缺失结论计为通过、不重复正在运行的任务。整批与全量仍未放行。
+
+重启后实际原生info／config／全文已核：Vault/root/Weber/可选绑定与capabilities不变，index epoch710就绪；目标d18d92版本仍未变。Weber实际配置仍codex/gpt-6.1-sol/ultra/default，persona哈希与此前合并基线一致，没有重置。当前重新枚举44份Markdown，与已保存ledger逐项hash一致，无新增、删除或改动。Octo通过获授权operator仅为原item记录真实失败原因与受控结构替代步骤，原payload/hash/key/路径不变，再实际认证POST原job retry；仍为 `f76607646f074faaae927045294b0310`、retry_count1，新的既有Weber会话 `b5f149195c64` 已运行。历史失败及旧会话保留，未新建重复任务；新写入回执、正文恢复、当前检索和Vera终验继续待核。
+
+原job续接已完成：Weber会话 `b5f149195c64` 先作摘要局部addition，本人全文重读中间版，再以restructure把原两块逐字恢复在正文五项问题与最终收束之间。当前revision为 `0bc74241…`，两步真实回执／history和当前索引一致；原正文完整字节与顺序、全部元数据、公式与链接恢复或保留，其余七篇未变。旧失败会话和保护拒绝继续保留。Vera对未受影响七篇独立复核通过，无新发现；该结论排除AI篇，新的正文恢复尚待当前原生读取检索及最终单篇／整批验收，不将机械检查算作语义放行。
+
+AI修订当前原生验收已补齐：0bc742版本从0完整读至4,266字符末尾，返回内容与实际保存字节及SHA一致；精确路径／ID／题名和所选内容查询均命中同版，索引epoch712就绪，无pending或error。两种问题的回答附六处当前字符／行范围及confidence，限定为对本文主张与条件的理解，不认证页内外部案例或实际模型误差。真实MCP job仍completed、唯一item done、当前回执一致；当前认证API确认Vault/root/Weber与旧App绑定保留。只读重新对账44份MD，身份／revision／核心索引全匹配，无新增、删除或意外漂移，旧七篇未变。已将这些证据交同一Vera终验AI及整批；在其结论前不放行本批或下一批，流程草稿继续暂存。
+
+Vera最终签署第002批八篇全部pass，关闭AI正文层次的V-P002-STRUCT-01，无新增实质问题或阻塞。独立回放47字符addition及34原块重排，核全部原正文／元数据／公式／链接和当前引用；七篇同版旧签署复用，23份冻结证据SHA一致。Octo在签署后再核当前44份MD、稳定ID／revision／核心索引，八篇与已签版本均未变，正式验收本批。私有 `batches/pika-002/vera-final-corrected-batch-review/`、`post-verdict-revision-check.json`、`acceptance.json` 保留最终依据；原失败与修复记录不覆盖。当前正式验收25/44（23变化、2真实no_change），余19篇仍待处理；pika003/004草案未提交，下一步先核pika003五篇当前全文与实际范围，再交既有Weber维护。
+
+第003批五篇维护前的当前原生全文共38,025字符、83,198原始字节已核，docID／revision与实际输入一致；完整363文件Library前清单、原稿及内容边界留私有 `batches/pika-003/`。经可信首行五文件维护入口，确认actual maintain模式、账户绑定、输入未变和固定幂等键无既有job后，真实MCP提交 `4d811d10896f471ca29ad004908141a8`。既有Weber两个窗口 `98cdea113a4c`、`c2eee09a0825` 已完成五项，六次受控操作的回执／history／blob／身份与当前索引机械检查通过。同口径363文件仅本批五篇变化，范围外变化为零。
+
+观察器exit4仅指PDF技能说明的定点操作需语义复核：实际是三处纯addition后normalize，没有restructure或原块移动。Octo从保存的参数逐字重放插入，与中间快照一致；原独立技能定位callout、四节教程及既有链接保留，不能由机械检查自动放行。五篇当前原生全文共43,058字符已连续返回至末尾，与各当前原始字节及输出revision一致；10次精确路径／身份定位和5次所选内容检索均命中当前版本，epoch718就绪。五个风险问答附20处当前正文字符／行范围引用、confidence及来源限制；不认证任意问法、外部论文或日常冷启动效率。原生完整分页清单再次核对44份MD的ID／revision与账本一致；一次cursor与offset参数组合422已按仅传cursor恢复，原错误留证。
+
+实际维护审计核五篇六次成功操作的本人同版本写前全文读取，PDF插入后本人重读中间版再normalize；四次blocks参数422均恢复，不能称所有Wiki工具零错误。两主窗口实际gpt-6.1-sol/ultra，主线程和三个helper用量分开记录，缓存／推理分别包含于输入／输出；helper父启动xhigh与自身ultra记录差异保留，不推provider档位或金额。原任务和观察器已终态，不重排或重跑。
+
+Vera独立终验第003批五篇全部pass，remaining_findings为空；69份冻结文件、六步执行、当前全文与20处引用均吻合。PDF原独立定位callout与三处addition忠实，Math规范的安装测试仍为历史报告。Octo签后再核44份MD的物理SHA、稳定ID／路径／revision及只读核心索引，均未变，正式接受本批；私有 `batches/pika-003/vera-review/`、`post-verdict-revision-check.json` 和 `acceptance.json` 保存依据。当前30/44正式通过（28变化、2真实no_change），余14未全部完成。
+
+第004批五份工具说明与模板已原生全文预读40,751字符、90,241字节；新维护入口确认actual maintain模式、账户／Vault／既有Weber绑定、五篇最新版本和完整363文件前清单均未变，固定key无既有job后，Octo真实MCP提交 `26adbf70b4ae4b8288657782d5c73795`。既有Weber首窗口 `aded32e87d67` 已running，五项待完成；仅原路径MD／material空。个人知识管理文的准确独立开头callout按原位canonical区域复用，其他完整正文和结尾保持；模板保留Template/template-v1、已有源UID及全部YAML／历史规则，仅以既有sources信息补五处引用所缺的同ID文末脚注，不应用生产prompt／skill。私有 `batches/pika-004/` 保存真实提交、首会话、输入与同口径观察配置；只读后台跟踪此既有job，完成后仍须当前全文／检索和同Vera验收。提交不计五篇通过，其他9篇仍待处理；全Library动态收口、最后一致恢复点和交付仍待。
+
+第004批真实job现已completed、五项done，共六步受控操作；观察器机械检查通过。五篇当前原生全文44,177字符已连续返回，与当前原始SHA、稳定ID、元数据、回执及核心索引一致，epoch726就绪；实际10次精确路径／ID定位、4篇Reference内容检索均命中。模板首个question未返回目标，改为显式lookup既有来源ID后命中同版；保留16次实际查询、初次缺口和补定位过程。五个问答样本20处当前char／行引用已逐字核验，限定为本文解释，未认证任意问法、冷启动效率、外部来源或实测性能。个人知识管理文的原位摘要区域和模板脚注addition仍须Vera专项语义验收，未计五篇通过。观察器的完整前清单为363文件，后清单365；范围外恰好新增两份Inbox Markdown，与用户声明的测试输入和本轮实际路径／版本核对一致。旧结果与前清单保留，另存用户新增对账；不归因于Weber，不回滚或重排job。
+
+用户新增的两份Inbox原稿已只读登记，连续读取共71,808字符，保存124,392原始字节及稳定ID／revision／初始元数据；当前无维护回执，正文和元数据未修改。两份保留供既有迁移收口、经验汇总完善流程之后的真实全流程测试，不提前交迁移worker整理。实际完整原生分页及物理枚举均确认当前46份Markdown／365文件：30份已独立通过，5份维护完成待验收，原迁移余9份未处理，另2份测试原稿保留未处理；全量未完成，分母仍动态核对。私有 `inbox-flow-test-inputs/registration.json`、`user_addition_reconciliation.json` 和更新的最终覆盖ledger保留依据。
+
+下一步收口第004批当前读取与独立验收，再处理原迁移剩余9份Markdown；之后总结全部经验完善system／skill流程，最后以两份保留原稿测试并核最终当前Library。用户于2026-10-14明确日常查询按完整问题过程验收：精准定位后读摘要和必要上下文，按缺口补检索／读取，给答案与confidence，证据足够就停；不要求首轮搜索答对或每问全文扫描。该澄清已写入spec、retrieval、evaluation及prompt参考稿，未修改生产运行指南或当前worker配置。维护入库的全文复核仍必需。没有逐批确认需求；每项仍需当前整理或 no_change、回执、身份与索引、精确读取及适用内容检索，最终全量对账和独立抽查不可省略。
+
+用户还要求将日常入库维护固化为短system知识段及按需skill类流程，避免固定多agent精细审计。已按现有任务装配与load_guide链保存本轮经验草稿：保留persona与配置，涉及正文结尾保全、局部修订与原块重排选择、失败只续未完成项、摘要与必要上下文回答及confidence。私有 `daily-workflow-candidate/` 留基线／草稿SHA和差异；公开原则见[prompt方案 §11](local-shared-wiki-prompts-v2.md#11-日常入库流程与本轮迁移验收)。用户随后明确先完成所有当前Markdown，再汇总全部经验完善流程，最后上线测试。当前只收尾既有任务和消化回传，不新增流程审查／上线测试；草稿未应用，不作为最终流程，当前批次验收义务保持。
+
+用户进一步要求日常入库改善完整耗时、模型往返和实际token消耗；组件协同prompt需按用途、结构、授权、版本和证据等通用合同组织，适应后续不同题材与风格。当前案例仅作经验，不能针对题名或词句专设规则。流程完善后保留未参与规则设计的材料验证泛化；两份Inbox原稿属于预登记未整理样本，不称全团队未见盲测或所有题材覆盖。本阶段只记录这些约束，未应用草稿或启动流程实验。
+
+Vera最终签署第004批五篇全部pass、remaining_findings为空，100份冻结SHA一致。旧写后read_many差异涉及实际内容与范围：原生日志缺一篇range、另一篇content短于声明；原因尚未独立确定，该call不认证完整写后回读。六次必要写前读取与写入完全匹配，另一次当前原生五篇完整回读补齐依据，因此不阻塞本批。私有 `batches/pika-004/vera-review/` 保留签署与边界；Octo尚需签后当前版本／身份／索引对账，正式通过计数暂不从30增加。下一Research／指南五文件的真实原生维护入口已续接，尚未提交job；先接受旧批与当前全文预读、幂等对账，再由既有Weber维护。两份Inbox测试原稿保持保留，流程草稿未应用。
+
+第004批签后实机只读对账已完成：46份MD的物理SHA、稳定ID／路径／revision／核心索引全匹配，365文件与上一全文件快照一致，100份冻结证据未变。Octo正式接受五篇，`batches/pika-004/acceptance.json` 保存依据，当前35/46独立通过（33变化、2真实no_change）；原迁移9份未处理、另2份Inbox原稿保留，全库仍未完成。下一Research／指南五篇实际native全文88,047字符／151,642字节已读至末尾，同版连续内容与原始SHA匹配；固定key尚无job，仅准备真实维护范围，不以预读代Weber写前ledger。
+
+用户随后要求暂停开发、记录未完成项并提供交接prompt。本轮不提交other001或新维护／审查／上线实验；重新核后台与Vera清单均终态。other001已有五篇当前预读、原稿／基线及完整前清单，但内容合同检查签署、worker-scope、config、submission和observer-started尚不存在；记录为预读完成且未提交。私有state的旧pika004 running／下一批等待旧验收等顶层状态已与真实accepted状态对齐并标注用户暂停，历史证据不覆盖。剩余九篇与两保留原稿、结构复用待核事项、日常通用流程／性能实测／新恢复点／最终交付待办及准确恢复条件见[暂停交接](local-shared-wiki-handoff-20261014.md)。
+
+## 7. 文档维护与下一次交付
 
 本页更新事实时间、对应版本、失败原因和证据位置；spec 只在行为决定变化时修订。格式/接口设计中的审阅基线、旧测试数据及个人信息 gold 标明历史，不重新冒充生产事实。执行产物仍留账户 workspace，仓库仅存非敏感结论。
 
-本轮设计 frontier 没有新的用户取舍：全 Library 范围、正文保全、来源选填、Octo 组织、真实 Weber 和现有 Vera 已确认。未完成分支是实现诊断、当前版本验证和真实内容验收，先取证并落实，不重复询问既有决定，也不由这次文档整理启动生产写入。
+全 Library 范围、正文保全、来源选填、Octo 组织、真实 Weber 和现有 Vera 已确认，无需逐批确认。当前按用户要求暂停，未完成分支完整写入最新交接；用户明确恢复后沿既有授权核真实任务入口并续做未完成项。文档更新本身不提交维护任务，也不宣布全量或日常流程交付完成。
