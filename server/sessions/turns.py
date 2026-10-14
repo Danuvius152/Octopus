@@ -31,6 +31,7 @@ from ..harness import (
     RunConfig,
     get_harness,
 )
+from ..harness.model_settings import effective_settings
 from ..large_prompts import spill_if_large
 from ..models import (
     AttachmentMetadata,
@@ -607,7 +608,11 @@ class TurnsMixin(SessionManagerBase):
         return sum(
             1
             for s in self.sessions.values()
-            if s.user_id == user_id and s._active_task and not s._active_task.done()
+            if s.user_id == user_id and (
+                (s._active_task is not None and not s._active_task.done())
+                or (s._dispatch_release_task is not None and not s._dispatch_release_task.done())
+                or bool(s._backend_cleanup_tasks)
+            )
         )
 
     def _check_turn_quota(self, session: Session) -> None:
@@ -626,6 +631,8 @@ class TurnsMixin(SessionManagerBase):
             return
         if session._active_task and not session._active_task.done():
             return  # this one is already counted; the message will queue
+        if session._backend_cleanup_tasks:
+            return  # Rejected before spawn; the existing writer owns this slot.
         if self.running_turns_for(session.user_id) >= cap:
             raise QuotaExceeded(
                 f"You already have {cap} turns running. Wait for one to finish, "
@@ -643,6 +650,10 @@ class TurnsMixin(SessionManagerBase):
 
     def _schedule_dispatch(self, session: Session) -> bool:
         """Claim the driver synchronously; its short lock never spans I/O."""
+        if self._legacy_transition:
+            return False
+        if session._dispatch_release_task is not None and not session._dispatch_release_task.done():
+            return False
         if self._admission_closed or session._admission_closed:
             return False
         if session._active_task and not session._active_task.done():
@@ -666,6 +677,8 @@ class TurnsMixin(SessionManagerBase):
         work_id: str | None = None,
         question_session_id: str | None = None,
         question_id: str | None = None,
+        request_id: str | None = None,
+        trusted_request: str | None = None,
     ) -> SubmissionReceipt:
         """Accept a request through the in-memory dispatch gate.
 
@@ -682,7 +695,7 @@ class TurnsMixin(SessionManagerBase):
             raise ValueError(f"too many attachments: max {MAX_ATTACHMENTS_PER_MESSAGE}")
         if delivery_id and delivery_id in session._delivery_receipts:
             return replace(session._delivery_receipts[delivery_id], disposition="duplicate")
-        if self._admission_closed or session._admission_closed or not work_is_open(work_id):
+        if self._admission_closed or self._legacy_transition or session._admission_closed or not work_is_open(work_id):
             queued = QueuedPrompt(prompt="", attachment_ids=[])
             receipt = self._new_receipt(session, queued, "closed")
             self._withdraw_requests(session, [queued], reason="shutdown" if self._admission_closed else "withdrawn")
@@ -691,6 +704,8 @@ class TurnsMixin(SessionManagerBase):
             prompt=prompt, attachment_ids=list(attachment_ids or []),
             wiki_mode=wiki_mode, source=source, delivery_id=delivery_id, work_id=work_id,
             question_session_id=question_session_id, question_id=question_id,
+            trusted_request=prompt if trusted_request is None else trusted_request,
+            **({"request_id": request_id} if request_id else {}),
         )
         # Stop closes the steering window synchronously before yielding. A
         # correction may steer another correction, but never the retired turn.
@@ -709,7 +724,7 @@ class TurnsMixin(SessionManagerBase):
                 raise ValueError(f"Session {session_id} not found")
             if delivery_id and delivery_id in session._delivery_receipts:
                 return replace(session._delivery_receipts[delivery_id], disposition="duplicate")
-            if self._admission_closed or session._admission_closed or not work_is_open(work_id):
+            if self._admission_closed or self._legacy_transition or session._admission_closed or not work_is_open(work_id):
                 receipt = self._new_receipt(session, queued, "closed")
                 self._withdraw_requests(session, [queued], reason="shutdown" if self._admission_closed else "withdrawn")
                 return receipt
@@ -775,8 +790,6 @@ class TurnsMixin(SessionManagerBase):
                 async with session._dispatch_lock:
                     eligible = self._eligible_request(session)
                     if eligible is None:
-                        if session._active_task is driver:
-                            session._active_task = None
                         break
                     current = session._pending_queue.pop(eligible)
                     gate = asyncio.Event()
@@ -816,22 +829,49 @@ class TurnsMixin(SessionManagerBase):
                         await self._broadcast(finished_event, user_id=session.user_id)
         finally:
             if session._active_task is driver:
-                session._active_task = None
-        # A paused session has stopped executing, but its pending work is not
-        # finished. Completion notifications and transient archival must wait.
-        if (not session._dispatch_paused and session._recording_blocked is None
-                and not session._pending_queue and not session._active_task):
-            await self._fire_session_idle_notification(session)
-            if session.origin in self._AUTO_ARCHIVE_ORIGINS:
-                await self.auto_archive_scheduled_session(session_id)
-        for waiting in list(self.sessions.values()):
-            if waiting is session:
-                continue
-            async with waiting._dispatch_lock:
+                release = asyncio.create_task(self._release_dispatch(session, driver),
+                                              name=f"dispatch-release-{session.id}")
+                session._dispatch_release_task = release
+                self._own_task(release)
+                await asyncio.shield(release)
+
+    async def _release_dispatch(self, session: Session, driver: asyncio.Task | None) -> None:
+        # The capacity slot stays owned until captured writers have retired.
+        # This task survives repeated cancellation of the original driver.
+        retired = True
+        if session._backend_cleanup_tasks:
+            try:
+                await self._await_backend_retirement(session)
+            except Exception:
+                retired = False
+        if session._active_task is driver:
+            session._active_task = None
+        if session._dispatch_release_task is asyncio.current_task():
+            session._dispatch_release_task = None
+        if self.sessions.get(session.id) is session:
+            async with session._dispatch_lock:
                 try:
-                    self._schedule_dispatch(waiting)
+                    self._schedule_dispatch(session)
                 except QuotaExceeded:
                     pass
+        if not retired:
+            return
+        try:
+            # A paused queue is unfinished; idle notifications must wait.
+            if (not session._dispatch_paused and session._recording_blocked is None
+                    and not session._pending_queue and not session._active_task):
+                await self._fire_session_idle_notification(session)
+                if session.origin in self._AUTO_ARCHIVE_ORIGINS:
+                    await self.auto_archive_scheduled_session(session.id)
+        finally:
+            for waiting in list(self.sessions.values()):
+                if waiting is session:
+                    continue
+                async with waiting._dispatch_lock:
+                    try:
+                        self._schedule_dispatch(waiting)
+                    except QuotaExceeded:
+                        pass
 
     async def resume_dispatch(self, session_id: str, *, resume_queue: bool = True) -> bool:
         session = self.sessions.get(session_id)
@@ -982,6 +1022,7 @@ class TurnsMixin(SessionManagerBase):
             session_id, queued.prompt, queued.attachment_ids,
             request_id=queued.request_id,
             source=queued.source, work_id=queued.work_id,
+            trusted_request=queued.trusted_request,
             **({"wiki_mode": queued.wiki_mode} if queued.wiki_mode else {})
         ):
             pass  # The executor persists and broadcasts each event.
@@ -996,6 +1037,7 @@ class TurnsMixin(SessionManagerBase):
         request_id: str | None = None,
         source: str = "human",
         work_id: str | None = None,
+        trusted_request: str | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         session = self.sessions.get(session_id)
         if session is None:
@@ -1022,7 +1064,9 @@ class TurnsMixin(SessionManagerBase):
         wiki_task_id = None
         try:
             session._wiki_mode = wiki_mode
-            session._wiki_task_id = wiki_tasks.open(session, wiki_mode, prompt) if wiki_mode else None
+            session._wiki_task_id = wiki_tasks.open(
+                session, wiki_mode, prompt if trusted_request is None else trusted_request
+            ) if wiki_mode else None
             wiki_task_id = session._wiki_task_id
             # Resolve attachment ids → on-disk paths so the prompt can
             # cite absolute paths the agent's `Read` tool will open.
@@ -2025,12 +2069,15 @@ class TurnsMixin(SessionManagerBase):
         credential = await self._resolve_credential(configured_session, agent, harness)
         # Defend the invocation boundary too: a refreshed catalog or an
         # internal caller can change availability without going through PATCH.
-        tier = configured_session.service_tier or (agent or {}).get("service_tier")
-        if tier == "fast":
-            catalog = harness.model_settings(credential)
-            model = configured_session.model or (agent or {}).get("model")
-            if catalog.service_tiers and tier not in catalog.tiers_for(model):
+        effective = effective_settings(configured_session, agent)
+        catalog = harness.model_settings(credential)
+        effort, tier, model = effective["reasoning_effort"], effective["service_tier"], effective["model"]
+        if catalog.reasoning_efforts and effort and effort not in catalog.efforts_for(model):
+            raise ValueError(f"Reasoning effort {effort!r} is unavailable for this model.")
+        if catalog.service_tiers and tier and tier not in catalog.tiers_for(model):
+            if tier == "fast":
                 raise ValueError("Fast speed is unavailable for this model. Choose Normal speed.")
+            raise ValueError(f"Speed {tier!r} is unavailable for this model.")
         connectors = await self._load_connectors(agent)
         settlement = session._settlement
         if settlement is None or settlement.final_task is not None:
@@ -2380,12 +2427,10 @@ class TurnsMixin(SessionManagerBase):
             tool_deny = _split_tool_list(agent.get("tool_deny"))
         # `/model` — a per-session override, applied after the agent's so it
         # wins. Both unset means the backend picks, which is the default.
-        if session.model:
-            model = session.model
-        if session.reasoning_effort:
-            reasoning_effort = session.reasoning_effort
-        if session.service_tier:
-            service_tier = session.service_tier
+        effective = effective_settings(session, agent)
+        model = effective["model"]
+        reasoning_effort = effective["reasoning_effort"]
+        service_tier = effective["service_tier"]
 
         # Per-agent native memory (docs/plans/memory.md): derive the agent's
         # canonical memory dir and ensure it exists. None when there's no agent

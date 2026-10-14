@@ -84,6 +84,28 @@ function setup() {
   };
 }
 
+it("keeps a rejected Wiki draft and protects subsequent editing during restoration", async () => {
+  let finish!: (reply: { accepted: boolean; message: string }) => void;
+  const sendMessage = vi.fn(() => new Promise<{ accepted: boolean; message: string }>((resolve) => { finish = resolve; }));
+  render(<ChatView sendMessage={sendMessage} interrupt={vi.fn()} approveTool={vi.fn()}
+    denyTool={vi.fn()} answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />);
+  const input = screen.getByRole("textbox");
+  const wiki = screen.getByRole("button", { name: "Use local Wiki for this message" });
+  fireEvent.change(input, { target: { value: "  /wiki maintain Library/a.md  " } });
+  fireEvent.click(wiki);
+  fireEvent.click(screen.getByRole("button", { name: "Send message" }));
+  fireEvent.change(input, { target: { value: "new draft" } });
+  await act(async () => finish({ accepted: false, message: "Conversation is closed" }));
+  expect(input).toHaveValue("new draft");
+  expect(screen.getByRole("alert")).toHaveTextContent("Conversation is closed");
+  expect(screen.getByRole("button", { name: "Restore draft" })).toBeDisabled();
+  fireEvent.change(input, { target: { value: "" } });
+  fireEvent.click(screen.getByRole("button", { name: "Restore draft" }));
+  expect(input).toHaveValue("  /wiki maintain Library/a.md  ");
+  expect(wiki).toHaveAttribute("aria-pressed", "false");
+  expect(sendMessage).toHaveBeenCalledTimes(1);
+});
+
 describe("Wiki composer selection", () => {
   it("gives visible selection feedback and can be turned off", () => {
     const { wiki } = setup();

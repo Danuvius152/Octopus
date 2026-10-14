@@ -330,6 +330,22 @@ async def test_agent_speed_update_validates_inherited_session_model(client):
     assert (await client.patch(path, headers=HEADERS, json={"service_tier": "fast"})).status_code == 200
 
 
+async def test_agent_reasoning_update_validates_inherited_session_model(client):
+    response = await client.post("/api/agents", headers=HEADERS, json={
+        "name": "Reasoning inheritance", "backend": "codex", "model": "model-a", "reasoning_effort": "low",
+    })
+    path = f"/api/agents/{response.json()['id']}"
+    response = await client.post(f"{path}/sessions", headers=HEADERS, json={})
+    session_path = f"/api/sessions/{response.json()['id']}"
+    assert (await client.patch(session_path, headers=HEADERS, json={"model": "model-b"})).status_code == 200
+    rejected = await client.patch(path, headers=HEADERS, json={"reasoning_effort": "high"})
+    assert rejected.status_code == 400
+    assert "Session" in rejected.json()["detail"]
+    assert (await client.get(path, headers=HEADERS)).json()["reasoning_effort"] == "low"
+    assert (await client.patch(session_path, headers=HEADERS, json={"reasoning_effort": "medium"})).status_code == 200
+    assert (await client.patch(path, headers=HEADERS, json={"reasoning_effort": "high"})).status_code == 200
+
+
 @pytest.mark.asyncio
 async def test_invocation_rejects_unavailable_inherited_speed_before_spawning(client, monkeypatch):
     response = await client.post("/api/sessions", headers=HEADERS, json={"backend": "codex"})

@@ -26,6 +26,7 @@ import asyncio
 import logging
 import os
 import time
+import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -85,6 +86,8 @@ class _Turn:
 
     session_id: str
     app_id: str
+    request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
+    observer: asyncio.Task | None = field(default=None, repr=False)
     queue: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue)
     done: asyncio.Event = field(default_factory=asyncio.Event)
     text: list[str] = field(default_factory=list)
@@ -118,7 +121,33 @@ class AppAgentManager:
     def shutdown(self) -> None:
         if self.session_mgr is not None:
             self.session_mgr.remove_broadcast(_BUS_KEY)
-        self._turns.clear()
+        for turn in list(self._turns.values()):
+            if not turn.done.is_set():
+                self._fail_turn(turn, "The service is shutting down")
+            self._release_turn(turn)
+
+    def _release_turn(self, turn: _Turn) -> None:
+        if self._turns.get(turn.session_id) is turn:
+            self._turns.pop(turn.session_id)
+        if turn.observer is not None and turn.observer is not asyncio.current_task():
+            turn.observer.cancel()
+
+    def _fail_turn(self, turn: _Turn, message: str) -> None:
+        turn.error = message
+        turn.queue.put_nowait({"type": "error", "message": message})
+        turn.done.set()
+
+    async def _observe_completion(self, turn: _Turn, receipt) -> None:
+        completion = await receipt.wait()
+        if turn.done.is_set():
+            return
+        if completion.state != "completed" or completion.recording_state != "committed":
+            self._fail_turn(turn, f"The request ended without a recorded reply ({completion.state})")
+        elif completion.outcome is not None and completion.outcome.status != "success":
+            self._fail_turn(turn, completion.outcome.message or "The agent did not complete this request")
+        else:
+            turn.queue.put_nowait({"type": "done", "reply": turn.reply(), "cost": turn.cost})
+            turn.done.set()
 
     # ------------------------------------------------------------- read-side
 
@@ -174,8 +203,11 @@ class AppAgentManager:
     async def delete_conversation(self, app_id: str, conversation_id: str) -> None:
         self._require_conversation(app_id, conversation_id)
         mgr = self._require_session_mgr()
-        self._turns.pop(conversation_id, None)
         await mgr.delete_session(conversation_id)
+        if turn := self._turns.get(conversation_id):
+            if not turn.done.is_set():
+                self._fail_turn(turn, "The conversation was deleted")
+            self._release_turn(turn)
 
     async def delete_conversations_for_app(self, app_id: str) -> int:
         """Called when an application is deleted — its threads go with it.
@@ -189,9 +221,12 @@ class AppAgentManager:
             if s.origin == ORIGIN_APP and s.app_id == app_id
         ]
         for sid in victims:
-            self._turns.pop(sid, None)
             try:
                 await mgr.delete_session(sid)
+                if turn := self._turns.get(sid):
+                    if not turn.done.is_set():
+                        self._fail_turn(turn, "The conversation was deleted")
+                    self._release_turn(turn)
             except Exception:
                 logger.exception("could not delete app conversation %s", sid)
         return len(victims)
@@ -210,7 +245,7 @@ class AppAgentManager:
                 status_code=504,
             )
         finally:
-            self._turns.pop(turn.session_id, None)
+            self._release_turn(turn)
         if turn.error:
             raise AppAgentError(turn.error, status_code=502)
         return {
@@ -249,7 +284,7 @@ class AppAgentManager:
                 if event["type"] in ("done", "error"):
                     return
         finally:
-            self._turns.pop(turn.session_id, None)
+            self._release_turn(turn)
 
     async def begin_turn(
         self,
@@ -331,15 +366,23 @@ class AppAgentManager:
         try:
             from .wiki.tasks import explicit_mode
             mode = explicit_mode(message, wiki_mode)
-            receipt = await mgr.start_message(session.id, body, source="app", **({"wiki_mode": mode} if mode else {}))
-        except Exception as exc:
-            self._turns.pop(session.id, None)
+            receipt = await mgr.start_message(
+                session.id, body, source="app", request_id=turn.request_id,
+                trusted_request=message, **({"wiki_mode": mode} if mode else {}),
+            )
+        except BaseException as exc:
+            self._release_turn(turn)
+            if isinstance(exc, asyncio.CancelledError):
+                raise
             raise AppAgentError(
                 f"could not start the turn: {exc}", status_code=500
             )
         if not receipt.accepted:
-            self._turns.pop(session.id, None)
+            self._release_turn(turn)
             raise AppAgentError("This conversation is closed to new turns", status_code=409)
+        if not turn.done.is_set():
+            turn.observer = asyncio.create_task(self._observe_completion(turn, receipt),
+                                                name=f"app-reply-{turn.request_id}")
         return turn
 
     # -------------------------------------------------------------- internals
@@ -510,7 +553,7 @@ class AppAgentManager:
         if not sid:
             return
         turn = self._turns.get(sid)
-        if turn is None or turn.done.is_set():
+        if turn is None or turn.done.is_set() or msg.get("request_id") != turn.request_id:
             return
 
         kind = msg.get("type")

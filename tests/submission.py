@@ -7,8 +7,8 @@ from server.models import TurnOutcome
 from server.sessions.submission import RequestCompletion, SubmissionReceipt
 
 
-def accepted_receipt():
-    request_id = uuid.uuid4().hex
+def accepted_receipt(request_id=None):
+    request_id = request_id or uuid.uuid4().hex
     future = asyncio.get_running_loop().create_future()
     future.set_result(RequestCompletion(
         input_request_id=request_id, request_id=request_id,

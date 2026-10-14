@@ -72,6 +72,50 @@ async def frame(outgoing):
     return json.loads(message["text"])
 
 
+@pytest.mark.parametrize("mode", [None, "read", "maintain"])
+async def test_agent_bearer_cannot_enter_human_websocket(runtime, monkeypatch, tmp_path, mode):
+    from server.mcp_identity import mint, register_run, revoke_run
+    from server.wiki.tasks import tasks
+
+    manager, db = runtime
+    agent = await db.get_system_agent()
+    session = await manager.create_session(agent["id"], "agent ws", str(tmp_path), backend="codex")
+    grant = tasks.open(session, mode, "/wiki maintain Library/note.md") if mode else None
+    lease = "ws-authority-test"
+    register_run(lease, session.id, None, None)
+    token = mint(session.id, wiki_task_id=grant, run_lease_id=lease)
+    try:
+        assert await deps.resolve_principal(token) is not None
+        async with connection(manager, token) as client:
+            closed = await asyncio.wait_for(client[1].get(), 1)
+            assert closed["type"] == "websocket.close" and closed["code"] == 4001
+            assert not session._pending_queue
+    finally:
+        revoke_run(lease)
+        if grant:
+            tasks.close(grant)
+
+
+async def test_closed_submission_is_rejected_with_client_identity(runtime, tmp_path):
+    manager, db = runtime
+    agent = await db.get_system_agent()
+    session = await manager.create_session(agent["id"], "closed ws", str(tmp_path), backend="codex")
+    session._admission_closed = True
+    async with connection(manager, settings.auth_token) as client:
+        await client[0].put({"type": "websocket.receive", "text": json.dumps({
+            "type": "send_message", "session_id": session.id, "content": "keep my draft",
+            "client_request_id": "draft-1",
+        })})
+        rejected = await frame(client[1])
+        assert rejected["type"] == "submission"
+        assert rejected["accepted"] is False
+        assert rejected["client_request_id"] == "draft-1"
+        assert rejected["session_id"] == session.id
+        assert "closed" in rejected["message"].lower()
+        assert not session._pending_queue
+        assert not await db.load_messages(session.id)
+
+
 async def test_blocked_asgi_send_does_not_hold_bus_or_other_browser(runtime):
     manager, _ = runtime
     release = asyncio.Event()

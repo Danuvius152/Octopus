@@ -594,9 +594,22 @@ class LifecycleMixin(SessionManagerBase):
         return session
 
     async def delete_session(self, session_id: str) -> bool:
-        session = self.sessions.pop(session_id, None)
+        session = self.sessions.get(session_id)
         if session is None:
             return False
+        task = session._deletion_task
+        if task is None or task.done():
+            session._admission_closed = True
+            session._dispatch_paused = True
+            task = asyncio.create_task(self._delete_live_session(session), name=f"delete-session-{session_id}")
+            session._deletion_task = task
+            self._own_task(task)
+        return await asyncio.shield(task)
+
+    async def _delete_live_session(self, session: Session) -> bool:
+        session_id = session.id
+        session._admission_closed = True
+        session._dispatch_paused = True
         self._withdraw_requests(session, [*session._pending_queue, *session._steer_queue], reason="deleted")
         if session._current_request is not None and not session._current_request.started:
             self._withdraw_requests(session, [session._current_request], reason="deleted")
@@ -613,6 +626,8 @@ class LifecycleMixin(SessionManagerBase):
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
         await self._await_backend_retirement(session)
+        if self.sessions.get(session_id) is session:
+            self.sessions.pop(session_id)
         # Blit attachment files into descendant forks BEFORE removing this
         # session's dir, so the read-time fallback stays valid (§5.5). Done
         # before the DB delete so the descendant message rows are still

@@ -8,6 +8,7 @@ from ..agent_manager import AgentError, AgentManager
 from ..auth import verify_token
 from ..credential_bindings import CredentialBindingError, validate_credential_binding
 from ..deps import ScopeUser, SessionMgr
+from ..harness.model_settings import effective_settings
 from ..models import (
     AgentCreate,
     AgentRead,
@@ -172,17 +173,18 @@ async def _update_agent_settings(session_manager, agent_id: str, fields: dict, u
         for session in await session_manager.db.load_sessions(include_archived=True, user_id=user_id):
             if session["agent_id"] != agent_id:
                 continue
-            tier = session.get("service_tier") or merged.get("service_tier")
-            if tier != "fast":
+            effective = effective_settings(session, merged)
+            if not effective["reasoning_effort"] and not effective["service_tier"]:
                 continue
             catalog = await model_settings_for(
                 session_manager, session["backend"],
-                session.get("credential_id") or merged.get("credential_id"), user_id,
+                effective["credential_id"], user_id,
             )
-            if not catalog.service_tiers:
-                continue  # This backend does not consume inherited speed.
             try:
-                validate_service_tier(catalog, session.get("model") or merged.get("model"), tier)
+                if catalog.reasoning_efforts:
+                    validate_reasoning(catalog, effective["model"], effective["reasoning_effort"])
+                if catalog.service_tiers:
+                    validate_service_tier(catalog, effective["model"], effective["service_tier"])
             except HTTPException as exc:
                 raise HTTPException(400, f"Session {session['name']!r}: {exc.detail}") from exc
     try:

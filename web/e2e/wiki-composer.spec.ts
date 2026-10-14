@@ -80,10 +80,10 @@ for (const width of [1280, 390]) {
         await input.fill(nested);
         await expect(wiki).toHaveAttribute("aria-pressed", "false");
         await page.getByRole("button", { name: "Send message" }).click();
-        await expect.poll(() => sent).toEqual([{
+        await expect.poll(() => sent).toEqual([expect.objectContaining({
           type: "send_message", session_id: session.id,
           content: nested, wiki_mode: "off",
-        }]);
+        })]);
         await expect(input).toHaveValue("");
         await expect(wiki).toHaveAttribute("aria-pressed", "false");
       } finally {

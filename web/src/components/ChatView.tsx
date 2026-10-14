@@ -48,6 +48,7 @@ import { Button } from "./ui/button";
 import { isSessionBusy } from "../lib/deferredFork";
 import { loadOlderMessages } from "../lib/transcript";
 import { wikiCommandMode, type WikiMessageMode } from "../lib/wikiComposer";
+import type { SubmissionReply } from "../lib/submission";
 
 const EMPTY_MESSAGES: Message[] = [];
 
@@ -89,7 +90,7 @@ interface Props {
     content: string,
     attachmentIds?: string[],
     wikiMode?: WikiMessageMode
-  ) => void;
+  ) => void | Promise<SubmissionReply>;
   interrupt: (sessionId: string) => void;
   approveTool: (sessionId: string, toolUseId: string) => void;
   denyTool: (sessionId: string, toolUseId: string) => void;
@@ -130,6 +131,10 @@ export function ChatView({
     textareaRef.current?.focus();
   };
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [rejectedDrafts, setRejectedDrafts] = useState<{
+    id: string; sessionId: string; text: string; attachments: PendingAttachment[];
+    wikiSelection: "read" | "off" | undefined; reason: string;
+  }[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   // Fork dialog (session-rewind.md §6.1-6.2). `null` = closed; `{}` = the
   // /fork picker; `{ seq }` = the per-message "Fork from here" confirm step.
@@ -637,6 +642,35 @@ export function ChatView({
     });
   };
 
+  const submitTurn = (content: string) => {
+    if (!activeSessionId) return;
+    const draft = {
+      id: crypto.randomUUID(), sessionId: activeSessionId, text: input,
+      attachments: pendingAttachments.filter((attachment) => attachment.status === "ready"), wikiSelection,
+    };
+    const submission = sendMessage(
+      activeSessionId,
+      content,
+      readyAttachmentIds.length > 0 ? readyAttachmentIds : undefined,
+      wikiSelection
+    );
+    setInput("");
+    setHistory(HISTORY_IDLE);
+    setWikiSelection(undefined);
+    // Drop both ready uploads (they're now associated with the message
+    // we just sent) and any failed uploads (the user can retry by
+    // re-attaching). Leave in-flight uploads alone — addFiles already
+    // prevents that case by blocking send while one is pending.
+    setPendingAttachments([]);
+    if (submission) {
+      void submission.then((reply) => {
+        if (!reply.accepted) setRejectedDrafts((drafts) => [...drafts, {
+          ...draft, reason: reply.message || "Your message was not accepted.",
+        }]);
+      });
+    }
+  };
+
   const handleSend = async () => {
     if (!activeSessionId) return;
     const trimmed = input.trim();
@@ -962,8 +996,7 @@ export function ChatView({
         setInput("");
         return;
       }
-      sendMessage(activeSessionId, buildRememberPrompt(note));
-      setInput("");
+      submitTurn(buildRememberPrompt(note));
       return;
     }
 
@@ -1050,20 +1083,7 @@ export function ChatView({
       return;
     }
 
-    sendMessage(
-      activeSessionId,
-      trimmed,
-      readyAttachmentIds.length > 0 ? readyAttachmentIds : undefined,
-      wikiSelection
-    );
-    setInput("");
-    setHistory(HISTORY_IDLE);
-    setWikiSelection(undefined);
-    // Drop both ready uploads (they're now associated with the message
-    // we just sent) and any failed uploads (the user can retry by
-    // re-attaching). Leave in-flight uploads alone — addFiles already
-    // prevents that case by blocking send while one is pending.
-    setPendingAttachments([]);
+    submitTurn(trimmed);
   };
 
   /** Put a recalled message in the box with the caret at its end, which is
@@ -1589,11 +1609,46 @@ export function ChatView({
       </div>
     ) : null;
 
+  const savedDrafts = <div className="shrink-0 max-h-72 overflow-auto px-6">
+          {rejectedDrafts.map((draft) => (
+            <div key={draft.id} role="alert" className="mb-2 rounded-md border border-destructive/40 p-3 text-sm">
+              <p>{draft.reason}</p>
+              {(!activeSessionId || isArchived) && <p>Open an active conversation to restore this draft.</p>}
+              <details><summary>Saved draft</summary>
+                <pre className="max-h-40 overflow-auto whitespace-pre-wrap">{draft.text}</pre>
+                {draft.attachments.map((attachment) => <p key={attachment.uid}>
+                  <button type="button" className="text-primary underline" onClick={() => {
+                    const url = URL.createObjectURL(attachment.file);
+                    const link = document.createElement("a");
+                    link.href = url; link.download = attachment.file.name; link.click();
+                    setTimeout(() => URL.revokeObjectURL(url), 0);
+                  }}>Download {attachment.file.name}</button></p>)}
+              </details>
+              <Button size="sm" variant="outline" className="mt-2"
+                disabled={!activeSessionId || isArchived || input.length > 0 || pendingAttachments.length > 0}
+                onClick={() => {
+                  if (!activeSessionId || isArchived || input.length > 0 || pendingAttachments.length > 0) return;
+                  setInput(draft.text);
+                  if (draft.sessionId === activeSessionId) setPendingAttachments(draft.attachments);
+                  else addFiles(draft.attachments.map((attachment) => attachment.file));
+                  setWikiSelection(draft.wikiSelection);
+                  setHistory(HISTORY_IDLE);
+                  setRejectedDrafts((drafts) => drafts.filter((item) => item.id !== draft.id));
+                  textareaRef.current?.focus();
+                }}>Restore draft</Button>
+              <Button size="sm" variant="ghost" className="ml-2 mt-2"
+                onClick={() => setRejectedDrafts((drafts) => drafts.filter((item) => item.id !== draft.id))}>Discard saved draft</Button>
+              {(input.length > 0 || pendingAttachments.length > 0) && <p className="mt-1 text-xs text-muted-foreground">Clear the current draft to restore this one.</p>}
+            </div>
+          ))}
+  </div>;
+
   if (!activeSessionId) {
     return (
       <div className="chat-view flex-1 flex flex-col min-h-0">
         {header}
         {delegationBanner}
+        {savedDrafts}
         <div className="chat-empty flex flex-1 flex-col items-center justify-center gap-2 px-8 text-center text-gray-700">
           {/* The one place the mark gets room to be itself — nothing else is
             * competing for attention on an empty canvas. */}
@@ -1709,6 +1764,7 @@ export function ChatView({
 
       {activeSessionId && <DispatchQueue key={activeSessionId} sessionId={activeSessionId} readOnly={isArchived} />}
 
+      {savedDrafts}
       {isArchived ? (
         <div className="chat-archived-banner px-4 py-3 border-t border-border bg-muted/40 text-sm text-muted-foreground flex items-center justify-between gap-3 shrink-0">
           <span>
@@ -1719,6 +1775,7 @@ export function ChatView({
         </div>
       ) : (
         <div className="chat-input-bar shrink-0 bg-background px-6 pb-5 pt-2">
+
           {(dispatchPaused || savingBlocked) && <p className="dispatch-pause-hint mb-2 text-xs text-muted-foreground">
             {savingBlocked ? "New messages stay queued until result saving is verified." : "Your next message takes priority. Pending results stay paused until you resume processing."}
           </p>}

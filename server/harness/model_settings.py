@@ -1,6 +1,17 @@
 """Model metadata advertised by a runtime, without credentials or config contents."""
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
+
+
+def effective_settings(session: Any, agent: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Resolve each override independently; an empty override inherits."""
+    defaults = agent or {}
+    def value(field: str):
+        override = session.get(field) if isinstance(session, Mapping) else getattr(session, field, None)
+        return override or defaults.get(field)
+    return {field: value(field) for field in ("model", "reasoning_effort", "service_tier", "credential_id")}
 
 
 @dataclass

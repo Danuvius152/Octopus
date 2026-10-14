@@ -161,6 +161,7 @@ class QueuedPrompt:
     prompt: str
     attachment_ids: list[str]
     wiki_mode: str | None = None
+    trusted_request: str | None = None
     source: str = "human"
     priority: bool = False
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -269,6 +270,8 @@ class Session:
     # start_message sets _active_task without holding _lock.
     _forking: bool = field(default=False, repr=False)
     _active_task: asyncio.Task | None = field(default=None, repr=False)
+    _dispatch_release_task: asyncio.Task | None = field(default=None, repr=False)
+    _deletion_task: asyncio.Task | None = field(default=None, repr=False)
     # Per-prompt task that interrupt() targets; the outer _active_task is
     # the orchestrator loop and survives interrupts so it can drain the queue.
     _inner_task: asyncio.Task | None = field(default=None, repr=False)
@@ -570,6 +573,7 @@ class SessionManagerBase:
         self.sessions: dict[str, Session] = {}
         self._dispatch_generation = uuid.uuid4().hex
         self._admission_closed = False
+        self._legacy_transition = False
         self._owned_tasks: set[asyncio.Task[Any]] = set()
         # Short configuration operations share a lock, independently of turn
         # execution. Read/validate/write and turn snapshots must agree.

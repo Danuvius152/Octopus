@@ -161,7 +161,9 @@ class ScheduleRunner:
         now = datetime.now(UTC).isoformat()
         row = await self._schedule_row(schedule_id)
         body = self._compose_prompt(row, prompt)
-        wiki_kwargs = {"wiki_mode": mode} if (mode := (row or {}).get("wiki_mode")) else {}
+        wiki_kwargs = {"trusted_request": prompt}
+        if mode := (row or {}).get("wiki_mode"):
+            wiki_kwargs["wiki_mode"] = mode
 
         try:
             if origin_session_id and self._session_mgr.get_session(origin_session_id):
@@ -219,10 +221,13 @@ class ScheduleRunner:
                     schedule_id, last_run_session_id=session.id
                 )
                 receipt = await self._session_mgr.start_message(session.id, body, source="schedule", **wiki_kwargs)
+                driver = session._active_task
                 if not receipt.accepted:
                     logger.info("Schedule %s suppressed: session admission is closed", schedule_id)
                     return
                 completion = await receipt.wait()
+                if driver is not None:
+                    await asyncio.wait({driver})
                 if completion.state == "recording_failed":
                     logger.error("Schedule %s result recording is %s (session=%s request=%s)", schedule_id, completion.recording_state, session.id, completion.request_id)
                     return

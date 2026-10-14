@@ -133,6 +133,7 @@ export default defineConfig({
         // Not the developer's own `~/.octopus`: see E2E_STATE_DIR above.
         OCTOPUS_MASTER_KEY_FILE: path.join(E2E_STATE_DIR, "master.key"),
         OCTOPUS_USERS_ROOT: path.join(E2E_STATE_DIR, "users"),
+        OCTOPUS_WIKI_DIR: path.join(E2E_STATE_DIR, "wiki"),
         OCTOPUS_RESEARCH_DIR: path.join(E2E_STATE_DIR, "research"),
       },
     },
@@ -182,6 +183,7 @@ export default defineConfig({
           "master.key",
         ),
         OCTOPUS_USERS_ROOT: path.join(E2E_ACCOUNTS_STATE_DIR, "users"),
+        OCTOPUS_WIKI_DIR: path.join(E2E_ACCOUNTS_STATE_DIR, "wiki"),
         OCTOPUS_RESEARCH_DIR: path.join(E2E_ACCOUNTS_STATE_DIR, "research"),
       },
     },

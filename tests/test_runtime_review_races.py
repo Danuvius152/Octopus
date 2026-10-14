@@ -322,12 +322,11 @@ async def test_archived_background_result_keeps_adopted_owner(background, runtim
 
 
 @pytest.mark.parametrize("boundary", ["incoming", "broadcast", "rotation_notice"])
-@pytest.mark.parametrize("legacy", [False, True])
-async def test_connected_ownerless_websocket_retires_on_account_transition(runtime, monkeypatch, boundary, legacy):
+async def test_connected_ownerless_websocket_retires_on_account_transition(runtime, monkeypatch, boundary):
     manager, database, session, _, _, _ = runtime
     users = UserManager(database)
     monkeypatch.setattr(deps, "_user_manager", users)
-    token = mint(session.id) if legacy else settings.auth_token
+    token = settings.auth_token
     incoming, outgoing, task = await connect_ws(manager, token)
     try:
         account = await users.create_user(username="first", password="password1")

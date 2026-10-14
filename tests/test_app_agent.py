@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import json
 import os
+from dataclasses import replace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -108,26 +109,29 @@ class FakeTurns:
 
     async def start_message(self, session_id, prompt, attachment_ids=None, **kw):
         self.prompts.append((session_id, prompt))
+        receipt = accepted_receipt(kw.get("request_id"))
         if not self.emit:
-            return accepted_receipt()
+            return replace(receipt, _completion=asyncio.get_running_loop().create_future())
+        async def broadcast(event):
+            await self.mgr._broadcast({**event, "request_id": receipt.request_id})
         for chunk in ("Sure — ", "the article "):
-            await self.mgr._broadcast(
+            await broadcast(
                 {"type": "assistant_delta", "session_id": session_id, "content": chunk}
             )
-        await self.mgr._broadcast(
+        await broadcast(
             {"type": "tool_use", "session_id": session_id, "tool": "WebFetch",
              "input": {"url": "http://x"}, "tool_use_id": "t1"}
         )
         if not self.is_error:
-            await self.mgr._broadcast(
+            await broadcast(
                 {"type": "assistant_text", "session_id": session_id,
                  "content": self.reply}
             )
-        await self.mgr._broadcast(
+        await broadcast(
             {"type": "result", "session_id": session_id, "is_error": self.is_error,
              "cost": 0.004}
         )
-        return accepted_receipt()
+        return receipt
 
 
 @pytest.fixture
@@ -469,11 +473,11 @@ async def test_app_waits_through_recovery_events(aam, am, db, mgr, turns):
         {"type": "result", "is_error": True, "retrying": True},
         {"type": "error", "code": "turn_timeout_retry", "retrying": True},
     ):
-        await mgr._broadcast({**event, "session_id": sid})
+        await mgr._broadcast({**event, "session_id": sid, "request_id": turn.request_id})
         assert not turn.done.is_set()
         assert turn.error is None
-    await mgr._broadcast({"type": "assistant_text", "session_id": sid, "content": "recovered"})
-    await mgr._broadcast({"type": "result", "session_id": sid, "is_error": False})
+    await mgr._broadcast({"type": "assistant_text", "session_id": sid, "request_id": turn.request_id, "content": "recovered"})
+    await mgr._broadcast({"type": "result", "session_id": sid, "request_id": turn.request_id, "is_error": False})
     events = [event async for event in aam.stream_turn(turn)]
     assert events[-1]["type"] == "done"
     assert events[-1]["reply"] == "recovered"
@@ -485,7 +489,7 @@ async def test_app_reports_recording_failure_without_a_saved_success(aam, am, db
     turns.emit = False
     turn = await aam.begin_turn(row, message="hi")
     await mgr._broadcast({"type": "recording_failed", "session_id": turn.session_id,
-                          "request_id": "chosen", "recording_state": "unconfirmed"})
+                          "request_id": turn.request_id, "recording_state": "unconfirmed"})
     assert turn.done.is_set()
     events = [event async for event in aam.stream_turn(turn)]
     assert events[-1]["type"] == "error"
@@ -537,6 +541,7 @@ async def test_a_question_reaches_the_app(aam, am, db, mgr, turns, monkeypatch):
             {
                 "type": "question_request",
                 "session_id": session_id,
+                "request_id": kw["request_id"],
                 "question_id": "q1",
                 "questions": [{"question": "Which one?"}],
             }

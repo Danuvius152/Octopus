@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
+import type { SubmissionReply } from "../lib/submission";
 import {
   addSessionInfo,
   applySessionSnapshot,
@@ -559,9 +560,14 @@ export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const token = useSessionStore((s) => s.token);
+  const submissions = useRef(new Map<string, {
+    sessionId: string;
+    finish: (reply: SubmissionReply) => void;
+  }>());
 
   useEffect(() => {
     if (!token) return;
+    const pendingSubmissions = submissions.current;
 
     function connect() {
       if (wsRef.current?.readyState === WebSocket.OPEN ||
@@ -646,6 +652,10 @@ export function useWebSocket() {
 
       ws.onclose = (event) => {
         if (wsRef.current !== ws) return;
+        for (const pending of submissions.current.values()) {
+          pending.finish({ accepted: false, message: "Delivery was not confirmed. Check the conversation before sending again." });
+        }
+        submissions.current.clear();
         getState().setConnected(false);
         // 4001 is the server saying this token is not accepted (it was
         // rotated while we were away, or revoked). Reconnecting every three
@@ -666,7 +676,16 @@ export function useWebSocket() {
       ws.onmessage = (e) => {
         if (wsRef.current !== ws) return;
         try {
-          handleWsMessage(JSON.parse(e.data));
+          const data = JSON.parse(e.data);
+          if (data.type === "submission") {
+            const pending = submissions.current.get(data.client_request_id);
+            if (pending && pending.sessionId === data.session_id) {
+              submissions.current.delete(data.client_request_id);
+              pending.finish({ accepted: data.accepted === true, message: data.message });
+            }
+          } else {
+            handleWsMessage(data);
+          }
         } catch {
           // ignore
         }
@@ -676,6 +695,10 @@ export function useWebSocket() {
     connect();
 
     return () => {
+      for (const pending of pendingSubmissions.values()) {
+        pending.finish({ accepted: false, message: "Delivery was not confirmed. Check the conversation before sending again." });
+      }
+      pendingSubmissions.clear();
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       reconnectTimer.current = undefined;
       wsRef.current?.close();
@@ -703,7 +726,28 @@ export function useWebSocket() {
         payload.attachment_ids = attachmentIds;
       }
       if (wikiMode) payload.wiki_mode = wikiMode;
-      send(payload);
+      const clientRequestId = crypto.randomUUID();
+      payload.client_request_id = clientRequestId;
+      if (wsRef.current?.readyState !== WebSocket.OPEN) {
+        return Promise.resolve({ accepted: false, message: "Disconnected. Your message was not sent." });
+      }
+      return new Promise<SubmissionReply>((finish) => {
+        const timeout = setTimeout(() => {
+          submissions.current.delete(clientRequestId);
+          finish({ accepted: false, message: "Delivery was not confirmed. Check the conversation before sending again." });
+        }, 30_000);
+        submissions.current.set(clientRequestId, { sessionId, finish: (reply) => {
+          clearTimeout(timeout);
+          finish(reply);
+        } });
+        try {
+          send(payload);
+        } catch {
+          clearTimeout(timeout);
+          submissions.current.delete(clientRequestId);
+          finish({ accepted: false, message: "Your message could not be sent." });
+        }
+      });
     },
     [send]
   );

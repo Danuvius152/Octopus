@@ -31,7 +31,7 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
     # sign-in screen.
     principal = await deps.resolve_principal(token)
     await ws.accept()
-    if principal is None:
+    if principal is None or principal.credential_kind not in {"account", "legacy"}:
         await ws.close(code=4001, reason="Unauthorized")
         return
     logger.info("WebSocket client connected")
@@ -57,12 +57,31 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
             except json.JSONDecodeError:
                 delivery.offer({"type": "error", "message": "Invalid JSON"})
                 continue
+            if not isinstance(data, dict):
+                delivery.offer({"type": "error", "message": "Expected a JSON object"})
+                continue
 
             msg_type = data.get("type")
 
             if msg_type == "send_message":
                 session_id = data.get("session_id")
                 content = data.get("content", "")
+                client_request_id = data.get("client_request_id")
+                if client_request_id is not None and (
+                    not isinstance(client_request_id, str) or not client_request_id
+                    or len(client_request_id) > 128
+                ):
+                    delivery.offer({"type": "error", "session_id": session_id,
+                                    "message": "Invalid client request identity"})
+                    continue
+
+                def reject(message: str, session_id=session_id, client_request_id=client_request_id) -> None:
+                    delivery.offer({
+                        "type": "submission" if client_request_id else "error",
+                        "session_id": session_id, "message": message,
+                        **({"client_request_id": client_request_id, "accepted": False}
+                           if client_request_id else {}),
+                    })
                 raw_aids = data.get("attachment_ids") or []
                 attachment_ids = (
                     [a for a in raw_aids if isinstance(a, str)]
@@ -71,10 +90,8 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                 )
                 # Allow attachment-only turns (no text), but require *some*
                 # signal so we don't kick a backend turn off an empty payload.
-                if not session_id or (not content and not attachment_ids):
-                    delivery.offer(
-                        {"type": "error", "message": "session_id and content required"}
-                    )
+                if not isinstance(session_id, str) or not session_id or not isinstance(content, str) or (not content and not attachment_ids):
+                    reject("session_id and content required")
                     continue
 
                 try:
@@ -86,24 +103,27 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                     # Everything else that injects a turn (bg results,
                     # delegation replies, schedules, research) needs its own
                     # turn, not to land inside an unrelated one.
-                    await session_manager.start_message(
+                    receipt = await session_manager.start_message(
                         session_id,
                         content,
                         attachment_ids=attachment_ids,
                         steerable=True,
                         **({"wiki_mode": mode} if (mode := explicit_mode(content, data.get("wiki_mode"))) else {}),
                     )
+                    if not receipt.accepted:
+                        reject("This conversation is closed to new messages. Your message was not accepted.")
+                    elif client_request_id:
+                        delivery.offer({"type": "submission", "session_id": session_id,
+                                        "client_request_id": client_request_id, "accepted": True,
+                                        "request_id": receipt.request_id,
+                                        "disposition": receipt.disposition})
                 except QuotaExceeded as e:
                     # Its own branch: this is "you, shortly" rather than
                     # "that request was wrong", and the difference is what the
                     # person needs to read (multi-tenancy.md §8).
-                    delivery.offer(
-                        {"type": "error", "session_id": session_id, "message": str(e)}
-                    )
+                    reject(str(e))
                 except ValueError as e:
-                    delivery.offer(
-                        {"type": "error", "session_id": session_id, "message": str(e)}
-                    )
+                    reject(str(e))
 
             elif msg_type == "interrupt":
                 session_id = data.get("session_id")

@@ -4,6 +4,47 @@ import { act, renderHook } from "@testing-library/react";
 import { handleWsMessage, shouldApplyWsEvent, useWebSocket } from "./useWebSocket";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 
+it("only the same socket, session and client request can acknowledge a submission", async () => {
+  class Socket {
+    static OPEN = 1;
+    static CONNECTING = 0;
+    static instances: Socket[] = [];
+    readyState = 1;
+    send = vi.fn();
+    onopen: (() => void) | null = null;
+    onclose: ((event: { code: number }) => void) | null = null;
+    onerror: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    constructor() { Socket.instances.push(this); }
+    close() { this.readyState = 3; }
+  }
+  vi.stubGlobal("WebSocket", Socket);
+  useSessionStore.getState().setToken("submission-token");
+  const hook = renderHook(useWebSocket);
+  try {
+    const socket = Socket.instances[0];
+    const pending = hook.result.current.sendMessage("own-session", "retained input");
+    const input = JSON.parse(socket.send.mock.calls[0][0]);
+    const resolved = vi.fn();
+    void pending.then(resolved);
+    act(() => socket.onmessage?.({ data: JSON.stringify({ type: "submission", client_request_id: input.client_request_id,
+      session_id: "other-session", accepted: true }) }));
+    await Promise.resolve();
+    expect(resolved).not.toHaveBeenCalled();
+    act(() => socket.onmessage?.({ data: JSON.stringify({ type: "submission", client_request_id: "other-request",
+      session_id: "own-session", accepted: true }) }));
+    await Promise.resolve();
+    expect(resolved).not.toHaveBeenCalled();
+    act(() => socket.onmessage?.({ data: JSON.stringify({ type: "submission", client_request_id: input.client_request_id,
+      session_id: "own-session", accepted: false, message: "Conversation closed" }) }));
+    expect(await pending).toEqual({ accepted: false, message: "Conversation closed" });
+    expect(socket.send).toHaveBeenCalledTimes(1);
+  } finally {
+    hook.unmount();
+    vi.unstubAllGlobals();
+  }
+});
+
 describe("archive replacement settings", () => {
   const old = {
     id: "archive-old", name: "Work", working_dir: "/tmp", backend: "codex",
