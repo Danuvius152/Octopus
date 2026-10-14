@@ -1,8 +1,10 @@
 # 共享 Wiki v2：2026-10-14 暂停与交接
 
-> **Status:** in-progress — 用户暂停开发；35/46 份 Markdown 已正式验收，原迁移剩余 9 份，两份 Inbox 原稿保留供流程完善后的测试。下一批未提交；2026-10-15 补录 R08 材料复用修复与 R14 同步测量，待后续开发。
+> **Status:** in-progress — 保留2026-10-14暂停证据；2026-10-15用户明确恢复，当前缺当次显式Wiki任务入口，下一批范围已准备但未提交。最后验收窗口35/46篇，原迁移9篇及两份保留测试原稿未完成；R08/R14后续待办。
 
 这是用户要求“目前先开发到这里”的停止记录。先完成交接，不继续维护、流程开发、部署或实验。以后用户明确恢复时，再按本页续接；本页与[当前进度](local-shared-wiki-progress-v2.md)更新最初[实施交接](local-shared-wiki-implementation-v2.md)中的停止位置，后者的历史证据保留。
+
+用户现已明确恢复；以上停止指令保留为历史，实际恢复核对与尚缺入口见§5.2，不继续沿用“用户仍暂停”的判断。
 
 ## 1. 已完成与实际停止位置
 
@@ -122,6 +124,16 @@ pika004 的旧 Weber 写后 read_many seq59→60 有实际内容／范围缺口�
 **R14 后续决策与验收：** 若测量证明慢账户拖延其他账户，再选择有限批次、游标、公平调度或可协作停止，并以同一工作量复验。保留实际线程完成后才能关闭的 writer 语义，以及现有索引新鲜度、错误和 checked time 表达；普通问库仍不触发 curator。尚未 ready 时是否允许使用旧索引属于另行明确的产品决定。测量结论、必要优化及适用回归均须留证；目前不将 R14 记为已修复性能故障，也不自动启动检索扩展。
 
 后续实现按 AGENTS 完成适用检查，记录源码、命令、结果及不可用检查。本次补录不启动代码开发、模型调用、生产维护、流程实验或部署；新的实现选择在实际开发时按原合同核对。
+
+### 5.2 2026-10-15 实际恢复入口核对
+
+本次用户已明确恢复，无需重新确认原迁移范围。实机已核服务健康、运行cwd／current及快照Git SHA为20601996235af3d680145011adba9729fb9235df，开发HEAD在它之后只有文档变化。当前Weber配置API显示codex/gpt-6.1-sol/xhigh/default、persona SHA与原基线一致；保留真实当前设置，不恢复历史ultra/max。
+
+当前恢复提示作为普通消息进入，没有Wiki namespace或有效task grant。使用当前合法MCP身份实际GET `/api/wiki/info`、`config`、`jobs`都返回403：`An active explicit /wiki task is required`。没有借此重新核生产全文／分母／同key jobs或写入；35/46仍是最后签署窗口。后台任务清单均终态。服务重启后delegation list为空，但只读会话API确认旧Vera e5f17154ffae仍属于同Octo父会话、未归档且idle；保留签署与会话，后续实际审查再核续接，不新开重复Vera。
+
+根据已部署[R01](../plans/octopus-framework-wiki-review-20261014.md#r01-限制人工-wiki-授权的身份来源)，MCP不能通过WS、wiki_mode/source或正文自建人工Wiki授权，旧续接helper不再运行。恢复提交需要用户在原生维护入口给出上节五个真实具体paths，或者经真实account身份认证的合法核心请求。此前全Library业务授权继续有效，这一步用于打开框架实际task。令入口生效后再核当前绑定／版本／同key jobs，不能沿用昨天空jobs结论。
+
+五篇 `worker-scope.md` 与 `prepared-maintain-request-20261015.json` 已保存：原key、paths五篇、material空、本人全文和原文保全、实际摘要区域及历史证据范围明确；不是已授权或已提交产物。原稿SHA与昨天预读一致只证明私有快照，未替代今天生产核对。根私有state/draft已改为用户恢复、范围已准备、等待真实Wiki任务；真实403和runtime／session／curator核对在 `B/resume-20261015/`。两份Inbox原稿与流程候选保持原状，R08/R14仍待后续实施。
 
 ## 6. 可复制的交接 prompt
 
