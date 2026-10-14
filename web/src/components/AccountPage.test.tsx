@@ -20,6 +20,7 @@ interface Routes {
   invites?: unknown[];
   users?: unknown[];
   workspace?: unknown;
+  upgradePending?: boolean;
 }
 
 let posts: { path: string; body: unknown }[] = [];
@@ -48,11 +49,16 @@ function stub(routes: Routes) {
             }),
           };
         }
+        if (path === "/bootstrap/resume") {
+          routes.upgradePending = false;
+          return { ok: true, json: async () => ({ username: routes.identity.label, adopted: { sessions: 1 } }) };
+        }
         return { ok: true, status: 200, json: async () => ({}) };
       }
       const body: Record<string, unknown> = {
         "/state": { accounts_exist: routes.accountsExist },
         "/identity": routes.identity,
+        "/bootstrap/status": { pending: routes.upgradePending ?? false },
         "/invites": routes.invites ?? [],
         "/users": routes.users ?? [],
         "/workspace": routes.workspace ?? {
@@ -70,6 +76,16 @@ beforeEach(() => useSessionStore.getState().setToken("install-token"));
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+});
+
+it("lets the authenticated migration owner resume a retained upgrade", async () => {
+  stub({ accountsExist: true, identity: { label: "owner", user_id: "owner-id", is_admin: true }, upgradePending: true });
+  render(<AccountPage />);
+  const resume = await screen.findByRole("button", { name: "Resume account upgrade" });
+  fireEvent.click(resume);
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Resume account upgrade" })).toBeNull());
+  expect(posts).toContainEqual({ path: "/bootstrap/resume", body: null });
+  expect(screen.getByText("This install now belongs to owner")).toBeTruthy();
 });
 
 describe("AccountPage", () => {

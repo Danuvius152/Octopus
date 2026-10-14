@@ -64,6 +64,28 @@ def set_db(db) -> None:
     _db = db
 
 
+@router.post("/bootstrap/resume")
+async def resume_bootstrap(user: CurrentUser, session_manager: SessionMgr) -> dict:
+    from ..wiki.account_upgrade import resume_upgrade
+    try:
+        return await resume_upgrade(_db, user, session_manager)
+    except BootstrapError as exc:
+        raise HTTPException(exc.status_code, exc.message) from exc
+
+
+@router.get("/bootstrap/status")
+async def bootstrap_status(user: CurrentUser) -> dict:
+    from ..wiki.account_upgrade import pending_upgrade
+    journal = pending_upgrade()
+    if journal is None or (
+        journal.get("user_id") != user["id"] and not (
+            journal.get("user_id") is None and journal.get("username") == user["username"]
+        )
+    ):
+        return {"pending": False}
+    return {"pending": True, "phase": journal["phase"], "adopt": journal["adopt"]}
+
+
 def _throttle_key(username: str, request: Request) -> str:
     client = request.client.host if request.client else "?"
     return f"{username.strip().lower()}@{client}"

@@ -456,23 +456,27 @@ async def test_mutation_shutdown_timeout_keeps_writer_lock_until_journal_finishe
     mutation = await mutation_bridge.begin(row, "POST", "git", {"vault": "obv"}, json.dumps({"action": "sync"}).encode())
     history.store.path("note.md").write_bytes(b"edited")
     remote = AsyncClient(transport=MockTransport(lambda request: Response(200, json={"status": "done"})))
-    contender = None
     mutation.follow_job(remote, "http://sapphire", "journal-owner", row["id"])
     try:
         await asyncio.wait_for(entered.wait(), 3)
         with pytest.raises(RuntimeError, match="Wiki application writer teardown remains unconfirmed"):
             await mutation_bridge.shutdown(timeout=.02)
 
-        contender = asyncio.create_task(mutation_bridge.begin(
-            row, "POST", "save", {"vault": "obv"}, json.dumps({"path": "note.md", "content": "edited"}).encode(),
-        ))
-        done, _ = await asyncio.wait({contender}, timeout=.02)
-        assert not done
+        from server.wiki.store import WikiError
+        with pytest.raises(WikiError, match="stopped during service transition"):
+            await mutation_bridge.begin(row, "POST", "save", {"vault": "obv"},
+                                        json.dumps({"path": "note.md", "content": "edited"}).encode())
+        import fcntl
+        with (history.state / "vault.lock").open("a+b") as probe:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
         assert (history.state / "external-change.json").is_file()
 
         release.set()
         await mutation_bridge.shutdown(timeout=3)
-        next_mutation = await asyncio.wait_for(contender, 3)
+        mutation_bridge.reopen()
+        next_mutation = await mutation_bridge.begin(row, "POST", "save", {"vault": "obv"},
+                                                    json.dumps({"path": "note.md", "content": "edited"}).encode())
         await next_mutation.finish()
         assert remote.is_closed
         assert history.store.read("note.md")["content"] == "edited"
@@ -481,9 +485,6 @@ async def test_mutation_shutdown_timeout_keeps_writer_lock_until_journal_finishe
     finally:
         release.set()
         await mutation_bridge.shutdown()
-        if contender is not None:
-            next_mutation = await contender
-            await next_mutation.finish()
         await remote.aclose()
 
 
@@ -514,3 +515,41 @@ async def test_mutation_shutdown_reports_and_retains_failed_journal_owner(sapphi
         assert (history.state / "external-change.json").is_file()
     finally:
         await remote.aclose()
+
+
+async def test_shutdown_joins_delete_receipt_before_releasing_journal(sapphire, mutation_bridge, monkeypatch):
+    row, history = sapphire
+    entered, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    atomic = mutation_bridge.atomic
+
+    def delayed_atomic(path, data):
+        loop.call_soon_threadsafe(entered.set)
+        release.wait()
+        return atomic(path, data)
+
+    mutation = await mutation_bridge.begin(row, "POST", "delete", {"vault": "obv"},
+                                           json.dumps({"path": "note.md"}).encode())
+    monkeypatch.setattr(mutation_bridge, "atomic", delayed_atomic)
+    receipt = asyncio.create_task(mutation.receipt({"id": "a" * 32}))
+    shutdown = None
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        shutdown = asyncio.create_task(mutation_bridge.shutdown())
+        await asyncio.sleep(.05)
+        assert not shutdown.done(), "shutdown released a journal whose receipt is still writing"
+        assert not mutation.handle.closed
+        release.set()
+        await receipt
+        await shutdown
+        assert mutation.handle.closed
+        assert not mutation.journal.exists()
+        # Late response callbacks cannot resurrect a retired journal.
+        await mutation.receipt({"id": "b" * 32})
+        assert not mutation.journal.exists()
+    finally:
+        release.set()
+        await receipt
+        if shutdown is not None:
+            await shutdown
+        await mutation.finish()

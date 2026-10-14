@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from functools import partial
 
@@ -81,6 +82,109 @@ async def service(tmp_path, monkeypatch):
     await registry.stop()
     if manager.db is not None:
         await manager.db.close()
+
+
+async def test_scheduler_startup_failure_cleans_all_acquired_resources(service, monkeypatch):
+    initialize = main.ScheduleRunner.initialize
+    captured = []
+
+    async def fail_after_start(runner):
+        captured.append(runner)
+        await initialize(runner)
+        raise RuntimeError("injected scheduler startup failure")
+
+    monkeypatch.setattr(main.ScheduleRunner, "initialize", fail_after_start)
+    with pytest.raises(RuntimeError, match="injected scheduler"):
+        async with main.app.router.lifespan_context(main.app):
+            pytest.fail("startup must fail")
+    assert not captured[0]._scheduler.running
+    assert service.db._conn is None
+    assert service._admission_closed
+
+
+@pytest.mark.parametrize("stage", ["background", "metrics", "mcp", "registry", "wiki_worker"])
+@pytest.mark.parametrize("cancel", [False, True])
+async def test_partial_startup_failure_or_cancel_releases_started_owners(service, monkeypatch, stage, cancel):
+    from server.monitor.store import MetricsStore
+    error = asyncio.CancelledError(f"injected {stage}") if cancel else RuntimeError(f"injected {stage}")
+    worker_task = None
+    if stage == "mcp":
+        original = main.mcp_lifespan
+
+        @asynccontextmanager
+        async def broken(application):
+            async with original(application):
+                raise error
+                yield  # Keep the injected context manager's generator shape.
+
+        monkeypatch.setattr(main, "mcp_lifespan", broken)
+    else:
+        owner, method = {
+            "background": (main.bg_task_manager, "start"),
+            "metrics": (MetricsStore, "initialize"),
+            "registry": (registry, "start"),
+            "wiki_worker": (wiki_jobs.worker, "start"),
+        }[stage]
+        original = getattr(owner, method)
+
+        async def broken(*args, **kwargs):
+            nonlocal worker_task
+            await original(*args, **kwargs)
+            if stage == "wiki_worker":
+                worker_task = asyncio.create_task(asyncio.Event().wait(), name="partial-account-worker")
+                wiki_jobs.worker.tasks["partially-started-account"] = worker_task
+            raise error
+
+        monkeypatch.setattr(owner, method, broken)
+    with pytest.raises(BaseException) as failed:
+        async with main.app.router.lifespan_context(main.app):
+            pytest.fail("injected startup must not serve")
+    assert f"injected {stage}" in repr(failed.value)
+    assert service.db._conn is None
+    assert service._admission_closed
+    assert registry._task is None
+    if worker_task is not None:
+        assert worker_task.done()
+    assert not [task for task in asyncio.all_tasks() if not task.done() and task.get_name() in {
+        "wiki-index-sync", "metrics-sampler", "app-backend-reaper", "mcp-lifespan", "partial-account-worker",
+    }]
+
+
+async def test_cancel_while_mcp_is_entering_retires_its_owner(service, monkeypatch):
+    original = main.mcp_lifespan
+    entered, released, allow_ready = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    @asynccontextmanager
+    async def delayed(application):
+        async with original(application):
+            entered.set()
+            try:
+                await allow_ready.wait()
+                yield
+            finally:
+                released.set()
+
+    monkeypatch.setattr(main, "mcp_lifespan", delayed)
+
+    async def startup():
+        async with main.app.router.lifespan_context(main.app):
+            pytest.fail("cancelled startup must not serve")
+
+    task = asyncio.create_task(startup())
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        task.cancel("cancel-before-mcp-ready")
+        done, _ = await asyncio.wait({task}, timeout=1)
+        assert task in done, "startup cancellation did not join the entering MCP owner"
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert released.is_set()
+        assert service.db._conn is None
+        assert not [owner for owner in asyncio.all_tasks()
+                    if not owner.done() and owner.get_name() == "mcp-lifespan"]
+    finally:
+        allow_ready.set()
+        await asyncio.gather(task, return_exceptions=True)
 
 
 def synthetic_cli(monkeypatch, starts, code=None):
@@ -165,7 +269,7 @@ async def test_lifespan_shutdown_preserves_wiki_job_as_interrupted(service, tmp_
         )
         await asyncio.wait_for(ready.wait(), 5)
 
-    saved = jobs.get(job["id"])
+    saved = wiki_jobs.WikiJobs(None).get(job["id"])
     assert saved["status"] == "interrupted"
     assert saved["items"][0]["status"] == "pending"
     assert len(starts) == 1

@@ -49,10 +49,16 @@ class WikiHistory:
         self.store = store
         self.state = store.state
         self.blobs = self.state / "blobs"
-        self.blobs.mkdir(exist_ok=True)
+        with store.operation():
+            self.blobs.mkdir(exist_ok=True)
 
     @contextlib.contextmanager
-    def under_existing_lock(self, handle):
+    def under_existing_lock(self, handle, lease=None):
+        with self.store.operation(lease), self._under_existing_lock(handle):
+            yield
+
+    @contextlib.contextmanager
+    def _under_existing_lock(self, handle):
         """The app bridge transfers its already-held exclusive flock to a worker."""
         if handle.closed:
             raise RuntimeError("The external vault lock has already been released")
@@ -65,6 +71,11 @@ class WikiHistory:
 
     @contextlib.contextmanager
     def locked(self, *, shared=False):
+        with self.store.operation(), self._locked(shared=shared):
+            yield
+
+    @contextlib.contextmanager
+    def _locked(self, *, shared=False):
         held = getattr(_owners, "held", set())
         key = str(self.state.resolve())
         if key in held:

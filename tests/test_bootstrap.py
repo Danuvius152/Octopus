@@ -26,6 +26,36 @@ from server.users import UserManager
 from server.workspace import paths_for
 
 
+async def test_bootstrap_adopts_registered_wiki_state_and_exact_root(legacy, tmp_path, monkeypatch):
+    from server.wiki.jobs import WikiJobs
+    from server.wiki.registry import registry
+    db, agent = legacy
+    registry.legacy_enabled = True
+    registry.unblock(None)
+    vault = tmp_path / "outside-vault"
+    (vault / "Library").mkdir(parents=True)
+    (vault / "Library/note.md").write_text("# Note\noriginal material\n")
+    config = registry.configure(None, vault, agent["id"])
+    note = registry.store(None).read("Library/note.md")
+    jobs = WikiJobs(None)
+    job = jobs.maintain("migration-pending", "", "verify note", ["Library/note.md"], "", [], "human")
+    try:
+        summary = await bootstrap_first_account(db, username="wikiowner", password="password1", session_manager=session_manager)
+        owner = await db.get_user(summary["user_id"])
+        assert registry.config(owner["id"])["vault_id"] == config["vault_id"]
+        current = registry.store(owner["id"]).read("Library/note.md")
+        assert current["id"] == note["id"] and current["revision"] == note["revision"]
+        assert WikiJobs(owner["id"]).get(job["id"])["id"] == job["id"]
+        assert str(vault.resolve()) in json.loads(owner["extra_roots"])
+        assert str(vault.parent.resolve()) not in json.loads(owner["extra_roots"])
+        assert not (registry.state(None) / "config.json").exists()
+        assert (vault / "Library/note.md").read_text() == "# Note\noriginal material\n"
+    finally:
+        registry.close()
+        registry.legacy_enabled = True
+        registry._blocked.clear()
+
+
 async def _stored_secret(db, credential_id: str) -> str:
     """The ciphertext as it sits in the split-out secrets table."""
     cursor = await db.conn.execute(

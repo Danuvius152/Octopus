@@ -115,6 +115,16 @@ def _account_state_stays_in_tmp(tmp_path_factory, monkeypatch):
     # Startup now sweeps Wiki text retention; never let a lifespan test reach
     # the installation's legacy Wiki state either.
     monkeypatch.setattr(settings, "wiki_dir", str(root / "wiki"))
+    # Each temporary installation starts in the legacy era with open writers.
+    # Keep resource-owner collections intact so teardown leaks remain visible.
+    from server.session_manager import session_manager
+    from server.wiki import app_bridge
+    from server.wiki.registry import registry
+    monkeypatch.setattr(registry, "legacy_enabled", True)
+    monkeypatch.setattr(registry, "_blocked", set())
+    monkeypatch.setattr(session_manager, "_legacy_transition", False)
+    monkeypatch.setattr(app_bridge, "_stopping", False)
+    monkeypatch.setattr(app_bridge, "_blocked_owners", set())
 
 
 @pytest.fixture(autouse=True)

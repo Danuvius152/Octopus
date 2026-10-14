@@ -561,10 +561,7 @@ class WikiWorker:
         self._stopping = False
         self.manager = manager
         self.loop = asyncio.get_running_loop()
-        states = [(None, Path(settings.wiki_dir).expanduser())]
-        root = Path(settings.users_root).expanduser()
-        if root.exists():
-            states.extend((p.parent.name, p) for p in root.glob("*/wiki"))
+        states = registry.states()
         for user_id, state in states:
             if (state / "config.json").is_file():
                 jobs = await _io(WikiJobs, user_id)

@@ -11,6 +11,7 @@ import re
 import sqlite3
 import threading
 import uuid
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -26,6 +27,12 @@ class WikiError(Exception):
     def __init__(self, message: str, status: int = 400) -> None:
         super().__init__(message)
         self.status = status
+
+
+@dataclass(eq=False)
+class StoreBorrow:
+    store: Any
+    active: bool = True
 
 
 def revision(raw: bytes) -> str:
@@ -75,6 +82,10 @@ def enumeration_error(error: OSError) -> None:
 def vault_read(function):
     @functools.wraps(function)
     def locked(self, *args, **kwargs):
+        with self.operation():
+            return read_locked(self, *args, **kwargs)
+
+    def read_locked(self, *args, **kwargs):
         from .history import WikiHistory
 
         if function.__name__ != "refresh":
@@ -104,6 +115,10 @@ def vault_read(function):
 
 class WikiStore:
     def __init__(self, root: Path, state: Path, vault_id: str) -> None:
+        self._lifecycle = threading.Condition()
+        self._local = threading.local()
+        self._users = 0
+        self._retired = False
         self.root = root.resolve()
         self.state = state
         self.vault_id = vault_id
@@ -119,20 +134,87 @@ class WikiStore:
 
         self.events = VaultEvents(self.root)
         self._synchronizing = threading.local()
-        with self.connect() as db:
-            checked = db.execute("SELECT checked_at FROM index_state WHERE singleton=1").fetchone()[0]
-            watched = [row[0] for row in db.execute("SELECT path FROM watch_directories")]
-        if checked is None:
-            self.refresh()
-        else:
-            for directory in watched:
-                self.events.watch(self.root / directory)
-            self.events.needs_reconciliation = True
+        try:
+            with self.connect() as db:
+                checked = db.execute("SELECT checked_at FROM index_state WHERE singleton=1").fetchone()[0]
+                watched = [row[0] for row in db.execute("SELECT path FROM watch_directories")]
+            if checked is None:
+                self.refresh()
+            else:
+                for directory in watched:
+                    self.events.watch(self.root / directory)
+                self.events.needs_reconciliation = True
+        except BaseException:
+            self.events.close()
+            raise
+
+    @contextlib.contextmanager
+    def borrow(self):
+        """A captured operation owns its observer until it releases the lease."""
+        with self._lifecycle:
+            if self._retired:
+                raise WikiError("This Wiki Store has retired; acquire the current registration", 503)
+            self._users += 1
+            lease = StoreBorrow(self)
+        try:
+            yield lease
+        finally:
+            with self._lifecycle:
+                lease.active = False
+                self._users -= 1
+                if not self._users and self._retired:
+                    self.events.close()
+                self._lifecycle.notify_all()
+
+    @contextlib.contextmanager
+    def operation(self, lease: StoreBorrow | None = None):
+        if getattr(self._local, "depth", 0):
+            self._local.depth += 1
+            try:
+                yield self
+            finally:
+                self._local.depth -= 1
+            return
+        if lease is not None:
+            with self._lifecycle:
+                if lease.store is not self or not lease.active:
+                    raise WikiError("Wiki operation lease has expired", 503)
+                self._users += 1
+            self._local.depth = 1
+            try:
+                yield self
+            finally:
+                self._local.depth = 0
+                with self._lifecycle:
+                    self._users -= 1
+                    if not self._users and self._retired:
+                        self.events.close()
+                    self._lifecycle.notify_all()
+            return
+        with self.borrow():
+            self._local.depth = 1
+            try:
+                yield self
+            finally:
+                self._local.depth = 0
+
+    def retire(self) -> None:
+        with self._lifecycle:
+            self._retired = True
+            if not self._users:
+                self.events.close()
 
     def close(self) -> None:
-        self.events.close()
+        self.retire()
+        with self._lifecycle:
+            while self._users:
+                self._lifecycle.wait()
 
     def index_state(self) -> dict[str, Any]:
+        with self.operation():
+            return self._index_state()
+
+    def _index_state(self) -> dict[str, Any]:
         with self.connect() as db:
             state = db.execute("SELECT * FROM index_state WHERE singleton=1").fetchone()
             errors = [{"path": row["path"], "error": json.loads(row["metadata"]).get("error", "Extraction failed")} for row in db.execute("SELECT path,metadata FROM documents WHERE quality='error'")]
@@ -147,6 +229,10 @@ class WikiStore:
         }
 
     def synchronize(self) -> None:
+        with self.operation():
+            self._synchronize()
+
+    def _synchronize(self) -> None:
         """Consume only known changes; full compensation is a background job."""
         if getattr(self._synchronizing, "active", False):
             return
@@ -201,13 +287,14 @@ class WikiStore:
 
     @contextlib.contextmanager
     def connect(self):
-        db = sqlite3.connect(self.db_path, timeout=30)
-        db.row_factory = sqlite3.Row
-        try:
-            with db:
-                yield db
-        finally:
-            db.close()
+        with self.operation():
+            db = sqlite3.connect(self.db_path, timeout=30)
+            db.row_factory = sqlite3.Row
+            try:
+                with db:
+                    yield db
+            finally:
+                db.close()
 
     def path(self, relative: str) -> Path:
         logical = PurePosixPath(relative)

@@ -2,10 +2,8 @@
 
 import asyncio
 import logging
-from pathlib import Path
 
 from ..aio import complete_cleanup
-from ..config import settings
 from .history import WikiHistory
 from .registry import registry
 
@@ -13,9 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 async def sweep():
-    states = [(None, Path(settings.wiki_dir).expanduser())]
-    root = Path(settings.users_root).expanduser()
-    states.extend((path.parent.name, path) for path in root.glob("*/wiki"))
+    states = registry.states()
     results = []
     for user_id, state in states:
         if not (state / "config.json").is_file():

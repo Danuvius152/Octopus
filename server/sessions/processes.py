@@ -13,7 +13,7 @@ import time
 from dataclasses import replace
 from typing import Any
 
-from ..aio import drain_cancelled, stopped_within
+from ..aio import drain_cancelled
 from ..harness import HarnessEvent, HarnessRun
 from .base import (
     _HELD_PROCESS_IDLE_SECONDS,
@@ -41,9 +41,14 @@ class ProcessesMixin(SessionManagerBase):
         for session, backend, driver in retiring:
             await self.interrupt(session.id)
             if backend is not None:
-                await stopped_within(backend.stop(), f"pre-accounts run {session.id}", timeout=4.0)
+                self._retire_backend(session, backend)
             if driver is not None:
-                await stopped_within(asyncio.shield(driver), f"pre-accounts request {session.id}", timeout=5.0)
+                done, pending = await asyncio.wait({driver}, timeout=5.0)
+                if pending:
+                    raise RuntimeError("Pre-account execution retirement remains unconfirmed")
+                if not driver.cancelled() and driver.exception() is not None:
+                    raise driver.exception()
+            await self._await_backend_retirement(session)
 
     async def _safe_backend_interrupt(self, backend: HarnessRun) -> None:
         """Best-effort background teardown of a wedged backend subprocess.

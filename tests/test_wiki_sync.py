@@ -118,3 +118,11 @@ async def test_background_updates_the_index_and_restart_preserves_identity(regis
     finally:
         await registry.stop()
     assert registry.store(None).read(original["id"])["content"] == "# 后台更新\n无需查询触发的内容。\n"
+def test_reconfigured_store_cannot_report_stale_results_as_ready(registered):
+    registry, root = registered
+    previous = registry.store(None)
+    registry.configure(None, root, "replacement-curator")
+    (root / "note.md").write_text("# Changed\nnewword after retirement\n")
+    with pytest.raises(WikiError, match="retired"):
+        previous.search("newword")
+    assert registry.store(None).search("newword")["items"]

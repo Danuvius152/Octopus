@@ -75,6 +75,9 @@ export function AccountPage({ onToggleSidebar }: { onToggleSidebar?: () => void 
   const [identity, setIdentity] = useState<IdentityResponse | null>(null);
   const [accountsExist, setAccountsExist] = useState<boolean | null>(null);
   const [claimSummary, setClaimSummary] = useState<BootstrapSummary | null>(null);
+  const [upgradePending, setUpgradePending] = useState(false);
+  const [upgradeBusy, setUpgradeBusy] = useState(false);
+  const [upgradeError, setUpgradeError] = useState("");
 
   const headers = useCallback(
     () => ({
@@ -95,14 +98,44 @@ export function AccountPage({ onToggleSidebar }: { onToggleSidebar?: () => void 
       if (!alive) return;
       if (state) setAccountsExist(Boolean(state.accounts_exist));
       if (who) setIdentity(who);
+      if (who?.user_id) {
+        void getJson<{ pending: boolean }>(`${API}/bootstrap/status`, headers()).then((upgrade) => {
+          if (alive) setUpgradePending(upgrade?.pending === true);
+        });
+      } else {
+        setUpgradePending(false);
+      }
     });
     return () => {
       alive = false;
     };
   }, [headers]);
 
+  const resumeUpgrade = async () => {
+    setUpgradeBusy(true);
+    setUpgradeError("");
+    try {
+      const response = await fetch(`${API}/bootstrap/resume`, { method: "POST", headers: headers() });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail || "Couldn't resume the account upgrade");
+      setClaimSummary(body as BootstrapSummary);
+      setUpgradePending(false);
+    } catch (error) {
+      setUpgradeError(error instanceof Error ? error.message : "Couldn't resume the account upgrade");
+    } finally {
+      setUpgradeBusy(false);
+    }
+  };
+
   return (
     <div className="account-page flex min-h-0 flex-1 flex-col">
+      {upgradePending && <div role="alert" className="mx-6 my-3 rounded-md border border-primary-200 bg-primary-50 p-4">
+        <p>Your account upgrade is incomplete. Your Wiki state is retained; finish the upgrade to use it.</p>
+        <Button className="mt-2" disabled={upgradeBusy} onClick={() => void resumeUpgrade()}>
+          {upgradeBusy ? "Resuming upgrade…" : "Resume account upgrade"}
+        </Button>
+        {upgradeError && <p className="mt-2 text-destructive">{upgradeError}</p>}
+      </div>}
       <PageHeader
         className="account-header"
         icon={<IconUser size={17} className="shrink-0 text-gray-700" />}

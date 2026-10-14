@@ -11,21 +11,33 @@ from pathlib import Path
 from ..aio import complete_cleanup
 from .history import WikiHistory, atomic, history_text
 from .registry import registry
+from .store import WikiError
 
 _pending: set[asyncio.Task] = set()
+_preparations: set[asyncio.Task] = set()
+_active: set = set()
+_stopping = False
+_ALL = object()
+_blocked_owners: set[str | None] = set()
+_preparation_owners: dict[asyncio.Task, str | None] = {}
+_pending_owners: dict[asyncio.Task, str | None] = {}
 logger = logging.getLogger(__name__)
 
 
-async def shutdown(*, timeout: float = 5.0) -> None:
+async def shutdown(*, timeout: float = 5.0, user_id=_ALL) -> None:
     """Join mutation owners while retaining any unconfirmed cleanup."""
     # The application supervisor has stopped its processes before this call.
-    tasks = tuple(_pending)
+    global _stopping
+    if user_id is _ALL:
+        _stopping = True
+    else:
+        _blocked_owners.add(user_id)
+    tasks = tuple(task for task in _pending | _preparations if user_id is _ALL or
+                  (_pending_owners.get(task) if task in _pending else _preparation_owners.get(task)) == user_id)
     for task in tasks:
         if not task.done() and not task.cancelling():
             task.cancel("shutdown")
-    if not tasks:
-        return
-    done, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout))
+    done, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout)) if tasks else (set(), set())
     if pending:
         names = ", ".join(sorted(task.get_name() for task in pending))
         raise RuntimeError(f"Wiki application writer teardown remains unconfirmed: {names}")
@@ -36,22 +48,53 @@ async def shutdown(*, timeout: float = 5.0) -> None:
     if failures:
         raise RuntimeError("Wiki application writer teardown remains unconfirmed") from failures[0]
     _pending.difference_update(tasks)
+    active = [mutation for mutation in _active if user_id is _ALL or mutation.user_id == user_id]
+    if active:
+        results = await asyncio.gather(*(mutation.finish() for mutation in active), return_exceptions=True)
+        if any(isinstance(result, BaseException) for result in results):
+            raise RuntimeError("Wiki application journal teardown remains unconfirmed")
+
+
+def reopen(user_id=_ALL) -> None:
+    global _stopping
+    if user_id is not _ALL:
+        if (any(mutation.user_id == user_id for mutation in _active)
+                or any(task in _pending and owner == user_id for task, owner in _pending_owners.items())
+                or any(task in _preparations and owner == user_id for task, owner in _preparation_owners.items())):
+            raise RuntimeError("Wiki application writers have not retired")
+        _blocked_owners.discard(user_id)
+        return
+    if _active or _preparations or _pending:
+        raise RuntimeError("Wiki application writers have not retired")
+    _stopping = False
+    _blocked_owners.clear()
 
 
 class AppMutation:
-    def __init__(self, history, handle, before, journal, actor, reason, body=None):
+    def __init__(self, history, handle, before, journal, actor, reason, body=None, borrow=None, lease=None, user_id=None):
         self.history, self.handle, self.before = history, handle, before
         self.journal, self.actor, self.reason = journal, actor, reason
         self.body = body or {}
+        self.borrow, self.lease = borrow, lease
+        self.user_id = user_id
+        self._finish_lock = asyncio.Lock()
+        _active.add(self)
 
     async def finish(self):
+        async with self._finish_lock:
+            await complete_cleanup(self._finish_owned())
+
+    async def _finish_owned(self):
         if self.handle.closed:
             return
         try:
-            await asyncio.to_thread(self._finish)
+            await complete_cleanup(asyncio.to_thread(self._finish))
         finally:
             fcntl.flock(self.handle, fcntl.LOCK_UN)
             self.handle.close()
+            if self.borrow is not None:
+                self.borrow.__exit__(None, None, None)
+            _active.discard(self)
 
     async def abort(self, app_id):
         from ..app_backends import backend_supervisor
@@ -60,13 +103,19 @@ class AppMutation:
         await self.finish()
 
     async def conflict(self, body):
+        async with self._finish_lock:
+            if self.handle.closed:
+                return
+            await self._conflict_owned(body)
+
+    async def _conflict_owned(self, body):
         relative = body.get("path")
         content = body.get("content")
         if isinstance(relative, str) and isinstance(content, str):
             path = self.history.store.path(relative)
 
             def record_conflict():
-                with self.history.under_existing_lock(self.handle):
+                with self.history.under_existing_lock(self.handle, self.lease):
                     return self.history.record(
                         relative,
                         path.read_bytes() if path.is_file() else None,
@@ -79,7 +128,7 @@ class AppMutation:
             await complete_cleanup(asyncio.to_thread(record_conflict))
 
     def _finish(self):
-        with self.history.under_existing_lock(self.handle):
+        with self.history.under_existing_lock(self.handle, self.lease):
             if self.before is not None:
                 self._journal_changes()
             self.history.store.synchronize()
@@ -89,6 +138,12 @@ class AppMutation:
         self.journal.unlink(missing_ok=True)
 
     async def receipt(self, payload):
+        async with self._finish_lock:
+            if self.handle.closed:
+                return
+            await self._receipt_owned(payload)
+
+    async def _receipt_owned(self, payload):
         if self.before is None or self.reason != "delete":
             return
 
@@ -141,6 +196,7 @@ class AppMutation:
 
         task = asyncio.create_task(wait(), name=f"wiki-app-{job_id}")
         _pending.add(task)
+        _pending_owners[task] = self.user_id
 
         def finished(task):
             if not task.cancelled() and (error := task.exception()) is not None:
@@ -149,11 +205,33 @@ class AppMutation:
                 )
                 return  # Shutdown must still report this unconfirmed journal.
             _pending.discard(task)
+            _pending_owners.pop(task, None)
 
         task.add_done_callback(finished)
 
 
 async def begin(app_row, method, endpoint, query, body=b""):
+    task = asyncio.create_task(_begin(app_row, method, endpoint, query, body), name="wiki-app-prepare")
+    _preparations.add(task)
+    _preparation_owners[task] = app_row.get("user_id")
+    try:
+        return await complete_cleanup(_join_preparation(task))
+    except asyncio.CancelledError:
+        if task.done() and not task.cancelled() and task.exception() is None:
+            mutation = task.result()
+            if mutation is not None:
+                await complete_cleanup(mutation.finish())
+        raise
+    finally:
+        _preparations.discard(task)
+        _preparation_owners.pop(task, None)
+
+
+async def _join_preparation(task):
+    return await task
+
+
+async def _begin(app_row, method, endpoint, query, body=b""):
     if method in {"GET", "HEAD", "OPTIONS"} or endpoint not in {
         "save",
         "upload",
@@ -170,6 +248,8 @@ async def begin(app_row, method, endpoint, query, body=b""):
     config = registry.config(user_id)
     if config.get("app_id") != app_row["id"]:
         return None
+    if _stopping or user_id in _blocked_owners:
+        raise WikiError("Wiki application writes are stopped during service transition", 503)
     # Sapphire can contain other vaults; this bridge covers only the registered root.
     vault = query.get("vault")
     if not vault:
@@ -180,9 +260,12 @@ async def begin(app_row, method, endpoint, query, body=b""):
     expected = Path(app_row["app_dir"] + ".data") / "vaults" / (vault or "") / "repo"
     if expected.resolve() != Path(config["root"]).resolve():
         return None
-    history = await asyncio.to_thread(lambda: WikiHistory(registry.store(user_id)))
-    handle = (state / "vault.lock").open("a+b")
+    history = await complete_cleanup(asyncio.to_thread(lambda: WikiHistory(registry.store(user_id))))
+    borrow = history.store.borrow()
+    lease = borrow.__enter__()
+    handle = None
     try:
+        handle = (state / "vault.lock").open("a+b")
         while True:
             try:
                 fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -192,7 +275,7 @@ async def begin(app_row, method, endpoint, query, body=b""):
         journal = state / "external-change.json"
 
         def prepare():
-            with history.under_existing_lock(handle):
+            with history.under_existing_lock(handle, lease):
                 history.recover()
                 try:
                     payload = json.loads(body)
@@ -248,8 +331,10 @@ async def begin(app_row, method, endpoint, query, body=b""):
         # before releasing its lock, including its final journal rename.
         before, payload = await complete_cleanup(asyncio.to_thread(prepare))
         return AppMutation(
-            history, handle, before, journal, f"app:{app_row['id']}", endpoint, payload
+            history, handle, before, journal, f"app:{app_row['id']}", endpoint, payload, borrow, lease, user_id
         )
     except BaseException:
-        handle.close()
+        if handle is not None:
+            handle.close()
+        borrow.__exit__(None, None, None)
         raise

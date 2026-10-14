@@ -1,5 +1,4 @@
 import asyncio
-import contextlib
 import logging
 import os
 import time
@@ -19,6 +18,7 @@ from fastapi.staticfiles import StaticFiles
 from . import deps
 from . import monitor as monitor_pkg
 from .agent_manager import AgentManager
+from .aio import complete_cleanup
 from .app_agent import app_agent_manager
 from .app_backends import backend_supervisor
 from .applications import application_manager
@@ -74,170 +74,272 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     db = Database(settings.db_path)
-    await db.initialize()
-    await session_manager.initialize(db)
-    # Restore round receipts before any background producer can start work.
-    delegation_manager.bind(session_mgr=session_manager, db=db)
+    started: set[str] = set()
+    schedule_runner = metrics = sampler_task = tunnel = None
+    mcp_owner = None
+    mcp_stop = asyncio.Event()
+    original: BaseException | None = None
     try:
+        await db.initialize()
+        from .wiki.app_bridge import reopen as reopen_wiki_app_writers
+        reopen_wiki_app_writers()
+        from .wiki.account_upgrade import pending_upgrade
+        if pending := pending_upgrade():
+            session_manager._legacy_transition = True
+            if pending["config"].get("app_id"):
+                backend_supervisor._blocked_apps.add(pending["config"]["app_id"])
+            from .wiki.app_bridge import _blocked_owners
+            _blocked_owners.add(None)
+        started.add("sessions")
+        await session_manager.initialize(db)
+        # Restore round receipts before any background producer can start work.
+        started.add("delegations")
+        delegation_manager.bind(session_mgr=session_manager, db=db)
         await delegation_manager.restore()
-    except BaseException:
-        session_manager.close_admission()
-        try:
-            await db.close()
-        except (asyncio.CancelledError, Exception):
-            logger.exception("Service startup cleanup unconfirmed; database retained")
-        else:
-            delegation_manager.shutdown()
-        raise
 
-    # Initialize scheduler
-    schedule_runner = ScheduleRunner(session_manager, db)
-    await schedule_runner.initialize()
-    app.state.schedule_runner = schedule_runner
-    session_manager.set_schedule_runner(schedule_runner)
-    schedules._db = db
-    schedules._runner = schedule_runner
-    agents.set_manager(AgentManager(db))
-    connectors.set_manager(ConnectorManager(db))
-    applications_router.set_manager(application_manager)
-    auth_router.set_db(db)
-    # Accounts. Bound like the other managers; `deps.current_user` resolves
-    # every request's bearer through it (multi-tenancy.md §5.1).
-    deps.set_user_manager(UserManager(db))
-    credentials.set_db(db)
-    notifiers.set_db(db)
-    notifier_manager.set_db(db)
-    session_manager.set_notifier_manager(notifier_manager)
-    await notifier_manager.load()
+        # Initialize scheduler
+        schedule_runner = ScheduleRunner(session_manager, db)
+        started.add("scheduler")
+        await schedule_runner.initialize()
+        app.state.schedule_runner = schedule_runner
+        session_manager.set_schedule_runner(schedule_runner)
+        schedules._db = db
+        schedules._runner = schedule_runner
+        agents.set_manager(AgentManager(db))
+        connectors.set_manager(ConnectorManager(db))
+        applications_router.set_manager(application_manager)
+        auth_router.set_db(db)
+        # Accounts. Bound like the other managers; `deps.current_user` resolves
+        # every request's bearer through it (multi-tenancy.md §5.1).
+        deps.set_user_manager(UserManager(db))
+        credentials.set_db(db)
+        notifiers.set_db(db)
+        notifier_manager.set_db(db)
+        session_manager.set_notifier_manager(notifier_manager)
+        await notifier_manager.load()
 
-    # Bg task worker — lives in this FastAPI process so spawned
-    # subprocesses survive any per-turn `claude --print` lifetime. The
-    # deliver callback synthesizes a user message into the session; the
-    # broadcast callback pushes status events to all WS clients.
-    bg_task_manager.bind(
-        db=db,
-        deliver_cb=session_manager.deliver_bg_result,
-        broadcast_cb=session_manager._broadcast,
-    )
-    await bg_task_manager.start()
+        # Bg task worker — lives in this FastAPI process so spawned
+        # subprocesses survive any per-turn `claude --print` lifetime. The
+        # deliver callback synthesizes a user message into the session; the
+        # broadcast callback pushes status events to all WS clients.
+        bg_task_manager.bind(
+            db=db,
+            deliver_cb=session_manager.deliver_bg_result,
+            broadcast_cb=session_manager._broadcast,
+        )
+        started.add("background")
+        await bg_task_manager.start()
 
-    # Applications (applications.md). Subscribes to the session broadcast bus
-    # so a build session's turns drive each application's building/ready/failed
-    # status.
-    application_manager.bind(session_mgr=session_manager, db=db)
-    from .wiki.jobs import worker as wiki_worker
-    # Pick up icons for applications that already exist. Discovery otherwise
-    # only runs after a build, so an app that already ships a logo would keep
-    # showing the generic fallback until someone rebuilt it.
-    await application_manager.refresh_icons()
-    # Applications with a backend (application-backends.md): stop the ones
-    # nobody is using, and never leave one running past our own exit.
-    backend_supervisor.start_reaper()
-    # Applications talking to agents (app-agent-access.md). Also a bus
-    # subscriber: it turns a conversation session's events into the small
-    # vocabulary an app consumes.
-    app_agent_manager.bind(
-        session_mgr=session_manager, db=db, app_mgr=application_manager
-    )
+        # Applications (applications.md). Subscribes to the session broadcast bus
+        # so a build session's turns drive each application's building/ready/failed
+        # status.
+        started.add("applications")
+        application_manager.bind(session_mgr=session_manager, db=db)
+        from .wiki.jobs import worker as wiki_worker
+        # Pick up icons for applications that already exist. Discovery otherwise
+        # only runs after a build, so an app that already ships a logo would keep
+        # showing the generic fallback until someone rebuilt it.
+        await application_manager.refresh_icons()
+        # Applications with a backend (application-backends.md): stop the ones
+        # nobody is using, and never leave one running past our own exit.
+        started.add("backends")
+        backend_supervisor.start_reaper()
+        # Applications talking to agents (app-agent-access.md). Also a bus
+        # subscriber: it turns a conversation session's events into the small
+        # vocabulary an app consumes.
+        started.add("app_agent")
+        app_agent_manager.bind(
+            session_mgr=session_manager, db=db, app_mgr=application_manager
+        )
 
-    # Native deep research (native-deep-research.md). Tracks research jobs as
-    # async tasks; injects the final report back into the session.
-    research_manager.bind(session_mgr=session_manager, db=db)
-    await research_manager.recover_interrupted()
+        # Native deep research (native-deep-research.md). Tracks research jobs as
+        # async tasks; injects the final report back into the session.
+        started.add("research")
+        research_manager.bind(session_mgr=session_manager, db=db)
+        await research_manager.recover_interrupted()
 
-    # Start Cloudflare Tunnel if enabled
-    tunnel: CloudflareTunnel | None = None
-    if settings.enable_tunnel:
-        tunnel = CloudflareTunnel(port=settings.port)
-        url = await tunnel.start()
-        if url:
-            print("\n" + "=" * 60)
-            print(f"  Tunnel URL: {url}")
-            print("=" * 60 + "\n")
-            logger.info("Cloudflare Tunnel active: %s", url)
+        # Start Cloudflare Tunnel if enabled
+        if settings.enable_tunnel:
+            tunnel = CloudflareTunnel(port=settings.port)
+            url = await tunnel.start()
+            if url:
+                print("\n" + "=" * 60)
+                print(f"  Tunnel URL: {url}")
+                print("=" * 60 + "\n")
+                logger.info("Cloudflare Tunnel active: %s", url)
 
-    # Idle-process reaper (inline-steering.md §7): a session keeps its CLI
-    # process after a turn so the next one skips the ~1.5s spawn, and this
-    # drops the ones that stop earning their ~255MB.
-    session_manager.start_reaper()
+        # Idle-process reaper (inline-steering.md §7): a session keeps its CLI
+        # process after a turn so the next one skips the ~1.5s spawn, and this
+        # drops the ones that stop earning their ~255MB.
+        session_manager.start_reaper()
 
-    # The MCP tool namespaces are served from this app rather than spawned per
-    # session (polish-2026-09.md §4 B1). Each one's session manager has to be
-    # running before it will answer, and mounting does not start it, so they run
-    # for the lifetime of the app.
-    metrics = MetricsStore(settings.metrics_db_path, settings.metrics_retention_days)
-    await metrics.initialize()
-    metrics.start()
-    monitor_pkg.set_store(metrics)
-    await metrics.prune()  # honour retention on every boot, not only on a timer
-    sampler_task = asyncio.create_task(
-        metrics_sampler.run(
-            settings.db_path,
-            held_process_count=lambda: len(getattr(session_manager, "_held", {}) or {}),
-        ), name="metrics-sampler",
-    )
+        # The MCP tool namespaces are served from this app rather than spawned per
+        # session (polish-2026-09.md §4 B1). Each one's session manager has to be
+        # running before it will answer, and mounting does not start it, so they run
+        # for the lifetime of the app.
+        metrics = MetricsStore(settings.metrics_db_path, settings.metrics_retention_days)
+        await metrics.initialize()
+        metrics.start()
+        monitor_pkg.set_store(metrics)
+        await metrics.prune()  # honour retention on every boot, not only on a timer
+        sampler_task = asyncio.create_task(
+            metrics_sampler.run(
+                settings.db_path,
+                held_process_count=lambda: len(getattr(session_manager, "_held", {}) or {}),
+            ), name="metrics-sampler",
+        )
 
-    async with mcp_lifespan(app):
+        ready = asyncio.get_running_loop().create_future()
+        mcp_owner = asyncio.create_task(_serve_mcp(app, ready, mcp_stop), name="mcp-lifespan")
+        await asyncio.shield(ready)
         from .wiki.registry import registry as wiki_registry
-
+        wiki_registry.legacy_enabled = not bool(await db.count_users())
+        from .wiki.account_upgrade import pending_upgrade
+        if pending := pending_upgrade():
+            session_manager._legacy_transition = True
+            wiki_registry._blocked.add(None)
+            if pending.get("user_id"):
+                wiki_registry._blocked.add(pending["user_id"])
+        started.add("wiki_registry")
         await wiki_registry.start()
         from .wiki.cleanup import sweep as sweep_wiki_history
         await sweep_wiki_history()
+        started.add("wiki_worker")
         await wiki_worker.start(session_manager)
         logger.info("MCP namespaces served in-process: %s", ", ".join(_mcp_mounts))
+        yield
+    except BaseException as exc:
+        original = exc
+        raise
+    finally:
+        cancelled_mcp_startup = mcp_owner is not None and not ready.done()
+        if cancelled_mcp_startup:
+            mcp_owner.cancel("service-startup-aborted")
         try:
-            yield
+            await complete_cleanup(_shutdown_service(db, started, schedule_runner, metrics, sampler_task, tunnel))
+        except BaseException:
+            if original is None:
+                raise
+            logger.exception("Service startup cleanup unconfirmed; database retained")
         finally:
-            # Seal before any await or producer cancellation can deliver work.
-            session_manager.close_admission()
-            wiki_worker.begin_shutdown()
-            schedule_runner.begin_shutdown()
-            research_manager.begin_shutdown()
-            bg_task_manager.begin_shutdown()
-            backend_supervisor.begin_shutdown()
-            from .codex_login import codex_login_manager
-            codex_login_manager.begin_shutdown()
+            try:
+                if mcp_owner is not None:
+                    mcp_stop.set()
+                    await complete_cleanup(_join_mcp(mcp_owner, cancelled_startup=cancelled_mcp_startup))
+            except BaseException:
+                if original is None:
+                    raise
+                logger.exception("MCP startup compensation failed")
 
-            # Wiki cancellation is already issued. Its shielded bookkeeping
-            # unwinds alongside session drain, with dependencies still alive.
-            owners = (
-                ("session reaper", session_manager.stop_reaper()),
-                ("session execution", session_manager.drain_turns()),
-                ("Wiki curator", wiki_worker.stop()),
-                ("scheduler", schedule_runner.shutdown()),
-                ("research", research_manager.shutdown()),
-                ("background tasks", bg_task_manager.shutdown()),
-                ("application processes", backend_supervisor.shutdown()),
-                ("Codex login", codex_login_manager.shutdown()),
-            )
-            results = await asyncio.gather(*(stop for _, stop in owners), return_exceptions=True)
-            failures = [(name, result) for (name, _), result in zip(owners, results, strict=True)
-                        if isinstance(result, BaseException)]
-            if failures:
-                names = ", ".join(name for name, _ in failures)
-                logger.error("Service shutdown cleanup unconfirmed: %s; database kept open", names)
-                raise RuntimeError(f"Service shutdown cleanup unconfirmed: {names}") from failures[0][1]
 
-            await session_manager.stop_all_held_processes()
-            await delegation_manager.confirm_recording()
-            await shutdown_wiki_app_writers()
-            await wiki_registry.stop()
-            if tunnel:
-                await tunnel.stop()
-            from .oauth_login import oauth_login_manager
-            await oauth_login_manager.shutdown()
-            app_agent_manager.shutdown()
-            application_manager.shutdown()
+async def _serve_mcp(app, ready, stop):
+    try:
+        async with mcp_lifespan(app):
+            ready.set_result(None)
+            await stop.wait()
+    except BaseException as exc:
+        if not ready.done():
+            ready.set_exception(exc)
+            # The startup waiter may already have been cancelled. Preserve
+            # the cause for an active waiter and consume it for an absent one.
+            ready.exception()
+        raise
+
+
+async def _join_mcp(owner, *, cancelled_startup=False):
+    try:
+        await owner
+    except asyncio.CancelledError:
+        if not cancelled_startup:
+            raise
+
+
+async def _shutdown_service(db, started, schedule_runner, metrics, sampler_task, tunnel):
+    from .codex_login import codex_login_manager
+    from .oauth_login import oauth_login_manager
+    from .wiki.jobs import worker as wiki_worker
+    from .wiki.registry import registry as wiki_registry
+    from .ws_delivery import shutdown_connections
+
+    session_manager.close_admission()
+    wiki_worker.begin_shutdown()
+    if schedule_runner is not None:
+        schedule_runner.begin_shutdown()
+    research_manager.begin_shutdown()
+    bg_task_manager.begin_shutdown()
+    backend_supervisor.begin_shutdown()
+    codex_login_manager.begin_shutdown()
+    if started <= {"sessions", "delegations"}:
+        # Close hooks join restored recorders before the session drain budget.
+        await db.close()
+        if "delegations" in started:
             delegation_manager.shutdown()
-            from .ws_delivery import shutdown_connections
-            await shutdown_connections()
-            sampler_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await sampler_task
-            await metrics.stop()
-            monitor_pkg.set_store(None)
-            # Close hooks remain a fallback for any direct database close.
-            await db.close()
+        return
+    owners = []
+    if "sessions" in started:
+        owners.extend((("session reaper", session_manager.stop_reaper()),
+                       ("session execution", session_manager.drain_turns())))
+    for flag, name, stop in (
+        ("wiki_worker", "Wiki curator", wiki_worker.stop),
+        ("scheduler", "scheduler", schedule_runner.shutdown if schedule_runner else None),
+        ("research", "research", research_manager.shutdown),
+        ("background", "background tasks", bg_task_manager.shutdown),
+        ("backends", "application processes", backend_supervisor.shutdown),
+    ):
+        if flag in started and stop is not None:
+            owners.append((name, stop()))
+    owners.append(("Codex login", codex_login_manager.shutdown()))
+    results = await asyncio.gather(*(stop for _, stop in owners), return_exceptions=True)
+    failures = [(name, result) for (name, _), result in zip(owners, results, strict=True)
+                if isinstance(result, BaseException)]
+    writer_failures = list(failures)
+
+    async def attempt(name, operation, *, writer=False):
+        try:
+            await operation
+        except BaseException as exc:
+            failures.append((name, exc))
+            if writer:
+                writer_failures.append((name, exc))
+
+    # Independent resources can retire even when a writer remains unconfirmed.
+    if tunnel is not None:
+        await attempt("tunnel", tunnel.stop())
+    await attempt("OAuth login", oauth_login_manager.shutdown())
+    await attempt("WebSockets", shutdown_connections())
+    if sampler_task is not None:
+        sampler_task.cancel()
+        try:
+            await sampler_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            failures.append(("metrics sampler", exc))
+    if metrics is not None:
+        await attempt("metrics", metrics.stop())
+    monitor_pkg.set_store(None)
+
+    await attempt("held processes", session_manager.stop_all_held_processes(), writer=True)
+    if "delegations" in started:
+        await attempt("delegation recording", delegation_manager.confirm_recording(), writer=True)
+    if not any(name == "application processes" for name, _ in writer_failures):
+        await attempt("Wiki application writers", shutdown_wiki_app_writers(), writer=True)
+    if not writer_failures and "wiki_registry" in started:
+        await attempt("Wiki registry", wiki_registry.stop(), writer=True)
+    if writer_failures:
+        names = ", ".join(name for name, _ in failures)
+        logger.error("Service shutdown cleanup unconfirmed: %s; database kept open", names)
+        raise RuntimeError(f"Service shutdown cleanup unconfirmed: {names}") from failures[0][1]
+    if "app_agent" in started:
+        app_agent_manager.shutdown()
+    if "applications" in started:
+        application_manager.shutdown()
+    if "delegations" in started:
+        delegation_manager.shutdown()
+    await db.close()
+    if failures:
+        names = ", ".join(name for name, _ in failures)
+        raise RuntimeError(f"Independent service resource cleanup failed: {names}") from failures[0][1]
 
 
 app = FastAPI(title="Octopus", version="0.1.0", lifespan=lifespan)

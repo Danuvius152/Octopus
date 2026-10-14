@@ -161,6 +161,7 @@ class BackendSupervisor:
         self._backends: dict[str, BackendState] = {}
         self._reaper: asyncio.Task[None] | None = None
         self._shutting_down = False
+        self._blocked_apps: set[str] = set()
 
     # ---------------------------------------------------------------- state
 
@@ -213,11 +214,11 @@ class BackendSupervisor:
         `failed` with the tail of the output, because "it doesn't work" with no
         log is the exact failure this feature exists to avoid.
         """
-        if self._shutting_down:
+        if self._shutting_down or app_id in self._blocked_apps:
             raise RuntimeError("Application backend supervisor is shutting down")
         st = self._state_for(app_id, app_dir)
         async with st.lock:
-            if self._shutting_down:
+            if self._shutting_down or app_id in self._blocked_apps:
                 raise RuntimeError("Application backend supervisor is shutting down")
             st._operation = asyncio.current_task()
             try:
@@ -315,7 +316,7 @@ class BackendSupervisor:
         Lazy by design: called from the proxy, so a backend exists only once
         something actually asks it for something.
         """
-        if self._shutting_down:
+        if self._shutting_down or app_id in self._blocked_apps:
             raise RuntimeError("Application backend supervisor is shutting down")
         st = self._state_for(app_id, app_dir)
         st.last_used = time.monotonic()
@@ -325,7 +326,7 @@ class BackendSupervisor:
             return st
 
         async with st.lock:
-            if self._shutting_down:
+            if self._shutting_down or app_id in self._blocked_apps:
                 raise RuntimeError("Application backend supervisor is shutting down")
             st._operation = asyncio.current_task()
             try:

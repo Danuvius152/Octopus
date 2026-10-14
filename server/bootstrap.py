@@ -21,6 +21,7 @@ working. The two facts are the same fact.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import shutil
@@ -60,7 +61,7 @@ class BootstrapError(Exception):
 
 
 @serialized_write
-async def _rekey_secrets(db: Any, old_key: str, new_key: str) -> dict[str, int]:
+async def _rekey_secrets(db: Any, old_key: str, new_key: str, user_id: str | None = None) -> dict[str, int]:
     """Move every stored secret off the old key. All, or none.
 
     A user's secrets go to `new_key`, their own DEK; the install's own go to the
@@ -85,9 +86,14 @@ async def _rekey_secrets(db: Any, old_key: str, new_key: str) -> dict[str, int]:
         (_INSTALL_SECRET_COLUMNS, master_key()),
     ):
         for table, key_col, secret_col in tables:
-            cursor = await db.conn.execute(
-                f"SELECT {key_col}, {secret_col} FROM {table}"  # noqa: S608
-            )
+            if table in {entry[0] for entry in _SECRET_COLUMNS}:
+                owner_table = "backend_credentials" if table == "credential_secrets" else "connector_installations"
+                cursor = await db.conn.execute(
+                    f"SELECT s.{key_col}, s.{secret_col} FROM {table} s JOIN {owner_table} o ON o.id=s.{key_col} "
+                    "WHERE o.user_id IS NULL OR o.user_id=?", (user_id,),  # noqa: S608
+                )
+            else:
+                cursor = await db.conn.execute(f"SELECT {key_col}, {secret_col} FROM {table}")  # noqa: S608
             counts[table] = 0
             for row_key, ciphertext in await cursor.fetchall():
                 if not ciphertext:
@@ -95,6 +101,11 @@ async def _rekey_secrets(db: Any, old_key: str, new_key: str) -> dict[str, int]:
                 try:
                     plaintext = decrypt(ciphertext, old_key)
                 except ValueError as exc:
+                    try:
+                        decrypt(ciphertext, destination)
+                        continue  # A recovered upgrade already committed this row.
+                    except ValueError:
+                        pass
                     raise BootstrapError(
                         f"{table}.{key_col}={row_key!r} could not be decrypted "
                         f"with the current token, so nothing was changed "
@@ -134,7 +145,7 @@ async def _rekey_secrets(db: Any, old_key: str, new_key: str) -> dict[str, int]:
     return counts
 
 
-async def _existing_working_dirs(db: Any) -> list[str]:
+async def _existing_working_dirs(db: Any, user_id: str | None = None) -> list[str]:
     """Every distinct directory this install's sessions already work in.
 
     They become the first account's `extra_roots`, because confining them to a
@@ -145,6 +156,8 @@ async def _existing_working_dirs(db: Any) -> list[str]:
     rows = await db.load_sessions(include_archived=True)
     roots: list[str] = []
     for row in rows:
+        if row.get("user_id") not in {None, user_id}:
+            continue
         raw = (row.get("working_dir") or "").strip()
         if not raw:
             continue
@@ -176,13 +189,16 @@ def _move_agent_memory(user_id: str) -> int:
     return moved
 
 
-async def bootstrap_first_account(
+async def _bootstrap_account(
     db: Any,
     *,
     username: str,
     password: str,
     adopt: bool = True,
     session_manager: Any = None,
+    existing_user: dict | None = None,
+    on_created: Any = None,
+    wiki_root: str | None = None,
 ) -> dict[str, Any]:
     """Create the install's first account and hand it everything.
 
@@ -194,17 +210,19 @@ async def bootstrap_first_account(
     and a server that is not restarted would go on serving them as unowned.
     """
     users = UserManager(db)
-    if await db.count_users() > 0:
+    if existing_user is None and await db.count_users() > 0:
         raise BootstrapError(
             "This install already has an account", status_code=409
         )
 
     try:
-        user = await users.create_user(
+        user = existing_user or await users.create_user(
             username=username, password=password, is_admin=True
         )
     except UserError as exc:
         raise BootstrapError(exc.message, status_code=exc.status_code) from exc
+    if on_created is not None:
+        await on_created(user)
 
     summary: dict[str, Any] = {"user_id": user["id"], "username": user["username"]}
 
@@ -220,12 +238,17 @@ async def bootstrap_first_account(
     # Secrets before rows: a failure here must not leave rows pointing at an
     # account whose credentials do not open.
     summary["reencrypted"] = await _rekey_secrets(
-        db, settings.auth_token, users.data_key(user)
+        db, settings.auth_token, users.data_key(user), user["id"]
     )
 
     if adopt:
         summary["adopted"] = await db.adopt_orphan_rows(user["id"])
-        roots = await _existing_working_dirs(db)
+        roots = list(dict.fromkeys(
+            str(Path(root).expanduser().resolve()) for root in (
+                *json.loads(user.get("extra_roots") or "[]"),
+                *await _existing_working_dirs(db, user["id"]), *([wiki_root] if wiki_root else []),
+            )
+        ))
         if roots:
             await db.update_user_field(user["id"], extra_roots=json.dumps(roots))
         summary["extra_roots"] = roots
@@ -238,3 +261,23 @@ async def bootstrap_first_account(
 
     logger.info("bootstrapped the first account: %s", summary)
     return summary
+
+
+async def bootstrap_first_account(db: Any, *, username: str, password: str, adopt: bool = True,
+                                  session_manager: Any = None) -> dict[str, Any]:
+    from .aio import complete_cleanup
+    from .wiki.account_upgrade import upgrade_with_wiki
+    from .wiki.registry import registry
+
+    if not hasattr(db, "_bootstrap_lock"):
+        db._bootstrap_lock = asyncio.Lock()
+    async with db._bootstrap_lock:
+        if await db.count_users():
+            raise BootstrapError("This install already has an account", status_code=409)
+        if (registry.state(None) / "config.json").is_file():
+            return await complete_cleanup(upgrade_with_wiki(
+                db, username=username, password=password, adopt=adopt, manager=session_manager,
+            ))
+        return await complete_cleanup(_bootstrap_account(
+            db, username=username, password=password, adopt=adopt, session_manager=session_manager,
+        ))
