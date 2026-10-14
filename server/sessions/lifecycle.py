@@ -324,6 +324,9 @@ class LifecycleMixin(SessionManagerBase):
                 "old_session_id": old.id,
                 "new_session_id": new.id,
                 "name": new.name,
+                "model": new.model,
+                "reasoning_effort": new.reasoning_effort,
+                "service_tier": new.service_tier,
             }, user_id=old.user_id,
         )
         return new

@@ -2,7 +2,63 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { act, renderHook } from "@testing-library/react";
 
 import { handleWsMessage, shouldApplyWsEvent, useWebSocket } from "./useWebSocket";
-import { useSessionStore } from "../stores/sessionStore";
+import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
+
+describe("archive replacement settings", () => {
+  const old = {
+    id: "archive-old", name: "Work", working_dir: "/tmp", backend: "codex",
+    model: "stale-model", reasoning_effort: "low", service_tier: "default",
+  } as SessionInfo;
+  const event = {
+    type: "session_archived", old_session_id: old.id, new_session_id: "archive-new",
+    name: "Work", model: "gpt-5.4", reasoning_effort: "high", service_tier: "fast",
+  };
+
+  beforeEach(() => {
+    useSessionStore.setState({
+      sessions: [old], archivedSessions: [], activeSessionId: old.id,
+      messages: {}, pendingQueue: {}, pendingQuestions: {},
+    });
+  });
+
+  it.each([
+    { model: "gpt-5.4", reasoning_effort: "high", service_tier: "fast" },
+    { model: null, reasoning_effort: null, service_tier: null },
+  ])("uses the server's settings, including explicit inheritance: %j", (settings) => {
+    handleWsMessage({ ...event, ...settings });
+    const store = useSessionStore.getState();
+    expect(store.activeSessionId).toBe(event.new_session_id);
+    expect(store.sessions).toEqual([expect.objectContaining({ id: event.new_session_id, ...settings })]);
+    expect(store.archivedSessions).toEqual([expect.objectContaining({ ...old, archived: true })]);
+  });
+
+  it("receives settings even when the old session is absent locally", () => {
+    useSessionStore.setState({ sessions: [] });
+    handleWsMessage(event);
+    expect(useSessionStore.getState().sessions[0]).toMatchObject({
+      model: event.model, reasoning_effort: event.reasoning_effort, service_tier: event.service_tier,
+    });
+  });
+
+  it("converges when the HTTP response precedes the event and ignores duplicate events", () => {
+    const fresh = { ...old, id: event.new_session_id, model: event.model,
+      reasoning_effort: "high", service_tier: "fast", archived: false } as SessionInfo;
+    useSessionStore.setState({ sessions: [fresh], activeSessionId: fresh.id });
+    handleWsMessage(event);
+    handleWsMessage(event);
+    expect(useSessionStore.getState().sessions).toEqual([fresh]);
+    expect(useSessionStore.getState().activeSessionId).toBe(fresh.id);
+  });
+
+  it("updates an existing successor loaded before its settings were persisted", () => {
+    useSessionStore.setState({ sessions: [old, { ...old, id: event.new_session_id, model: null }] });
+    handleWsMessage(event);
+    expect(useSessionStore.getState().sessions).toEqual([expect.objectContaining({
+      id: event.new_session_id, model: event.model,
+      reasoning_effort: event.reasoning_effort, service_tier: event.service_tier,
+    })]);
+  });
+});
 
 it("applies the nested server dispatch frame for an idle Stop and a remote Resume", () => {
   useSessionStore.setState({ dispatchStates: {}, dispatchGeneration: null, retiredDispatchGenerations: [], pendingQueue: {} });

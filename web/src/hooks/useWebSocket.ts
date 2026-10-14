@@ -16,6 +16,7 @@ import {
   type Message,
   type PendingQuestion,
   type ResearchJob,
+  type SessionInfo,
   type SessionStatus,
   type SubagentRun,
 } from "../stores/sessionStore";
@@ -476,9 +477,16 @@ export function handleWsMessage(data: Record<string, unknown>) {
       // session auto-archiving on idle, or an agent being archived).
       const newId = data.new_session_id as string | null;
       const name = data.name as string;
+      const settings = {
+        model: (data.model as SessionInfo["model"]) ?? null,
+        reasoning_effort: (data.reasoning_effort as SessionInfo["reasoning_effort"]) ?? null,
+        service_tier: (data.service_tier as SessionInfo["service_tier"]) ?? null,
+      };
       const store = getState();
       const prev = store.sessions.find((s) => s.id === oldId);
-      const next = store.sessions.filter((s) => s.id !== oldId);
+      const next = store.sessions.filter((s) => s.id !== oldId).map((s) =>
+        s.id === newId ? { ...s, ...settings } : s
+      );
       if (newId && !next.some((s) => s.id === newId)) {
         next.push({
           id: newId,
@@ -492,6 +500,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
           agent_id: prev?.agent_id ?? null,
           origin: prev?.origin ?? "user",
           backend: prev?.backend ?? "claude-code",
+          ...settings,
           can_fork: prev?.can_fork ?? true,
           // Carried from the session it replaces: same agent, same backend,
           // so the same harness capability.

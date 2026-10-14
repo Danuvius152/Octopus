@@ -1438,11 +1438,20 @@ async def test_archive_unknown_session_raises(manager):
 
 
 @pytest.mark.asyncio
-async def test_archive_broadcasts_session_archived_event(manager):
+@pytest.mark.parametrize("overrides", [
+    ("gpt-5.4", "high", "fast"),
+    (None, None, None),
+])
+async def test_archive_broadcasts_session_archived_event(manager, overrides):
     received: list[dict] = []
     manager.on_broadcast("test", lambda m: asyncio.sleep(0, result=received.append(m)))
 
     old = await _new(manager,name="X", working_dir="/tmp")
+    old.model, old.reasoning_effort, old.service_tier = overrides
+    await manager.db.update_session_field(
+        old.id, model=old.model, reasoning_effort=old.reasoning_effort,
+        service_tier=old.service_tier,
+    )
     new = await manager.archive_session(old.id)
 
     archived_evts = [m for m in received if m.get("type") == "session_archived"]
@@ -1450,6 +1459,9 @@ async def test_archive_broadcasts_session_archived_event(manager):
     assert archived_evts[0]["old_session_id"] == old.id
     assert archived_evts[0]["new_session_id"] == new.id
     assert archived_evts[0]["name"] == "X"
+    saved = next(row for row in await manager.db.load_sessions() if row["id"] == new.id)
+    for field, expected in zip(("model", "reasoning_effort", "service_tier"), overrides, strict=True):
+        assert archived_evts[0][field] == getattr(new, field) == saved[field] == expected
 
 
 # --------------------------------------------------------------- auth-expiry detection

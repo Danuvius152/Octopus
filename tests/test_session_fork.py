@@ -6,6 +6,7 @@ Codex HISTORY_REPLAY), plus crash recovery, the `_forking` mutex, side-effect
 classification routing, safe-revert, and dispatch-only replay wrapping.
 """
 
+import asyncio
 import json
 import subprocess
 
@@ -103,6 +104,8 @@ async def test_fork_codex_history_replay(manager):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("full_copy", [False, True])
 async def test_fork_settings_snapshot_matches_database_during_parent_update(manager, tmp_path, monkeypatch, full_copy):
+    received = []
+    manager.on_broadcast("test", lambda event: asyncio.sleep(0, result=received.append(event)))
     parent_dir = tmp_path / "parent"
     parent_dir.mkdir()
     parent = await _seed_parent(manager, backend="codex", working_dir=str(parent_dir))
@@ -128,6 +131,12 @@ async def test_fork_settings_snapshot_matches_database_during_parent_update(mana
     monkeypatch.setattr(manager, "_fork_copy_base", lambda: str(tmp_path / "forks"))
     fork = await manager.duplicate_session(parent.id) if full_copy else await manager.fork_session(parent.id, 2)
     assert (fork.model, fork.reasoning_effort, fork.service_tier) == ("original-model", "low", "fast")
+    if not full_copy:
+        event = next(event for event in received if event["type"] == "session_archived")
+        assert event["new_session_id"] == fork.id
+        assert (event["model"], event["reasoning_effort"], event["service_tier"]) == (
+            fork.model, fork.reasoning_effort, fork.service_tier,
+        )
     restored = SessionManager()
     await restored.initialize(manager.db)
     loaded = restored.get_session(fork.id)

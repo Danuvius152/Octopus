@@ -37,6 +37,7 @@ const OWNED_NAMES = new Set([
   "Webhook Fire Probe",
   "Archive Probe",
   "Archive Probe Two",
+  "Archive Settings Probe",
   "Attachment Picker Test",
   "Attachment History Test",
   "Viewer Showme Test",
@@ -2715,6 +2716,54 @@ test.describe("Composer history", () => {
 });
 
 test.describe("/model", () => {
+  test("keeps replacement overrides visible when another client archives the session", async ({ page, request }) => {
+    const headers = { Authorization: `Bearer ${TOKEN}` };
+    const settings = { model: "archive-override-probe", reasoning_effort: "high", service_tier: "fast" };
+    await page.route("**/api/backends/codex/models*", (route) => route.fulfill({
+      json: {
+        models: [], reasoning_efforts: ["low", "high"], service_tiers: ["default", "fast"],
+      },
+    }));
+    const imported = await request.post(`${API}/sessions/import`, {
+      headers, data: {
+        name: "Archive Settings Probe", working_dir: "/tmp", backend: "codex",
+        messages: [{ role: "user", type: "text", content: "Old archive history" }],
+      },
+    });
+    expect(imported.ok()).toBeTruthy();
+    const old = await imported.json();
+    const updated = await request.patch(`${API}/sessions/${old.id}`, { headers, data: settings });
+    expect(updated.ok()).toBeTruthy();
+    await login(page);
+    await page.locator(".session-item .session-name", { hasText: "Archive Settings Probe" }).click();
+    await expect(page.locator(".msg", { hasText: "Old archive history" })).toBeVisible();
+    try {
+      // The browser receives only the replacement event; the full HTTP response
+      // goes to this separate API client and cannot mask missing event fields.
+      const archived = await request.post(`${API}/sessions/${old.id}/archive`, { headers });
+      expect(archived.ok()).toBeTruthy();
+      const fresh = await archived.json();
+      expect(fresh).toMatchObject(settings);
+      await expect(page.locator(".msg", { hasText: "Old archive history" })).toBeHidden();
+      await expect(page.locator(".session-item.active .session-name")).toHaveText("Archive Settings Probe");
+      await page.locator(".btn-model-settings").click();
+      const dialog = page.locator(".model-picker-dialog");
+      await expect(dialog.getByLabel("Model name")).toHaveValue(settings.model);
+      await expect(dialog.getByLabel("Reasoning effort")).toHaveValue(settings.reasoning_effort);
+      await expect(dialog.getByLabel("Speed")).toHaveValue(settings.service_tier);
+      await page.reload();
+      await openSessionRail(page);
+      await page.locator(".session-item .session-name", { hasText: "Archive Settings Probe" }).click();
+      await page.locator(".btn-model-settings").click();
+      await expect(dialog.getByLabel("Model name")).toHaveValue(settings.model);
+      await expect(dialog.getByLabel("Reasoning effort")).toHaveValue(settings.reasoning_effort);
+      await expect(dialog.getByLabel("Speed")).toHaveValue(settings.service_tier);
+      await request.delete(`${API}/sessions/${fresh.id}`, { headers });
+    } finally {
+      await request.delete(`${API}/sessions/${old.id}`, { headers });
+    }
+  });
+
   test("switches Fast and Normal independently and preserves history after reload", async ({ page, request }) => {
     await page.route("**/api/backends/codex/models*", (route) => route.fulfill({
       json: {

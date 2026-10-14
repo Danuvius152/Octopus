@@ -423,6 +423,9 @@ class ForkingMixin(SessionManagerBase):
                         "old_session_id": parent_id,
                         "new_session_id": fork.id,
                         "name": fork.name,
+                        "model": fork.model,
+                        "reasoning_effort": fork.reasoning_effort,
+                        "service_tier": fork.service_tier,
                     },
                     user_id=parent.user_id,
                 )
