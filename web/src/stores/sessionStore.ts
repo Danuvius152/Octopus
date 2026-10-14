@@ -428,7 +428,7 @@ export interface Delegation {
   target_agent_name: string;
   request: string;
   work_id?: string;
-  state: "running" | "completed" | "failed" | "cancelled";
+  state: "running" | "completed" | "failed" | "cancelled" | "interrupted";
   created_at: string;
   finished_at: string | null;
   error: string | null;

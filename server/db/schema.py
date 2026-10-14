@@ -82,6 +82,8 @@ CREATE TABLE IF NOT EXISTS sessions (
     -- render "Octo asked: «…»" without rummaging through the first message.
     -- NULL on every non-delegation session.
     delegation_request TEXT,
+    -- Latest future-format delegation round; NULL histories are not recovered.
+    delegation_state TEXT,
     -- The application this session belongs to, for the two kinds a running
     -- app owns: its build session and the conversations the app itself holds
     -- with an agent (origin='app'). It's what lets a route prove a

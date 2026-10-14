@@ -764,15 +764,11 @@ class SessionManagerBase:
         """Archive delegation children left live by a restart
         (agent-collaboration.md §5.2).
 
-        Delegation run records live ONLY in `DelegationManager._records`
-        (in-memory; never persisted — "the delegation id IS the child
-        session id, no parallel id space"). A restart wipes that registry,
-        and the child's subprocess is dead, so the chain can never finish:
-        no `result`/`error` will ever arrive to drive `_inject_terminal`,
-        and therefore nothing will ever auto-archive the child. Loaded back
-        by `initialize` as a live `origin == "delegation"` session, it would
-        otherwise sit forever in the sidebar's "+N delegations hidden"
-        count with no path to cleanup.
+        The old subprocess and delivery loop do not survive restart. Archive
+        their sessions so an unfinished child cannot linger in the sidebar
+        as live work. DelegationManager separately restores future round
+        receipts from the same session rows; only an explicit follow-up can
+        reopen that child conversation and admit a new round.
 
         Any delegation-origin session that reaches this boot un-archived is
         by definition abandoned (a healthy one archives itself the moment

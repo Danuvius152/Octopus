@@ -76,6 +76,19 @@ async def lifespan(app: FastAPI):
     db = Database(settings.db_path)
     await db.initialize()
     await session_manager.initialize(db)
+    # Restore round receipts before any background producer can start work.
+    delegation_manager.bind(session_mgr=session_manager, db=db)
+    try:
+        await delegation_manager.restore()
+    except BaseException:
+        session_manager.close_admission()
+        try:
+            await db.close()
+        except (asyncio.CancelledError, Exception):
+            logger.exception("Service startup cleanup unconfirmed; database retained")
+        else:
+            delegation_manager.shutdown()
+        raise
 
     # Initialize scheduler
     schedule_runner = ScheduleRunner(session_manager, db)
@@ -107,11 +120,6 @@ async def lifespan(app: FastAPI):
         broadcast_cb=session_manager._broadcast,
     )
     await bg_task_manager.start()
-
-    # Agent-to-agent delegations (agent-collaboration.md). Subscribes to
-    # the session-manager broadcast bus and routes child-session
-    # replies/errors back into the parent session as injected turns.
-    delegation_manager.bind(session_mgr=session_manager, db=db)
 
     # Applications (applications.md). Subscribes to the session broadcast bus
     # so a build session's turns drive each application's building/ready/failed
@@ -211,6 +219,7 @@ async def lifespan(app: FastAPI):
                 raise RuntimeError(f"Service shutdown cleanup unconfirmed: {names}") from failures[0][1]
 
             await session_manager.stop_all_held_processes()
+            await delegation_manager.confirm_recording()
             await shutdown_wiki_app_writers()
             await wiki_registry.stop()
             if tunnel:

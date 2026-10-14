@@ -78,6 +78,31 @@ it("keeps repeated provider IDs and an earlier round away from a running continu
   await act(async () => {});
 });
 
+it("keeps an interrupted round readable without letting it cancel the new continuation", async () => {
+  const previous = toolUse("call-before-restart");
+  const continued = { ...toolUse(), tool_input: { delegation_id: "child", request: "review again" } };
+  const records = [
+    delegation({ work_id: "round-before-restart", state: "interrupted", finished_at: "2026-10-14T00:01:00Z", error: "Service shutdown interrupted the delegation" }),
+    delegation({ request: "review again" }),
+  ];
+  vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(records))));
+  useSessionStore.getState().setMessages("parent", [previous, result("call-before-restart", "round-before-restart"), continued, result()]);
+  useSessionStore.getState().setDelegations("parent", records);
+  await act(async () => {
+    render(<><MessageBubble sessionId="parent" message={previous} /><MessageBubble sessionId="parent" message={continued} /></>);
+  });
+
+  expect(screen.getByText("interrupted")).toBeTruthy();
+  expect(screen.getByText("“review the readme”")).toBeTruthy();
+  expect(screen.getByText("Continued Vera")).toBeTruthy();
+  expect(screen.getByText("“review again”")).toBeTruthy();
+  expect(screen.getAllByTitle("Cancel delegation")).toHaveLength(1);
+  await act(async () => fireEvent.click(screen.getByTitle("Cancel delegation")));
+  expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/sessions/parent/delegations/child/cancel"),
+    expect.objectContaining({ method: "POST", body: JSON.stringify({ reason: "cancelled from UI", work_id: "round-current" }) }));
+  expect(screen.getByText("interrupted")).toBeTruthy();
+});
+
 it("renders the continuation without requiring a name argument", () => {
   const continued = { ...toolUse(), tool_input: { delegation_id: "child", request: "review again" } };
   useSessionStore.getState().setMessages("parent", [continued, result()]);

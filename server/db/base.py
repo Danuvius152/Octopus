@@ -303,6 +303,8 @@ class DatabaseBase:
          "REFERENCES sessions(id) ON DELETE SET NULL"),
         ("sessions", "delegation_request",
          "ALTER TABLE sessions ADD COLUMN delegation_request TEXT"),
+        ("sessions", "delegation_state",
+         "ALTER TABLE sessions ADD COLUMN delegation_state TEXT"),
         # native-subagents.md §6 — '[]' means "the CLI's built-ins only".
         ("agents", "subagents",
          "ALTER TABLE agents ADD COLUMN subagents TEXT NOT NULL DEFAULT '[]'"),

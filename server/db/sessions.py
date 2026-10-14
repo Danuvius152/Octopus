@@ -18,8 +18,96 @@ import aiosqlite
 
 from .base import DatabaseBase, serialized_write
 
+# A persisted round is usable only through its actual surviving relationship.
+# IS also matches the pre-account installation's NULL owner exactly.
+_DELEGATION_RELATION = (
+    "FROM sessions child "
+    "JOIN sessions parent ON parent.id = child.parent_session_id "
+    "JOIN agents target ON target.id = child.agent_id "
+    "WHERE child.origin = 'delegation' "
+    "AND parent.user_id IS child.user_id AND target.user_id IS child.user_id "
+)
+
 
 class SessionsMixin(DatabaseBase):
+
+    async def load_delegation_states(self) -> list[dict[str, Any]]:
+        """Load future round snapshots, including archived child conversations."""
+        await self._ensure_connected()
+        cursor = await self.conn.execute(
+            "SELECT child.id, child.parent_session_id, child.user_id, "
+            "child.agent_id, child.delegation_state " + _DELEGATION_RELATION +
+            "AND child.delegation_state IS NOT NULL ORDER BY child.id"
+        )
+        return [
+            {"id": row[0], "parent_session_id": row[1], "user_id": row[2],
+             "agent_id": row[3], "delegation_state": row[4]}
+            for row in await cursor.fetchall()
+        ]
+
+    async def load_delegation_state(
+        self, child_id: str, *, parent_session_id: str, user_id: str | None,
+    ) -> str | None:
+        """Read committed state independently when a write acknowledgement is lost."""
+        await self._ensure_connected()
+
+        async def read(reader: aiosqlite.Connection) -> str | None:
+            cursor = await reader.execute(
+                "SELECT child.delegation_state " + _DELEGATION_RELATION +
+                "AND child.id = ? AND child.parent_session_id = ? "
+                "AND child.user_id IS ?",
+                (child_id, parent_session_id, user_id),
+            )
+            row = await cursor.fetchone()
+            return row[0] if row else None
+
+        if self._db_path == ":memory:":
+            return None if self.conn.in_transaction else await read(self.conn)
+        async with aiosqlite.connect(Path(self._db_path).resolve().as_uri() + "?mode=ro", uri=True) as reader:
+            return await read(reader)
+
+    @serialized_write
+    async def compare_and_set_delegation_state(
+        self, child_id: str, expected_json: str | None, new_json: str,
+        *, parent_session_id: str, user_id: str | None,
+    ) -> bool:
+        """Commit a round only if its complete previous snapshot still matches."""
+        await self._ensure_connected()
+        # Isolate this snapshot from deferred transcript appends before rollback
+        # can be needed. An unacknowledged write must not escape in a later commit.
+        await self._flush_locked()
+        try:
+            cursor = await self.conn.execute(
+                "UPDATE sessions SET delegation_state = ? WHERE id IN ("
+                "SELECT child.id " + _DELEGATION_RELATION +
+                "AND child.id = ? AND child.parent_session_id = ? "
+                "AND child.user_id IS ? AND child.delegation_state IS ?)",
+                (new_json, child_id, parent_session_id, user_id, expected_json),
+            )
+            await self.conn.commit()
+        except BaseException:
+            await self.conn.rollback()
+            raise
+        return cursor.rowcount == 1
+
+    async def get_latest_delegation_request(
+        self, child_id: str, work_id: str, *,
+        parent_session_id: str, user_id: str | None,
+    ) -> str | None:
+        """Resolve the last stored turn in this round, including nested relays."""
+        await self._ensure_connected()
+        cursor = await self.conn.execute(
+            "SELECT (SELECT json_extract(tool_input, '$.request_context.request_id') "
+            "FROM messages WHERE session_id = child.id AND role = 'user' "
+            "AND type = 'text' "
+            "AND json_extract(tool_input, '$.request_context.work_id') = ? "
+            "AND json_type(tool_input, '$.request_context.request_id') = 'text' "
+            "ORDER BY seq DESC LIMIT 1) " + _DELEGATION_RELATION +
+            "AND child.id = ? AND child.parent_session_id = ? AND child.user_id IS ?",
+            (work_id, child_id, parent_session_id, user_id),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else None
 
     @serialized_write
     async def save_session(

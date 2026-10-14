@@ -2,7 +2,7 @@
  * Inline card rendered next to a `mcp__ask_agent__ask` tool_use. The
  * tool_use itself shows the model's call shape (target agent name,
  * request, optional files); this card shows the LIVE state of the
- * delegation — running spinner, completed, cancelled, failed — plus
+ * delegation — running spinner, completed, cancelled, interrupted, failed — plus
  * a deep-link into the child's session and a cancel button while
  * the run is open.
  *
@@ -33,6 +33,7 @@ const STATUS_LABEL: Record<Delegation["state"], string> = {
   completed: "replied",
   failed: "failed",
   cancelled: "cancelled",
+  interrupted: "interrupted",
 };
 
 function StatusIcon({ state }: { state: Delegation["state"] }) {
@@ -42,7 +43,7 @@ function StatusIcon({ state }: { state: Delegation["state"] }) {
   if (state === "completed") {
     return <IconCheck size={14} className="text-green-700" />;
   }
-  if (state === "cancelled") {
+  if (state === "cancelled" || state === "interrupted") {
     return <IconHandStop size={14} className="text-muted-foreground" />;
   }
   return <IconExclamationCircle size={14} className="text-destructive" />;
@@ -184,7 +185,7 @@ export function AgentDelegationRequestCard({
           ? "border-primary/40 bg-primary/5"
           : state === "running" || (!state && !projection.failed)
           ? "border-border bg-card"
-          : state === "cancelled"
+          : state === "cancelled" || state === "interrupted"
           ? "border-border bg-muted/40 text-muted-foreground"
           : "border-destructive/40 bg-destructive/5"
       }`}
