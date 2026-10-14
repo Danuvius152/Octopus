@@ -25,7 +25,6 @@ import uuid
 from dataclasses import dataclass, field
 from enum import Enum
 
-from .aio import stopped_within
 from .config import settings
 from .harness.run import _which_with_fallback, augmented_path
 
@@ -33,6 +32,7 @@ logger = logging.getLogger(__name__)
 
 _LOGIN_TTL_SECONDS = 20 * 60  # device codes expire in ~15 min; pad a little
 _SCRAPE_TIMEOUT_SECONDS = 30.0
+_REAP_TIMEOUT_SECONDS = 5.0
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]")
 _URL_RE = re.compile(r"https?://\S+")
@@ -89,7 +89,7 @@ def _kill_process_group(proc: asyncio.subprocess.Process | None) -> None:
     the stdout pipe open, so killing only the parent leaves our reader blocked
     until the device code expires (~15 min). We spawn it as a group leader
     (`start_new_session=True`) and kill the group so the pipe EOFs at once."""
-    if proc is None or proc.returncode is not None:
+    if proc is None:
         return
     try:
         os.killpg(proc.pid, signal.SIGKILL)
@@ -105,6 +105,7 @@ class CodexLoginManager:
 
     def __init__(self) -> None:
         self._sessions: dict[str, CodexLoginSession] = {}
+        self._shutting_down = False
 
     async def start(
         self,
@@ -113,6 +114,8 @@ class CodexLoginManager:
         reauth_credential_id: str | None = None,
         user_id: str | None = None,
     ) -> CodexLoginSession:
+        if self._shutting_down:
+            raise RuntimeError("Codex login manager is shutting down")
         argv = build_codex_login_argv()
         if argv is None:
             raise RuntimeError(
@@ -134,38 +137,48 @@ class CodexLoginManager:
         # node even when the service PATH omits the nvm bin (else exit 127).
         env["PATH"] = augmented_path(env.get("PATH"), os.path.dirname(argv[0]))
 
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *argv,
-                cwd=home,
-                env=env,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.STDOUT,
-                start_new_session=True,  # own process group → killable as a unit
-            )
-        except FileNotFoundError:
-            shutil.rmtree(home, ignore_errors=True)
-            raise RuntimeError("Could not launch the `codex` CLI for sign-in.")
-
         loop = asyncio.get_running_loop()
         session = CodexLoginSession(
             id=uuid.uuid4().hex[:16],
             credential_id=credential_id,
             codex_home=home,
             label=label,
-            _proc=proc,
             _created_at=loop.time(),
             user_id=user_id,
         )
-        session._task = asyncio.create_task(self._drive(session))
+        # Register before yielding to spawn. The drive owns the process even
+        # if the HTTP waiter is cancelled or shutdown starts during creation.
+        self._sessions[session.id] = session
+        spawned = asyncio.Event()
+
+        async def launch_and_drive() -> None:
+            try:
+                session._proc = await asyncio.create_subprocess_exec(
+                    *argv, cwd=home, env=env,
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.STDOUT,
+                    start_new_session=True,
+                )
+            except Exception as exc:
+                await self._fail(session, f"Could not launch the `codex` CLI for sign-in: {exc}")
+                return
+            finally:
+                spawned.set()
+            if session.state == CodexLoginState.cancelled:
+                _kill_process_group(session._proc)
+            await self._drive(session)
+
+        session._task = asyncio.create_task(launch_and_drive(), name=f"codex-login-{session.id}")
         # Scrape happens asynchronously — `start` returns immediately so the
         # HTTP request can't outlive a proxy/tunnel timeout (codex blocks the
         # whole device-auth window polling for authorization). The UI polls
         # `status` for the URL+code, then for completion.
         session._watchdog = asyncio.create_task(self._scrape_watchdog(session))
-        self._sessions[session.id] = session
         self._gc()
+        await spawned.wait()
+        if session._proc is None:
+            raise RuntimeError(session.message)
 
         logger.info(
             "Codex login %s: spawned (cred=%s)", session.id, credential_id
@@ -176,9 +189,7 @@ class CodexLoginManager:
         """Fail the login if codex never emits a device code (e.g. it can't
         reach auth.openai.com), so it doesn't sit pending forever."""
         try:
-            await asyncio.wait_for(
-                asyncio.shield(session._scraped.wait()), _SCRAPE_TIMEOUT_SECONDS
-            )
+            await asyncio.wait_for(session._scraped.wait(), _SCRAPE_TIMEOUT_SECONDS)
         except TimeoutError:
             if session.state == CodexLoginState.pending and not session.verification_url:
                 await self._fail(
@@ -204,6 +215,7 @@ class CodexLoginManager:
 
         rc = await proc.wait()
         if session.state == CodexLoginState.cancelled:
+            session._scraped.set()
             return
         auth_ok = os.path.exists(os.path.join(session.codex_home, "auth.json"))
         if rc == 0 and auth_ok:
@@ -237,9 +249,11 @@ class CodexLoginManager:
         misbehaving child can never wedge a request."""
         if session._task is None:
             return
-        await stopped_within(
-            asyncio.shield(session._task), "codex login watcher", timeout=5.0
-        )
+        done, _ = await asyncio.wait({session._task}, timeout=_REAP_TIMEOUT_SECONDS)
+        if not done or (session._proc is not None and session._proc.returncode is None):
+            raise RuntimeError(f"Codex login {session.id} shutdown did not confirm process exit")
+        if not session._task.cancelled():
+            session._task.result()
 
     async def _fail(self, session: CodexLoginSession, message: str) -> None:
         session.state = CodexLoginState.error
@@ -265,12 +279,35 @@ class CodexLoginManager:
     def get(self, login_id: str) -> CodexLoginSession | None:
         return self._sessions.get(login_id)
 
-    async def shutdown(self) -> None:
+    def begin_shutdown(self) -> None:
+        """Close admission and signal captured login owners without yielding."""
+        self._shutting_down = True
         for session in list(self._sessions.values()):
+            if session.state == CodexLoginState.pending:
+                session.state = CodexLoginState.cancelled
+                session.message = "server shutdown"
             _kill_process_group(session._proc)
-            if session._watchdog is not None:
+            if session._watchdog is not None and not session._watchdog.done() and not session._watchdog.cancelling():
                 session._watchdog.cancel()
-        self._sessions.clear()
+
+    async def shutdown(self) -> None:
+        self.begin_shutdown()
+        failures: list[str] = []
+        for session in list(self._sessions.values()):
+            try:
+                await self._reap(session)
+                if session._watchdog is not None:
+                    done, _ = await asyncio.wait({session._watchdog}, timeout=_REAP_TIMEOUT_SECONDS)
+                    if not done:
+                        raise RuntimeError("scrape watchdog did not exit")
+                    if not session._watchdog.cancelled():
+                        session._watchdog.result()
+            except Exception as exc:
+                failures.append(f"{session.id}: {exc}")
+                continue
+            self._sessions.pop(session.id, None)
+        if failures:
+            raise RuntimeError("Codex login shutdown incomplete: " + "; ".join(failures))
 
     def _gc(self) -> None:
         loop = asyncio.get_running_loop()
@@ -279,6 +316,9 @@ class CodexLoginManager:
             s.id
             for s in self._sessions.values()
             if now - s._created_at > _LOGIN_TTL_SECONDS
+            and (s._task is None or s._task.done())
+            and (s._watchdog is None or s._watchdog.done())
+            and (s._proc is None or s._proc.returncode is not None)
         ]:
             self._sessions.pop(sid, None)
 

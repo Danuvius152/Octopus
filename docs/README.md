@@ -77,7 +77,7 @@ fails if it has drifted. The hand-written version of this list had reached 13 of
 | [运行日志缺陷修复：设计访谈与行为契约](plans/runtime-log-repair-20261013.md) | shipped | Q12 修复及本地 Codex 验收已完成；Stop 暂停内存积压、人工纠偏优先、明确恢复；保留主要框架，Q11 持久队列不实施。 |
 | [Octopus 本地共享 Wiki：已确认规格](plans/local-shared-wiki-spec.md) | superseded by ../plans_new/local-shared-wiki-spec-v2.md | 保留 Q53/W 阶段历史；当前行为以 v2 spec、Q54～60 及 Library 全量授权为准。 |
 | [本地共享 Wiki：补充访谈记录](plans/local-shared-wiki-grill-round2.md) | superseded by local-shared-wiki-spec.md | 保留 Q17–Q36 的历史访谈；最终规则已在 Q53 收束，样稿已接受。 |
-| [运行时接口修补：接管、记录与调用身份](plans/runtime-interface-repair.md) | completed | 运行时修补与 Q19 活动观察收敛均已通过本机验收；删除累计数量后停用/淘汰关联逻辑，保留五分钟静默和两次恢复，尚未部署。 |
+| [运行时接口修补：接管、记录与调用身份](plans/runtime-interface-repair.md) | completed | 原修补、Q19 与 Q20–Q24 均已完成本机验收；修补分支交付，尚未部署。 |
 
 <!-- END plans-index -->
 

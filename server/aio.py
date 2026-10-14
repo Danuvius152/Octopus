@@ -15,13 +15,18 @@ nothing; any other exception is the task's last words — a stream decode that
 blew up, a DB write that failed on the way out — and a teardown path is exactly
 where those used to disappear. So: swallow the cancellation, log the rest, and
 never raise, because every caller is releasing a process or a lock and must
-finish doing it.
+finish doing it. `complete_cleanup` instead protects a captured writer and
+propagates cleanup failures and the first cancellation after it finishes.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Coroutine
+from typing import Any
+
+import anyio
 
 logger = logging.getLogger(__name__)
 
@@ -67,3 +72,22 @@ async def stopped_within(
         pass
     except Exception:
         logger.debug("%s raised while stopping", what, exc_info=True)
+
+
+async def complete_cleanup[T](awaitable: Coroutine[Any, Any, T]) -> T:
+    """Finish captured cleanup before propagating its first cancellation."""
+    task = asyncio.create_task(awaitable)
+    cancelled: asyncio.CancelledError | None = None
+    # ASGI uses level-triggered AnyIO cancellation; shielding asyncio alone
+    # allows the surrounding scope to cancel every subsequent cleanup await.
+    with anyio.CancelScope(shield=True):
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError as error:
+                if cancelled is None:
+                    cancelled = error
+    result = task.result()
+    if cancelled is not None:
+        raise cancelled
+    return result

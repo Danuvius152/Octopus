@@ -81,11 +81,11 @@ class ProcessesMixin(SessionManagerBase):
         stopped = 0
         for session in held[: max(0, excess)]:
             backend = session._backend
-            self._forget_backend(session)
             if backend is None:
                 continue
+            self._retire_backend(session, backend)
             try:
-                await backend.stop()
+                await self._await_backend_retirement(session)
                 stopped += 1
             except Exception:
                 logger.exception(
@@ -121,11 +121,11 @@ class ProcessesMixin(SessionManagerBase):
         stopped = 0
         for session in doomed:
             backend = session._backend
-            self._forget_backend(session)
             if backend is None:
                 continue
+            self._retire_backend(session, backend)
             try:
-                await backend.stop()
+                await self._await_backend_retirement(session)
                 stopped += 1
             except Exception:
                 logger.exception(
@@ -162,27 +162,15 @@ class ProcessesMixin(SessionManagerBase):
         stopped = 0
         for session in list(self.sessions.values()):
             backend = session._backend
-            self._forget_backend(session)
-            if backend is None:
+            if backend is not None:
+                self._retire_backend(session, backend)
+            if not session._backend_cleanup_tasks:
                 continue
-            try:
-                # Bounded: a CLI that won't die must not hold up shutdown.
-                # The process group gets SIGKILLed by stop()'s own escalation,
-                # and anything still alive after that is the OS's problem, not
-                # a reason to hang the server.
-                await asyncio.wait_for(backend.stop(), timeout=_HELD_STOP_TIMEOUT)
+            # Observe captured retirement under the existing sweep budget.
+            # An unconfirmed exit keeps its owner and is a shutdown failure.
+            await self._await_backend_retirement(session, timeout=_HELD_STOP_TIMEOUT)
+            if backend is not None:
                 stopped += 1
-            except TimeoutError:
-                logger.warning(
-                    "held process for session %s didn't stop in %.0fs; abandoning it",
-                    session.id,
-                    _HELD_STOP_TIMEOUT,
-                )
-            except Exception:
-                logger.exception(
-                    "failed stopping held process for session %s at shutdown",
-                    session.id,
-                )
         return stopped
 
     async def stop_reaper(self) -> None:

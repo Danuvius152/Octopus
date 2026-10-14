@@ -1,5 +1,7 @@
 """Tests for the agent-scoped ScheduleRunner (agent-refactor.md §5.3/§5.6)."""
 
+import asyncio
+
 import pytest
 
 from server.database import Database
@@ -19,7 +21,165 @@ async def setup():
     try:
         yield mgr, db, runner
     finally:
+        if runner._scheduler.running:
+            await runner.shutdown()
         await db.close()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_shutdown_waits_for_its_cancelled_callback_cleanup(setup):
+    mgr, db, runner = setup
+    agent = await db.get_system_agent()
+    started = asyncio.Event()
+    cleaning = asyncio.Event()
+    release = asyncio.Event()
+
+    async def scheduled_callback():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+            await db.update_schedule("shutdown-schedule", last_run_at="cleanup-confirmed")
+
+    await db.save_schedule(
+        schedule_id="shutdown-schedule", agent_id=agent["id"], name="shutdown",
+        prompt="do it", interval_seconds=3600, created_at="2026-01-01T00:00:00+00:00",
+    )
+    await runner.initialize()
+    runner._scheduler.add_job(scheduled_callback, "date", id="cleanup-test")
+    stopping = None
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        stopping = asyncio.create_task(runner.shutdown())
+        await asyncio.wait_for(cleaning.wait(), timeout=5)
+
+        assert not stopping.done(), "scheduler returned while its callback still owned a DB write"
+        release.set()
+        await stopping
+        assert (await db.load_schedules())[0]["last_run_at"] == "cleanup-confirmed"
+    finally:
+        release.set()
+        if stopping is not None:
+            await stopping
+        else:
+            await runner.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_shutdown_closes_admission_before_awaiting(setup):
+    _mgr, db, runner = setup
+    agent = await db.get_system_agent()
+    await db.save_schedule(
+        schedule_id="too-late", agent_id=agent["id"], name="late", prompt="late",
+        interval_seconds=3600, created_at="2026-01-01T00:00:00+00:00",
+    )
+
+    runner.begin_shutdown()
+
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await runner.add((await db.load_schedules())[0])
+    with pytest.raises(RuntimeError, match="shutting down"):
+        await runner.initialize()
+    await runner.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_shutdown_timeout_retains_callback_cleanup_for_later_join(setup):
+    _mgr, _db, runner = setup
+    started = asyncio.Event()
+    cleaning = asyncio.Event()
+    release = asyncio.Event()
+    retired = asyncio.Event()
+
+    async def callback():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cleaning.set()
+            await release.wait()
+            retired.set()
+
+    await runner.initialize()
+    runner._scheduler.add_job(callback, "date", id="slow-retirement")
+    await asyncio.wait_for(started.wait(), timeout=5)
+    retry = None
+    try:
+        with pytest.raises(TimeoutError, match="retirement unconfirmed"):
+            await runner.shutdown(timeout=0.01)
+        assert cleaning.is_set()
+        assert not retired.is_set()
+        retry = asyncio.create_task(runner.shutdown())
+        await asyncio.sleep(0)
+        assert not retry.done()
+
+        release.set()
+        await retry
+        assert retired.is_set()
+    finally:
+        release.set()
+        if retry is not None:
+            await retry
+        else:
+            await runner.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_scheduler_shutdown_propagates_callback_cleanup_failure(setup):
+    _mgr, _db, runner = setup
+    started = asyncio.Event()
+
+    async def callback():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            raise OSError("callback DB cleanup unconfirmed")
+
+    await runner.initialize()
+    runner._scheduler.add_job(callback, "date", id="failed-retirement")
+    await asyncio.wait_for(started.wait(), timeout=5)
+
+    with pytest.raises(ExceptionGroup, match="callback cleanup failed") as error:
+        await runner.shutdown()
+    assert str(error.value.exceptions[0]) == "callback DB cleanup unconfirmed"
+
+
+@pytest.mark.asyncio
+async def test_removing_schedule_preserves_its_already_running_callback(setup):
+    _mgr, _db, runner = setup
+    started = asyncio.Event()
+    release = asyncio.Event()
+    retired = asyncio.Event()
+    was_cancelled = False
+
+    async def callback():
+        nonlocal was_cancelled
+        started.set()
+        try:
+            await release.wait()
+        except asyncio.CancelledError:
+            was_cancelled = True
+            raise
+        finally:
+            retired.set()
+
+    await runner.initialize()
+    runner._scheduler.add_job(callback, "interval", seconds=0.02, id="removed-schedule")
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        await runner.remove("removed-schedule")
+        await asyncio.sleep(0)
+        assert not was_cancelled
+        assert not retired.is_set()
+
+        release.set()
+        await asyncio.wait_for(retired.wait(), timeout=5)
+    finally:
+        release.set()
+        await runner.shutdown()
 
 
 @pytest.mark.asyncio

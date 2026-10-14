@@ -10,8 +10,9 @@ A "leaf" is one fan-out unit:
   - REASONING leaf (`run_reason_leaf`): a tool-free `run_oneshot` (scope
     decompose, synthesize) — the same agnostic primitive schedule_ai uses.
 
-Both return a `LeafResult` and never raise: a failed leaf degrades to
-`error` text so the orchestrator can carry on. Backend-agnostic.
+Provider failures degrade to `LeafResult.error` so the orchestrator can carry
+on. Cancellation and unconfirmed process retirement propagate to the job
+owner. Backend-agnostic.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import logging
 from dataclasses import dataclass
 from typing import Any
 
+from ..aio import complete_cleanup
 from ..harness import HarnessCredential, HarnessOneshotError, OneShotContext, RunConfig
 
 logger = logging.getLogger(__name__)
@@ -96,10 +98,7 @@ async def run_web_leaf(
         logger.exception("web research leaf crashed")
         error = str(e)
     finally:
-        try:
-            await run.stop()
-        except Exception:
-            logger.exception("web research leaf stop() failed")
+        await complete_cleanup(run.stop())
     return LeafResult(text="".join(parts).strip(), cost=cost or None, error=error)
 
 
@@ -113,7 +112,7 @@ async def run_reason_leaf(
     timeout: float = 90.0,
 ) -> LeafResult:
     """Run one tool-free reasoning call (`run_oneshot`) — scope decompose /
-    synthesize. Backend-agnostic; never raises."""
+    synthesize. Provider errors degrade; cleanup failures propagate."""
     ctx = OneShotContext(
         prompt=prompt, model=model, credential=credential, working_dir=working_dir
     )
@@ -124,6 +123,6 @@ async def run_reason_leaf(
         return LeafResult(text="", error=f"reasoning leaf failed: {e.code}")
     except asyncio.CancelledError:
         raise
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         logger.exception("reasoning leaf crashed")
-        return LeafResult(text="", error=str(e))
+        raise

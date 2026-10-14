@@ -527,6 +527,109 @@ async def test_run_oneshot_reaps_group_on_cancel(monkeypatch):
     assert _signal.SIGKILL in calls
 
 
+@pytest.mark.asyncio
+async def test_cancelled_oneshot_reports_unconfirmed_process_retirement(tmp_path, monkeypatch):
+    import os
+    import signal
+
+    import server.harness.run as run_mod
+
+    pid_file = tmp_path / "oneshot.pid"
+
+    def alive(pid):
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return False
+        return True
+
+    def argv(context):
+        script = f"import os,time;open({str(pid_file)!r},'w').write(str(os.getpid()));time.sleep(60)"
+        return [sys.executable, "-u", "-c", script], {}
+
+    profile = RuntimeProfile(**{**_stream_profile().__dict__, "build_oneshot_argv": argv})
+    monkeypatch.setattr(run_mod, "_terminate_process_group", lambda *args: None)
+    task = asyncio.create_task(Harness(profile).run_oneshot(OneShotContext(prompt="synthetic")))
+    pid = None
+    try:
+        async with asyncio.timeout(3):
+            while not pid_file.exists() or not pid_file.read_text():
+                await asyncio.sleep(.01)
+        pid = int(pid_file.read_text())
+        task.cancel("shutdown")
+        with pytest.raises(RuntimeError, match="retirement.*unconfirmed"):
+            await asyncio.wait_for(asyncio.shield(task), 4)
+        assert alive(pid), "the fault gate must leave the captured process unretired"
+    finally:
+        if pid is not None and alive(pid):
+            os.killpg(pid, signal.SIGKILL)
+        if not task.done():
+            task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cleanup_wait", ["confirmed", "cancelled", "timeout"])
+async def test_cancelled_oneshot_retires_process_delivered_after_cancellation(
+    tmp_path, monkeypatch, cleanup_wait
+):
+    import os
+    import signal
+
+    original_spawn = asyncio.create_subprocess_exec
+    spawned = asyncio.get_running_loop().create_future()
+    release_handle = asyncio.Event()
+
+    async def delayed_handle(*argv, **kwargs):
+        process = await original_spawn(*argv, **kwargs)
+        spawned.set_result(process)
+        await release_handle.wait()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", delayed_handle)
+
+    def oneshot_argv(context):
+        return [sys.executable, str(FAKE_CLI), "sleep-then", "60"], {"cwd": str(tmp_path)}
+
+    profile = RuntimeProfile(**{
+        **_stream_profile().__dict__, "build_oneshot_argv": oneshot_argv,
+    })
+    invocation = asyncio.create_task(Harness(profile).run_oneshot(OneShotContext(prompt="late handle")))
+    process = await asyncio.wait_for(spawned, timeout=3)
+    try:
+        invocation.cancel("shutdown")
+        await asyncio.sleep(0)
+        assert not invocation.done(), "cancelled one-shot surrendered its pending process handle"
+
+        if cleanup_wait == "confirmed":
+            release_handle.set()
+            with pytest.raises(asyncio.CancelledError) as error:
+                async with asyncio.timeout(3):
+                    await invocation
+            assert error.value.args == ("shutdown",)
+        else:
+            if cleanup_wait == "cancelled":
+                invocation.cancel("second shutdown")
+            with pytest.raises(RuntimeError, match="retirement.*unconfirmed"):
+                async with asyncio.timeout(3):
+                    await invocation
+            assert process.returncode is None
+            # The failed public call retains its local retirement owner: a
+            # late handle still gets reaped without calling the harness again.
+            release_handle.set()
+            async with asyncio.timeout(3):
+                await process.wait()
+        assert process.returncode is not None
+        with pytest.raises(ProcessLookupError):
+            os.kill(process.pid, 0)
+    finally:
+        release_handle.set()
+        if process.returncode is None:
+            os.killpg(process.pid, signal.SIGKILL)
+        await process.wait()
+        await asyncio.gather(invocation, return_exceptions=True)
+
+
 # --------------------------------------------------------------------------- #
 # stdin as an input channel (inline-steering.md §6)
 # --------------------------------------------------------------------------- #

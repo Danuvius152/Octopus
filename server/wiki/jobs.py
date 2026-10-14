@@ -8,9 +8,9 @@ from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 
+from ..aio import complete_cleanup
 from ..config import settings
 from . import materials
-from .app_bridge import complete_cleanup
 from .curation import WikiCuration
 from .history import WikiHistory
 from .registry import registry
@@ -553,8 +553,12 @@ class WikiWorker:
         self.loop = None
         self.tasks: dict[str | None, asyncio.Task] = {}
         self.pending: set[str | None] = set()
+        self._stopping = False
 
     async def start(self, manager):
+        if self._stopping and self.tasks:
+            raise RuntimeError("Wiki curator teardown remains unconfirmed")
+        self._stopping = False
         self.manager = manager
         self.loop = asyncio.get_running_loop()
         states = [(None, Path(settings.wiki_dir).expanduser())]
@@ -568,6 +572,8 @@ class WikiWorker:
                 self.wake(user_id)
 
     def wake(self, user_id):
+        if self._stopping:
+            return
         if self.loop is not None:
             try:
                 current = asyncio.get_running_loop()
@@ -585,10 +591,29 @@ class WikiWorker:
                 self.run(user_id), name=f"wiki-curator-{user_id}"
             )
 
-    async def stop(self):
+    def begin_shutdown(self) -> None:
+        """Seal wakes and issue curator cancellation before execution is drained."""
+        self._stopping = True
+        self.pending.clear()
         for task in self.tasks.values():
-            task.cancel()
-        await asyncio.gather(*self.tasks.values(), return_exceptions=True)
+            if not task.done() and not task.cancelling():
+                task.cancel("shutdown")
+
+    async def stop(self, *, timeout: float = 8.0) -> None:
+        """Join captured owners without cancelling their shielded cleanup."""
+        self.begin_shutdown()
+        tasks = tuple(self.tasks.values())
+        if tasks:
+            done, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout))
+            if pending:
+                names = ", ".join(sorted(task.get_name() for task in pending))
+                raise RuntimeError(f"Wiki curator teardown remains unconfirmed: {names}")
+            failures = [
+                error for task in done
+                if not task.cancelled() and (error := task.exception()) is not None
+            ]
+            if failures:
+                raise RuntimeError("Wiki curator teardown remains unconfirmed") from failures[0]
         self.tasks.clear()
         self.pending.clear()
         self.manager = None
@@ -596,7 +621,7 @@ class WikiWorker:
 
     async def run(self, user_id):
         jobs = await _io(WikiJobs, user_id)
-        while True:
+        while not self._stopping:
             self.pending.discard(user_id)
             job_id = await _io(jobs.next_queued)
             if job_id is None:
@@ -617,6 +642,17 @@ class WikiWorker:
                     )
                 raise
             except Exception as exc:
+                if self._stopping:
+                    job = await _io(jobs.get, job_id)
+                    if job["status"] == "running":
+                        await _io(
+                            jobs.update,
+                            job_id,
+                            expected_status="running",
+                            status="interrupted",
+                            error=f"Server stopped; curator cleanup remains unconfirmed: {type(exc).__name__}: {exc}",
+                        )
+                    raise
                 await _io(
                     jobs.update,
                     job_id,
@@ -771,9 +807,14 @@ class WikiWorker:
                     item["worker_request"] = {"session_id": session.id, "request_id": receipt.request_id}
                 await _io(jobs.update, job_id, expected_status="running", items=job["items"])
                 completion = await receipt.wait()
-            except BaseException:
+            except BaseException as error:
                 if receipt is not None and receipt.accepted:
-                    await complete_cleanup(self.manager.cancel_request(session.id, receipt.request_id))
+                    cancellation = {"cause": "shutdown"} if (
+                        isinstance(error, asyncio.CancelledError) and error.args == ("shutdown",)
+                    ) else {}
+                    await complete_cleanup(self.manager.cancel_request(
+                        session.id, receipt.request_id, **cancellation,
+                    ))
                     completion = await receipt.wait()
                     if completion.state == "recording_failed":
                         await self._mark_recording_failure(jobs, job_id, job, readable, session.id, completion)

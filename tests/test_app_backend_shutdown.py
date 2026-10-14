@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from server import app_backends
 from server.app_backends import RUNNING, STOPPED, BackendState, BackendSupervisor
 
 
@@ -80,3 +81,268 @@ async def test_successful_install_survives_cancelling_pending_output_reader(tmp_
     assert reader_started.is_set() and reader_finished.is_set()
     state = supervisor.get("test-app")
     assert state is not None and state.installed and state.state == STOPPED
+
+
+@pytest.mark.asyncio
+async def test_shutdown_retains_backend_when_kill_does_not_confirm_exit(tmp_path, monkeypatch):
+    class UnconfirmedProcess:
+        pid = 2**30
+        returncode = None
+
+        def __init__(self):
+            self.exited = asyncio.Event()
+
+        async def wait(self):
+            await self.exited.wait()
+            return self.returncode
+
+    proc = UnconfirmedProcess()
+    signals = []
+    monkeypatch.setattr(app_backends.os, "killpg", lambda pgid, sig: signals.append(sig))
+    monkeypatch.setattr(app_backends, "_TERM_TIMEOUT_SECONDS", 0.03, raising=False)
+    monkeypatch.setattr(app_backends, "_KILL_TIMEOUT_SECONDS", 0.03, raising=False)
+    supervisor = BackendSupervisor()
+    state = BackendState(
+        app_id="unconfirmed", app_dir=str(tmp_path), state=RUNNING,
+        process=proc, pid=proc.pid, port=12345,
+    )
+    supervisor._backends[state.app_id] = state
+    try:
+        with pytest.raises(RuntimeError, match="process exit unconfirmed"):
+            await asyncio.wait_for(supervisor.shutdown(), timeout=0.3)
+        assert signals == [signal.SIGTERM, signal.SIGKILL]
+        assert supervisor.get(state.app_id).process is proc
+        assert state.pid == proc.pid and state.state != STOPPED
+        proc.returncode = -9
+        proc.exited.set()
+        await supervisor.shutdown()
+        assert state.process is None and state.state == STOPPED
+    finally:
+        proc.returncode = -9
+        proc.exited.set()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_seals_admission_and_retains_a_reader_that_delays_cancellation(tmp_path, monkeypatch):
+    supervisor = BackendSupervisor()
+    released = asyncio.Event()
+    started = asyncio.Event()
+
+    async def reader():
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await released.wait()
+
+    reader_task = asyncio.create_task(reader())
+    await started.wait()
+    state = BackendState(app_id="reader", app_dir=str(tmp_path), state=RUNNING, _readers=[reader_task])
+    supervisor._backends[state.app_id] = state
+    monkeypatch.setattr(app_backends, "_TASK_DRAIN_SECONDS", 0.03, raising=False)
+    try:
+        with pytest.raises(RuntimeError, match="output readers did not exit"):
+            await supervisor.shutdown()
+        assert state._readers == [reader_task]
+        assert not reader_task.done() and state.state != STOPPED
+        with pytest.raises(RuntimeError, match="shutting down"):
+            await supervisor.install("late", str(tmp_path))
+        with pytest.raises(RuntimeError, match="shutting down"):
+            await supervisor.ensure_running("late", str(tmp_path))
+        released.set()
+        await reader_task
+        await supervisor.shutdown()
+        assert state._readers == [] and state.state == STOPPED
+    finally:
+        released.set()
+        await reader_task
+
+
+@pytest.mark.asyncio
+async def test_shutdown_joins_an_install_process_that_is_already_running(tmp_path):
+    script = tmp_path / "install.sh"
+    pid_file = tmp_path / "install.pid"
+    script.write_text(f"#!/bin/sh\necho $$ > '{pid_file}'\nsleep 60\n")
+    script.chmod(0o700)
+    supervisor = BackendSupervisor()
+    installation = asyncio.create_task(supervisor.install("installing", str(tmp_path)))
+    try:
+        for _ in range(100):
+            if pid_file.exists():
+                break
+            await asyncio.sleep(0.01)
+        assert pid_file.exists()
+        pid = int(pid_file.read_text())
+        await supervisor.shutdown()
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        assert installation.done()
+        assert (await asyncio.gather(installation, return_exceptions=True))[0].__class__ is asyncio.CancelledError
+    finally:
+        if pid_file.exists():
+            try:
+                os.killpg(int(pid_file.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        installation.cancel()
+        await asyncio.gather(installation, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("cancel_waiter", [False, True])
+async def test_shutdown_owns_install_spawn_before_its_process_handle_arrives(tmp_path, monkeypatch, cancel_waiter):
+    script = tmp_path / "install.sh"
+    script.write_text("#!/bin/sh\nsleep 60\n")
+    script.chmod(0o700)
+    real_spawn = asyncio.create_subprocess_exec
+    spawned = asyncio.Event()
+    release_handle = asyncio.Event()
+    processes = []
+
+    async def delayed_spawn(*args, **kwargs):
+        proc = await real_spawn(*args, **kwargs)
+        processes.append(proc)
+        spawned.set()
+        await release_handle.wait()
+        return proc
+
+    monkeypatch.setattr(app_backends.asyncio, "create_subprocess_exec", delayed_spawn)
+    supervisor = BackendSupervisor()
+    installation = asyncio.create_task(supervisor.install("spawning", str(tmp_path)))
+    cleanup = None
+    try:
+        await spawned.wait()
+        if cancel_waiter:
+            installation.cancel()
+            await asyncio.sleep(0)
+            installation.cancel()
+            await asyncio.gather(installation, return_exceptions=True)
+        supervisor.begin_shutdown()
+        cleanup = asyncio.create_task(supervisor.shutdown())
+        await asyncio.sleep(0)
+        assert not cleanup.done()
+        release_handle.set()
+        await cleanup
+        assert (await asyncio.gather(installation, return_exceptions=True))[0].__class__ is asyncio.CancelledError
+        assert processes[0].returncode is not None
+        assert supervisor.get("spawning").process is None
+    finally:
+        release_handle.set()
+        for proc in processes:
+            if proc.returncode is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+        await asyncio.gather(installation, *(task for task in [cleanup] if task is not None), return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_owns_completed_spawn_cancelled_before_its_waiter_resumes(tmp_path, monkeypatch):
+    script = tmp_path / "install.sh"
+    script.write_text("#!/bin/sh\nsleep 60\n")
+    script.chmod(0o700)
+    real_spawn = asyncio.create_subprocess_exec
+    spawned = asyncio.Event()
+    release_handle = asyncio.Event()
+    processes = []
+
+    async def delayed_spawn(*args, **kwargs):
+        proc = await real_spawn(*args, **kwargs)
+        processes.append(proc)
+        spawned.set()
+        await release_handle.wait()
+        # Completion first resolves the shield, then this callback cancels
+        # the waiter before its already-queued resume can adopt the handle.
+        asyncio.current_task().add_done_callback(lambda task: installation.cancel())
+        return proc
+
+    monkeypatch.setattr(app_backends.asyncio, "create_subprocess_exec", delayed_spawn)
+    supervisor = BackendSupervisor()
+    installation = asyncio.create_task(supervisor.install("completed-spawn", str(tmp_path)))
+    try:
+        await spawned.wait()
+        installation.cancel()
+        await asyncio.sleep(0)
+        release_handle.set()
+        await asyncio.gather(installation, return_exceptions=True)
+        assert processes[0].returncode is None
+        await supervisor.shutdown()
+        assert processes[0].returncode is not None
+        assert supervisor.get("completed-spawn").process is None
+    finally:
+        release_handle.set()
+        for proc in processes:
+            if proc.returncode is None:
+                os.killpg(proc.pid, signal.SIGKILL)
+            await proc.wait()
+        await asyncio.gather(installation, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_shutdown_reports_a_reaper_that_retains_the_backend_lock(tmp_path, monkeypatch):
+    supervisor = BackendSupervisor()
+    state = BackendState(app_id="locked", app_dir=str(tmp_path), state=RUNNING)
+    supervisor._backends[state.app_id] = state
+    locked = asyncio.Event()
+    release = asyncio.Event()
+
+    async def reaper():
+        async with state.lock:
+            locked.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                await release.wait()
+
+    task = asyncio.create_task(reaper())
+    supervisor._reaper = task
+    await locked.wait()
+    monkeypatch.setattr(app_backends, "_TASK_DRAIN_SECONDS", 0.03)
+    try:
+        with pytest.raises(RuntimeError, match="reaper did not exit"):
+            await asyncio.wait_for(supervisor.shutdown(), 0.3)
+        assert supervisor._reaper is task and not task.done()
+        release.set()
+        await task
+        await supervisor.shutdown()
+        assert supervisor._reaper is None and state.state == STOPPED
+    finally:
+        release.set()
+        await task
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drains_output_while_the_backend_handles_sigterm(tmp_path, monkeypatch):
+    source = (
+        "import os, signal, sys, time\n"
+        "def stop(*args):\n"
+        "    sys.stdout.write('shutdown output\\n' * 100000)\n"
+        "    sys.stdout.flush()\n"
+        "    os._exit(0)\n"
+        "signal.signal(signal.SIGTERM, stop)\n"
+        "print('ready', flush=True)\n"
+        "time.sleep(60)\n"
+    )
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, "-u", "-c", source,
+        stdout=asyncio.subprocess.PIPE, start_new_session=True,
+    )
+    assert proc.stdout is not None
+    await proc.stdout.readline()
+    reader = asyncio.create_task(proc.stdout.read())
+    supervisor = BackendSupervisor()
+    state = BackendState(
+        app_id="output", app_dir=str(tmp_path), state=RUNNING,
+        process=proc, pid=proc.pid, _readers=[reader],
+    )
+    supervisor._backends[state.app_id] = state
+    monkeypatch.setattr(app_backends, "_TERM_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(app_backends, "_KILL_TIMEOUT_SECONDS", 0.1)
+    try:
+        await supervisor.shutdown()
+        assert proc.returncode == 0
+        assert reader.done() and state.process is None
+    finally:
+        if proc.returncode is None:
+            os.killpg(proc.pid, signal.SIGKILL)
+        await proc.stdout.read()
+        await proc.wait()
+        await asyncio.gather(reader, return_exceptions=True)

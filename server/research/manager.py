@@ -23,6 +23,7 @@ import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from ..aio import complete_cleanup
 from ..config import settings
 from ..harness import get_harness, has_backend
 from ..workspace import paths_for
@@ -69,11 +70,15 @@ class ResearchManager:
         self.db: Database | None = None
         self._tasks: dict[str, asyncio.Task] = {}
         self._job_sem: asyncio.Semaphore | None = None
+        self._closing = False
+        self._shutdown_tasks: dict[str, asyncio.Task] | None = None
 
     def bind(self, session_mgr: SessionManager, db: Database) -> None:
         self.session_mgr = session_mgr
         self.db = db
         self._job_sem = asyncio.Semaphore(max(1, settings.research_max_concurrent_jobs))
+        self._closing = False
+        self._shutdown_tasks = None
 
     async def recover_interrupted(self) -> int:
         """Boot sweep — mark prior-process `running` jobs interrupted."""
@@ -88,6 +93,8 @@ class ResearchManager:
 
     async def start(self, session_id: str, question: str) -> dict[str, Any]:
         """Create + launch a research job for `session_id`. Returns the row."""
+        if self._closing:
+            raise ResearchError("ResearchManager is shutting down", status_code=503)
         if self.session_mgr is None or self.db is None:
             raise ResearchError("ResearchManager not bound", status_code=500)
         question = (question or "").strip()
@@ -108,25 +115,62 @@ class ResearchManager:
             )
 
         job_id = uuid.uuid4().hex[:12]
-        await self.db.create_research_job(job_id, session_id, question, _now())
-        await self._broadcast({
-            "type": "research_started",
-            "session_id": session_id,
-            "research_id": job_id,
-            "question": question,
-        })
-        task = asyncio.create_task(self._run_job(job_id, session_id, question))
+        ready: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
+        # Own the whole launch before SQLite or subscribers can suspend it.
+        task = asyncio.create_task(
+            self._start_job(job_id, session_id, question, ready),
+            name=f"research-{job_id}",
+        )
         self._tasks[job_id] = task
-        task.add_done_callback(lambda _t, jid=job_id: self._tasks.pop(jid, None))
-        row = await self.db.get_research_job(job_id)
-        assert row is not None  # written immediately above
-        return row
+
+        def finished(done: asyncio.Task) -> None:
+            error = None if done.cancelled() else done.exception()
+            if error is None:
+                self._tasks.pop(job_id, None)
+            if not ready.done():
+                ready.set_exception(error or ResearchError(
+                    "ResearchManager is shutting down" if self._closing else "research launch cancelled",
+                    status_code=503,
+                ))
+            if error is not None:
+                logger.error("research %s cleanup failed", job_id, exc_info=error)
+
+        task.add_done_callback(finished)
+        # A cancelled HTTP waiter does not surrender ownership of admitted work.
+        ready.add_done_callback(lambda future: future.exception() if not future.cancelled() else None)
+        return await asyncio.shield(ready)
+
+    async def _start_job(
+        self, job_id: str, session_id: str, question: str,
+        ready: asyncio.Future[dict[str, Any]],
+    ) -> None:
+        assert self.db is not None
+        try:
+            await self.db.create_research_job(job_id, session_id, question, _now())
+            await self._broadcast({
+                "type": "research_started",
+                "session_id": session_id,
+                "research_id": job_id,
+                "question": question,
+            })
+            row = await self.db.get_research_job(job_id)
+            assert row is not None
+            ready.set_result(row)
+            await self._run_job(job_id, session_id, question)
+        except asyncio.CancelledError:
+            await self._finalize_failed(
+                job_id, session_id,
+                "interrupted" if self._closing else "cancelled",
+                "research interrupted by server shutdown" if self._closing else "cancelled by user",
+            )
+            raise
 
     # ------------------------------------------------------------------- run
 
     async def _run_job(self, job_id: str, session_id: str, question: str) -> None:
         assert self.session_mgr is not None and self.db is not None
         assert self._job_sem is not None
+        report = None
         try:
             async with self._job_sem:  # bound concurrent jobs
                 session = self.session_mgr.get_session(session_id)
@@ -158,8 +202,8 @@ class ResearchManager:
                 # leaves from touching real files (Vera review).
                 scratch = os.path.join(_research_dir(session.user_id), job_id, "cwd")
                 os.makedirs(scratch, exist_ok=True)
-                report = await asyncio.wait_for(
-                    run_research(
+                async with asyncio.timeout(settings.research_job_timeout_seconds):
+                    report = await run_research(
                         question,
                         harness=harness,
                         credential=credential,
@@ -167,37 +211,54 @@ class ResearchManager:
                         working_dir=scratch,
                         limits=ResearchLimits(),
                         on_progress=on_progress,
-                    ),
-                    timeout=settings.research_job_timeout_seconds,
-                )
+                    )
 
-            # Persist the report file (best-effort) + mark completed.
-            report_path = self._write_report(job_id, report.report, session.user_id)
-            await self.db.update_research_job(
-                job_id, status="completed", phase="done", cost=report.cost,
-                completed_at=_now(), report_path=report_path,
-            )
-            await self._broadcast({
-                "type": "research_completed",
-                "session_id": session_id,
-                "research_id": job_id,
-                "sources": report.sources,
-                "verified": len(report.findings),
-            })
-            await self._inject_report(job_id, session_id, question, report)
+            # Completion is selected before this await. Cancellation retires
+            # its original record/delivery; it cannot select interruption.
+            await complete_cleanup(self._complete_report(
+                job_id, session_id, question, report, session.user_id,
+            ))
         except asyncio.CancelledError:
-            await self._finalize_failed(job_id, session_id, "cancelled", "cancelled by user")
             raise
         except TimeoutError:
+            if report is not None or self._closing:
+                raise
             await self._finalize_failed(
                 job_id, session_id, "failed",
                 f"research exceeded {settings.research_job_timeout_seconds}s and was stopped",
             )
         except ResearchError as e:
+            if report is not None or self._closing:
+                raise
             await self._finalize_failed(job_id, session_id, "failed", e.message)
         except Exception as e:  # noqa: BLE001
             logger.exception("research job %s crashed", job_id)
+            current = asyncio.current_task()
+            if report is not None or self._closing or (current and current.cancelling()):
+                raise
             await self._finalize_failed(job_id, session_id, "failed", str(e))
+            # An unexpected leaf failure can be unconfirmed retirement after
+            # user cancellation. Keep its owner and exception for shutdown.
+            raise
+
+    async def _complete_report(
+        self, job_id: str, session_id: str, question: str, report: Any,
+        user_id: str | None,
+    ) -> None:
+        assert self.db is not None
+        report_path = self._write_report(job_id, report.report, user_id)
+        await self.db.update_research_job(
+            job_id, status="completed", phase="done", cost=report.cost,
+            completed_at=_now(), report_path=report_path,
+        )
+        await self._broadcast({
+            "type": "research_completed",
+            "session_id": session_id,
+            "research_id": job_id,
+            "sources": report.sources,
+            "verified": len(report.findings),
+        })
+        await self._inject_report(job_id, session_id, question, report)
 
     async def _inject_report(
         self, job_id: str, session_id: str, question: str, report: Any
@@ -235,7 +296,7 @@ class ResearchManager:
             # it before interrupting), don't overwrite or re-broadcast (Vera
             # review — avoids the cancel double-write/double-event).
             row = await self.db.get_research_job(job_id)
-            if row and row["status"] != "running":
+            if row is None or row["status"] != "running":
                 return
             await self.db.update_research_job(
                 job_id, status=status, error=error, completed_at=_now()
@@ -249,6 +310,8 @@ class ResearchManager:
             })
         except Exception:
             logger.exception("research %s: finalize(%s) failed", job_id, status)
+            if self._closing:
+                raise
 
     # ---------------------------------------------------------------- cancel
 
@@ -283,6 +346,30 @@ class ResearchManager:
         return row
 
     # --------------------------------------------------------------- helpers
+
+    def begin_shutdown(self) -> None:
+        """Close admission and signal the jobs this manager already owns."""
+        if self._closing:
+            return
+        self._closing = True
+        self._shutdown_tasks = dict(self._tasks)
+        for task in self._shutdown_tasks.values():
+            if not task.done() and not task.cancelling():
+                task.cancel()
+
+    async def shutdown(self, *, timeout: float = 5.0) -> None:
+        """Wait for owned jobs to unwind without cancelling their cleanup again."""
+        self.begin_shutdown()
+        tasks = self._shutdown_tasks or {}
+        if not tasks:
+            return
+        done, pending = await asyncio.wait(tasks.values(), timeout=timeout)
+        if pending:
+            jobs = ", ".join(job_id for job_id, task in tasks.items() if task in pending)
+            raise TimeoutError(f"research shutdown retirement unconfirmed: {jobs}")
+        for task in done:
+            if not task.cancelled():
+                task.result()
 
     def _write_report(self, job_id: str, report: str, user_id: str | None) -> str | None:
         try:

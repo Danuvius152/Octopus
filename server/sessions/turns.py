@@ -73,6 +73,16 @@ class _Settlement:
     seq: int | None = None
     event: dict[str, Any] | None = None
     publication_started: bool = False
+    interruption_cause: Literal["user", "shutdown"] | None = None
+
+    def request_interruption(self, cause: Literal["user", "shutdown"]) -> None:
+        if self.outcome is None and self.interruption_cause is None:
+            self.interruption_cause = cause
+
+    def interruption(self) -> tuple[str, str]:
+        if self.interruption_cause == "shutdown":
+            return "(interrupted by service shutdown)", "service_shutdown"
+        return "(interrupted by user)", "interrupted"
 
 
 @dataclass
@@ -531,14 +541,21 @@ class TurnsMixin(SessionManagerBase):
         for task in tasks:
             await asyncio.shield(task)
 
+    def close_admission(self) -> None:
+        """Seal request admission synchronously before other owners stop."""
+        self._admission_closed = True
+
     async def drain_turns(self, timeout: float = 5.0) -> int:
         """Close admission before draining execution and manager-owned cleanup."""
-        self._admission_closed = True
+        self.close_admission()
         deadline = time.monotonic() + max(0.0, timeout)
         tasks: list[asyncio.Task[Any]] = []
         drivers: list[asyncio.Task[Any]] = []
         questions: list[asyncio.Task[None]] = []
         for session in list(self.sessions.values()):
+            current, settlement = session._current_request, session._settlement
+            if settlement is not None and (current is None or current.request_id == settlement.request_id):
+                settlement.request_interruption("shutdown")
             self._withdraw_requests(session, [*session._pending_queue, *session._steer_queue], reason="shutdown")
             session._pending_queue.clear()
             session._steer_queue.clear()
@@ -547,7 +564,7 @@ class TurnsMixin(SessionManagerBase):
                 self._retire_backend(session, session._backend)
             if session._active_task is not None and not session._active_task.done():
                 if not session._active_task.cancelling():
-                    session._active_task.cancel()
+                    session._active_task.cancel("shutdown")
                 tasks.append(session._active_task)
                 drivers.append(session._active_task)
         for session in list(self.sessions.values()):
@@ -580,6 +597,7 @@ class TurnsMixin(SessionManagerBase):
             if session._recording_blocked is not None:
                 logger.error("Shutdown with unconfirmed result session=%s request=%s",
                              session.id, session._recording_blocked.request_id)
+                raise RuntimeError("Session result recording remains unconfirmed")
         return sum(task.done() for task in drivers)
 
     def running_turns_for(self, user_id: str | None) -> int:
@@ -1131,9 +1149,9 @@ class TurnsMixin(SessionManagerBase):
                 )
                 yield event
         except asyncio.CancelledError:
+            message, code = settlement.interruption()
             await self._settle_turn(
-                session, settlement, status="interrupted", message="(interrupted by user)",
-                code="interrupted",
+                session, settlement, status="interrupted", message=message, code=code,
             )
             raise
         except Exception as exc:
@@ -1208,6 +1226,8 @@ class TurnsMixin(SessionManagerBase):
         question_attempt = session._question_attempt_id
         had_active = inner is not None and not inner.done()
         if had_active:
+            if settlement is not None:
+                settlement.request_interruption("user")
             inner.cancel()
         elif session._lock.locked():
             # Wedged state: no live task to cancel but the lock is still
@@ -1237,9 +1257,9 @@ class TurnsMixin(SessionManagerBase):
             return True  # The retained request has no execution outcome yet.
 
         if settlement is not None:
+            message, code = settlement.interruption()
             await self._settle_turn(
-                session, settlement, status="interrupted", message="(interrupted by user)",
-                code="interrupted",
+                session, settlement, status="interrupted", message=message, code=code,
             )
             return True
 
@@ -1258,20 +1278,25 @@ class TurnsMixin(SessionManagerBase):
         await self._broadcast(event, user_id=session.user_id)
         return True
 
-    async def cancel_request(self, session_id: str, request_id: str) -> bool:
+    async def cancel_request(
+        self, session_id: str, request_id: str, *, cause: Literal["user", "shutdown"] = "user",
+    ) -> bool:
         session = self.sessions.get(session_id)
         if session is None:
             return False
         removed = [q for q in (*session._pending_queue, *session._steer_queue) if q.request_id == request_id]
         session._pending_queue[:] = [q for q in session._pending_queue if q.request_id != request_id]
         session._steer_queue[:] = [q for q in session._steer_queue if q.request_id != request_id]
-        self._withdraw_requests(session, removed, reason="withdrawn")
+        self._withdraw_requests(session, removed, reason="shutdown" if cause == "shutdown" else "withdrawn")
         current = session._current_request
         if current is None or current.request_id != request_id:
             return bool(removed)
         session._steer_open = False
+        settlement = session._settlement
+        if settlement is not None and settlement.request_id == request_id:
+            settlement.request_interruption(cause)
         if not current.started:
-            self._withdraw_requests(session, [current], reason="withdrawn")
+            self._withdraw_requests(session, [current], reason="shutdown" if cause == "shutdown" else "withdrawn")
         backend = session._backend
         if backend is not None:
             self._retire_backend(session, backend)

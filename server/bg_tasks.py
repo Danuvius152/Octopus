@@ -68,6 +68,9 @@ IDLE_AFTER_OUTPUT_TIMEOUT_SECS = 60
 # detection is prompt once the threshold is crossed, large enough to
 # avoid wakeup churn on a busy event loop.
 IDLE_CHECK_INTERVAL_SECS = 5
+_TERM_GRACE_SECONDS = 5.0
+_STARTUP_DRAIN_SECONDS = 6.0
+_ORCHESTRATION_DRAIN_SECONDS = 5.0
 
 
 # Callback type the manager invokes when a task reaches a terminal state.
@@ -196,6 +199,7 @@ class _StartingTask:
     work_id: str | None
     stop_reason: str | None = None
     running: _RunningTask | None = None
+    owner: asyncio.Task[Any] | None = None
 
 
 class BgTaskManager:
@@ -246,31 +250,57 @@ class BgTaskManager:
             )
         self._started = True
 
+    def begin_shutdown(self) -> None:
+        """Seal admission and cancel startup waiters while retaining owners."""
+        self._shutting_down = True
+        current = asyncio.current_task()
+        for item in self._starting.values():
+            item.stop_reason = item.stop_reason or "server_shutdown"
+            # Once spawned, registration may already be committing its row.
+            # Signal that captured process and join the registration owner;
+            # cancelling the writer here would make its acknowledgement unknown.
+            if item.running is None and item.owner is not None and item.owner is not current and not item.owner.done() and not item.owner.cancelling():
+                item.owner.cancel()
+
     async def shutdown(self) -> None:
         """Graceful teardown: SIGTERM all running subprocesses and await
         their orchestration tasks. The DB-update path in `_run_task`
         will fire `status=interrupted` for each one so chat history is
         consistent."""
-        self._shutting_down = True
+        self.begin_shutdown()
         starting = list(self._starting.values())
         for item in starting:
-            item.stop_reason = item.stop_reason or "server_shutdown"
-        for item in starting:
             if item.running is not None:
-                await self._terminate_proc(item.running, reason=item.stop_reason)
-        for cleanup in list(self._cleanup_tasks):
-            await stopped_within(asyncio.shield(cleanup), "cancelled bg startup", timeout=6.0)
-        if not self._running:
-            return
-        logger.info("Stopping %d in-flight bg tasks for shutdown", len(self._running))
-        for rt in list(self._running.values()):
+                await self._terminate_proc(item.running, reason="server_shutdown")
+        owners = {item.owner for item in starting if item.owner is not None}
+        if owners:
+            await asyncio.wait(owners, timeout=_STARTUP_DRAIN_SECONDS)
+        running = list(self._running.values())
+        for rt in running:
             await self._terminate_proc(rt, reason="server_shutdown")
-        # Wait for orchestration tasks to wrap up DB writes.
-        for rt in list(self._running.values()):
-            if rt.task and not rt.task.done():
-                await stopped_within(
-                    rt.task, f"bg task {rt.record.id} orchestration", timeout=5.0
-                )
+        # Termination creates kill fallbacks, and cancelled startup creates
+        # compensating cleanup. Drain the current collection after stopping,
+        # including any fallback registered while another cleanup unwinds.
+        deadline = asyncio.get_running_loop().time() + _STARTUP_DRAIN_SECONDS
+        while self._cleanup_tasks:
+            captured = set(self._cleanup_tasks)
+            done, pending = await asyncio.wait(
+                captured, timeout=max(0.0, deadline - asyncio.get_running_loop().time()),
+            )
+            for cleanup in done:
+                if not cleanup.cancelled() and cleanup.exception() is None:
+                    self._cleanup_tasks.discard(cleanup)
+            if pending or any(task in self._cleanup_tasks for task in done):
+                break
+        tasks = {rt.task for rt in running if rt.task is not None}
+        if tasks:
+            await asyncio.wait(tasks, timeout=_ORCHESTRATION_DRAIN_SECONDS)
+        # A timeout leaves the original task/process reachable for a retry.
+        # In particular, do not let lifespan close the database underneath it.
+        incomplete = bool(self._starting or self._running or self._cleanup_tasks)
+        incomplete |= any(rt.proc.returncode is None or (rt.task and not rt.task.done()) for rt in running)
+        if incomplete:
+            raise RuntimeError("Background task shutdown incomplete: startup, process, recording or cleanup exit unconfirmed")
 
     # ------------------------------------------------------------------ public API (called by MCP / REST)
 
@@ -333,7 +363,7 @@ class BgTaskManager:
             timeout_seconds=limits.timeout_seconds,
             work_id=work_id,
         )
-        reservation = _StartingTask(work_id)
+        reservation = _StartingTask(work_id, owner=asyncio.current_task())
         self._starting[task_id] = reservation
 
         # Spawn through /bin/sh -c so the model can use shell syntax
@@ -360,14 +390,19 @@ class BgTaskManager:
                     running = _RunningTask(record, abandoned, limits, started_monotonic)
                     reservation.running = running
                     await self._terminate_proc(running, reason=reservation.stop_reason or "server_shutdown")
-                    await stopped_within(abandoned.wait(), f"aborted bg startup {task_id}", timeout=6.0)
+                    waiter = asyncio.create_task(abandoned.wait())
+                    done, _ = await asyncio.wait({waiter}, timeout=_STARTUP_DRAIN_SECONDS)
+                    if not done or abandoned.returncode is None:
+                        waiter.cancel()
+                        raise RuntimeError(f"aborted bg startup {task_id} exit unconfirmed")
                 except Exception:
                     logger.exception("Failed to reap aborted bg startup %s", task_id)
-                finally:
+                    raise
+                else:
                     self._starting.pop(task_id, None)
             cleanup = asyncio.create_task(reap_aborted_start(), name=f"bg-startup-cleanup-{task_id}")
             self._cleanup_tasks.add(cleanup)
-            cleanup.add_done_callback(self._cleanup_tasks.discard)
+            cleanup.add_done_callback(self._cleanup_done)
             raise
         except Exception as e:
             self._starting.pop(task_id, None)
@@ -652,15 +687,20 @@ class BgTaskManager:
             completed_at = _now_iso()
             truncated = rt.stdout_truncated or rt.stderr_truncated
 
-            try:
-                await rt.registration_done.wait()
-                if rt.registered:
-                    await self._publish_terminal(
-                        rt, status=status, exit_code=exit_code, stdout_str=stdout_str,
-                        stderr_str=stderr_str, truncated=truncated, completed_at=completed_at,
-                    )
-            finally:
+            await rt.registration_done.wait()
+            if rt.registered:
+                await self._publish_terminal(
+                    rt, status=status, exit_code=exit_code, stdout_str=stdout_str,
+                    stderr_str=stderr_str, truncated=truncated, completed_at=completed_at,
+                )
+            if proc.returncode is not None:
                 self._running.pop(rt.record.id, None)
+
+    def _cleanup_done(self, task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and task.exception() is None:
+            self._cleanup_tasks.discard(task)
+        elif not task.cancelled():
+            logger.error("Background cleanup failed", exc_info=task.exception())
 
     async def _publish_terminal(
         self, rt: _RunningTask, *, status: str, exit_code: int | None,
@@ -689,7 +729,6 @@ class BgTaskManager:
         # Preserve started/completed event order while allowing the
         # process and its watchdogs to run independently of notification.
         await rt.started_notice.wait()
-        self._running.pop(rt.record.id, None)
 
         if self._broadcast_cb:
             try:
@@ -726,6 +765,8 @@ class BgTaskManager:
         """
         if rt.stop_reason is not None:
             return False
+        if rt.record.status != "running" and rt.proc.returncode is not None:
+            return False  # publication must not relabel its selected outcome
         pgid = rt.pgid
         try:
             # The first stopping action owns the cause. A later cancel or
@@ -752,7 +793,7 @@ class BgTaskManager:
         # Don't await here — let the wait_for in _run_task notice the exit.
         # Schedule a SIGKILL fallback if the process resists SIGTERM.
         async def _kill_later() -> None:
-            await asyncio.sleep(5.0)
+            await asyncio.sleep(_TERM_GRACE_SECONDS)
             # The shell may have exited while a descendant ignores TERM and
             # still holds the output pipes. Reap the captured GROUP, not the
             # shell's current pid/returncode (which no longer identifies it).
@@ -762,9 +803,10 @@ class BgTaskManager:
                 pass
             except PermissionError:
                 logger.exception("bg task %s: SIGKILL denied for pgid=%s", rt.record.id, pgid)
+                raise
         cleanup = asyncio.create_task(_kill_later(), name=f"bg-kill-{rt.record.id}")
         self._cleanup_tasks.add(cleanup)
-        cleanup.add_done_callback(self._cleanup_tasks.discard)
+        cleanup.add_done_callback(self._cleanup_done)
         return True
 
 

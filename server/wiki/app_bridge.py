@@ -8,8 +8,7 @@ import re
 import uuid
 from pathlib import Path
 
-import anyio
-
+from ..aio import complete_cleanup
 from .history import WikiHistory, atomic, history_text
 from .registry import registry
 
@@ -17,30 +16,26 @@ _pending: set[asyncio.Task] = set()
 logger = logging.getLogger(__name__)
 
 
-async def complete_cleanup(awaitable):
-    """A disconnected client must not interrupt writer termination or journaling."""
-    task = asyncio.create_task(awaitable)
-    cancelled = False
-    # ASGI uses level-triggered AnyIO cancellation; shielding asyncio alone
-    # allows the surrounding scope to cancel every subsequent cleanup await.
-    with anyio.CancelScope(shield=True):
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                cancelled = True
-    result = task.result()
-    if cancelled:
-        raise asyncio.CancelledError
-    return result
-
-
-async def shutdown():
+async def shutdown(*, timeout: float = 5.0) -> None:
+    """Join mutation owners while retaining any unconfirmed cleanup."""
     # The application supervisor has stopped its processes before this call.
-    tasks = list(_pending)
+    tasks = tuple(_pending)
     for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
+        if not task.done() and not task.cancelling():
+            task.cancel("shutdown")
+    if not tasks:
+        return
+    done, pending = await asyncio.wait(tasks, timeout=max(0.0, timeout))
+    if pending:
+        names = ", ".join(sorted(task.get_name() for task in pending))
+        raise RuntimeError(f"Wiki application writer teardown remains unconfirmed: {names}")
+    failures = [
+        error for task in done
+        if not task.cancelled() and (error := task.exception()) is not None
+    ]
+    if failures:
+        raise RuntimeError("Wiki application writer teardown remains unconfirmed") from failures[0]
+    _pending.difference_update(tasks)
 
 
 class AppMutation:
@@ -148,11 +143,12 @@ class AppMutation:
         _pending.add(task)
 
         def finished(task):
-            _pending.discard(task)
-            if not task.cancelled() and task.exception():
+            if not task.cancelled() and (error := task.exception()) is not None:
                 logger.error(
-                    "Wiki application journal failed", exc_info=task.exception()
+                    "Wiki application journal failed", exc_info=error
                 )
+                return  # Shutdown must still report this unconfirmed journal.
+            _pending.discard(task)
 
         task.add_done_callback(finished)
 

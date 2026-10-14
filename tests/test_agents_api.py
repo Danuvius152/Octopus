@@ -290,14 +290,20 @@ async def test_archive_agent_storage_refusal_keeps_agent_and_session_live(client
     async def fail_recording(**kwargs):
         raise OSError("Result storage unavailable")
 
+    recording = session_manager.db.record_terminal
     monkeypatch.setattr(session_manager.db, "record_terminal", fail_recording)
-    await session_manager._settle_turn(session, _Settlement(), status="success")
-    response = await client.post(f"/api/agents/{agent['id']}/archive", headers=HEADERS)
-    assert response.status_code == 409
-    assert "recording" in response.json()["detail"].lower()
-    assert not (await session_manager.db.get_agent(agent["id"]))["archived"]
-    assert session_manager.get_session(session.id) is session
-    assert not next(row for row in await session_manager.db.load_sessions(include_archived=True) if row["id"] == session.id)["archived"]
+    try:
+        await session_manager._settle_turn(session, _Settlement(), status="success")
+        response = await client.post(f"/api/agents/{agent['id']}/archive", headers=HEADERS)
+        assert response.status_code == 409
+        assert "recording" in response.json()["detail"].lower()
+        assert not (await session_manager.db.get_agent(agent["id"]))["archived"]
+        assert session_manager.get_session(session.id) is session
+        assert not next(row for row in await session_manager.db.load_sessions(include_archived=True) if row["id"] == session.id)["archived"]
+    finally:
+        # Recover the selected result before exercising truthful DB teardown.
+        monkeypatch.setattr(session_manager.db, "record_terminal", recording)
+        await session_manager.resume_dispatch(session.id)
 
 
 @pytest.mark.asyncio

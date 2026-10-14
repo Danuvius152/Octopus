@@ -2471,29 +2471,32 @@ async def test_held_cap_never_touches_a_running_turn():
 
 
 async def test_shutdown_sweep_is_bounded_by_a_hung_process():
-    """A CLI that won't die must not hold up server shutdown. stop() already
-    escalates stdin-close → SIGTERM → SIGKILL; if even that doesn't return, the
-    sweep abandons it rather than hanging the process forever."""
+    """Bounded shutdown reports an unconfirmed exit and retains its owner."""
     import time as _time
 
     from server.session_manager import _HELD_STOP_TIMEOUT
+
+    release = asyncio.Event()
 
     class _HangingStop(FakeRunBase):
         reusable = True
 
         async def stop(self):
-            await asyncio.sleep(3600)
+            await release.wait()
 
     mgr = SessionManager()
     sess = _held_session(mgr, _HangingStop(), held_at=_time.monotonic())
 
-    t0 = _time.monotonic()
-    stopped = await mgr.stop_all_held_processes()
-    elapsed = _time.monotonic() - t0
-
-    assert elapsed < _HELD_STOP_TIMEOUT + 1.0
-    assert stopped == 0            # it never confirmed it died
-    assert sess._backend is None   # but we've let go of it either way
+    try:
+        t0 = _time.monotonic()
+        with pytest.raises(RuntimeError, match="retirement.*unconfirmed"):
+            await mgr.stop_all_held_processes()
+        assert _time.monotonic() - t0 < _HELD_STOP_TIMEOUT + 1.0
+        assert sess._backend is None
+        assert sess._backend_cleanup_tasks
+    finally:
+        release.set()
+        await mgr.drain_turns()
 
 
 async def test_interrupt_releases_the_session_handle_immediately(manager):

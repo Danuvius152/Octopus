@@ -1,7 +1,10 @@
 """Exact-material reuse, bounded retries and durable publication recovery."""
 
 import asyncio
+import sys
+import threading
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -862,3 +865,201 @@ async def test_job_cancel_targets_captured_wiki_request_and_preserves_human_corr
         assert (await asyncio.wait_for(correction.wait(), 2)).outcome.status == "success"
     finally:
         finish.set()
+
+
+@pytest.fixture
+async def shutdown_worker(jobs, monkeypatch):
+    from server.harness import get_harness
+    from server.harness.profile import StdinMode
+    from server.wiki.registry import registry
+
+    manager = wiki_api.session_manager
+    await manager.db.update_agent(registry.config(None)["curator_agent_id"], backend="codex")
+    ready = asyncio.Event()
+    script = (
+        "import json,sys\n"
+        "print(json.dumps({'type':'thread.started','thread_id':'test-thread'}),flush=True)\n"
+        "print(json.dumps({'type':'item.completed','item':{'id':'ready','type':'agent_message','text':'curator ready'}}),flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+
+    def argv(context):
+        return [sys.executable, "-u", "-c", script], {"cwd": context.working_dir}
+
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", replace(
+        harness.profile, build_turn_argv=argv, stdin_mode=StdinMode.STREAM_JSON,
+    ))
+
+    async def observe(event):
+        if event.get("type") == "assistant_text" and event.get("content") == "curator ready":
+            ready.set()
+
+    manager.on_broadcast("shutdown-curator-ready", observe)
+    worker = WikiWorker()
+    try:
+        yield worker, manager, ready
+    finally:
+        await worker.stop()
+        manager.remove_broadcast("shutdown-curator-ready")
+
+
+async def test_shutdown_interrupts_curator_and_preserves_queued_jobs(jobs, shutdown_worker):
+    worker, manager, ready = shutdown_worker
+    current = jobs.maintain("shutdown-current", "Original source", "organize", [], "Library/current.md", [], "human")
+    await worker.start(manager)
+    await asyncio.wait_for(ready.wait(), 3)
+
+    worker.begin_shutdown()
+    queued = jobs.maintain("shutdown-later", "Another source", "organize", [], "Library/later.md", [], "human")
+    worker.wake(None)
+    await worker.stop()
+
+    stopped = jobs.get(current["id"])
+    assert stopped["status"] == "interrupted"
+    assert stopped["items"][0]["status"] == "pending"
+    assert jobs.get(queued["id"])["status"] == "queued"
+
+
+async def test_shutdown_cause_survives_shielded_wiki_write(jobs, shutdown_worker, monkeypatch):
+    worker, manager, ready = shutdown_worker
+    current = jobs.maintain("shutdown-write", "Original source", "organize", [], "Library/write.md", [], "human")
+    entered, release = asyncio.Event(), threading.Event()
+    loop = asyncio.get_running_loop()
+    update = WikiJobs.update
+
+    def delayed_update(self, job_id, **fields):
+        result = update(self, job_id, **fields)
+        if job_id == current["id"] and any(item.get("worker_request") for item in fields.get("items", [])):
+            loop.call_soon_threadsafe(entered.set)
+            if not release.wait(timeout=5):
+                raise TimeoutError("test Wiki writer was not released")
+        return result
+
+    monkeypatch.setattr(WikiJobs, "update", delayed_update)
+    try:
+        await worker.start(manager)
+        await asyncio.wait_for(entered.wait(), 3)
+        await asyncio.wait_for(ready.wait(), 3)
+        session_id = jobs.get(current["id"])["session_id"]
+        worker.begin_shutdown()
+        await asyncio.sleep(0)
+        release.set()
+        await worker.stop()
+
+        outcomes = [row["content"] for row in await manager.db.load_messages(session_id) if row["type"] == "result"]
+        assert len(outcomes) == 1
+        assert outcomes[0]["status"] == "interrupted"
+        assert outcomes[0]["code"] == "service_shutdown"
+        assert jobs.get(current["id"])["status"] == "interrupted"
+    finally:
+        release.set()
+
+
+async def test_shutdown_timeout_retains_writer_and_owner_until_cleanup_finishes(jobs, shutdown_worker, monkeypatch):
+    worker, manager, ready = shutdown_worker
+    current = jobs.maintain("shutdown-recording", "Original source", "organize", [], "Library/recording.md", [], "human")
+    entered, release = asyncio.Event(), asyncio.Event()
+    record = manager.db.record_terminal
+
+    async def delayed_record(**fields):
+        entered.set()
+        await release.wait()
+        return await record(**fields)
+
+    monkeypatch.setattr(manager.db, "record_terminal", delayed_record)
+    try:
+        await worker.start(manager)
+        await asyncio.wait_for(ready.wait(), 3)
+        session_id = jobs.get(current["id"])["session_id"]
+        worker.begin_shutdown()
+        await asyncio.wait_for(entered.wait(), 3)
+
+        with pytest.raises(RuntimeError, match="Wiki curator teardown remains unconfirmed"):
+            await worker.stop(timeout=.02)
+        assert jobs.get(current["id"])["status"] == "running"
+        assert await manager.db.count_messages(session_id) > 0
+        with pytest.raises(RuntimeError, match="Wiki curator teardown remains unconfirmed"):
+            await worker.start(manager)
+
+        release.set()
+        await worker.stop(timeout=3)
+        outcomes = [row["content"] for row in await manager.db.load_messages(session_id) if row["type"] == "result"]
+        assert len(outcomes) == 1
+        assert outcomes[0]["code"] == "service_shutdown"
+        assert jobs.get(current["id"])["status"] == "interrupted"
+    finally:
+        release.set()
+
+
+async def test_shutdown_preserves_earlier_user_job_cancellation(jobs, shutdown_worker, monkeypatch):
+    worker, manager, ready = shutdown_worker
+    current = jobs.maintain("shutdown-user-cancel", "Original source", "organize", [], "Library/user-cancel.md", [], "human")
+    entered, release = asyncio.Event(), asyncio.Event()
+    record = manager.db.record_terminal
+    cancellation = None
+
+    async def delayed_record(**fields):
+        entered.set()
+        await release.wait()
+        return await record(**fields)
+
+    monkeypatch.setattr(manager.db, "record_terminal", delayed_record)
+    try:
+        await worker.start(manager)
+        await asyncio.wait_for(ready.wait(), 3)
+        session_id = jobs.get(current["id"])["session_id"]
+        cancellation = asyncio.create_task(jobs.cancel(current["id"], manager))
+        await asyncio.wait_for(entered.wait(), 3)
+        worker.begin_shutdown()
+        release.set()
+        assert (await cancellation)["status"] == "cancelled"
+        await worker.stop()
+
+        outcomes = [row["content"] for row in await manager.db.load_messages(session_id) if row["type"] == "result"]
+        assert len(outcomes) == 1
+        assert outcomes[0]["code"] == "interrupted"
+        assert outcomes[0]["message"] == "(interrupted by user)"
+        assert jobs.get(current["id"])["status"] == "cancelled"
+    finally:
+        release.set()
+        if cancellation is not None:
+            await asyncio.gather(cancellation, return_exceptions=True)
+
+
+async def test_shutdown_cleanup_failure_is_reported_without_claiming_next_job(jobs, shutdown_worker, monkeypatch):
+    worker, manager, ready = shutdown_worker
+    current = jobs.maintain("shutdown-cleanup-failure", "Original source", "organize", [], "Library/cleanup.md", [], "human")
+    queued = jobs.maintain("shutdown-unclaimed", "Another source", "organize", [], "Library/unclaimed.md", [], "human")
+    cancel = manager.cancel_request
+
+    async def failed_cleanup(*args, **kwargs):
+        await cancel(*args, **kwargs)
+        raise RuntimeError("captured curator cleanup failed")
+
+    monkeypatch.setattr(manager, "cancel_request", failed_cleanup)
+    try:
+        await worker.start(manager)
+        await asyncio.wait_for(ready.wait(), 3)
+        session_id = jobs.get(current["id"])["session_id"]
+        worker.begin_shutdown()
+        with pytest.raises(RuntimeError, match="Wiki curator teardown remains unconfirmed") as failure:
+            await worker.stop(timeout=.1)
+
+        assert jobs.get(current["id"])["status"] == "interrupted"
+        assert jobs.get(current["id"])["items"][0]["status"] == "pending"
+        assert jobs.get(queued["id"])["status"] == "queued"
+        assert str(failure.value.__cause__) == "captured curator cleanup failed"
+        with pytest.raises(RuntimeError, match="Wiki curator teardown remains unconfirmed"):
+            await worker.stop(timeout=0)
+        outcomes = [row["content"] for row in await manager.db.load_messages(session_id) if row["type"] == "result"]
+        assert len(outcomes) == 1
+        assert outcomes[0]["code"] == "service_shutdown"
+    finally:
+        monkeypatch.setattr(manager, "cancel_request", cancel)
+        worker.begin_shutdown()
+        await manager.drain_turns()
+        await asyncio.gather(*worker.tasks.values(), return_exceptions=True)
+        # Release the test's completed failed-owner metadata after observing
+        # the public failure; no running curator or writer is discarded.
+        worker.tasks.clear()

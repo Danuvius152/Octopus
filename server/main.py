@@ -61,6 +61,7 @@ from .session_manager import session_manager
 from .tunnel import CloudflareTunnel
 from .users import UserManager
 from .wiki import WikiError
+from .wiki.app_bridge import shutdown as shutdown_wiki_app_writers
 from .workspace import WorkspaceError
 
 logging.basicConfig(
@@ -165,7 +166,7 @@ async def lifespan(app: FastAPI):
         metrics_sampler.run(
             settings.db_path,
             held_process_count=lambda: len(getattr(session_manager, "_held", {}) or {}),
-        )
+        ), name="metrics-sampler",
     )
 
     async with mcp_lifespan(app):
@@ -176,42 +177,58 @@ async def lifespan(app: FastAPI):
         await sweep_wiki_history()
         await wiki_worker.start(session_manager)
         logger.info("MCP namespaces served in-process: %s", ", ".join(_mcp_mounts))
-        yield
+        try:
+            yield
+        finally:
+            # Seal before any await or producer cancellation can deliver work.
+            session_manager.close_admission()
+            wiki_worker.begin_shutdown()
+            schedule_runner.begin_shutdown()
+            research_manager.begin_shutdown()
+            bg_task_manager.begin_shutdown()
+            backend_supervisor.begin_shutdown()
+            from .codex_login import codex_login_manager
+            codex_login_manager.begin_shutdown()
 
-    sampler_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError, Exception):
-        await sampler_task
-    monitor_pkg.set_store(None)
-    await metrics.stop()
+            # Wiki cancellation is already issued. Its shielded bookkeeping
+            # unwinds alongside session drain, with dependencies still alive.
+            owners = (
+                ("session reaper", session_manager.stop_reaper()),
+                ("session execution", session_manager.drain_turns()),
+                ("Wiki curator", wiki_worker.stop()),
+                ("scheduler", schedule_runner.shutdown()),
+                ("research", research_manager.shutdown()),
+                ("background tasks", bg_task_manager.shutdown()),
+                ("application processes", backend_supervisor.shutdown()),
+                ("Codex login", codex_login_manager.shutdown()),
+            )
+            results = await asyncio.gather(*(stop for _, stop in owners), return_exceptions=True)
+            failures = [(name, result) for (name, _), result in zip(owners, results, strict=True)
+                        if isinstance(result, BaseException)]
+            if failures:
+                names = ", ".join(name for name, _ in failures)
+                logger.error("Service shutdown cleanup unconfirmed: %s; database kept open", names)
+                raise RuntimeError(f"Service shutdown cleanup unconfirmed: {names}") from failures[0][1]
 
-    await session_manager.stop_reaper()
-    await session_manager.stop_all_held_processes()
-    await backend_supervisor.shutdown()
-    from .wiki.app_bridge import shutdown as shutdown_wiki_app_writers
-    await shutdown_wiki_app_writers()
-
-    if tunnel:
-        await tunnel.stop()
-
-    # Clean up any in-flight OAuth login subprocesses before we tear down DB.
-    from .oauth_login import oauth_login_manager
-    await oauth_login_manager.shutdown()
-    from .codex_login import codex_login_manager
-    await codex_login_manager.shutdown()
-
-    await bg_task_manager.shutdown()
-    await wiki_worker.stop()
-    await wiki_registry.stop()
-    app_agent_manager.shutdown()
-    application_manager.shutdown()
-    delegation_manager.shutdown()
-    await schedule_runner.shutdown()
-    from .ws_delivery import shutdown_connections
-    await shutdown_connections()
-    # `db.close()` drains the turns still in flight first — they are registered
-    # as a close hook when the manager is initialized — so nothing is left
-    # awaiting a connection that has gone.
-    await db.close()
+            await session_manager.stop_all_held_processes()
+            await shutdown_wiki_app_writers()
+            await wiki_registry.stop()
+            if tunnel:
+                await tunnel.stop()
+            from .oauth_login import oauth_login_manager
+            await oauth_login_manager.shutdown()
+            app_agent_manager.shutdown()
+            application_manager.shutdown()
+            delegation_manager.shutdown()
+            from .ws_delivery import shutdown_connections
+            await shutdown_connections()
+            sampler_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await sampler_task
+            await metrics.stop()
+            monitor_pkg.set_store(None)
+            # Close hooks remain a fallback for any direct database close.
+            await db.close()
 
 
 app = FastAPI(title="Octopus", version="0.1.0", lifespan=lifespan)

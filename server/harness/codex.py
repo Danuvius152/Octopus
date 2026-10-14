@@ -101,7 +101,12 @@ one-shot). Timezone defaults to the host's. Write `prompt` self-contained: \
 when it fires the conversation is gone and nobody can answer questions. \
 Related: `mcp__schedule__list()`, `mcp__schedule__update(schedule_id, \
 enabled=False|…)` (pause rather than delete when the user may want it \
-back), `mcp__schedule__delete(schedule_id)`."""
+back), `mcp__schedule__delete(schedule_id)`.
+
+Prefer `apply_patch` for substantial text and code edits. Keep bulk file \
+contents out of shell command arguments; use a file tool or smaller writes \
+and verify the reconstructed result. If a command fails with "argument list \
+too long", reduce the command size before retrying."""
 
 
 def _toml_basic_string(value: str) -> str:
