@@ -194,14 +194,27 @@ main 的已提交 Wiki 开发记录，六份未提交 Wiki 文档仍在开发目
    和 `current`，记录实际部署提交。账户、数据库、Wiki、配置和共享依赖保留。
 
 2026-10-14 已按此流程部署归档／回退替换会话的模型设置同步修复，代码提交为
-`9e1b9224d182540764d98b63684152b40a6feedc`。当前服务源码工作树是
-`/home/jack/.octopus/releases/main-9e1b9224d182`，`current` 指向它。
+`9e1b9224d182540764d98b63684152b40a6feedc`。当时服务源码工作树是
+`/home/jack/.octopus/releases/main-9e1b9224d182`，当时 `current` 指向它。
 部署前通过八项离线检查、77 项纯 UI 浏览器测试、21 项真实 Codex 测试和
 1 项 Codex 浏览器对话测试；Claude 实机测试按用户要求未运行。上线后确认
 进程工作目录、健康接口、HTML 与静态资源一致，实际浏览器登录页及刷新通过，
 无页面异常或 HTTP 失败。验收成功后删除旧的 `main-01c16a699727` 工作树。
 部署前 SQLite 备份位于
 `~/.octopus/backups/before-session-settings-20261014T115831Z/`。
+
+2026-10-15 已部署框架与 Wiki 基础设施修复，实际代码提交为
+`20601996235af3d680145011adba9729fb9235df`。当前服务源码工作树是
+`/home/jack/.octopus/releases/main-20601996235a`，`current` 指向它。
+上线前八项门槛全部通过，包括 2,751 项 hermetic backend、407 项 frontend unit；
+另有 78 项纯 UI 浏览器、21 项 Codex 实机及 1 项 Codex 浏览器测试通过，无跳过。
+Claude 实机检查按本机约定未运行。候选先构建并核验资源，服务切换和健康确认后
+再次构建，实际 HTML / JS / CSS 与候选 hash 一致；进程工作目录、源码逐文件指纹、
+登录页及刷新均验收通过，无页面异常或 HTTP 失败。随后已删除旧的
+`main-9e1b9224d182` 工作树。两个 SQLite 数据库的一致性备份通过 integrity check，
+保存在 `~/.octopus/backups/before-framework-review-20261014T163707Z/`。
+本次没有执行生产账户认领或 Library 维护；R06、R08、R14 及检索扩展按用户要求
+暂缓，完整证据见[审查计划](plans/octopus-framework-wiki-review-20261014.md)。
 
 ## 同步原作者更新
 
