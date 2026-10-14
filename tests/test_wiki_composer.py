@@ -24,7 +24,7 @@ def test_wiki_command_cases(case):
 
 @pytest.mark.parametrize("case", CASES)
 def test_explicit_cancellation_overrides_all_command_text(case):
-    assert explicit_mode(case["message"], "off") is None
+    assert explicit_mode(case["message"], "off") == "off"
 
 
 async def test_websocket_cancelled_wiki_command_never_opens_task(monkeypatch):
@@ -49,5 +49,5 @@ async def test_websocket_cancelled_wiki_command_never_opens_task(monkeypatch):
     )
     await ws_router.websocket_endpoint(manager, socket, token="token")
     manager.start_message.assert_awaited_once_with(
-        "session", message, attachment_ids=[], steerable=True
+        "session", message, attachment_ids=[], steerable=True, wiki_mode="off"
     )

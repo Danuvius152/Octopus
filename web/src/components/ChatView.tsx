@@ -127,7 +127,7 @@ export function ChatView({
   const toggleWiki = () => {
     // Preserve the whole draft. The explicit off signal wins over command
     // text, so cancelling cannot reinterpret the task as a new grant.
-    setWikiSelection(wikiSelected ? "off" : commandMode ? undefined : "read");
+    setWikiSelection(wikiSelected ? "off" : wikiSelection === "off" ? undefined : "read");
     textareaRef.current?.focus();
   };
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
@@ -1884,24 +1884,26 @@ export function ChatView({
                   aria-pressed={wikiSelected}
                   aria-describedby="wiki-composer-hint"
                   title={wikiSelected
-                    ? "本条消息已启用 Wiki；点击取消，发送后自动关闭"
+                    ? "本条消息使用指定的 Wiki 模式；点击关闭本轮 Wiki"
                     : wikiSelection === "off"
-                      ? "本条消息已关闭 Wiki，即使正文含 /wiki；点击重新启用"
-                      : "仅本条消息查询本地知识库；入库与整理用 /wiki maintain"}
+                      ? "本条消息已关闭 Wiki，即使正文含 /wiki；点击恢复默认模式"
+                      : "默认由 agent 按需查询或提交维护；点击将本条限制为只读"}
                   className={`btn btn-wiki inline-flex items-center justify-center gap-1.5 h-8 px-2 rounded-lg border text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${wikiSelected
                     ? "border-primary-200 bg-primary-50 text-primary hover:bg-primary-100"
                     : "border-transparent hover:bg-accent hover:text-foreground"}`}
                   onClick={toggleWiki}
                 >
                   {wikiSelected ? <IconCheck size={15} aria-hidden /> : <IconBook2 size={15} stroke={1.5} aria-hidden />}
-                  <span>{wikiMaintaining ? "Wiki · 整理" : wikiSelected ? "Wiki · 已启用" : "Wiki"}</span>
+                  <span>{wikiMaintaining ? "Wiki · 整理" : wikiSelected ? "Wiki · 只读" : wikiSelection === "off" ? "Wiki · 关闭" : "Wiki · 自动"}</span>
                 </button>
                 <span id="wiki-composer-hint" className="sr-only">
                   {wikiMaintaining
-                    ? "本条消息将入库或整理知识库；发送后自动关闭。"
+                    ? "本条消息显式提交入库或整理；实际写入由获准维护任务执行。"
                     : wikiSelection === "off"
                       ? "本条消息已关闭 Wiki，即使正文含 /wiki。"
-                      : "仅本条消息查询本地知识库；发送后自动关闭。"}
+                      : wikiSelected
+                        ? "本条消息只能查询知识库，不能提交维护；下一条恢复自动模式。"
+                        : "默认由 agent 按需查询或提交具体维护，无需先输入 /wiki。"}
                 </span>
                 <button
                   type="button"

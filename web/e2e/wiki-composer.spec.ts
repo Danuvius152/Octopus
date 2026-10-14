@@ -47,7 +47,7 @@ for (const width of [1280, 390]) {
         const initialColor = await wiki.evaluate((el) => getComputedStyle(el).backgroundColor);
         await activate();
         await expect(wiki).toHaveAttribute("aria-pressed", "true");
-        await expect(wiki).toHaveText("Wiki · 已启用");
+        await expect(wiki).toHaveText("Wiki · 只读");
         await expect(input).toBeFocused();
         await expect.poll(() => wiki.evaluate((el) => getComputedStyle(el).backgroundColor))
           .not.toBe(initialColor);
@@ -58,10 +58,13 @@ for (const width of [1280, 390]) {
           await expect(wiki).toBeFocused();
           await expect(wiki).not.toHaveCSS("box-shadow", "none");
           await wiki.press("Space");
-          await expect(wiki).toHaveAttribute("aria-pressed", "true");
+          await expect(wiki).toHaveAttribute("aria-pressed", "false");
+          await expect(wiki).toHaveText("Wiki · 自动");
           await expect(input).toBeFocused();
           await input.press("Tab");
           await wiki.press("Enter");
+          await expect(wiki).toHaveAttribute("aria-pressed", "true");
+          await activate();
           await expect(wiki).toHaveAttribute("aria-pressed", "false");
         }
         await input.fill("/wiki maintain Library/a.md");

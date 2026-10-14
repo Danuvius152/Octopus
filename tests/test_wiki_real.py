@@ -16,6 +16,54 @@ from tests.callback_api import start_callback_api
 pytestmark = [pytest.mark.real, pytest.mark.real_codex]
 
 
+async def test_codex_autonomous_wiki_exports_large_evidence_without_shell_payload(tmp_path, monkeypatch):
+    import uuid
+
+    from server.wiki.jobs import WikiJobs
+
+    monkeypatch.setattr(settings, "wiki_dir", str(tmp_path / "wiki-state"))
+    monkeypatch.setattr(settings, "default_working_dir", str(tmp_path / "workspace"))
+    monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "agents"))
+    db = Database(":memory:")
+    await db.initialize()
+    manager = SessionManager()
+    await manager.initialize(db)
+    agent = await db.get_system_agent()
+    vault = tmp_path / "vault"
+    (vault / "Library").mkdir(parents=True)
+    note = vault / "Library/note.md"
+    note.write_text("# Source\nPreserve these bytes.\n")
+    registry.configure(None, vault, agent["id"])
+    proof = "AUTONOMOUS-EVIDENCE-" + uuid.uuid4().hex
+    job = WikiJobs(None).maintain("autonomous-large-proof", "", "scope " * 24000 + "\nProof: " + proof,
+                                ["Library/note.md"], None, [], "human")
+    api = await start_callback_api(router, overrides={get_session_manager: lambda: manager},
+                                   exception_handlers={WikiError: _wiki_error})
+    monkeypatch.setattr(settings, "port", api.port)
+    session = await manager.create_session(agent["id"], "Autonomous capture", str(tmp_path), backend="codex")
+    try:
+        receipt = await manager.start_message(session.id,
+            "This is a normal task, without a /wiki command. Use the Wiki jobs tool to locate exact "
+            "idempotency_key autonomous-large-proof. Fetch the full matching job with export=true. "
+            "Read the exported JSON file with a short native exec command and report the Proof value "
+            "at the end of payload.request.scope. Do not put the JSON in a command, print the full "
+            "scope, modify the vault, run the job, or ask the user to enable Wiki. Only report the proof.")
+        completion = await asyncio.wait_for(receipt.wait(), 150)
+        assert completion.outcome.status == "success", completion.outcome
+        messages = await db.load_messages(session.id)
+        replies = "\n".join(row.get("content", "") for row in messages if row["role"] == "assistant" and row["type"] == "text")
+        assert proof in replies, replies
+        tools = [row for row in messages if row["type"] == "tool_use"]
+        assert any("wiki" in str(row.get("tool_name", "")) and "jobs" in str(row.get("tool_name", "")) for row in tools), tools
+        assert not any("Argument list too long" in (row.get("content") or "") for row in messages)
+        assert note.read_text() == "# Source\nPreserve these bytes.\n"
+        assert WikiJobs(None).get(job["id"])["status"] == "queued"
+    finally:
+        await manager.stop_all_held_processes()
+        await api.stop()
+        await db.close()
+
+
 async def test_codex_explicit_wiki_and_native_helper_then_ordinary_task(
     tmp_path, monkeypatch
 ):

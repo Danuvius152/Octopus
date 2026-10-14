@@ -82,16 +82,44 @@ class WikiJobs:
             receipt["details"] = json.loads(receipt["details"])
         return self.public(row) | {"receipts": receipts}
 
-    def list(self, offset=0, limit=30):
+    @staticmethod
+    def summary(row):
+        """Navigation omits source material, instructions and individual receipts."""
+        result = {key: row[key] for key in ("id", "request_key", "status", "session_id", "created_at", "updated_at")}
+        if len(result["request_key"]) > 1024:
+            result["request_key"] = result["request_key"][:1024]
+            result["request_key_truncated"] = True
+        items = json.loads(row["items"]) if isinstance(row["items"], str) else row["items"]
+        result["progress"] = {
+            "total": len(items),
+            "completed": sum(item["status"] == "done" for item in items),
+            "attention": sum(item["status"] == "attention" for item in items),
+            "failed": sum(item["status"] == "failed" for item in items),
+        }
+        error = row.get("error") if isinstance(row, dict) else row["error"]
+        if error:
+            result["error"] = error[:1024]
+            result["error_truncated"] = len(error) > 1024
+        return result
+
+    def list(self, offset=0, limit=30, *, view="full", idempotency_key=None):
         if offset < 0 or not 1 <= limit <= 100:
             raise WikiError("Invalid maintenance pagination", 422)
+        if view not in {"compact", "full"}:
+            raise WikiError("Invalid maintenance view", 422)
+        columns = "*" if view == "full" else "id,request_key,status,error,session_id,created_at,updated_at,items"
+        condition = ""
+        parameters = []
+        if idempotency_key is not None:
+            condition = " WHERE request_key=? OR id=(SELECT job_id FROM job_requests WHERE request_key=?)"
+            parameters.extend((idempotency_key, idempotency_key))
         with self.store.connect() as db:
             rows = db.execute(
-                "SELECT * FROM jobs ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                (limit + 1, offset),
+                f"SELECT {columns} FROM jobs{condition} ORDER BY created_at DESC LIMIT ? OFFSET ?",  # noqa: S608
+                (*parameters, limit + 1, offset),
             ).fetchall()
         return {
-            "items": [self.public(row) for row in rows[:limit]],
+            "items": [(self.summary(row) if view == "compact" else self.public(row)) for row in rows[:limit]],
             "next_offset": offset + limit if len(rows) > limit else None,
         }
 

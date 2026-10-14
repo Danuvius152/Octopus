@@ -39,7 +39,9 @@ def instructions(mode: str, task_id: str | None = None) -> str:
             card["guides"] = ["article", "writing"]
     base = "本次知识操作卡：" + json.dumps(card, ensure_ascii=False) + "\n"
     base += "使用本次 mcp__wiki__ 工具；工具描述提供真实参数。原生助手共享当前任务凭据，等待它们结束后完成任务；之后没有知识授权。\n"
-    if mode == "read":
+    if mode == "auto":
+        base += guide("auto-entry")
+    elif mode == "read":
         base += guide("query-v2") + "\n" + guide("retrieval-v2")
     elif mode == "maintain" and tasks.is_curator_worker(task):
         base += (
@@ -54,6 +56,8 @@ def instructions(mode: str, task_id: str | None = None) -> str:
 
 def load_guide(module: str, task_id: str | None) -> str:
     task = tasks.active.get(task_id)
+    if task and module in {"query", "retrieval", "entry"}:
+        return guide({"query": "query-v2", "retrieval": "retrieval-v2", "entry": "auto-entry" if task.mode == "auto" else "entry"}[module])
     if not tasks.is_curator_worker(task) or module not in {"article", "writing"}:
         raise WikiError("This guide requires an active curator assignment", 403)
     return guide("article-v2" if module == "article" else module)

@@ -113,7 +113,7 @@ describe("Wiki composer selection", () => {
     fireEvent.click(wiki);
     expect(wiki).toHaveAttribute("aria-pressed", "true");
     expect(wiki).toHaveClass("bg-primary-50", "text-primary", "border-primary-200");
-    expect(wiki).toHaveTextContent("Wiki · 已启用");
+    expect(wiki).toHaveTextContent("Wiki · 只读");
     fireEvent.click(wiki);
     expect(wiki).toHaveAttribute("aria-pressed", "false");
     expect(wiki).not.toHaveClass("bg-primary-50");
@@ -176,9 +176,9 @@ describe("Wiki composer selection", () => {
   });
 
   it.each([
-    ["/wiki 查找相关文章", "Wiki · 已启用"],
+    ["/wiki 查找相关文章", "Wiki · 只读"],
     ["  /wiki\nmaintain Library/a.md", "Wiki · 整理"],
-    ["/wiki /wiki maintain 的用法是什么？", "Wiki · 已启用"],
+    ["/wiki /wiki maintain 的用法是什么？", "Wiki · 只读"],
   ])("reflects the explicit command %s and lets the user cancel it", (command, label) => {
     const { wiki, input, send, sendMessage } = setup();
     fireEvent.change(input, { target: { value: command } });
@@ -195,7 +195,7 @@ describe("Wiki composer selection", () => {
     const { wiki, input } = setup();
     fireEvent.change(input, { target: { value: message } });
     expect(wiki).toHaveAttribute("aria-pressed", String(mode !== null));
-    expect(wiki).toHaveTextContent(mode === "maintain" ? "Wiki · 整理" : mode === "read" ? "Wiki · 已启用" : "Wiki");
+    expect(wiki).toHaveTextContent(mode === "maintain" ? "Wiki · 整理" : mode === "read" ? "Wiki · 只读" : "Wiki");
   });
 
   it("can re-enable a cancelled command without rewriting the draft", () => {

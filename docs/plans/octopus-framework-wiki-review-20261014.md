@@ -85,7 +85,25 @@
 
 实际 HTML、入口 JS 和 CSS 的 SHA-256 分别为 `bde18b84fad2330fe47b1e2bff56531e5745b05f3a60d9d6366715cd7e7b63ab`、`7d01d58830564f979e351c80fa920d231b83494d146d3612b05fb0caae77f16e`、`acfaddfdd45830aef37d56a36dced329f82242c8a02d616bd198b06769660326`，与候选和部署后构建一致。健康接口、真实浏览器登录页及刷新验收通过后，已删除旧的 `main-9e1b9224d182` 运行源码工作树。上线前的两个 SQLite 数据库一致性备份及 integrity check 已完成，保存在 `~/.octopus/backups/before-framework-review-20261014T163707Z/`。账户、主库正文、Wiki 状态、共享配置及依赖保留；生产账户认领与 Library 维护没有执行。
 
+### 1.4 自主入口与大记录导出的新版验收
+
+2026-10-15 本次修订已通过最终 `scripts/check.sh` 八项门槛，包含 2,759 项 hermetic backend、407 项 frontend unit、Ruff、mypy、ESLint、`tsc -b --force`、生成合同与文档索引检查。纯 UI 78 项、Codex real tier 22 项、Codex 浏览器对话 1 项均通过，无跳过；开发目录前端构建通过。Claude live 及依赖 Claude 的浏览器用例按本机约定未运行，未计为通过。初轮过期生成合同、旧 UI 二态断言及新增测试的 nullable content 断言已修正；此处只记录最终成功结果。
+
+实际 E2BIG 回归证明超长 argv 被系统拒绝、完整 JSON 导出字节数与 SHA-256 一致、短 argv 可从文件读取所需内容；导出目录越界及主库内保存被拒绝，工作区即主库时使用主库外账户状态目录。真实 Codex 在普通消息中自主调用 Wiki 工具并读取大记录的隐藏核验值；Weber 实机维护验证既有原文和未分配旧文章保全。
+
+最终验证的 485 个源码／测试／脚本／前端配置与 package 文件 SHA-256 映射指纹为 `0fae069e7c7bed3d4f384f0503e416cc708c6481507ba7792bc09f0af55ae26f`，计算方法同 §1.3；源码在最后检查后未变。此时提交、推送及实际发布正在执行，当前运行快照仍为 §1.3 的旧代码；发布成功后另记实际提交、资源与旧快照退役证据。
+
 ## 2 保留的架构与必须成立的边界
+
+### 2026-10-15 自主 Wiki 与大工具返回合同修订
+
+用户明确撤销“必须人工先发送 `/wiki` 才能使用 Wiki”的要求，并确认普通 agent 可按任务需要自主查询、选择文件并提交维护。原显式任务门槛早于 R01；R01 关闭 MCP 经 WS 取得人工权限的旧路径后，普通恢复提示暴露了该门槛。修订在正常 MCP / 当前轮次授权上提供自主入口，保留账户隔离及人工 WS 的身份边界，见[自主 Wiki ADR](../adr/0007-autonomous-wiki-with-scoped-maintenance.md)。
+
+已注册账户默认 `auto`，每轮权限独立并随轮结束失效；显式只读与 Off 继续收窄，Off 通过 WS、App、队列、委托和 schedule 保留，不退化成默认自动。普通 agent 及普通会话中的 Weber 可以提交精确 paths/material 的维护，实际整理和发布仍由真实绑定 Weber assignment 执行，保留身份、当前版本、已读范围、原文和历史保护。`/wiki` 仍为兼容入口，其显式维护路径规则保留；R05 的可信原请求继续独立于包装文本，默认自动模式的具体目标由获准 agent 提出。
+
+最新日志在 2026-10-15 01:13:38（本地时间）的失败来自模型内部 `exec_command`：将 171,506 字节 jobs 返回拼进 179,664 字节 `/bin/bash -lc` 命令，超过本机单参数约 131,072 字节限制。后续 12,000 JS 字符分块写入成功，仍有大量重复返回与保存；这不证明框架已修复该链路。现有 `spill_if_large` 仅保护启动模型的 prompt，不能覆盖模型自己的 shell 参数。
+
+对应修复是原生 jobs 默认摘要、服务端精确幂等键过滤，以及完整/超大结果的直接证据导出，返回路径、字节数和 SHA-256。保留原 REST full 兼容；原生工具取 full 时超预算会自动保存文件，模型用短程序读必要字段。导出受当前权限与账户目录约束，保存在主库外，不代替正文 read ledger。加入实际系统 E2BIG → 文件完整捕获 → 短参数读取的回归，以及真实 Codex 不用 `/wiki` 查目标任务并读取隐藏证明码的端到端验证。此修订的完整本机门槛及实际发布仍在执行，之前 §1.3 的验收属于 `2060199`，不挪作新版通过。
 
 保留现有管理器分工：SessionManager 拥有接管、队列和逻辑轮次；HarnessRun 拥有 CLI 执行；AppAgentManager 消费所属请求的事件；WikiTasks 拥有短期授权；Registry 管理账户注册和 Store；History 与 Jobs 管理受控发布和恢复。相关概念见[术语](../../GLOSSARY.md)、[逻辑轮次 ADR](../adr/0003-logical-turn-owns-terminal-outcome.md)及[接管与记录 ADR](../adr/0004-admission-recording-and-notification.md)。
 
@@ -147,7 +165,7 @@ R01～R09 对应前一轮九条审查意见；R10～R15 对应参考包六项发
 
 **修复要求：** 在 WS 的可信入口区分 account、legacy 与 MCP。只有 account 或安装尚未认领时的 legacy 身份可以建立新的人工 Wiki 授权。MCP 路径必须继续执行自身 live scope 与既有 Wiki grant 检查；不能通过目标会话、`wiki_mode`、`source` 或内容中的 `/wiki` 把自己升级为人工。若没有实际用途需要 MCP 在 WS 发消息，直接拒绝该身份的发送动作比复制一套授权传播规则更清楚。
 
-**验收：** 使用真实 principal 解析和 WS handler，证明无授权 MCP 对自己的会话与同账户其他会话均不能取得新 Wiki grant；read grant 不能升级 maintain，失效 bearer 被拒绝。account 与合法 legacy 的显式 `/wiki` 仍可用，普通消息和 `off` 不授予权限，另一账户始终不可达。
+**验收：** 使用真实 principal 解析和 WS handler，证明 MCP 无法对自己的会话或同账户其他会话建立人工 Wiki grant；read grant 不能升级 maintain，失效 bearer 被拒绝，另一账户始终不可达。account 与合法 legacy 的显式 `/wiki` 继续兼容；按 2026-10-15 自主合同，已注册账户的普通执行轮获得自己的 auto grant，`off` 不授予权限。新增 `test_wiki_autonomy.py` 锁定正常派发、只读／Off、轮末失效及普通 agent 无直接正文写权。
 
 ### R02 App 回答绑定接管请求
 

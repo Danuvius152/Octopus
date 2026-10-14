@@ -1063,10 +1063,11 @@ class TurnsMixin(SessionManagerBase):
         session._settlement = settlement
         wiki_task_id = None
         try:
+            wiki_mode = wiki_tasks.mode_for(session, wiki_mode)
             session._wiki_mode = wiki_mode
             session._wiki_task_id = wiki_tasks.open(
                 session, wiki_mode, prompt if trusted_request is None else trusted_request
-            ) if wiki_mode else None
+            ) if wiki_mode in {"auto", "read", "maintain"} else None
             wiki_task_id = session._wiki_task_id
             # Resolve attachment ids → on-disk paths so the prompt can
             # cite absolute paths the agent's `Read` tool will open.
@@ -1143,7 +1144,7 @@ class TurnsMixin(SessionManagerBase):
             # resolves on the client + dedicated resolution endpoint instead of
             # being rewritten into a backend command.
             wiki_prompt = prompt
-            if wiki_mode and prompt.strip().split(maxsplit=1)[0:1] == ["/wiki"]:
+            if wiki_mode in {"auto", "read", "maintain"} and prompt.strip().split(maxsplit=1)[0:1] == ["/wiki"]:
                 pieces = prompt.strip().split(maxsplit=2)
                 skip = 2 if len(pieces) > 1 and pieces[1] == "maintain" else 1
                 wiki_prompt = prompt.strip().split(maxsplit=skip)[skip] if len(prompt.strip().split(maxsplit=skip)) > skip else "Explain the enabled Wiki task and ask what the user wants to do."
@@ -2319,7 +2320,8 @@ class TurnsMixin(SessionManagerBase):
         (the turn is finishing), when the backlog is full, or when the message
         carries attachments, which the frame channel doesn't take.
         """
-        if queued.attachment_ids or queued.wiki_mode or session._wiki_mode:
+        if (queued.attachment_ids or queued.wiki_mode not in {None, "auto"}
+                or session._wiki_mode not in {None, "auto"}):
             return False
         async with session._steer_lock:
             if self._admission_closed or session._admission_closed or not session._steer_open:

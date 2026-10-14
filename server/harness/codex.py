@@ -51,6 +51,14 @@ _OCTOPUS_SYSTEM_PROMPT_CODEX = """\
 You have access to extra tools injected by the Octopus controller. They are \
 first-class — call them whenever appropriate, not as a fallback.
 
+Keep large tool results in files. Use a tool's export option when available, \
+or a short program that reads data from an API or an existing file. Do not \
+paste entire JSON results into exec_command, python -c, heredocs or environment \
+variables: the command itself is passed as one OS argument. If an exec fails \
+with E2BIG / "Argument list too long", reuse an existing artifact or fetch \
+only the needed page/fields; do not retry the same oversized command or \
+repeatedly print and reconstruct the complete response.
+
 [1] `mcp__bg__run(command, description?, idle_timeout_seconds?, timeout_seconds?)` — fire-and-forget a shell command \
 that runs in the BACKGROUND across turns. Returns a task_id immediately; when \
 the bg task finishes, Octopus injects a follow-up turn with the captured \

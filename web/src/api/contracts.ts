@@ -2736,7 +2736,7 @@ export interface components {
             /** Prompt */
             prompt: string;
             /** Wiki Mode */
-            wiki_mode?: ("read" | "maintain") | null;
+            wiki_mode?: ("read" | "maintain" | "off") | null;
             /** Name */
             name?: string | null;
             /** Cron */
@@ -2848,7 +2848,7 @@ export interface components {
             /** Message */
             message: string;
             /** Wiki Mode */
-            wiki_mode?: ("read" | "maintain") | null;
+            wiki_mode?: ("read" | "maintain" | "off") | null;
             /** Context */
             context?: string | null;
             /** Agent */
@@ -3355,7 +3355,7 @@ export interface components {
         /** CreateScheduleRequest */
         CreateScheduleRequest: {
             /** Wiki Mode */
-            wiki_mode?: ("read" | "maintain") | null;
+            wiki_mode?: ("read" | "maintain" | "off") | null;
             /** Name */
             name: string;
             /** Prompt */
@@ -4124,7 +4124,7 @@ export interface components {
          */
         ScheduleFromTextRequest: {
             /** Wiki Mode */
-            wiki_mode?: ("read" | "maintain") | null;
+            wiki_mode?: ("read" | "maintain" | "off") | null;
             /** Text */
             text: string;
             /** Timezone */
@@ -4141,7 +4141,7 @@ export interface components {
             /** Agent Id */
             agent_id: string;
             /** Wiki Mode */
-            wiki_mode?: ("read" | "maintain") | null;
+            wiki_mode?: ("read" | "maintain" | "off") | null;
             /** Name */
             name: string;
             /** Prompt */
@@ -4724,7 +4724,7 @@ export interface components {
          */
         UpdateScheduleRequest: {
             /** Wiki Mode */
-            wiki_mode?: ("read" | "maintain") | null;
+            wiki_mode?: ("read" | "maintain" | "off") | null;
             /** Name */
             name?: string | null;
             /** Prompt */
@@ -7308,7 +7308,7 @@ export interface operations {
     get_guide_api_wiki_guide_get: {
         parameters: {
             query: {
-                module: "article" | "writing";
+                module: "query" | "retrieval" | "entry" | "article" | "writing";
                 token?: string | null;
             };
             header?: never;
@@ -7969,6 +7969,8 @@ export interface operations {
             query?: {
                 offset?: number;
                 limit?: number;
+                view?: "compact" | "full";
+                idempotency_key?: string | null;
                 token?: string | null;
             };
             header?: never;
@@ -8000,6 +8002,7 @@ export interface operations {
     get_job_api_wiki_jobs__job_id__get: {
         parameters: {
             query?: {
+                view?: "compact" | "full";
                 token?: string | null;
             };
             header?: never;

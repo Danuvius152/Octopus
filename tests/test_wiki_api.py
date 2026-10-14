@@ -1356,7 +1356,7 @@ async def test_curator_role_cannot_be_forged_and_lowercase_bearer_is_not_human(
         tasks.close(token)
 
 
-async def test_queued_messages_keep_separate_grants_and_reports_do_not_trigger_them(
+async def test_queued_messages_keep_separate_explicit_and_autonomous_grants(
     client, tmp_path, monkeypatch
 ):
     import asyncio
@@ -1408,7 +1408,7 @@ async def test_queued_messages_keep_separate_grants_and_reports_do_not_trigger_t
     async with asyncio.timeout(3):
         while len(modes) < 3 or session._lock.locked():
             await asyncio.sleep(0.01)
-    assert modes == ["read", None, "maintain"]
+    assert modes == ["read", "auto", "maintain"]
 
 
 @pytest.mark.parametrize("backend", ["codex", "claude-code"])
@@ -1479,13 +1479,17 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
         pass
     async for _ in session_manager._execute_claimed_request(session.id, "普通任务"):
         pass
-    assert seen == [(True, True), (False, False)]
-    response = await client.get(
-        "/api/wiki/read",
-        params={"doc": "notes.md"},
-        headers={"Authorization": f"Bearer {credentials[0]}"},
-    )
-    assert response.status_code == 403
+    async for _ in session_manager._execute_claimed_request(session.id, "关闭本轮", wiki_mode="off"):
+        pass
+    assert seen == [(True, True), (True, False), (False, False)]
+    assert len(set(credentials)) == 2
+    for credential in credentials:
+        response = await client.get(
+            "/api/wiki/read",
+            params={"doc": "notes.md"},
+            headers={"Authorization": f"Bearer {credential}"},
+        )
+        assert response.status_code == 403
 
 
 async def test_sapphire_existing_writer_and_async_git_share_framework_history(

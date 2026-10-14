@@ -133,6 +133,8 @@ async def app_wiki(request: Request, app_id: str, operation: str):
             kwargs |= {
                 "offset": int(request.query_params.get("offset", 0)),
                 "limit": int(request.query_params.get("limit", 30)),
+                "view": request.query_params.get("view", "full"),
+                "idempotency_key": request.query_params.get("idempotency_key"),
             }
         elif operation == "documents":
             kwargs |= {
@@ -154,6 +156,8 @@ async def app_wiki(request: Request, app_id: str, operation: str):
             kwargs |= {"offset": int(request.query_params.get("offset", 0)), "limit": int(request.query_params.get("limit", 100)), "cursor": request.query_params.get("cursor")}
         elif operation.startswith("jobs/"):
             kwargs["job_id"] = operation.split("/")[1]
+            if request.method == "GET":
+                kwargs["view"] = request.query_params.get("view", "full")
     except (ValueError, KeyError, ValidationError) as exc:
         raise WikiError(f"Invalid knowledge request: {exc}", 422)
     # The same handlers enforce task grants when an MCP credential reaches this app path.
@@ -294,13 +298,13 @@ def info(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_to
 
 
 @router.get("/guide")
-def get_guide(request: Request, module: Literal["article", "writing"], user_id: ScopeUser = None, _: str = Depends(verify_token)):
+def get_guide(request: Request, module: Literal["query", "retrieval", "entry", "article", "writing"], user_id: ScopeUser = None, _: str = Depends(verify_token)):
     from ..wiki.workflow import load_guide
 
     task = access(request)
     scope = verify(request.headers.get("authorization", "").split(" ", 1)[-1])
     if task is None or scope is None or task.user_id != user_id:
-        raise WikiError("Guides for writing require an active curator assignment", 403)
+        raise WikiError("Wiki guides require an active authorized turn", 403)
     return {"module": module, "content": load_guide(module, scope.wiki_task_id)}
 
 
@@ -805,22 +809,28 @@ def list_jobs(
     request: Request,
     offset: int = Query(0, ge=0),
     limit: int = Query(30, ge=1, le=100),
+    view: Literal["compact", "full"] = "full",
+    idempotency_key: str | None = None,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
     access(request)
-    return WikiJobs(user_id).list(offset, limit)
+    return WikiJobs(user_id).list(offset, limit, view=view, idempotency_key=idempotency_key)
 
 
 @router.get("/jobs/{job_id}")
 def get_job(
     job_id: str,
     request: Request,
+    view: Literal["compact", "full"] = "full",
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
     access(request)
-    return WikiJobs(user_id).get(job_id)
+    if view not in {"compact", "full"}:
+        raise WikiError("Invalid maintenance view", 422)
+    result = WikiJobs(user_id).get(job_id)
+    return WikiJobs.summary(result) if view == "compact" else result
 
 
 @router.post("/jobs/{job_id}/cancel")

@@ -1,4 +1,7 @@
-"""Explicit-task Wiki tools. Authorization is enforced by the host API."""
+"""Account and live-turn Wiki tools. Authorization is enforced by the host API."""
+
+import json
+from typing import Literal
 
 import httpx
 from mcp.server.fastmcp import FastMCP, Image
@@ -26,8 +29,9 @@ class TaskWiki(FastMCP):
             "graph",
             "inspect_image",
             "jobs",
+            "load_guide",
         }
-        if task.mode == "maintain":
+        if task.mode in {"auto", "maintain"}:
             if tasks.is_curator_worker(task):
                 names |= {"organize", "publish", "blocks", "restructure", "revise", "load_guide"}
             elif not task.job_id:
@@ -113,9 +117,9 @@ def info() -> dict:
 
 @mcp.tool()
 def load_guide(module: str) -> dict:
-    """Load article conventions for normalization, or writing rules before new prose.
+    """Load query/retrieval details or entry rules when a Wiki task needs them.
 
-    Ordinary reading and simple typo fixes do not need the writing module.
+    Article conventions and writing rules require an active curator assignment.
     """
     return call("GET", "guide", params={"module": module})
 
@@ -173,8 +177,9 @@ def maintain(
 
     Material is preserved verbatim; target is a new Library/*.md path, otherwise
     Library/Inbox is used. Sources are read-only citations, not write targets.
-    Existing paths must be explicitly selected in the user's request. Only
-    /wiki maintain grants this action; no scope means no full-vault maintenance.
+    In autonomous mode, choose exact paths relevant to the current task.
+    Explicit maintenance mode retains the user's selected paths. The user need
+    not type /wiki; no material or paths means no full-vault maintenance.
     """
     return call(
         "POST",
@@ -292,10 +297,31 @@ def restructure(
 
 
 @mcp.tool()
-def jobs(job_id: str | None = None, offset: int = 0, limit: int = 30) -> dict:
-    """Inspect maintenance progress and item outcomes."""
-    return call(
+def jobs(job_id: str | None = None, offset: int = 0, limit: int = 30,
+         idempotency_key: str | None = None, view: Literal["compact", "full"] = "compact",
+         export: bool = False) -> dict:
+    """Navigate jobs with small summaries; filter exact idempotency keys on the server.
+
+    Use job_id and view=full for item outcomes. export=true saves the complete
+    selected result to a private JSON file and returns its path, bytes and hash.
+    Oversize results are exported automatically. Read needed fields from that
+    file with a short program; never embed the returned JSON in a shell command.
+    """
+    if job_id and idempotency_key is not None:
+        return {"error": "Choose job_id or idempotency_key", "status": 422}
+    result = call(
         "GET",
         f"jobs/{job_id}" if job_id else "jobs",
-        params={"offset": offset, "limit": limit},
+        params={"offset": offset, "limit": limit, "view": view,
+                **({"idempotency_key": idempotency_key} if idempotency_key is not None else {})},
     )
+    if isinstance(result.get("status"), int) and result["status"] >= 400:
+        return result
+    from ..wiki.evidence import INLINE_JOB_BYTES, capture_jobs
+    if export or len(json.dumps(result, ensure_ascii=False).encode("utf-8")) > INLINE_JOB_BYTES:
+        from ..mcp_identity import current_scope
+        from ..wiki.jobs import WikiJobs
+        artifact = capture_jobs(current_scope(), result)
+        summary = WikiJobs.summary(result) if job_id and view == "full" else result if job_id else {"count": len(result["items"]), "next_offset": result["next_offset"]}
+        return {"summary": summary, "artifact": artifact}
+    return result

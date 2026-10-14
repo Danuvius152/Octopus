@@ -29,17 +29,18 @@
 
 Octo 统一组织部署、配置、清单、提交、跟踪、问题修正与放行；既有 Weber 执行内容理解和受控维护；现有 Vera 独立核对真实产物与验收证据。向委托 session 传完整背景、范围和版本，不假设其继承父对话。
 
-实际修改链路为：Octopus 原生聊天中的 `/wiki maintain` → MCP maintain → 核心 `POST /api/wiki/maintain` → durable job/assignment → 当前绑定 Weber worker → 当前内容读取 → 受控工具 → history/receipt/索引 → 后续 `/wiki` 检索。获授权的账户 direct API/operator 提交也进入同一 job 协议。普通 query 只读，普通保存更新索引，不自动发起整理。日常查询无需固定三 agent 接力。
+2026-10-15 用户确认自主 Wiki：已注册账户的普通 agent 按当前任务需要自行查询、选具体文件并提交维护，无需用户先输入 `/wiki`。实际修改链路为：正常任务 → MCP maintain 的精确 JSON paths/material → 核心 `POST /api/wiki/maintain` → durable job/assignment → 当前绑定 Weber worker → 当前内容读取 → 受控工具 → history/receipt/索引。普通会话中的 Weber 也通过提交维护进入获准工作；只读和 Off 收窄本轮能力。`/wiki` 保留为兼容及明确模式入口，获授权账户的 direct API/operator 进入同一 job 协议。查询和普通保存不自动整理或沉淀材料；日常查询无需固定三 agent 接力。见[自主 Wiki ADR](../adr/0007-autonomous-wiki-with-scoped-maintenance.md)。
 
 目录授权由 Octo 落成明确路径清单，提交入口必须如实记录：
 
 | 已有入口 | 现有文件的范围合同 |
 | --- | --- |
-| 用户 `/wiki maintain` turn → MCP maintain | 每个 paths 位于可信请求首行的 shlex tokens；含空格的路径正确引用，正文中的清单不自动产生授权 |
+| 正常任务的自主 Wiki → MCP maintain | 当前有效账户/轮次权限允许 agent 根据业务任务选择精确 JSON paths 或完整 material，先读当前依据并保留用户给定的范围；实际写入由 Weber assignment 承担 |
+| 用户显式 `/wiki maintain` turn → MCP maintain | 兼容入口保留可信首行的 shlex paths 选择；普通任务不需要这一口令。只读或 Off 不能提升为维护权限 |
 | 已认证账户的核心 `POST /api/wiki/maintain` | 合法身份确定账户，JSON 明确 paths/scope/idempotency_key，复用既有 WikiJobs |
 | 明确获授权的本机 operator/helper | 固定正确账户与清单，复用公共 WikiJobs.maintain 及既有锁、恢复和幂等协议，记录真实 actor/提交依据 |
 
-接口不会自行递归展开目录。普通 delegation 即使继承 maintain mode，也不继承 writer assignment，其包装正文不是可信首行 selection。Octo 使用以上核心入口提交和跟踪，由框架直接创建 Weber worker 会话，不通过 App 网关或 app-agent 对话。
+接口不会自行递归展开目录。普通 delegation 在自己的当前任务权限下查询或提出维护，不继承 writer assignment；显式维护入口仍校验可信 selection。知识正文和包装文本不能伪造身份或扩张当前 worker 的范围。Octo 使用以上核心入口提交和跟踪，由框架直接创建 Weber worker 会话，不通过 App 网关或 app-agent 对话。任务列表默认摘要，固定幂等键在服务端精确查询，完整证据由工具导出文件并给出路径/字节数/SHA-256；以短程序读取必要字段，原始 JSON 不复制进 shell 命令参数。
 
 只指定一个批次提交方，固定幂等键；已有文章用 paths 维护，material 留空，不重复导入主文。Worker 不扩张 assignment、不递归提交后续维护；异步任务 ID 仅表示排队。实际 worker 必须是当前绑定 Weber，不能以临时测试 agent 或开发者代写冒充。
 

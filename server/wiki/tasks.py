@@ -38,8 +38,21 @@ class WikiTasks:
     def unassign(self, session_id):
         self.assignments.pop(session_id, None)
 
+    def mode_for(self, session, requested: str | None) -> str | None:
+        """Default registered accounts to autonomous use; retain explicit restrictions."""
+        if requested in {"off", "read", "maintain"}:
+            return requested
+        if requested not in {None, "auto"}:
+            raise WikiError("Unknown wiki task mode")
+        from .registry import registry
+        if (session.user_id in registry._blocked
+                or (session.user_id is None and not registry.legacy_enabled)
+                or not (registry.state(session.user_id) / "config.json").is_file()):
+            return None
+        return "maintain" if session.id in self.assignments else "auto"
+
     def open(self, session, mode: str, request: str = "") -> str:
-        if mode not in {"read", "maintain"}:
+        if mode not in {"auto", "read", "maintain"}:
             raise WikiError("Unknown wiki task mode")
         token = secrets.token_hex(24)
         self.active[token] = WikiTask(
@@ -75,9 +88,9 @@ class WikiTasks:
             scope.session_id,
             scope.user_id,
         ):
-            raise WikiError("An active explicit /wiki task is required", 403)
-        if write and task.mode != "maintain":
-            raise WikiError("Use /wiki maintain to ingest or organize materials", 403)
+            raise WikiError("Wiki access is unavailable outside the active authorized turn", 403)
+        if write and task.mode not in {"auto", "maintain"}:
+            raise WikiError("This turn is limited to read-only Wiki access", 403)
         if publish and task.mode != "maintain":
             raise WikiError("An explicit maintenance task is required", 403)
         return task
@@ -126,6 +139,8 @@ class WikiTasks:
             return
         if task.job_id:
             raise WikiError("A running worker cannot expand its assigned files", 403)
+        if task.mode == "auto":
+            return  # The agent declares exact paths in the maintenance request.
         # Only the trusted request's first line selects existing files. Article
         # body, retrieved notes and model-supplied scope descriptions cannot.
         try:
@@ -207,7 +222,7 @@ def explicit_mode(message: str, selected: str | None = None) -> str | None:
     # A person's explicit cancellation must win over text in their draft.
     # This transport value only revokes access; never pass it to tasks.open.
     if selected == "off":
-        return None
+        return "off"
     words = message.strip().split(maxsplit=2)
     if words and words[0] == "/wiki":
         return words[1] if len(words) > 1 and words[1] == "maintain" else "read"
