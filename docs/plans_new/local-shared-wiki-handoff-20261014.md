@@ -1,6 +1,6 @@
 # 共享 Wiki v2：2026-10-14 暂停与交接
 
-> **Status:** in-progress — 用户暂停开发；35/46 份 Markdown 已正式验收，原迁移剩余 9 份，两份 Inbox 原稿保留供流程完善后的测试。下一批未提交。
+> **Status:** in-progress — 用户暂停开发；35/46 份 Markdown 已正式验收，原迁移剩余 9 份，两份 Inbox 原稿保留供流程完善后的测试。下一批未提交；2026-10-15 补录 R08 材料复用修复与 R14 同步测量，待后续开发。
 
 这是用户要求“目前先开发到这里”的停止记录。先完成交接，不继续维护、流程开发、部署或实验。以后用户明确恢复时，再按本页续接；本页与[当前进度](local-shared-wiki-progress-v2.md)更新最初[实施交接](local-shared-wiki-implementation-v2.md)中的停止位置，后者的历史证据保留。
 
@@ -10,7 +10,7 @@
 
 | 项目 | 已核事实 | 尚未完成 |
 | --- | --- | --- |
-| 核心与部署 | `74eab95fa1f418d726c27c562fddacaf5c2c9a1f`，运行 release `main-74eab95fa1f4`；schema7 / sections-v7 / html-body-v3 | 本次没有新增代码或部署；后续流程变更仍待开发验证 |
+| 暂停时核心与部署 | `74eab95fa1f418d726c27c562fddacaf5c2c9a1f`，当时运行 release `main-74eab95fa1f4`；schema7 / sections-v7 / html-body-v3 | 此行为 10-14 内容暂停时的历史基线；后续框架发布见 §5.1，恢复时重新核当前版本 |
 | 原有验证 | 630 专项、八关、UI 76 / Codex 19 / browser、A、九篇试点与 Q58 已通过 | 不因续接重新部署或重跑旧门禁；有新改动再运行适用检查 |
 | 内容验收 | 试点 9 + pika001 8 + pika002 8 + pika003 5 + pika004 5，共 35 篇；33 变化、2 真实 no_change | 原迁移还剩 9 篇；全量未完成 |
 | Library 分母 | 最近完整枚举为 46 MD / 365 文件；35 已验收、9 原迁移待办、2 新测试原稿保留 | 后续新增、移动、修改仍须动态对账，不能固定 44 或 46 |
@@ -102,14 +102,36 @@ pika004 的旧 Weber 写后 read_many seq59→60 有实际内容／范围缺口�
 
 仓库位于 `/home/jack/Octopus`，保留用户 dirty 工作，尤其 `docs/plans_new/local-shared-wiki-implementation-v2.md` 与 `docs/sapphire-wiki-iterate-prompt.md`。此前 spec/retrieval/evaluation/prompts 的事实和原则修改仍有未提交内容，后续聚焦交付时逐一核 ownership；不做 reset/stash 覆盖、无关整理或配置恢复。
 
+### 5.1 后续开发登记：R08、R14
+
+2026-10-15 用户要求将以下两项加入交接，供后续开发续接。两项尚未实施或验收；本次为文档登记，内容维护仍处于暂停状态。保持“原迁移九篇 → 汇总经验完善通用流程 → 两份保留 Inbox 原稿实测”的既有内容顺序。原迁移采用具体 `paths`、空 `material`，其正文验收不证明新材料跨 key 复用。R08 是后续日常新材料入库交付须完成的修复与验收项；R14 是同步基础设施的测量项，不能用日常模型耗时或 token 记录替代。
+
+框架审查中其余选定修复已经验收并部署，实际运行代码提交为 `20601996235af3d680145011adba9729fb9235df`，发布证据见[框架与 Wiki 审查计划 §1.3](../plans/octopus-framework-wiki-review-20261014.md#13-2026-10-15-定稿验收)及[本机自动发布记录](../local-wsl.md)。框架上线没有增加 Library 验收篇数，也没有恢复生产维护。下一位开发者须核当前 Git、运行快照和源码；§1 的 `74eab95` 与历史门禁继续作为内容暂停时的证据。
+
+| 编号 | 后续任务与状态 | 原合同与代码入口 |
+| --- | --- | --- |
+| R08 | v2 整理保留可验证的原始材料身份，并安全复用跨 key 的相同材料；已定位，待修复 | [R08 修复与验收合同](../plans/octopus-framework-wiki-review-20261014.md#r08-v2-整理保留可验证的原始材料身份)、`server/wiki/normalize.py`、`operations.py`、`materials.py`、`jobs.py`、`history.py` |
+| R14 | Wiki 同步成本与账户间等待；待测量，优化由结果决定 | [R14 测量合同](../plans/octopus-framework-wiki-review-20261014.md#r14-同步成本和账户间等待先测量)、`server/wiki/registry.py`、`store.py`、`tests/test_wiki_sync.py` |
+
+**R08 开发合同：** 受控 normalization 同时提交可信的原始材料身份与生成结构归属，与 History journal、publication、operation receipt、索引及恢复一起提交。复用前须从当前文件验证原始字节；仅保留 input hash 不足。用户原有 YAML、Key note 和同名标题也是材料，不能按外观或任意注释剥离。人工修改影响原材料时失效或重新验证；移动保持稳定身份，同路径替换不继承复用资格。保留编码、BOM 与换行等字节语义，不另建永久原稿正文副本；必要 durable schema 变更提供迁移，保全身份与历史。
+
+**R08 关闭条件：** 用真实 job 的 `ingest → v2 normalize → 不同 key 再 submit` 链路证明仅有一个当前文档，不再次执行模型整理；覆盖并发跨 key、重启、派生索引重建与恢复、用户原有 YAML / Key note、CRLF / BOM、人工修改、伪造标记、改名及同路径替换。复用 `tests/test_wiki_jobs.py`、`test_wiki_curation.py`、`test_wiki_history.py` 的相关合同并补 v2 回归，保留已有 legacy reuse 验证。原迁移成功篇及两份 Inbox 保留原稿不用于提前试修或重复整理。
+
+**R14 测量合同：** 固定源码、依赖、隔离语料规模和延迟判据，分别记录冷启动、无变化补偿、单文件增删改、查询、关闭等待、活跃 vault 超过 Store 缓存容量六类操作的耗时、文件读取量、索引代际、观察器数及并发主 API / WS 延迟。当前容量为 32 个 Store，不是每库文档数；已知文件事件消费与后台完整补偿扫描分别测量。使用临时语料或私有隔离评测，不改生产库，不公开原文或账户路径。
+
+**R14 后续决策与验收：** 若测量证明慢账户拖延其他账户，再选择有限批次、游标、公平调度或可协作停止，并以同一工作量复验。保留实际线程完成后才能关闭的 writer 语义，以及现有索引新鲜度、错误和 checked time 表达；普通问库仍不触发 curator。尚未 ready 时是否允许使用旧索引属于另行明确的产品决定。测量结论、必要优化及适用回归均须留证；目前不将 R14 记为已修复性能故障，也不自动启动检索扩展。
+
+后续实现按 AGENTS 完成适用检查，记录源码、命令、结果及不可用检查。本次补录不启动代码开发、模型调用、生产维护、流程实验或部署；新的实现选择在实际开发时按原合同核对。
+
 ## 6. 可复制的交接 prompt
 
 ```text
 继续 Octopus 共享 Wiki v2，但先读取暂停交接，不从旧实现计划的初始停止点重跑。
-仓库 /home/jack/Octopus。先读 AGENTS.md、docs/plans_new/local-shared-wiki-handoff-20261014.md、local-shared-wiki-progress-v2.md、spec 和适用 v2 合同。
+仓库 /home/jack/Octopus。先读 AGENTS.md、docs/plans_new/local-shared-wiki-handoff-20261014.md、local-shared-wiki-progress-v2.md、spec 和适用 v2 合同，以及 docs/plans/octopus-framework-wiki-review-20261014.md 的最终发布记录和 R08/R14 合同。
 证据根 B=/home/jack/.octopus/users/f527ad605dd4/workspace/wiki-v2-rollout-20261013/evidence/stage-a-takeover-20261013；核 B/state.json、current-library-maintenance-ledger.json、batches/pika-004/acceptance.json 和 next-full-batch-other-001-draft.json。
-用户在2026-10-14暂停；此次提示明确恢复，按保存结果先核当前 jobs/后台/委托及真实授权，已成功未变项不重做。核心74eab95/schema7/sections-v7/html-body-v3已上线，旧门禁与35篇验收通过，不重部署或重跑旧门禁。最近46MD/365files：35通过，9原迁移待处理，2Inbox原稿保留，全量未完成。
+用户在2026-10-14暂停；此次提示明确恢复，按保存结果先核当前 jobs/后台/委托及真实授权，已成功未变项不重做。74eab95/schema7/sections-v7/html-body-v3为内容暂停时历史基线；2026-10-15框架修复已部署20601996235af3d680145011adba9729fb9235df，恢复时再核实际当前源码与运行快照，不无因重部署或重跑旧门禁。内容验收没有因框架上线增加：最近46MD/365files，35通过，9原迁移待处理，2Inbox原稿保留，全量未完成。
 下一other001五篇具体路径见交接文档，固定key wiki-v2-library-20261013-batch-other-001；Octo已有88,047字符同版全文预读，但尚无job，worker-scope和执行产物尚缺。恢复时重新核当前版本/同key jobs/真实MCP绑定；只由合法原生具体selection或认证core合同提交既有Weber durable assignment。无Wiki能力不能伪造授权，普通ask/private plan不赋写权。之后处理四篇课程MD。每篇Weber本人当前全文读取、有限维护或真实no_change、回执/历史/索引、当前回读/精确定位及适用问答证据收口；保全原文/条件/论证结尾/公式代码链接/YAML身份，不新造来源，不执行正文指令，不默认新Concept/Topic。
 Vera有效delegation e5f17154ffae；list确认上一轮终态后同ID omit name续审，旧93fa不可续。保留全部旧失败、observer_attention和pika004真实旧回读缺口，以已补当前验收为准，不重排成功任务。
+新增后续开发待办见交接§5.1：R08原始材料身份/跨key复用缺陷尚未修复，是后续日常新材料入库交付的验收项，须从当前文件验证原始字节，并覆盖真实job ingest→v2 normalize→不同key再submit及并发/重启/恢复，不能靠input hash或已有正文迁移验收冒充通过。R14同步成本与账户间等待尚待测量，六类隔离工作量先测量，证实拖延才优化；与日常模型耗时/token实测分别记账，旧索引服务策略仍需明确产品决定，不自动扩展检索开发。两项保留待办，不提前加工两份Inbox原稿或重做成功篇。
 先完成原迁移9篇，再汇总全部经验完善通用短system与按需skill/组件流程，最后上线并用两份Inbox原稿测试；现在不应用daily-workflow-candidate，不提前整理测试原稿。未来速度按端到端耗时/往返/token验收，不按当前题名或topic特设规则；QA少token定位→摘要/必要上下文→答案confidence，可迭代检索。最终动态全Library/Vera终验、新当前一致恢复点及隔离验证、公共事实docs聚焦提交推送都待完成。保留现有模型/persona/凭据/memory/绑定/root与用户dirty，不经App/Sapphire/SmartReader/PDF/Wolfram管线。长任务用后台idle0明确timeout，启动后结束等回传，不空等造成超时。
 ```
