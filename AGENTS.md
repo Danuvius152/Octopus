@@ -306,6 +306,10 @@ updates; retaining this Git remote does not recreate a GitHub fork relationship.
 - Commit and push this project's changes to `origin`; keep source changes in
   focused commits so original-author updates can be reviewed and integrated
   without losing local behavior.
+- After pushing a fully validated `main` code change on this WSL installation,
+  deploy and retire the previous runtime snapshot using `docs/local-wsl.md`
+  §“自动发布”. The user has authorized this flow without another confirmation.
+  Documentation-only commits do not restart the service.
 - When the user requests original-author updates, run `git fetch upstream`,
   inspect the incoming changes, and merge `upstream/main` into the maintained
   branch. The repositories still share Git history despite GitHub detachment.
