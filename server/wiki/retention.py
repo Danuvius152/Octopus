@@ -178,6 +178,10 @@ def collect(history, now=None):
                             f"UPDATE change_management SET {side}_state=NULL WHERE change_id=?",
                             (row["id"],),
                         )
+                        db.execute(
+                            f"UPDATE change_material_origins SET {side}_state=NULL WHERE change_id=?",
+                            (row["id"],),
+                        )
                 if row["status"] == "conflict" and not unresolved and not safe:
                     expired_proposals += db.execute(
                         "DELETE FROM change_proposals WHERE change_id=?", (row["id"],)

@@ -71,7 +71,7 @@ def process_alive(pid):
     try:
         state = __import__("pathlib").Path(f"/proc/{pid}/stat").read_text().split()[2]
         return state != "Z"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return False
 
 

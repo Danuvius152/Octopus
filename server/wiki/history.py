@@ -11,6 +11,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
+from . import origins
 from .store import WikiError, is_maintainable_text, revision
 
 _owners = threading.local()
@@ -121,6 +122,8 @@ class WikiHistory:
         publication=None,
         operation="save",
         operation_details=None,
+        origin_state=origins.UNCHANGED,
+        before_origin=origins.UNCHANGED,
     ):
         if change_id:
             with self.store.connect() as db:
@@ -198,6 +201,12 @@ class WikiHistory:
                 "INSERT INTO change_management VALUES(?,?,?)",
                 (row["id"], json.dumps(before_state), json.dumps(after_state)),
             )
+            origins.record(
+                db, row["id"], document_id, row["before_hash"], row["after_hash"],
+                before_state=before_origin, after_state=origin_state,
+            )
+            if status == "applied":
+                origins.apply(db, row["id"])
             if publication:
                 first = db.execute("SELECT input_revision FROM job_publications WHERE job_id=? AND source_doc=? ORDER BY rowid LIMIT 1", (publication["job_id"], publication["source_doc"])).fetchone()
                 db.execute("INSERT INTO job_publications VALUES(?,?,?,?,?,?,0)", (
@@ -222,6 +231,7 @@ class WikiHistory:
                 change = db.execute(
                     "SELECT path,after_hash FROM changes WHERE id=?", (change_id,)
                 ).fetchone()
+                origins.apply(db, change_id)
                 if change and change["after_hash"] is None and not self.store.path(change["path"]).is_file():
                     self.store.detach_path(db, change["path"])
                     return
@@ -246,10 +256,8 @@ class WikiHistory:
         external = self.state / "external-change.json"
         if external.exists():
             entry = json.loads(external.read_text())
-            if entry.get("version") == 2:
-                self.finish_external(entry)
-            else:
-                self.record_external(
+            if entry.get("version") != 2:
+                entry = self.legacy_external_entry(
                     {
                         path: digest
                         for path, digest in entry["before"].items()
@@ -259,6 +267,10 @@ class WikiHistory:
                     entry["actor"],
                     entry["reason"] + "; recovered external mutation",
                 )
+                # Persist stable source identities and claims before moving
+                # anything. Every subsequent replay uses the same change IDs.
+                atomic(external, json.dumps(entry).encode())
+            self.finish_external(entry)
             external.unlink()
             self.store.refresh()
         with self.store.connect() as db:
@@ -278,34 +290,100 @@ class WikiHistory:
             )
 
     def record_external(self, before, after, actor, reason):
-        # Unambiguous exact-content moves cover Sapphire rename and Git renames;
-        # inode-based moves are additionally detected by the store's refresh.
+        with self.locked():
+            self.finish_external(self.legacy_external_entry(before, after, actor, reason))
+
+    def legacy_deleted_reservation(self, db, identity, path, digest):
+        """Recognize an identity created solely by the old deletion-half record."""
+        if identity["file_key"] or identity["origin"] is not None:
+            return False
+        doc_id = identity["id"]
+        if (
+            db.execute("SELECT 1 FROM documents WHERE id=?", (doc_id,)).fetchone()
+            or db.execute("SELECT 1 FROM uid_aliases WHERE doc_id=?", (doc_id,)).fetchone()
+            or db.execute("SELECT 1 FROM operation_receipts WHERE doc_id=?", (doc_id,)).fetchone()
+        ):
+            return False
+        changes = db.execute(
+            """SELECT c.path,c.before_hash,c.after_hash,c.status FROM changes c
+            JOIN change_retention r ON r.change_id=c.id WHERE r.document_id=?""",
+            (doc_id,),
+        ).fetchall()
+        return bool(changes) and all(
+            (row["path"], row["before_hash"], row["after_hash"], row["status"])
+            == (path, digest, None, "applied")
+            for row in changes
+        )
+
+    def legacy_move_source(self, db, old, new, digest, identities):
+        source, target = identities.get(old), identities.get(new)
+        if source is None:
+            return target
+        reserved = self.legacy_deleted_reservation(db, source, old, digest)
+        if target is None or target["id"] == source["id"]:
+            if not reserved:
+                return source
+        else:
+            actual_key = self.store.file_key(self.store.path(new).stat())
+            # A real source inode still identifies an unrecorded move, including
+            # an unindexed edit. A stale destination binding cannot override it.
+            if source["file_key"] and source["file_key"].split(":")[:2] == actual_key.split(":")[:2]:
+                return source
+            # The old handler can reserve the now absent source path after the
+            # real identity has already moved. Keep that verified current target;
+            # preserve the reservation's history without moving or merging it.
+            if reserved and target["file_key"] == actual_key and db.execute(
+                "SELECT 1 FROM documents WHERE id=? AND path=?", (target["id"], new),
+            ).fetchone():
+                return target
+        raise WikiError(
+            f"Ambiguous external move identity for {old} -> {new}; journal and identities retained", 409,
+        )
+
+    def legacy_external_entry(self, before, after, actor, reason):
+        """Upgrade legacy inventories, including an already partly applied move.
+
+        An absent old path is not an explicit absence of origin state. A unique
+        exact move may already have transferred its identity to the new path.
+        Capture that binding once; finish_external then owns replay and indexing.
+        """
+        removed, added = set(before) - set(after), set(after) - set(before)
+        moves = {}
+        for old in sorted(removed):
+            candidates = [new for new in added if after[new] == before[old]]
+            if len(candidates) == 1 and sum(digest == before[old] for digest in before.values()) == 1:
+                moves[old] = candidates[0]
+        captured = {}
         with self.store.connect() as db:
             ownership = {
                 row["path"]: dict(row)
                 for row in db.execute("SELECT * FROM managed_notes")
             }
-        removed = set(before) - set(after)
-        added = set(after) - set(before)
-        for old in sorted(removed):
-            candidates = [new for new in added if after[new] == before[old]]
-            if (
-                len(candidates) == 1
-                and sum(before[path] == before[old] for path in removed) == 1
-            ):
-                self.store.move_identity(old, candidates[0])
-        for path in sorted(set(before) | set(after)):
-            previous, current = before.get(path), after.get(path)
-            if previous != current:
-                self.record(
-                    path,
-                    (self.blobs / previous).read_bytes() if previous else None,
-                    (self.blobs / current).read_bytes() if current else None,
-                    actor,
-                    reason,
-                    "applied",
-                    before_management=ownership.get(path),
-                )
+            source_states = {
+                row["path"]: dict(row) | {"origin": origins.get(db, row["id"])}
+                for row in db.execute("SELECT id,path,file_key FROM document_identities WHERE path IS NOT NULL")
+            }
+            for path, digest in before.items():
+                raw = (self.blobs / digest).read_bytes()
+                moved_to = moves.get(path)
+                binding = self.legacy_move_source(db, path, moved_to, digest, source_states) if moved_to else source_states.get(path)
+                identity, origin = (binding["id"], binding["origin"]) if binding else (None, None)
+                if identity is None:
+                    identity = uuid.uuid4().hex
+                    db.execute(
+                        "INSERT INTO document_identities VALUES(?,?,?)", (identity, path, ""),
+                    )
+                managed = ownership.get(binding["path"] if binding else path)
+                captured[path] = {
+                    "hash": digest, "content": base64.b64encode(raw).decode(),
+                    "document_id": identity,
+                    "management": managed | {"path": path} if managed else None,
+                    "origin_state": origins.preimage(origin, identity, digest),
+                }
+        return {
+            "version": 2, "id": uuid.uuid4().hex, "before": captured,
+            "paths": sorted(set(before) | set(after)), "actor": actor, "reason": reason,
+        }
 
     def write(self, relative, raw, expected_revision, actor, reason):
         with self.locked():
@@ -316,6 +394,7 @@ class WikiHistory:
         publication=None, restore_document_id=None,
         operation="save",
         operation_details=None,
+        origin_state=origins.UNCHANGED,
     ):
         path = self.store.path(relative)
         if path.exists() and not path.is_file():
@@ -350,7 +429,7 @@ class WikiHistory:
             with self.store.connect() as db:
                 receipt = record(db, doc_id=document["id"], path=relative, before=current, after=current, operation=operation, reason=reason, publication=publication, details=operation_details)
             return {"path": relative, "revision": current, "change_id": None, "receipt_id": receipt, "changed": False, **self.store.index_state()}
-        row = self.record(relative, before, raw, actor, reason, "prepared", management, publication=publication, operation=operation, operation_details=operation_details)
+        row = self.record(relative, before, raw, actor, reason, "prepared", management, publication=publication, operation=operation, operation_details=operation_details, origin_state=origin_state)
         if raw is None:
             path.unlink(missing_ok=True)
         else:
@@ -451,6 +530,7 @@ class WikiHistory:
                     f"SELECT {side}_state FROM change_management WHERE change_id=?",
                     (change_id,),
                 ).fetchone()
+                origin_state = origins.change_state(db, change_id, side)
             management = json.loads(entry[0]) if entry else _UNCHANGED
             result = self.write_locked(
                 row["path"],
@@ -460,6 +540,7 @@ class WikiHistory:
                 f"Restore {change_id} {side} as a new revision",
                 management,
                 restore_document_id=row["document_id"],
+                origin_state=origin_state,
             )
             self.resolve_proposals([change_id])
             return result
@@ -510,11 +591,19 @@ class WikiHistory:
                     "content": base64.b64encode(raw).decode(),
                     "document_id": identity,
                     "management": dict(owned) if owned else None,
+                    "origin_state": origins.preimage(origins.get(db, identity), identity, revision(raw)),
                 }
         return result
 
     def finish_external(self, entry):
-        before = entry["before"]
+        # Older persisted journals can contain claims for bytes edited before
+        # capture. Recheck at consumption as well as at new capture boundaries.
+        before = {
+            path: old | {"origin_state": origins.preimage(
+                old.get("origin_state"), old["document_id"], old["hash"],
+            )}
+            for path, old in entry["before"].items()
+        }
         paths = self.text_paths() if entry["paths"] is None else entry["paths"]
         after = {
             relative: self.store.path(relative).read_bytes()
@@ -534,8 +623,17 @@ class WikiHistory:
                 and sum(v["hash"] == before[old]["hash"] for v in before.values()) == 1
             ):
                 moves.append((old, candidates[0]))
-        for old, new in moves:
-            self.store.move_identity(old, new)
+        with self.store.connect() as db:
+            for old, new in moves:
+                expected = before[old]["document_id"]
+                source = db.execute("SELECT id FROM document_identities WHERE path=?", (old,)).fetchone()
+                target = db.execute("SELECT id FROM document_identities WHERE path=?", (new,)).fetchone()
+                if source and source[0] == expected:
+                    self.store.move_identity(old, new, db)
+                elif not target or target[0] != expected:
+                    raise WikiError(
+                        f"External move identity changed for {old} -> {new}; journal retained", 409,
+                    )
         if entry["reason"] == "delete":
             # A crash may precede the HTTP receipt. Recover the app's durable
             # trash record by original path and verified bytes, not its name.
@@ -559,12 +657,13 @@ class WikiHistory:
                 if len(candidates) == 1:
                     with self.store.connect() as db:
                         db.execute(
-                            "INSERT OR REPLACE INTO app_trash VALUES(?,?,?,?)",
+                            "INSERT OR REPLACE INTO app_trash(trash_id,path,document_id,management,origin_state) VALUES(?,?,?,?,?)",
                             (
                                 candidates[0],
                                 relative,
                                 old["document_id"],
                                 json.dumps(old["management"]),
+                                json.dumps(old.get("origin_state")),
                             ),
                         )
         restored = entry.get("restored")
@@ -616,6 +715,17 @@ class WikiHistory:
                     None,
                 )
             )
+            moved_from = next((old for old, new in moves if new == relative), None)
+            origin_state = origins.UNCHANGED
+            if moved_from is not None:
+                origin_state = before[moved_from].get("origin_state")
+            elif restored and restored["path"] == relative and previous is None:
+                encoded_origin = restored.get("origin_state")
+                doc_id = restored["document_id"]
+                origin_state = origins.preimage(
+                    json.loads(encoded_origin) if encoded_origin is not None else None,
+                    doc_id, revision(raw),
+                )
             self.record(
                 relative,
                 base64.b64decode(previous["content"]) if previous else None,
@@ -624,6 +734,8 @@ class WikiHistory:
                 entry["reason"],
                 "applied",
                 before_management=previous["management"] if previous else None,
+                before_origin=previous.get("origin_state") if previous else None,
+                origin_state=origin_state,
                 document_id=doc_id,
                 change_id=uuid.uuid5(
                     uuid.NAMESPACE_URL, f"{entry['id']}:{relative}"
@@ -726,6 +838,7 @@ class WikiHistory:
                         "human",
                         f"Restore snapshot {snapshot_id}",
                         manifest.get("managed_notes", {}).get(relative),
+                        origin_state=None,
                     )
                 )
             return {"items": results}

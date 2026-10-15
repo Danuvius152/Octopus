@@ -354,6 +354,11 @@ class WikiStore:
         if identity is None:
             return
         # A prior deleted document at the destination keeps its ID as a tombstone.
+        from . import origins
+
+        displaced = db.execute("SELECT id FROM document_identities WHERE path=?", (new,)).fetchone()
+        if displaced and displaced[0] != identity[0]:
+            origins.detach(db, new)
         db.execute(
             "UPDATE document_identities SET path=NULL WHERE path=? AND id<>?",
             (new, identity[0]),
@@ -408,6 +413,9 @@ class WikiStore:
 
     def detach_path(self, db, relative):
         """Observed deletion ends a binding; historical IDs remain tombstones."""
+        from . import origins
+
+        origins.detach(db, relative)
         db.execute(
             "UPDATE document_identities SET path=NULL,file_key='' WHERE path=?",
             (relative,),
@@ -428,6 +436,9 @@ class WikiStore:
             raw = b"" if path.suffix.lower() == ".pdf" else path.read_bytes()
         digest = revision(f"excluded-pdf:{stat.st_mtime_ns}:{stat.st_size}".encode()) if path.suffix.lower() == ".pdf" else revision(raw)
         doc_id = self.identity(db, relative, stat)
+        from . import origins
+
+        origins.observe(db, doc_id, digest)
         signature = f"{stat.st_mtime_ns}:{stat.st_size}:v3"
         existing = db.execute(
             "SELECT * FROM documents WHERE path=?", (relative,)

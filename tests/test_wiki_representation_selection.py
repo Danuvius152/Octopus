@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from server.wiki.schema import VERSION as DURABLE_SCHEMA_VERSION
 from server.wiki.store import WikiError, WikiStore
 from tests import test_wiki_api as api
 from tests import test_wiki_identity as identity_tests
@@ -377,7 +378,7 @@ def test_html_upgrade_reextracts_missing_structure_without_rewriting_history(his
         assert found["total"] == 1 and found["items"][0]["path"] == "Summaries/summary-00.md"
         with upgraded.connect() as db:
             assert durable == {table: [tuple(row) for row in db.execute("SELECT * FROM " + table + " ORDER BY rowid")] for table in tables}
-            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == 7
+            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == DURABLE_SCHEMA_VERSION
         WikiHistory(upgraded).restore(edited["change_id"], current["revision"], "before", "human")
         assert upgraded.path(path).read_bytes() == before
         assert upgraded.read(alpha["id"])["revision"] == created["revision"]
@@ -424,7 +425,7 @@ def test_markdown_old_v5_qualification_is_rebuilt_without_touching_durable_state
             assert {row[0] for row in db.execute("SELECT version FROM search_documents")} == {search_index.VERSION}
             assert {row[0] for row in db.execute("SELECT readable_body FROM search_sections WHERE doc_id=?", (alpha["id"],))} == {0}
             assert durable == {table: [tuple(row) for row in db.execute("SELECT * FROM " + table + " ORDER BY rowid")] for table in tables}
-            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == 7
+            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == DURABLE_SCHEMA_VERSION
         upgraded.refresh()
         assert upgraded.search("realtime", intent="question")["items"][0]["path"] == "Summaries/summary-00.md"
     finally:
@@ -451,7 +452,7 @@ def test_existing_index_upgrade_preserves_identity_revision_and_history(history)
             assert db.execute("SELECT epoch FROM index_state").fetchone()[0] > epoch
             assert db.execute("SELECT count(*) FROM changes WHERE id=? AND status='applied'",
                               (created["change_id"],)).fetchone()[0] == 1
-            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == 7
+            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == DURABLE_SCHEMA_VERSION
     finally:
         upgraded.close()
 

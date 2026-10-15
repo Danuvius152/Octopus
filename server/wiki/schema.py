@@ -2,7 +2,7 @@
 
 from datetime import UTC, datetime
 
-VERSION = 7
+VERSION = 8
 
 
 def initialize(store):
@@ -95,7 +95,20 @@ def initialize(store):
             db.execute("UPDATE documents SET signature=''")
             db.execute("UPDATE index_state SET checked_at=NULL")
             db.execute("INSERT INTO wiki_schema VALUES(7,?)", (datetime.now(UTC).isoformat(),))
+        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=8").fetchone():
+            db.execute("CREATE TABLE material_origins(doc_id TEXT PRIMARY KEY,state TEXT NOT NULL)")
+            db.execute("CREATE TABLE change_material_origins(change_id TEXT PRIMARY KEY,before_state TEXT,after_state TEXT)")
+            db.execute("ALTER TABLE app_trash ADD COLUMN origin_state TEXT")
+            for action in ("INSERT", "UPDATE", "DELETE"):
+                binding = "old" if action == "DELETE" else "new"
+                db.execute(f"""CREATE TRIGGER wiki_origin_{action.lower()} AFTER {action} ON material_origins
+                    BEGIN UPDATE documents SET signature='' WHERE id={binding}.doc_id; END""")
+            db.execute("INSERT INTO wiki_schema VALUES(8,?)", (datetime.now(UTC).isoformat(),))
         available = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if not {"material_origins", "change_material_origins"}.issubset(available):
+            raise WikiError("Material-origin ledger is missing; durable state retained", 503)
+        if "origin_state" not in {row[1] for row in db.execute("PRAGMA table_info(app_trash)")}:
+            raise WikiError("Material-origin trash state is missing; durable state retained", 503)
         search_missing = not {"search_documents", "search_sections", "search_fts"}.issubset(available)
         search_changed = search_missing or (
             "readable_body" not in {column[1] for column in db.execute("PRAGMA table_info(search_sections)")}

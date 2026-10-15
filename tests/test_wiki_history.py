@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from server.config import settings
+from server.wiki import origins
 from server.wiki.app_bridge import begin
 from server.wiki.history import WikiHistory, atomic
 from server.wiki.registry import registry
@@ -360,6 +361,10 @@ async def test_sapphire_rename_delete_restore_preserve_identity_and_owned_additi
 ):
     row, history = sapphire
     original = history.store.read("note.md")
+    origin_state = {
+        "version": 1, "doc_id": original["id"], "revision": original["revision"],
+        "status": "valid", "proof": {"version": 739, "opaque": "private source state"},
+    }
     managed = {
         "path": "note.md",
         "base_hash": original["revision"],
@@ -368,6 +373,7 @@ async def test_sapphire_rename_delete_restore_preserve_identity_and_owned_additi
         "metadata": json.dumps({"author": "Weber 整理"}),
     }
     with history.store.connect() as db:
+        origins.put(db, original["id"], origin_state)
         db.execute(
             "INSERT INTO managed_notes VALUES(:path,:base_hash,:rendered_revision,:regions,:metadata)",
             managed,
@@ -382,6 +388,8 @@ async def test_sapphire_rename_delete_restore_preserve_identity_and_owned_additi
     history.store.path("note.md").rename(history.store.path("renamed.md"))
     await rename.finish()
     assert history.store.read(original["id"])["path"] == "renamed.md"
+    with history.store.connect() as db:
+        assert origins.get(db, original["id"]) == origin_state
     delete = await begin(
         row, "POST", "delete", {}, json.dumps({"path": "renamed.md"}).encode()
     )
@@ -392,11 +400,15 @@ async def test_sapphire_rename_delete_restore_preserve_identity_and_owned_additi
     history.store.path("renamed.md").rename(trash / "file")
     await delete.receipt({"id": tid})
     await delete.finish()
+    with history.store.connect() as db:
+        assert origins.get(db, original["id"])["status"] == "invalid"
+        assert json.loads(db.execute("SELECT origin_state FROM app_trash WHERE trash_id=?", (tid,)).fetchone()[0]) == origin_state
     # Same path reused for another document must not steal the old identity.
     other = history.write(
         "renamed.md", b"other document", None, "human", "create other"
     )
-    assert history.store.read("renamed.md")["id"] != original["id"]
+    replacement_id = history.store.read("renamed.md")["id"]
+    assert replacement_id != original["id"]
     failed_restore = await begin(
         row, "POST", "restore", {}, json.dumps({"id": tid}).encode()
     )
@@ -413,6 +425,9 @@ async def test_sapphire_rename_delete_restore_preserve_identity_and_owned_additi
     assert restored["id"] == original["id"]
     assert restored["metadata"]["author"] == "Weber 整理"
     assert restored["content"] == original["content"]
+    with history.store.connect() as db:
+        assert origins.get(db, original["id"]) == origin_state
+        assert origins.get(db, replacement_id) is None
 
 
 async def test_sync_partial_failure_records_only_actual_text_changes_and_crash_replays_once(
