@@ -217,8 +217,8 @@ Claude 实机检查按本机约定未运行。候选先构建并核验资源，�
 暂缓，完整证据见[审查计划](plans/octopus-framework-wiki-review-20261014.md)。
 
 2026-10-15 随后已重新上线自主 Wiki 与大记录导出修订，实际代码提交为
-`1102448cded75bf1de673011832d213ac5dcffaf`。当前运行工作树为
-`/home/jack/.octopus/releases/main-1102448cded7`，`current` 指向它。
+`1102448cded75bf1de673011832d213ac5dcffaf`。当时运行工作树为
+`/home/jack/.octopus/releases/main-1102448cded7`，当时 `current` 指向它。
 上线前八项门槛全部通过：2,759 项 hermetic backend、407 项 frontend unit；
 78 项纯 UI、22 项 Codex 实机、1 项 Codex 浏览器均通过，无跳过。
 Claude live 检查按本机约定未运行。候选构建、切换后端及健康确认后的前端构建、
@@ -229,6 +229,19 @@ Claude live 检查按本机约定未运行。候选构建、切换后端及健�
 实际正文写入由绑定 Weber assignment 承担；大 jobs 返回直接导出文件。
 本次未提交生产 Library 维护，R08/R14 仍是后续交接事项。
 完整新版验收见[审查计划 §1.4](plans/octopus-framework-wiki-review-20261014.md#14-自主入口与大记录导出的新版验收)。
+
+2026-10-15 又按用户“所有 agent 任何时候都可查询”的要求完成常驻查询与旧会话修复。
+当前代码提交为 `12f2598f44f787eda19d224f1f4cfc2519dd2a90`，已推送；运行目录为
+`/home/jack/.octopus/releases/main-12f2598f44f7`，`current` 指向它。
+本机八项门槛全部通过（2,767 项 hermetic backend、407 项 frontend unit），
+另有 78 项纯 UI、24 项 Codex 实机与 1 项真实浏览器对话通过，无跳过。
+Claude live 检查按本机约定未运行。运行源码 487 个文件与验收 hash 一致，
+候选／服务资源、健康接口、登录页及刷新均验收通过。
+旧 `main-1102448cded7` 快照已退役，两个 SQLite 一致性备份通过 integrity check，
+位置为 `/home/jack/.octopus/backups/before-always-shared-wiki-20261015T051308Z`。
+查询不能被单轮开关关闭；旧 off 仅按只读兼容。恢复旧 Codex 会话前通过原生
+`thread/inject_items` 更新真实 developer 控制器，保留线程与历史，维护仍由
+绑定 Weber assignment 执行。完整证据见[审查计划 §1.5](plans/octopus-framework-wiki-review-20261014.md#15-所有-agent-常驻查询与旧会话控制器修订)。
 
 ## 同步原作者更新
 

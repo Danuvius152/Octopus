@@ -44,7 +44,7 @@ fails if it has drifted. The hand-written version of this list had reached 13 of
 |---|---|---|
 | [Multi-tenancy, second pass: Connectors, Schedules, Harness](plans/multi-tenancy-gaps.md) | in-progress | Proposal: close the gaps a read-only review found where accounts can reach each other's work through the Manage surfaces, and make each class of gap structurally impossible. |
 | [Octopus 本地共享 Wiki：开发任务与验收](plans/local-shared-wiki-ticket-proposal.md) | in-progress | W01–W05 已实现并部署；W06 实际 Weber 补验、真实快照退役与 W07 旧库整理尚未完成。 |
-| [Octopus 框架与 Wiki 审查及修复计划](plans/octopus-framework-wiki-review-20261014.md) | in-progress | 共享查询常驻与旧会话控制器修订正在验收；此前框架／大返回修复已上线，R06、R08、R14 与检索扩展暂缓。 |
+| [Octopus 框架与 Wiki 审查及修复计划](plans/octopus-framework-wiki-review-20261014.md) | in-progress | 共享查询常驻、旧会话控制器及大返回修订已验收并上线；R06、R08、R14 与检索扩展暂缓。 |
 | [本地共享 Wiki：Weber 与任务 prompt 设计](plans/local-shared-wiki-prompt-proposal.md) | in-progress | 任务指南分层已上线，Weber persona 保留；r6 职业字段与零基全文分页修正待实机补验/复核。 |
 | [本地共享 Wiki：实施交接](plans/local-shared-wiki-implementation-handoff.md) | in-progress | W01–W07 历史交接；当前核心、真实试点及 Library 全量执行进度以 v2 进度页为准，旧快照等独立事项保留历史记录。 |
 | [/fork — duplicate a session onto a copied working directory](plans/session-fork.md) | shipped | Duplicate a session onto an independent full copy of its working directory. |

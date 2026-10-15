@@ -1,6 +1,6 @@
 # Octopus 框架与 Wiki 审查及修复计划
 
-> **Status:** in-progress — 共享查询常驻与旧会话控制器修订正在验收；此前框架／大返回修复已上线，R06、R08、R14 与检索扩展暂缓。
+> **Status:** in-progress — 共享查询常驻、旧会话控制器及大返回修订已验收并上线；R06、R08、R14 与检索扩展暂缓。
 
 当前需要先收紧 Wiki 授权、请求归属、账户接管和异常清理，再评估检索与同步的性能。Octopus 仍沿用 FastAPI、SessionManager、Harness、账户作用域和 Wiki Registry 的组织方式；已发现的问题发生在这些模块的交界处，适合在现有框架内修复。
 
@@ -93,7 +93,7 @@
 
 实际 E2BIG 回归证明超长 argv 被系统拒绝、完整 JSON 导出字节数与 SHA-256 一致、短 argv 可从文件读取所需内容；导出目录越界及主库内保存被拒绝，工作区即主库时使用主库外账户状态目录。真实 Codex 在普通消息中自主调用 Wiki 工具并读取大记录的隐藏核验值；Weber 实机维护验证既有原文和未分配旧文章保全。
 
-最终验证的 485 个源码／测试／脚本／前端配置与 package 文件 SHA-256 映射指纹为 `0fae069e7c7bed3d4f384f0503e416cc708c6481507ba7792bc09f0af55ae26f`，计算方法同 §1.3；源码在最后检查后未变。实际代码提交 `1102448cded75bf1de673011832d213ac5dcffaf` 已推送至 `origin/main` 并部署，运行源码为 `/home/jack/.octopus/releases/main-1102448cded7`，`current` 指向它；服务进程目录和全部 485 个源码 hash 与验收映射一致。
+最终验证的 485 个源码／测试／脚本／前端配置与 package 文件 SHA-256 映射指纹为 `0fae069e7c7bed3d4f384f0503e416cc708c6481507ba7792bc09f0af55ae26f`，计算方法同 §1.3；源码在最后检查后未变。实际代码提交 `1102448cded75bf1de673011832d213ac5dcffaf` 已推送至 `origin/main` 并部署，当时运行源码为 `/home/jack/.octopus/releases/main-1102448cded7`，当时 `current` 指向它；服务进程目录和全部 485 个源码 hash 与验收映射一致。
 
 候选先构建并核验，切换快照并重启后端、健康确认后再次构建前端。实际 HTML／JS／CSS 的 SHA-256 分别为 `fd37d32411c53e54a5d127c8158932ddad706e1192e3991b7d95065caa72d573`、`3bd02086b01fff2e8a50b1e037e5c557ab3c2e183735cdb5ab17955cf40ee91b`、`acfaddfdd45830aef37d56a36dced329f82242c8a02d616bd198b06769660326`，与候选一致；真实浏览器登录页和刷新通过，无页面异常或 HTTP 失败。再次核健康后，已删除旧 `main-20601996235a` 工作树；两个 SQLite 一致性备份与 integrity check 已完成，位置为 `/home/jack/.octopus/backups/before-autonomous-wiki-20261014T180726Z`。本次未提交生产 Wiki 维护；原有六份未提交文档的改动保留，R08/R14 内容交接范围和 35/46 验收窗口没有增加。
 
@@ -111,7 +111,9 @@ Codex `exec resume` 不因新的 `-c developer_instructions` 替换历史首条�
 
 原生控制器协议的 8 项隔离回归还覆盖大输入走 stdin、持久化确认后等待退出、错误禁止继续执行、超时及启动句柄晚到后的回收。模拟 Python CLI 的集成替身显式不调用原生准备协议；真实 Codex 测试仍使用完整协议。拒绝草稿验收更新为保留维护只读；手机遮罩测试点击实际可见关闭区，修正中心点被抽屉覆盖的错误坐标。
 
-最终 487 个源码／测试／脚本／前端配置与 package 文件的 SHA-256 映射指纹为 `3ea91ca27c7e3d1ec66db0637415c5360924d83bc4be5aa1cc5f45a14296294a`，计算方法同 §1.3；最后验证后源码未变。当前生产仍为 `1102448`，本修订已完成本机验收，提交和实际发布正在执行；发布后补实际提交、资源及旧快照退役证据。
+最终 487 个源码／测试／脚本／前端配置与 package 文件的 SHA-256 映射指纹为 `3ea91ca27c7e3d1ec66db0637415c5360924d83bc4be5aa1cc5f45a14296294a`，计算方法同 §1.3；最后验证后源码未变。实际代码提交 `12f2598f44f787eda19d224f1f4cfc2519dd2a90` 已推送至 `origin/main` 并部署，当前运行目录为 `/home/jack/.octopus/releases/main-12f2598f44f7`，`current` 和服务进程工作目录均指向该快照，487 个源码 hash 与验收映射逐项一致。
+
+候选构建并校验后切换并重启后端，健康确认后再构建前端。实际 HTML／JS／CSS 的 SHA-256 分别为 `a4543bd16070bd3e0d2aae16f6ea9bce59d24bbef17289d167a2cd800d65839b`、`497a1be273f2e6feb29385e2777cb1e486f9b68637fe2eb914b3cbe08b7c48a9`、`acfaddfdd45830aef37d56a36dced329f82242c8a02d616bd198b06769660326`，与候选一致；真实浏览器登录页及刷新通过，无页面异常或 HTTP 失败。两个 SQLite 一致性备份通过 integrity check，位于 `/home/jack/.octopus/backups/before-always-shared-wiki-20261015T051308Z`；最后核对健康后已删除旧 `main-1102448cded7` 运行工作树。用户原有草稿和交接段落的修改继续单独保留，本次未提交生产 Library 维护，也不改变 35/46 内容验收或 R08/R14 的后续范围。
 
 ## 2 保留的架构与必须成立的边界
 
