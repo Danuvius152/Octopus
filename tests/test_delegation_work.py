@@ -63,7 +63,7 @@ async def work_runtime(monkeypatch, tmp_path):
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
     try:
         yield manager, delegations, parent, starts
     finally:
@@ -297,7 +297,7 @@ async def test_held_claude_reuses_actual_lease_until_work_changes(work_runtime, 
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("claude-code")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
     finished = asyncio.Queue()
 
     async def capture(event):

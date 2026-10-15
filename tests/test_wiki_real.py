@@ -16,6 +16,58 @@ from tests.callback_api import start_callback_api
 pytestmark = [pytest.mark.real, pytest.mark.real_codex]
 
 
+@pytest.mark.parametrize("next_mode", [None, "read"])
+async def test_codex_resumed_turn_replaces_previous_wiki_off_instruction(tmp_path, monkeypatch, next_mode):
+    import uuid
+
+    from server.agent_manager import AgentManager
+    from server.harness import assembly
+
+    monkeypatch.setattr(settings, "wiki_dir", str(tmp_path / "wiki-state"))
+    monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "agents"))
+    db = Database(":memory:")
+    await db.initialize()
+    manager = SessionManager()
+    await manager.initialize(db)
+    agent = await db.get_system_agent()
+    vault = tmp_path / "vault"
+    (vault / "Library").mkdir(parents=True)
+    proof = "WIKI-REOPENED-" + uuid.uuid4().hex
+    note = vault / "Library/permission-proof.md"
+    note.write_text("# Permission proof\nThe current proof is " + proof + "\n")
+    registry.configure(None, vault, agent["id"])
+    api = await start_callback_api(router, overrides={get_session_manager: lambda: manager},
+                                   exception_handlers={WikiError: _wiki_error})
+    monkeypatch.setattr(settings, "port", api.port)
+    reader = await AgentManager(db).create_agent(name="Reader", backend="codex", mcp_servers=[])
+    session = await manager.create_session(reader["id"], "Wiki Off then reopen", str(tmp_path), backend="codex")
+    try:
+        # Seed the initial developer message emitted by the previous release.
+        # The next real resume must repair this existing thread, not replace it.
+        with monkeypatch.context() as legacy:
+            legacy.setattr(assembly, "compose_system_prompt", lambda *args, **kwargs:
+                "Wiki is explicitly disabled for this turn; do not access the vault or delegate around this restriction.")
+            first = await manager.start_message(session.id, "Only reply MODE-OFF-ACK; do not use any tools.", wiki_mode="off")
+            assert (await asyncio.wait_for(first.wait(), 120)).outcome.status == "success"
+        native_id = session.claude_session_id
+        cutoff = len(await db.load_messages(session.id))
+        kwargs = {"wiki_mode": next_mode} if next_mode else {}
+        next_turn = await manager.start_message(session.id,
+            "请查询共享本地 Wiki 的 Library/permission-proof.md，返回当前核验码。"
+            "使用本轮提供的 Wiki read 工具，禁止 shell 读文件或委托。", **kwargs)
+        assert (await asyncio.wait_for(next_turn.wait(), 120)).outcome.status == "success"
+        messages = (await db.load_messages(session.id))[cutoff:]
+        replies = "\n".join(row.get("content") or "" for row in messages if row["role"] == "assistant" and row["type"] == "text")
+        assert proof in replies, replies
+        assert any(row["type"] == "tool_use" and "wiki" in str(row.get("tool_name", "")) for row in messages), messages
+        assert session.claude_session_id == native_id, "A per-turn mode change must preserve native conversation history"
+        assert note.read_text() == "# Permission proof\nThe current proof is " + proof + "\n"
+    finally:
+        await manager.stop_all_held_processes()
+        await api.stop()
+        await db.close()
+
+
 async def test_codex_autonomous_wiki_exports_large_evidence_without_shell_payload(tmp_path, monkeypatch):
     import uuid
 

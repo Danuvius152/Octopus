@@ -10,7 +10,7 @@ for (const width of [1280, 390]) {
       isMobile: width < 768,
       hasTouch: width < 768,
     });
-    test("selection is visible, accessible and cancellable", async ({ page, request }) => {
+    test("shared lookup stays available while maintenance is restricted", async ({ page, request }) => {
       // Observe the real client payload without starting a model in a UI test.
       // The server's cancellation boundary is covered in test_wiki_composer.py.
       const sent: Record<string, unknown>[] = [];
@@ -58,34 +58,29 @@ for (const width of [1280, 390]) {
           await expect(wiki).toBeFocused();
           await expect(wiki).not.toHaveCSS("box-shadow", "none");
           await wiki.press("Space");
-          await expect(wiki).toHaveAttribute("aria-pressed", "false");
-          await expect(wiki).toHaveText("Wiki · 自动");
+          await expect(wiki).toHaveAttribute("aria-pressed", "true");
+          await expect(wiki).toHaveText("Wiki · 只读");
           await expect(input).toBeFocused();
           await input.press("Tab");
           await wiki.press("Enter");
-          await expect(wiki).toHaveAttribute("aria-pressed", "true");
-          await activate();
           await expect(wiki).toHaveAttribute("aria-pressed", "false");
         }
         await input.fill("/wiki maintain Library/a.md");
-        // Explicit cancellation persists until the person re-enables Wiki.
-        await expect(wiki).toHaveAttribute("aria-pressed", "false");
-        await activate();
         await expect(wiki).toHaveText("Wiki · 整理");
         await activate();
+        await expect(wiki).toHaveText("Wiki · 只读");
         await expect(input).toHaveValue("/wiki maintain Library/a.md");
-        await expect(wiki).toHaveAttribute("aria-pressed", "false");
         const box = await wiki.boundingBox();
         expect(box).not.toBeNull();
         expect(box!.x).toBeGreaterThanOrEqual(0);
         expect(box!.x + box!.width).toBeLessThanOrEqual(width);
         const nested = "/wiki /wiki maintain 的用法是什么？";
         await input.fill(nested);
-        await expect(wiki).toHaveAttribute("aria-pressed", "false");
+        await expect(wiki).toHaveText("Wiki · 只读");
         await page.getByRole("button", { name: "Send message" }).click();
         await expect.poll(() => sent).toEqual([expect.objectContaining({
           type: "send_message", session_id: session.id,
-          content: nested, wiki_mode: "off",
+          content: nested, wiki_mode: "read",
         })]);
         await expect(input).toHaveValue("");
         await expect(wiki).toHaveAttribute("aria-pressed", "false");

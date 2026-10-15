@@ -61,7 +61,7 @@ def scripted_cli(monkeypatch, scripts):
         return [sys.executable, "-u", "-c", code], {"cwd": ctx.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
     return prompts
 
 

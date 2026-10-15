@@ -16,7 +16,7 @@ servers, composed system prompt) into a `TurnContext`; the profile's
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
@@ -252,6 +252,9 @@ class RuntimeProfile:
     model_settings: Callable[[HarnessCredential | None], ModelSettings] | None = None
     # Collaborators (optional features):
     activity_observer: Callable[..., ActivityObserver] | None = None
+    # Deliver current controller instructions before resuming a runtime whose
+    # native history otherwise retains its initial developer message.
+    prepare_resume: Callable[[TurnContext, list[str], dict[str, Any]], Coroutine[Any, Any, None]] | None = None
     login: LoginDriver | None = None
     transcript_codec: TranscriptCodec | None = None
     # Fork strategy collaborators (session-rewind.md §3). `fork_prepare`

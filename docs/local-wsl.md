@@ -204,8 +204,8 @@ main 的已提交 Wiki 开发记录，六份未提交 Wiki 文档仍在开发目
 `~/.octopus/backups/before-session-settings-20261014T115831Z/`。
 
 2026-10-15 已部署框架与 Wiki 基础设施修复，实际代码提交为
-`20601996235af3d680145011adba9729fb9235df`。当前服务源码工作树是
-`/home/jack/.octopus/releases/main-20601996235a`，`current` 指向它。
+`20601996235af3d680145011adba9729fb9235df`。当时服务源码工作树是
+`/home/jack/.octopus/releases/main-20601996235a`，当时 `current` 指向它。
 上线前八项门槛全部通过，包括 2,751 项 hermetic backend、407 项 frontend unit；
 另有 78 项纯 UI 浏览器、21 项 Codex 实机及 1 项 Codex 浏览器测试通过，无跳过。
 Claude 实机检查按本机约定未运行。候选先构建并核验资源，服务切换和健康确认后
@@ -215,6 +215,20 @@ Claude 实机检查按本机约定未运行。候选先构建并核验资源，�
 保存在 `~/.octopus/backups/before-framework-review-20261014T163707Z/`。
 本次没有执行生产账户认领或 Library 维护；R06、R08、R14 及检索扩展按用户要求
 暂缓，完整证据见[审查计划](plans/octopus-framework-wiki-review-20261014.md)。
+
+2026-10-15 随后已重新上线自主 Wiki 与大记录导出修订，实际代码提交为
+`1102448cded75bf1de673011832d213ac5dcffaf`。当前运行工作树为
+`/home/jack/.octopus/releases/main-1102448cded7`，`current` 指向它。
+上线前八项门槛全部通过：2,759 项 hermetic backend、407 项 frontend unit；
+78 项纯 UI、22 项 Codex 实机、1 项 Codex 浏览器均通过，无跳过。
+Claude live 检查按本机约定未运行。候选构建、切换后端及健康确认后的前端构建、
+实际 HTML／JS／CSS hash、485 个源码文件 hash、进程目录、登录页及刷新均验收通过。
+已删除旧 `main-20601996235a` 工作树；数据库备份通过 integrity check，保存在
+`/home/jack/.octopus/backups/before-autonomous-wiki-20261014T180726Z`。
+普通消息可按任务需要自主查 Wiki 或提交具体维护，显式只读／Off 保留，
+实际正文写入由绑定 Weber assignment 承担；大 jobs 返回直接导出文件。
+本次未提交生产 Library 维护，R08/R14 仍是后续交接事项。
+完整新版验收见[审查计划 §1.4](plans/octopus-framework-wiki-review-20261014.md#14-自主入口与大记录导出的新版验收)。
 
 ## 同步原作者更新
 

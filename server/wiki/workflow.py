@@ -38,7 +38,7 @@ def instructions(mode: str, task_id: str | None = None) -> str:
             card["job_id"] = task.job_id
             card["guides"] = ["article", "writing"]
     base = "本次知识操作卡：" + json.dumps(card, ensure_ascii=False) + "\n"
-    base += "使用本次 mcp__wiki__ 工具；工具描述提供真实参数。原生助手共享当前任务凭据，等待它们结束后完成任务；之后没有知识授权。\n"
+    base += "所有 agent 始终可查询本账户共享 Wiki；使用当前 mcp__wiki__ 工具与真实参数。原生助手共享当前执行凭据，等待它们结束后完成任务；后续轮自动获得查询能力，不复用已失效凭据。\n"
     if mode == "auto":
         base += guide("auto-entry")
     elif mode == "read":

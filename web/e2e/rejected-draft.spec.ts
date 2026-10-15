@@ -52,14 +52,14 @@ test("a rejected draft survives archive and restores its text and attachment to 
     nextId = next.id;
     await page.getByRole("button", { name: "Restore draft" }).click();
     await expect(input).toHaveValue(text);
-    await expect(page.getByRole("button", { name: "Use local Wiki for this message" })).toHaveAttribute("aria-pressed", "false");
+    await expect(page.getByRole("button", { name: "Use local Wiki for this message" })).toHaveText("Wiki · 只读");
     await expect(page.locator(".attachment-pending")).toContainText("retained.txt");
     await expect(page.locator(".attachment-pending")).not.toContainText("uploading");
     expect(sent).toHaveLength(1);
     await page.getByRole("button", { name: "Send message" }).click();
     await expect.poll(() => sent.length).toBe(2);
     expect(sent[1].content).toBe(text.trim());
-    expect(sent[1].wiki_mode).toBe("off");
+    expect(sent[1].wiki_mode).toBe("read");
     expect(sent[1].session_id).toBe(next.id);
     expect(sent[1].attachment_ids[0]).not.toBe(sent[0].attachment_ids[0]);
     const downloaded = await request.get(`${API}/sessions/${next.id}/attachments/${sent[1].attachment_ids[0]}`, { headers });

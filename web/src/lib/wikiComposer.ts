@@ -1,4 +1,4 @@
-/** Human composer intent. `off` revokes access even if the draft says /wiki. */
+/** Human maintenance intent. Legacy `off` means read-only; lookup is always available. */
 export type WikiMessageMode = "read" | "maintain" | "off";
 
 // Match Python str.split() at server/wiki/tasks.py's trusted input boundary.

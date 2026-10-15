@@ -276,7 +276,7 @@ async def test_slow_browser_does_not_delay_stop_or_the_committed_result(runtime,
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
     release = asyncio.Event()
     async with connection(manager, settings.auth_token, release=release) as slow:
         async with connection(manager, settings.auth_token) as healthy:

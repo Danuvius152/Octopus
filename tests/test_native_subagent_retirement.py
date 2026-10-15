@@ -95,7 +95,7 @@ def native_cli(monkeypatch, *, hold=False, child_status="running", parent_error=
 
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
-        harness.profile, build_turn_argv=argv, activity_observer=None,
+        harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None,
     ))
     return starts
 

@@ -40,7 +40,9 @@ class WikiTasks:
 
     def mode_for(self, session, requested: str | None) -> str | None:
         """Default registered accounts to autonomous use; retain explicit restrictions."""
-        if requested in {"off", "read", "maintain"}:
+        if requested == "off":
+            return "read"  # Legacy clients may disable maintenance, never shared lookup.
+        if requested in {"read", "maintain"}:
             return requested
         if requested not in {None, "auto"}:
             raise WikiError("Unknown wiki task mode")
@@ -219,10 +221,10 @@ class WikiTasks:
 
 def explicit_mode(message: str, selected: str | None = None) -> str | None:
     """Only call at trusted input boundaries, never on app context/reports."""
-    # A person's explicit cancellation must win over text in their draft.
-    # This transport value only revokes access; never pass it to tasks.open.
-    if selected == "off":
-        return "off"
+    # Cancelling maintenance must win over command text. Shared lookup is
+    # always available; old clients' off value now means read-only.
+    if selected in {"off", "read"}:
+        return "read"
     words = message.strip().split(maxsplit=2)
     if words and words[0] == "/wiki":
         return words[1] if len(words) > 1 and words[1] == "maintain" else "read"

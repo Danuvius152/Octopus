@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from .codex_activity import CodexActivityObserver, diagnostic_environment
+from .codex_control import refresh_instructions
 from .events import HarnessCredential, HarnessEvent, SubagentUpdate
 from .harness import Harness
 from .login import LoginMethod
@@ -295,6 +296,8 @@ def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
         ctx.working_dir,
         "-c",
         f"developer_instructions={_toml_basic_string(ctx.system_prompt)}",
+        "-c",
+        "features.retain_client_developer_messages=true",
     ]
     if ctx.web_research:
         # A research leaf: enable codex's native web_search and run READ-ONLY so
@@ -1068,6 +1071,7 @@ CODEX = RuntimeProfile(
     stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
     build_turn_argv=build_turn_argv,
     activity_observer=CodexActivityObserver,
+    prepare_resume=refresh_instructions,
     new_event_parser=CodexEventParser,
     build_oneshot_argv=build_oneshot_argv,
     parse_oneshot_stdout=parse_oneshot_stdout,

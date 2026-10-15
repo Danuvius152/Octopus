@@ -56,7 +56,7 @@ def scripted_codex(monkeypatch, *, hold=False):
         return [sys.executable, "-u", "-c", script], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
     return starts
 
 

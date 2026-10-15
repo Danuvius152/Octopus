@@ -98,8 +98,6 @@ def schedule_wiki_mode(request: Request, prompt: str, selected: str | None = Non
     requested = explicit_mode(prompt, selected)
     if not scope:
         return requested
-    if requested == "off":
-        return requested
     if requested:
         task = tasks.require(scope, write=requested == "maintain")
         return task.mode if requested == task.mode else requested

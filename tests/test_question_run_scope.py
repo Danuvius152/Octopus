@@ -43,7 +43,7 @@ async def question_runtime(monkeypatch, tmp_path):
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
 
     async def receive(event):
         events.append(event)
@@ -188,7 +188,7 @@ async def test_idle_held_process_cannot_open_a_new_question(question_runtime, mo
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("claude-code")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
     await manager.start_message(held.id, "Finish")
     context = await asyncio.wait_for(starts.get(), 5)
     async with asyncio.timeout(5):

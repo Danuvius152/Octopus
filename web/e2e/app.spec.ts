@@ -328,7 +328,12 @@ test.describe("Responsive Layout", () => {
 
     // …and entirely off-screen when closed. It used to sit at -260px while
     // being 270px wide, leaving a 10px sliver of sidebar on every screen.
-    await page.locator(".sidebar-overlay").click();
+    const overlay = page.locator(".sidebar-overlay");
+    const overlayBox = await overlay.boundingBox();
+    expect(overlayBox).not.toBeNull();
+    // Its center lies behind the open drawer on this narrow viewport.
+    // Click the actual exposed dismiss area at the right-hand edge.
+    await overlay.click({ position: { x: overlayBox!.width - 8, y: overlayBox!.height / 2 } });
     await expect(page.locator(".sidebar")).not.toHaveClass(/open/);
     // Polled, because the class comes off when the slide-out *starts*.
     await expect

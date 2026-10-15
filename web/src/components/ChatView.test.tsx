@@ -102,12 +102,12 @@ it("keeps a rejected Wiki draft and protects subsequent editing during restorati
   fireEvent.change(input, { target: { value: "" } });
   fireEvent.click(screen.getByRole("button", { name: "Restore draft" }));
   expect(input).toHaveValue("  /wiki maintain Library/a.md  ");
-  expect(wiki).toHaveAttribute("aria-pressed", "false");
+  expect(wiki).toHaveTextContent("Wiki · 只读");
   expect(sendMessage).toHaveBeenCalledTimes(1);
 });
 
 describe("Wiki composer selection", () => {
-  it("gives visible selection feedback and can be turned off", () => {
+  it("restricts maintenance with visible read-only feedback and restores automatic mode", () => {
     const { wiki } = setup();
     expect(wiki).toHaveAttribute("aria-pressed", "false");
     fireEvent.click(wiki);
@@ -119,7 +119,7 @@ describe("Wiki composer selection", () => {
     expect(wiki).not.toHaveClass("bg-primary-50");
   });
 
-  it("grants read access to one sent message and resets for the next", () => {
+  it("restricts one sent message to read-only and restores automatic maintenance for the next", () => {
     const { wiki, input, send, sendMessage } = setup();
     fireEvent.click(wiki);
     fireEvent.change(input, { target: { value: "查找相关文章" } });
@@ -139,14 +139,14 @@ describe("Wiki composer selection", () => {
     expect(wiki).toHaveAttribute("aria-pressed", "true");
   });
 
-  it("clears the selection when switching conversations", () => {
+  it("preserves the read-only restriction with the draft when switching conversations", () => {
     const { wiki } = setup();
     fireEvent.click(wiki);
     act(() => useSessionStore.setState({
       activeSessionId: "other-session",
       sessions: [session, { ...session, id: "other-session" }],
     }));
-    expect(wiki).toHaveAttribute("aria-pressed", "false");
+    expect(wiki).toHaveAttribute("aria-pressed", "true");
   });
 
   it.each([
@@ -163,15 +163,15 @@ describe("Wiki composer selection", () => {
       sessions: [session, { ...session, id: "other-session" }],
     }));
     expect(input).toHaveValue(command);
-    expect(wiki).toHaveAttribute("aria-pressed", "false");
+    expect(wiki).toHaveAttribute("aria-pressed", "true");
     if (returnToOriginal) {
       act(() => useSessionStore.setState({ activeSessionId: session.id }));
       expect(input).toHaveValue(command);
-      expect(wiki).toHaveAttribute("aria-pressed", "false");
+      expect(wiki).toHaveAttribute("aria-pressed", "true");
     }
     fireEvent.click(send);
     expect(sendMessage).toHaveBeenLastCalledWith(
-      returnToOriginal ? session.id : "other-session", command, undefined, "off",
+      returnToOriginal ? session.id : "other-session", command, undefined, "read",
     );
   });
 
@@ -185,10 +185,10 @@ describe("Wiki composer selection", () => {
     expect(wiki).toHaveAttribute("aria-pressed", "true");
     expect(wiki).toHaveTextContent(label);
     fireEvent.click(wiki);
-    expect(wiki).toHaveAttribute("aria-pressed", "false");
+    expect(wiki).toHaveAttribute("aria-pressed", "true");
     expect(input).toHaveValue(command);
     fireEvent.click(send);
-    expect(sendMessage).toHaveBeenLastCalledWith(session.id, command.trim(), undefined, "off");
+    expect(sendMessage).toHaveBeenLastCalledWith(session.id, command.trim(), undefined, "read");
   });
 
   it.each(commandCases)("agrees with the server for $message", ({ message, mode }) => {
@@ -211,7 +211,7 @@ describe("Wiki composer selection", () => {
   });
 
   it.each(["讨论 /wiki 的用法", "/wikimedia", "/wiki-maintain", "/Wiki 查询"])(
-    "does not indicate access for ordinary text %s", (text) => {
+    "keeps automatic shared lookup for ordinary text %s", (text) => {
       const { wiki, input } = setup();
       fireEvent.change(input, { target: { value: text } });
       expect(wiki).toHaveAttribute("aria-pressed", "false");

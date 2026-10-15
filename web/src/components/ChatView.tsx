@@ -119,21 +119,21 @@ export function ChatView({
   onOpenSchedules,
 }: Props) {
   const [input, setInput] = useState("");
-  const [wikiSelection, setWikiSelection] = useState<"read" | "off" | undefined>();
+  const [wikiSelection, setWikiSelection] = useState<"read" | undefined>();
   const commandMode = wikiCommandMode(input);
-  const wikiMode = wikiSelection === "off" ? undefined : commandMode ?? wikiSelection;
+  const wikiMode = wikiSelection ?? commandMode;
   const wikiSelected = wikiMode !== undefined;
   const wikiMaintaining = wikiMode === "maintain";
   const toggleWiki = () => {
-    // Preserve the whole draft. The explicit off signal wins over command
-    // text, so cancelling cannot reinterpret the task as a new grant.
-    setWikiSelection(wikiSelected ? "off" : wikiSelection === "off" ? undefined : "read");
+    // Shared lookup is always available. Only restrict maintenance, keeping
+    // the command text intact so the person can restore their original intent.
+    setWikiSelection(wikiSelection ? undefined : "read");
     textareaRef.current?.focus();
   };
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [rejectedDrafts, setRejectedDrafts] = useState<{
     id: string; sessionId: string; text: string; attachments: PendingAttachment[];
-    wikiSelection: "read" | "off" | undefined; reason: string;
+    wikiSelection: "read" | undefined; reason: string;
   }[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   // Fork dialog (session-rewind.md §6.1-6.2). `null` = closed; `{}` = the
@@ -153,11 +153,6 @@ export function ChatView({
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  useEffect(() => {
-    // Drafts survive conversation changes, so their explicit cancellation
-    // must survive too. Only discard a manually selected read grant.
-    setWikiSelection((selection) => selection === "off" ? "off" : undefined);
-  }, [activeSessionId]);
   const messagesMap = useSessionStore((s) => s.messages);
   const streamingMap = useSessionStore((s) => s.streamingText);
   const messages = activeSessionId ? (messagesMap[activeSessionId] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES;
@@ -1883,27 +1878,23 @@ export function ChatView({
                   aria-label="Use local Wiki for this message"
                   aria-pressed={wikiSelected}
                   aria-describedby="wiki-composer-hint"
-                  title={wikiSelected
-                    ? "本条消息使用指定的 Wiki 模式；点击关闭本轮 Wiki"
-                    : wikiSelection === "off"
-                      ? "本条消息已关闭 Wiki，即使正文含 /wiki；点击恢复默认模式"
-                      : "默认由 agent 按需查询或提交维护；点击将本条限制为只读"}
+                  title={wikiSelection
+                    ? "查询始终可用；本条禁止提交维护，点击恢复默认模式"
+                    : "查询始终可用；点击将本条限制为只读，不提交维护"}
                   className={`btn btn-wiki inline-flex items-center justify-center gap-1.5 h-8 px-2 rounded-lg border text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${wikiSelected
                     ? "border-primary-200 bg-primary-50 text-primary hover:bg-primary-100"
                     : "border-transparent hover:bg-accent hover:text-foreground"}`}
                   onClick={toggleWiki}
                 >
                   {wikiSelected ? <IconCheck size={15} aria-hidden /> : <IconBook2 size={15} stroke={1.5} aria-hidden />}
-                  <span>{wikiMaintaining ? "Wiki · 整理" : wikiSelected ? "Wiki · 只读" : wikiSelection === "off" ? "Wiki · 关闭" : "Wiki · 自动"}</span>
+                  <span>{wikiMaintaining ? "Wiki · 整理" : wikiSelected ? "Wiki · 只读" : "Wiki · 自动"}</span>
                 </button>
                 <span id="wiki-composer-hint" className="sr-only">
                   {wikiMaintaining
                     ? "本条消息显式提交入库或整理；实际写入由获准维护任务执行。"
-                    : wikiSelection === "off"
-                      ? "本条消息已关闭 Wiki，即使正文含 /wiki。"
-                      : wikiSelected
+                    : wikiSelected
                         ? "本条消息只能查询知识库，不能提交维护；下一条恢复自动模式。"
-                        : "默认由 agent 按需查询或提交具体维护，无需先输入 /wiki。"}
+                        : "所有 agent 始终可按需查询；默认也可提出具体维护，无需先输入 /wiki。"}
                 </span>
                 <button
                   type="button"

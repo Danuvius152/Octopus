@@ -209,6 +209,7 @@ class HarnessRun:
         self._lease_closed = False
         self._spawn_task: asyncio.Task[asyncio.subprocess.Process] | None = None
         self._spawn_cleanup: asyncio.Task[None] | None = None
+        self._preparation_task: asyncio.Task[None] | None = None
         self._stop_task: asyncio.Task[None] | None = None
         self._activity_observer: ActivityObserver | None = None
         self._parser = profile.new_event_parser()
@@ -329,6 +330,19 @@ class HarnessRun:
         ctx = self._make_context(prompt, working_dir, resume_id, credential)
         argv, kwargs = self._profile.build_turn_argv(ctx)
         argv, kwargs = prepare_spawn(argv, kwargs)
+        if ctx.resume_id and self._profile.prepare_resume is not None:
+            preparation = asyncio.create_task(self._profile.prepare_resume(ctx, argv, kwargs), name="harness-controller-update")
+            self._preparation_task = preparation
+            try:
+                await preparation
+            except BaseException:
+                self._begin_retirement()
+                raise
+            finally:
+                if preparation.done():
+                    self._preparation_task = None
+        if self._lease_closed or not work_is_open(self.work_id):
+            raise asyncio.CancelledError
         if self._profile.activity_observer is not None:
             generation = self._activity_generation
             self._activity_observer = self._profile.activity_observer(
@@ -571,6 +585,17 @@ class HarnessRun:
         await asyncio.shield(self._begin_retirement())
 
     async def _stop(self) -> None:
+        if self._preparation_task is not None:
+            preparation = self._preparation_task
+            if not preparation.done():
+                preparation.cancel()
+            try:
+                await asyncio.shield(preparation)
+            except asyncio.CancelledError:
+                pass  # the preparation owns and confirms its subprocess cleanup
+            except Exception:
+                logger.debug("Controller preparation failed while stopping", exc_info=True)
+            self._preparation_task = None
         if self._spawn_cleanup is not None:
             await self._spawn_cleanup
             self._spawn_cleanup = None

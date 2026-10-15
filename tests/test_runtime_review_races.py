@@ -129,7 +129,7 @@ async def runtime(monkeypatch, tmp_path):
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
     try:
         yield manager, database, parent, delegations, starts, events
     finally:
@@ -235,7 +235,7 @@ async def test_bootstrap_retires_held_process_and_resumes_transcript_under_new_o
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("claude-code")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
     held = await manager.create_session(parent.agent_id, "Held scope", str(tmp_path), backend="claude-code")
     await manager.start_message(held.id, "Finish initial request")
     before = await asyncio.wait_for(starts.get(), 5)
@@ -674,7 +674,7 @@ async def test_overall_cap_expires_in_retry_backoff_before_another_cli_can_start
         return [sys.executable, "-u", "-c", f"import json; print(json.dumps({payload!r}), flush=True)"], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
     began = time.monotonic()
     await manager.start_message(session.id, "Capacity request")
     await wait_dispatch_idle(manager, session.id)
@@ -853,7 +853,7 @@ async def test_elapsed_cap_retires_a_reusable_run_before_its_success_can_be_held
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("claude-code")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
     await manager.start_message(session.id, "Complete at the deadline")
     context = await asyncio.wait_for(starts.get(), 5)
     await wait_dispatch_idle(manager, session.id)

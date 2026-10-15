@@ -1481,8 +1481,8 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
         pass
     async for _ in session_manager._execute_claimed_request(session.id, "关闭本轮", wiki_mode="off"):
         pass
-    assert seen == [(True, True), (True, False), (False, False)]
-    assert len(set(credentials)) == 2
+    assert seen == [(True, True), (True, False), (True, True)]
+    assert len(set(credentials)) == 3
     for credential in credentials:
         response = await client.get(
             "/api/wiki/read",

@@ -18,15 +18,19 @@ from tests.fake_run import FakeRunBase
 client = wiki_api.client
 
 
-@pytest.mark.parametrize("selected,expected", [(None, "auto"), ("off", None), ("read", "read")])
-async def test_normal_turn_has_scoped_autonomous_wiki_and_off_remains_off(client, tmp_path, monkeypatch, selected, expected):
+@pytest.mark.parametrize("selected,expected", [(None, "auto"), ("off", "read"), ("read", "read")])
+async def test_all_turns_can_query_and_legacy_off_only_disables_maintenance(client, tmp_path, monkeypatch, selected, expected):
     vault = tmp_path / "vault"
     (vault / "Library").mkdir(parents=True)
     note = vault / "Library/note.md"
     note.write_text("# Evidence\nPreserve these words.\n")
+    from server.agent_manager import AgentManager
+
     config = await wiki_api.configure(client, vault)
     manager = wiki_api.session_manager
-    session = await manager.create_session(config["curator_agent_id"], "Autonomy", str(tmp_path), backend="codex")
+    reader = await AgentManager(manager.db).create_agent(name="Reader", backend="codex", mcp_servers=[])
+    assert reader["id"] != config["curator_agent_id"]
+    session = await manager.create_session(reader["id"], "Autonomy", str(tmp_path), backend="codex")
     captured = []
 
     def create(run_config):
@@ -43,28 +47,25 @@ async def test_normal_turn_has_scoped_autonomous_wiki_and_off_remains_off(client
                 pass
 
             async def stream(self):
-                if expected is None:
-                    assert wiki is None and run_config.wiki_task_id is None
-                else:
-                    assert wiki is not None
-                    task = tasks.active[run_config.wiki_task_id]
-                    assert task.mode == expected
-                    headers = {"Authorization": f"Bearer {wiki.credential}"}
-                    response = await client.get("/api/wiki/read", params={"doc": "Library/note.md"}, headers=headers)
-                    assert response.status_code == 200, response.text
-                    query_guide = await client.get("/api/wiki/guide", params={"module": "query"}, headers=headers)
-                    assert query_guide.status_code == 200
-                    writing_guide = await client.get("/api/wiki/guide", params={"module": "writing"}, headers=headers)
-                    assert writing_guide.status_code == 403
-                    response = await client.post("/api/wiki/maintain", headers=headers, json={
-                        "idempotency_key": "autonomous-maintenance", "scope": "Preserve source; check the note", "paths": ["Library/note.md"],
-                    })
-                    assert response.status_code == (200 if expected == "auto" else 403), response.text
-                    # Autonomous submission still cannot publish or impersonate a human editor.
-                    response = await client.put("/api/wiki/document", headers=headers, json={
-                        "path": "Library/note.md", "content": "Overwrite", "reason": "Attempt direct write", "expected_revision": None,
-                    })
-                    assert response.status_code == 403
+                assert wiki is not None
+                task = tasks.active[run_config.wiki_task_id]
+                assert task.mode == expected
+                headers = {"Authorization": f"Bearer {wiki.credential}"}
+                response = await client.get("/api/wiki/read", params={"doc": "Library/note.md"}, headers=headers)
+                assert response.status_code == 200, response.text
+                query_guide = await client.get("/api/wiki/guide", params={"module": "query"}, headers=headers)
+                assert query_guide.status_code == 200
+                writing_guide = await client.get("/api/wiki/guide", params={"module": "writing"}, headers=headers)
+                assert writing_guide.status_code == 403
+                response = await client.post("/api/wiki/maintain", headers=headers, json={
+                    "idempotency_key": "autonomous-maintenance", "scope": "Preserve source; check the note", "paths": ["Library/note.md"],
+                })
+                assert response.status_code == (200 if expected == "auto" else 403), response.text
+                # Autonomous submission still cannot publish or impersonate a human editor.
+                response = await client.put("/api/wiki/document", headers=headers, json={
+                    "path": "Library/note.md", "content": "Overwrite", "reason": "Attempt direct write", "expected_revision": None,
+                })
+                assert response.status_code == 403
                 yield HarnessEvent(type="result", content="done", is_error=False)
 
             async def stop(self):

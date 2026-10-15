@@ -141,7 +141,7 @@ async def test_actual_dispatch_waits_for_storage_then_preserves_stop_pause(datab
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
     original = database.record_terminal
 
     async def uncertain(**kwargs):
