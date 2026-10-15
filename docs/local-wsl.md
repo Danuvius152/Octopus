@@ -231,8 +231,8 @@ Claude live 检查按本机约定未运行。候选构建、切换后端及健�
 完整新版验收见[审查计划 §1.4](plans/octopus-framework-wiki-review-20261014.md#14-自主入口与大记录导出的新版验收)。
 
 2026-10-15 又按用户“所有 agent 任何时候都可查询”的要求完成常驻查询与旧会话修复。
-当前代码提交为 `12f2598f44f787eda19d224f1f4cfc2519dd2a90`，已推送；运行目录为
-`/home/jack/.octopus/releases/main-12f2598f44f7`，`current` 指向它。
+当时代码提交为 `12f2598f44f787eda19d224f1f4cfc2519dd2a90`，已推送；当时运行目录为
+`/home/jack/.octopus/releases/main-12f2598f44f7`，当时 `current` 指向它。
 本机八项门槛全部通过（2,767 项 hermetic backend、407 项 frontend unit），
 另有 78 项纯 UI、24 项 Codex 实机与 1 项真实浏览器对话通过，无跳过。
 Claude live 检查按本机约定未运行。运行源码 487 个文件与验收 hash 一致，
@@ -242,6 +242,23 @@ Claude live 检查按本机约定未运行。运行源码 487 个文件与验收
 查询不能被单轮开关关闭；旧 off 仅按只读兼容。恢复旧 Codex 会话前通过原生
 `thread/inject_items` 更新真实 developer 控制器，保留线程与历史，维护仍由
 绑定 Weber assignment 执行。完整证据见[审查计划 §1.5](plans/octopus-framework-wiki-review-20261014.md#15-所有-agent-常驻查询与旧会话控制器修订)。
+
+2026-10-15 随后已部署短查询入口及移除输入框 Wiki 开关的有限修订，代码提交为
+`3b60b709359c8aa23023c95ded374bb1c22ac9e9`，已推送。当前运行目录为
+`/home/jack/.octopus/releases/main-3b60b709359c`；`current` 与进程工作目录一致，
+服务实际启动时间为 **14:46:59 CST**。Vera 实现审查及最终门禁证据核验通过；
+八关（2,773 项 hermetic backend、396 项 frontend unit）、78 项纯 UI、
+24 项 Codex real、1 项 Codex browser 及构建通过。Claude live 未运行，不计通过。
+
+候选先构建并核资源，切换及健康确认后再次构建；实际 HTML／JS／CSS hash 与
+候选一致，484 个已验源码文件与运行快照一致。桌面／手机实际登录页及刷新通过，
+composer 行为由同版 E2E 验证。首轮发布因外部字体请求失败已回退，失败证据保留；
+第二轮沿既有代理配置核验通过。两次发布均先等待实际任务排空。
+第二轮两个 SQLite 备份通过 integrity check，位置为
+`~/.octopus/backups/before-shared-query-ui-20261015T064659Z`。
+验收后已退役旧 `main-12f2598f44f7` 工作树，未为退役再次重启服务。
+七份用户原 dirty 文档与全部 365 个 Library 文件未变，四份 Weber 内容指南未改，
+本次入口发布不增加内容验收数。完整记录见[审查计划 §1.6](plans/octopus-framework-wiki-review-20261014.md#16-短查询入口与移除输入框-wiki-开关)。
 
 ## 同步原作者更新
 

@@ -1,6 +1,6 @@
 # Octopus 框架与 Wiki 审查及修复计划
 
-> **Status:** in-progress — 共享查询常驻、旧会话控制器及大返回修订已验收并上线；R06、R08、R14 与检索扩展暂缓。
+> **Status:** in-progress — 共享查询常驻、旧会话控制器、大返回及短查询入口／移除输入框开关均已验收并上线；R06、R08、R14 与检索扩展暂缓。
 
 当前需要先收紧 Wiki 授权、请求归属、账户接管和异常清理，再评估检索与同步的性能。Octopus 仍沿用 FastAPI、SessionManager、Harness、账户作用域和 Wiki Registry 的组织方式；已发现的问题发生在这些模块的交界处，适合在现有框架内修复。
 
@@ -111,9 +111,23 @@ Codex `exec resume` 不因新的 `-c developer_instructions` 替换历史首条�
 
 原生控制器协议的 8 项隔离回归还覆盖大输入走 stdin、持久化确认后等待退出、错误禁止继续执行、超时及启动句柄晚到后的回收。模拟 Python CLI 的集成替身显式不调用原生准备协议；真实 Codex 测试仍使用完整协议。拒绝草稿验收更新为保留维护只读；手机遮罩测试点击实际可见关闭区，修正中心点被抽屉覆盖的错误坐标。
 
-最终 487 个源码／测试／脚本／前端配置与 package 文件的 SHA-256 映射指纹为 `3ea91ca27c7e3d1ec66db0637415c5360924d83bc4be5aa1cc5f45a14296294a`，计算方法同 §1.3；最后验证后源码未变。实际代码提交 `12f2598f44f787eda19d224f1f4cfc2519dd2a90` 已推送至 `origin/main` 并部署，当前运行目录为 `/home/jack/.octopus/releases/main-12f2598f44f7`，`current` 和服务进程工作目录均指向该快照，487 个源码 hash 与验收映射逐项一致。
+最终 487 个源码／测试／脚本／前端配置与 package 文件的 SHA-256 映射指纹为 `3ea91ca27c7e3d1ec66db0637415c5360924d83bc4be5aa1cc5f45a14296294a`，计算方法同 §1.3；最后验证后源码未变。实际代码提交 `12f2598f44f787eda19d224f1f4cfc2519dd2a90` 已推送至 `origin/main` 并部署，当时运行目录为 `/home/jack/.octopus/releases/main-12f2598f44f7`，当时 `current` 和服务进程工作目录均指向该快照，487 个源码 hash 与验收映射逐项一致。该快照已在 §1.6 发布验收后退役。
 
 候选构建并校验后切换并重启后端，健康确认后再构建前端。实际 HTML／JS／CSS 的 SHA-256 分别为 `a4543bd16070bd3e0d2aae16f6ea9bce59d24bbef17289d167a2cd800d65839b`、`497a1be273f2e6feb29385e2777cb1e486f9b68637fe2eb914b3cbe08b7c48a9`、`acfaddfdd45830aef37d56a36dced329f82242c8a02d616bd198b06769660326`，与候选一致；真实浏览器登录页及刷新通过，无页面异常或 HTTP 失败。两个 SQLite 一致性备份通过 integrity check，位于 `/home/jack/.octopus/backups/before-always-shared-wiki-20261015T051308Z`；最后核对健康后已删除旧 `main-1102448cded7` 运行工作树。用户原有草稿和交接段落的修改继续单独保留，本次未提交生产 Library 维护，也不改变 35/46 内容验收或 R08/R14 的后续范围。
+
+### 1.6 短查询入口与移除输入框 Wiki 开关
+
+2026-10-15 用户将有限入口修订提前到内容迁移之前。输入框不再保存或发送隐藏的 Wiki 模式，普通消息直接使用共享查询；旧 `/wiki` 文本和 read／Off／API 参数保留兼容。auto 或明确 maintain 的普通 agent 与普通会话 Weber 可以提交具体维护，read／Off 可查询但不可提交。正文写入仍须绑定 Weber 的有效 durable assignment，普通委托不授写权，查询和普通聊天不自动入库。
+
+共同 access 指南统一维护权限说明，非 worker 共用短 query 核心，详细 retrieval 按需加载；Me 限域、整篇同 revision 连续读完、实际证据和 confidence 规则保留。四份 worker 内容指南未改，日常流程 candidate 未应用。Vera 对冻结的 20 份修改完成实现审查及最终证据核验，无开放 finding。
+
+完整本机检查全部通过：八关（2,773 项 hermetic backend、396 项 frontend unit，及 lint／types／生成合同／文档索引）、78 项纯 UI、24 项 Codex real、1 项 Codex browser、前端构建，无选中测试跳过。12 项真实 Wiki 用例包含 Me、整篇读取、旧 Off 续聊、原生助手与 worker；桌面／手机 composer 及拒绝草稿的跨会话附件原字节恢复均通过。Claude live 按本机约定未运行，不计通过。首轮输出排空测试的 100ms 人为宽限失败保留；仅测试恢复生产 5s 宽限并增加完整字节断言，生产关闭实现未改。
+
+实际代码提交 `3b60b709359c8aa23023c95ded374bb1c22ac9e9` 已聚焦提交、推送并部署。按本轮 runner 的路径集合核对 484 个源码／测试／脚本／前端配置及 package 文件，SHA-256 映射指纹为 `eca85c1eb64ce00c27b95ad6a8850eea587bf6612ee49f5f16f0ee85fa058e0e`；检查前后、已提交文件和运行快照逐项一致。七份用户原 dirty 文档未改，未纳入代码提交；快照继续共享本机依赖，不是依赖快照。
+
+候选构建及资源核验后切换重启，健康确认后再次构建前端。首轮在 14:42:06 启动新服务，因浏览器外部字体请求失败于 14:42:19 回退旧服务；原失败与备份保留。第二轮沿既有代理配置执行浏览器核验，于 **14:46:59 CST** 重启到 `main-3b60b709359c`，进程目录与 `current` 一致。实际 HTML／JS／CSS SHA-256 分别为 `d326ce0eea09d29bfe7b790b6f1cf3651c8d7062de7960700fe36e2dd6cb6ee7`、`9ccdef2ff4c4589e8d4e56d1202a5a5046547b1b2e50972c5b22cabf79c0d91d`、`6e00a4f61a1f38ea489896c856264a5e561e34b14aa0dd4b173bd607204eadee`，均与候选一致；实际桌面和手机登录页／刷新无页面异常或请求失败。线上浏览器范围为登录页和刷新，composer 行为由同版 E2E、真实 Wiki 行为由隔离 Codex tier 验证。
+
+第二轮两个 SQLite 一致性备份通过 integrity check，位于 `~/.octopus/backups/before-shared-query-ui-20261015T064659Z`。再次核健康、源码及无旧目录进程引用后，已删除旧 `main-12f2598f44f7` 工作树，未为退役再次重启。Library 365 个文件／46 篇 MD 的字节、身份、revision 和当前索引均未变；本次入口发布没有增加 35 篇内容验收数，other001 五篇仍待正式独立验收。R08／R14、课程迁移、通用日常流程与两份保留 Inbox 原稿继续按原顺序处理。
 
 ## 2 保留的架构与必须成立的边界
 
