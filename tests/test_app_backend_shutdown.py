@@ -310,7 +310,7 @@ async def test_shutdown_reports_a_reaper_that_retains_the_backend_lock(tmp_path,
 
 
 @pytest.mark.asyncio
-async def test_shutdown_drains_output_while_the_backend_handles_sigterm(tmp_path, monkeypatch):
+async def test_shutdown_drains_output_while_the_backend_handles_sigterm(tmp_path):
     source = (
         "import os, signal, sys, time\n"
         "def stop(*args):\n"
@@ -334,12 +334,13 @@ async def test_shutdown_drains_output_while_the_backend_handles_sigterm(tmp_path
         process=proc, pid=proc.pid, _readers=[reader],
     )
     supervisor._backends[state.app_id] = state
-    monkeypatch.setattr(app_backends, "_TERM_TIMEOUT_SECONDS", 0.1)
-    monkeypatch.setattr(app_backends, "_KILL_TIMEOUT_SECONDS", 0.1)
+    # Use the production grace period: this checks output draining during TERM,
+    # not whether a loaded machine can transfer the entire pipe in 100 ms.
     try:
         await supervisor.shutdown()
         assert proc.returncode == 0
         assert reader.done() and state.process is None
+        assert reader.result() == b"shutdown output\n" * 100000
     finally:
         if proc.returncode is None:
             os.killpg(proc.pid, signal.SIGKILL)

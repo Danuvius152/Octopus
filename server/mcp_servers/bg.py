@@ -102,6 +102,11 @@ def bg_run(
     commands (< 30s) use the regular Bash tool — bg has overhead from
     the follow-up turn and is not free.
 
+    Background shells do not inherit an agent turn's Wiki MCP identity.
+    Use a normal agent turn or an existing delegation for model-driven Wiki
+    work; the follow-up turn gets its own current tools. Do not copy turn
+    credentials into a background command or persist them for later use.
+
     Args:
         command: The shell command to run. Executed under `/bin/sh -c`
             with cwd = session working_dir. Use full shell syntax

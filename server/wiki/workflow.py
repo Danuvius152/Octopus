@@ -38,19 +38,23 @@ def instructions(mode: str, task_id: str | None = None) -> str:
             card["job_id"] = task.job_id
             card["guides"] = ["article", "writing"]
     base = "本次知识操作卡：" + json.dumps(card, ensure_ascii=False) + "\n"
-    base += "所有 agent 始终可查询本账户共享 Wiki；使用当前 mcp__wiki__ 工具与真实参数。原生助手共享当前执行凭据，等待它们结束后完成任务；后续轮自动获得查询能力，不复用已失效凭据。\n"
-    if mode == "auto":
-        base += guide("auto-entry")
-    elif mode == "read":
-        base += guide("query-v2") + "\n" + guide("retrieval-v2")
-    elif mode == "maintain" and tasks.is_curator_worker(task):
+    base += guide("access") + "\n"
+    if mode == "maintain" and tasks.is_curator_worker(task):
         base += (
             guide("maintenance-v2")
             + "\n"
             + guide("retrieval-v2")
         )
-    elif mode == "maintain":
-        base += guide("entry")
+    else:
+        base += guide("query-v2")
+        if task and task.job_id:
+            base += "\n当前维护 assignment 已结束或不可用；只可查询，不发起或继续维护。\n"
+        elif mode == "auto":
+            base += "\n" + guide("auto-entry")
+        elif mode == "maintain":
+            base += "\n" + guide("entry")
+        elif mode == "read":
+            base += "\n本轮只读：可查询，不可提交维护或写入。\n"
     return base
 
 

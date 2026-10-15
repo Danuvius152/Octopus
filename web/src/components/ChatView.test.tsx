@@ -78,7 +78,6 @@ function setup() {
     connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />);
   return {
     sendMessage,
-    wiki: screen.getByRole("button", { name: "Use local Wiki for this message" }),
     input: screen.getByRole("textbox"),
     send: screen.getByRole("button", { name: "Send message" }),
   };
@@ -90,9 +89,7 @@ it("keeps a rejected Wiki draft and protects subsequent editing during restorati
   render(<ChatView sendMessage={sendMessage} interrupt={vi.fn()} approveTool={vi.fn()}
     denyTool={vi.fn()} answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />);
   const input = screen.getByRole("textbox");
-  const wiki = screen.getByRole("button", { name: "Use local Wiki for this message" });
   fireEvent.change(input, { target: { value: "  /wiki maintain Library/a.md  " } });
-  fireEvent.click(wiki);
   fireEvent.click(screen.getByRole("button", { name: "Send message" }));
   fireEvent.change(input, { target: { value: "new draft" } });
   await act(async () => finish({ accepted: false, message: "Conversation is closed" }));
@@ -102,119 +99,39 @@ it("keeps a rejected Wiki draft and protects subsequent editing during restorati
   fireEvent.change(input, { target: { value: "" } });
   fireEvent.click(screen.getByRole("button", { name: "Restore draft" }));
   expect(input).toHaveValue("  /wiki maintain Library/a.md  ");
-  expect(wiki).toHaveTextContent("Wiki · 只读");
+  expect(screen.queryByRole("button", { name: "Use local Wiki for this message" })).not.toBeInTheDocument();
   expect(sendMessage).toHaveBeenCalledTimes(1);
 });
 
-describe("Wiki composer selection", () => {
-  it("restricts maintenance with visible read-only feedback and restores automatic mode", () => {
-    const { wiki } = setup();
-    expect(wiki).toHaveAttribute("aria-pressed", "false");
-    fireEvent.click(wiki);
-    expect(wiki).toHaveAttribute("aria-pressed", "true");
-    expect(wiki).toHaveClass("bg-primary-50", "text-primary", "border-primary-200");
-    expect(wiki).toHaveTextContent("Wiki · 只读");
-    fireEvent.click(wiki);
-    expect(wiki).toHaveAttribute("aria-pressed", "false");
-    expect(wiki).not.toHaveClass("bg-primary-50");
-  });
-
-  it("restricts one sent message to read-only and restores automatic maintenance for the next", () => {
-    const { wiki, input, send, sendMessage } = setup();
-    fireEvent.click(wiki);
-    fireEvent.change(input, { target: { value: "查找相关文章" } });
-    fireEvent.click(send);
-    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "查找相关文章", undefined, "read");
-    expect(wiki).toHaveAttribute("aria-pressed", "false");
-    fireEvent.change(input, { target: { value: "继续普通聊天" } });
-    fireEvent.click(send);
-    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "继续普通聊天", undefined, undefined);
-  });
-
-  it("keeps the selection when an empty message cannot be sent", () => {
-    const { wiki, input, sendMessage } = setup();
-    fireEvent.click(wiki);
-    fireEvent.keyDown(input, { key: "Enter" });
-    expect(sendMessage).not.toHaveBeenCalled();
-    expect(wiki).toHaveAttribute("aria-pressed", "true");
-  });
-
-  it("preserves the read-only restriction with the draft when switching conversations", () => {
-    const { wiki } = setup();
-    fireEvent.click(wiki);
-    act(() => useSessionStore.setState({
-      activeSessionId: "other-session",
-      sessions: [session, { ...session, id: "other-session" }],
-    }));
-    expect(wiki).toHaveAttribute("aria-pressed", "true");
-  });
-
-  it.each([
-    ["/wiki 查询相关文章", false],
-    ["/wiki 查询相关文章", true],
-    ["/wiki maintain Library/a.md", false],
-    ["/wiki maintain Library/a.md", true],
-  ])("preserves cancellation for %s across conversation switches (return=%s)", (command, returnToOriginal) => {
-    const { wiki, input, send, sendMessage } = setup();
-    fireEvent.change(input, { target: { value: command } });
-    fireEvent.click(wiki);
-    act(() => useSessionStore.setState({
-      activeSessionId: "other-session",
-      sessions: [session, { ...session, id: "other-session" }],
-    }));
-    expect(input).toHaveValue(command);
-    expect(wiki).toHaveAttribute("aria-pressed", "true");
-    if (returnToOriginal) {
-      act(() => useSessionStore.setState({ activeSessionId: session.id }));
-      expect(input).toHaveValue(command);
-      expect(wiki).toHaveAttribute("aria-pressed", "true");
-    }
-    fireEvent.click(send);
-    expect(sendMessage).toHaveBeenLastCalledWith(
-      returnToOriginal ? session.id : "other-session", command, undefined, "read",
-    );
-  });
-
-  it.each([
-    ["/wiki 查找相关文章", "Wiki · 只读"],
-    ["  /wiki\nmaintain Library/a.md", "Wiki · 整理"],
-    ["/wiki /wiki maintain 的用法是什么？", "Wiki · 只读"],
-  ])("reflects the explicit command %s and lets the user cancel it", (command, label) => {
-    const { wiki, input, send, sendMessage } = setup();
-    fireEvent.change(input, { target: { value: command } });
-    expect(wiki).toHaveAttribute("aria-pressed", "true");
-    expect(wiki).toHaveTextContent(label);
-    fireEvent.click(wiki);
-    expect(wiki).toHaveAttribute("aria-pressed", "true");
-    expect(input).toHaveValue(command);
-    fireEvent.click(send);
-    expect(sendMessage).toHaveBeenLastCalledWith(session.id, command.trim(), undefined, "read");
-  });
-
-  it.each(commandCases)("agrees with the server for $message", ({ message, mode }) => {
-    const { wiki, input } = setup();
-    fireEvent.change(input, { target: { value: message } });
-    expect(wiki).toHaveAttribute("aria-pressed", String(mode !== null));
-    expect(wiki).toHaveTextContent(mode === "maintain" ? "Wiki · 整理" : mode === "read" ? "Wiki · 只读" : "Wiki");
-  });
-
-  it("can re-enable a cancelled command without rewriting the draft", () => {
-    const { wiki, input, send, sendMessage } = setup();
-    const command = "/wiki maintain Library/a.md";
-    fireEvent.change(input, { target: { value: command } });
-    fireEvent.click(wiki);
-    fireEvent.click(wiki);
-    expect(wiki).toHaveTextContent("Wiki · 整理");
-    expect(input).toHaveValue(command);
-    fireEvent.click(send);
-    expect(sendMessage).toHaveBeenLastCalledWith(session.id, command, undefined, undefined);
-  });
-
-  it.each(["讨论 /wiki 的用法", "/wikimedia", "/wiki-maintain", "/Wiki 查询"])(
-    "keeps automatic shared lookup for ordinary text %s", (text) => {
-      const { wiki, input } = setup();
-      fireEvent.change(input, { target: { value: text } });
-      expect(wiki).toHaveAttribute("aria-pressed", "false");
+describe("shared Wiki without a composer switch", () => {
+  it.each(["请结合共享知识解释这个问题", ...commandCases.map(({ message }) => message)])(
+    "sends the original request without an implicit Wiki mode: %s", (message) => {
+      const { input, send, sendMessage } = setup();
+      expect(screen.queryByRole("button", { name: "Use local Wiki for this message" })).not.toBeInTheDocument();
+      fireEvent.change(input, { target: { value: message } });
+      fireEvent.click(send);
+      expect(sendMessage).toHaveBeenLastCalledWith(session.id, message.trim(), undefined, undefined);
+      expect(input).toHaveValue("");
     },
   );
+
+  it.each(["普通查询", "/wiki 查询资料", "/wiki maintain Library/a.md"])(
+    "keeps an unsent draft across conversation switches: %s", (message) => {
+      const { input, send, sendMessage } = setup();
+      fireEvent.change(input, { target: { value: message } });
+      act(() => useSessionStore.setState({
+        activeSessionId: "other-session",
+        sessions: [session, { ...session, id: "other-session" }],
+      }));
+      expect(input).toHaveValue(message);
+      fireEvent.click(send);
+      expect(sendMessage).toHaveBeenLastCalledWith("other-session", message, undefined, undefined);
+    },
+  );
+
+  it("does not send an empty request", () => {
+    const { input, sendMessage } = setup();
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
 });

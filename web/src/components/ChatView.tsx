@@ -1,8 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconArrowUp,
-  IconBook2,
-  IconCheck,
   IconCpu,
   IconFile,
   IconMenu2,
@@ -47,7 +45,7 @@ import {
 import { Button } from "./ui/button";
 import { isSessionBusy } from "../lib/deferredFork";
 import { loadOlderMessages } from "../lib/transcript";
-import { wikiCommandMode, type WikiMessageMode } from "../lib/wikiComposer";
+import type { WikiMessageMode } from "../lib/wikiComposer";
 import type { SubmissionReply } from "../lib/submission";
 
 const EMPTY_MESSAGES: Message[] = [];
@@ -119,21 +117,10 @@ export function ChatView({
   onOpenSchedules,
 }: Props) {
   const [input, setInput] = useState("");
-  const [wikiSelection, setWikiSelection] = useState<"read" | undefined>();
-  const commandMode = wikiCommandMode(input);
-  const wikiMode = wikiSelection ?? commandMode;
-  const wikiSelected = wikiMode !== undefined;
-  const wikiMaintaining = wikiMode === "maintain";
-  const toggleWiki = () => {
-    // Shared lookup is always available. Only restrict maintenance, keeping
-    // the command text intact so the person can restore their original intent.
-    setWikiSelection(wikiSelection ? undefined : "read");
-    textareaRef.current?.focus();
-  };
   const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
   const [rejectedDrafts, setRejectedDrafts] = useState<{
     id: string; sessionId: string; text: string; attachments: PendingAttachment[];
-    wikiSelection: "read" | undefined; reason: string;
+    reason: string;
   }[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   // Fork dialog (session-rewind.md §6.1-6.2). `null` = closed; `{}` = the
@@ -641,17 +628,16 @@ export function ChatView({
     if (!activeSessionId) return;
     const draft = {
       id: crypto.randomUUID(), sessionId: activeSessionId, text: input,
-      attachments: pendingAttachments.filter((attachment) => attachment.status === "ready"), wikiSelection,
+      attachments: pendingAttachments.filter((attachment) => attachment.status === "ready"),
     };
     const submission = sendMessage(
       activeSessionId,
       content,
       readyAttachmentIds.length > 0 ? readyAttachmentIds : undefined,
-      wikiSelection
+      undefined
     );
     setInput("");
     setHistory(HISTORY_IDLE);
-    setWikiSelection(undefined);
     // Drop both ready uploads (they're now associated with the message
     // we just sent) and any failed uploads (the user can retry by
     // re-attaching). Leave in-flight uploads alone — addFiles already
@@ -675,7 +661,6 @@ export function ChatView({
     // Block while uploads are still in flight so we don't drop attachments
     // the user just added but the server hasn't finished receiving.
     if (hasUploadInFlight) return;
-    setWikiSelection(undefined);
 
     // /reset command — escape hatch for wedged sessions. Calls the
     // server's force-reset endpoint, which cancels the active task,
@@ -1626,7 +1611,6 @@ export function ChatView({
                   setInput(draft.text);
                   if (draft.sessionId === activeSessionId) setPendingAttachments(draft.attachments);
                   else addFiles(draft.attachments.map((attachment) => attachment.file));
-                  setWikiSelection(draft.wikiSelection);
                   setHistory(HISTORY_IDLE);
                   setRejectedDrafts((drafts) => drafts.filter((item) => item.id !== draft.id));
                   textareaRef.current?.focus();
@@ -1873,29 +1857,6 @@ export function ChatView({
 
             <div className="composer-actions flex items-center justify-between gap-2 px-1.5 pb-1.5">
               <div className="flex items-center gap-1 text-muted-foreground">
-                <button
-                  type="button"
-                  aria-label="Use local Wiki for this message"
-                  aria-pressed={wikiSelected}
-                  aria-describedby="wiki-composer-hint"
-                  title={wikiSelection
-                    ? "查询始终可用；本条禁止提交维护，点击恢复默认模式"
-                    : "查询始终可用；点击将本条限制为只读，不提交维护"}
-                  className={`btn btn-wiki inline-flex items-center justify-center gap-1.5 h-8 px-2 rounded-lg border text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 ${wikiSelected
-                    ? "border-primary-200 bg-primary-50 text-primary hover:bg-primary-100"
-                    : "border-transparent hover:bg-accent hover:text-foreground"}`}
-                  onClick={toggleWiki}
-                >
-                  {wikiSelected ? <IconCheck size={15} aria-hidden /> : <IconBook2 size={15} stroke={1.5} aria-hidden />}
-                  <span>{wikiMaintaining ? "Wiki · 整理" : wikiSelected ? "Wiki · 只读" : "Wiki · 自动"}</span>
-                </button>
-                <span id="wiki-composer-hint" className="sr-only">
-                  {wikiMaintaining
-                    ? "本条消息显式提交入库或整理；实际写入由获准维护任务执行。"
-                    : wikiSelected
-                        ? "本条消息只能查询知识库，不能提交维护；下一条恢复自动模式。"
-                        : "所有 agent 始终可按需查询；默认也可提出具体维护，无需先输入 /wiki。"}
-                </span>
                 <button
                   type="button"
                   className="btn btn-attach inline-flex items-center justify-center size-8 rounded-lg transition-colors duration-200 hover:bg-accent hover:text-foreground disabled:opacity-40 disabled:cursor-not-allowed"

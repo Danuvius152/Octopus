@@ -4,15 +4,15 @@ const API = "http://localhost:8765/api";
 const headers = { Authorization: "Bearer changeme" };
 
 for (const width of [1280, 390]) {
-  test.describe(`Wiki composer at ${width}px`, () => {
+  test.describe(`Shared Wiki composer at ${width}px`, () => {
     test.use({
       viewport: { width, height: 844 },
       isMobile: width < 768,
       hasTouch: width < 768,
     });
-    test("shared lookup stays available while maintenance is restricted", async ({ page, request }) => {
-      // Observe the real client payload without starting a model in a UI test.
-      // The server's cancellation boundary is covered in test_wiki_composer.py.
+    test("ordinary lookup and legacy commands need no Wiki switch", async ({ page, request }) => {
+      // Observe browser payloads without starting a model in this UI test.
+      // Backend tests cover default lookup and explicit maintenance scope.
       const sent: Record<string, unknown>[] = [];
       await page.routeWebSocket(/\/ws(?:\?|$)/, (socket) => {
         const server = socket.connectToServer();
@@ -23,7 +23,7 @@ for (const width of [1280, 390]) {
         });
       });
       const created = await request.post(`${API}/sessions`, {
-        headers, data: { name: `Wiki Composer ${width}`, working_dir: "/tmp" },
+        headers, data: { name: `Shared Wiki Composer ${width}`, working_dir: "/tmp" },
       });
       expect(created.ok()).toBeTruthy();
       const session = await created.json();
@@ -36,54 +36,28 @@ for (const width of [1280, 390]) {
           await expect(page.locator(".sidebar")).toHaveClass(/open/);
         }
         await expect(page.locator(".agent-list-header")).toBeVisible();
-        const agent = page.locator(".agent-item", { hasText: "Octo" });
-        await agent.click();
+        await page.locator(".agent-item", { hasText: "Octo" }).click();
         await page.locator(".session-item", { hasText: session.name }).click();
         await expect(page.locator(".conn-status.on")).toBeVisible();
-        const wiki = page.getByRole("button", { name: "Use local Wiki for this message" });
         const input = page.locator(".chat-input-bar textarea");
-        const activate = () => width < 768 ? wiki.tap() : wiki.click();
-        await expect(wiki).toBeVisible();
-        const initialColor = await wiki.evaluate((el) => getComputedStyle(el).backgroundColor);
-        await activate();
-        await expect(wiki).toHaveAttribute("aria-pressed", "true");
-        await expect(wiki).toHaveText("Wiki · 只读");
-        await expect(input).toBeFocused();
-        await expect.poll(() => wiki.evaluate((el) => getComputedStyle(el).backgroundColor))
-          .not.toBe(initialColor);
-        await activate();
-        await expect(wiki).toHaveAttribute("aria-pressed", "false");
-        if (width >= 768) {
-          await input.press("Tab");
-          await expect(wiki).toBeFocused();
-          await expect(wiki).not.toHaveCSS("box-shadow", "none");
-          await wiki.press("Space");
-          await expect(wiki).toHaveAttribute("aria-pressed", "true");
-          await expect(wiki).toHaveText("Wiki · 只读");
-          await expect(input).toBeFocused();
-          await input.press("Tab");
-          await wiki.press("Enter");
-          await expect(wiki).toHaveAttribute("aria-pressed", "false");
+        await expect(page.getByRole("button", { name: "Use local Wiki for this message" })).toHaveCount(0);
+        await expect(page.getByRole("button", { name: "Attach file" })).toBeVisible();
+        const messages = [
+          "请结合共享知识解释这个问题",
+          "/wiki 查询相关文章",
+          "/wiki maintain Library/a.md",
+          "/wiki /wiki maintain 的用法是什么？",
+        ];
+        for (const [index, message] of messages.entries()) {
+          await input.fill(message);
+          await page.getByRole("button", { name: "Send message" }).click();
+          await expect.poll(() => sent.length).toBe(index + 1);
+          expect(sent[index]).toEqual(expect.objectContaining({
+            type: "send_message", session_id: session.id, content: message,
+          }));
+          expect(sent[index]).not.toHaveProperty("wiki_mode");
+          await expect(input).toHaveValue("");
         }
-        await input.fill("/wiki maintain Library/a.md");
-        await expect(wiki).toHaveText("Wiki · 整理");
-        await activate();
-        await expect(wiki).toHaveText("Wiki · 只读");
-        await expect(input).toHaveValue("/wiki maintain Library/a.md");
-        const box = await wiki.boundingBox();
-        expect(box).not.toBeNull();
-        expect(box!.x).toBeGreaterThanOrEqual(0);
-        expect(box!.x + box!.width).toBeLessThanOrEqual(width);
-        const nested = "/wiki /wiki maintain 的用法是什么？";
-        await input.fill(nested);
-        await expect(wiki).toHaveText("Wiki · 只读");
-        await page.getByRole("button", { name: "Send message" }).click();
-        await expect.poll(() => sent).toEqual([expect.objectContaining({
-          type: "send_message", session_id: session.id,
-          content: nested, wiki_mode: "read",
-        })]);
-        await expect(input).toHaveValue("");
-        await expect(wiki).toHaveAttribute("aria-pressed", "false");
       } finally {
         await request.delete(`${API}/sessions/${session.id}`, { headers }).catch(() => {});
       }

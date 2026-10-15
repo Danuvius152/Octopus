@@ -18,8 +18,9 @@ from tests.fake_run import FakeRunBase
 client = wiki_api.client
 
 
-@pytest.mark.parametrize("selected,expected", [(None, "auto"), ("off", "read"), ("read", "read")])
-async def test_all_turns_can_query_and_legacy_off_only_disables_maintenance(client, tmp_path, monkeypatch, selected, expected):
+@pytest.mark.parametrize("selected,expected", [(None, "auto"), ("off", "read"), ("read", "read"), ("maintain", "maintain")])
+@pytest.mark.parametrize("actor", ["reader", "curator"])
+async def test_all_turns_can_query_and_legacy_off_only_disables_maintenance(client, tmp_path, monkeypatch, selected, expected, actor):
     vault = tmp_path / "vault"
     (vault / "Library").mkdir(parents=True)
     note = vault / "Library/note.md"
@@ -30,14 +31,25 @@ async def test_all_turns_can_query_and_legacy_off_only_disables_maintenance(clie
     manager = wiki_api.session_manager
     reader = await AgentManager(manager.db).create_agent(name="Reader", backend="codex", mcp_servers=[])
     assert reader["id"] != config["curator_agent_id"]
-    session = await manager.create_session(reader["id"], "Autonomy", str(tmp_path), backend="codex")
+    actor_id = reader["id"] if actor == "reader" else config["curator_agent_id"]
+    session = await manager.create_session(actor_id, "Autonomy", str(tmp_path), backend="codex")
     captured = []
 
     def create(run_config):
+        from server.harness.assembly import compose_system_prompt
+        from server.wiki.workflow import guide
+
         entries = select_mcp_servers(run_config.mcp_servers, [], {}, session_id=session.id,
                                      user_id=session.user_id, wiki_task_id=run_config.wiki_task_id)
         wiki = next((entry for entry in entries if entry.key == "wiki"), None)
         captured.append((run_config, wiki))
+        prompt = compose_system_prompt(run_config.system_prompt, "", [], wiki_mode=run_config.wiki_mode,
+                                       wiki_capability=True, wiki_task_id=run_config.wiki_task_id)
+        assert guide("access") in prompt and guide("query-v2") in prompt
+        assert guide("retrieval-v2") not in prompt and guide("maintenance-v2") not in prompt
+        assert "confidence" in prompt and "next_start" in prompt
+        if expected == "read":
+            assert "本轮只读：可查询，不可提交维护或写入" in prompt
 
         class Run(FakeRunBase):
             def set_idle_handler(self, handler):
@@ -50,17 +62,36 @@ async def test_all_turns_can_query_and_legacy_off_only_disables_maintenance(clie
                 assert wiki is not None
                 task = tasks.active[run_config.wiki_task_id]
                 assert task.mode == expected
+                from server.mcp_identity import (
+                    reset_current_scope,
+                    set_current_scope,
+                    verify,
+                )
+                from server.mcp_servers.wiki import mcp
+
+                scope = verify(wiki.credential)
+                assert scope is not None
+                context = set_current_scope(scope)
+                try:
+                    names = {tool.name for tool in await mcp.list_tools()}
+                finally:
+                    reset_current_scope(context)
+                assert {"search", "read", "read_many", "load_guide"} <= names
+                assert ("maintain" in names) == (expected in {"auto", "maintain"})
+                assert not {"organize", "publish", "revise", "restructure", "blocks"} & names
                 headers = {"Authorization": f"Bearer {wiki.credential}"}
                 response = await client.get("/api/wiki/read", params={"doc": "Library/note.md"}, headers=headers)
                 assert response.status_code == 200, response.text
                 query_guide = await client.get("/api/wiki/guide", params={"module": "query"}, headers=headers)
                 assert query_guide.status_code == 200
+                retrieval_guide = await client.get("/api/wiki/guide", params={"module": "retrieval"}, headers=headers)
+                assert retrieval_guide.status_code == 200
                 writing_guide = await client.get("/api/wiki/guide", params={"module": "writing"}, headers=headers)
                 assert writing_guide.status_code == 403
                 response = await client.post("/api/wiki/maintain", headers=headers, json={
                     "idempotency_key": "autonomous-maintenance", "scope": "Preserve source; check the note", "paths": ["Library/note.md"],
                 })
-                assert response.status_code == (200 if expected == "auto" else 403), response.text
+                assert response.status_code == (200 if expected in {"auto", "maintain"} else 403), response.text
                 # Autonomous submission still cannot publish or impersonate a human editor.
                 response = await client.put("/api/wiki/document", headers=headers, json={
                     "path": "Library/note.md", "content": "Overwrite", "reason": "Attempt direct write", "expected_revision": None,
@@ -78,7 +109,8 @@ async def test_all_turns_can_query_and_legacy_off_only_disables_maintenance(clie
 
     monkeypatch.setattr(get_harness("codex"), "create_run", create)
     kwargs = {"wiki_mode": selected} if selected is not None else {}
-    receipt = await manager.start_message(session.id, "Use our knowledge to answer this question", **kwargs)
+    prompt = "/wiki maintain Library/note.md\nUse our knowledge" if selected == "maintain" else "Use our knowledge to answer this question"
+    receipt = await manager.start_message(session.id, prompt, **kwargs)
     completion = await receipt.wait()
     assert completion.outcome.status == "success", completion.outcome
     assert len(captured) == 1
@@ -88,6 +120,18 @@ async def test_all_turns_can_query_and_legacy_off_only_disables_maintenance(clie
         assert run_config.wiki_task_id not in tasks.active
         expired = await client.get("/api/wiki/read", params={"doc": "Library/note.md"}, headers={"Authorization": f"Bearer {wiki.credential}"})
         assert expired.status_code == 403
+
+
+def test_unregistered_wiki_does_not_claim_available_tools_and_legacy_off_is_read_only():
+    from server.harness.assembly import compose_system_prompt
+    from server.wiki.workflow import guide
+
+    missing = compose_system_prompt(None, "", [], wiki_capability=True)
+    assert "unavailable" in missing
+    assert guide("access") not in missing and guide("query-v2") not in missing
+    legacy = compose_system_prompt(None, "", [], wiki_capability=True, wiki_mode="off")
+    assert guide("access") in legacy and guide("query-v2") in legacy
+    assert "本轮只读：可查询，不可提交维护或写入" in legacy
 
 
 async def test_native_job_navigation_avoids_embedding_large_payload_in_command(client, tmp_path):

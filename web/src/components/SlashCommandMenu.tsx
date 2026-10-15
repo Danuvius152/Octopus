@@ -25,7 +25,7 @@ export interface SlashCommand {
 }
 
 export const SLASH_COMMANDS: SlashCommand[] = [
-  { name: "/wiki", hint: "[maintain] <task>", description: "Use the local knowledge base for this message", Icon: IconFile },
+  { name: "/wiki", hint: "[maintain] <task>", description: "Optional Wiki command — lookup is always available; maintain sends work to Weber", Icon: IconFile },
   {
     name: "/schedule",
     hint: "[when] [what]",

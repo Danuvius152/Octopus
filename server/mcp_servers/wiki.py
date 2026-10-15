@@ -173,8 +173,10 @@ def maintain(
     target: str | None = None,
     sources: list[dict] | None = None,
 ) -> dict:
-    """Ingest new material OR maintain explicitly named files in a durable Weber task.
+    """Submit a durable maintenance request to the configured Weber worker.
 
+    This queues work; a job ID alone does not mean maintenance is complete.
+    Submission gives the caller no direct document-writing capability.
     Material is preserved verbatim; target is a new Library/*.md path, otherwise
     Library/Inbox is used. Sources are read-only citations, not write targets.
     In autonomous mode, choose exact paths relevant to the current task.

@@ -4,7 +4,7 @@ const API = "http://localhost:8765/api";
 const headers = { Authorization: "Bearer changeme" };
 
 test("a rejected draft survives archive and restores its text and attachment to a new conversation", async ({ page, request }) => {
-  const sent: { session_id: string; client_request_id: string; content: string; attachment_ids: string[]; wiki_mode: string }[] = [];
+  const sent: { session_id: string; client_request_id: string; content: string; attachment_ids: string[]; wiki_mode?: string }[] = [];
   await page.routeWebSocket(/\/ws(?:\?|$)/, (socket) => {
     const server = socket.connectToServer();
     socket.onMessage((message) => {
@@ -29,7 +29,6 @@ test("a rejected draft survives archive and restores its text and attachment to 
     const input = page.locator(".chat-input-bar textarea");
     const text = "  /wiki maintain Library/note.md  ";
     await input.fill(text);
-    await page.getByRole("button", { name: "Use local Wiki for this message" }).click();
     await page.getByTestId("attachment-file-input").setInputFiles({ name: "retained.txt", mimeType: "text/plain", buffer: Buffer.from("original attachment bytes") });
     await expect(page.locator(".attachment-pending")).toContainText("retained.txt");
     await expect(page.locator(".attachment-pending")).not.toContainText("uploading");
@@ -52,14 +51,14 @@ test("a rejected draft survives archive and restores its text and attachment to 
     nextId = next.id;
     await page.getByRole("button", { name: "Restore draft" }).click();
     await expect(input).toHaveValue(text);
-    await expect(page.getByRole("button", { name: "Use local Wiki for this message" })).toHaveText("Wiki · 只读");
+    await expect(page.getByRole("button", { name: "Use local Wiki for this message" })).toHaveCount(0);
     await expect(page.locator(".attachment-pending")).toContainText("retained.txt");
     await expect(page.locator(".attachment-pending")).not.toContainText("uploading");
     expect(sent).toHaveLength(1);
     await page.getByRole("button", { name: "Send message" }).click();
     await expect.poll(() => sent.length).toBe(2);
     expect(sent[1].content).toBe(text.trim());
-    expect(sent[1].wiki_mode).toBe("read");
+    expect(sent[1]).not.toHaveProperty("wiki_mode");
     expect(sent[1].session_id).toBe(next.id);
     expect(sent[1].attachment_ids[0]).not.toBe(sent[0].attachment_ids[0]);
     const downloaded = await request.get(`${API}/sessions/${next.id}/attachments/${sent[1].attachment_ids[0]}`, { headers });

@@ -1445,7 +1445,14 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
         wiki = next((e for e in entries if e.key == "wiki"), None)
         from server.wiki.workflow import guide
 
-        seen.append((wiki is not None, guide("query-v2").splitlines()[0] in " ".join(argv)))
+        if backend == "codex":
+            import tomllib
+
+            override = next(arg for arg in argv if arg.startswith("developer_instructions="))
+            prompt = tomllib.loads(override)["developer_instructions"]
+        else:
+            prompt = argv[argv.index("--append-system-prompt") + 1]
+        seen.append((wiki is not None, guide("query-v2") in prompt))
 
         class Runtime(FakeRunBase):
             def set_idle_handler(self, handler):
@@ -1455,6 +1462,9 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
                 pass
 
             async def stop(self):
+                pass
+
+            async def interrupt(self):
                 pass
 
             async def stream(self):
@@ -1481,7 +1491,7 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
         pass
     async for _ in session_manager._execute_claimed_request(session.id, "关闭本轮", wiki_mode="off"):
         pass
-    assert seen == [(True, True), (True, False), (True, True)]
+    assert seen == [(True, True), (True, True), (True, True)]
     assert len(set(credentials)) == 3
     for credential in credentials:
         response = await client.get(

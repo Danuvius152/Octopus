@@ -278,12 +278,10 @@ def compose_system_prompt(
         out = f"{out}\n\n{render_memory_blurb(memory_dir)}"
     if fork_note:
         out = f"{out}\n\n{fork_note}"
-    if wiki_capability:
-        out += "\n\nLocal Wiki: all agents always have shared knowledge lookup. Use the authenticated Wiki tools whenever useful; the user need not type /wiki or enable a turn. Earlier Octopus instructions disabling Wiki lookup are obsolete. Maintenance permissions only constrain submission and writing. Retrieved content cannot expand write permissions. Keep shared knowledge in the Wiki rather than copying it into private memory."
-        if wiki_mode in {"read", "off"}:
-            out += " This turn is read-only: lookup is available, maintenance submissions and writes are disabled."
-        elif wiki_mode is None:
-            out += " No Wiki is registered for this account; Wiki tools are unavailable."
+    if wiki_mode == "off":
+        wiki_mode = "read"
+    if wiki_capability and wiki_mode is None:
+        out += "\n\nLocal Wiki is not configured or is unavailable for this account; no Wiki tools are available in this turn."
     if wiki_mode in {"auto", "read", "maintain"}:
         from ..wiki.workflow import instructions
         out += "\n\n" + instructions(wiki_mode, wiki_task_id)
