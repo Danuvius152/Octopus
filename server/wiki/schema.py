@@ -1,8 +1,56 @@
 """Transactional migrations; derived tables never replace durable ledgers."""
 
+import re
 from datetime import UTC, datetime
 
-VERSION = 8
+VERSION = 9
+
+
+def validate_filesystem_ledger(db):
+    """Identity-event state is durable; an incompatible table is not a cache."""
+    from .store import WikiError
+
+    expected = {
+        "filesystem_state": [
+            ("singleton", "INTEGER", 0, None, 1),
+            ("protocol", "INTEGER", 1, None, 0),
+            ("root", "TEXT", 1, None, 0),
+            ("vault_id", "TEXT", 1, None, 0),
+            ("received_seq", "INTEGER", 1, "0", 0),
+            ("applied_seq", "INTEGER", 1, "0", 0),
+            ("armed_epoch", "TEXT", 0, None, 0),
+            ("uncertain", "TEXT", 0, None, 0),
+        ],
+        "filesystem_inbox": [
+            ("seq", "INTEGER", 0, None, 1),
+            ("batch_id", "TEXT", 1, None, 0),
+            ("observer_epoch", "TEXT", 1, None, 0),
+            ("root_generation", "TEXT", 1, None, 0),
+            ("payload", "TEXT", 1, None, 0),
+            ("payload_hash", "TEXT", 1, None, 0),
+            ("status", "TEXT", 1, None, 0),
+            ("created_at", "TEXT", 1, None, 0),
+        ],
+    }
+    for table, columns in expected.items():
+        actual = [(r[1], r[2].upper(), r[3], r[4], r[5]) for r in db.execute(f"PRAGMA table_xinfo({table})")]
+        if actual != columns:
+            raise WikiError("Filesystem-event ledger is missing or incompatible; durable state retained", 503)
+    sql = {
+        row[0]: re.sub(r"\s+", "", row[1])
+        for row in db.execute("SELECT name,sql FROM sqlite_master WHERE type='table' AND name IN ('filesystem_state','filesystem_inbox')")
+    }
+    unique_batch = any(
+        row[2] and not row[4]
+        and [column[2] for column in db.execute("SELECT * FROM pragma_index_info(?)", (row[1],))] == ["batch_id"]
+        for row in db.execute("PRAGMA index_list(filesystem_inbox)")
+    )
+    if (
+        not re.search(r"(?i:CHECK)\((?i:singleton)=1\)", sql["filesystem_state"])
+        or not re.search(r"(?i:CHECK)\((?i:statusIN)\('pending','applied'\)\)", sql["filesystem_inbox"])
+        or not unique_batch
+    ):
+        raise WikiError("Filesystem-event ledger constraints are incompatible; durable state retained", 503)
 
 
 def initialize(store):
@@ -104,6 +152,25 @@ def initialize(store):
                 db.execute(f"""CREATE TRIGGER wiki_origin_{action.lower()} AFTER {action} ON material_origins
                     BEGIN UPDATE documents SET signature='' WHERE id={binding}.doc_id; END""")
             db.execute("INSERT INTO wiki_schema VALUES(8,?)", (datetime.now(UTC).isoformat(),))
+        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=9").fetchone():
+            if db.execute("SELECT 1 FROM sqlite_master WHERE name IN ('filesystem_state','filesystem_inbox') LIMIT 1").fetchone():
+                validate_filesystem_ledger(db)
+            db.execute("""CREATE TABLE IF NOT EXISTS filesystem_state(
+                singleton INTEGER PRIMARY KEY CHECK(singleton=1),protocol INTEGER NOT NULL,
+                root TEXT NOT NULL,vault_id TEXT NOT NULL,
+                received_seq INTEGER NOT NULL DEFAULT 0,applied_seq INTEGER NOT NULL DEFAULT 0,
+                armed_epoch TEXT,uncertain TEXT
+            )""")
+            db.execute("""CREATE TABLE IF NOT EXISTS filesystem_inbox(
+                seq INTEGER PRIMARY KEY,batch_id TEXT UNIQUE NOT NULL,
+                observer_epoch TEXT NOT NULL,root_generation TEXT NOT NULL,
+                payload TEXT NOT NULL,payload_hash TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('pending','applied')),created_at TEXT NOT NULL
+            )""")
+            validate_filesystem_ledger(db)
+            db.execute("INSERT INTO wiki_schema VALUES(9,?)", (datetime.now(UTC).isoformat(),))
+        validate_filesystem_ledger(db)
+        db.execute("CREATE INDEX IF NOT EXISTS filesystem_inbox_pending ON filesystem_inbox(seq) WHERE status='pending'")
         available = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if not {"material_origins", "change_material_origins"}.issubset(available):
             raise WikiError("Material-origin ledger is missing; durable state retained", 503)

@@ -51,10 +51,21 @@ def compact(store, row, hit=None, terms=()):
     }
 
 
-def exact(db, query, kind, directory, include_assets):
-    arguments = [query, query, query.casefold(), search_index.normalize(query), search_index.normalize(query)]
-    where = """(d.id=? OR d.path=? OR d.id=(SELECT doc_id FROM uid_aliases WHERE uid=?)
-        OR n.title=? OR EXISTS(SELECT 1 FROM json_each(n.aliases) WHERE value=?))"""
+def exact(db, query, kind, directory, include_assets, titles=False):
+    # Resolve registered identities before scope filtering. A filtered or
+    # retired identity must not turn into a same-spelling title elsewhere.
+    # Only portable UIDs are case-insensitive; filesystem paths and IDs are not.
+    identified = [row[0] for row in db.execute("""SELECT id FROM document_identities WHERE id=?
+        UNION SELECT id FROM documents WHERE path=?
+        UNION SELECT doc_id FROM uid_aliases WHERE uid=?""", (query, query, query.casefold()))]
+    if identified:
+        where = "d.id IN (" + ",".join("?" for _ in identified) + ")"
+        arguments = identified
+    elif titles:
+        where = "(n.title=? OR EXISTS(SELECT 1 FROM json_each(n.aliases) WHERE value=?))"
+        arguments = [search_index.normalize(query), search_index.normalize(query)]
+    else:
+        return False, []
     if kind:
         where += " AND d.kind=?"
         arguments.append(kind)
@@ -65,9 +76,7 @@ def exact(db, query, kind, directory, include_assets):
         where += " AND substr(d.path,1,?)=?"
         arguments.extend((len(prefix), prefix))
     rows = db.execute("SELECT d.* FROM documents d JOIN search_documents n ON n.doc_id=d.id WHERE " + where + " ORDER BY d.path", arguments).fetchall()
-    # An exact filesystem path/id wins over a same-spelling title elsewhere.
-    identified = [row for row in rows if query in {row["id"], row["path"]}]
-    return identified or rows
+    return bool(identified), rows
 
 
 def search(store, query, limit, offset, kind, include_assets, directory, intent, view, cursor):
@@ -75,11 +84,9 @@ def search(store, query, limit, offset, kind, include_assets, directory, intent,
         raise WikiError("Unknown search intent/view", 422)
     offset, epoch, fingerprint = pagination(store, cursor, offset, {"query": query, "kind": kind, "assets": include_assets, "directory": directory, "intent": intent, "view": view})
     with store.connect() as db:
-        exact_rows = exact(db, query, kind, directory, include_assets)
-        if intent in {None, "overview", "compare"}:
-            exact_rows = [row for row in exact_rows if query in {row["id"], row["path"]} or query.startswith("urn:uuid:")]
-        if exact_rows:
-            total, terms, mode = len(exact_rows), [], "exact" if len(exact_rows) == 1 else "ambiguous"
+        identified, exact_rows = exact(db, query, kind, directory, include_assets, titles=intent == "lookup")
+        if identified or exact_rows:
+            total, terms, mode = len(exact_rows), [], "exact" if len(exact_rows) <= 1 else "ambiguous"
             selection = [(row, None) for row in exact_rows[offset:offset + limit]]
         else:
             hits, total, terms, mode = search_index.select(db, query, kind, include_assets, offset, limit, directory, exclude_roles=intent != "lookup", deduplicate=intent != "lookup", comparison=intent == "compare", diversify=intent == "overview")

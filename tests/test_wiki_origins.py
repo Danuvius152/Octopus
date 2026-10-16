@@ -627,7 +627,7 @@ def downgrade_fixture_to_schema7(history):
         db.execute("DROP TABLE material_origins")
         db.execute("DROP TABLE change_material_origins")
         db.execute("ALTER TABLE app_trash DROP COLUMN origin_state")
-        db.execute("DELETE FROM wiki_schema WHERE version=8")
+        db.execute("DELETE FROM wiki_schema WHERE version>=8")
     return store.root, store.state, store.vault_id
 
 
@@ -642,7 +642,7 @@ def test_schema7_upgrade_is_transactional_idempotent_and_does_not_backfill_proof
         try:
             assert upgraded.read("note.md")["content"] == "legacy material"
             with upgraded.connect() as db:
-                assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == 8
+                assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == schema.VERSION
                 assert before == {t: [tuple(r) for r in db.execute("SELECT * FROM " + t)] for t in tables}
                 assert db.execute("SELECT count(*) FROM material_origins").fetchone()[0] == 0
                 assert db.execute("SELECT count(*) FROM change_material_origins").fetchone()[0] == 0

@@ -11,6 +11,7 @@ import re
 import sqlite3
 import threading
 import uuid
+import weakref
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -102,7 +103,7 @@ def vault_read(function):
         with history.locked(shared=not pending and function.__name__ != "refresh"):
             try:
                 return function(self, *args, **kwargs)
-            except (OSError, WikiError) as error:
+            except (OSError, WikiError, sqlite3.DatabaseError) as error:
                 if function.__name__ != "refresh":
                     raise
                 with self.connect() as db:
@@ -124,17 +125,26 @@ class WikiStore:
         self.vault_id = vault_id
         state.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db_path = state / "index.sqlite3"
+        from .events import VaultEvents
         from .schema import initialize
 
         try:
+            self.events = VaultEvents.acquire(self.root, state)
+        except OSError as exc:
+            raise WikiError(f"Wiki observer unavailable; another process may own this index: {exc}", 503) from exc
+        self._events_released = False
+        self._events_finalizer = weakref.finalize(self, self.events.release)
+        try:
             initialize(self)
         except sqlite3.DatabaseError as exc:
+            self.release_events()
             raise WikiError(f"Wiki initialization failed; durable state retained: {exc}", 503) from exc
-        from .events import VaultEvents
-
-        self.events = VaultEvents(self.root)
+        except BaseException:
+            self.release_events()
+            raise
         self._synchronizing = threading.local()
         try:
+            self.events.bind_journal(self.db_path, self.vault_id)
             with self.connect() as db:
                 checked = db.execute("SELECT checked_at FROM index_state WHERE singleton=1").fetchone()[0]
                 watched = [row[0] for row in db.execute("SELECT path FROM watch_directories")]
@@ -145,8 +155,13 @@ class WikiStore:
                     self.events.watch(self.root / directory)
                 self.events.needs_reconciliation = True
         except BaseException:
-            self.events.close()
+            self.release_events()
             raise
+
+    def release_events(self):
+        if not self._events_released:
+            self._events_released = True
+            self._events_finalizer()
 
     @contextlib.contextmanager
     def borrow(self):
@@ -163,7 +178,7 @@ class WikiStore:
                 lease.active = False
                 self._users -= 1
                 if not self._users and self._retired:
-                    self.events.close()
+                    self.release_events()
                 self._lifecycle.notify_all()
 
     @contextlib.contextmanager
@@ -188,7 +203,7 @@ class WikiStore:
                 with self._lifecycle:
                     self._users -= 1
                     if not self._users and self._retired:
-                        self.events.close()
+                        self.release_events()
                     self._lifecycle.notify_all()
             return
         with self.borrow():
@@ -202,7 +217,7 @@ class WikiStore:
         with self._lifecycle:
             self._retired = True
             if not self._users:
-                self.events.close()
+                self.release_events()
 
     def close(self) -> None:
         self.retire()
@@ -218,21 +233,29 @@ class WikiStore:
         with self.connect() as db:
             state = db.execute("SELECT * FROM index_state WHERE singleton=1").fetchone()
             errors = [{"path": row["path"], "error": json.loads(row["metadata"]).get("error", "Extraction failed")} for row in db.execute("SELECT path,metadata FROM documents WHERE quality='error'")]
+            stream = db.execute("SELECT received_seq,applied_seq,armed_epoch,uncertain FROM filesystem_state WHERE singleton=1").fetchone()
+        durable_error = None
+        durable_pending = 0
+        if stream:
+            durable_pending = stream["received_seq"] - stream["applied_seq"]
+            durable_error = stream["uncertain"] or ("Filesystem reception is incomplete; durable receipt required" if stream["armed_epoch"] else None)
         if state["error"]:
             errors.append({"path": "", "error": state["error"]})
-        pending = int(self.events.needs_reconciliation)
+        if durable_error:
+            errors.append({"path": "", "error": durable_error})
+        pending = max(int(self.events.needs_reconciliation), durable_pending, int(bool(durable_error)))
         return {
             "index_epoch": state["epoch"], "index_checked_at": state["checked_at"],
             "pending_changes": pending,
-            "index_status": "unavailable" if state["error"] else "updating" if pending else "partial" if errors else "ready",
+            "index_status": "unavailable" if state["error"] or durable_error else "updating" if pending else "partial" if errors else "ready",
             "index_errors": errors, "observer_mode": self.events.mode,
         }
 
-    def synchronize(self) -> None:
+    def synchronize(self, *, dirty=True, removed_paths=frozenset(), journal_moves=()) -> None:
         with self.operation():
-            self._synchronize()
+            self._synchronize(dirty=dirty, removed_paths=removed_paths, journal_moves=journal_moves)
 
-    def _synchronize(self) -> None:
+    def _synchronize(self, *, dirty=True, removed_paths=frozenset(), journal_moves=()) -> None:
         """Consume only known changes; full compensation is a background job."""
         if getattr(self._synchronizing, "active", False):
             return
@@ -241,23 +264,28 @@ class WikiStore:
         with WikiHistory(self).locked():
             self._synchronizing.active = True
             try:
-                events = self.events.drain()
+                events = self.pending_changes(removed_paths=removed_paths)
                 changed = events.paths
-                with self.connect() as db:
-                    changed.update(row[0] for row in db.execute("SELECT path FROM documents WHERE signature=''").fetchall())
+                if dirty:
+                    with self.connect() as db:
+                        changed.update(row[0] for row in db.execute("SELECT path FROM documents WHERE signature=''").fetchall())
                 if self.events.needs_reconciliation and (not self.root.is_dir() or self.root.is_symlink()):
                     with self.connect() as db:
                         db.execute("UPDATE index_state SET error='Vault unavailable; existing index retained' WHERE singleton=1")
                     return
                 if not changed:
+                    with self.connect() as db:
+                        if self.events.journal is not None:
+                            self.events.journal.mark_applied(db, events.receipts)
+                    self.acknowledge_changes()
                     return
                 if not self.root.is_dir() or self.root.is_symlink():
                     raise WikiError("Vault unavailable; existing index retained", 503)
                 paths = set(changed)
                 with self.connect() as db:
-                    paths.update(self.apply_moves(db, events.moves))
+                    paths.update(self.apply_lifecycle(db, events.lifecycle, journal_moves))
                     for relative in sorted(changed):
-                        target = self.observed_path(relative)
+                        target = self.root if relative == "" else self.observed_path(relative)
                         if target is not None and target.is_dir():
                             for directory, dirs, files in os.walk(target, followlinks=False, onerror=enumeration_error):
                                 dirs[:] = [d for d in dirs if not d.startswith(".") and not (Path(directory) / d).is_symlink()]
@@ -268,19 +296,24 @@ class WikiStore:
                     # Moves must be discovered before missing identities detach.
                     for relative in sorted(paths):
                         target = self.observed_path(relative)
-                        if target is not None and target.is_file() and target.suffix.lower() in SUPPORTED:
+                        if target is not None and target.is_file() and target.suffix.lower() in SUPPORTED and not any(part.startswith(".") for part in PurePosixPath(relative).parts):
                             current = db.execute("SELECT signature FROM documents WHERE path=?", (relative,)).fetchone()
                             stat = target.stat()
                             if relative in events.written or current is None or current[0] != f"{stat.st_mtime_ns}:{stat.st_size}:v3":
                                 self._index(db, relative)
                     for relative in sorted(paths):
                         target = self.observed_path(relative)
-                        if target is None or not target.is_file():
+                        if target is None or not target.is_file() or any(part.startswith(".") for part in PurePosixPath(relative).parts):
                             self.detach_path(db, relative)
-            except (OSError, WikiError) as error:
+                    if self.events.journal is not None:
+                        self.events.journal.mark_applied(db, events.receipts)
+                self.acknowledge_changes()
+            except (OSError, WikiError, sqlite3.DatabaseError) as error:
                 self.events.needs_reconciliation = True
                 with self.connect() as db:
                     db.execute("UPDATE index_state SET error=? WHERE singleton=1", (str(error),))
+                if journal_moves and isinstance(error, WikiError) and error.status == 409:
+                    raise
                 raise WikiError("Known Wiki change awaits reconciliation: " + str(error), 503) from error
             finally:
                 self._synchronizing.active = False
@@ -326,47 +359,106 @@ class WikiStore:
     def file_key(stat) -> str:
         return f"{stat.st_dev}:{stat.st_ino}:{stat.st_mtime_ns}"
 
-    def apply_moves(self, db, moves):
+    def pending_changes(self, *, removed_paths=frozenset()):
+        """Keep observed lifecycles until the index transaction commits."""
+        self.events.reconcile_applied()
+        queued = self.events.drain()
+        if queued.pending_moves:
+            with self.connect() as db:
+                active = {row[0] for row in db.execute("SELECT path FROM document_identities WHERE path IS NOT NULL AND file_key<>''")}
+            self.events.settle_inactive(active, removed_paths)
+            queued = self.events.drain()
+        self.events.queued.merge(queued)
+        if queued.pending_moves:
+            raise WikiError("A filesystem move awaits its matching notification", 503)
+        return self.events.queued
+
+    def acknowledge_changes(self):
+        from .events import FileChanges
+
+        if self.events.journal is not None:
+            self.events.journal.acknowledge(self.events.queued.receipts)
+        self.events.queued = FileChanges()
+
+    @staticmethod
+    def event_affects(event, path):
+        return event.path == path or (event.directory and (not event.path or path.startswith(event.path.rstrip("/") + "/")))
+
+    def journal_transitions(self, db, lifecycle, moves):
+        transitions = {}
+        for old, new, expected in moves:
+            # Already-applied journals and matched kernel renames need no
+            # interpretation. Empty-key legacy reservations are not sources.
+            source = db.execute("SELECT id,file_key FROM document_identities WHERE path=?", (old,)).fetchone()
+            if source is None or source["id"] != expected or not source["file_key"]:
+                continue
+            source_events = [(index, event) for index, event in enumerate(lifecycle) if self.event_affects(event, old)]
+            if any(event.kind == "move" for _index, event in source_events):
+                continue
+            ended = [(index, event) for index, event in source_events if event.kind == "delete"]
+            if not ended:
+                continue
+            target = db.execute("SELECT id FROM document_identities WHERE path=?", (new,)).fetchone()
+            if len(ended) != 1 or any(self.event_affects(event, new) for event in lifecycle) or (target is not None and target["id"] != expected):
+                raise WikiError("Ambiguous external copy/unlink move; journal and filesystem events retained", 409)
+            transitions[(ended[0][0], old)] = (new, expected)
+        return transitions
+
+    def apply_lifecycle(self, db, lifecycle, journal_moves=()):
+        """Replay observed bindings in order, before indexing terminal bytes.
+
+        The destination may already have moved or been deleted again. Its
+        terminal inode cannot validate an earlier rename; the matched kernel
+        cookie provides that transition. Hidden temporary sources have no
+        binding, so an atomic save keeps its destination identity.
+        """
         paths = set()
-        for old, new, is_directory in moves:
+        transitions = self.journal_transitions(db, lifecycle, journal_moves)
+        for index, event in enumerate(lifecycle):
+            old, new = event.path, event.destination
             prefix = old.rstrip("/") + "/"
-            moved = [(row[0], new.rstrip("/") + "/" + row[0][len(prefix):]) for row in db.execute("SELECT path FROM document_identities WHERE substr(path,1,?)=?", (len(prefix), prefix)).fetchall()] if is_directory else [(old, new)]
-            for old_path, new_path in moved:
-                target = self.observed_path(new_path)
-                previous = db.execute("SELECT file_key FROM document_identities WHERE path=?", (old_path,)).fetchone()
-                if target is None or not target.is_file() or previous is None or previous[0].split(":")[:2] != self.file_key(target.stat()).split(":")[:2]:
-                    continue
-                self.move_identity(old_path, new_path, db)
-                paths.update((old_path, new_path))
+            bound = [row[0] for row in db.execute(
+                "SELECT path FROM document_identities WHERE (? OR path=? OR (? AND substr(path,1,?)=?)) AND (? OR file_key<>'')",
+                (old == "" and event.directory, old, event.directory, len(prefix), prefix, event.kind != "move"),
+            ).fetchall()]
+            for old_path in bound:
+                paths.add(old_path)
+                trusted = transitions.get((index, old_path))
+                current = db.execute("SELECT id FROM document_identities WHERE path=?", (old_path,)).fetchone()
+                if trusted and current is not None and current["id"] == trusted[1]:
+                    self.move_identity(old_path, trusted[0], db, observed=True)
+                    paths.add(trusted[0])
+                elif event.kind == "delete":
+                    self.detach_path(db, old_path)
+                elif event.kind == "move":
+                    new_path = new + old_path[len(old):]
+                    self.move_identity(old_path, new_path, db, observed=True)
+                    paths.add(new_path)
         return paths
 
-    def move_identity(self, old: str, new: str, db=None) -> None:
+    def move_identity(self, old: str, new: str, db=None, *, observed=False) -> None:
         """Move trusted identity/ownership without touching any note bytes."""
         if db is None:
             with self.connect() as connection:
-                self.move_identity(old, new, connection)
+                self.move_identity(old, new, connection, observed=observed)
             return
-        self.path(old)
-        target = self.path(new)
+        if not observed:
+            self.path(old)
+        # Observed intermediate names may now be missing, hidden, symlinks or
+        # unsupported API coordinates. Only terminal paths are opened/indexed.
+        target = None if observed else self.path(new)
         identity = db.execute(
-            "SELECT id FROM document_identities WHERE path=?", (old,)
+            "SELECT id,file_key FROM document_identities WHERE path=?", (old,)
         ).fetchone()
         if identity is None:
             return
         # A prior deleted document at the destination keeps its ID as a tombstone.
-        from . import origins
-
         displaced = db.execute("SELECT id FROM document_identities WHERE path=?", (new,)).fetchone()
         if displaced and displaced[0] != identity[0]:
-            origins.detach(db, new)
-        db.execute(
-            "UPDATE document_identities SET path=NULL WHERE path=? AND id<>?",
-            (new, identity[0]),
-        )
-        db.execute("DELETE FROM documents WHERE path=? AND id<>?", (new, identity[0]))
+            self.detach_path(db, new)
         db.execute(
             "UPDATE document_identities SET path=?,file_key=? WHERE id=?",
-            (new, self.file_key(target.stat()), identity[0]),
+            (new, identity["file_key"] if target is None else self.file_key(target.stat()), identity[0]),
         )
         db.execute(
             "UPDATE documents SET path=?,signature='' WHERE id=?", (new, identity[0])
@@ -446,6 +538,7 @@ class WikiStore:
         previous_metadata = json.loads(existing["metadata"]) if existing is not None else {}
         if (
             existing is not None
+            and existing["id"] == doc_id
             and existing["signature"]
             and existing["revision"] == digest
             and previous_metadata.get("pipeline_version")
@@ -598,9 +691,10 @@ class WikiStore:
 
         if not self.root.is_dir() or self.root.is_symlink():
             raise WikiError("Vault unavailable; existing index retained", 503)
+        # Receipt must commit independently before any application transaction.
+        queued = self.pending_changes()
         with self.connect() as db:
-            queued = self.events.drain()
-            self.apply_moves(db, queued.moves)
+            self.apply_lifecycle(db, queued.lifecycle)
             found = set()
             if self.events.mode == "inotify":
                 self.events.error = None
@@ -621,6 +715,8 @@ class WikiStore:
                     ):
                         continue
                     relative = path.relative_to(self.root).as_posix()
+                    if self.observed_path(relative) is None:
+                        continue
                     found.add(relative)
                     stat = path.stat()
                     old = db.execute(
@@ -632,12 +728,15 @@ class WikiStore:
             # missing files when only the durable ledger survived a rebuild.
             for row in db.execute("SELECT path FROM document_identities WHERE path IS NOT NULL").fetchall():
                 observed = self.observed_path(row["path"])
-                if observed is None or not observed.is_file():
+                if observed is None or not observed.is_file() or any(part.startswith(".") for part in PurePosixPath(row["path"]).parts):
                     self.detach_path(db, row["path"])
             for row in db.execute("SELECT id,path FROM documents").fetchall():
                 if row["path"] not in found:
                     db.execute("DELETE FROM documents WHERE id=?", (row["id"],))
             db.execute("UPDATE index_state SET checked_at=?,error=NULL WHERE singleton=1", (datetime.now(UTC).isoformat(),))
+            if self.events.journal is not None:
+                self.events.journal.mark_applied(db, queued.receipts)
+        self.acknowledge_changes()
         self.events.needs_reconciliation = bool(self.events.error)
 
     def rebuild_search(self) -> None:

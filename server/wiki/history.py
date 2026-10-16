@@ -402,6 +402,9 @@ class WikiHistory:
         origin_state=origins.UNCHANGED,
         origin_builder=None,
     ):
+        # Consume earlier notifications before attaching/restoring a binding.
+        # In particular, a journalled delete must not later retire its successor.
+        self.store.synchronize(dirty=False)
         path = self.store.path(relative)
         if path.exists() and not path.is_file():
             raise WikiError("The target is not a regular file", 409)
@@ -589,6 +592,7 @@ class WikiHistory:
 
     def capture_external(self, paths=None):
         """Temporary crash-safe preimages; unchanged text never enters blobs."""
+        self.store.synchronize()
         result = {}
         with self.store.connect() as db:
             for relative in self.text_paths() if paths is None else paths:
@@ -637,6 +641,13 @@ class WikiHistory:
                 and sum(v["hash"] == before[old]["hash"] for v in before.values()) == 1
             ):
                 moves.append((old, candidates[0]))
+        # A verified legacy rename can be implemented as copy/unlink. Preserve
+        # that one transition in event order; do not discard unrelated deletes
+        # or a later replacement of its destination.
+        self.store.synchronize(
+            dirty=False, removed_paths=set(before) - set(after),
+            journal_moves=[(old, new, before[old]["document_id"]) for old, new in moves],
+        )
         with self.store.connect() as db:
             for old, new in moves:
                 expected = before[old]["document_id"]

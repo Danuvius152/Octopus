@@ -98,9 +98,9 @@ class WikiCuration:
                 path,
                 expected_revision,
                 key_note,
-                tags or [],
+                tags,
                 relations,
-                sources or [],
+                sources,
                 actor,
                 reason,
                 publication,
@@ -144,14 +144,14 @@ class WikiCuration:
 
                 tasks.require_path(task, self.store, path)
                 tasks.require_read(task, self.store, path, expected_revision)
-                for ref in sources + relations:
+                for ref in (sources or []) + relations:
                     tasks.require_source_read(task, self.store, ref)
             source = self.store.read(
                 path, length=1, expected_revision=expected_revision
             )
             if not is_maintainable_text(source["path"]):
                 raise WikiError("Excluded assets are not note templates", 422)
-            refs = self.sources(sources)
+            refs = self.sources(sources) if sources is not None else []
             linked = self.sources(relations)
             for entry, relationship in zip(linked, relations, strict=True):
                 with self.store.connect() as db:
@@ -211,6 +211,7 @@ class WikiCuration:
                     409,
                 )
             previous = json.loads(owned["regions"]) if owned else []
+            owned_metadata = json.loads(owned["metadata"]) if owned else {}
             from .material_proof import Trace
 
             trace = Trace(base) if destination == path else None
@@ -219,11 +220,30 @@ class WikiCuration:
             if trace is not None:
                 trace.edit([(rendered_base.index(part["raw"]), rendered_base.index(part["raw"]) + len(part["raw"]), "") for part in previous])
             additions = []
+            # Omitted fields retain only our trusted saved metadata. Retained
+            # citations keep their recorded identity/version, even when stale;
+            # validating them as new citations would silently refresh evidence.
+            inherited_sources = sources is None and "sources" in owned_metadata
+            if inherited_sources:
+                retained = owned_metadata["sources"]
+                refs = retained + [ref for ref in refs if not any(previous_ref["doc"] == ref["doc"] for previous_ref in retained)]
             provenance = {
                 "sources": refs + linked,
                 "source_revision": source["revision"],
             }
             supplied_points = bool(key_note and key_note.strip())
+            if supplied_points and sources is None:
+                current = source if destination == path else None
+                if destination != path and destination_revision is not None:
+                    current = self.store.read(destination, length=1, expected_revision=destination_revision)
+                if current and any(
+                    ref["status"] not in {"indexed", "external"}
+                    for ref in current["metadata"].get("source_refs", [])
+                ):
+                    raise WikiError(
+                        "A new Key note requires explicit current sources when retained evidence is stale or missing",
+                        422,
+                    )
             if supplied_points and reuse_existing_summary:
                 raise WikiError("Choose supplementary Key note or explicit reuse of existing points", 422)
             if (
@@ -244,11 +264,13 @@ class WikiCuration:
                 additions.extend(
                     part for part in previous if part["role"] == "key_note"
                 )
-            normalized = list(
+            normalized = owned_metadata.get("tags", []) if tags is None else list(
                 dict.fromkeys(re.sub(r"[^\w/-]+", "-", tag).strip("-/") for tag in tags)
             )
             normalized = [tag for tag in normalized if tag]
-            if normalized:
+            if tags is None:
+                additions.extend(part for part in previous if part["role"] == "tags")
+            elif normalized:
                 additions.append(
                     region(
                         "tags",
@@ -256,7 +278,7 @@ class WikiCuration:
                         {"tags": normalized},
                     )
                 )
-            normalized_aliases = list(dict.fromkeys(alias.strip() for alias in aliases if alias.strip())) if aliases is not None else json.loads(owned["metadata"]).get("aliases", []) if owned else []
+            normalized_aliases = list(dict.fromkeys(alias.strip() for alias in aliases if alias.strip())) if aliases is not None else owned_metadata.get("aliases", [])
             if aliases is None:
                 additions.extend(part for part in previous if part["role"] == "aliases")
             elif normalized_aliases:
@@ -287,16 +309,18 @@ class WikiCuration:
             if trace is not None:
                 trace.edit([(offset, offset, head), (len(base), len(base), tail)])
             for addition in additions:
-                self.validate_links(destination, addition["raw"], candidate=text)
+                if addition not in previous:
+                    self.validate_links(destination, addition["raw"], candidate=text)
             metadata = {
                 "author": "Weber 整理",
                 "tags": normalized,
                 "aliases": normalized_aliases,
                 "opening_points_decision": "supplement" if supplied_points else "reuse" if reuse_existing_summary else "preserve_owned",
-                "sources": [ref for ref in refs + linked if ref["path"] != destination],
                 "original_revision": revision(base.encode()),
                 "organized_from_revision": source["revision"],
             }
+            if sources is not None or inherited_sources or refs or linked:
+                metadata["sources"] = [ref for ref in refs + linked if ref["path"] != destination]
             management = {
                 "path": destination,
                 "base_hash": revision(base.encode()),
