@@ -124,6 +124,7 @@ class WikiHistory:
         operation_details=None,
         origin_state=origins.UNCHANGED,
         before_origin=origins.UNCHANGED,
+        origin_builder=None,
     ):
         if change_id:
             with self.store.connect() as db:
@@ -201,6 +202,10 @@ class WikiHistory:
                 "INSERT INTO change_management VALUES(?,?,?)",
                 (row["id"], json.dumps(before_state), json.dumps(after_state)),
             )
+            if origin_builder is not None:
+                if origin_state is not origins.UNCHANGED or before_origin is not origins.UNCHANGED:
+                    raise WikiError("Choose a material transition or an explicit recovery state", 409)
+                before_origin, origin_state = origin_builder(db, document_id, before, after)
             origins.record(
                 db, row["id"], document_id, row["before_hash"], row["after_hash"],
                 before_state=before_origin, after_state=origin_state,
@@ -395,6 +400,7 @@ class WikiHistory:
         operation="save",
         operation_details=None,
         origin_state=origins.UNCHANGED,
+        origin_builder=None,
     ):
         path = self.store.path(relative)
         if path.exists() and not path.is_file():
@@ -429,7 +435,7 @@ class WikiHistory:
             with self.store.connect() as db:
                 receipt = record(db, doc_id=document["id"], path=relative, before=current, after=current, operation=operation, reason=reason, publication=publication, details=operation_details)
             return {"path": relative, "revision": current, "change_id": None, "receipt_id": receipt, "changed": False, **self.store.index_state()}
-        row = self.record(relative, before, raw, actor, reason, "prepared", management, publication=publication, operation=operation, operation_details=operation_details, origin_state=origin_state)
+        row = self.record(relative, before, raw, actor, reason, "prepared", management, publication=publication, operation=operation, operation_details=operation_details, origin_state=origin_state, origin_builder=origin_builder)
         if raw is None:
             path.unlink(missing_ok=True)
         else:
@@ -531,6 +537,14 @@ class WikiHistory:
                     (change_id,),
                 ).fetchone()
                 origin_state = origins.change_state(db, change_id, side)
+            origins.bound(origin_state, row["document_id"], digest)
+
+            def restored_origin(db, document_id, before, after):
+                # Restored bytes may form a copy while the source identity is
+                # still active elsewhere. Preserve its payload without giving
+                # the copy the source's material qualification.
+                return origins.UNCHANGED, origins.preimage(origin_state, document_id, digest)
+
             management = json.loads(entry[0]) if entry else _UNCHANGED
             result = self.write_locked(
                 row["path"],
@@ -540,7 +554,7 @@ class WikiHistory:
                 f"Restore {change_id} {side} as a new revision",
                 management,
                 restore_document_id=row["document_id"],
-                origin_state=origin_state,
+                origin_builder=restored_origin,
             )
             self.resolve_proposals([change_id])
             return result

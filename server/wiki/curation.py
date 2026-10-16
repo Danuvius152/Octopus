@@ -211,7 +211,13 @@ class WikiCuration:
                     409,
                 )
             previous = json.loads(owned["regions"]) if owned else []
+            from .material_proof import Trace
+
+            trace = Trace(base) if destination == path else None
+            rendered_base = base
             base = original_text(base, previous)
+            if trace is not None:
+                trace.edit([(rendered_base.index(part["raw"]), rendered_base.index(part["raw"]) + len(part["raw"]), "") for part in previous])
             additions = []
             provenance = {
                 "sources": refs + linked,
@@ -278,6 +284,8 @@ class WikiCuration:
                 part["raw"] for part in additions if part["role"] == "relations"
             )
             text = base[:offset] + head + base[offset:] + tail
+            if trace is not None:
+                trace.edit([(offset, offset, head), (len(base), len(base), tail)])
             for addition in additions:
                 self.validate_links(destination, addition["raw"], candidate=text)
             metadata = {
@@ -304,6 +312,7 @@ class WikiCuration:
                 reason,
                 management,
                 publication=publication | {"source_doc": source["id"], "source_path": path, "input_revision": source["revision"]} if publication else None,
+                origin_builder=trace.transition(publication, allow_seed=True) if trace is not None else None,
             )
             return result | {"original_preserved": True, "source_path": path}
 
@@ -361,6 +370,8 @@ class WikiCuration:
         return read(self, doc, **kwargs)
 
     def restructure(self, path, expected_revision, order, additions, actor, reason, task=None, frontmatter_patch=None, tags=None, aliases=None, item_doc=None):
+        from . import layout
+
         with self.history.locked():
             if task:
                 from .tasks import tasks
@@ -400,6 +411,7 @@ class WikiCuration:
             ):
                 raise WikiError("Original frontmatter must stay first")
             inserted = {}
+            addition_details = []
             for addition in additions:
                 position = addition["before"]
                 if (
@@ -421,21 +433,54 @@ class WikiCuration:
                     + ("，来源待核验" if not refs else "，来源见记录")
                     + "\n\n"
                 )
-                inserted.setdefault(position, []).append(
-                    attribution + addition["content"] + "\n\n"
-                )
+                structural = layout.headings_only(addition["content"])
+                content = addition["content"] if structural else attribution + addition["content"] + "\n\n"
+                inserted.setdefault(position, []).append((content, structural))
+                addition_details.append({"before": position, "kind": "structure" if structural else "explanation", "sources": refs})
             result = []
             mapping = {p["id"]: p["content"] for p in parts}
+            heading_fragments = []
+            newline = "\r\n" if "\r\n" in "".join(mapping.values()) else "\n"
+            rendered_characters, tail = 0, ""
             for index in range(len(order) + 1):
-                result.extend(inserted.get(index, []))
+                additions_here = inserted.get(index, [])
+                rendered = []
+                for number, (content, structural) in enumerate(additions_here):
+                    if structural:
+                        following = additions_here[number + 1][0] if number + 1 < len(additions_here) else mapping[order[index]] if index < len(order) else ""
+                        content = layout.insert_heading(content, tail, following, newline)
+                        heading_fragments.append((rendered_characters, content))
+                    result.append(content)
+                    rendered.append(content)
+                    rendered_characters += len(content)
+                    tail = layout.trailing_context(tail + content)
+                inserted[index] = rendered
                 if index < len(order):
-                    result.append(mapping[order[index]])
-            from . import format, operations
+                    original_part = mapping[order[index]]
+                    result.append(original_part)
+                    rendered_characters += len(original_part)
+                    tail = layout.trailing_context(tail + original_part)
+            from . import format, material_proof, operations
 
             text = "".join(result)
+            layout.validate_headings(text, heading_fragments)
+            original_text = "".join(part["content"] for part in parts)
+            trace = material_proof.Trace(original_text)
+            offsets, offset = {}, 0
+            for part in parts:
+                end = offset + len(part["content"].encode())
+                offsets[part["id"]] = (offset, end)
+                offset = end
+            chunks = []
+            for index in range(len(order) + 1):
+                chunks.extend(value.encode() for value in inserted.get(index, []))
+                if index < len(order):
+                    chunks.append(offsets[order[index]])
+            trace.replace(chunks)
             for addition in additions:
                 self.validate_links(path, addition["content"], candidate=text)
             document = self.store.read(path, length=1, expected_revision=expected_revision)
             text = format.patch(text, fields=frontmatter_patch, tags=tags, aliases=aliases, uid=document["metadata"]["uid"] if frontmatter_patch is not None else None, actor=actor if frontmatter_patch is not None else None)
+            trace.metadata(text)
             context = operations.publication(task, self.store, document, item_doc)
-            return self.history.write_locked(path, text.encode(), expected_revision, actor, reason, operations.management(self.store, path, text), publication=context, operation="restructure")
+            return self.history.write_locked(path, text.encode(), expected_revision, actor, reason, operations.management(self.store, path, text), publication=context, operation="restructure", operation_details={"additions": addition_details}, origin_builder=trace.transition(context, allow_seed=True))

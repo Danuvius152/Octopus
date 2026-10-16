@@ -312,14 +312,18 @@ async def test_shutdown_reports_a_reaper_that_retains_the_backend_lock(tmp_path,
 @pytest.mark.asyncio
 async def test_shutdown_drains_output_while_the_backend_handles_sigterm(tmp_path):
     source = (
-        "import os, signal, sys, time\n"
+        "import os, select, signal, sys\n"
         "def stop(*args):\n"
         "    sys.stdout.write('shutdown output\\n' * 100000)\n"
         "    sys.stdout.flush()\n"
         "    os._exit(0)\n"
+        "read_fd, write_fd = os.pipe()\n"
+        "os.set_blocking(write_fd, False)\n"
+        "signal.set_wakeup_fd(write_fd)\n"
         "signal.signal(signal.SIGTERM, stop)\n"
         "print('ready', flush=True)\n"
-        "time.sleep(60)\n"
+        "while True:\n"
+        "    select.select([read_fd], [], [])\n"
     )
     proc = await asyncio.create_subprocess_exec(
         sys.executable, "-u", "-c", source,
@@ -336,6 +340,8 @@ async def test_shutdown_drains_output_while_the_backend_handles_sigterm(tmp_path
     supervisor._backends[state.app_id] = state
     # Use the production grace period: this checks output draining during TERM,
     # not whether a loaded machine can transfer the entire pipe in 100 ms.
+    # The wakeup pipe also covers TERM arriving just before the child blocks,
+    # when a Python callback could otherwise wait for a long sleep to finish.
     try:
         await supervisor.shutdown()
         assert proc.returncode == 0

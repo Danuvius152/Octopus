@@ -594,6 +594,8 @@ class WikiStore:
 
     @vault_read
     def refresh(self) -> None:
+        from . import materials
+
         if not self.root.is_dir() or self.root.is_symlink():
             raise WikiError("Vault unavailable; existing index retained", 503)
         with self.connect() as db:
@@ -622,9 +624,9 @@ class WikiStore:
                     found.add(relative)
                     stat = path.stat()
                     old = db.execute(
-                        "SELECT d.signature,n.version,p.revision,p.ownership,coalesce(m.regions,''),NOT EXISTS(SELECT 1 FROM search_sections s WHERE s.doc_id=d.id) OR EXISTS(SELECT 1 FROM search_sections s LEFT JOIN search_fts f ON f.rowid=s.id WHERE s.doc_id=d.id AND f.rowid IS NULL),json_extract(d.metadata,'$.format_version'),json_extract(d.metadata,'$.html_body_version') FROM documents d LEFT JOIN search_documents n ON n.doc_id=d.id LEFT JOIN raw_materials p ON p.doc_id=d.id LEFT JOIN managed_notes m ON m.path=d.path WHERE d.path=?", (relative,)
+                        "SELECT d.signature,n.version,p.revision,p.ownership,coalesce(m.regions,''),NOT EXISTS(SELECT 1 FROM search_sections s WHERE s.doc_id=d.id) OR EXISTS(SELECT 1 FROM search_sections s LEFT JOIN search_fts f ON f.rowid=s.id WHERE s.doc_id=d.id AND f.rowid IS NULL),json_extract(d.metadata,'$.format_version'),json_extract(d.metadata,'$.html_body_version'),o.state FROM documents d LEFT JOIN search_documents n ON n.doc_id=d.id LEFT JOIN raw_materials p ON p.doc_id=d.id LEFT JOIN managed_notes m ON m.path=d.path LEFT JOIN material_origins o ON o.doc_id=d.id WHERE d.path=?", (relative,)
                     ).fetchone()
-                    if relative in queued.written or old is None or old[0] != f"{stat.st_mtime_ns}:{stat.st_size}:v3" or old[1] != search_index.VERSION or old[5] or old[6] != document_format.VERSION or (path.suffix.lower() in {".html", ".htm"} and old[7] != HTML_BODY_VERSION) or (not asset_reason(relative) and (old[2] is None or old[3] != old[4])):
+                    if relative in queued.written or old is None or old[0] != f"{stat.st_mtime_ns}:{stat.st_size}:v3" or old[1] != search_index.VERSION or old[5] or old[6] != document_format.VERSION or (path.suffix.lower() in {".html", ".htm"} and old[7] != HTML_BODY_VERSION) or (not asset_reason(relative) and (old[2] is None or old[3] != materials.ownership(old[4], old[8]))):
                         self._index(db, relative)
             # Discover moves before detaching missing paths. This also covers
             # missing files when only the durable ledger survived a rebuild.

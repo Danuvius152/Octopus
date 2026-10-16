@@ -3,7 +3,7 @@
 import json
 import unicodedata
 
-from . import format, operations, raw_blocks
+from . import format, material_proof, operations, raw_blocks
 from .store import WikiError
 
 
@@ -40,6 +40,7 @@ def revise(curation, body, actor, task):
             return {"id": document["id"], "path": path, "revision": document["revision"], "changed": False, "change_id": None, "receipt_id": receipt, "operation": "no_change", **store.index_state()}
         changes, fields, tags, aliases, refs = [], None, None, None, None
         candidate = text
+        trace = material_proof.Trace(text)
         if body.operation == "confirm_sources":
             tasks.require_read(task, store, path, body.expected_revision)
             refs = [dict(ref) for ref in document["metadata"].get("sources", [])]
@@ -86,6 +87,7 @@ def revise(curation, body, actor, task):
                     raise WikiError("Edits must not overlap or share an insertion point", 422)
             for start, end, replacement in reversed(ordered):
                 candidate = candidate[:start] + replacement + candidate[end:]
+            trace.edit(ordered)
             fields, tags, aliases = body.frontmatter_patch, body.tags, body.aliases
             if fields is not None or tags is not None or aliases is not None:
                 tasks.require_read(task, store, path, body.expected_revision)
@@ -99,10 +101,12 @@ def revise(curation, body, actor, task):
         if refs == document["metadata"].get("sources"):
             refs = None
         candidate = format.patch(candidate, fields=fields, tags=tags, aliases=aliases, sources=refs, uid=document["metadata"]["uid"] if fields is not None else None, actor=actor if fields is not None else None)
+        trace.metadata(candidate)
         management = operations.management(store, path, candidate)
         if management is not None and refs is not None:
             legacy = json.loads(management["metadata"])
             legacy.pop("sources", None)
             management["metadata"] = json.dumps(legacy, ensure_ascii=False)
-        result = curation.history.write_locked(path, candidate.encode(), document["revision"], actor, body.reason, management, publication=context, operation=body.operation, operation_details={"changed_ranges": changes})
+        allow_seed = body.operation == "confirm_sources" or any(value is not None for value in (fields, tags, aliases))
+        result = curation.history.write_locked(path, candidate.encode(), document["revision"], actor, body.reason, management, publication=context, operation=body.operation, operation_details={"changed_ranges": changes}, origin_builder=trace.transition(context, allow_seed=allow_seed))
         return result | {"id": document["id"], "changed_ranges": changes, "original_preserved": False if changes else True, "operation": body.operation}

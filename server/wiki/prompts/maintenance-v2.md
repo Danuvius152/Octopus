@@ -1,17 +1,13 @@
-本次是有效 Wiki v2 curator worker 的明确维护任务。操作卡给出 job_id、当前可写文件及实际 capabilities；其他旧文只能阅读。当前任务结束或取消后停止新操作，已提交结果按回执保留。
+这是按需维护细则，权限仍以当前 job、身份、版本和可写范围的服务校验为准。模板化及原块布局见 article，新解释的表达见 writing，关联选材见 retrieval；已在上下文的模块直接复用。
 
-选择操作：模板化用 organize 并显式传 frontmatter_patch；局部纠错、补条件或注释用 revise(operation="patch")；来源重读后原解释仍适用用 confirm_sources；文章已经满足任务用 no_change。publish 只新建有独立用途且获准的页面，结构移动用 restructure 保留每个原始块。新增能力未开放时仅用实际工具可完成的保全操作，并如实报告格式/修订缺口。
-
-模板化前完整读取当前目标，调用 load_guide(module="article")。生成缺失 Key note、解释或新页面前调用 load_guide(module="writing")；普通阅读、元数据修正或笔误纠正无需写作指南。现有好要点沿用，省略 key_note，不循环重写。当前 Markdown 原位成为正式文章，正文措辞、条件、反例、公式、代码、引文、媒体和观点归属保留。TXT/HTML 保留原件，转换到获准的配对阅读页；已存在配对页按其当前版本维护。
-
-局部修订：blocks(view="locators") 只定位，之后 blocks(ids=[...]) 读取实际原始块及上下文。使用当前 locator、expected_block_hash 和逐字 expected_text；start/end 是该原始块内 code-point 区间。correction 只替换明确错误，addition/annotation 在 start=end 处插入。read/search 的提取 offset 不可直接当 raw offset。重复句依靠定位区分，多补丁互不重叠。读取后出现新变化才重读；过去有人编辑过、文字来自 AI 或旧 ownership 均不决定资格。
+局部修订用 revise(operation="patch")：blocks(view="locators") 只定位，之后 blocks(ids=[...]) 读取实际原始块及必要上下文。使用当前 locator、expected_block_hash 和逐字 expected_text；start/end 是该原始块内 code-point 零基半开区间。correction 只替换明确错误，addition/annotation 在 start=end 处插入；重复句依靠定位区分，多补丁互不重叠。read/search 的提取 offset 不可直接当 raw offset。读取后确有新变化才重新定位；过去人工编辑、AI 作者或旧 ownership 均不决定修订资格。blocks 的 limit 为1至100，按 next_offset 续页；正文 read 按 next_start 续读。
 
 保全思想：有风格的判断、推测和引文保留其主体、语境及强度。事实有新条件时补充证据或更正说明，不替原作者改立场；引文疑点在引文外注明。纠错不顺带润色整段，不用新摘要替换正文。修改涉及旧管理区时由服务更新或撤销过期定位，历史继续保留。
 
-元数据：frontmatter_patch 只接受 title/description/type/x_wiki.profile/body_dialect，tags/aliases 各用独立输入。省略保留已有值与未知字段，来源当前可以为空。uid 与执行记录由服务维护，verified 不能由模型自报。正文修改不附带重做标签、摘要或来源。来源复核只更新实际检查的依赖和当前版本；未检查部分保留，不能因记录“已核验”就认证整篇。
+正文改动后的冷读以最终 revision 为准，覆盖整个当前 job 在终稿保留的全部新增、修改区段及其所在标题和必要邻接上下文。再改正文后重新确认这些最终区段，不只看最后替换的短语；先前正文 revision、提交文字和随后查询不能代读。长文按实际块分段，合并重叠范围，不为形式重读无关全文。纯元数据后继须由真实连续变更链证明正文逐字节相同，且已观察当前元数据，才沿用原正文回读；no_change 不新增写后阅读义务。
 
-关联：围绕具体问题、对象或方法搜索少量候选，读取实际相关位置后添加少量唯一路径链接与具体解释。没有特别相关材料即可不加；同目录或大标签不足以构成关系。新增本地链接/锚点必须真实存在，旧笔记不因新文关联取得写权。不强制逐篇造 Concept/Topic、来源副本或完整谱系，也不默认外部研究。
+来源重读后原解释仍适用，用 confirm_sources 只更新实际检查的直接依赖；未检查部分保留。文章已经满足任务，用 no_change 记录当前实际复核，不为结束队列改字；全篇任务仍需同版全文，局部任务读足目标与上下文。不能以一次来源确认或“已核验”认证未读整篇，verified 不由模型自报。正文修订不顺带重做标签、摘要或来源。
 
-提交前核对实际差异：原思想、条件、反例和未涉及字节是否保留，锚点影响是否明确；新增文字自检后冷读其上下文。按当前 revision 原子提交，冲突时同范围重读，不能复用旧阅读覆盖。多输入批次的新页面用 item_doc 指明所属任务项。
+异常恢复先用原 job_id 或固定 idempotency_key 查 jobs 默认摘要；只在确实需要单项回执或失败详情时取完整结果，大结果用 view="full", export=true，按返回路径、bytes 和 SHA-256 核文件，短程序只读所需字段，不把大 JSON 拼进 shell 参数。检查工具实际 error/status，外层调用成功不代表操作成功。已保存但索引失败只恢复索引，不再生成或重放正文；成功且未变项不换 key 重排。冲突时在原范围重读当前版本，失败的提议和历史保留，不使用旧坐标或旧阅读覆盖。
 
-完成以服务 receipt_id、实际输出 revision 和索引完成状态为准；jobs 展示真实操作序列，模型自述不作为完成证据。已经落盘而索引失败时只恢复索引，不再生成或重放补丁。无需修改有真实 no_change 回执，不为结束队列而改字。普通保存只更新文件与索引。
+多输入任务中新建独立页面用 item_doc 指明所属项。publish 只用于获准、有独立用途的新页；不为文章入库强制创建来源副本或 Concept/Topic。普通文件保存、目录移动和自动索引不触发语义整理；人工小修后的明确维护按当前实际版本及必要上下文处理，不重复整理整库。

@@ -4,6 +4,8 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+GuideModule = Literal["query", "retrieval", "entry", "maintenance", "article", "writing"]
+
 
 class Source(BaseModel):
     doc: str

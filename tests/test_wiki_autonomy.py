@@ -86,8 +86,9 @@ async def test_all_turns_can_query_and_legacy_off_only_disables_maintenance(clie
                 assert query_guide.status_code == 200
                 retrieval_guide = await client.get("/api/wiki/guide", params={"module": "retrieval"}, headers=headers)
                 assert retrieval_guide.status_code == 200
-                writing_guide = await client.get("/api/wiki/guide", params={"module": "writing"}, headers=headers)
-                assert writing_guide.status_code == 403
+                for module in ("maintenance", "article", "writing"):
+                    worker_guide = await client.get("/api/wiki/guide", params={"module": module}, headers=headers)
+                    assert worker_guide.status_code == 403
                 response = await client.post("/api/wiki/maintain", headers=headers, json={
                     "idempotency_key": "autonomous-maintenance", "scope": "Preserve source; check the note", "paths": ["Library/note.md"],
                 })

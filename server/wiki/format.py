@@ -12,7 +12,7 @@ from typing import Any
 import yaml
 from markdown_it import MarkdownIt
 
-VERSION = "okf-parser-v4"
+VERSION = "okf-parser-v5"
 _FRONT = re.compile(r"\A\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|$)", re.S)
 _markdown = MarkdownIt("commonmark")
 _ROLES = {
@@ -80,6 +80,23 @@ class DocumentFormat:
         return result
 
 
+def metadata_end(text: str) -> int:
+    """Return the exact frontmatter/BOM prefix without parsing the prose."""
+    match = _FRONT.match(text)
+    return match.end() if match else int(text.startswith("\ufeff"))
+
+
+def markdown_line_offsets(text: str, start: int = 0) -> list[int]:
+    """Map CommonMark token lines onto unchanged source character offsets."""
+    offsets = [start]
+    # CommonMark normalizes CRLF/CR to LF; other Unicode separators stay in
+    # their original line. Keep offsets in the unmodified source coordinates.
+    offsets.extend(start + match.end() for match in re.finditer(r"\r\n|\r|\n", text))
+    if offsets[-1] < start + len(text):
+        offsets.append(start + len(text))
+    return offsets
+
+
 def parse(text: str) -> DocumentFormat:
     result = DocumentFormat()
     match = _FRONT.match(text)
@@ -94,9 +111,7 @@ def parse(text: str) -> DocumentFormat:
         except yaml.YAMLError:
             result.error = "Invalid YAML; original retained"
     body = text[result.body_start:]
-    offsets = [result.body_start]
-    for line in body.splitlines(keepends=True):
-        offsets.append(offsets[-1] + len(line))
+    offsets = markdown_line_offsets(body, result.body_start)
     boundaries = [(result.body_start, "body", "")]
     active_role, active_heading, active_level = "body", "", 0
     tokens = _markdown.parse(body)

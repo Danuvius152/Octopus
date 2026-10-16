@@ -12,7 +12,7 @@ from ..auth import verify_token
 from ..deps import ScopeUser, SessionMgr
 from ..mcp_identity import verify
 from ..wiki import WikiError, registry
-from ..wiki.contracts import ReadBatch, Revision, Source
+from ..wiki.contracts import GuideModule, ReadBatch, Revision, Source
 from ..wiki.curation import WikiCuration
 from ..wiki.history import WikiHistory
 from ..wiki.jobs import WikiJobs, worker
@@ -298,7 +298,7 @@ def info(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_to
 
 
 @router.get("/guide")
-def get_guide(request: Request, module: Literal["query", "retrieval", "entry", "article", "writing"], user_id: ScopeUser = None, _: str = Depends(verify_token)):
+def get_guide(request: Request, module: GuideModule, user_id: ScopeUser = None, _: str = Depends(verify_token)):
     from ..wiki.workflow import load_guide
 
     task = access(request)

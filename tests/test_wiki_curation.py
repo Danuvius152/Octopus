@@ -183,19 +183,52 @@ async def test_guides_follow_verified_job_role_instead_of_agent_name(client, not
     try:
         worker = instructions("maintain", token)
         assert guide("access") in worker
-        assert guide("maintenance-v2") in worker and guide("writing") not in worker and guide("query-v2") not in worker
-        assert guide("retrieval-v2") in worker
+        assert guide("worker-v2") in worker and guide("writing") not in worker and guide("query-v2") not in worker
+        assert guide("maintenance-v2") not in worker and guide("retrieval-v2") not in worker
         from server.wiki.workflow import load_guide
 
         assert load_guide("writing", token) == guide("writing")
+        assert load_guide("maintenance", token) == guide("maintenance-v2")
         assert guide("entry") not in worker
+        modules = {"query", "retrieval", "entry", "maintenance", "article", "writing"}
+        card = json.loads(worker.splitlines()[0].split("：", 1)[1])
+        assert set(card["guides"]) == modules
+        headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
+        for module in modules:
+            response = await client.get("/api/wiki/guide", params={"module": module}, headers=headers)
+            assert response.status_code == 200, response.text
+            assert response.json()["content"] == load_guide(module, token)
+
+        # Model and REST schemas must advertise the same actual module contract.
+        from server.main import app
+        from server.mcp_identity import reset_current_scope, set_current_scope, verify
+        from server.mcp_servers.wiki import mcp
+
+        scope = verify(headers["Authorization"].split(" ", 1)[1])
+        context = set_current_scope(scope)
+        try:
+            tools = await mcp.list_tools()
+        finally:
+            reset_current_scope(context)
+        schema = next(tool for tool in tools if tool.name == "load_guide").inputSchema
+        assert set(schema["properties"]["module"]["enum"]) == modules
+        parameters = app.openapi()["paths"]["/api/wiki/guide"]["get"]["parameters"]
+        assert set(next(parameter for parameter in parameters if parameter["name"] == "module")["schema"]["enum"]) == modules
+        assert (await client.get("/api/wiki/guide", params={"module": "missing"}, headers=headers)).status_code == 422
+
         jobs.update(job["id"], status="cancelled")
         ended = instructions("maintain", token)
-        assert guide("maintenance-v2") not in ended and guide("entry") not in ended
+        assert guide("worker-v2") not in ended and guide("maintenance-v2") not in ended and guide("entry") not in ended
         assert guide("query-v2") in ended and "只可查询，不发起或继续维护" in ended
+        assert set(json.loads(ended.splitlines()[0].split("：", 1)[1])["guides"]) == {"query", "retrieval", "entry"}
+        for module in ("maintenance", "article", "writing"):
+            denied = await client.get("/api/wiki/guide", params={"module": module}, headers=headers)
+            assert denied.status_code == 403, denied.text
+        assert (await client.get("/api/wiki/guide", params={"module": "query"}, headers=headers)).status_code == 200
     finally:
         tasks.close(token)
         tasks.unassign(session.id)
+    assert (await client.get("/api/wiki/guide", params={"module": "query"}, headers=headers)).status_code == 403
 
 
 async def test_graph_reads_only_selected_current_neighbors(client, notes, monkeypatch):

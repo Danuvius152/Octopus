@@ -6,7 +6,7 @@ from typing import Literal
 import httpx
 from mcp.server.fastmcp import FastMCP, Image
 
-from ..wiki.contracts import ReadRequest, Revision
+from ..wiki.contracts import GuideModule, ReadRequest, Revision
 from . import _host
 
 
@@ -116,10 +116,12 @@ def info() -> dict:
 
 
 @mcp.tool()
-def load_guide(module: str) -> dict:
-    """Load query/retrieval details or entry rules when a Wiki task needs them.
+def load_guide(module: GuideModule) -> dict:
+    """Load a needed guide; reuse it while its content remains in context.
 
-    Article conventions and writing rules require an active curator assignment.
+    query/retrieval/entry are readable in authorized turns. maintenance
+    (patches, sources, recovery), article (metadata/layout) and writing
+    (new prose) require a current curator worker assignment.
     """
     return call("GET", "guide", params={"module": module})
 
@@ -267,6 +269,7 @@ def blocks(doc: str, view: str = "full", ids: list[str] | None = None, expected_
 
     Raw positions are Unicode codepoints and hashes cover original UTF-8 bytes.
     Locators bind the document/revision; locator-only output is not a read.
+    offset is zero-based; limit is 1..100. Follow next_offset for more blocks.
     """
     return call("GET", "blocks", params={key: value for key, value in locals().items() if value is not None})
 
@@ -294,7 +297,11 @@ def restructure(
     aliases: list[str] | None = None,
     item_doc: str | None = None,
 ) -> dict:
-    """Reorder every original block once; additions have before, content, sources."""
+    """Reorder every original block once; additions have before, content, sources.
+
+    Heading-only additions insert structure without visible attribution prose.
+    New explanations retain attribution; original bytes and private history stay.
+    """
     return call("POST", "restructure", body=locals())
 
 

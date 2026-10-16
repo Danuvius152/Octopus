@@ -415,12 +415,15 @@ class WikiJobs:
                         409,
                     )
             else:
+                from .material_proof import ingest
+
                 history.write_locked(
                     path,
                     payload["material"].encode(),
                     None,
                     payload["actor"],
                     f"Ingest job {job_id}",
+                    origin_builder=ingest(job_id),
                 )
             return self.store.read(path, length=1)
 

@@ -14,7 +14,7 @@ from markdown_it.renderer import RendererHTML
 
 from .extract import HTML_BODY_VERSION, HTMLBodyAnalyzer, html_has_readable_body
 
-VERSION = "sections-v7"
+VERSION = "sections-v8"
 _tokenizer = jieba.Tokenizer()
 _markdown = MarkdownIt("commonmark")
 jieba.setLogLevel(logging.WARNING)
@@ -109,15 +109,13 @@ def query_groups(query: str) -> tuple[list[str], list[str]]:
 
 def sections(text: str, title: str) -> list[dict]:
     """Character coordinates refer to extracted text, exactly as read() does."""
-    from .format import parse
+    from .format import markdown_line_offsets, parse
 
     parsed = parse(text)
     # Keep the rendered container/heading state across all Markdown tokens.
     # A fence creates a source partition, not a fresh HTML context.
     body = text[parsed.body_start:]
-    line_offsets = [parsed.body_start]
-    for line in body.splitlines(keepends=True):
-        line_offsets.append(line_offsets[-1] + len(line))
+    line_offsets = markdown_line_offsets(body, parsed.body_start)
     env: dict = {}
     stream = _markdown.parse(body, env)
     renderer = cast(RendererHTML, _markdown.renderer)

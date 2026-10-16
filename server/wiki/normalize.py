@@ -3,7 +3,7 @@
 from pathlib import Path
 from urllib.parse import quote
 
-from . import format, operations
+from . import format, material_proof, operations
 from .sections import top_offset
 from .store import WikiError, is_maintainable_text
 
@@ -34,6 +34,7 @@ def organize(curation, path, expected_revision, key_note, tags, aliases, relatio
             except UnicodeError as exc:
                 raise WikiError("Non-UTF-8 originals require encoding review", 422) from exc
             output_revision = expected_revision
+        trace = material_proof.Trace(text) if destination == path else None
         newline = "\r\n" if "\r\n" in text else "\n"
         parsed = format.parse(text)
         article = fields.get("x_wiki", {}).get("profile") == "article-v1"
@@ -55,6 +56,8 @@ def organize(curation, path, expected_revision, key_note, tags, aliases, relatio
                 raise WikiError("Use explicit raw layout changes to separate existing Key note and original body", 422)
             inserts += "## 正文" + newline * 2
         candidate = text[:offset] + inserts + text[offset:]
+        if trace is not None:
+            trace.edit([(offset, offset, inserts)])
         refs = None
         if sources is not None:
             for ref in sources:
@@ -66,11 +69,16 @@ def organize(curation, path, expected_revision, key_note, tags, aliases, relatio
             for relation in relations:
                 tasks.require_source_read(task, store, relation)
             linked = curation.sources(relations)
-            candidate += newline * 2 + "## 相关笔记" + newline * 2 + newline.join(f"- [[{ref['path']}]]：{relation['explanation']}" for ref, relation in zip(linked, relations, strict=True)) + newline
+            related = newline * 2 + "## 相关笔记" + newline * 2 + newline.join(f"- [[{ref['path']}]]：{relation['explanation']}" for ref, relation in zip(linked, relations, strict=True)) + newline
+            if trace is not None:
+                trace.edit([(len(candidate), len(candidate), related)])
+            candidate += related
         curation.validate_links(destination, inserts, candidate=candidate)
         if relations:
             curation.validate_links(destination, candidate[candidate.rfind("## 相关笔记"):], candidate=candidate)
         candidate = format.patch(candidate, fields=fields, tags=tags, aliases=aliases, sources=refs, uid=source["metadata"]["uid"] if destination == path else None, actor=actor, representation_of=source["id"] if destination != path else None)
         context = operations.publication(task, store, source, item_doc)
-        result = curation.history.write_locked(destination, candidate.encode(), output_revision, actor, reason, operations.management(store, destination, candidate), publication=context, operation="normalize")
+        if trace is not None:
+            trace.metadata(candidate)
+        result = curation.history.write_locked(destination, candidate.encode(), output_revision, actor, reason, operations.management(store, destination, candidate), publication=context, operation="normalize", origin_builder=trace.transition(context, allow_seed=True) if trace is not None else None)
         return result | {"source_path": path, "original_preserved": True}
