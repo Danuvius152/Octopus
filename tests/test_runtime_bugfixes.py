@@ -342,6 +342,37 @@ async def test_rebinding_keeps_blocked_recording_session_until_original_is_verif
                 await manager._reconcile_recording(session)
 
 
+@pytest.mark.parametrize("binding", ["curator_agent_id", "app_id"])
+@pytest.mark.parametrize("retry_immediately", [False, True])
+async def test_recording_reference_survives_a_cancellation_between_control_read_and_write(jobs, monkeypatch, binding, retry_immediately):
+    WikiHistory(jobs.store).write("Library/cancel-race.md", b"# Original\nRetained.\n", None, "human", "source")
+    job = jobs.maintain("cancel-recording-race", "", "organize", ["Library/cancel-race.md"], None, [], "human")
+    captured = jobs.update(job["id"], status="running", session_id="original-session")
+    config = registry.config(None)
+    config[binding] = "replacement-binding"
+    registry.configure(None, Path(config["root"]), config["curator_agent_id"], config["app_id"])
+    current = WikiJobs(None)
+    update = WikiJobs.update
+    raced = False
+
+    def racing_update(self, job_id, **fields):
+        nonlocal raced
+        if not raced and any(item.get("recording_failure") for item in fields.get("items", [])):
+            raced = True
+            current.mark_cancelled(job_id)
+            if retry_immediately:
+                current.retry(job_id)
+        return update(self, job_id, **fields)
+
+    monkeypatch.setattr(WikiJobs, "update", racing_update)
+    completion = SimpleNamespace(request_id="original-request", recording_state="unconfirmed")
+    await WikiWorker()._mark_recording_failure(jobs, job["id"], captured, captured["items"], "original-session", completion)
+    result = current.get(job["id"])
+    assert raced
+    assert result["status"] == ("queued" if retry_immediately else "cancelled")
+    assert result["items"][0]["recording_failure"]["request_id"] == "original-request"
+
+
 async def test_captured_web_lifecycle_prevents_idle_but_replays_and_silence_do_not(monkeypatch):
     rows = [json.loads(line) for line in (Path(__file__).parent / "fixtures/codex-web-search-0.162.1.jsonl").read_text().splitlines()]
     clock = SimpleNamespace(now=299.0)

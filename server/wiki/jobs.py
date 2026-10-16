@@ -953,8 +953,9 @@ class WikiWorker:
         # This reference is control metadata, not authority to publish through
         # a replacement binding. Preserve it even if the captured Store retired.
         current_jobs = await _io(WikiJobs, jobs.user_id)
-        current = await _io(current_jobs.get, job_id)
-        await _io(current_jobs.update, job_id, expected_status=current["status"], items=job["items"],
+        # Cancellation/retry may change job status between a read and write.
+        # Record the original execution reference without changing that status.
+        await _io(current_jobs.update, job_id, items=job["items"],
                   error="Execution result recording remains unconfirmed", session_id=session_id)
 
     async def _recover_recorded_item(self, jobs, job_id, item):
