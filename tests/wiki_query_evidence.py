@@ -47,6 +47,7 @@ async def collect_evaluation(probe, question: str, *, case_id: str, output: Path
         report = {
             "schema": "wiki-knowledge-evaluation-v1", "case_id": case_id,
             "question": question, "execution_status": "failed" if failure else "success",
+            "input_context": getattr(probe, "input_context", None),
             "semantic_acceptance": "not_reviewed", "failure": failure,
             "session_id": probe.last_session_id, "request_id": probe.last_request_id,
             "answer": answer, "source_before": before,
@@ -57,6 +58,7 @@ async def collect_evaluation(probe, question: str, *, case_id: str, output: Path
             "elapsed_seconds": time.monotonic() - started,
             "timing_scope": "Query execution and source checks; excludes CLI availability probe and test fixture setup/teardown",
             "usage_observations": getattr(probe, "usage_observations", []),
+            "cleanup_failures": getattr(probe, "cleanup_failures", []),
             "total_input_plus_output_tokens": None, "USD": None,
             "usage_limit": "Raw counters may be cumulative or omit helpers/recovery; retain observations without summing or treating unknown usage as zero",
         }

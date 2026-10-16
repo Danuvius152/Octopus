@@ -140,6 +140,26 @@ octopus_knowledge_evidence=$(mktemp -d /tmp/octopus-wiki-evals.XXXXXX)
 总量及美元费用保留为空。固定事件回放的精确文本比较仍用于协议检查。
 实际用户修改笔记后，回答应随当前资料更新，不受合成样本答案约束。
 
+普通聊天入口评测使用真实 WebSocket `send_message`，另行预登记自然问题和
+源版本，不追加逐题评阅提示，也不强制 Wiki 模式。准备 registration JSON，
+包含 `source_root`、`source_manifest_sha256`、当前所选的 `credential_id` 和
+一至四项 `questions`（每项为 `id`、`question`）。源清单摘要按
+`tests.wiki_query_evidence.source_manifest` 的结果做 Unicode JSON 编码，
+`sort_keys=True, separators=(",", ":")`，再计算 UTF-8 SHA-256。
+
+```bash
+.venv/bin/pytest tests/test_wiki_chat_real.py --run-knowledge-evals \
+  --wiki-chat-registration=/path/to/registration.json \
+  --knowledge-eval-output=/path/to/fresh-chat-evidence -q
+```
+
+该评测固定独立测试代理为 `gpt-6.1-sol/high`、正常速度，只引用既有 CLI
+凭据目录；选定目录不可用时失败，不回退其他默认登录。可选知识评测不再
+先运行一次使用默认 CLI 配置的额外模型探测，以实际请求结果检查可用性并
+保留失败及用量。隔离数据库和旧安装认证测试宿主仍沿用真实 WS 处理器，
+报告明确记录这些差异；新 cwd 和空代理记忆不能证明文件系统隔离或盲测。
+源快照、实际读取、回答和原始用量继续留证，语义验收另行进行。
+
 ### 已完成的验证
 
 截至 2026-10-10，本机验证结果：

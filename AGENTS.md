@@ -115,6 +115,16 @@ requires independent review. Unknown token totals or dollar costs remain
 unknown, and cumulative counters must not be summed. Fixed event-replay tests
 may still compare exact text to verify ordered message delivery.
 
+Optional knowledge evaluations use their evidence-producing request to check
+provider availability; do not spend an additional model call with ambient CLI
+defaults as a setup probe. Preserve actual request failures in the evidence.
+Ordinary-chat evaluations use authenticated WebSocket `send_message`, natural
+questions and the normal shared prompt assembly, without delegation or a forced
+Wiki mode. Register questions and source versions before execution, keep
+assessor material out of submitted context, and disclose actual filesystem,
+authentication and source-binding isolation limits rather than claiming a blind
+test. Test model settings do not change the user's agent defaults.
+
 ## Test Coverage
 
 | Suite | Tool | Command | Count | Scope |

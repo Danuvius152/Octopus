@@ -124,6 +124,7 @@ class CallbackApi:
 async def start_callback_api(
     *routers: Any,
     mcp: bool = True,
+    websocket: bool = False,
     overrides: dict[Any, Any] | None = None,
     exception_handlers: dict[Any, Any] | None = None,
 ) -> CallbackApi:
@@ -162,41 +163,79 @@ async def start_callback_api(
         # ever actually asked for it.
         log_level=os.environ.get("OCTOPUS_TEST_CALLBACK_LOG", "warning"),
         lifespan="off",
-        # No WebSocket routes here, and asking for the implementation imports
-        # `websockets.legacy`, whose deprecation warning would then be the
-        # suite's only noise.
-        ws="none",
+        # Most callback hosts need HTTP only. Ordinary-chat evaluations opt in
+        # to the same WebSocket transport used by the production composer.
+        ws="auto" if websocket else "none",
     )
     server = uvicorn.Server(config)
 
     release: asyncio.Event | None = None
     owner: asyncio.Task | None = None
-    if mcp:
-        ready, release = asyncio.Event(), asyncio.Event()
-        owner = asyncio.create_task(
-            _own_namespaces(app, servers, ready, release), name="mcp-namespaces"
+    task: asyncio.Task | None = None
+    try:
+        if mcp:
+            ready, release = asyncio.Event(), asyncio.Event()
+            owner = asyncio.create_task(
+                _own_namespaces(app, servers, ready, release), name="mcp-namespaces"
+            )
+            waiter = asyncio.create_task(ready.wait())
+            try:
+                done, _ = await asyncio.wait(
+                    (owner, waiter), timeout=10.0,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if owner in done:
+                    await owner  # Preserve the namespace startup error itself.
+                    raise RuntimeError("MCP namespaces stopped before becoming ready")
+                if waiter not in done:
+                    raise TimeoutError("MCP namespaces never became ready")
+            finally:
+                waiter.cancel()
+                await asyncio.gather(waiter, return_exceptions=True)
+        task = asyncio.create_task(server.serve())
+        for _ in range(200):
+            if task.done():
+                await task
+                raise RuntimeError("callback API server stopped before becoming ready")
+            if server.started and server.servers:
+                break
+            await asyncio.sleep(0.05)
+        else:  # pragma: no cover - a stuck uvicorn is a real failure, not a skip
+            raise RuntimeError("callback API server never started")
+        port = server.servers[0].sockets[0].getsockname()[1]
+        if mcp:
+            await _await_namespaces(port, servers)
+        return CallbackApi(
+            port=port,
+            app=app,
+            _server=server,
+            _task=task,
+            _release=release,
+            _owner=owner,
         )
-        await asyncio.wait_for(ready.wait(), timeout=10.0)
-    task = asyncio.create_task(server.serve())
-    for _ in range(200):
-        if server.started and server.servers:
-            break
-        await asyncio.sleep(0.05)
-    else:  # pragma: no cover - a stuck uvicorn is a real failure, not a skip
-        if release is not None:
-            release.set()
-        raise RuntimeError("callback API server never started")
-    port = server.servers[0].sockets[0].getsockname()[1]
-    if mcp:
-        await _await_namespaces(port, servers)
-    return CallbackApi(
-        port=port,
-        app=app,
-        _server=server,
-        _task=task,
-        _release=release,
-        _owner=owner,
-    )
+    except BaseException as startup_error:
+        # No handle has reached the caller yet, so startup owns teardown too.
+        # Stop HTTP before releasing the namespace lifespan, as stop() does.
+        _set_sse_shutdown_latch(True)
+        try:
+            server.should_exit = True
+            for pending in (task, owner):
+                if pending is owner and release is not None:
+                    release.set()
+                if pending is None:
+                    continue
+                try:
+                    await asyncio.wait_for(pending, timeout=10.0)
+                except (Exception, asyncio.CancelledError) as cleanup_error:
+                    pending.cancel()
+                    await asyncio.gather(pending, return_exceptions=True)
+                    if cleanup_error is not startup_error:
+                        startup_error.add_note(
+                            f"Callback startup cleanup: {type(cleanup_error).__name__}"
+                        )
+        finally:
+            _set_sse_shutdown_latch(False)
+        raise
 
 
 async def _await_namespaces(port: int, servers: dict[str, Any]) -> None:

@@ -191,6 +191,10 @@ def pytest_addoption(parser):
         "--knowledge-eval-output", metavar="DIR",
         help="Retain optional evaluation reports under DIR; otherwise use each test's temporary directory",
     )
+    group.addoption(
+        "--wiki-chat-registration", metavar="FILE",
+        help="Prospectively registered source root, credential id and at most four natural chat questions",
+    )
 
 
 def pytest_collection_modifyitems(config, items):
@@ -223,6 +227,12 @@ def pytest_runtest_setup(item):
     so the cost is paid at most once per CLI per session no matter how many
     marked tests run.
     """
+    if item.get_closest_marker("knowledge_eval"):
+        # The evidence-producing request verifies provider availability itself.
+        # A separate CLI probe spends tokens outside that request's ledger and
+        # may use a different login/model. Preserve actual execution failures.
+        return
+
     from server.harness.run import _which_with_fallback
     from tests.cli_gate import claude_cli_works, codex_cli_works
 
