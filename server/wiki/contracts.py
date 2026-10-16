@@ -5,6 +5,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 GuideModule = Literal["query", "retrieval", "entry", "maintenance", "article", "writing"]
+ReadView = Literal["full", "compact"]
 
 
 class Source(BaseModel):
@@ -23,6 +24,7 @@ class ReadRequest(BaseModel):
 class ReadBatch(BaseModel):
     items: list[ReadRequest] = Field(min_length=1, max_length=20)
     budget_chars: int = Field(default=24000, ge=1, le=96000)
+    view: ReadView = "full"
 
 
 class RawEdit(BaseModel):

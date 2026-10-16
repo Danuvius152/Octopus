@@ -6,7 +6,7 @@ from typing import Literal
 import httpx
 from mcp.server.fastmcp import FastMCP, Image
 
-from ..wiki.contracts import GuideModule, ReadRequest, Revision
+from ..wiki.contracts import GuideModule, ReadRequest, ReadView, Revision
 from . import _host
 
 
@@ -66,11 +66,12 @@ def search(
     include_assets: bool = False,
     directory: str | None = None,
     intent: str | None = None,
-    view: str = "full",
+    view: str = "compact",
     cursor: str | None = None,
 ) -> dict:
-    """Find indexed navigation; use view=compact and an explicit lookup/question/overview/compare intent.
+    """Find indexed navigation; defaults to compact with lookup/question/overview/compare intent.
 
+    Explicit view=full includes all indexed metadata and may be much larger.
     Each document appears once. section.start/end locate evidence for read();
     sections includes extra matched chapters for terms discussed separately.
     pass expected_revision to check freshness. Snippets are navigation only.
@@ -85,14 +86,19 @@ def search(
 
 
 @mcp.tool()
-def read_many(items: list[ReadRequest], budget_chars: int = 24000) -> dict:
-    """Read current evidence under a character budget, merging overlapping ranges.
+def read_many(items: list[ReadRequest], budget_chars: int = 24000, view: ReadView = "compact") -> dict:
+    """Read requested current passages once, merging overlaps; no model is called.
 
     Each item reports ok/partial/changed/not_found/excluded/budget_exhausted.
     Content appears once in ranges; items reference range_id and start/end.
-    Only returned passages count as read. Follow each next_start as needed.
+    budget_chars counts unique body Unicode characters. Default compact omits
+    full chapter metadata and caps the serialized MCP text result and its
+    wrapper at 32768 UTF-8 bytes. This is not a token
+    limit or a guarantee against later client truncation. Follow next_start
+    after partial/budget results; only returned passages count as read.
+    Explicit view=full retains complete metadata and the old body-only budget.
     """
-    return call("POST", "read-many", body={"items": [item.model_dump() for item in items], "budget_chars": budget_chars})
+    return call("POST", "read-many", body={"items": [item.model_dump() for item in items], "budget_chars": budget_chars, "view": view})
 
 
 @mcp.tool()
@@ -102,8 +108,17 @@ def read(
     length: int = 16000,
     expected_revision: str | None = None,
     page: int | None = None,
+    view: ReadView = "compact",
 ) -> dict:
-    """Read evidence with a revision and line/page location; follow next_start."""
+    """Read one current document slice, not the vault; no model is called.
+
+    start/length are Unicode character offsets (default 16000 characters).
+    Default compact omits full chapter metadata and bounds the complete MCP
+    result at 32768 UTF-8 bytes, so less body may fit. Keep revision and follow
+    next_start; only returned content was read. This is not a token limit or
+    a guarantee against later client truncation. Use view=full explicitly for
+    all metadata with the existing unbounded-envelope behavior.
+    """
     return call(
         "GET", "read", params={k: v for k, v in locals().items() if v is not None}
     )
@@ -135,10 +150,14 @@ def list_documents(
     include_assets: bool = False,
     quality: str | None = None,
     source: str | None = None,
-    view: str = "full",
+    view: str = "compact",
     cursor: str | None = None,
 ) -> dict:
-    """Browse a directory when keywords miss; follow next_offset. Assets are opt-in."""
+    """Browse compact directory navigation; follow next_cursor/next_offset.
+
+    Assets are opt-in. Explicit view=full returns all indexed metadata and may
+    be much larger. Navigation does not count as reading the document body.
+    """
     return call(
         "GET", "documents", params={k: v for k, v in locals().items() if v is not None}
     )

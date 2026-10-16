@@ -30,10 +30,12 @@ def _merge(intervals):
     return result
 
 
-def read_many(store, requests, budget_chars, task=None):
+def read_many(store, requests, budget_chars, task=None, view="full"):
     from .history import WikiHistory
+    from .read_response import compact_batch, validate_view
     from .tasks import tasks
 
+    validate_view(view)
     if not 1 <= len(requests) <= 20 or not 1 <= budget_chars <= 96000:
         raise WikiError("Invalid evidence batch size/budget", 422)
     cache, documents, intervals, items = {}, {}, {}, []
@@ -78,8 +80,13 @@ def read_many(store, requests, budget_chars, task=None):
             for start, end in selected:
                 range_id = f"{identifier}:{document['revision']}:{start}:{end}"
                 ranges.append({"id": range_id, "doc": identifier, "revision": document["revision"], "start": start, "end": end, "content": text[start:end], "line_start": text[:start].count("\n") + 1, "line_end": text[:end].count("\n") + 1})
-                tasks.record_read(task, document | {"start": start, "end": end, "page": None})
                 for item in items:
                     if item.get("id") == identifier and item["status"] in {"ok", "partial"} and start <= item["start"] <= item["end"] <= end:
                         item["range_id"] = range_id
-    return {"items": items, "documents": list(documents.values()), "ranges": ranges, "characters_returned": budget_chars - remaining, "budget_chars": budget_chars, "freshness": "live", **store.index_state()}
+        result = {"items": items, "documents": list(documents.values()), "ranges": ranges, "characters_returned": budget_chars - remaining, "budget_chars": budget_chars, "freshness": "live", **store.index_state()}
+        if view == "compact":
+            result = compact_batch(result)
+        for piece in result["ranges"]:
+            document, _ = cache[piece["doc"]]
+            tasks.record_read(task, document | {"start": piece["start"], "end": piece["end"], "page": None})
+        return result

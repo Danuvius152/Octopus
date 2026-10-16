@@ -4030,6 +4030,12 @@ export interface components {
              * @default 24000
              */
             budget_chars: number;
+            /**
+             * View
+             * @default full
+             * @enum {string}
+             */
+            view: "full" | "compact";
         };
         /** ReadRequest */
         ReadRequest: {
@@ -7385,6 +7391,7 @@ export interface operations {
                 length?: number;
                 expected_revision?: string | null;
                 page?: number | null;
+                view?: "full" | "compact";
                 token?: string | null;
             };
             header?: never;

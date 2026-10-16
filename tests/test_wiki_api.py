@@ -1224,12 +1224,22 @@ async def test_bound_app_token_can_edit_only_its_registered_wiki(
             "/apps/sapphire/wiki/read?doc=note.md", headers=app_headers
         )
         assert original.status_code == 200, original.text
+        compact = await client.get("/apps/sapphire/wiki/read", params={"doc": "note.md", "view": "compact"}, headers=app_headers)
+        assert compact.status_code == 200, compact.text
+        assert compact.json()["content"] == original.json()["content"]
+        assert "metadata" in original.json() and "metadata" not in compact.json()
+        invalid = await client.get("/apps/sapphire/wiki/read", params={"doc": "note.md", "view": "invalid"}, headers=app_headers)
+        assert invalid.status_code == 422
         navigation = await client.get("/apps/sapphire/wiki/search", params={"query": "note.md", "intent": "lookup", "view": "compact"}, headers=app_headers)
         assert navigation.status_code == 200, navigation.text
         assert navigation.json()["items"][0]["freshness"] == "indexed"
         batch = await client.post("/apps/sapphire/wiki/read-many", json={"items": [{"doc": "note.md", "length": 2}], "budget_chars": 2}, headers=app_headers)
         assert batch.status_code == 200, batch.text
         assert batch.json()["characters_returned"] == 2
+        compact_batch = await client.post("/apps/sapphire/wiki/read-many", json={"items": [{"doc": "note.md", "length": 2}], "budget_chars": 2, "view": "compact"}, headers=app_headers)
+        assert compact_batch.status_code == 200, compact_batch.text
+        assert compact_batch.json()["ranges"] == batch.json()["ranges"]
+        assert "metadata" not in compact_batch.json()["documents"][0]
         denied = await client.get(
             "/apps/other/wiki/read?doc=note.md",
             headers={"Authorization": f"Bearer {app_scope_token('other')}"},

@@ -12,7 +12,7 @@ from ..auth import verify_token
 from ..deps import ScopeUser, SessionMgr
 from ..mcp_identity import verify
 from ..wiki import WikiError, registry
-from ..wiki.contracts import GuideModule, ReadBatch, Revision, Source
+from ..wiki.contracts import GuideModule, ReadBatch, ReadView, Revision, Source
 from ..wiki.curation import WikiCuration
 from ..wiki.history import WikiHistory
 from ..wiki.jobs import WikiJobs, worker
@@ -114,6 +114,7 @@ async def app_wiki(request: Request, app_id: str, operation: str):
                 "start": int(request.query_params.get("start", 0)),
                 "length": int(request.query_params.get("length", 16000)),
                 "expected_revision": request.query_params.get("expected_revision"),
+                "view": request.query_params.get("view", "full"),
                 "page": int(request.query_params["page"])
                 if "page" in request.query_params
                 else None,
@@ -402,13 +403,19 @@ def read(
     length: int = Query(16000, ge=1, le=24000),
     expected_revision: str | None = None,
     page: int | None = Query(None, ge=1),
+    view: ReadView = "full",
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
+    from ..wiki.read_response import compact_read, validate_view
+
     task = access(request)
+    validate_view(view)
     result = registry.store(user_id).read(
         doc, start=start, length=length, expected_revision=expected_revision, page=page
     )
+    if view == "compact":
+        result = compact_read(result)
     tasks.record_read(task, result)
     return result
 
@@ -418,7 +425,7 @@ def read(
 def read_many(body: ReadBatch, request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
     from ..wiki.batch_read import read_many
 
-    return read_many(registry.store(user_id), body.items, body.budget_chars, access(request))
+    return read_many(registry.store(user_id), body.items, body.budget_chars, access(request), view=body.view)
 
 
 @router.get("/image")
