@@ -23,7 +23,12 @@ from pathlib import Path
 import pytest
 
 from server.harness import HarnessEvent, RunConfig, get_harness
-from server.harness.codex import _find_rollout
+from tests.codex_speed_evidence import (
+    capture_rollout,
+    record_phase,
+    successful_thread,
+    verify_resume,
+)
 
 pytestmark = [pytest.mark.real, pytest.mark.real_codex]
 
@@ -108,8 +113,11 @@ async def test_real_resume_across_speed_changes(tmp_path):
         e1 = await _drain(b1)
     finally:
         await b1.stop()
-    sid = next(e for e in e1 if e.type == "result").session_id
-    assert sid, "turn 1 didn't yield a resumable thread id"
+    sid = successful_thread(e1)
+    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+    evidence = tmp_path / "speed-evidence"
+    initial = capture_rollout(home / "sessions", sid, tmp_path)
+    record_phase(evidence, "initial", initial, e1)
 
     b2 = _codex_run(session_id="r2", mcp_servers=[], reasoning_effort="high", service_tier="fast")
     await b2.start(
@@ -121,9 +129,13 @@ async def test_real_resume_across_speed_changes(tmp_path):
         e2 = await _drain(b2)
     finally:
         await b2.stop()
-    text = "".join(e.content or "" for e in e2 if e.type == "text")
-    assert "MARIGOLD" in text.upper(), f"resume didn't recall the word; got {text!r}"
-    assert next(e for e in e2 if e.type == "result").session_id == sid
+    fast = capture_rollout(home / "sessions", sid, tmp_path)
+    record_phase(evidence, "fast", fast, e2)
+    successful_thread(e2, expected_thread=sid, recalled_word="MARIGOLD")
+    fast_interval = verify_resume(
+        initial, fast, thread_id=sid, cwd=tmp_path,
+        service_tier="priority", effort="high",
+    )
 
     b3 = _codex_run(session_id="r3", mcp_servers=[], reasoning_effort="low", service_tier="default")
     await b3.start(
@@ -134,26 +146,18 @@ async def test_real_resume_across_speed_changes(tmp_path):
         e3 = await _drain(b3)
     finally:
         await b3.stop()
-    text = "".join(e.content or "" for e in e3 if e.type == "text")
-    assert "MARIGOLD" in text.upper(), f"normal speed resume didn't recall the word; got {text!r}"
-    assert next(e for e in e3 if e.type == "result").session_id == sid
-    # The CLI emits these when it applies resumed thread settings. Check
-    # applied Fast -> Normal, rather than only the flags we constructed.
-    home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
-    rollout = _find_rollout(home / "sessions", sid)
-    assert rollout is not None
-    records = [json.loads(line) for line in rollout.read_text().splitlines() if line]
-    applied = [
-        row["payload"]["thread_settings"] for row in records
-        if row.get("type") == "event_msg" and row.get("payload", {}).get("type") == "thread_settings_applied"
-    ]
-    # The CLI may repeat an event; order and values are the contract.
-    changes = []
-    for settings in applied:
-        setting = (settings["service_tier"], settings["reasoning_effort"])
-        if not changes or changes[-1] != setting:
-            changes.append(setting)
-    assert changes == [("priority", "high"), ("default", "low")], applied
+    normal = capture_rollout(home / "sessions", sid, tmp_path)
+    record_phase(evidence, "normal", normal, e3)
+    successful_thread(e3, expected_thread=sid, recalled_word="MARIGOLD")
+    normal_interval = verify_resume(
+        fast, normal, thread_id=sid, cwd=tmp_path,
+        service_tier="default", effort="low",
+    )
+    # Each prefix was captured after that process stopped. Initial settings
+    # stay in the first prefix; they cannot be mistaken for resume settings.
+    (evidence / "verified-intervals.json").write_text(
+        json.dumps([fast_interval, normal_interval], indent=2) + "\n"
+    )
 
 
 @pytest.mark.asyncio
