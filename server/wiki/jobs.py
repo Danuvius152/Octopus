@@ -720,7 +720,8 @@ class WikiWorker:
             session = self.manager.get_session(job["session_id"])
             if session is not None:
                 await complete_cleanup(self.manager._await_backend_retirement(session))
-                await self.manager.archive_session(session.id, replace=False)
+                if getattr(session, "_recording_blocked", None) is None:
+                    await self.manager.archive_session(session.id, replace=False)
 
     async def process(self, jobs, job_id):
         config = registry.config(jobs.user_id)
@@ -949,8 +950,11 @@ class WikiWorker:
         for item in readable:
             item.update(status="attention", recording_failure=reference,
                         error="Execution result recording failed or is unconfirmed; verify the original request without rerunning the model")
-        current = await _io(jobs.get, job_id)
-        await _io(jobs.update, job_id, expected_status=current["status"], items=job["items"],
+        # This reference is control metadata, not authority to publish through
+        # a replacement binding. Preserve it even if the captured Store retired.
+        current_jobs = await _io(WikiJobs, jobs.user_id)
+        current = await _io(current_jobs.get, job_id)
+        await _io(current_jobs.update, job_id, expected_status=current["status"], items=job["items"],
                   error="Execution result recording remains unconfirmed", session_id=session_id)
 
     async def _recover_recorded_item(self, jobs, job_id, item):

@@ -231,6 +231,117 @@ async def test_publication_survives_registration_change_without_another_model_ru
         await worker.stop()
 
 
+@pytest.mark.parametrize("binding", ["curator_agent_id", "app_id"])
+async def test_unconfirmed_recording_survives_rebinding_without_regeneration(jobs, binding):
+    from server.models import TurnOutcome
+    from server.sessions.submission import RequestCompletion, SubmissionReceipt
+
+    class UnconfirmedThenRebound(test_wiki_jobs.Curator):
+        committed = False
+
+        def get_session(self, session_id):
+            return None
+
+        async def get_committed_terminal(self, session_id, request_id):
+            return {"request_id": request_id, "status": "success"} if self.committed else None
+
+        async def start_message(self, session_id, prompt, **kwargs):
+            async for _ in self._events(session_id, prompt, **kwargs):
+                pass
+            config = registry.config(None)
+            config[binding] = "replacement-binding"
+            registry.configure(None, Path(config["root"]), config["curator_agent_id"], config["app_id"])
+            request_id = "unconfirmed-original-request"
+            completion = asyncio.get_running_loop().create_future()
+            completion.set_result(RequestCompletion(input_request_id=request_id, request_id=request_id,
+                state="recording_failed", recording_state="unconfirmed",
+                outcome=TurnOutcome(request_id=request_id, status="success")))
+            return SubmissionReceipt("accepted", request_id, completion)
+
+    job = jobs.maintain("unconfirmed-rebind", "# Original\nKeep this source.\n", "organize", [], "Library/unconfirmed.md", [], "human")
+    manager = UnconfirmedThenRebound(jobs)
+    worker = WikiWorker()
+    await worker.start(manager)
+    try:
+        await asyncio.wait_for(worker.tasks[None], 3)
+        current = WikiJobs(None)
+        first = current.get(job["id"])
+        assert first["status"] == "failed"
+        assert first["items"][0]["recording_failure"]["request_id"] == "unconfirmed-original-request"
+        retained = current.store.path("Library/unconfirmed.md").read_bytes()
+        attention = await test_wiki_jobs.process(current, current.retry(job["id"]), manager)
+        assert attention["status"] == "completed_with_attention"
+        assert manager.turns == 1
+        manager.committed = True
+        finished = await test_wiki_jobs.process(current, current.retry(job["id"]), manager)
+        assert finished["status"] == "completed"
+        assert manager.turns == 1
+        assert current.store.path("Library/unconfirmed.md").read_bytes() == retained
+    finally:
+        await worker.stop()
+
+
+async def test_rebinding_keeps_blocked_recording_session_until_original_is_verified(jobs, monkeypatch):
+    from server.harness import HarnessEvent
+    from server.wiki.curation import WikiCuration
+
+    manager = test_wiki_jobs.wiki_api.session_manager
+    record_terminal = manager.db.record_terminal
+    calls = []
+    rebound = False
+
+    class PublishingRun(FakeRunBase):
+        async def start(self, *args, **kwargs):
+            calls.append("model")
+
+        async def stream(self):
+            session_id = jobs.get(job["id"])["session_id"]
+            doc = jobs.store.read("Library/blocked.md")
+            await asyncio.to_thread(WikiCuration(jobs.store).organize, doc["path"], doc["revision"],
+                "Original conclusion and conditions.", [], [], [], "curator", "publish",
+                {"job_id": job["id"], "session_id": session_id})
+            yield HarnessEvent(type="result")
+
+        async def stop(self):
+            pass
+
+    async def fail_recording(**kwargs):
+        nonlocal rebound
+        if not rebound:
+            rebound = True
+            config = registry.config(None)
+            registry.configure(None, Path(config["root"]), config["curator_agent_id"], "replacement-app")
+        raise OSError("injected terminal persistence failure")
+
+    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: PublishingRun())
+    monkeypatch.setattr(manager.db, "record_terminal", fail_recording)
+    job = jobs.maintain("blocked-recording-rebind", "# Original\nKeep this source.\n", "organize", [], "Library/blocked.md", [], "human")
+    worker = WikiWorker()
+    await worker.start(manager)
+    try:
+        await eventually(lambda: rebound and WikiJobs(None).get(job["id"])["status"] == "failed")
+        current = WikiJobs(None)
+        first = current.get(job["id"])
+        assert first["items"][0].get("recording_failure")
+        await asyncio.wait_for(asyncio.shield(worker.tasks[None]), 3)
+        session = manager.get_session(first["session_id"])
+        assert session is not None and session._recording_blocked is not None
+        monkeypatch.setattr(manager.db, "record_terminal", record_terminal)
+        resumed = WikiWorker()
+        resumed.manager = manager
+        current.retry(job["id"])
+        await resumed.run(None)
+        assert current.get(job["id"])["status"] == "completed"
+        assert calls == ["model"]
+        assert manager.get_session(session.id) is None
+    finally:
+        monkeypatch.setattr(manager.db, "record_terminal", record_terminal)
+        await worker.stop()
+        for session in list(manager.sessions.values()):
+            if session._recording_blocked is not None:
+                await manager._reconcile_recording(session)
+
+
 async def test_captured_web_lifecycle_prevents_idle_but_replays_and_silence_do_not(monkeypatch):
     rows = [json.loads(line) for line in (Path(__file__).parent / "fixtures/codex-web-search-0.162.1.jsonl").read_text().splitlines()]
     clock = SimpleNamespace(now=299.0)
