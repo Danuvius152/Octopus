@@ -22,6 +22,7 @@ import yaml
 from . import catalog, search_index
 from . import format as document_format
 from .extract import HTML_BODY_VERSION, SUPPORTED, extract
+from .formats import MARKDOWN_QUERY_CONTRACT, MARKDOWN_SQL
 
 
 class WikiError(Exception):
@@ -767,9 +768,12 @@ class WikiStore:
     def indexed_metadata(self, row):
         """Navigation metadata only; current evidence is read separately."""
         native = json.loads(row["metadata"])
-        with self.connect() as db:
-            managed = db.execute("SELECT metadata FROM managed_notes WHERE path=?", (row["path"],)).fetchone()
-        supplied = json.loads(managed[0]) if managed else {}
+        if "managed_metadata" in row.keys():
+            supplied = json.loads(row["managed_metadata"] or "{}")
+        else:
+            with self.connect() as db:
+                managed = db.execute("SELECT metadata FROM managed_notes WHERE path=?", (row["path"],)).fetchone()
+            supplied = json.loads(managed[0]) if managed else {}
         merged = native | supplied
         for field in ("tags", "aliases"):
             if field in native or field in supplied:
@@ -889,9 +893,9 @@ class WikiStore:
             self.path(directory.rstrip("/"))
         from .retrieval import compact, continuation, pagination
 
-        offset, epoch, fingerprint = pagination(self, cursor, offset, {"kind": kind, "quality": quality, "source": source, "assets": include_assets, "directory": directory, "view": view})
+        offset, epoch, fingerprint = pagination(self, cursor, offset, {"kind": kind, "quality": quality, "source": source, "assets": include_assets, "directory": directory, "view": view, "query_contract": MARKDOWN_QUERY_CONTRACT})
         with self.connect() as db:
-            filters, arguments = [], []
+            filters, arguments = [MARKDOWN_SQL], []
             if not include_assets and kind != "asset":
                 filters.append("d.kind<>'asset'")
             if directory:
@@ -912,17 +916,20 @@ class WikiStore:
             predicate = " WHERE " + " AND ".join(filters) if filters else ""
             total = db.execute("SELECT count(*)" + relation + predicate, arguments).fetchone()[0]
             rows = db.execute(
-                "SELECT d.*" + relation + predicate + " ORDER BY d.title,d.path LIMIT ? OFFSET ?",
+                "SELECT d.*,m.metadata AS managed_metadata" + relation + predicate + " ORDER BY d.title,d.path LIMIT ? OFFSET ?",
                 [*arguments, limit, offset],
             ).fetchall()
             items = [compact(self, row) if view == "compact" else self.navigation(row) for row in rows]
+        from .read_response import compact_index
+
+        state = self.index_state()
         return {
             "items": items,
             "total": total,
             "next_offset": offset + limit if offset + limit < total else None,
             "next_cursor": continuation(offset + limit if offset + limit < total else None, epoch, fingerprint),
             "view": view,
-            **self.index_state(),
+            **(compact_index(state) if view == "compact" else state),
         }
 
     @vault_read

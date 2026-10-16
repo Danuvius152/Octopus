@@ -192,7 +192,8 @@ async def test_guides_follow_verified_job_role_instead_of_agent_name(client, not
         assert guide("entry") not in worker
         modules = {"query", "retrieval", "entry", "maintenance", "article", "writing"}
         card = json.loads(worker.splitlines()[0].split("：", 1)[1])
-        assert set(card["guides"]) == modules
+        assert card["injected_guides"] == ["worker"]
+        assert "guides" not in card and "capabilities" not in card
         headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
         for module in modules:
             response = await client.get("/api/wiki/guide", params={"module": module}, headers=headers)
@@ -220,7 +221,7 @@ async def test_guides_follow_verified_job_role_instead_of_agent_name(client, not
         ended = instructions("maintain", token)
         assert guide("worker-v2") not in ended and guide("maintenance-v2") not in ended and guide("entry") not in ended
         assert guide("query-v2") in ended and "只可查询，不发起或继续维护" in ended
-        assert set(json.loads(ended.splitlines()[0].split("：", 1)[1])["guides"]) == {"query", "retrieval", "entry"}
+        assert json.loads(ended.splitlines()[0].split("：", 1)[1])["injected_guides"] == ["query"]
         for module in ("maintenance", "article", "writing"):
             denied = await client.get("/api/wiki/guide", params={"module": module}, headers=headers)
             assert denied.status_code == 403, denied.text

@@ -69,8 +69,10 @@ def search(
     view: str = "compact",
     cursor: str | None = None,
 ) -> dict:
-    """Find indexed navigation; defaults to compact with lookup/question/overview/compare intent.
+    """Find Markdown navigation; defaults to compact with lookup/question/overview/compare intent.
 
+    All intents, explicit identities, kind and include_assets remain Markdown-only.
+    Use read() for an explicitly selected HTML/TXT original.
     Explicit view=full includes all indexed metadata and may be much larger.
     Each document appears once. section.start/end locate evidence for read();
     sections includes extra matched chapters for terms discussed separately.
@@ -132,8 +134,9 @@ def info() -> dict:
 
 @mcp.tool()
 def load_guide(module: GuideModule) -> dict:
-    """Load a needed guide; reuse it while its content remains in context.
+    """Load a needed guide; injected_guides marks the content already injected this turn.
 
+    Reuse available content; reload when that content is missing from context.
     query/retrieval/entry are readable in authorized turns. maintenance
     (patches, sources, recovery), article (metadata/layout) and writing
     (new prose) require a current curator worker assignment.
@@ -153,9 +156,11 @@ def list_documents(
     view: str = "compact",
     cursor: str | None = None,
 ) -> dict:
-    """Browse compact directory navigation; follow next_cursor/next_offset.
+    """Browse compact Markdown navigation; follow next_cursor/next_offset.
 
-    Assets are opt-in. Explicit view=full returns all indexed metadata and may
+    kind and include_assets do not include HTML/TXT or other non-Markdown files.
+    Use read() for an explicitly selected HTML/TXT original.
+    Explicit view=full returns all indexed metadata and may
     be much larger. Navigation does not count as reading the document body.
     """
     return call(
@@ -200,11 +205,14 @@ def maintain(
     Submission gives the caller no direct document-writing capability.
     Material is preserved verbatim; target is a new Library/*.md path, otherwise
     Library/Inbox is used. Sources are read-only citations, not write targets.
+    Selected paths must be eligible Markdown; HTML/TXT originals remain read-only.
     In autonomous mode, choose exact paths relevant to the current task.
     Explicit maintenance mode retains the user's selected paths. The user need
     not type /wiki; no material or paths means no full-vault maintenance.
+    Returns a bounded submission receipt with the actual current job status;
+    use jobs(job_id=..., view="full", export=true) for complete item evidence.
     """
-    return call(
+    result = call(
         "POST",
         "maintain",
         body={
@@ -216,6 +224,25 @@ def maintain(
             "target": target,
         },
     )
+    if isinstance(result.get("status"), int) and result["status"] >= 400:
+        return result
+    from ..wiki.jobs import WikiJobs
+
+    receipt = WikiJobs.summary(result)
+    reused = [item for item in result["items"] if item.get("reused") is True]
+    if reused:
+        limits = {"doc": 128, "output": 512, "output_revision": 128}
+        receipt["reused_count"] = len(reused)
+        receipt["reused_items"] = [
+            {key: item[key][:limit] for key, limit in limits.items() if item.get(key)}
+            for item in reused[:3]
+        ]
+        receipt["reused_items_truncated"] = len(reused) > 3 or any(
+            len(item.get(key, "")) > limit
+            for item in reused[:3]
+            for key, limit in limits.items()
+        )
+    return receipt
 
 
 @mcp.tool()
@@ -241,7 +268,8 @@ def organize(
     reliable names; native frontmatter stays intact. relations have doc,
     revision, location (L1-L3 or an actual heading), explanation; read their
     cited current passages first. New links use unique vault-path wikilinks.
-    TXT/HTML originals stay intact with a sibling Markdown reading note.
+    Maintain Markdown only. TXT/HTML originals are read-only; explicitly select
+    an existing paired Markdown note when that is the maintenance target.
     """
     return call(
         "POST",

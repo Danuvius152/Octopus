@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-from .capabilities import CAPABILITIES
 from .contracts import GuideModule
 from .registry import registry
 from .store import WikiError
@@ -22,14 +21,16 @@ def guide(name: str) -> str:
 def instructions(mode: str, task_id: str | None = None) -> str:
     task = tasks.active.get(task_id)
     worker = tasks.is_curator_worker(task)
+    injected = ["worker"] if mode == "maintain" and worker else ["query"]
+    if injected != ["worker"] and not (task and task.job_id) and mode in {"auto", "maintain"}:
+        injected.append("entry")
     card: dict[str, Any] = {
         "mode": mode,
         "organization": "Library 分类；Key note；细粒度标签；必要关联",
         "excluded": "PDF 不处理；工具/tmp/配套静态资产按需读取",
-        "capabilities": CAPABILITIES,
+        "injected_guides": injected,
     }
     if task:
-        card["guides"] = [*PUBLIC_GUIDES, *(WORKER_GUIDES if worker else ())]
         try:
             config = registry.config(task.user_id)
             card |= {
@@ -42,6 +43,7 @@ def instructions(mode: str, task_id: str | None = None) -> str:
         if task.job_id:
             card["job_id"] = task.job_id
     base = "本次知识操作卡：" + json.dumps(card, ensure_ascii=False) + "\n"
+    base += "injected_guides 标记本轮常驻内容；按需指南已有内容时复用，仅上下文缺失时再 load_guide。\n"
     base += guide("access") + "\n"
     if mode == "maintain" and worker:
         base += guide("worker-v2")

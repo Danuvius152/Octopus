@@ -1,11 +1,9 @@
 """In-place article adaptation by insertion, never by body regeneration."""
 
-from pathlib import Path
-from urllib.parse import quote
-
 from . import format, material_proof, operations
+from .formats import require_markdown_maintenance
 from .sections import top_offset
-from .store import WikiError, is_maintainable_text
+from .store import WikiError
 
 
 def organize(curation, path, expected_revision, key_note, tags, aliases, relations, sources, actor, reason, fields, task=None, item_doc=None, reuse=False):
@@ -16,25 +14,14 @@ def organize(curation, path, expected_revision, key_note, tags, aliases, relatio
         tasks.require_path(task, store, path)
         tasks.require_read(task, store, path, expected_revision)
         source = store.read(path, length=1, expected_revision=expected_revision)
-        if not is_maintainable_text(source["path"]):
-            raise WikiError("Excluded assets are not articles", 422)
+        require_markdown_maintenance(source["path"])
         destination = path
-        if Path(path).suffix.lower() not in {".md", ".markdown"}:
-            destination = path + ".md"
-            tasks.require_path(task, store, destination)
-            if store.path(destination).exists():
-                raise WikiError("The reading page already exists; maintain its current blocks", 409)
-            with store.connect() as db:
-                extracted = db.execute("SELECT text FROM documents WHERE id=?", (source["id"],)).fetchone()[0]
-            text = f"# {source['title']}\n\n[原文]({quote(Path(path).name)})\n\n" + extracted
-            output_revision = None
-        else:
-            try:
-                text = store.path(path).read_bytes().decode("utf-8")
-            except UnicodeError as exc:
-                raise WikiError("Non-UTF-8 originals require encoding review", 422) from exc
-            output_revision = expected_revision
-        trace = material_proof.Trace(text) if destination == path else None
+        try:
+            text = store.path(path).read_bytes().decode("utf-8")
+        except UnicodeError as exc:
+            raise WikiError("Non-UTF-8 originals require encoding review", 422) from exc
+        output_revision = expected_revision
+        trace = material_proof.Trace(text)
         newline = "\r\n" if "\r\n" in text else "\n"
         parsed = format.parse(text)
         article = fields.get("x_wiki", {}).get("profile") == "article-v1"
@@ -56,29 +43,24 @@ def organize(curation, path, expected_revision, key_note, tags, aliases, relatio
                 raise WikiError("Use explicit raw layout changes to separate existing Key note and original body", 422)
             inserts += "## 正文" + newline * 2
         candidate = text[:offset] + inserts + text[offset:]
-        if trace is not None:
-            trace.edit([(offset, offset, inserts)])
+        trace.edit([(offset, offset, inserts)])
         refs = None
         if sources is not None:
             for ref in sources:
                 tasks.require_source_read(task, store, ref)
             refs = [{"resource": ref["path"], "revision": ref["revision"], "location": ref["location"]} for ref in curation.sources(sources)]
-        if destination != path:
-            refs = [*(refs or []), {"resource": source["path"], "revision": source["revision"], "location": "原文全文"}]
         if relations:
             for relation in relations:
                 tasks.require_source_read(task, store, relation)
             linked = curation.sources(relations)
             related = newline * 2 + "## 相关笔记" + newline * 2 + newline.join(f"- [[{ref['path']}]]：{relation['explanation']}" for ref, relation in zip(linked, relations, strict=True)) + newline
-            if trace is not None:
-                trace.edit([(len(candidate), len(candidate), related)])
+            trace.edit([(len(candidate), len(candidate), related)])
             candidate += related
         curation.validate_links(destination, inserts, candidate=candidate)
         if relations:
             curation.validate_links(destination, candidate[candidate.rfind("## 相关笔记"):], candidate=candidate)
-        candidate = format.patch(candidate, fields=fields, tags=tags, aliases=aliases, sources=refs, uid=source["metadata"]["uid"] if destination == path else None, actor=actor, representation_of=source["id"] if destination != path else None)
+        candidate = format.patch(candidate, fields=fields, tags=tags, aliases=aliases, sources=refs, uid=source["metadata"]["uid"], actor=actor)
         context = operations.publication(task, store, source, item_doc)
-        if trace is not None:
-            trace.metadata(candidate)
-        result = curation.history.write_locked(destination, candidate.encode(), output_revision, actor, reason, operations.management(store, destination, candidate), publication=context, operation="normalize", origin_builder=trace.transition(context, allow_seed=True) if trace is not None else None)
+        trace.metadata(candidate)
+        result = curation.history.write_locked(destination, candidate.encode(), output_revision, actor, reason, operations.management(store, destination, candidate), publication=context, operation="normalize", origin_builder=trace.transition(context, allow_seed=True))
         return result | {"source_path": path, "original_preserved": True}

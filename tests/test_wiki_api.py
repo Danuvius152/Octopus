@@ -608,7 +608,7 @@ async def test_default_search_excludes_tool_and_temporary_assets_but_can_read_th
     assets = await client.get(
         "/api/wiki/documents?include_assets=true", headers=HEADERS
     )
-    assert assets.json()["total"] == 4
+    assert assets.json()["total"] == 2
     read = await client.get(
         "/api/wiki/read?doc=Library/course/tmp/extract.txt", headers=HEADERS
     )

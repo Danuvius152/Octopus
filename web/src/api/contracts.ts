@@ -4233,6 +4233,13 @@ export interface components {
             index_errors: {
                 [key: string]: string;
             }[];
+            /** Index Error Count */
+            index_error_count?: number | null;
+            /**
+             * Index Errors Truncated
+             * @default false
+             */
+            index_errors_truncated: boolean;
             /** Match Mode */
             match_mode: string;
             /** Query Terms */

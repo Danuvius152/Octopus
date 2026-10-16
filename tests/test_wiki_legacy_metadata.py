@@ -264,17 +264,23 @@ async def test_legacy_paired_page_keeps_original_evidence_version_on_omission(cl
     html = root / "Library/page.html"
     html.write_text("<html><body><h1>Human view</h1><p>First claim.</p></body></html>")
     source = await read(client, "Library/page.html")
+    paired_path = source["path"] + ".md"
+    # Represent a preserved legacy reading page, then maintain that Markdown
+    # explicitly; the HTML original remains a read-only versioned source.
+    (root / paired_path).write_text("# Human view\n\n[原文](page.html)\n\nFirst claim.\n")
+    paired_original = await read(client, paired_path)
     first = await client.post("/api/wiki/organize", headers=HEADERS, json={
-        "path": source["path"], "expected_revision": source["revision"],
+        "path": paired_path, "expected_revision": paired_original["revision"],
         "key_note": "Reading points from the human view.", "reason": "paired page",
+        "sources": [{"doc": source["id"], "revision": source["revision"], "location": "L1"}],
     })
     assert first.status_code == 200, first.text
-    paired_path = source["path"] + ".md"
     before = await read(client, paired_path)
     html.write_text("<html><body><h1>Human view</h1><p>Changed claim.</p></body></html>")
     current = await read(client, source["path"])
+    assert current["revision"] != source["revision"]
     refreshed = await client.post("/api/wiki/organize", headers=HEADERS, json={
-        "path": current["path"], "expected_revision": current["revision"],
+        "path": paired_path, "expected_revision": before["revision"],
         "tags": ["metadata-only"], "reason": "paired refresh without new evidence",
     })
     assert refreshed.status_code == 200, refreshed.text

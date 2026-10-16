@@ -1,4 +1,4 @@
-查询保留问题中的命名对象和原词。已知路径/id/uid 直接 read；否则用 search(view="compact") 定位，明确文章用 lookup，具体问题用 question，宽主题用 overview，多方比较用 compare。只在状态或绑定不明时查 info，结果有缺口再调整原词、可靠别名或浏览相关目录。
+查询保留问题中的命名对象和原词。search/list_documents 只返回 Markdown，所有 intent、显式身份、include_assets 和 kind 均不放开非 Markdown；已知 HTML/TXT 原件仍可直接 read。已知路径/id/uid 直接 read；否则用 search(view="compact") 定位，明确文章用 lookup，具体问题用 question，宽主题用 overview，多方比较用 compare。只在状态或绑定不明时查 info，结果有缺口再调整原词、可靠别名或浏览相关目录。
 
 读当前摘要、Key note、适用知识页及必要上下文，已覆盖问题和条件时即可回答；有具体缺口才补检索或正文。索引卡和 snippet 只作导航，不能冒充已读；实际读到的当前摘要可以作为依据，注明其来源层级。回答附简短 confidence 和必要限制，检索分数不等于答案置信度。
 

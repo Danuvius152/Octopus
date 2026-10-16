@@ -3,6 +3,7 @@
 import json
 
 from . import material_proof, origins
+from .formats import is_markdown_maintenance
 from .sections import original_text
 from .store import WikiError, asset_reason, revision
 
@@ -63,7 +64,7 @@ def index(db, row, raw):
     )
 
 
-def find(store, raw):
+def find(store, raw, *, markdown_only=False):
     """Caller holds the writer lock. Recheck candidate bytes before reusing."""
     store.refresh()
     with store.connect() as db:
@@ -73,6 +74,8 @@ def find(store, raw):
         ).fetchall()
     for candidate in candidates:
         path = candidate["path"]
+        if markdown_only and not is_markdown_maintenance(path):
+            continue
         try:
             with store.connect() as db:
                 row = store._index(db, path)

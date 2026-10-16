@@ -100,16 +100,16 @@ async def test_existing_paired_reading_page_cannot_be_replaced_after_assignment(
     root, config = notes
     store = registry.store(None)
     history = WikiHistory(store)
-    created = history.write("Library/source.txt", b"A full original source.", None, "human", "create")
-    WikiCuration(store).organize("Library/source.txt", created["revision"], "A reading note.", [], [], [], "human", "organize")
+    history.write("Library/source.txt", b"A full original source.", None, "human", "create")
     paired_path = "Library/source.txt.md"
+    created = history.write(paired_path, b"# Existing legacy reading page\nPreserve this page.\n", None, "human", "legacy page")
     raw = store.path(paired_path).read_bytes()
-    with active_worker(config, ["Library/source.txt"]) as headers:
+    with active_worker(config, [paired_path]) as headers:
         await client.get("/api/wiki/read", params={"doc": "Library/source.txt"}, headers=headers)
         await client.get("/api/wiki/read", params={"doc": paired_path}, headers=headers)
         sapphire_delete(history, paired_path)
         history.write(paired_path, raw, None, "human", "replacement reading page")
-        rejected = await client.post("/api/wiki/organize", headers=headers, json={"path": "Library/source.txt", "expected_revision": created["revision"], "key_note": "New summary.", "reason": "scope"})
+        rejected = await client.post("/api/wiki/organize", headers=headers, json={"path": paired_path, "expected_revision": created["revision"], "key_note": "New summary.", "reason": "scope"})
         assert rejected.status_code == 403 and "identity" in rejected.text, rejected.text
     assert (root / paired_path).read_bytes() == raw
 

@@ -12,9 +12,10 @@ from ..aio import complete_cleanup
 from ..config import settings
 from . import materials
 from .curation import WikiCuration
+from .formats import MARKDOWN_SQL, is_markdown_maintenance, require_markdown_maintenance
 from .history import WikiHistory
 from .registry import registry
-from .store import WikiError, asset_reason, is_maintainable_text
+from .store import WikiError, asset_reason
 
 
 async def _io(function, *args, **kwargs):
@@ -235,8 +236,7 @@ class WikiJobs:
         for path in dict.fromkeys(paths):
             self.store.path(path)
             document = self.store.read(path, length=1)
-            if not is_maintainable_text(document["path"]):
-                raise WikiError(f"This is an excluded asset: {path}", 422)
+            require_markdown_maintenance(document["path"])
             if created_changes:
                 WikiHistory(self.store)
                 with self.store.connect() as db:
@@ -265,15 +265,6 @@ class WikiJobs:
                     "revision": document["revision"],
                     "quality": document["quality"],
                 }
-            if Path(path).suffix.lower() not in {".md", ".markdown"}:
-                paired_path = path + ".md"
-                item["paired_doc"] = None
-                if self.store.path(paired_path).is_file():
-                    with self.store.connect() as db:
-                        owned = db.execute("SELECT metadata FROM managed_notes WHERE path=?", (paired_path,)).fetchone()
-                    if paired_path not in paths and (not owned or not any(ref.get("doc") == document["id"] for ref in json.loads(owned[0]).get("sources", []))):
-                        raise WikiError("The paired reading page is not owned by this source; select it explicitly after review", 403)
-                    item["paired_doc"] = self.store.read(paired_path, length=1)["id"]
             selected.append(item)
         payload = {
             "kind": "submission" if material else "curation",
@@ -288,11 +279,17 @@ class WikiJobs:
         }
         if material:
             with self.store.connect() as db:
-                pending = db.execute("SELECT id,payload FROM jobs WHERE status IN ('queued','running','interrupted') ORDER BY created_at").fetchall()
+                pending = db.execute("SELECT id,payload,items FROM jobs WHERE status IN ('queued','running','interrupted') ORDER BY created_at").fetchall()
             for job in pending:
-                if json.loads(job["payload"]).get("material") == material:
+                pending_payload = json.loads(job["payload"])
+                eligible = (
+                    pending_payload.get("kind") == "submission"
+                    and (not pending_payload.get("target") or is_markdown_maintenance(pending_payload["target"]))
+                    and all(is_markdown_maintenance(item["path"]) for item in json.loads(job["items"]))
+                )
+                if eligible and pending_payload.get("material") == material:
                     return self.alias(key, request, job["id"])
-            reused = materials.find(self.store, material.encode())
+            reused = materials.find(self.store, material.encode(), markdown_only=True)
             if reused:
                 result = self.enqueue(key, payload, [{
                     "doc": reused["id"], "path": reused["path"], "revision": reused["revision"],
@@ -321,7 +318,7 @@ class WikiJobs:
         self.store.refresh()
         with self.store.connect() as db:
             documents = db.execute(
-                "SELECT * FROM documents WHERE kind='original' ORDER BY path"
+                "SELECT d.* FROM documents d WHERE d.kind='original' AND " + MARKDOWN_SQL + " ORDER BY d.path"
             ).fetchall()
         items = [
             {
@@ -332,6 +329,7 @@ class WikiJobs:
                 "status": "pending",
             }
             for row in documents
+            if is_markdown_maintenance(row["path"])
         ]
         return self.enqueue(
             key,
@@ -394,14 +392,15 @@ class WikiJobs:
             if job["status"] == "cancelled":
                 return None
             payload = job["payload"]
-            existing = materials.find(self.store, payload["material"].encode())
+            path = payload.get("target") or f"Library/Inbox/{job_id}.md"
+            require_markdown_maintenance(path)
+            existing = materials.find(self.store, payload["material"].encode(), markdown_only=True)
             if existing:
                 with self.store.connect() as db:
                     own_creation = db.execute("""SELECT 1 FROM changes c JOIN change_retention r ON r.change_id=c.id
                       WHERE c.path=? AND c.reason=? AND c.status='applied' AND c.before_hash IS NULL
                         AND r.document_id=?""", (existing["path"], f"Ingest job {job_id}", existing["id"])).fetchone()
                 return existing | {"reused": not bool(own_creation)}
-            path = payload.get("target") or f"Library/Inbox/{job_id}.md"
             target = self.store.path(path)
             if target.exists():
                 current = self.store.read(path, length=1)
@@ -753,7 +752,9 @@ class WikiWorker:
                     item.update(status="attention", error="Publication recovery receipt is unavailable; review without regenerating the note")
                     continue
                 try:
+                    require_markdown_maintenance(item["path"])
                     doc = await _io(jobs.store.read, item["doc"], length=1)
+                    require_markdown_maintenance(doc["path"])
                 except WikiError as exc:
                     item.update(status="attention", error=str(exc))
                     continue
@@ -809,11 +810,6 @@ class WikiWorker:
             from .tasks import tasks as grants
 
             assigned = [item["path"] for item in readable]
-            assigned.extend(
-                item["path"] + ".md"
-                for item in readable
-                if Path(item["path"]).suffix.lower() not in {".md", ".markdown"}
-            )
             grants.assign(session.id, job_id, assigned)
             prompt = (
                 "这是已明确授权的持久维护任务。按本次共享维护与写作指南执行。\n"

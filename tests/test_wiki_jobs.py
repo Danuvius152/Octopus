@@ -369,13 +369,16 @@ async def test_ingest_rechecks_current_original_after_waiting_in_queue(jobs):
 @pytest.mark.parametrize(
     "suffix,raw", [(".txt", "完整文本\n"), (".html", "<p>完整正文</p>\n")]
 )
-async def test_reuse_compares_original_txt_html_bytes_not_extracted_text(
+async def test_new_material_does_not_reuse_unsearchable_txt_html(
     jobs, suffix, raw
 ):
     path = "Library/original" + suffix
     WikiHistory(jobs.store).write(path, raw.encode(), None, "human", "create")
     result = jobs.maintain("same", raw, "organize", [], "Library/new.md", [], "human")
-    assert result["items"][0]["output"] == path
+    assert result["status"] == "queued" and result["items"] == []
+    created = jobs.ingest(result["id"])
+    assert created["path"] == "Library/new.md"
+    assert jobs.store.path(created["path"]).read_bytes() == raw.encode()
     assert jobs.store.path(path).read_bytes() == raw.encode()
     if suffix == ".html":
         different = jobs.maintain(

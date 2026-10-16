@@ -1,0 +1,42 @@
+"""Compact diagnostics survive the actual HTTP response model and MCP shim."""
+
+import httpx
+import pytest
+
+from server.mcp_servers import wiki as mcp_wiki
+from server.wiki.registry import registry
+from tests import test_wiki_api as wiki_api
+
+client = wiki_api.client
+
+
+@pytest.mark.parametrize("error_count", [0, 2, 9])
+async def test_navigation_error_bounds_survive_http_and_mcp(client, tmp_path, monkeypatch, error_count):
+    root = tmp_path / "vault"
+    root.mkdir()
+    (root / "note.md").write_text("# Needle\nEvidence for the query.\n")
+    await wiki_api.configure(client, root)
+    store = registry.store(None)
+    state = store.index_state()
+    errors = [{"path": "长" * 200 + str(index), "error": "错误" * 150} for index in range(error_count)]
+    monkeypatch.setattr(store, "index_state", lambda: state | {"index_status": "partial" if errors else "ready", "index_errors": errors})
+    compact_search = None
+    for endpoint, base in (("search", {"query": "Needle"}), ("documents", {})):
+        compact = await client.get("/api/wiki/" + endpoint, params=base | {"view": "compact"}, headers=wiki_api.HEADERS)
+        assert compact.status_code == 200, compact.text
+        value = compact.json()
+        assert value["index_error_count"] == error_count
+        assert len(value["index_errors"]) == min(error_count, 3)
+        assert bool(value.get("index_errors_truncated")) == bool(errors)
+        assert all(len(item["path"]) <= 160 and len(item["error"]) <= 160 for item in value["index_errors"])
+        assert value["index_status"] == ("partial" if errors else "ready")
+        assert value["pending_changes"] == state["pending_changes"]
+        full = await client.get("/api/wiki/" + endpoint, params=base | {"view": "full"}, headers=wiki_api.HEADERS)
+        assert full.status_code == 200 and full.json()["index_errors"] == errors
+        if endpoint == "search":
+            compact_search = value
+    monkeypatch.setattr(mcp_wiki.httpx, "request", lambda *args, **kwargs: httpx.Response(200, json=compact_search))
+    seen = mcp_wiki.search("Needle", view="compact")
+    assert seen["index_error_count"] == error_count
+    assert bool(seen.get("index_errors_truncated")) == bool(errors)
+    assert seen["index_errors"] == compact_search["index_errors"]

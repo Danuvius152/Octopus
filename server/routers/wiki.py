@@ -366,6 +366,8 @@ class SearchResult(BaseModel):
     next_offset: int | None
     index_status: str
     index_errors: list[dict[str, str]]
+    index_error_count: int | None = None
+    index_errors_truncated: bool = False
     match_mode: str
     query_terms: list[str]
     index_epoch: int

@@ -317,7 +317,7 @@ def test_visible_body_key_note_math_and_code_keep_original_identity(store, inten
     ("<h2>整理说明</h2><p>Realtime bookkeeping only.</p>", False),
     ("<h2>相关笔记</h2><p>Realtime links only.</p>", False),
 ], ids=["heading", "hidden", "heading-image", "image-only", "wrapped-image", "paragraph", "curator", "related"])
-def test_physical_html_structure_selects_source_without_changing_read_coordinates(
+def test_physical_html_stays_readable_without_entering_markdown_navigation(
     store, intent, view, suffix, body, usable,
 ):
     from server.wiki.extract import HTMLText
@@ -327,10 +327,10 @@ def test_physical_html_structure_selects_source_without_changing_read_coordinate
     result = store.search("realtime", intent=intent, view=view, limit=1)
     assert result["total"] == 1
     hit = result["items"][0]
-    assert (hit["id"] == alpha["id"]) is usable
-    assert hit["path"] == (path if usable else "Summaries/summary-00.md")
+    assert hit["id"] != alpha["id"]
+    assert hit["path"] == "Summaries/summary-00.md"
     assert hit["revision"] == store.read(hit["id"])["revision"]
-    assert store.search(alpha["id"], intent="lookup", view=view)["items"][0]["id"] == alpha["id"]
+    assert store.search(alpha["id"], intent="lookup", view=view)["items"] == []
     # Qualification uses original structure; the evidence text still has the
     # established extractor's exact code-point coordinates.
     legacy = HTMLText()

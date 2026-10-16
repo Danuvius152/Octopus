@@ -12,7 +12,7 @@ from httpx import AsyncClient, MockTransport, Response
 from server.mcp_identity import mint
 from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiJobs, WikiWorker
-from server.wiki.store import revision
+from server.wiki.store import WikiError, revision
 from server.wiki.tasks import tasks
 from tests import test_wiki_api as wiki_api
 from tests import test_wiki_history as wiki_history
@@ -371,7 +371,7 @@ async def test_asset_index_failure_recovers_without_repeating_content(client, as
 
 @pytest.mark.parametrize("suffix", [".md", ".markdown", ".txt", ".html", ".htm"])
 @pytest.mark.parametrize("modern", [True, False], ids=["article-v1", "compatibility"])
-async def test_ordinary_text_keeps_explicit_read_and_organize_behavior(client, asset_notes, suffix, modern):
+async def test_ordinary_text_keeps_explicit_reads_and_markdown_only_maintenance(client, asset_notes, suffix, modern):
     root, config, jobs = asset_notes
     path = "Library/ordinary" + suffix
     text = "Ordinary evidence remains conditional on A.\n"
@@ -379,6 +379,22 @@ async def test_ordinary_text_keeps_explicit_read_and_organize_behavior(client, a
     (root / path).write_text(raw)
     original = await read(client, path)
     assert original["kind"] != "asset"
+    if suffix not in {".md", ".markdown"}:
+        returned = await client.post("/api/wiki/read_many", headers=HEADERS, json={"items": [{"doc": original["id"], "expected_revision": original["revision"]}]})
+        assert returned.status_code == 200, returned.text
+        assert returned.json()["items"][0]["status"] == "ok"
+        assert returned.json()["ranges"][0]["content"] == original["content"]
+        with pytest.raises(WikiError) as rejected:
+            with assignment(jobs, config, [path]):
+                pytest.fail("Non-Markdown maintenance was assigned")
+        assert rejected.value.status == 422
+        result = await client.post("/api/wiki/organize", headers=HEADERS, json=organize_body(original, modern))
+        assert result.status_code == 422 and "Markdown" in result.text
+        assert (root / path).read_text() == raw
+        assert (await read(client, path))["id"] == original["id"]
+        assert not (root / (path + ".md")).exists()
+        assert jobs.list()["items"] == []
+        return
     with assignment(jobs, config, [path]) as (headers, job, _):
         returned = await client.post("/api/wiki/read_many", headers=headers, json={"items": [{"doc": original["id"], "expected_revision": original["revision"]}]})
         assert returned.status_code == 200, returned.text
@@ -386,19 +402,15 @@ async def test_ordinary_text_keeps_explicit_read_and_organize_behavior(client, a
         assert returned.json()["ranges"][0]["content"] == original["content"]
         result = await client.post("/api/wiki/organize", headers=headers, json=organize_body(original, modern))
         assert result.status_code == 200, result.text
-        output_path = path if suffix in {".md", ".markdown"} else path + ".md"
+        output_path = path
         assert result.json()["path"] == output_path
-        if output_path != path:
-            assert (root / path).read_text() == raw
-            assert (await read(client, path))["id"] == original["id"]
-        else:
-            assert text in (root / path).read_text()
+        assert text in (root / path).read_text()
         receipt = jobs.get(job["id"])["receipts"][0]
         output = await read(client, output_path)
         assert receipt["doc_id"] == output["id"]
         assert receipt["item_doc"] == original["id"]
         assert receipt["details"]["input_source_revision"] == original["revision"]
-        assert receipt["input_revision"] == (original["revision"] if output_path == path else None)
+        assert receipt["input_revision"] == original["revision"]
         change = WikiHistory(jobs.store).history(output_path)["items"][0]
         assert change["recoverable"]["after"] is True
 

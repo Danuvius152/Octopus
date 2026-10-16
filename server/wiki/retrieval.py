@@ -5,6 +5,8 @@ import hashlib
 import json
 
 from . import search_index
+from .formats import MARKDOWN_QUERY_CONTRACT, MARKDOWN_SQL
+from .read_response import compact_index
 from .store import WikiError
 
 
@@ -66,6 +68,7 @@ def exact(db, query, kind, directory, include_assets, titles=False):
         arguments = [search_index.normalize(query), search_index.normalize(query)]
     else:
         return False, []
+    where += " AND " + MARKDOWN_SQL
     if kind:
         where += " AND d.kind=?"
         arguments.append(kind)
@@ -75,14 +78,14 @@ def exact(db, query, kind, directory, include_assets, titles=False):
         prefix = directory.rstrip("/") + "/"
         where += " AND substr(d.path,1,?)=?"
         arguments.extend((len(prefix), prefix))
-    rows = db.execute("SELECT d.* FROM documents d JOIN search_documents n ON n.doc_id=d.id WHERE " + where + " ORDER BY d.path", arguments).fetchall()
+    rows = db.execute("SELECT d.*,m.metadata AS managed_metadata FROM documents d JOIN search_documents n ON n.doc_id=d.id LEFT JOIN managed_notes m ON m.path=d.path WHERE " + where + " ORDER BY d.path", arguments).fetchall()
     return bool(identified), rows
 
 
 def search(store, query, limit, offset, kind, include_assets, directory, intent, view, cursor):
     if intent not in {None, "lookup", "question", "overview", "compare"} or view not in {"full", "compact"}:
         raise WikiError("Unknown search intent/view", 422)
-    offset, epoch, fingerprint = pagination(store, cursor, offset, {"query": query, "kind": kind, "assets": include_assets, "directory": directory, "intent": intent, "view": view})
+    offset, epoch, fingerprint = pagination(store, cursor, offset, {"query": query, "kind": kind, "assets": include_assets, "directory": directory, "intent": intent, "view": view, "query_contract": MARKDOWN_QUERY_CONTRACT})
     with store.connect() as db:
         identified, exact_rows = exact(db, query, kind, directory, include_assets, titles=intent == "lookup")
         if identified or exact_rows:
@@ -90,7 +93,7 @@ def search(store, query, limit, offset, kind, include_assets, directory, intent,
             selection = [(row, None) for row in exact_rows[offset:offset + limit]]
         else:
             hits, total, terms, mode = search_index.select(db, query, kind, include_assets, offset, limit, directory, exclude_roles=intent != "lookup", deduplicate=intent != "lookup", comparison=intent == "compare", diversify=intent == "overview")
-            selection = [(db.execute("SELECT * FROM documents WHERE id=?", (hit["doc_id"],)).fetchone(), hit) for hit in hits]
+            selection = [(db.execute("SELECT d.*,m.metadata AS managed_metadata FROM documents d LEFT JOIN managed_notes m ON m.path=d.path WHERE d.id=?", (hit["doc_id"],)).fetchone(), hit) for hit in hits]
         items = []
         for row, hit in selection:
             if view == "compact":
@@ -104,4 +107,5 @@ def search(store, query, limit, offset, kind, include_assets, directory, intent,
                     sections = [{"title": row["title"], "start": 0, "end": len(row["text"]), "line_start": 1, "line_end": row["text"].count("\n") + 1}]
                 items.append(store.navigation(row) | {"snippet": snippet, "snippet_start": position, "score": -hit["cost"] if hit else 0.0, "section": sections[0], "sections": sections})
     next_offset = offset + limit if offset + limit < total else None
-    return {"items": items, "total": total, "next_offset": next_offset, "next_cursor": continuation(next_offset, epoch, fingerprint), "match_mode": mode, "query_terms": terms, "view": view, "intent": intent or "question", **store.index_state()}
+    state = store.index_state()
+    return {"items": items, "total": total, "next_offset": next_offset, "next_cursor": continuation(next_offset, epoch, fingerprint), "match_mode": mode, "query_terms": terms, "view": view, "intent": intent or "question", **(compact_index(state) if view == "compact" else state)}

@@ -4,6 +4,7 @@ import json
 import unicodedata
 
 from . import format, material_proof, operations, raw_blocks
+from .formats import require_markdown_maintenance
 from .store import WikiError
 
 
@@ -31,6 +32,7 @@ def revise(curation, body, actor, task):
     with curation.history.locked():
         document, text, parts = raw_blocks.load(store, body.doc, body.expected_revision)
         path = document["path"]
+        require_markdown_maintenance(path)
         tasks.require_path(task, store, path)
         context = operations.publication(task, store, document, body.item_doc)
         if body.operation == "no_change":

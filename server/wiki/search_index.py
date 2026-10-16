@@ -13,6 +13,7 @@ from markdown_it import MarkdownIt
 from markdown_it.renderer import RendererHTML
 
 from .extract import HTML_BODY_VERSION, HTMLBodyAnalyzer, html_has_readable_body
+from .formats import MARKDOWN_SQL
 
 VERSION = "sections-v8"
 _tokenizer = jieba.Tokenizer()
@@ -303,7 +304,7 @@ def select(db, query, kind, include_assets, offset, limit, directory=None, exclu
     terms, groups = query_groups(query)
     if not groups:
         return [], 0, terms, "lexical"
-    filters, arguments = [], []
+    filters, arguments = [MARKDOWN_SQL], []
     if kind:
         filters.append("d.kind=?")
         arguments.append(kind)

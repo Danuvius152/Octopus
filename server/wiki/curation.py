@@ -4,12 +4,12 @@ import json
 import os
 import re
 from pathlib import Path
-from urllib.parse import quote
 
+from .formats import require_markdown_maintenance
 from .history import WikiHistory
 from .links import anchor_exists, local_links, resolve_link, source_span
 from .sections import original_text, region, top_offset
-from .store import WikiError, is_maintainable_text, revision
+from .store import WikiError, revision
 
 
 class WikiCuration:
@@ -149,8 +149,7 @@ class WikiCuration:
             source = self.store.read(
                 path, length=1, expected_revision=expected_revision
             )
-            if not is_maintainable_text(source["path"]):
-                raise WikiError("Excluded assets are not note templates", 422)
+            require_markdown_maintenance(source["path"])
             refs = self.sources(sources) if sources is not None else []
             linked = self.sources(relations)
             for entry, relationship in zip(linked, relations, strict=True):
@@ -161,46 +160,11 @@ class WikiCuration:
                 if not relationship["explanation"].strip():
                     raise WikiError("A relation needs a concrete explanation", 422)
             destination = path
-            if Path(path).suffix.lower() not in {".md", ".markdown"}:
-                destination = path + ".md"
-                target = self.store.path(destination)
-                if task:
-                    tasks.require_path(task, self.store, destination)
-                if target.exists():
-                    with self.store.connect() as db:
-                        paired = db.execute(
-                            "SELECT 1 FROM managed_notes WHERE path=?", (destination,)
-                        ).fetchone()
-                    if not paired:
-                        raise WikiError(
-                            "The paired reading-note path is already owned by another document",
-                            409,
-                        )
-                base = (
-                    target.read_bytes().decode("utf-8")
-                    if target.exists()
-                    else (f"# {Path(path).stem}\n\n[原文]({quote(Path(path).name)})\n")
-                )
-                destination_revision = (
-                    revision(base.encode()) if target.exists() else None
-                )
-                if task:
-                    if target.exists():
-                        tasks.require_read(task, self.store, destination, destination_revision)
-                refs.append(
-                    {
-                        "doc": source["id"],
-                        "path": path,
-                        "revision": source["revision"],
-                        "location": "原文全文",
-                    }
-                )
-            else:
-                try:
-                    base = self.store.path(path).read_bytes().decode("utf-8")
-                except UnicodeError:
-                    raise WikiError("Non-UTF-8 Markdown requires encoding review", 422)
-                destination_revision = expected_revision
+            try:
+                base = self.store.path(path).read_bytes().decode("utf-8")
+            except UnicodeError:
+                raise WikiError("Non-UTF-8 Markdown requires encoding review", 422)
+            destination_revision = expected_revision
             with self.store.connect() as db:
                 owned = db.execute(
                     "SELECT * FROM managed_notes WHERE path=?", (destination,)
@@ -341,6 +305,7 @@ class WikiCuration:
             return result | {"original_preserved": True, "source_path": path}
 
     def publish(self, path, content, kind, sources, expected_revision, actor, reason, task=None, frontmatter_patch=None, tags=None, aliases=None, item_doc=None):
+        require_markdown_maintenance(path)
         if (
             not path.startswith(("Library/", "Wiki/"))
             or Path(path).suffix.lower() != ".md"
@@ -397,6 +362,7 @@ class WikiCuration:
         from . import layout
 
         with self.history.locked():
+            require_markdown_maintenance(self.store.read(path, length=1)["path"])
             if task:
                 from .tasks import tasks
 

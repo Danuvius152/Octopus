@@ -107,7 +107,10 @@ class WikiTasks:
         job = WikiJobs(task.user_id).get(task.job_id)
         if job["status"] != "running" or job["session_id"] != task.session_id:
             raise WikiError("This maintenance assignment is no longer active", 403)
+        from .formats import require_markdown_maintenance
+
         target = store.path(path)
+        require_markdown_maintenance(path)
         if path in task.writable:
             from .store import is_maintainable_text
 
