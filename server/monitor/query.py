@@ -74,7 +74,7 @@ async def errors(conn: aiosqlite.Connection, window: str = "7d") -> list[dict[st
         conn,
         "SELECT kind, error_code, COUNT(*) n, MAX(ts) last_seen "
         "FROM events WHERE ts >= ? AND (ok = 0 OR error_code IS NOT NULL) "
-        "AND NOT (kind = 'delegation' AND ok = 1 AND error_code = 'completed') "
+        "AND NOT (kind = 'delegation' AND ok IS 1 AND error_code IS 'completed') "
         "GROUP BY kind, error_code ORDER BY n DESC",
         (_since(window),),
     )
