@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import uuid
 from datetime import UTC, datetime
 from functools import partial
@@ -17,6 +18,8 @@ from .history import WikiHistory
 from .registry import registry
 from .store import WikiError, asset_reason
 
+logger = logging.getLogger(__name__)
+
 
 async def _io(function, *args, **kwargs):
     # Native asyncio cancellation must join a writer before its worker is reaped.
@@ -26,6 +29,7 @@ async def _io(function, *args, **kwargs):
 class WikiJobs:
     def __init__(self, user_id):
         self.user_id = user_id
+        self.registration = registry.config(user_id)
         self.store = registry.store(user_id)
         with self.store.connect() as db:
             db.execute("""CREATE TABLE IF NOT EXISTS jobs (
@@ -578,6 +582,9 @@ class WikiJobs:
 
 
 class WikiWorker:
+    RETRY_INITIAL_SECONDS = 5.0
+    RETRY_MAX_SECONDS = 60.0
+
     def __init__(self):
         self.manager = None
         self.loop = None
@@ -594,8 +601,6 @@ class WikiWorker:
         states = registry.states()
         for user_id, state in states:
             if (state / "config.json").is_file():
-                jobs = await _io(WikiJobs, user_id)
-                await _io(jobs.recover_jobs)
                 self.wake(user_id)
 
     def wake(self, user_id):
@@ -647,10 +652,29 @@ class WikiWorker:
         self.loop = None
 
     async def run(self, user_id):
-        jobs = await _io(WikiJobs, user_id)
+        recover = True
+        retry_delay = self.RETRY_INITIAL_SECONDS
+        unfinished = None
         while not self._stopping:
             self.pending.discard(user_id)
-            job_id = await _io(jobs.next_queued)
+            try:
+                # Control-plane state must use the live registration. Content
+                # processing below keeps its captured Store and grants.
+                jobs = await _io(WikiJobs, user_id)
+                if unfinished is not None:
+                    await self._finish_failed_job(user_id, *unfinished)
+                    unfinished = None
+                if recover:
+                    await _io(jobs.recover_jobs)
+                    recover = False
+                job_id = await self._claim_job(jobs)
+            except Exception:
+                recover = True
+                logger.exception("Wiki worker unavailable for account=%s; retrying in %.1fs", user_id, retry_delay)
+                await asyncio.sleep(retry_delay)
+                retry_delay = min(retry_delay * 2, self.RETRY_MAX_SECONDS)
+                continue
+            retry_delay = self.RETRY_INITIAL_SECONDS
             if job_id is None:
                 if user_id in self.pending:
                     continue
@@ -658,38 +682,50 @@ class WikiWorker:
             try:
                 await self.process(jobs, job_id)
             except asyncio.CancelledError:
-                job = await _io(jobs.get, job_id)
-                if job["status"] == "running":
-                    await _io(
-                        jobs.update,
-                        job_id,
-                        expected_status="running",
-                        status="interrupted",
-                        error="Server stopped; retry resumes unfinished items",
-                    )
+                try:
+                    await self._finish_failed_job(user_id, job_id, "interrupted", "Worker stopped; retry resumes unfinished items")
+                except Exception:
+                    logger.exception("Wiki interruption recording unavailable for account=%s job=%s; startup recovery required", user_id, job_id)
                 raise
             except Exception as exc:
+                unfinished = (job_id, "interrupted" if self._stopping else "failed", f"{type(exc).__name__}: {exc}")
                 if self._stopping:
-                    job = await _io(jobs.get, job_id)
-                    if job["status"] == "running":
-                        await _io(
-                            jobs.update,
-                            job_id,
-                            expected_status="running",
-                            status="interrupted",
-                            error=f"Server stopped; curator cleanup remains unconfirmed: {type(exc).__name__}: {exc}",
-                        )
+                    await self._finish_failed_job(user_id, *unfinished)
                     raise
-                await _io(
-                    jobs.update,
-                    job_id,
-                    expected_status="running",
-                    status="failed",
-                    error=f"{type(exc).__name__}: {exc}",
-                )
+
+    async def _claim_job(self, jobs):
+        # A cancelled thread join still has to retain the committed claim's
+        # identity. Otherwise shutdown can leave a job permanently running.
+        claim = asyncio.create_task(_io(jobs.next_queued))
+        try:
+            return await asyncio.shield(claim)
+        except asyncio.CancelledError:
+            async def settle_claim():
+                job_id = await claim
+                if job_id is not None:
+                    await self._finish_failed_job(jobs.user_id, job_id, "interrupted", "Worker stopped while claiming this job; retry resumes unfinished items")
+            try:
+                await complete_cleanup(settle_claim())
+            except Exception:
+                logger.exception("Wiki claim interruption recording unavailable for account=%s; startup recovery required", jobs.user_id)
+            raise
+
+    async def _finish_failed_job(self, user_id, job_id, status, error):
+        jobs = await _io(WikiJobs, user_id)
+        job = await _io(jobs.get, job_id)
+        # A cancellation already committed through the current Store wins.
+        if job["status"] == "running":
+            await _io(jobs.update, job_id, expected_status="running", status=status, error=error)
+        if job["session_id"]:
+            session = self.manager.get_session(job["session_id"])
+            if session is not None:
+                await complete_cleanup(self.manager._await_backend_retirement(session))
+                await self.manager.archive_session(session.id, replace=False)
 
     async def process(self, jobs, job_id):
         config = registry.config(jobs.user_id)
+        if config != jobs.registration:
+            raise WikiError("Wiki registration changed; retry with the current binding", 409)
         agent = await self.manager.db.get_agent(
             config["curator_agent_id"], jobs.user_id
         )
@@ -810,7 +846,7 @@ class WikiWorker:
             from .tasks import tasks as grants
 
             assigned = [item["path"] for item in readable]
-            grants.assign(session.id, job_id, assigned)
+            grants.assign(session.id, job_id, assigned, registration=config)
             prompt = (
                 "这是已明确授权的持久维护任务。按本次共享维护与写作指南执行。\n"
                 + "用户要求: "

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef } from "react";
-import type { SubmissionReply } from "../lib/submission";
+import { newSubmissionId, type SubmissionReply } from "../lib/submission";
 import {
   addSessionInfo,
   applySessionSnapshot,
@@ -726,7 +726,7 @@ export function useWebSocket() {
         payload.attachment_ids = attachmentIds;
       }
       if (wikiMode) payload.wiki_mode = wikiMode;
-      const clientRequestId = crypto.randomUUID();
+      const clientRequestId = newSubmissionId();
       payload.client_request_id = clientRequestId;
       if (wsRef.current?.readyState !== WebSocket.OPEN) {
         return Promise.resolve({ accepted: false, message: "Disconnected. Your message was not sent." });

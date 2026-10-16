@@ -63,6 +63,7 @@ from .submission import RequestCompletion, SubmissionReceipt
 class _Settlement:
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     work_id: str | None = None
+    started_at: float | None = None
     recovery: dict[str, int] = field(default_factory=lambda: {
         "transient": 0, "idle": 0, "stale_session": 0, "premature_exit": 0,
     })
@@ -295,7 +296,9 @@ class TurnsMixin(SessionManagerBase):
                 "content": outcome.model_dump(), "is_error": status != "success",
                 "cost": settlement.cost, "code": code, "message": outcome.message,
                 "terminal": True, "turns": result.num_turns if result else None,
-                "duration_ms": result.duration_ms if result else None,
+                # Logical request latency includes retries and their waits.
+                "duration_ms": round((time.monotonic() - settlement.started_at) * 1000)
+                if settlement.started_at is not None else None,
             }
             if metadata:
                 for key in ("credential_id", "backend"):
@@ -1600,7 +1603,9 @@ class TurnsMixin(SessionManagerBase):
             backend=session.backend,
             duration_ms=event.duration_ms,
             ok=not event.is_error,
-            detail={"cost": event.cost, "num_turns": event.num_turns},
+            detail={"cost": event.cost, "num_turns": event.num_turns,
+                    "duration_scope": "attempt", "attempt_id": attempt.attempt_id,
+                    "request_id": session._settlement.request_id if session._settlement else None},
         ))
         # Shut the steering window first: past this point the CLI is idle, and
         # a frame written now would start a fresh turn rather than steer this
@@ -2086,6 +2091,7 @@ class TurnsMixin(SessionManagerBase):
             session._settlement = settlement
         # A setting saved while this turn is running belongs to the next turn,
         # including when the current one needs an automatic retry.
+        settlement.started_at = time.monotonic()
         turn = _Turn(
             prompt=prompt,
             current_prompt=prompt,

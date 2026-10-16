@@ -122,6 +122,17 @@ class TestTheGmailCase:
 
 
 class TestReports:
+    async def test_legacy_successful_delegations_are_not_errors(self, store, conn):
+        store.record(Event(kind="delegation", ok=True, error_code="completed"))
+        store.record(Event(kind="delegation", ok=True))
+        store.record(Event(kind="delegation", ok=False, error_code="failed"))
+        store.record(Event(kind="turn", ok=True, error_code="diagnostic"))
+        await store.drain()
+        rows = await query.errors(conn, "24h")
+        assert {(row["kind"], row["error_code"], row["n"]) for row in rows} == {
+            ("delegation", "failed", 1), ("turn", "diagnostic", 1),
+        }
+
     async def test_turn_percentiles(self, store, conn):
         for ms in (10, 20, 30, 40, 1000):
             store.record(Event(kind="turn", backend="claude-code",

@@ -21,6 +21,7 @@ import contextlib
 import contextvars
 import functools
 import logging
+import weakref
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -149,14 +150,18 @@ class _ScopeMiddleware:
 
     Pure ASGI rather than a FastAPI middleware because it wraps a *mounted*
     sub-application, which FastAPI's decorator-based middleware does not reach.
-    An unverifiable bearer is left as no scope rather than rejected here, so the
-    tool itself can answer the model in words it understands instead of the
-    model seeing a bare HTTP error it cannot act on.
+    Tool calls require live authority. A retired, correctly signed identity
+    can only DELETE the exact transport that identity initialized; session
+    ids never authorize another run or account to use or clean it up.
     """
 
-    def __init__(self, app: Any, name: str) -> None:
+    def __init__(self, app: Any, name: str, manager: Any = None) -> None:
         self.app = app
         self.name = name
+        self.manager = manager
+        # Bind ownership to the actual transport, so idle expiry and manager
+        # shutdown do not leave another unbounded session registry behind.
+        self._owners: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope.get("type") != "http":
@@ -168,14 +173,40 @@ class _ScopeMiddleware:
         if raw.lower().startswith("bearer "):
             bearer = raw[7:].strip()
         resolved = verify(bearer)
-        if resolved is None or not await scope_is_authorized(resolved):
-            logger.warning("mcp/%s: call carried no verifiable scope", self.name)
+        transport = None
+        session_id = headers.get(b"mcp-session-id", b"").decode("latin-1")
+        if self.manager is not None and session_id:
+            transport = self.manager._server_instances.get(session_id)
+        owns_transport = transport is not None and self._owners.get(transport) == resolved
+        authorized = resolved is not None and await scope_is_authorized(resolved)
+        cleanup = scope.get("method") == "DELETE" and resolved is not None and owns_transport
+        if cleanup and not authorized:
+            from .deps import accounts_exist
+            cleanup = resolved.user_id is not None or not await accounts_exist()
+        if not authorized and not cleanup:
+            logger.warning("mcp/%s: %s rejected reason=%s", self.name, scope.get("method"),
+                           "invalid_signature" if resolved is None else "retired_or_wrong_era")
             await send({"type": "http.response.start", "status": 401, "headers": []})
             await send({"type": "http.response.body", "body": b"Model run is no longer active"})
             return
+        if transport is not None and not owns_transport:
+            logger.warning("mcp/%s: %s rejected reason=transport_owner_mismatch", self.name, scope.get("method"))
+            await send({"type": "http.response.start", "status": 404, "headers": []})
+            await send({"type": "http.response.body", "body": b"Session not found"})
+            return
+
+        async def owned_send(message):
+            if self.manager is not None and message["type"] == "http.response.start":
+                response_headers = dict(message.get("headers") or [])
+                created = response_headers.get(b"mcp-session-id", b"").decode("latin-1")
+                current = self.manager._server_instances.get(created)
+                if current is not None:
+                    self._owners.setdefault(current, resolved)
+            await send(message)
+
         token = set_current_scope(resolved)
         try:
-            await self.app(scope, receive, self._log_bad_request(scope, headers, send))
+            await self.app(scope, receive, self._log_bad_request(scope, headers, owned_send))
         finally:
             reset_current_scope(token)
 
@@ -233,6 +264,7 @@ def mount_all(app: FastAPI, servers: dict[str, Any] | None = None) -> list[str]:
     """Mount every namespace. Returns the paths, for logging and for tests."""
     mounted: list[str] = []
     for name, server in (servers or build_servers()).items():
-        app.mount(mount_path(name), _ScopeMiddleware(server.streamable_http_app(), name))
+        transport_app = server.streamable_http_app()
+        app.mount(mount_path(name), _ScopeMiddleware(transport_app, name, server.session_manager))
         mounted.append(mount_path(name))
     return mounted

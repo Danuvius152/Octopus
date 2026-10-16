@@ -46,7 +46,7 @@ import { Button } from "./ui/button";
 import { isSessionBusy } from "../lib/deferredFork";
 import { loadOlderMessages } from "../lib/transcript";
 import type { WikiMessageMode } from "../lib/wikiComposer";
-import type { SubmissionReply } from "../lib/submission";
+import { newSubmissionId, type SubmissionReply } from "../lib/submission";
 
 const EMPTY_MESSAGES: Message[] = [];
 
@@ -627,7 +627,7 @@ export function ChatView({
   const submitTurn = (content: string) => {
     if (!activeSessionId) return;
     const draft = {
-      id: crypto.randomUUID(), sessionId: activeSessionId, text: input,
+      id: newSubmissionId(), sessionId: activeSessionId, text: input,
       attachments: pendingAttachments.filter((attachment) => attachment.status === "ready"),
     };
     const submission = sendMessage(

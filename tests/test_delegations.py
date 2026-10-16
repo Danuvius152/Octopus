@@ -2235,5 +2235,33 @@ async def test_terminal_metric_is_independent_of_closed_parent(dm, mgr, db, monk
     await dm._inject_terminal(rec)
     await dm._inject_terminal(rec)
     assert len(records) == 1 and records[0].ok is expected
+    assert records[0].error_code == (None if expected else state)
+    assert records[0].detail["state"] == state
     assert rec._terminal_disposition == "closed"
     assert rec._terminal_injected is False
+
+
+async def test_success_and_failure_delegation_metrics_query_real_storage(dm, mgr, db, monkeypatch, tmp_path):
+    from server.delegations import DelegationRunState
+    from server.mcp_identity import close_work
+    from server.monitor import MetricsStore, query
+
+    store = MetricsStore(str(tmp_path / "delegation-metrics.db"))
+    await store.initialize()
+    monkeypatch.setattr("server.delegations._mon_record", store.record)
+    parent = await _make_session(mgr, (await db.get_system_agent())["id"], name="metric storage parent")
+    work = "closed-storage-metrics"
+    close_work(work)
+    try:
+        for state in ("completed", "failed"):
+            rec = DelegationRunState(delegation_id=f"metric-{state}", parent_session_id=parent.id,
+                                     target_agent_id="agent", target_agent_name="worker", request="work",
+                                     parent_work_id=work, state=state)
+            await dm._inject_terminal(rec)
+        await store.drain()
+        rows = await query.errors(store.conn, "24h")
+        assert [(row["kind"], row["error_code"], row["n"]) for row in rows] == [("delegation", "failed", 1)]
+        stored = await store.conn.execute_fetchall("SELECT ok,error_code FROM events ORDER BY rowid")
+        assert [tuple(row) for row in stored] == [(1, None), (0, "failed")]
+    finally:
+        await store.stop()

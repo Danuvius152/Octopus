@@ -72,16 +72,18 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                     or len(client_request_id) > 128
                 ):
                     delivery.offer({"type": "error", "session_id": session_id,
-                                    "message": "Invalid client request identity"})
+                                    "message": "Invalid client request identity"}, session_scoped=False)
                     continue
 
                 def reject(message: str, session_id=session_id, client_request_id=client_request_id) -> None:
+                    # Account-local echo of submitted input, containing no
+                    # session content. Missing/foreign resources share it.
                     delivery.offer({
                         "type": "submission" if client_request_id else "error",
                         "session_id": session_id, "message": message,
                         **({"client_request_id": client_request_id, "accepted": False}
                            if client_request_id else {}),
-                    })
+                    }, session_scoped=False)
                 raw_aids = data.get("attachment_ids") or []
                 attachment_ids = (
                     [a for a in raw_aids if isinstance(a, str)]

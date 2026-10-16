@@ -18,7 +18,9 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import tomllib
+import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -405,6 +407,15 @@ class CodexEventParser(EventParser):
         self._activity_open_items: set[int] = set()
         self._activity_turn_started = False
         self._activity_schema_warned = False
+        self._activity_web_items: dict[str, str] = {}
+        self._activity_terminal = False
+        self._started_at: float | None = None
+
+    def begin_turn(self) -> None:
+        self._started_at = time.monotonic()
+
+    def _duration_ms(self) -> int | None:
+        return round((time.monotonic() - self._started_at) * 1000) if self._started_at is not None else None
 
     def parse(self, obj: dict[str, Any]) -> ParseOutput:
         kind = obj.get("type")
@@ -421,12 +432,15 @@ class CodexEventParser(EventParser):
             return ParseOutput()
 
         if kind == "turn.started":
+            if self._started_at is None:
+                self.begin_turn()
             first = not self._activity_turn_started
             self._activity_turn_started = True
             return ParseOutput(activity=first)
 
         if kind == "turn.completed":
             self._activity_open_items.clear()
+            self._activity_terminal = True
             usage = obj.get("usage") or {}
             return ParseOutput(
                 events=[
@@ -435,6 +449,7 @@ class CodexEventParser(EventParser):
                         session_id=self._captured_thread_id,
                         cost=None,  # Codex reports tokens, not USD
                         num_turns=1,
+                        duration_ms=self._duration_ms(),
                         raw={"usage": usage},
                     )
                 ],
@@ -443,6 +458,7 @@ class CodexEventParser(EventParser):
 
         if kind == "turn.failed":
             self._activity_open_items.clear()
+            self._activity_terminal = True
             err = obj.get("error")
             msg = err if isinstance(err, str) else (
                 (err or {}).get("message") if isinstance(err, dict) else None
@@ -453,6 +469,7 @@ class CodexEventParser(EventParser):
                         type="result",
                         session_id=self._captured_thread_id,
                         is_error=True,
+                        duration_ms=self._duration_ms(),
                         error_code=_provider_code(err),
                         content=msg or "Turn failed",
                         raw=obj,
@@ -484,6 +501,8 @@ class CodexEventParser(EventParser):
         return ParseOutput()
 
     def _item_activity(self, kind: str, item: Any) -> bool | None:
+        if self._activity_terminal:
+            return False
         if not isinstance(item, dict) or not isinstance(item.get("type"), str) or item["type"] not in {
             "reasoning", "agent_message", "mcp_tool_call", "command_execution",
             "collab_tool_call", "file_edit", "file_write", "file_read", "file_change",
@@ -495,6 +514,19 @@ class CodexEventParser(EventParser):
         if kind == "item.updated":
             return False
         identifier = item.get("id")
+        # Codex 0.162 emits native Web identities alongside numeric item ids.
+        # UUIDs have no ordering; track each lifecycle within this attempt.
+        if item["type"] == "web_search" and isinstance(identifier, str) and identifier.startswith("exec-"):
+            try:
+                valid = str(uuid.UUID(identifier[5:])) == identifier[5:]
+            except ValueError:
+                valid = False
+            if valid:
+                previous = self._activity_web_items.get(identifier)
+                if previous == "item.completed" or previous == kind:
+                    return False
+                self._activity_web_items[identifier] = kind
+                return True
         number = identifier[5:] if isinstance(identifier, str) and identifier.startswith("item_") else ""
         ordinal = int(number) if len(number) <= 20 and number.isascii() and number.isdecimal() else None
         if ordinal is None or identifier != f"item_{ordinal}" or ordinal >= 2**64:

@@ -1277,8 +1277,8 @@ class DelegationManager:
             rec._metric_recorded = True
             _mon_record(_MonEvent(
                 kind="delegation", session_id=rec.parent_session_id,
-                ok=rec.state == "completed", error_code=rec.state,
-                detail={"delegation_id": rec.delegation_id},
+                ok=rec.state == "completed", error_code=None if rec.state == "completed" else rec.state,
+                detail={"delegation_id": rec.delegation_id, "state": rec.state},
             ))
         if rec._terminal_disposition is not None or rec._terminal_injecting:
             return

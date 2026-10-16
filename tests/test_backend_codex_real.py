@@ -76,6 +76,7 @@ async def test_real_text_then_result(tmp_path):
     assert result.session_id is not None
     assert result.cost is None
     assert result.is_error is False
+    assert result.duration_ms is not None and result.duration_ms > 0
 
 
 @pytest.mark.asyncio

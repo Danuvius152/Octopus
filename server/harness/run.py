@@ -323,6 +323,8 @@ class HarnessRun:
         if self._lease_closed:
             raise RuntimeError("HarnessRun has been retired")
 
+        self._parser.begin_turn()
+
         from ..mcp_identity import work_is_open
         if not work_is_open(self.work_id):
             raise RuntimeError("Delegated work is closed")
@@ -560,6 +562,7 @@ class HarnessRun:
         # turn would duplicate messages.
         self._event_queue = asyncio.Queue()
         self._stream_closed = False
+        self._parser.begin_turn()
         self._initial_uuid = await self.send_user_frame(prompt)
 
     async def stream(self) -> AsyncIterator[HarnessEvent]:

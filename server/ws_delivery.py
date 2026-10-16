@@ -64,7 +64,7 @@ class SocketDelivery:
         _connections.add(self)
         self._writer = asyncio.create_task(self._write(), name=f"websocket-writer:{self.key}")
 
-    def offer(self, message: dict) -> None:
+    def offer(self, message: dict, *, session_scoped: bool = True) -> None:
         """Bounded, synchronous admission; never awaits a socket or database."""
         if self._closing or self._revocation_pending:
             return
@@ -104,7 +104,7 @@ class SocketDelivery:
                 or self._pending_bytes + size > MAX_PENDING_BYTES):
             self.request_close(4001 if revoke else 1013, "Unauthorized" if revoke else "Reconnect to synchronize")
             return
-        sid = message.get("session_id") or message.get("old_session_id")
+        sid = (message.get("session_id") or message.get("old_session_id")) if session_scoped else None
         self._queue.append(_Frame(text, size, sid if isinstance(sid, str) else None, revoke))
         self._pending_frames += 1
         self._pending_bytes += size

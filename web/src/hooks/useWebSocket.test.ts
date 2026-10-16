@@ -4,7 +4,9 @@ import { act, renderHook } from "@testing-library/react";
 import { handleWsMessage, shouldApplyWsEvent, useWebSocket } from "./useWebSocket";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 
-it("only the same socket, session and client request can acknowledge a submission", async () => {
+it.each(["native", "without-randomUUID", "without-crypto"])("matches submission receipts in %s browsers", async (mode) => {
+  if (mode === "without-randomUUID") vi.stubGlobal("crypto", { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) });
+  if (mode === "without-crypto") vi.stubGlobal("crypto", undefined);
   class Socket {
     static OPEN = 1;
     static CONNECTING = 0;

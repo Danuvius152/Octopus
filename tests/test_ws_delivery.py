@@ -142,6 +142,41 @@ async def account(runtime, monkeypatch):
     return users, user, await users.issue_token(user["id"])
 
 
+@pytest.mark.parametrize("resource", ["missing", "deleted", "other-owner"])
+async def test_resource_rejection_preserves_account_socket(runtime, monkeypatch, tmp_path, resource):
+    manager, db = runtime
+    users, user, token = await account(runtime, monkeypatch)
+    agent = await db.get_system_agent()
+    sid = "nonexistent"
+    if resource != "missing":
+        from server.agent_manager import AgentManager
+
+        owner = user["id"]
+        if resource == "other-owner":
+            owner = (await users.create_user(username="other", password="password2"))["id"]
+        agent = await AgentManager(db).create_agent(name="owned-agent", user_id=owner)
+        session = await manager.create_session(agent["id"], "private", None)
+        sid = session.id
+        if resource == "deleted":
+            await manager.delete_session(sid)
+    async with connection(manager, token) as client:
+        await client[0].put({"type": "websocket.receive", "text": json.dumps({
+            "type": "send_message", "session_id": sid, "content": "draft",
+            "client_request_id": "stable-id",
+        })})
+        assert await frame(client[1]) == {
+            "type": "submission", "session_id": sid, "client_request_id": "stable-id",
+            "accepted": False, "message": "Session not found",
+        }
+        await client[0].put({"type": "websocket.receive", "text": "invalid json"})
+        assert (await frame(client[1]))["message"] == "Invalid JSON"
+        assert (await users.resolve_token(token))["id"] == user["id"]
+        await users.revoke_token(token)
+        await client[0].put({"type": "websocket.receive", "text": "invalid json"})
+        closed = await asyncio.wait_for(client[1].get(), 1)
+        assert closed["type"] == "websocket.close" and closed["code"] == 4001
+
+
 async def test_outgoing_account_frame_uses_one_read_and_no_activity_write(runtime, monkeypatch):
     manager, db = runtime
     _, _, token = await account(runtime, monkeypatch)

@@ -145,6 +145,10 @@ class EventParser(ABC):
     the protocols need — e.g. the captured session/thread id surfaced on
     `session_started` before `result` arrives."""
 
+    def begin_turn(self) -> None:
+        """Start local measurements when the harness accepts this attempt."""
+        return None
+
     @abstractmethod
     def parse(self, obj: dict[str, Any]) -> ParseOutput:
         """Map one parsed stdout JSON object to zero+ events, flagging

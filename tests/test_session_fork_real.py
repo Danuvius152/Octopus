@@ -7,9 +7,8 @@ pre-branch context and then switches to native resume on turn 2, and that the
 safe-revert path leaves a recoverable git stash. They cost real model calls;
 prompts that recall a planted word use the cheapest model.
 
-Boots SessionManager (no FastAPI) the same way test_delegations_real.py does;
-the bg/ask MCP servers launch but are never invoked by these prompts, so the
-absent host callback doesn't matter.
+Boots SessionManager without FastAPI. These memory-only tests disable MCP;
+tool tests must use their own callback API, never the production port.
 """
 
 from __future__ import annotations
@@ -58,6 +57,7 @@ async def _bootstrap(tmp_path, monkeypatch):
     def _no_mem(session, agent=None, connectors=None):
         cfg = _orig_run_config(session, agent, connectors)
         cfg.memory_dir = None
+        cfg.mcp_servers = []
         return cfg
 
     mgr._run_config = _no_mem  # type: ignore[assignment]
@@ -173,7 +173,7 @@ async def test_codex_fork_history_replay_then_native_resume(tmp_path, monkeypatc
     wd = str(tmp_path / "ws")
     os.makedirs(wd, exist_ok=True)
     try:
-        await am.create_agent(name="Codey", backend="codex")
+        await am.create_agent(name="Codey", backend="codex", mcp_servers=[])
         agent = await db.get_agent_by_name("Codey")
         sess = await mgr.create_session(agent_id=agent["id"], name="s",
                                         working_dir=wd, backend="codex")

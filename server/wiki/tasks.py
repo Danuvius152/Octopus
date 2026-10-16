@@ -17,6 +17,7 @@ class WikiTask:
     job_id: str | None = None
     writable: tuple[str, ...] = ()
     new_pages: bool = False
+    registration: dict | None = field(default=None, compare=False)
     reads: dict = field(default_factory=dict, compare=False)
     read_sizes: dict = field(default_factory=dict, compare=False)
     raw_reads: dict = field(default_factory=dict, compare=False)
@@ -28,11 +29,12 @@ class WikiTasks:
         self.active: dict[str, WikiTask] = {}
         self.assignments: dict[str, dict] = {}
 
-    def assign(self, session_id, job_id, paths):
+    def assign(self, session_id, job_id, paths, *, registration=None):
         self.assignments[session_id] = {
             "job_id": job_id,
             "writable": tuple(paths),
             "new_pages": True,
+            "registration": dict(registration) if registration is not None else None,
         }
 
     def unassign(self, session_id):
@@ -95,6 +97,10 @@ class WikiTasks:
             raise WikiError("This turn is limited to read-only Wiki access", 403)
         if publish and task.mode != "maintain":
             raise WikiError("An explicit maintenance task is required", 403)
+        if (write or publish) and task.registration is not None:
+            from .registry import registry
+            if task.registration != registry.config(task.user_id):
+                raise WikiError("This maintenance assignment's registration has changed", 403)
         return task
 
     def require_path(self, task, store, path):

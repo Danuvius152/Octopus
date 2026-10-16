@@ -83,6 +83,22 @@ function setup() {
   };
 }
 
+it.each(["without-randomUUID", "without-crypto"])("submits and restores rejected drafts %s", async (mode) => {
+  vi.stubGlobal("crypto", mode === "without-crypto" ? undefined : { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) });
+  try {
+    const sendMessage = vi.fn(async () => ({ accepted: false, message: "Session not found" }));
+    render(<ChatView sendMessage={sendMessage} interrupt={vi.fn()} approveTool={vi.fn()}
+      denyTool={vi.fn()} answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "retained draft" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send message" })));
+    expect(sendMessage).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "Restore draft" }));
+    expect(screen.getByRole("textbox")).toHaveValue("retained draft");
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
 it("keeps a rejected Wiki draft and protects subsequent editing during restoration", async () => {
   let finish!: (reply: { accepted: boolean; message: string }) => void;
   const sendMessage = vi.fn(() => new Promise<{ accepted: boolean; message: string }>((resolve) => { finish = resolve; }));
