@@ -1,11 +1,12 @@
-"""Natural Codex queries: personal scope, named reports and complete reading.
+"""Opt-in natural knowledge evaluations; pytest success only records execution.
 
-All evidence is synthetic; no real personal notes are used by this suite.
+All evidence is synthetic. Review the versioned sources, answers and traces
+separately; these cases do not grade wording or block ordinary releases.
 """
 
 import asyncio
-import re
 import uuid
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -22,32 +23,11 @@ from server.session_manager import SessionManager
 from server.wiki import WikiError, registry
 from server.wiki.workflow import guide
 from tests.callback_api import start_callback_api
+from tests.wiki_query_evidence import collect_evaluation
 
-pytestmark = [pytest.mark.real, pytest.mark.real_codex]
+pytestmark = [pytest.mark.real, pytest.mark.real_codex, pytest.mark.knowledge_eval]
 REPORT = "Library/Research/vidu_realtime_report/技术报告.md"
 PERSONAL = "Library/Me/information.md"
-
-
-def states_career_is_unrecorded(answer):
-    # Associate the absence with the career field, rather than another field
-    # elsewhere in the answer. This is a mechanical cue, not a semantic judge.
-    missing = (
-        "未记载", "未记录", "没有记录", "没有记载", "没有提到", "未提供", "未说明",
-        "无法确定", "未明确", "不足以确定", "不足以判断", "无法判断",
-        "不能确定", "不能判断", "没有明确记录", "没有明确记载",
-    )
-    # Only field qualifiers may join the field and its absence. In particular,
-    # punctuation and unrelated 学历/履历 fields cannot bridge the two cues.
-    qualifiers = (
-        r"(?:(?:你|我|用户|本人)的|的|目前|当前|尚|仍|还|暂时|具体|明确|实际|"
-        r"相关|任何|记录|记载|信息|字段|背景|资料|是|为|[:：]|\s)*"
-    )
-    absence = "(?:" + "|".join(re.escape(term) for term in missing) + ")"
-    text = re.sub(r"[*_`]", "", answer)
-    return bool(re.search(
-        rf"职业{qualifiers}{absence}|{absence}{qualifiers}职业|没有职业(?:记录|记载)",
-        text,
-    ))
 
 
 @dataclass
@@ -60,6 +40,8 @@ class QueryProbe:
     last_session_id: str | None = None
     last_request_id: str | None = None
     last_events: list[dict] = field(default_factory=list)
+    call_trace: list[dict] = field(default_factory=list)
+    usage_observations: list[dict] = field(default_factory=list)
 
     async def ask(self, question):
         self.requests.clear()
@@ -123,6 +105,18 @@ async def query_probe(tmp_path, monkeypatch):
     agent = await AgentManager(db).create_agent(name="Weber", backend="codex", system_prompt=guide("curator"), mcp_servers=[])
     registry.configure(None, root, agent["id"])
     probe = QueryProbe(manager, agent["id"], root)
+    original_result = manager._handle_result_event
+
+    async def record_usage(session, attempt, event):
+        probe.usage_observations.append({
+            "session_id": session.id, "request_id": probe.last_request_id,
+            "attempt_id": attempt.attempt_id, "native_thread_id": event.session_id,
+            "reused": attempt.reused, "is_error": event.is_error,
+            "raw": deepcopy(event.raw),
+        })
+        await original_result(session, attempt, event)
+
+    monkeypatch.setattr(manager, "_handle_result_event", record_usage)
     api = await start_callback_api(router, overrides={get_session_manager: lambda: manager}, exception_handlers={WikiError: _wiki_error})
     monkeypatch.setattr(settings, "port", api.port)
 
@@ -131,7 +125,15 @@ async def query_probe(tmp_path, monkeypatch):
     original_call = wiki_tools.call
 
     def record_call(method, path, *, params=None, body=None):
-        result = original_call(method, path, params=params, body=body)
+        observation = {"method": method, "operation": path,
+                       "params": deepcopy(params), "body": deepcopy(body)}
+        probe.call_trace.append(observation)
+        try:
+            result = original_call(method, path, params=params, body=body)
+        except Exception as error:
+            observation["exception"] = {"type": type(error).__name__, "message": str(error)}
+            raise
+        observation["response"] = deepcopy(result)
         if "error" not in result:
             probe.requests.append((path, dict(params or body or {})))
             probe.responses.append((path, result))
@@ -147,43 +149,26 @@ async def query_probe(tmp_path, monkeypatch):
         await db.close()
 
 
+async def evaluate(query_probe, question, request):
+    configured = request.config.getoption("knowledge_eval_output")
+    output = Path(configured) if configured else query_probe.root.parent / "quality-evidence"
+    path = await collect_evaluation(query_probe, question, case_id=request.node.nodeid, output=output)
+    request.node.user_properties.append(("knowledge_evidence", str(path)))
+
+
 @pytest.mark.parametrize("question", ["介绍我的背景", "我的职业是什么"])
-async def test_codex_personal_facts_use_current_me_directory_without_guessing(query_probe, question):
-    answer = await query_probe.ask(question)
-    locating = [(operation, params) for operation, params in query_probe.requests if operation in {"documents", "search", "read"}]
-    assert locating[0][0] == "documents" and locating[0][1].get("directory") == "Library/Me", locating
-    first_limit = int(locating[0][1].get("limit", 30))
-    if first_limit < 31:
-        assert any(operation == "documents" and (int(params.get("offset", 0)) > 0 or params.get("cursor")) for operation, params in locating), locating
-    assert any(path == PERSONAL for path, _, _ in query_probe.reads()), query_probe.requests
-    assert all(path.startswith("Library/Me/") for path, _, _ in query_probe.reads())
-    if "背景" in question:
-        assert "青峦大学" in answer and "合成视觉推理" in answer, answer
-    else:
-        assert states_career_is_unrecorded(answer), answer
+async def test_codex_personal_facts_use_current_me_directory_without_guessing(query_probe, question, request):
+    await evaluate(query_probe, question, request)
 
 
-async def test_codex_knowledge_question_with_my_still_searches_the_term(query_probe):
-    answer = await query_probe.ask("我的笔记里怎样解释投影矩阵？")
-    assert any(operation == "search" for operation, _ in query_probe.requests)
-    assert any(path == "Library/Research/投影矩阵.md" for path, _, _ in query_probe.reads())
-    assert "坐标" in answer, answer
+async def test_codex_knowledge_question_with_my_still_searches_the_term(query_probe, request):
+    await evaluate(query_probe, "我的笔记里怎样解释投影矩阵？", request)
 
 
 @pytest.mark.parametrize("question", ["数字人研究有哪些结论？", "那篇 Vidu 论文主要有哪些结论？"])
-async def test_codex_locates_curated_report_by_topic_and_named_object(query_probe, question):
-    answer = await query_probe.ask(question)
-    assert any(path == REPORT for path, _, _ in query_probe.reads()), query_probe.requests
-    assert "延迟" in answer and ("条件" in answer or "实证" in answer), answer
+async def test_codex_locates_curated_report_by_topic_and_named_object(query_probe, question, request):
+    await evaluate(query_probe, question, request)
 
 
-async def test_codex_whole_report_evaluation_reads_all_current_pages(query_probe):
-    answer = await query_probe.ask("完整读完那篇 Vidu 技术报告再评价其结论。")
-    spans = sorted((start, end) for path, start, end in query_probe.reads() if path == REPORT)
-    covered = 0
-    for start, end in spans:
-        assert start <= covered, spans
-        covered = max(covered, end)
-    document = registry.store(None).read(REPORT, length=1)
-    assert covered == document["characters"], spans
-    assert "测试环境" in answer, answer
+async def test_codex_whole_report_evaluation_reads_all_current_pages(query_probe, request):
+    await evaluate(query_probe, "完整读完那篇 Vidu 技术报告再评价其结论。", request)

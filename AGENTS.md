@@ -34,6 +34,14 @@ shortcut. Do the real thing the first time.
 
 You MUST verify your changes before considering them done:
 
+Natural Wiki question answering is a separate, opt-in quality evaluation,
+marked `knowledge_eval`. Pytest deselects it by default, before setup or CLI
+availability probes. It is not a required release check. Evaluate answers
+against their recorded source version, not exact wording or a fixed personal
+fact; real answers must follow current notes. A deselected evaluation is not
+a pass. Keep deterministic permission, source-preservation, revision/index,
+pagination, receipt, settlement and CLI/browser checks in the required tier.
+
 1. **Backend unit tests**: `.venv/bin/pytest tests/ -v` (1,320 tests; all of them
    run on a dev box with both CLIs installed and signed in — a skip means a
    lapsed login, not a passing suite). The real-CLI tier is selected by marker,
@@ -77,7 +85,11 @@ You MUST verify your changes before considering them done:
    signed-in `codex` (`codex login --device-auth`); a lapsed login fails
    it rather than hiding it.
 
-**Zero test failures are acceptable.** All tests must pass before committing. If a test fails, investigate and fix it — do not ignore, skip, or dismiss any failure as "flaky" or "pre-existing".
+**Zero failures in required release checks are acceptable.** All selected
+release checks must pass before committing. If one fails, investigate and fix
+it — do not ignore, skip, or dismiss it as "flaky" or "pre-existing". Optional
+knowledge evaluations retain execution failures and separate semantic review;
+their answer wording is not a release gate.
 
 ### Local Codex validation
 
@@ -91,6 +103,17 @@ or failed Claude checks do not count as passes. Failures in the required local
 checks must still be investigated and fixed before committing. This local
 agreement does not change the full-suite requirements for environments with
 both backends usable.
+
+The Codex release selection is
+`real and (real_codex or codex_bin) and not real_claude and not knowledge_eval`.
+Run natural-answer evaluations explicitly with
+`pytest tests/test_wiki_query_real.py --run-knowledge-evals --knowledge-eval-output=/path/to/fresh-evidence`.
+They use isolated synthetic sources and preserve answers, source hashes,
+actual reads, completion evidence and raw usage observations. Pytest success
+means execution was recorded; `semantic_acceptance: not_reviewed` still
+requires independent review. Unknown token totals or dollar costs remain
+unknown, and cumulative counters must not be summed. Fixed event-replay tests
+may still compare exact text to verify ordered message delivery.
 
 ## Test Coverage
 

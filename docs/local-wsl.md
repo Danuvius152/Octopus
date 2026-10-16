@@ -101,7 +101,7 @@ bunx playwright test e2e/codex.spec.ts --workers=1
 ```
 
 仅 Codex 的后端实机测试按 marker 选择
-`real and (real_codex or codex_bin) and not real_claude`。其中 research 测试需要
+`real and (real_codex or codex_bin) and not real_claude and not knowledge_eval`。其中 research 测试需要
 目录式凭据，验证时使用临时目录中的符号链接指向现有 `~/.codex`，并通过
 `OCTOPUS_CODEX_HOME_DIR` 指定；无需复制认证文件或重新登录。Claude 实机测试
 需要另外安装并登录 Claude，本机按用户选择使用 Codex。
@@ -113,11 +113,32 @@ cd /home/jack/Octopus
 octopus_test_homes=$(mktemp -d)
 ln -s "$HOME/.codex" "$octopus_test_homes/host"
 OCTOPUS_CODEX_HOME_DIR="$octopus_test_homes" .venv/bin/pytest tests/ -v \
-  -m 'real and (real_codex or codex_bin) and not real_claude'
+  -m 'real and (real_codex or codex_bin) and not real_claude and not knowledge_eval'
 rm "$octopus_test_homes/host"
 rmdir "$octopus_test_homes"
 unset octopus_test_homes
 ```
+
+Wiki 自然问答使用独立的 `knowledge_eval` 标记，默认在收集阶段排除，不作
+发布必过项，也不记为通过。发布仍须验证权限、原文保全、版本与索引、
+分页、回执、请求终态，以及 CLI 和浏览器基础运行链路。
+
+需要评估回答质量时显式运行；此命令会调用真实 Codex，资料使用隔离合成
+样本，不读取本人的笔记。输出目录应为新目录，避免覆盖先前证据：
+
+```bash
+cd /home/jack/Octopus
+octopus_knowledge_evidence=$(mktemp -d /tmp/octopus-wiki-evals.XXXXXX)
+.venv/bin/pytest tests/test_wiki_query_real.py --run-knowledge-evals \
+  --knowledge-eval-output="$octopus_knowledge_evidence" -q
+```
+
+报告保存问题、源文件版本 hash、实际读取与返回的 revision/范围、完整回答、
+执行终态、耗时和原始用量观察。Pytest 通过仅表示执行与记录成功，语义
+状态仍是 `not_reviewed`，需按该版资料另行评阅，不以固定句子或关键词
+代替判断。原始 token 计数可能累计，不能直接相加；无法证明完整账目时
+总量及美元费用保留为空。固定事件回放的精确文本比较仍用于协议检查。
+实际用户修改笔记后，回答应随当前资料更新，不受合成样本答案约束。
 
 ### 已完成的验证
 

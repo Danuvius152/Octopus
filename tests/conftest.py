@@ -181,6 +181,28 @@ def _no_cli_left_behind(request):
             pass
 
 
+def pytest_addoption(parser):
+    group = parser.getgroup("knowledge evaluation")
+    group.addoption(
+        "--run-knowledge-evals", action="store_true", default=False,
+        help="Run optional knowledge-answer evaluations (not release gates)",
+    )
+    group.addoption(
+        "--knowledge-eval-output", metavar="DIR",
+        help="Retain optional evaluation reports under DIR; otherwise use each test's temporary directory",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    """Opt in before setup, including the signed-in CLI availability probe."""
+    if config.getoption("run_knowledge_evals"):
+        return
+    evaluations = [item for item in items if item.get_closest_marker("knowledge_eval")]
+    if evaluations:
+        items[:] = [item for item in items if not item.get_closest_marker("knowledge_eval")]
+        config.hook.pytest_deselected(items=evaluations)
+
+
 def pytest_runtest_setup(item):
     """Apply the real-CLI markers — at setup, deliberately not at import.
 

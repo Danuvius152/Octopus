@@ -18,7 +18,8 @@ class ReplayManager:
 
     async def _execute_claimed_request(self, session_id, question, *, wiki_mode, request_id):
         assert wiki_mode == "read"
-        yield {"type": "assistant_text", "content": "职业未记载。"}
+        yield {"type": "assistant_text", "content": "Replay segment A."}
+        yield {"type": "assistant_text", "content": "Replay segment B."}
         final = {"type": "result", "session_id": session_id, "request_id": request_id,
                  "terminal": True, "is_error": False,
                  "content": {"status": "success", "request_id": request_id}}
@@ -54,12 +55,13 @@ class ReplayManager:
 async def test_failed_or_unsettled_turn_cannot_pass_on_partial_answer(scenario):
     probe = QueryProbe(ReplayManager(scenario), "synthetic-agent", Path("/tmp/synthetic-vault"))
     with pytest.raises(AssertionError):
-        await probe.ask("我的职业是什么")
+        await probe.ask("Return the replay segments.")
     assert probe.last_events and probe.last_session_id == "synthetic-session"
 
 
 @pytest.mark.parametrize("scenario", ["success", "recovery"])
 async def test_successful_settlement_retains_auditable_recovery_and_request(scenario):
     probe = QueryProbe(ReplayManager(scenario), "synthetic-agent", Path("/tmp/synthetic-vault"))
-    assert await probe.ask("我的职业是什么") == "职业未记载。"
+    assert await probe.ask("Return the replay segments.") == "Replay segment A.\nReplay segment B."
     assert probe.last_events[-1]["content"]["request_id"] == probe.last_request_id
+    assert any(event["type"] == "recovery" for event in probe.last_events) is (scenario == "recovery")
