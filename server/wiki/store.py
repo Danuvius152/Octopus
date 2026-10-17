@@ -19,7 +19,7 @@ from typing import Any
 
 import yaml
 
-from . import catalog, search_index
+from . import catalog, portable_metadata, search_index
 from . import format as document_format
 from .extract import HTML_BODY_VERSION, SUPPORTED, extract
 from .formats import MARKDOWN_QUERY_CONTRACT, MARKDOWN_SQL
@@ -545,6 +545,7 @@ class WikiStore:
             and previous_metadata.get("pipeline_version")
             == "octopus-extract-v3"
             and previous_metadata.get("format_version") == document_format.VERSION
+            and previous_metadata.get("metadata_validation_version") == portable_metadata.VERSION
             and (path.suffix.lower() not in {".html", ".htm"}
                  or previous_metadata.get("html_body_version") == HTML_BODY_VERSION)
         ):
@@ -572,6 +573,7 @@ class WikiStore:
             }
         text = extracted["text"]
         metadata = extracted["metadata"]
+        metadata["metadata_validation_version"] = portable_metadata.VERSION
         if path.suffix.lower() == ".pdf":
             metadata["revision_kind"] = "stat"
         front = re.match(
@@ -592,35 +594,12 @@ class WikiStore:
         portable = re.search(r"<!-- octopus-wiki\s+(.*?)\s*-->", text, re.S)
         if portable:
             try:
-                supplied = json.loads(portable[1])
-                if not isinstance(supplied, dict):
-                    raise ValueError("Metadata must be an object")
-                kind = supplied.get("kind", "original")
-                sources = supplied.get("sources", [])
-                if (
-                    not isinstance(kind, str)
-                    or not isinstance(sources, list)
-                    or any(
-                        not isinstance(ref, dict)
-                        or not all(
-                            isinstance(ref.get(key), str)
-                            for key in ("doc", "revision", "location")
-                        )
-                        for ref in sources
-                    )
-                ):
-                    raise ValueError("Invalid document kind or source relationships")
-                for name in ("tags", "aliases"):
-                    if name in supplied and (
-                        not isinstance(supplied[name], list)
-                        or any(not isinstance(value, str) for value in supplied[name])
-                    ):
-                        raise ValueError("Tags and aliases must be string lists")
+                supplied = portable_metadata.validate(json.loads(portable[1]))
                 # Extraction quality and tool versions cannot be supplied by a document.
                 metadata |= {
                     k: v for k, v in supplied.items() if k not in extracted["metadata"]
                 }
-            except (ValueError, TypeError):
+            except (ValueError, TypeError, RecursionError):
                 metadata["metadata_error"] = "Invalid octopus-wiki metadata"
         kind = metadata.get("kind", "original")
         if kind not in {"original", "source", "concept", "topic", "submission"}:

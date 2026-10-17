@@ -581,10 +581,10 @@ async def test_uncertain_publication_receipt_never_starts_another_model_turn(job
     def crash_before_status(self, change_id, value):
         raise RuntimeError("controlled crash after atomic publication")
 
-    def crash_before_atomic(path, raw):
+    def crash_before_atomic(path, raw, **kwargs):
         if path == jobs.store.path("Library/note.md"):
             raise RuntimeError("controlled crash before atomic publication")
-        return original_atomic(path, raw)
+        return original_atomic(path, raw, **kwargs)
 
     if stage == "before_atomic":
         monkeypatch.setattr(history_module, "atomic", crash_before_atomic)

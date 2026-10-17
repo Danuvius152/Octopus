@@ -45,7 +45,7 @@ def record(db, *, doc_id, path, before, after, operation, reason, publication=No
     return identifier
 
 
-def management(store, path, text):
+def management(store, path, text, *, replaced=()):
     """Revoke only expired legacy locators; retain the unchanged regions."""
     with store.connect() as db:
         row = db.execute("SELECT * FROM managed_notes WHERE path=?", (path,)).fetchone()
@@ -55,4 +55,21 @@ def management(store, path, text):
     base = text
     for part in regions:
         base = base.replace(part["raw"], "", 1)
-    return dict(row) | {"regions": json.dumps(regions, ensure_ascii=False), "base_hash": revision(base.encode()), "rendered_revision": revision(text.encode())}
+    metadata = json.loads(row["metadata"])
+    for field in replaced:
+        metadata.pop(field, None)
+    return dict(row) | {"regions": json.dumps(regions, ensure_ascii=False), "metadata": json.dumps(metadata, ensure_ascii=False), "base_hash": revision(base.encode()), "rendered_revision": revision(text.encode())}
+
+
+def replaced_regions(store, path, text, replaced):
+    """Only trusted, unchanged legacy tag/alias additions may be removed."""
+    with store.connect() as db:
+        row = db.execute("SELECT regions FROM managed_notes WHERE path=?", (path,)).fetchone()
+    edits = []
+    for part in json.loads(row[0]) if row else []:
+        if part["role"] in set(replaced) & {"tags", "aliases"}:
+            if text.count(part["raw"]) != 1:
+                raise WikiError("A user edited a Weber section; preserve it and review before replacing metadata", 409)
+            start = text.index(part["raw"])
+            edits.append((start, start + len(part["raw"]), ""))
+    return sorted(edits)

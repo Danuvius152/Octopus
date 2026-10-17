@@ -458,8 +458,15 @@ async def test_detail_response_is_404_if_session_deleted_during_history_read(run
     async with session_client(manager, session) as client:
         request = asyncio.create_task(client.get(f"/api/sessions/{session.id}"))
         await asyncio.wait_for(entered.wait(), 5)
-        await manager.delete_session(session.id)
-        release.set()
+        # Transcript reads now serialize flush + SELECT with writers. Let
+        # deletion revoke the live object while its durable delete waits for
+        # the paused reader, then release SQL; the response must still be 404.
+        deletion = asyncio.create_task(manager.delete_session(session.id))
+        try:
+            await wait_until(lambda: manager.get_session(session.id) is None)
+        finally:
+            release.set()
+        await asyncio.wait_for(deletion, 5)
         response = await asyncio.wait_for(request, 5)
     assert response.status_code == 404
 

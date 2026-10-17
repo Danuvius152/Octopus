@@ -402,10 +402,10 @@ async def get_session(
             # seq is dense from 0, so anything above 0 means there is older
             # transcript the window left behind.
             has_more_messages=bool(oldest),
-            # High-water mark: clients use this as the dedup baseline so any
-            # WS event with seq < next_message_seq is treated as already
-            # applied (it's in the messages list above).
-            next_message_seq=s._message_count,
+            # The allocator may include an unsaved terminal reservation, or
+            # advance while this snapshot is loading. A dedup watermark must
+            # describe these exact rows, never the in-memory allocator.
+            next_message_seq=max((m.seq for m in messages if m.seq is not None), default=-1) + 1,
         )
 
     # Archived session: not in memory; read history straight from DB.

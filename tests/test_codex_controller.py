@@ -15,7 +15,7 @@ from server.harness.run import HarnessRun
 
 
 @pytest.fixture
-def controller(tmp_path):
+def controller(tmp_path, _hermetic_execution_boundary):
     binary = tmp_path / "codex"
     binary.write_text(f"#!{sys.executable}\n" + '''
 import json, os, sys, time
@@ -54,6 +54,7 @@ for line in sys.stdin:
 (root / 'closed').touch()
 ''')
     binary.chmod(0o700)
+    _hermetic_execution_boundary.allow_fake_executable(binary)
     context = TurnContext(prompt="hello", working_dir=str(tmp_path), resume_id="thread-proof",
         system_prompt="All agents can query Wiki. " * 10000, model=None,
         tool_allow=None, tool_deny=None, mcp_servers=[], credential=None)

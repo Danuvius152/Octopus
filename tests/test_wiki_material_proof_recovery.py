@@ -266,10 +266,10 @@ def test_restore_copy_recovers_its_own_identity_without_revoking_the_moved_sourc
     change, original, state, rendered = moved_origin(history)
     atomic, index = history_module.atomic, history.store._index
 
-    def replace(path, raw):
+    def replace(path, raw, **kwargs):
         if path == history.store.path(original["path"]):
             raise RuntimeError("restore-copy interruption")
-        return atomic(path, raw)
+        return atomic(path, raw, **kwargs)
 
     def apply(change_id, value):
         raise RuntimeError("restore-copy interruption")

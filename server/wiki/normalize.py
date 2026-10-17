@@ -22,6 +22,11 @@ def organize(curation, path, expected_revision, key_note, tags, aliases, relatio
             raise WikiError("Non-UTF-8 originals require encoding review", 422) from exc
         output_revision = expected_revision
         trace = material_proof.Trace(text)
+        replaced = [name for name, value in (("tags", tags), ("aliases", aliases), ("sources", sources)) if value is not None]
+        edits = operations.replaced_regions(store, path, text, replaced)
+        trace.edit(edits)
+        for start, end, replacement in reversed(edits):
+            text = text[:start] + replacement + text[end:]
         newline = "\r\n" if "\r\n" in text else "\n"
         parsed = format.parse(text)
         article = fields.get("x_wiki", {}).get("profile") == "article-v1"
@@ -62,5 +67,5 @@ def organize(curation, path, expected_revision, key_note, tags, aliases, relatio
         candidate = format.patch(candidate, fields=fields, tags=tags, aliases=aliases, sources=refs, uid=source["metadata"]["uid"], actor=actor)
         context = operations.publication(task, store, source, item_doc)
         trace.metadata(candidate)
-        result = curation.history.write_locked(destination, candidate.encode(), output_revision, actor, reason, operations.management(store, destination, candidate), publication=context, operation="normalize", origin_builder=trace.transition(context, allow_seed=True))
+        result = curation.history.write_locked(destination, candidate.encode(), output_revision, actor, reason, operations.management(store, destination, candidate, replaced=replaced), publication=context, operation="normalize", origin_builder=trace.transition(context, allow_seed=True))
         return result | {"source_path": path, "original_preserved": True}

@@ -378,6 +378,9 @@ class DatabaseBase:
         self._closed: bool = False
         self._pending_appends: int = 0
         self._last_flush: float = time.monotonic()
+        self._flush_task: asyncio.Task[None] | None = None
+        self._close_task: asyncio.Task[None] | None = None
+        self._dirty_since: float | None = None
         self._write_lock = asyncio.Lock()
         self._close_lock = asyncio.Lock()
         self._write_owner: asyncio.Task[Any] | None = None
@@ -961,6 +964,20 @@ class DatabaseBase:
         self._close_hooks.append(hook)
 
     async def close(self) -> None:
+        # Closing owns the timer and connection. Caller cancellation must not
+        # abandon either resource halfway through their teardown.
+        if self._close_task is None or self._close_task.done():
+            self._close_task = asyncio.create_task(self._close(), name="database-close")
+            self._close_task.add_done_callback(self._observe_close)
+        await asyncio.shield(self._close_task)
+
+    @staticmethod
+    def _observe_close(task: asyncio.Task[None]) -> None:
+        if not task.cancelled() and (error := task.exception()) is not None:
+            logger.error("Database close failed; connection retained for retry",
+                         exc_info=(type(error), error, error.__traceback__))
+
+    async def _close(self) -> None:
         """Unwind the hooks, commit, then close. The flag goes up *before* the
         connection is torn down, deliberately.
 
@@ -991,7 +1008,16 @@ class DatabaseBase:
             async with self._writing():
                 if not self._conn:
                     return
-                await self._flush_locked()
+                timer = self._flush_task
+                if timer is not None:
+                    timer.cancel()
+                    await asyncio.gather(timer, return_exceptions=True)
+                    self._flush_task = None
+                try:
+                    await self._flush_locked()
+                except Exception:
+                    self._schedule_flush()
+                    raise
                 self._closed = True
                 await self.conn.close()
                 self._conn = None
@@ -1008,6 +1034,7 @@ class DatabaseBase:
         if self._dirty:
             await self.conn.commit()
             self._dirty = False
+            self._dirty_since = None
             pending, waited = self._pending_appends, time.monotonic() - self._last_flush
             self._pending_appends = 0
             self._last_flush = time.monotonic()
@@ -1019,27 +1046,38 @@ class DatabaseBase:
             ))
 
     async def _maybe_flush(self) -> None:
-        """Commit if the pending batch has grown old or large enough.
-
-        `append_message` sets `_dirty` and defers the commit, which is the right
-        trade for a per-token-ish append path — but it was unbounded. Only three
-        call sites flushed explicitly and no timer existed, so a hard kill lost
-        everything since the last incidental flush, and a long tool-heavy turn
-        with no intervening read lost the most. The production WAL sitting at
-        7 MB was this batching visible on disk.
-
-        Whichever bound trips first wins, so the exposure is sub-second in wall
-        time and bounded in rows regardless of traffic shape (B4). Note reads
-        also flush — `load_messages` calls flush() for write-visibility — so in
-        practice this is the floor, not the only trigger.
-        """
+        """Size pressure may flush early; the first write's timer bounds idle batches."""
         if not self._dirty:
             return
         if (
             self._pending_appends >= _FLUSH_EVERY_APPENDS
-            or (time.monotonic() - self._last_flush) >= _FLUSH_AFTER_SECONDS
+            or (time.monotonic() - (self._dirty_since or self._last_flush)) >= _FLUSH_AFTER_SECONDS
         ):
             await self._flush_locked()
+
+    def _defer_commit(self) -> None:
+        self._dirty = True
+        if self._dirty_since is None:
+            self._dirty_since = time.monotonic()
+        self._schedule_flush()
+
+    def _schedule_flush(self) -> None:
+        if self._flush_task is None or self._flush_task.done():
+            self._flush_task = asyncio.create_task(self._flush_deferred(), name="database-batch-flush")
+
+    async def _flush_deferred(self) -> None:
+        while self._dirty and not self._closed:
+            deadline = (self._dirty_since or time.monotonic()) + _FLUSH_AFTER_SECONDS
+            await asyncio.sleep(max(0, deadline - time.monotonic()))
+            try:
+                async with self._writing():
+                    await self._flush_locked()
+            except Exception as error:
+                logger.exception("Deferred database commit failed; batch retained for retry")
+                _mon_record(_MonEvent(kind="db_flush", ok=False, error_code=type(error).__name__))
+                # Failed storage cannot honor the normal deadline. Preserve
+                # dirty state and retry at a bounded rate, without a busy loop.
+                await asyncio.sleep(_FLUSH_AFTER_SECONDS)
 
     @property
     def conn(self) -> aiosqlite.Connection:

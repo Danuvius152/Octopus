@@ -348,7 +348,7 @@ class SessionsMixin(DatabaseBase):
                 terminal_request_id,
             ),
         )
-        self._dirty = True
+        self._defer_commit()
         self._pending_appends += 1
         await self._maybe_flush()
 
@@ -385,6 +385,7 @@ class SessionsMixin(DatabaseBase):
         # Explicit acknowledgement even when another writer committed the row.
         await self.conn.commit()
         self._dirty = False
+        self._dirty_since = None
         self._pending_appends = 0
         self._last_flush = time.monotonic()
         if self._db_path != ":memory:":
@@ -424,6 +425,7 @@ class SessionsMixin(DatabaseBase):
         async with aiosqlite.connect(Path(self._db_path).resolve().as_uri() + "?mode=ro", uri=True) as reader:
             return await read(reader)
 
+    @serialized_write
     async def load_messages(
         self,
         session_id: str,

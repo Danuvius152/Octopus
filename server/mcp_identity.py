@@ -94,9 +94,27 @@ def scope_is_live(scope: McpScope) -> bool:
 
 async def scope_is_authorized(scope: McpScope) -> bool:
     """A live claim also has to belong to the install's current identity era."""
+    return await scope_rejection_reason(scope) is None
+
+
+async def scope_rejection_reason(scope: McpScope) -> str | None:
+    """Only call with a verified signature; never diagnose untrusted claims."""
     from .deps import accounts_exist
 
-    return scope_is_live(scope) and (scope.user_id is not None or not await accounts_exist())
+    if not work_is_open(scope.work_id):
+        return "closed_work"
+    if scope.run_lease_id is None:
+        if scope.work_id is not None:
+            return "missing_run_lease"
+    else:
+        lease = _run_leases.get(scope.run_lease_id)
+        if lease is None:
+            return "retired_run_lease"
+        if lease != (scope.session_id, scope.user_id, scope.work_id):
+            return "mismatched_run_lease"
+    if scope.user_id is None and await accounts_exist():
+        return "legacy_era"
+    return None
 
 
 def require_live_scope(scope: McpScope | None, session_id: str) -> None:

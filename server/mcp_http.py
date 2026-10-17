@@ -31,7 +31,7 @@ from starlette.types import Receive, Scope, Send
 
 from .mcp_identity import (
     reset_current_scope,
-    scope_is_authorized,
+    scope_rejection_reason,
     set_current_scope,
     verify,
 )
@@ -178,14 +178,15 @@ class _ScopeMiddleware:
         if self.manager is not None and session_id:
             transport = self.manager._server_instances.get(session_id)
         owns_transport = transport is not None and self._owners.get(transport) == resolved
-        authorized = resolved is not None and await scope_is_authorized(resolved)
+        reason = await scope_rejection_reason(resolved) if resolved is not None else "invalid_signature" if bearer else "missing_bearer"
+        authorized = reason is None
         cleanup = scope.get("method") == "DELETE" and resolved is not None and owns_transport
         if cleanup and not authorized:
             from .deps import accounts_exist
             cleanup = resolved.user_id is not None or not await accounts_exist()
         if not authorized and not cleanup:
-            logger.warning("mcp/%s: %s rejected reason=%s", self.name, scope.get("method"),
-                           "invalid_signature" if resolved is None else "retired_or_wrong_era")
+            logger.warning("mcp/%s: %s rejected reason=%s session=%s run=%s", self.name, scope.get("method"),
+                           reason, resolved.session_id if resolved else "-", resolved.run_lease_id if resolved else "-")
             await send({"type": "http.response.start", "status": 401, "headers": []})
             await send({"type": "http.response.body", "body": b"Model run is no longer active"})
             return

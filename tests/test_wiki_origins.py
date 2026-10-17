@@ -83,10 +83,10 @@ def test_crash_windows_recover_file_and_origin_as_one_change(history, monkeypatc
     def crash(*args, **kwargs):
         raise RuntimeError("injected crash window")
 
-    def crash_document_replace(path, content):
+    def crash_document_replace(path, content, **kwargs):
         if path == history.store.path("note.md"):
             crash()
-        atomic(path, content)
+        atomic(path, content, **kwargs)
 
     if window == "prepared":
         monkeypatch.setattr(history_module, "atomic", crash_document_replace)
@@ -482,8 +482,8 @@ def test_upgraded_legacy_journal_keeps_selected_identity_across_another_crash(
     with history.store.connect() as db:
         previous_changes = db.execute("SELECT count(*) FROM changes WHERE reason LIKE 'legacy rename%'").fetchone()[0]
 
-    def after_upgrade(path, content):
-        original_atomic(path, content)
+    def after_upgrade(path, content, **kwargs):
+        original_atomic(path, content, **kwargs)
         if path == journal:
             raise RuntimeError("crash after upgrading journal")
 

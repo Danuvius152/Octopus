@@ -298,15 +298,15 @@ class UsersMixin(DatabaseBase):
 
         Deliberately not committed on its own — this fires on *every*
         authenticated request, and a commit per request would put a disk write
-        in front of every call. It rides the next write's transaction, which is
-        the same bargain `_maybe_flush` makes for messages.
+        in front of every call. It shares the bounded batch used by messages;
+        the first deferred write schedules a commit even if traffic stops.
         """
         await self._ensure_connected()
         await self.conn.execute(
             "UPDATE auth_tokens SET last_seen_at = ? WHERE token_hash = ?",
             (at, token_hash),
         )
-        self._dirty = True
+        self._defer_commit()
 
     @serialized_write
     async def revoke_token(self, token_hash: str, *, at: str) -> None:

@@ -505,7 +505,7 @@ async def test_a_message_queued_behind_a_running_turn_is_not_refused(
 
 
 @pytest.mark.asyncio
-async def test_two_accounts_can_both_have_an_application_called_notes(two_accounts):
+async def test_two_accounts_can_both_have_an_application_called_notes(two_accounts, monkeypatch):
     """The name index was unique across the box. That is a bug with accounts:
     the second person who wants an app called "Notes" cannot have one, and the
     refusal tells them somebody else already does."""
@@ -513,6 +513,11 @@ async def test_two_accounts_can_both_have_an_application_called_notes(two_accoun
 
     ctx = two_accounts
     application_manager.bind(db=ctx["db"], session_mgr=session_manager)
+    # This case exercises allocation and ownership, not an agent build.
+    from unittest.mock import AsyncMock
+
+    build = AsyncMock()
+    monkeypatch.setattr(session_manager, "start_message", build)
 
     first = await application_manager.create_application(
         name="Notes", description="Archer's", agent_id=ctx["archer"]["agent"]["id"]
@@ -526,6 +531,10 @@ async def test_two_accounts_can_both_have_an_application_called_notes(two_accoun
     # Separate directories, so the files cannot collide either.
     assert first["app_dir"] != second["app_dir"]
     assert str(paths_for(ctx["archer"]["user"]["id"]).applications) in first["app_dir"]
+    assert build.await_count == 2
+    assert {call.args[0] for call in build.await_args_list} == {
+        first["session_id"], second["session_id"],
+    }
 
     # Still taken within one account.
     with pytest.raises(Exception) as e:

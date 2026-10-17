@@ -221,10 +221,10 @@ async def test_ingest_seed_recovers_in_the_same_actual_new_file_transaction(jobs
     def crash():
         raise RuntimeError("injected byte-map ingest crash")
 
-    def replace(path, value):
+    def replace(path, value, **kwargs):
         if path == target and window == "prepared":
             crash()
-        return original_atomic(path, value)
+        return original_atomic(path, value, **kwargs)
 
     def status(self, change_id, value):
         if value == "applied" and window == "replaced":
@@ -265,10 +265,10 @@ def test_first_controlled_transform_recovers_its_exact_before_or_after_proof(his
     def fail():
         raise RuntimeError("injected byte-map transform crash")
 
-    def replace(path, value):
+    def replace(path, value, **kwargs):
         if path == target and window == "prepared":
             fail()
-        return original_atomic(path, value)
+        return original_atomic(path, value, **kwargs)
 
     def status(self, change_id, value):
         if value == "applied" and window == "replaced":

@@ -263,6 +263,8 @@ class Session:
     fork_metadata: str | None = None
     fork_revert_record: str | None = None
     fork_status: str | None = None
+    # Sequence allocator: may include a reserved, unconfirmed terminal row.
+    # Snapshot dedup watermarks must come from the rows actually loaded.
     _message_count: int = field(default=0, repr=False)
     # Set True for the lifetime of a fork-create saga against this session as
     # the PARENT (session-rewind.md §5.4). start_message() refuses while

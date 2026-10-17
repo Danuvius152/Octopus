@@ -1,0 +1,53 @@
+{
+  "before": {
+    "messages": [],
+    "next_message_seq": 0
+  },
+  "after": {
+    "messages": [
+      {
+        "seq": 0,
+        "role": "system",
+        "type": "result",
+        "content": {
+          "request_id": "recording-replay",
+          "status": "success",
+          "message": null,
+          "code": null,
+          "provider_code": null,
+          "recovery": {
+            "transient": 0,
+            "idle": 0,
+            "stale_session": 0,
+            "premature_exit": 0
+          },
+          "kind": "outcome"
+        },
+        "is_error": false
+      }
+    ],
+    "next_message_seq": 1
+  },
+  "event": {
+    "type": "result",
+    "session_id": "recording-replay-session",
+    "seq": 0,
+    "terminal": true,
+    "request_id": "recording-replay",
+    "content": {
+      "request_id": "recording-replay",
+      "status": "success",
+      "message": null,
+      "code": null,
+      "provider_code": null,
+      "recovery": {
+        "transient": 0,
+        "idle": 0,
+        "stale_session": 0,
+        "premature_exit": 0
+      },
+      "kind": "outcome"
+    },
+    "is_error": false
+  }
+}

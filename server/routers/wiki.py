@@ -283,7 +283,8 @@ async def configure_wiki(
         or await session_manager.db.get_agent(body.curator_agent_id, user_id) is None
     ):
         raise HTTPException(404, "Curator agent not found")
-    root = confine(body.root, user_id=user_id)
+    roots = await session_manager._owner_extra_roots(user_id)
+    root = confine(body.root, user_id=user_id, extra_roots=roots)
     if body.app_id:
         application = await session_manager.db.get_application(body.app_id, user_id)
         if application is None:

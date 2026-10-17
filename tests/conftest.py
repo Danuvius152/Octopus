@@ -17,6 +17,20 @@ os.environ["OCTOPUS_DEFAULT_BACKEND"] = "claude-code"
 
 _PROC = Path("/proc")
 
+
+@pytest.fixture(autouse=True)
+def _hermetic_execution_boundary(request, monkeypatch):
+    if request.node.get_closest_marker("real") is not None:
+        yield
+        return
+    from tests.hermetic_guard import install
+
+    violations = install(monkeypatch)
+    yield violations
+    # A manager may catch a failed build. That must still fail this test.
+    if violations:
+        pytest.fail("; ".join(violations))
+
 # Isolate per-agent state (the canonical memory dir each agent gets) under a
 # throwaway temp root, so creating agents in tests never litters the
 # developer's real ~/.octopus/agents (docs/plans/memory.md). Set before any

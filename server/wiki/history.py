@@ -22,7 +22,7 @@ def history_text(path: str) -> bool:
     return is_maintainable_text(path)
 
 
-def atomic(path: Path, raw: bytes) -> None:
+def atomic(path: Path, raw: bytes, *, before_replace=None) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
@@ -33,6 +33,8 @@ def atomic(path: Path, raw: bytes) -> None:
             os.fsync(handle.fileno())
         if path.exists():
             os.chmod(temporary, path.stat().st_mode & 0o777)
+        if before_replace is not None:
+            before_replace()
         os.replace(temporary, path)
         temporary = None
         fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
@@ -409,6 +411,7 @@ class WikiHistory:
         if path.exists() and not path.is_file():
             raise WikiError("The target is not a regular file", 409)
         before = path.read_bytes() if path.is_file() else None
+        identity = path.stat() if before is not None else None
         current = revision(before) if before is not None else None
         if current != expected_revision:
             row = self.record(relative, before, raw, actor, reason, "conflict", proposal={
@@ -439,10 +442,36 @@ class WikiHistory:
                 receipt = record(db, doc_id=document["id"], path=relative, before=current, after=current, operation=operation, reason=reason, publication=publication, details=operation_details)
             return {"path": relative, "revision": current, "change_id": None, "receipt_id": receipt, "changed": False, **self.store.index_state()}
         row = self.record(relative, before, raw, actor, reason, "prepared", management, publication=publication, operation=operation, operation_details=operation_details, origin_state=origin_state, origin_builder=origin_builder)
+        # flock coordinates Octopus writers, not an external editor. Preparing
+        # the durable journal can take time: validate both identity and bytes
+        # again before changing the live file. This is not a filesystem CAS;
+        # an editor ignoring the lock can still race the final syscall.
+        def check_target():
+            live = None
+            try:
+                target = self.store.path(relative)
+                live = target.read_bytes() if target.is_file() else None
+                stat = target.stat() if target.exists() else None
+                def fingerprint(value):
+                    return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns) if value else None
+                unchanged = target == path and live == before and fingerprint(stat) == fingerprint(identity)
+            except (OSError, WikiError):
+                unchanged = False
+            if not unchanged:
+                self.status(row["id"], "conflict")
+                # Keep the original preimage and proposal, and separately
+                # retain the observed human bytes. Recovery never applies a
+                # conflict, including one whose bytes equal our proposed bytes.
+                self.record(relative, live, raw, actor, reason + "; target changed during journal preparation", "conflict", proposal={
+                    "job_id": publication["job_id"], "source_path": publication["source_path"],
+                    "expected_revision": expected_revision,
+                } if publication else None)
+                raise WikiError(f"Target changed during journal preparation; proposal retained as change {row['id']}", 409)
+        check_target()
         if raw is None:
             path.unlink(missing_ok=True)
         else:
-            atomic(path, raw)
+            atomic(path, raw, before_replace=check_target)
         self.status(row["id"], "applied")
         if raw is not None and history_text(relative):
             with self.store.connect() as db:
