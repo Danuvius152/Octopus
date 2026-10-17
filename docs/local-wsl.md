@@ -1,5 +1,10 @@
 # 本机 WSL 配置
 
+本文负责本机环境与操作步骤，不追加逐次发布日志或测试项数。代码交付与纯文档
+改动的动作边界统一遵循 [AGENTS.md](../AGENTS.md#repository-and-upstream-maintenance)；
+Wiki 交付历史、证据及未完成需求分别见[开发总结](plans/wiki-development-summary.md)
+和[未来计划](plans/wiki-future-plan.md)。
+
 这台机器运行 WSL2 / Ubuntu 26.04，已启用 systemd。项目使用 Ubuntu 自带的
 Python 3.14.4，满足 `pyproject.toml` 的 Python >=3.12 要求。虚拟环境通过
 `python3 -m venv .venv` 创建，依赖用 pip 安装；本机不使用 uv。
@@ -76,6 +81,11 @@ Windows 风格的 `127.*`
 
 ## 本机测试
 
+发布所需检查与 Codex 选择条件以 [AGENTS.md](../AGENTS.md#after-every-code-change)
+为准，不在这里复制一份测试清单或固定通过数。下面只补充 WSL 环境、凭据入口
+和可选知识评测的使用方法；文档整理只做受影响链接、索引和差异检查，不触发
+全套测试、构建或付费模型请求。
+
 仓库锁定的 Playwright 1.58.2 尚未提供 Ubuntu 26.04 平台包，本机使用它的
 Ubuntu 24.04 Chromium 构建，并已安装官方浏览器依赖。运行浏览器测试前指定
 平台，同时明确绕过本机代理：
@@ -90,18 +100,9 @@ export PATH="$HOME/.nvm/versions/node/v24.21.0/bin:$HOME/.local/bin:$PATH"
 export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,::1"
 export no_proxy="$NO_PROXY"
 export PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64
-
-cd /home/jack/Octopus
-.venv/bin/pytest tests/ -v -m 'not real'
-cd web
-bun run test
-bun run typecheck
-bun run test:e2e:fast
-bunx playwright test e2e/codex.spec.ts --workers=1
 ```
 
-仅 Codex 的后端实机测试按 marker 选择
-`real and (real_codex or codex_bin) and not real_claude and not knowledge_eval`。其中 research 测试需要
+Codex 实机测试按 AGENTS 的 marker 选择。其中 research 测试需要
 目录式凭据，验证时使用临时目录中的符号链接指向现有 `~/.codex`，并通过
 `OCTOPUS_CODEX_HOME_DIR` 指定；无需复制认证文件或重新登录。Claude 实机测试
 需要另外安装并登录 Claude，本机按用户选择使用 Codex。
@@ -109,22 +110,20 @@ bunx playwright test e2e/codex.spec.ts --workers=1
 重跑 Codex 后端实机测试时，可以这样创建并清理临时凭据入口：
 
 ```bash
-cd /home/jack/Octopus
-octopus_test_homes=$(mktemp -d)
-ln -s "$HOME/.codex" "$octopus_test_homes/host"
-OCTOPUS_CODEX_HOME_DIR="$octopus_test_homes" .venv/bin/pytest tests/ -v \
-  -m 'real and (real_codex or codex_bin) and not real_claude and not knowledge_eval'
-rm "$octopus_test_homes/host"
-rmdir "$octopus_test_homes"
-unset octopus_test_homes
+(
+  cd /home/jack/Octopus || exit
+  octopus_test_homes=$(mktemp -d) || exit
+  trap 'rm -f -- "$octopus_test_homes/host"; rmdir -- "$octopus_test_homes"' EXIT
+  ln -s "$HOME/.codex" "$octopus_test_homes/host" || exit
+  OCTOPUS_CODEX_HOME_DIR="$octopus_test_homes" .venv/bin/pytest tests/ -v \
+    -m 'real and (real_codex or codex_bin) and not real_claude and not knowledge_eval'
+)
 ```
 
-Wiki 自然问答使用独立的 `knowledge_eval` 标记，默认在收集阶段排除，不作
-发布必过项，也不记为通过。发布仍须验证权限、原文保全、版本与索引、
-分页、回执、请求终态，以及 CLI 和浏览器基础运行链路。
-
-需要评估回答质量时显式运行；此命令会调用真实 Codex，资料使用隔离合成
-样本，不读取本人的笔记。输出目录应为新目录，避免覆盖先前证据：
+Wiki 自然问答使用独立的 `knowledge_eval` 标记，默认排除，不作发布必过项，
+也不记为通过。只为具体质量问题显式运行，不能为补一条文档记录重跑。
+下列命令会调用真实 Codex，使用隔离合成样本，不读取本人的笔记；输出使用
+新目录，避免覆盖先前证据：
 
 ```bash
 cd /home/jack/Octopus
@@ -133,15 +132,13 @@ octopus_knowledge_evidence=$(mktemp -d /tmp/octopus-wiki-evals.XXXXXX)
   --knowledge-eval-output="$octopus_knowledge_evidence" -q
 ```
 
-报告保存问题、源文件版本 hash、实际读取与返回的 revision/范围、完整回答、
-执行终态、耗时和原始用量观察。Pytest 通过仅表示执行与记录成功，语义
-状态仍是 `not_reviewed`，需按该版资料另行评阅，不以固定句子或关键词
-代替判断。原始 token 计数可能累计，不能直接相加；无法证明完整账目时
-总量及美元费用保留为空。固定事件回放的精确文本比较仍用于协议检查。
-实际用户修改笔记后，回答应随当前资料更新，不受合成样本答案约束。
+保留源版本、实际读取、完整回答、终态及原始用量；Pytest 通过只说明执行
+留证成功，`not_reviewed` 仍需语义评阅。资料变化后按当前版本判断，不能
+用固定个人事实作 gold；累计 token 不相加，未知总量/费用不补造。
 
-普通聊天入口评测使用真实 WebSocket `send_message`，另行预登记自然问题和
-源版本，不追加逐题评阅提示，也不强制 Wiki 模式。准备 registration JSON，
+普通聊天入口评测使用真实 WebSocket `send_message` 和正常共享提示装配，不以
+委托代替普通入口。预登记自然问题和源版本，评阅材料不随问题提交，不追加
+逐题评阅提示，也不强制 Wiki 模式。准备 registration JSON，
 包含 `source_root`、`source_manifest_sha256`、当前所选的 `credential_id` 和
 一至四项 `questions`（每项为 `id`、`question`）。源清单摘要按
 `tests.wiki_query_evidence.source_manifest` 的结果做 Unicode JSON 编码，
@@ -153,60 +150,31 @@ octopus_knowledge_evidence=$(mktemp -d /tmp/octopus-wiki-evals.XXXXXX)
   --knowledge-eval-output=/path/to/fresh-chat-evidence -q
 ```
 
-该评测固定独立测试代理为 `gpt-6.1-sol/high`、正常速度，只引用既有 CLI
-凭据目录；选定目录不可用时失败，不回退其他默认登录。可选知识评测不再
-先运行一次使用默认 CLI 配置的额外模型探测，以实际请求结果检查可用性并
-保留失败及用量。隔离数据库和旧安装认证测试宿主仍沿用真实 WS 处理器，
-报告明确记录这些差异；新 cwd 和空代理记忆不能证明文件系统隔离或盲测。
-源快照、实际读取、回答和原始用量继续留证，语义验收另行进行。
+测试会话固定 `gpt-6.1-sol/high`、正常速度和既有 credential 绑定，不改用户
+代理默认，不回退其他登录，也不先发额外付费探针。报告保留隔离数据库、
+认证宿主、文件访问及源绑定的实际限制；新 cwd/空 memory 不证明盲测。
 
-### Wiki 文件事件与索引进程
+## Wiki 文件事件与索引进程
 
 同一 Wiki 索引由一个后端进程观察和写入；`observer.lock` 在进程持有索引期间
 排除另一个进程独立打开 Store。冲突返回 503，不在第二个进程重放文件事件。
 同进程因注册绑定更新而重叠的 Store 租约共享观察器与尚未提交的事件，最后一个
 租约释放后才关闭。需要离线打开 Store 时，应先停止拥有该索引的后端。
 
-Linux 已观察到的删除会先结束旧身份，再索引同路径的新文件；匹配的重命名和
-原子替换保存沿用现有身份。事件按顺序处理，索引事务失败后保留事件供重试。
-schema9 将事件接收队列纳入持久状态：读取内核通知前先提交接收标记，收到的
-原始通知独立提交，再将身份／索引变更与 applied 标记放在同一事务提交。
-确认清理只压缩已应用 payload，保留回执 ID/hash；关闭、GC 和重启不丢弃队列。
-接收中断或旧观察器留下无法配对的半个移动时返回 503，并保留不确定状态供核对，
-不让补偿扫描覆盖证据。升级后旧 schema8 代码会拒绝打开索引；回退必须使用完整
-支持相同接收／应用协议的 schema9 构建，不能仅放宽版本检查或覆盖当前数据库。
-通知溢出也会保留不确定状态。文件监视不可用或停机期间，补偿扫描只能看到
-最终状态，无法可靠区分瞬时删除重建与原子保存；不据此声称恢复了不可见的身份历史。
+schema9/文件事件协议1先持久接收，再原子应用身份与索引，最后精确确认。
+删除重建结束旧身份，已匹配重命名/原子保存沿用身份。索引失败保留事件重试；
+接收中断、无法配对的移动或通知溢出会保留不确定状态并返回 503。应核对阶段
+和证据，不能删除队列或用补偿扫描强行伪造 ready。
 
-### 已完成的验证
-
-截至 2026-10-10，本机验证结果：
-
-| 检查 | 结果 |
-| --- | --- |
-| 后端普通测试 | 1,320 项通过 |
-| Codex 后端实机测试 | 9 项通过，无跳过 |
-| 前端单元测试 | 302 项通过 |
-| TypeScript 检查、前端构建、ESLint | 通过 |
-| 纯界面 E2E 测试桶 | 67 项通过 |
-| Codex 浏览器实机对话 | 1 项通过，无跳过 |
-| OpenAPI 生成类型、文档索引 | 与源码一致 |
-| Windows 访问服务 | `localhost:8000/health` 返回正常 |
-| 实际服务界面 | 安装令牌登录、刷新后保持登录、新代理默认 Codex 均通过 |
-| 清空继承环境的新 Bash 终端 | 自动加载代理与工具链，真实 Codex 请求返回 `PONG-CODEX` |
-
-Claude 后端实机测试及依赖 Claude 的浏览器实机用例未运行。
-
-验证过程中修复了安装令牌登录被身份接口拒绝的问题，以及 Codex 原生
-fork 的 transcript 文件名与当前 CLI 不兼容的问题，并补充了回归测试。
-研究取消界面测试使用受控的 REST / WebSocket 数据，不再依赖模型运行时间。
+旧 schema8 代码拒绝打开新索引；回退只可使用完整支持相同接收/应用协议的
+schema9 构建，不能仅放宽版本检查或恢复旧数据库覆盖当前写入。停机期间的
+补偿扫描只能观察最终文件，不能恢复未被观察的瞬时身份历史。实现细节与
+证据边界见[开发总结 §4](plans/wiki-development-summary.md#4-当前运行合同)。
 
 ## 服务管理
 
 ```bash
 systemctl --user status octopus
-systemctl --user restart octopus
-systemctl --user stop octopus
 journalctl --user -u octopus -n 100 --no-pager
 ```
 
@@ -219,288 +187,53 @@ journalctl --user -u octopus -n 100 --no-pager
 `.venv` 和 `web/node_modules` 复用开发目录中的本机配置与依赖；账户数据和
 Codex 登录位置不变。修改这些共享配置或依赖仍会影响正式服务。
 
-2026-10-14 按 Q31 将六个已验证的运行时修补提交合并到 main，合并提交为
-`01c16a699727d46a6b70c9e1362f42abb353f3cc`。当时服务源码工作树是
-`/home/jack/.octopus/releases/main-01c16a699727`。合并保留
-main 的已提交 Wiki 开发记录，六份未提交 Wiki 文档仍在开发目录，没有纳入
-服务快照。此次没有创建版本 tag 或 GitHub Release；目录名 `releases` 只用于
-隔离服务源码，Wiki 的开发与验收状态见
-[交接记录](plans_new/local-shared-wiki-handoff-20261014.md)。
+`systemctl --user stop octopus` / `restart octopus` 是变更操作；先等执行中、
+排队和待回报任务自然结束，不能为发布 kill CLI 或取消用户工作。只需查看状态
+或整理文档时，不执行它们。发布切换按下节完成，避免重叠服务动作。
 
-上线先切换快照并重启后端，在 `/health` 正常后构建该快照的前端，再验证实际
-页面、资源和浏览器。验证通过后，按用户要求删除 `main-b083efe59940` 和
-`main-74eab95fa1f4` 两个旧工作树；`releases` 只保留当前快照与 `current`。
-历史源码仍可从 Git 提交重建。数据库、账户、工作区、Wiki、Codex 登录及共享
-配置和依赖未删除；上线前数据库备份保存在 `~/.octopus/backups/`。
+本地开发的 `bun run dev` 使用 5173 端口；8000 提供服务快照的 `web/dist`。
+开发目录改动不会直接出现在 8000，不能靠反复重启把未验收源码带入正式服务。
 
 ### 自动发布
 
-开发代理在完成本机验证并推送 main 的代码提交后直接执行发布；仅改文档的
-提交不重启服务。这是用户授权的默认流程，用户本次另有指令时按本次指令执行。
+本节只适用于已授权、完成必要本机检查并推送 main 的代码改变，按用户已授权
+流程直接发布；用户本次另有指令时优先遵循。只提交本任务已验证的代码及必要
+相关文档，排除并行工作，不能把整个脏工作树一起收进提交。
+
+纯文档改动完成链接、索引和差异检查后留在工作区，不自动 stage、commit、
+push、构建、重启或发布。用户明确要求文档提交时才提交，提交本身也不触发发布。
 
 1. 为已验证提交创建 `releases/main-<commit>` 的独立工作树，连接本机配置和
    共享依赖，先在候选快照执行 `cd web && bun run build`，再运行
    `.venv/bin/python scripts/validate-release.py <候选快照>` 核验入口及其引用的
    JS / CSS。候选缺少资源时不能切换；保留当前快照用于回退。
-2. 原子替换 `current` 指向新快照，重启服务；确认进程工作目录与目标提交一致，
+2. 用不依赖当前模型回合继续存活的独立发布进程等待自然排空，包括主控会话、
+   队列、CLI 和待交付的后台/委托回报。已有发布进程运行时只观察，不叠加切换
+   或重启。切换前再确认目标和准入条件仍有效。
+3. 原子替换 `current` 指向新快照，重启服务；确认实际进程工作目录与目标提交一致，
    `/health` 正常后在新快照构建前端。
-3. 验证健康接口、登录页面、静态资源和真实浏览器，确认代码与构建产物属于
+4. 验证健康接口、登录页面、静态资源和真实浏览器，确认代码与构建产物属于
    本次提交；在服务快照运行
    `.venv/bin/python scripts/validate-release.py <服务快照> --base-url http://127.0.0.1:8000`
    比对实际 HTML / JS / CSS 的 SHA-256。验收失败时恢复旧指向、重启旧服务
-   并验证，不清理旧快照。
-4. 验收全部通过后，用 `git worktree remove` 删除旧服务工作树；仅保留新快照
-   和 `current`，记录实际部署提交。账户、数据库、Wiki、配置和共享依赖保留。
-
-2026-10-14 已按此流程部署归档／回退替换会话的模型设置同步修复，代码提交为
-`9e1b9224d182540764d98b63684152b40a6feedc`。当时服务源码工作树是
-`/home/jack/.octopus/releases/main-9e1b9224d182`，当时 `current` 指向它。
-部署前通过八项离线检查、77 项纯 UI 浏览器测试、21 项真实 Codex 测试和
-1 项 Codex 浏览器对话测试；Claude 实机测试按用户要求未运行。上线后确认
-进程工作目录、健康接口、HTML 与静态资源一致，实际浏览器登录页及刷新通过，
-无页面异常或 HTTP 失败。验收成功后删除旧的 `main-01c16a699727` 工作树。
-部署前 SQLite 备份位于
-`~/.octopus/backups/before-session-settings-20261014T115831Z/`。
-
-2026-10-15 已部署框架与 Wiki 基础设施修复，实际代码提交为
-`20601996235af3d680145011adba9729fb9235df`。当时服务源码工作树是
-`/home/jack/.octopus/releases/main-20601996235a`，当时 `current` 指向它。
-上线前八项门槛全部通过，包括 2,751 项 hermetic backend、407 项 frontend unit；
-另有 78 项纯 UI 浏览器、21 项 Codex 实机及 1 项 Codex 浏览器测试通过，无跳过。
-Claude 实机检查按本机约定未运行。候选先构建并核验资源，服务切换和健康确认后
-再次构建，实际 HTML / JS / CSS 与候选 hash 一致；进程工作目录、源码逐文件指纹、
-登录页及刷新均验收通过，无页面异常或 HTTP 失败。随后已删除旧的
-`main-9e1b9224d182` 工作树。两个 SQLite 数据库的一致性备份通过 integrity check，
-保存在 `~/.octopus/backups/before-framework-review-20261014T163707Z/`。
-本次没有执行生产账户认领或 Library 维护；R06、R08、R14 及检索扩展按用户要求
-暂缓，完整证据见[审查计划](plans/octopus-framework-wiki-review-20261014.md)。
-
-2026-10-15 随后已重新上线自主 Wiki 与大记录导出修订，实际代码提交为
-`1102448cded75bf1de673011832d213ac5dcffaf`。当时运行工作树为
-`/home/jack/.octopus/releases/main-1102448cded7`，当时 `current` 指向它。
-上线前八项门槛全部通过：2,759 项 hermetic backend、407 项 frontend unit；
-78 项纯 UI、22 项 Codex 实机、1 项 Codex 浏览器均通过，无跳过。
-Claude live 检查按本机约定未运行。候选构建、切换后端及健康确认后的前端构建、
-实际 HTML／JS／CSS hash、485 个源码文件 hash、进程目录、登录页及刷新均验收通过。
-已删除旧 `main-20601996235a` 工作树；数据库备份通过 integrity check，保存在
-`/home/jack/.octopus/backups/before-autonomous-wiki-20261014T180726Z`。
-普通消息可按任务需要自主查 Wiki 或提交具体维护，显式只读／Off 保留，
-实际正文写入由绑定 Weber assignment 承担；大 jobs 返回直接导出文件。
-本次未提交生产 Library 维护，R08/R14 仍是后续交接事项。
-完整新版验收见[审查计划 §1.4](plans/octopus-framework-wiki-review-20261014.md#14-自主入口与大记录导出的新版验收)。
-
-2026-10-15 又按用户“所有 agent 任何时候都可查询”的要求完成常驻查询与旧会话修复。
-当时代码提交为 `12f2598f44f787eda19d224f1f4cfc2519dd2a90`，已推送；当时运行目录为
-`/home/jack/.octopus/releases/main-12f2598f44f7`，当时 `current` 指向它。
-本机八项门槛全部通过（2,767 项 hermetic backend、407 项 frontend unit），
-另有 78 项纯 UI、24 项 Codex 实机与 1 项真实浏览器对话通过，无跳过。
-Claude live 检查按本机约定未运行。运行源码 487 个文件与验收 hash 一致，
-候选／服务资源、健康接口、登录页及刷新均验收通过。
-旧 `main-1102448cded7` 快照已退役，两个 SQLite 一致性备份通过 integrity check，
-位置为 `/home/jack/.octopus/backups/before-always-shared-wiki-20261015T051308Z`。
-查询不能被单轮开关关闭；旧 off 仅按只读兼容。恢复旧 Codex 会话前通过原生
-`thread/inject_items` 更新真实 developer 控制器，保留线程与历史，维护仍由
-绑定 Weber assignment 执行。完整证据见[审查计划 §1.5](plans/octopus-framework-wiki-review-20261014.md#15-所有-agent-常驻查询与旧会话控制器修订)。
-
-2026-10-15 随后已部署短查询入口及移除输入框 Wiki 开关的有限修订，代码提交为
-`3b60b709359c8aa23023c95ded374bb1c22ac9e9`，已推送。当前运行目录为
-`/home/jack/.octopus/releases/main-3b60b709359c`；`current` 与进程工作目录一致，
-服务实际启动时间为 **14:46:59 CST**。Vera 实现审查及最终门禁证据核验通过；
-八关（2,773 项 hermetic backend、396 项 frontend unit）、78 项纯 UI、
-24 项 Codex real、1 项 Codex browser 及构建通过。Claude live 未运行，不计通过。
-
-候选先构建并核资源，切换及健康确认后再次构建；实际 HTML／JS／CSS hash 与
-候选一致，484 个已验源码文件与运行快照一致。桌面／手机实际登录页及刷新通过，
-composer 行为由同版 E2E 验证。首轮发布因外部字体请求失败已回退，失败证据保留；
-第二轮沿既有代理配置核验通过。两次发布均先等待实际任务排空。
-第二轮两个 SQLite 备份通过 integrity check，位置为
-`~/.octopus/backups/before-shared-query-ui-20261015T064659Z`。
-验收后已退役旧 `main-12f2598f44f7` 工作树，未为退役再次重启服务。
-七份用户原 dirty 文档与全部 365 个 Library 文件未变，四份 Weber 内容指南未改，
-本次入口发布不增加内容验收数。完整记录见[审查计划 §1.6](plans/octopus-framework-wiki-review-20261014.md#16-短查询入口与移除输入框-wiki-开关)。
+   并验证，不清理旧快照；回退代码须兼容当前 schema/事件协议，不恢复旧 DB。
+5. 验收全部通过且旧工作树干净、没有进程继续使用后，用 `git worktree remove`
+   退役旧源码，不强制删除脏工作树。账户、数据库、工作区、Wiki、登录及共享
+   配置/依赖保留。记录实际部署提交与结果到相应任务产物；必要时更新现有文档，
+   不为补验收记录再造一次文档提交或发布。
 
 ## 同步原作者更新
 
-本仓库 `Danuvius152/Octopus` 已解除 GitHub 的 fork 关系，独立维护；
-提交和推送使用 `origin`。`upstream` 仍指向原作者的 `archeryue/Octopus`，
-仅用于按需检查和同步原作者更新，保留这个 Git remote 不会恢复 fork 关系。
-需要同步时，先保存自己的源码改动并检查上游差异，再合并到当前维护分支：
+仅在用户要求同步原作者更新时，按 [AGENTS 的仓库规则](../AGENTS.md#repository-and-upstream-maintenance)
+检查 `upstream`，保护未提交工作，读取上游差异后再合并。`origin` 是当前独立
+维护仓库，GitHub fork 关系和 remote 的说明不在这里重复维护。
 
 ```bash
 git fetch upstream
+# 先检查差异并保护现有工作，再合并。
 git merge upstream/main
 ```
 
-合并时保留本机 `.env`、持久数据和定制行为，处理冲突后执行 `AGENTS.md`
-要求的测试。部署前创建并验证一个只包含目标提交的服务工作树，准备本机配置、
-依赖及 `web/dist`，再更新 `releases/current`。不要把开发目录中尚未验收的
-改动混入服务目录。部署有前端变化的更新时，按项目规定先重启后端、等待
-`/health` 正常，再在实际服务目录构建前端，随后刷新浏览器：
-
-```bash
-# 在新后端 /health 确认正常后执行。
-octopus_release_dir=$(readlink -f /home/jack/.octopus/releases/current)
-cd "$octopus_release_dir/web"
-bun run build
-```
-
-本地开发使用 `bun run dev` 的 5173 端口；后台服务的 8000 端口提供构建后的
-服务工作树中的 `web/dist`；开发目录源码修改需完成验收、部署和服务构建后，
-才会在 8000 端口看到。
-
-2026-10-16 已部署入库保全与查询评测分离修订，运行代码提交为
-`5ddc0e3da038c42c1b3f809c36baa2403f39b449`，服务工作树为
-`main-5ddc0e3da038`，实际启动时间为 **20:09:11 CST**。
-本机八关通过（3,022 项 hermetic backend、396 项 frontend unit），
-78 项串行纯 UI 通过。默认发布保留 18 个 Codex 机制节点：17 项沿精确依赖
-继承原配置的通过记录，正常／Fast 节点修正后单独实测通过；这不是一次
-全新 18 项实机运行。已有 Codex 浏览器实机通过记录保持，六项自然问答改为
-显式可选评测，不以固定措辞阻塞发布，旧失败记录保留。
-
-发布前任务及回报自然排空；重启后健康、构建及实际 HTML／JS／CSS hash、
-499 个运行源码文件、桌面／手机登录页和刷新均核验通过。Wiki 已升级至
-schema 8、okf-parser-v5、sections-v8，340 个已索引文档的身份和 revision、
-既有持久记录及受管文件保持，原生查找和当前版本读取通过，索引 ready、
-无待处理变更。七份用户原有未提交文档保持原样，未重复维护已验收内容。
-
-旧运行快照 `main-3b60b709359c` 已退役；兼容分支
-`wiki/schema8-compatibility-20261015` 已完整合并并从本地和 origin 删除。
-保留已验证的 detached 快照 `compat-schema8-6ca1fd83ed5b`，用于 schema 8
-数据的兼容代码回退；不能把新数据交给旧 schema 7 代码，或用旧数据库覆盖
-之后的写入。范围恢复点 `ingestion-first-20261016T115910Z` 保留，两份保留
-样本未读取、hash 或归档。本次发布未新增模型调用，也未重复既有功能样本。
-
-2026-10-17 已完成读取负载优化与三项正确性修复的直接发布，运行代码提交为
-`5e211c551eb16f5fddb4338e732e614cbe8617e3`，服务工作树为
-`main-5e211c551eb1`。后端 3,335 项、前端单元 396 项、串行纯 UI 78 项
-及八项离线门禁通过；50 项未选中的实机／可选知识评测不计通过。
-未变的 Codex 机制沿既有依赖证据有限继承，本轮没有新增模型评测。
-
-已观察到的删除与重建通过持久接收、原子应用和确认协议结束旧身份；legacy
-整理省略 tags/sources 时保留旧值与来源版本；自然问题的题名命中经过原文
-表示选择，显式身份定位继续精确匹配。三项修复均通过 Vera 冻结版本审查。
-Wiki 已正常启动迁移至 schema9、事件协议 1，保持 okf-parser-v5／sections-v8。
-读取和导航默认 compact，模型读取的完整 MCP 结果上限为 32,768 UTF-8 字节，
-不是 token 上限；显式 full 与既有 HTML 查询兼容保持。
-
-发布等待任务自然排空。603 个候选源码文件、服务 PID 工作目录、健康接口、
-实际 HTML／JS／CSS hash、桌面／手机登录页及刷新均通过。上线后复核 16 张
-原持久业务表、340 个文档身份与 revision、63 份 MD／HTML 及配置未变，
-保留路径仅检查 stat；索引 ready，事件水位相等，无 armed、uncertain 或 pending。
-七份用户草稿保持原样，未重做维护、恢复旧数据库或创建全库备份。
-
-2026-10-17 已部署 Markdown 搜索／维护范围及协同精简修订，运行代码为
-`de9fd6cac18e308ba326dc2cdc3557f3b4953e9b`，服务工作树为
-`main-de9fd6cac18e`。后端 3,406 项通过、50 项未选中；前端单元 396 项、
-78 项串行纯 UI 及其余离线门禁通过。后端三项在 r2 重跑，未受三文件增量
-影响的前端五项与 UI 沿原 SHA 记录继承；Vera 冻结版本审查通过。未新增
-旧模型机制或知识问答评测，不据此宣称整体 token／速度优于旧版。
-
-搜索和目录导航只返回 Markdown；已知 HTML／TXT 原件仍可显式读取，旧身份、
-历史和既有 MD 配对页保留。新维护各入口、材料去重及未发表任务恢复均检查
-Markdown 资格；旧幂等键仍返回原任务事实。共享提示删除重复机制说明，维护
-提交回执不再重复材料正文，完整任务证据仍可导出；导航复用已 JOIN 的元数据。
-
-第二次发布已核验 609 份源码、实际进程目录和健康接口、HTML／JS／CSS hash、
-桌面／手机登录页及刷新；16 张持久业务表、340 个文档身份、365 个 Library
-路径、配置和知识库 Git 保存点保持。首次独立发布检查在切换前因临时票据
-撤销的数据库锁停止，未切换；改用服务自身退出接口提交撤销后，零模型认证
-检查及第二次发布通过。旧 `main-5e211c551eb1` 已退役，七份用户草稿未变。
-本轮未创建整库备份或额外兼容回退。发布验收位于 workspace 下
-`wiki-markdown-workflow-20261017/release-acceptance.json`；新报告内容流程单独记账。
-
-2026-10-17 已部署基于 Weber 实际维护轨迹的通用流程修订，运行代码为
-`596ebc25f34c347b3e30c773d650a5cbb9c3daa0`，服务工作树为
-`main-596ebc25f34c`。八项离线门禁新跑通过：后端 3,410 项、前端单元 396 项，
-50 项实机／可选评测未选中，不计通过。78 项纯 UI 和未变的旧机制结果按冻结
-依赖证据有限继承，未冒充新跑；Vera 四文件冻结终审无阻断。
-
-共享指南明确合法字段、库内来源与外部出处的区别，并把可选关联改为先用
-compact、围绕实际缺口取证。终稿冷读同时检查意义与表达，仍覆盖整个 job 的
-全部最终新增／修改区段、标题和必要邻接上下文，允许分页；新任务和新版本
-不继承旧阅读覆盖。新增 HTTP 回归核对指南加载后的读取复用、任务边界及三类
-错误请求不写原文／历史。Weber 自定义 prompt 通过正常管理 API 仅更新
-system_prompt，其他公开设置逐项不变，模型／xhigh／正常速度和登录绑定保持。
-
-实际进程目录、健康、609 份源码、服务 HTML／JS／CSS、桌面／手机登录页与刷新
-均通过。schema9／事件协议1、16张持久业务表、341个文档和366个Library路径、
-配置及知识库Git状态前后保持；这包含先前数学家报告入库后的合法当前状态。
-旧 `main-de9fd6cac18e` 已退役，共享配置和依赖保留。未创建全库备份、恢复旧
-数据库或重复数学家维护。验收与实际指南／persona 冻结位于 workspace 下
-`wiki-markdown-workflow-20261017/efficiency-release/`；最终新材料在冻结前未读取，
-其单次泛化流程另记实际结果，不据静态精简或本次门禁宣称普遍提速或成本降低。
-
-上述冻结后的最终泛化流程已完成：指定 `models_runtime_deep_dive.md` 在库内
-已有副本，旧正文与本机原件逐字相同，因此实际验收为既有文章原位维护及
-普通查询，不能称首次新材料导入。框架 Weber 一次写入、10 次工具调用，
-worker 无错误；原文逐字保留，新增内容冷读及索引验收通过。主控此前两次
-422／409 准入失败均在任务创建前，记录保留，未据材料调整提示词或重新维护。
-
-预登记的唯一自然问题通过普通 Weber WebSocket 会话实际发出，使用
-`gpt-6.1-sol/high/default`，未附正文或评阅材料、未强制 Wiki；一次 compact
-检索、两页同版本全文读取后回答，独立语义复核通过。起手缺失可选 MEMORY
-文件的一次读取错误保留，未重发问题；临时认证已撤销，代理设置逐项未变。
-实际维护任务约91.57秒，普通问答约44.59秒；两者是不同阶段、不同设置，
-不是配对提速实验。原生末次累计分别263361、116925 tokens，含缓存输入
-226560、95616；累计快照未求和，美元与全局编排成本未知。单材料不证明
-普遍泛化或因果收益。实际回执、保全、轨迹、用量与语义验收保存在 workspace
-`wiki-markdown-workflow-20261017/holdout-full-flow-acceptance.json` 及所引产物。
-
-按用户要求没有额外构建 schema9 兼容回退版本。验收后退役旧
-`main-5ddc0e3da038`、未启用的 `main-920a86b18e82` 及
-`compat-schema8-6ca1fd83ed5b`；本机运行快照仅保留当前版本与 `current`。
-历史代码可由 Git 重建，schema8 代码不能直接打开 schema9 数据。
-未观测到的离线瞬时文件历史不在新协议恢复保证内；六题既有语义结论不构成
-配对效率胜出或全项目成本认证。验收与保全记录见工作区
-`read-payload-daily-flow-20261016/user-three-findings/release-acceptance-r2.json`。
-
-2026-10-17 已部署默认增量 Wiki 维护，运行代码为
-`1e818d44f27065fc90f8cdfa2c436d13030ef0aa`，服务工作树为
-`main-1e818d44f270`。`/wiki维护`、`/wiki 维护` 与 `/wiki maintain`
-共用后端解析；裸维护命令选择当前 Library 中需要处理的 Markdown，指定文件
-时保持指定范围。只读状态提供身份、合格维护基线、来源警告和待恢复任务；
-普通保存不充当维护基线，安全重放、外部编辑冲突及一致分页均受服务端校验。
-纯移动且版本未变、索引就绪、无来源警告或未完任务时不重新整理；历史文字
-链接单独观察，未选中的关联页不获写权。现行人工内容、删除及未知字段保全，
-短个人资料允许合法 no_change，不强制套用文章结构。
-
-Vera 产品和发布助手冻结终审通过。11 项本机门禁通过：新跑后端 3,521 项、
-串行纯 UI 80 项、Codex 机制 18 项和浏览器 1 项；前端 lint／unit／types、
-生成合同及文档索引五项按未变输入 SHA 继承，不冒充重跑。50 项未选中的
-实机／可选知识评测不计通过；r1 审查拒绝、门禁失败和修复前回归均保留。
-
-独立发布 unit 已成功退出，核验实际进程工作目录、健康、614 份源码、服务
-HTML／JS／CSS、桌面／手机及刷新；原生 info、compact 定位和短读取通过。
-schema9／事件协议1、16张业务表、当时366个Library路径、配置和知识库Git
-状态在切换前后保持；七份用户草稿及代理公开配置 hash 不变。旧
-`main-8132a0764b56` 已退役，共享配置及依赖保留。未恢复旧数据库、创建全库
-备份或改动 Weber persona。初次临时认证因数据库锁在出票前失败，证据保留；
-后续用当前回合的只读 API 完成公开配置核验，未转发该身份给后台。
-
-实际上线回执位于 workspace 的
-`wiki-default-maintenance-20261017/release-acceptance.json`；预登记的两条
-普通 Weber 最短维护命令另记首次行为、错误和用量。发布门禁通过不等于这两条
-普通入口语义已验收；已用于诊断的真实例子也不构成未见材料或普遍最佳证明。
-
-上述两条预登记最短普通入口现已完成，未附正文、路径提示、评阅标准或额外
-操作 prompt，未重发请求或改动代理默认。`/wiki维护 vidu.md` 经过三次有限
-Wiki 观察，识别同身份／版本的纯改名后停止；没有复读正文、提交任务或修改
-两处未选中旧名字面入链来源页。`/wiki维护 information.md` 由入口全文读取
-当前版本，仅提交一篇；框架 wiki-origin worker 再独立全文读取后合法
-`no_change`，completed／applied 回执和 index_complete 绑定当前版本。
-现有人工新增、删除和未知字段因字节未变全部保留，没有补文章壳或扩大描述。
-先前已验收的报告移动没有重复入队。
-
-两次入口各保留一次可选 MEMORY 文件缺失的非致命错误，worker 无错误。
-入口分别约19.43秒／22.68秒，编辑复核 job 约22.23秒，阶段可能重叠。
-末次累计 total 分别104494／124389／104477 tokens，其中缓存输入分别
-92928／112640／92416；累计快照不求和，美元及全局编排费用未知。
-临时认证均撤销，代理公开配置、614份运行源码和7草稿复核通过。
-
-Vera 对脱敏行为及回执链独立复核通过，无新增阻断；未亲读私人正文或独立
-访问生产，不能扩大成普遍隐私认证。主控随后将 fresh 原生 state／job／read
-返回直接提取为无正文元数据并逐字段核验，补足先前仅声明的原生收尾依据；
-最终索引 ready、无 pending／来源警告／待恢复尝试。实际回执、首次错误、
-分阶段用量、独立审查及限制见 workspace
-`wiki-default-maintenance-20261017/ordinary-entry-final-acceptance.json`。
-两例是已见诊断材料，只证明本次覆盖的对象路径，不宣称普遍最佳或提速。
+保留 `.env`、持久数据和本地定制，按变更运行 AGENTS 要求的检查；有代码变化
+的发布统一走上节流程。同步上游不顺带提交本地文档整理；没有运行代码变化时
+不重启或发布。

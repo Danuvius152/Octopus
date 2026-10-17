@@ -34,13 +34,10 @@ shortcut. Do the real thing the first time.
 
 You MUST verify your changes before considering them done:
 
-Natural Wiki question answering is a separate, opt-in quality evaluation,
-marked `knowledge_eval`. Pytest deselects it by default, before setup or CLI
-availability probes. It is not a required release check. Evaluate answers
-against their recorded source version, not exact wording or a fixed personal
-fact; real answers must follow current notes. A deselected evaluation is not
-a pass. Keep deterministic permission, source-preservation, revision/index,
-pagination, receipt, settlement and CLI/browser checks in the required tier.
+Wiki `knowledge_eval` is opt-in, deselected before setup/CLI probes, and is
+not a release gate. Assess answers against recorded source versions, not exact
+wording or fixed personal facts. Permission, source-preservation, revision/index,
+pagination, receipt, settlement and CLI/browser checks remain required.
 
 1. **Backend unit tests**: `.venv/bin/pytest tests/ -v` (1,320 tests; all of them
    run on a dev box with both CLIs installed and signed in — a skip means a
@@ -85,45 +82,24 @@ pagination, receipt, settlement and CLI/browser checks in the required tier.
    signed-in `codex` (`codex login --device-auth`); a lapsed login fails
    it rather than hiding it.
 
-**Zero failures in required release checks are acceptable.** All selected
-release checks must pass before committing. If one fails, investigate and fix
-it — do not ignore, skip, or dismiss it as "flaky" or "pre-existing". Optional
-knowledge evaluations retain execution failures and separate semantic review;
-their answer wording is not a release gate.
+**All required release checks must pass before committing.** Investigate and
+fix failures; do not dismiss them as "flaky" or "pre-existing". Unavailable,
+skipped or deselected checks do not count as passes.
 
 ### Local Codex validation
 
-For this user's Codex-based WSL installation, the user authorizes committing
-after the hermetic backend tests, frontend unit tests, TypeScript check,
-pure-UI E2E bucket and available Codex real-CLI/browser tests all pass. Run
-the existing lint, generated-contract and documentation-index checks too.
-Claude live tests are not a commit blocker for this installation when its
-provider is unavailable. Report those unavailable checks separately; skipped
-or failed Claude checks do not count as passes. Failures in the required local
-checks must still be investigated and fixed before committing. This local
-agreement does not change the full-suite requirements for environments with
-both backends usable.
-
-The Codex release selection is
+On this WSL installation, require hermetic backend, frontend unit/types,
+pure-UI E2E, available Codex real-CLI/browser, lint, generated-contract and
+docs-index checks. Unavailable Claude live tests are reported separately and
+do not block this installation; environments with both providers still require
+the full suite. The Codex selection is
 `real and (real_codex or codex_bin) and not real_claude and not knowledge_eval`.
-Run natural-answer evaluations explicitly with
-`pytest tests/test_wiki_query_real.py --run-knowledge-evals --knowledge-eval-output=/path/to/fresh-evidence`.
-They use isolated synthetic sources and preserve answers, source hashes,
-actual reads, completion evidence and raw usage observations. Pytest success
-means execution was recorded; `semantic_acceptance: not_reviewed` still
-requires independent review. Unknown token totals or dollar costs remain
-unknown, and cumulative counters must not be summed. Fixed event-replay tests
-may still compare exact text to verify ordered message delivery.
 
-Optional knowledge evaluations use their evidence-producing request to check
-provider availability; do not spend an additional model call with ambient CLI
-defaults as a setup probe. Preserve actual request failures in the evidence.
-Ordinary-chat evaluations use authenticated WebSocket `send_message`, natural
-questions and the normal shared prompt assembly, without delegation or a forced
-Wiki mode. Register questions and source versions before execution, keep
-assessor material out of submitted context, and disclose actual filesystem,
-authentication and source-binding isolation limits rather than claiming a blind
-test. Test model settings do not change the user's agent defaults.
+Opt-in evaluation setup, registration and evidence rules are in
+[local-wsl.md](docs/local-wsl.md#本机测试). Preserve failures and raw usage;
+execution success still needs independent semantic review. Do not change agent
+defaults or add paid availability probes. Fixed event-replay assertions remain
+valid protocol checks.
 
 ## Test Coverage
 
@@ -323,31 +299,20 @@ cd web && npx playwright test --reporter=list  # verbose output
 
 ## Repository and Upstream Maintenance
 
-This is the independently maintained repository
-https://github.com/Danuvius152/Octopus, and `origin` points to it. It originated
-from https://github.com/archeryue/Octopus, but its GitHub fork relationship has
-been removed. The `upstream` remote remains
-https://github.com/archeryue/Octopus.git as a reference for original-author
-updates; retaining this Git remote does not recreate a GitHub fork relationship.
+`origin` is the independently maintained `Danuvius152/Octopus`; `upstream` is
+`archeryue/Octopus` for requested updates. The GitHub fork relationship is removed.
 
-- Preserve the user's local configuration and customizations when syncing
-  upstream. Prefer the existing `.env` / `OCTOPUS_*` settings for
-  machine-specific configuration; keep secrets and runtime data out of Git.
-- The local WSL installation follows the README's `python3 -m venv .venv`
-  and pip workflow. The user explicitly does not want uv. Use the existing
-  signed-in Codex backend. See `docs/local-wsl.md` for local runtime details.
-- Commit and push this project's changes to `origin`; keep source changes in
-  focused commits so original-author updates can be reviewed and integrated
-  without losing local behavior.
-- After pushing a fully validated `main` code change on this WSL installation,
-  deploy and retire the previous runtime snapshot using `docs/local-wsl.md`
-  §“自动发布”. The user has authorized this flow without another confirmation.
-  Documentation-only commits do not restart the service.
-- When the user requests original-author updates, run `git fetch upstream`,
-  inspect the incoming changes, and merge `upstream/main` into the maintained
-  branch. The repositories still share Git history despite GitHub detachment.
-  Protect existing uncommitted work before merging. Resolve conflicts by
-  preserving the intended upstream updates and local behavior; do not replace
-  this repository with a hard reset or blindly choose one side of every conflict.
-- After an upstream merge that changes code, run all checks required above.
-  Rebuild the frontend when its source or build dependencies change.
+- Use the existing venv + pip (no uv), signed-in Codex and `.env` / `OCTOPUS_*`
+  configuration. Keep secrets and runtime data out of Git; local setup is in
+  [local-wsl.md](docs/local-wsl.md).
+- Commit/push authorized, verified code to `origin` in focused commits, with
+  necessary related docs. Exclude concurrent or unrelated work.
+- Docs-only: check affected links, index and diff; leave changes unstaged and
+  uncommitted unless the user requests otherwise. No automatic push, builds,
+  full suites, model calls, restarts or deployment, even after a requested docs commit.
+- After pushing validated `main` code, follow [自动发布](docs/local-wsl.md#自动发布),
+  including natural drain and old-worktree retirement, without another confirmation.
+- On a user-requested upstream sync, protect uncommitted work, fetch and inspect
+  upstream changes, then merge `upstream/main`. Preserve local behavior/config;
+  do not hard reset or blindly resolve conflicts. Code changes use the same
+  checks/build/deployment flow above.
