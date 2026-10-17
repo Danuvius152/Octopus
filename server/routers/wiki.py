@@ -12,7 +12,14 @@ from ..auth import verify_token
 from ..deps import ScopeUser, SessionMgr
 from ..mcp_identity import verify
 from ..wiki import WikiError, registry
-from ..wiki.contracts import GuideModule, ReadBatch, ReadView, Revision, Source
+from ..wiki.contracts import (
+    GuideModule,
+    ReadBatch,
+    ReadView,
+    ReviewObservation,
+    Revision,
+    Source,
+)
 from ..wiki.curation import WikiCuration
 from ..wiki.history import WikiHistory
 from ..wiki.jobs import WikiJobs, worker
@@ -65,6 +72,7 @@ async def app_wiki(request: Request, app_id: str, operation: str):
         ("GET", "jobs"): (list_jobs, None),
         ("GET", "documents"): (documents, None),
         ("GET", "graph"): (graph, None),
+        ("GET", "maintenance-status"): (maintenance_status, None),
         ("GET", "snapshots"): (snapshots, None),
         ("POST", "snapshot/restore"): (restore_snapshot, SnapshotRestore),
     }
@@ -152,6 +160,10 @@ async def app_wiki(request: Request, app_id: str, operation: str):
                 "view": request.query_params.get("view", "full"),
                 "cursor": request.query_params.get("cursor"),
             }
+        elif operation == "maintenance-status":
+            kwargs |= {"doc": request.query_params.get("doc"), "directory": request.query_params.get("directory", "Library"),
+                       "view": request.query_params.get("view", "state"), "limit": int(request.query_params.get("limit", 20)),
+                       "cursor": request.query_params.get("cursor")}
         elif operation == "graph":
             kwargs["doc"] = request.query_params["doc"]
             kwargs |= {"offset": int(request.query_params.get("offset", 0)), "limit": int(request.query_params.get("limit", 100)), "cursor": request.query_params.get("cursor")}
@@ -233,6 +245,28 @@ def graph(
 ):
     access(request)
     return registry.store(user_id).graph(doc, offset, limit, cursor)
+
+
+@router.get("/maintenance-status")
+def maintenance_status(
+    request: Request,
+    doc: str | None = None,
+    directory: str = "Library",
+    view: Literal["state", "links"] = "state",
+    limit: int = Query(20, ge=1, le=50),
+    cursor: str | None = None,
+    user_id: ScopeUser = None,
+    _: str = Depends(verify_token),
+):
+    from ..wiki.maintenance_state import status
+
+    task = access(request)
+    with registry._account_lock(user_id):
+        registration = registry.config(user_id)
+        store = registry.store(user_id)
+        return status(store, registration, user_id,
+                      doc=doc, directory=directory, view=view, limit=limit, cursor=cursor,
+                      actor=task.agent_id if task else "human")
 
 
 @router.put("/config")
@@ -744,6 +778,7 @@ class Maintenance(BaseModel):
     target: str | None = None
     sources: list[Source] = []
     created_changes: dict[str, str] = {}
+    review: ReviewObservation | None = None
 
 
 @router.post("/maintain")
@@ -758,7 +793,7 @@ def maintain(
         raise WikiError(
             "Finish the assigned job; workers cannot enqueue more maintenance", 403
         )
-    tasks.require_selection(task, body.paths)
+    tasks.require_selection(task, body.paths, registry.store(user_id), checked=body.review is not None)
     return WikiJobs(user_id).maintain(
         body.idempotency_key,
         body.material,
@@ -768,6 +803,8 @@ def maintain(
         [s.model_dump() for s in body.sources],
         task.agent_id if task else "human",
         body.created_changes,
+        review=body.review.model_dump() if body.review is not None else None,
+        selection_task=task,
     )
 
 

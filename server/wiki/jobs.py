@@ -1,6 +1,7 @@
 """Persistent, account-scoped curator work with observable item outcomes."""
 
 import asyncio
+import contextlib
 import hashlib
 import json
 import logging
@@ -192,15 +193,22 @@ class WikiJobs:
         return self.maintain(key, material, scope, [], None, sources, actor)
 
     def maintain(
-        self, key, material, scope, paths, target, sources, actor, created_changes=None
+        self, key, material, scope, paths, target, sources, actor, created_changes=None, *, review=None, selection_task=None
     ):
-        with WikiHistory(self.store).locked():
-            return self._maintain(key, material, scope, paths, target, sources, actor, created_changes)
+        guard = registry._account_lock(self.user_id) if review is not None else contextlib.nullcontext()
+        # Workers already look up the registration inside the history lock.
+        # Never hold the account lock while waiting for that worker to finish.
+        with WikiHistory(self.store).locked(), guard:
+            return self._maintain(key, material, scope, paths, target, sources, actor, created_changes, review=review, selection_task=selection_task)
 
     def _maintain(
-        self, key, material, scope, paths, target, sources, actor, created_changes=None
+        self, key, material, scope, paths, target, sources, actor, created_changes=None, *, review=None, selection_task=None
     ):
         created_changes = created_changes or {}
+        if review is not None:
+            from .maintenance_state import DAILY_SCOPE
+
+            scope = DAILY_SCOPE
         if not key.strip() or not (material.strip() or paths):
             raise WikiError(
                 "Maintenance requires a key and material or explicit paths", 422
@@ -220,6 +228,13 @@ class WikiJobs:
             "actor": actor,
             "created_changes": created_changes,
         }
+        if review is not None:
+            from .maintenance_state import check_submission
+
+            request["review"] = review
+            previous = check_submission(self, key, request, review, selection_task)
+            if previous:
+                return previous
         previous = self.previous_request(key, request)
         if previous:
             return previous
@@ -239,7 +254,9 @@ class WikiJobs:
             raise WikiError("The new-file manifest must match the selected files", 422)
         for path in dict.fromkeys(paths):
             self.store.path(path)
-            document = self.store.read(path, length=1)
+            document = self.store.read(path, length=1, **({"expected_revision": review["revision"]} if review is not None else {}))
+            if review is not None and (document["id"], document["path"], document["revision"]) != (review["doc"], review["path"], review["revision"]):
+                raise WikiError("The observed document changed before item admission", 409)
             require_markdown_maintenance(document["path"])
             if created_changes:
                 WikiHistory(self.store)

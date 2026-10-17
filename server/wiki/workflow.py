@@ -42,6 +42,11 @@ def instructions(mode: str, task_id: str | None = None) -> str:
             card["state"] = "主库尚未绑定；用 info 确认状态"
         if task.job_id:
             card["job_id"] = task.job_id
+        elif mode == "maintain":
+            from .tasks import daily_command
+
+            if daily_command(task.request):
+                card["selection"] = {"mode": "incremental", "directory": "Library"}
     base = "本次知识操作卡：" + json.dumps(card, ensure_ascii=False) + "\n"
     base += "injected_guides 标记本轮常驻内容；按需指南已有内容时复用，仅上下文缺失时再 load_guide。\n"
     base += guide("access") + "\n"

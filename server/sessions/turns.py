@@ -1146,11 +1146,9 @@ class TurnsMixin(SessionManagerBase):
             # Attachments wrap the raw prompt; the `/showme` viewer flow now
             # resolves on the client + dedicated resolution endpoint instead of
             # being rewritten into a backend command.
-            wiki_prompt = prompt
-            if wiki_mode in {"auto", "read", "maintain"} and prompt.strip().split(maxsplit=1)[0:1] == ["/wiki"]:
-                pieces = prompt.strip().split(maxsplit=2)
-                skip = 2 if len(pieces) > 1 and pieces[1] == "maintain" else 1
-                wiki_prompt = prompt.strip().split(maxsplit=skip)[skip] if len(prompt.strip().split(maxsplit=skip)) > skip else "Explain the enabled Wiki task and ask what the user wants to do."
+            from ..wiki.tasks import command_prompt
+
+            wiki_prompt = command_prompt(prompt, wiki_mode)
             augmented_prompt = _augment_prompt_with_attachments(
                 wiki_prompt, attachment_paths
             )

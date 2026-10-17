@@ -21,6 +21,18 @@ class ReadRequest(BaseModel):
     expected_revision: str | None = None
 
 
+class ReviewObservation(BaseModel):
+    """A comparison snapshot, never a document selection or write grant."""
+
+    model_config = ConfigDict(extra="forbid")
+    doc: str = Field(pattern=r"^[0-9a-f]{32}$")
+    path: str
+    revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    baseline_receipt_id: str | None
+    dependency_generation: str = Field(pattern=r"^[0-9a-f]{64}$")
+    review_key: str
+
+
 class ReadBatch(BaseModel):
     items: list[ReadRequest] = Field(min_length=1, max_length=20)
     budget_chars: int = Field(default=24000, ge=1, le=96000)

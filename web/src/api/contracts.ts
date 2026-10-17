@@ -1139,6 +1139,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/wiki/maintenance-status": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Maintenance Status */
+        get: operations["maintenance_status_api_wiki_maintenance_status_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/wiki/config": {
         parameters: {
             query?: never;
@@ -3719,6 +3736,7 @@ export interface components {
             created_changes: {
                 [key: string]: string;
             };
+            review?: components["schemas"]["ReviewObservation"] | null;
         };
         /** MessageContent */
         MessageContent: {
@@ -4111,6 +4129,24 @@ export interface components {
             aliases?: string[] | null;
             /** Item Doc */
             item_doc?: string | null;
+        };
+        /**
+         * ReviewObservation
+         * @description A comparison snapshot, never a document selection or write grant.
+         */
+        ReviewObservation: {
+            /** Doc */
+            doc: string;
+            /** Path */
+            path: string;
+            /** Revision */
+            revision: string;
+            /** Baseline Receipt Id */
+            baseline_receipt_id: string | null;
+            /** Dependency Generation */
+            dependency_generation: string;
+            /** Review Key */
+            review_key: string;
         };
         /** RuntimeMetadata */
         RuntimeMetadata: {
@@ -7191,6 +7227,42 @@ export interface operations {
             query: {
                 doc: string;
                 offset?: number;
+                limit?: number;
+                cursor?: string | null;
+                token?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    maintenance_status_api_wiki_maintenance_status_get: {
+        parameters: {
+            query?: {
+                doc?: string | null;
+                directory?: string;
+                view?: "state" | "links";
                 limit?: number;
                 cursor?: string | null;
                 token?: string | null;

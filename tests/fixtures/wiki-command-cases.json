@@ -1,5 +1,12 @@
 [
   {"message": "/wiki 查询", "mode": "read"},
+  {"message": "/wiki维护", "mode": "maintain"},
+  {"message": "/wiki维护 Library/notes/entry.md", "mode": "maintain"},
+  {"message": "/wiki 维护 Library/projects/log.md", "mode": "maintain"},
+  {"message": "  /wiki\u3000维护\nLibrary/a.markdown", "mode": "maintain"},
+  {"message": "/wiki维护手册", "mode": null},
+  {"message": "/wiki 维护手册的写法", "mode": "read"},
+  {"message": "讨论 /wiki维护 的用法", "mode": null},
   {"message": "  /wiki\nmaintain Library/a.md", "mode": "maintain"},
   {"message": "/wiki /wiki maintain 的用法是什么？", "mode": "read"},
   {"message": "/wiki\u0085maintain Library/a.md", "mode": "maintain"},

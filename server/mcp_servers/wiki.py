@@ -6,7 +6,13 @@ from typing import Literal
 import httpx
 from mcp.server.fastmcp import FastMCP, Image
 
-from ..wiki.contracts import GuideModule, ReadRequest, ReadView, Revision
+from ..wiki.contracts import (
+    GuideModule,
+    ReadRequest,
+    ReadView,
+    ReviewObservation,
+    Revision,
+)
 from . import _host
 
 
@@ -30,6 +36,7 @@ class TaskWiki(FastMCP):
             "inspect_image",
             "jobs",
             "load_guide",
+            "maintenance_status",
         }
         if task.mode in {"auto", "maintain"}:
             if tasks.is_curator_worker(task):
@@ -191,6 +198,23 @@ def inspect_image(path: str):
 
 
 @mcp.tool()
+def maintenance_status(doc: str | None = None, directory: str = "Library", view: Literal["state", "links"] = "state", limit: int = 20, cursor: str | None = None) -> dict:
+    """Observe maintenance state without reading bodies or granting writes.
+
+    Defaults to bounded Library Markdown deltas; an explicit doc returns its
+    state, including unchanged. Compare current identity/revision with accepted
+    maintenance only, not ordinary saves. Follow next_cursor; changed state
+    invalidates old cursors. ready=false is not a clean result. Observations
+    do not count as reading the note. For an actionable daily review copy its
+    review object and review_key into maintain, using its exact current path.
+    Unchanged moves need no semantic job. view=links with doc observes current
+    local links matching known historical receipt paths, including unresolved
+    inlinks; it neither certifies move causality nor authorizes those sources.
+    """
+    return call("GET", "maintenance-status", params={k: v for k, v in locals().items() if v is not None})
+
+
+@mcp.tool()
 def maintain(
     idempotency_key: str,
     material: str = "",
@@ -198,6 +222,7 @@ def maintain(
     paths: list[str] | None = None,
     target: str | None = None,
     sources: list[dict] | None = None,
+    review: ReviewObservation | None = None,
 ) -> dict:
     """Submit a durable maintenance request to the configured Weber worker.
 
@@ -211,6 +236,11 @@ def maintain(
     not type /wiki; no material or paths means no full-vault maintenance.
     Returns a bounded submission receipt with the actual current job status;
     use jobs(job_id=..., view="full", export=true) for complete item evidence.
+    For ordinary daily review, copy review and its review_key from the current
+    maintenance_status item, set paths to that one current path and material
+    empty. This checked branch has a fixed minimal-review purpose; it does not
+    accept new material, sources or targets. Other explicit purposes retain the
+    original idempotency contract. A comparison never grants file selection.
     """
     result = call(
         "POST",
@@ -222,6 +252,7 @@ def maintain(
             "sources": sources or [],
             "paths": paths or [],
             "target": target,
+            **({"review": review.model_dump()} if review is not None else {}),
         },
     )
     if isinstance(result.get("status"), int) and result["status"] >= 400:

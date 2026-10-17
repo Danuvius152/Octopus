@@ -51,3 +51,29 @@ async def test_websocket_cancelled_maintenance_keeps_shared_lookup(monkeypatch):
     manager.start_message.assert_awaited_once_with(
         "session", message, attachment_ids=[], steerable=True, wiki_mode="read"
     )
+
+
+@pytest.mark.parametrize("command", ["/wiki维护", "/wiki 维护"])
+@pytest.mark.parametrize("selection", [None, "off", "read"])
+async def test_websocket_chinese_maintenance_uses_trusted_intent_and_respects_cancellation(monkeypatch, command, selection):
+    monkeypatch.setattr(
+        ws_router.deps, "resolve_principal", AsyncMock(return_value=Principal(None, "legacy"))
+    )
+    manager = SimpleNamespace(
+        on_broadcast=Mock(), remove_broadcast=Mock(),
+        get_session=Mock(return_value=SimpleNamespace(user_id=None)),
+        start_message=AsyncMock(),
+    )
+    message = command + " Library/projects/current.md"
+    payload = {"type": "send_message", "session_id": "session", "content": message}
+    if selection is not None:
+        payload["wiki_mode"] = selection
+    socket = SimpleNamespace(
+        accept=AsyncMock(), send_json=AsyncMock(),
+        receive_text=AsyncMock(side_effect=[json.dumps(payload), WebSocketDisconnect()]),
+    )
+    await ws_router.websocket_endpoint(manager, socket, token="token")
+    manager.start_message.assert_awaited_once_with(
+        "session", message, attachment_ids=[], steerable=True,
+        wiki_mode="maintain" if selection is None else "read",
+    )

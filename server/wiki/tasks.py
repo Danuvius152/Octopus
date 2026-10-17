@@ -145,24 +145,42 @@ class WikiTasks:
             403,
         )
 
-    def require_selection(self, task, paths):
+    def require_selection(self, task, paths, store=None, *, checked=False):
         if task is None or not paths:
             return
         if task.job_id:
             raise WikiError("A running worker cannot expand its assigned files", 403)
         if task.mode == "auto":
             return  # The agent declares exact paths in the maintenance request.
+        if checked and daily_command(task.request):
+            from .formats import is_markdown_maintenance
+
+            if all(path.startswith("Library/") and is_markdown_maintenance(path) for path in paths):
+                return  # Eligibility and the observation are checked under the admission lock.
+            raise WikiError("Daily maintenance is limited to current Library Markdown changes", 403)
         # Only the trusted request's first line selects existing files. Article
         # body, retrieved notes and model-supplied scope descriptions cannot.
+        first_line = next(iter(task.request.splitlines()), "")
+        _, selection = wiki_command(first_line)
         try:
-            words = shlex.split(task.request.splitlines()[0])
-        except (ValueError, IndexError):
+            words = shlex.split(selection)
+        except ValueError:
             words = []
-        if any(path not in words for path in paths):
-            raise WikiError(
-                "Name existing file paths explicitly in /wiki maintain, or select them in the app",
-                403,
-            )
+        if all(path in words for path in paths):
+            return
+        if store is not None:
+            from .maintenance_state import selected_document
+
+            with store.connect() as db:
+                whole = selected_document(db, selection.strip()) if selection.strip() else None
+                selectors = [selection.strip()] if whole is not None else words
+                selected = set()
+                for selector in selectors:
+                    if (row := selected_document(db, selector)) is not None:
+                        selected.add(row["id"])
+                if all((row := selected_document(db, path)) is not None and row["id"] in selected for path in paths):
+                    return
+        raise WikiError("Select an unambiguous current file explicitly, or use a checked daily maintenance observation", 403)
 
     def record_read(self, task, document):
         if task is None or document.get("page"):
@@ -228,15 +246,42 @@ class WikiTasks:
             raise WikiError("Read the relation's cited current passage before adding its link", 422)
 
 
+def wiki_command(message: str) -> tuple[str | None, str]:
+    """Parse only a leading human command; preserve its remaining text."""
+    text = message.strip()
+    words = text.split(maxsplit=2)
+    if words and words[0] == "/wiki维护":
+        return "maintain", text.split(maxsplit=1)[1] if len(words) > 1 else ""
+    if words and words[0] == "/wiki":
+        if len(words) > 1 and words[1] in {"maintain", "维护"}:
+            return "maintain", words[2] if len(words) > 2 else ""
+        return "read", text.split(maxsplit=1)[1] if len(words) > 1 else ""
+    return None, message
+
+
+def daily_command(message: str) -> bool:
+    mode, body = wiki_command(message)
+    return mode == "maintain" and not body.strip()
+
+
+def command_prompt(message: str, mode: str | None) -> str:
+    command, body = wiki_command(message)
+    if command is None or mode not in {"auto", "read", "maintain"}:
+        return message
+    if body:
+        return body
+    return "执行日常 Wiki 增量维护。" if command == mode == "maintain" else "说明当前 Wiki 查询范围。"
+
+
 def explicit_mode(message: str, selected: str | None = None) -> str | None:
     """Only call at trusted input boundaries, never on app context/reports."""
     # Cancelling maintenance must win over command text. Shared lookup is
     # always available; old clients' off value now means read-only.
     if selected in {"off", "read"}:
         return "read"
-    words = message.strip().split(maxsplit=2)
-    if words and words[0] == "/wiki":
-        return words[1] if len(words) > 1 and words[1] == "maintain" else "read"
+    mode, _ = wiki_command(message)
+    if mode:
+        return mode
     return selected if selected in {"read", "maintain"} else None
 
 
