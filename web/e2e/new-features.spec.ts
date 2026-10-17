@@ -1942,10 +1942,8 @@ test.describe("File attachments", () => {
       page.locator(".attachment-pending", { hasText: "uploading" })
     ).toHaveCount(0, { timeout: 10_000 });
 
-    // Send: type a prompt and click Send. We don't wait for the backend
-    // turn to complete — only that the user_message + attachment chip
-    // round-trip into the chat history. Interrupting at the end stops
-    // the spawned CLI subprocess so test cleanup isn't slow.
+    // Real upload/auth/WS/persistence; the pure-UI server's execution program
+    // is explicitly offline. Wait for its reply as well as the user receipt.
     await page
       .locator(".chat-input-bar textarea")
       .fill("attached a file for you");
@@ -1961,20 +1959,14 @@ test.describe("File attachments", () => {
       page.locator(".chat-attachment-chips .attachment-pending")
     ).toHaveCount(0);
 
-    // Stop whatever the backend started so cleanup is quick.
-    await page.keyboard.press("Escape");
+    await expect(page.locator(".msg-assistant", { hasText: "Offline UI execution complete." })).toBeVisible();
   });
 
   test("attachment metadata survives a reload and the download URL works", async ({
     page,
     request,
   }) => {
-    // Upload via the API (single session id throughout), then import the
-    // message into the SAME session via a direct DB write so we don't
-    // need the live backend turn to complete. We use the `import` flow
-    // by upload-then-import-into-new-session would mismatch ids; instead
-    // we drive `start_message` indirectly via WebSocket and let the
-    // server's broadcast path persist the metadata.
+    // Upload and submit through the actual HTTP/WS paths in one session.
     const { id: sid } = await createSessionApi(
       request,
       "Attachment History Test"
@@ -1998,11 +1990,7 @@ test.describe("File attachments", () => {
       mime_type: string;
     };
 
-    // Log in, activate the session, send a message with the attachment
-    // through the live UI flow. The user_message broadcast happens
-    // before the backend turn, so the chip lands in chat history (and
-    // hits the DB via _persist_message) regardless of whether the CLI
-    // turn completes.
+    // The offline program replaces execution only, not WS or persistence.
     await login(page);
     await page
       .locator(".session-item .session-name", {
@@ -2030,8 +2018,17 @@ test.describe("File attachments", () => {
       page.locator(".msg-user .attachment-chip", { hasText: "doc.md" })
     ).toBeVisible({ timeout: 10_000 });
 
-    // Interrupt to stop the backend turn quickly.
-    await page.keyboard.press("Escape");
+    await expect(page.locator(".msg-assistant", { hasText: "Offline UI execution complete." })).toBeVisible();
+
+    const snapshot = await request.get(`${API}/sessions/${sid}`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(snapshot.ok()).toBeTruthy();
+    const saved = await snapshot.json() as { messages: { role: string; attachments?: { id: string; filename: string }[] }[] };
+    const userMessages = saved.messages.filter((message) => message.role === "user");
+    expect(userMessages).toHaveLength(1);
+    expect(userMessages[0].attachments).toHaveLength(1);
+    expect(userMessages[0].attachments![0].filename).toBe("doc.md");
 
     // ---- Reload: chip is reconstructed from the DB snapshot ----
     // Token is persisted in localStorage, so reload skips the login form
@@ -2058,6 +2055,7 @@ test.describe("File attachments", () => {
     const href = await chip.getAttribute("href");
     expect(href).toContain(`/api/sessions/${sid}/attachments/`);
     expect(href).toContain("token=");
+    expect(href).toContain(userMessages[0].attachments![0].id);
 
     // Fetch the download URL to confirm the file is actually retrievable.
     const dl = await request.get(href!);

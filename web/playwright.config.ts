@@ -4,6 +4,16 @@ import path from "node:path";
 
 import { defineConfig } from "@playwright/test";
 
+const mode = process.env.OCTOPUS_E2E_MODE;
+if (mode !== "offline" && mode !== "real") {
+  throw new Error("Run E2E through bun run test:e2e:fast or test:e2e:llm (explicit execution mode required)");
+}
+const offline = mode === "offline";
+const auditDir = process.env.OCTOPUS_E2E_AUDIT_DIR;
+if (offline && !auditDir) throw new Error("Offline E2E requires a fresh runner audit directory");
+const backendApp = offline ? "tests.e2e_backend:app" : "server.main:app";
+const backendLoop = offline ? " --loop asyncio" : "";
+
 // Isolate the e2e backend's per-agent state (canonical memory/ + claude-home/)
 // under a temp dir so runs never litter the developer's real
 // ~/.octopus/agents (and never leave copied Claude credentials there). Removed
@@ -62,6 +72,9 @@ mkdirSync(E2E_ACCOUNTS_STATE_DIR, { recursive: true });
 
 export default defineConfig({
   testDir: "./e2e",
+  // Select the bucket together with its execution mode. Real mode retains the
+  // product entrypoint; neither mode can reuse the other's existing servers.
+  ...(offline ? { grepInvert: /@llm/ } : { grep: /@llm/ }),
   globalTeardown: "./e2e/global-teardown.ts",
   timeout: 30_000,
   retries: 0,
@@ -96,12 +109,13 @@ export default defineConfig({
   webServer: [
     {
       command:
-        "cd .. && .venv/bin/uvicorn server.main:app --host 0.0.0.0 --port 8765",
+        `cd .. && .venv/bin/uvicorn ${backendApp}${backendLoop} --host 127.0.0.1 --port 8765`,
       port: 8765,
-      reuseExistingServer: true,
+      reuseExistingServer: false,
       timeout: 10_000,
       env: {
         ...process.env,
+        OCTOPUS_E2E_AUDIT_FILE: path.join(auditDir ?? "", "main.jsonl"),
         // The backend spawns the `claude` CLI directly via PATH lookup.
         // ~/.local/bin is the typical install location and may not be on
         // a non-interactive shell's PATH. Prepend it so the e2e server
@@ -125,6 +139,8 @@ export default defineConfig({
         // Applications built by the e2e suite land here, not in the
         // developer's real ~/.octopus/applications.
         OCTOPUS_APPLICATIONS_DIR: E2E_APPLICATIONS_DIR,
+        OCTOPUS_ATTACHMENTS_DIR: path.join(E2E_STATE_DIR, "attachments"),
+        OCTOPUS_DEFAULT_WORKING_DIR: path.join(E2E_STATE_DIR, "workspace"),
         // Short auto-answer window so the AskUserQuestion-timeout e2e
         // fires in seconds instead of minutes. Existing interactive
         // real-CLI tests click within a second of the form appearing,
@@ -140,7 +156,7 @@ export default defineConfig({
     {
       command: "bun dev --port 5174",
       port: 5174,
-      reuseExistingServer: true,
+      reuseExistingServer: false,
       timeout: 10_000,
       env: {
         ...process.env,
@@ -149,13 +165,14 @@ export default defineConfig({
     },
     {
       command:
-        "cd .. && .venv/bin/uvicorn server.main:app --host 0.0.0.0 --port " +
+        `cd .. && .venv/bin/uvicorn ${backendApp}${backendLoop} --host 127.0.0.1 --port ` +
         `${E2E_ACCOUNTS_PORT}`,
       port: E2E_ACCOUNTS_PORT,
       reuseExistingServer: false,
       timeout: 10_000,
       env: {
         ...process.env,
+        OCTOPUS_E2E_AUDIT_FILE: path.join(auditDir ?? "", "accounts.jsonl"),
         PATH: `${process.env.HOME ?? ""}/.local/bin:${process.env.PATH ?? ""}`,
         OCTOPUS_AUTH_TOKEN: "changeme",
         OCTOPUS_DEFAULT_BACKEND: "claude-code",
@@ -190,7 +207,7 @@ export default defineConfig({
     {
       command: `bun dev --port ${E2E_ACCOUNTS_WEB_PORT}`,
       port: E2E_ACCOUNTS_WEB_PORT,
-      reuseExistingServer: true,
+      reuseExistingServer: false,
       timeout: 10_000,
       env: {
         ...process.env,
