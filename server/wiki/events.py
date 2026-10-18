@@ -93,6 +93,7 @@ class VaultEvents:
         self.queued = FileChanges()
         self._references = 0
         self._closed = False
+        self._release_error: BaseException | None = None
         self._owner: io.BufferedRandom | None = None
         self.epoch = uuid.uuid4().hex
         self.journal = None
@@ -343,9 +344,16 @@ class VaultEvents:
 
     def release(self) -> None:
         with _OBSERVERS_LOCK:
-            self._references -= 1
+            if self._release_error is not None:
+                raise RuntimeError("Filesystem observer cleanup remains unconfirmed") from self._release_error
+            if self._references > 0:
+                self._references -= 1
             if not self._references:
-                self.close()
+                try:
+                    self.close()
+                except BaseException as error:
+                    self._release_error = error
+                    raise
                 for key, observer in list(_OBSERVERS.items()):
                     if observer is self:
                         del _OBSERVERS[key]

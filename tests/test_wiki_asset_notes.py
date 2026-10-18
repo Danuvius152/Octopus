@@ -65,7 +65,7 @@ def assignment(jobs, config, paths, *, agent_id=None, job_id=None):
     job = jobs.get(job_id) if job_id else jobs.maintain("asset-test", "", "原位维护", paths, None, [], "human")
     session = SimpleNamespace(id="asset-worker", user_id=None, agent_id=agent_id or config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
-    tasks.assign(session.id, job["id"], paths)
+    tasks.assign(session.id, job["id"], [item for item in job["items"] if item["path"] in paths])
     token = tasks.open(session, "maintain")
     try:
         yield {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}, job, tasks.active[token]
@@ -449,8 +449,11 @@ def mutation_bridge(monkeypatch):
     from server.wiki import app_bridge
 
     # Owners are registered through follow_job; isolate their service lifetime.
-    monkeypatch.setattr(app_bridge, "_pending", set())
-    return app_bridge
+    assert not app_bridge._pending
+    monkeypatch.setattr(app_bridge, "_pending", {})
+    yield app_bridge
+    assert all(task.done() and not task.cancelled() and task.exception() is not None
+               for task in app_bridge._pending)
 
 
 async def test_mutation_shutdown_timeout_keeps_writer_lock_until_journal_finishes(sapphire, mutation_bridge, monkeypatch):

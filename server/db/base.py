@@ -469,6 +469,34 @@ class DatabaseBase:
         await self._stamp(f"column:{table}.{column}")
         logger.info("migration applied: %s.%s", table, column)
 
+    async def _guard_message_sequences(self) -> None:
+        """Protect future writes without rewriting ambiguous historical rows."""
+        cursor = await self.conn.execute(
+            "SELECT 1 FROM messages GROUP BY session_id, seq HAVING COUNT(*) > 1 LIMIT 1"
+        )
+        if await cursor.fetchone() is None:
+            await self.conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS messages_unique_sequence ON messages(session_id, seq)"
+            )
+        else:
+            # A global UNIQUE index cannot be created over old duplicates. The
+            # guards enforce the same rule for new keys and leave every old
+            # row intact, including its original storage id and sequence.
+            await self.conn.executescript("""
+                CREATE TRIGGER IF NOT EXISTS messages_sequence_insert
+                BEFORE INSERT ON messages
+                WHEN EXISTS(SELECT 1 FROM messages WHERE session_id = NEW.session_id AND seq = NEW.seq)
+                BEGIN SELECT RAISE(ABORT, 'duplicate message sequence'); END;
+                CREATE TRIGGER IF NOT EXISTS messages_sequence_update
+                BEFORE UPDATE OF session_id, seq ON messages
+                WHEN (NEW.session_id != OLD.session_id OR NEW.seq != OLD.seq)
+                  AND EXISTS(SELECT 1 FROM messages WHERE session_id = NEW.session_id
+                             AND seq = NEW.seq AND id != OLD.id)
+                BEGIN SELECT RAISE(ABORT, 'duplicate message sequence'); END;
+            """)
+            logger.warning("Historical duplicate message sequences retained; affected transcripts require review")
+        await self._stamp("guard:message_sequences")
+
     async def _apply_migrations(self) -> None:
         """Bring an existing database up to the current schema.
 
@@ -528,6 +556,7 @@ class DatabaseBase:
             "CREATE UNIQUE INDEX IF NOT EXISTS messages_terminal_request "
             "ON messages(session_id, terminal_request_id) WHERE terminal_request_id IS NOT NULL"
         )
+        await self._guard_message_sequences()
 
         await self._backfill_fork_owners()
 
@@ -797,6 +826,9 @@ class DatabaseBase:
         # schedules remain unprivileged until explicitly configured.
         if not await self._has_column("schedules", "wiki_mode"):
             await self.conn.execute("ALTER TABLE schedules ADD COLUMN wiki_mode TEXT")
+            await self.conn.commit()
+        if not await self._has_column("schedules", "invalid_reason"):
+            await self.conn.execute("ALTER TABLE schedules ADD COLUMN invalid_reason TEXT")
             await self.conn.commit()
 
     async def _column_info(self, table: str) -> list[tuple[Any, ...]]:

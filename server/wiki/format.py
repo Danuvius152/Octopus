@@ -12,7 +12,10 @@ from typing import Any
 import yaml
 from markdown_it import MarkdownIt
 
-VERSION = "okf-parser-v5"
+from .bounded_yaml import compose as compose_metadata
+from .bounded_yaml import load as load_metadata
+
+VERSION = "okf-parser-v6"
 _FRONT = re.compile(r"\A\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|$)", re.S)
 _markdown = MarkdownIt("commonmark")
 _ROLES = {
@@ -25,13 +28,6 @@ _HEADINGS = {
     "key note": "key_note", "keynote": "key_note",
     "正文": "body", "相关笔记": "related_notes", "整理说明": "curator_note",
 }
-
-
-class MetadataLoader(yaml.SafeLoader):
-    """Keep the source spelling of dates instead of inventing serialization."""
-
-
-MetadataLoader.add_constructor("tag:yaml.org,2002:timestamp", lambda loader, node: loader.construct_scalar(node))
 
 
 @dataclass
@@ -103,13 +99,13 @@ def parse(text: str) -> DocumentFormat:
     if match:
         result.body_start = match.end()
         try:
-            fields = yaml.load(match[1], Loader=MetadataLoader)
+            fields = load_metadata(match[1])
             if isinstance(fields, dict) and all(isinstance(key, str) for key in fields):
                 result.fields = fields
             elif fields is not None:
                 result.error = "Frontmatter must be a mapping; original retained"
-        except yaml.YAMLError:
-            result.error = "Invalid YAML; original retained"
+        except yaml.YAMLError as exc:
+            result.error = f"Invalid or excessive YAML; original retained ({type(exc).__name__})"
     body = text[result.body_start:]
     offsets = markdown_line_offsets(body, result.body_start)
     boundaries = [(result.body_start, "body", "")]
@@ -148,7 +144,7 @@ def _yaml_patch(source, updates, newline):
     from .store import WikiError
 
     try:
-        node = yaml.compose(source, Loader=MetadataLoader)
+        node = compose_metadata(source)
     except yaml.YAMLError as exc:
         raise WikiError("Invalid YAML requires review before metadata editing", 422) from exc
     if node is None:
@@ -159,7 +155,7 @@ def _yaml_patch(source, updates, newline):
     if len(names) != len(set(names)):
         raise WikiError("Duplicate metadata keys require review", 422)
     if node.flow_style:
-        values = yaml.load(source, Loader=MetadataLoader)
+        values = load_metadata(source)
         for name, value in updates.items():
             values[name] = (values.get(name, {}) | value) if isinstance(value, dict) and isinstance(values.get(name), dict) else value
         return yaml.safe_dump(values, allow_unicode=True, sort_keys=False).replace("\n", newline)
@@ -182,7 +178,7 @@ def _yaml_patch(source, updates, newline):
             replacement = "".join(" " * indent + line if line.strip() else line for line in replacement.splitlines(keepends=True))
             edits.append((inner_start, end, replacement))
         else:
-            old_value = yaml.load(source, Loader=MetadataLoader).get(name)
+            old_value = load_metadata(source).get(name)
             if isinstance(value, dict) and isinstance(old_value, dict):
                 value = old_value | value
             replacement = yaml.safe_dump({name: value}, allow_unicode=True, sort_keys=False).replace("\n", newline)

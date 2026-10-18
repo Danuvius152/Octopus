@@ -39,9 +39,12 @@ not a release gate. Assess answers against recorded source versions, not exact
 wording or fixed personal facts. Permission, source-preservation, revision/index,
 pagination, receipt, settlement and CLI/browser checks remain required.
 
-1. **Backend unit tests**: `.venv/bin/pytest tests/ -v` (1,320 tests; all of them
-   run on a dev box with both CLIs installed and signed in — a skip means a
-   lapsed login, not a passing suite). The real-CLI tier is selected by marker,
+1. **Backend tests**: run the hermetic tier and the available provider's
+   real-CLI tier. This installation defaults to **Codex**; **Claude is not
+   installed/configured and its live tests are not selected**. Do not probe,
+   install or authenticate Claude merely to run this task's checks. Offline
+   protocol tests for either backend remain part of the hermetic tier. A
+   machine with both providers must validate both. Select live tests by marker,
    not by listing filenames:
 
    - `pytest -m "not real"` — the hermetic tier: 1,286 tests, ~47 s, no CLI
@@ -89,10 +92,13 @@ skipped or deselected checks do not count as passes.
 ### Local Codex validation
 
 On this WSL installation, require hermetic backend, frontend unit/types,
-pure-UI E2E, available Codex real-CLI/browser, lint, generated-contract and
-docs-index checks. Unavailable Claude live tests are reported separately and
-do not block this installation; environments with both providers still require
-the full suite. The Codex selection is
+pure-UI E2E, Codex real-CLI/browser, lint, generated-contract and docs-index
+checks. Reports and reviewer briefs must state the provider scope explicitly:
+**Codex: actual results; Claude: unavailable, live tests not run**. Never call
+this a passing two-provider suite. Claude-only and mixed-provider live tests
+are outside this installation's release gate, not an unresolved release task.
+Do not change the project's supported backends or existing agent settings.
+The Codex selection is
 `real and (real_codex or codex_bin) and not real_claude and not knowledge_eval`.
 
 Opt-in evaluation setup, registration and evidence rules are in

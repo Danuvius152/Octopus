@@ -84,8 +84,8 @@ def read_many(store, requests, budget_chars, task=None, view="full"):
                     if item.get("id") == identifier and item["status"] in {"ok", "partial"} and start <= item["start"] <= item["end"] <= end:
                         item["range_id"] = range_id
         result = {"items": items, "documents": list(documents.values()), "ranges": ranges, "characters_returned": budget_chars - remaining, "budget_chars": budget_chars, "freshness": "live", **store.index_state()}
-        if view == "compact":
-            result = compact_batch(result)
+        if view == "compact" or task is not None:
+            result = compact_batch(result, view=view)
         for piece in result["ranges"]:
             document, _ = cache[piece["doc"]]
             tasks.record_read(task, document | {"start": piece["start"], "end": piece["end"], "page": None})

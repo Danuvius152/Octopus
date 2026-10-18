@@ -349,8 +349,8 @@ async def test_protected_agent_is_validated_before_session_eviction(client):
 async def test_cancelled_archive_waiter_still_finishes_agent_and_session_archive(client, monkeypatch):
     agent = await _create_agent(client, name="Owned archive")
     session = await session_manager.create_session(agent["id"], "Captured session", "/tmp")
-    manager = agents_mod._get_manager()
-    archive = manager.archive_agent
+    database = session_manager.db
+    archive = database.archive_agent
     entered, release = asyncio.Event(), asyncio.Event()
     notices = []
 
@@ -363,7 +363,7 @@ async def test_cancelled_archive_waiter_still_finishes_agent_and_session_archive
         if message.get("type") == "agent_archived" and message.get("agent_id") == agent["id"]:
             notices.append(message)
 
-    monkeypatch.setattr(manager, "archive_agent", held_archive)
+    monkeypatch.setattr(database, "archive_agent", held_archive)
     session_manager.on_broadcast("archive-completion-observer", observe)
     request = asyncio.create_task(client.post(f"/api/agents/{agent['id']}/archive", headers=HEADERS))
     try:
@@ -482,12 +482,13 @@ async def test_schedule_from_text_ai_cron(client, monkeypatch):
     monkeypatch.setattr(get_harness("claude-code"), "run_oneshot", fake_oneshot)
 
     agent = await _create_agent(client, name="NL Sched")
+    origin = await session_manager.create_session(agent["id"], "schedule origin")
     resp = await client.post(
         f"/api/agents/{agent['id']}/schedules/from_text",
         json={
             "text": "summarize my unread email every morning at 9am",
             "timezone": "America/Los_Angeles",
-            "session_id": "chat-session-1",
+            "session_id": origin.id,
         },
         headers=HEADERS,
     )
@@ -500,7 +501,7 @@ async def test_schedule_from_text_ai_cron(client, monkeypatch):
     assert data["prompt"] == "summarize my unread email"
     # The session the command was issued from is remembered so each fire
     # appends the summary into that same conversation.
-    assert data["origin_session_id"] == "chat-session-1"
+    assert data["origin_session_id"] == origin.id
 
 
 @pytest.mark.asyncio

@@ -5,15 +5,18 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.responses import Response
-from pydantic import BaseModel
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, ConfigDict, StrictInt
 
 from ..auth import verify_token
 from ..deps import ScopeUser, SessionMgr
-from ..mcp_identity import verify
+from ..mcp_identity import McpScope, verify
 from ..wiki import WikiError, registry
 from ..wiki.contracts import (
+    CreationRequest,
+    GrantReadmissionRequest,
     GuideModule,
+    MaintenanceSelectionRequest,
     ReadBatch,
     ReadView,
     ReviewObservation,
@@ -23,6 +26,7 @@ from ..wiki.contracts import (
 from ..wiki.curation import WikiCuration
 from ..wiki.history import WikiHistory
 from ..wiki.jobs import WikiJobs, worker
+from ..wiki.maintenance_contract import actor_for
 from ..wiki.tasks import tasks
 from ..workspace import confine
 
@@ -73,9 +77,12 @@ async def app_wiki(request: Request, app_id: str, operation: str):
         ("GET", "documents"): (documents, None),
         ("GET", "graph"): (graph, None),
         ("GET", "maintenance-status"): (maintenance_status, None),
+        ("POST", "maintenance-selections"): (create_maintenance_selection, MaintenanceSelectionRequest),
         ("GET", "snapshots"): (snapshots, None),
         ("POST", "snapshot/restore"): (restore_snapshot, SnapshotRestore),
     }
+    if operation.startswith("maintenance-selections/") and request.method == "GET" and len(operation.split("/")) == 2:
+        handlers[("GET", operation)] = (get_maintenance_selection, None)
     if operation.startswith("jobs/"):
         parts = operation.split("/")
         if len(parts) == 2 and request.method == "GET":
@@ -130,6 +137,7 @@ async def app_wiki(request: Request, app_id: str, operation: str):
         elif operation == "blocks":
             kwargs["doc"] = request.query_params["doc"]
             kwargs |= {"view": request.query_params.get("view", "full"), "ids": request.query_params.getlist("ids") or None, "expected_revision": request.query_params.get("expected_revision"), "budget_chars": int(request.query_params["budget_chars"]) if "budget_chars" in request.query_params else None, "offset": int(request.query_params.get("offset", 0)), "limit": int(request.query_params["limit"]) if "limit" in request.query_params else None}
+            kwargs["start"] = int(request.query_params["start"]) if "start" in request.query_params else None
         elif operation == "image":
             kwargs["path"] = request.query_params["path"]
         elif operation == "history":
@@ -164,6 +172,10 @@ async def app_wiki(request: Request, app_id: str, operation: str):
             kwargs |= {"doc": request.query_params.get("doc"), "directory": request.query_params.get("directory", "Library"),
                        "view": request.query_params.get("view", "state"), "limit": int(request.query_params.get("limit", 20)),
                        "cursor": request.query_params.get("cursor")}
+        elif operation.startswith("maintenance-selections/"):
+            kwargs |= {"selection_id": operation.split("/")[1],
+                       "limit": int(request.query_params["limit"]) if "limit" in request.query_params else None,
+                       "cursor": request.query_params.get("cursor")}
         elif operation == "graph":
             kwargs["doc"] = request.query_params["doc"]
             kwargs |= {"offset": int(request.query_params.get("offset", 0)), "limit": int(request.query_params.get("limit", 100)), "cursor": request.query_params.get("cursor")}
@@ -181,6 +193,12 @@ async def app_wiki(request: Request, app_id: str, operation: str):
     return await anyio.to_thread.run_sync(lambda: function(**kwargs))
 
 
+def _mcp_scope(request: Request) -> McpScope | None:
+    from .applications import _presented_token
+
+    return verify(_presented_token(request))
+
+
 def access(
     request: Request,
     *,
@@ -188,13 +206,11 @@ def access(
     write: bool = False,
     publish: bool = False,
 ):
-    from .applications import _presented_token
-
-    scope = verify(_presented_token(request))
+    scope = _mcp_scope(request)
     if scope:
         if human_only:
             raise WikiError("This operation requires the account owner", 403)
-        return tasks.require(scope, write=write, publish=publish)
+        return tasks.call(tasks.require(scope, write=write, publish=publish), scope)
     return None
 
 
@@ -219,7 +235,7 @@ def documents(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    access(request)
+    task = access(request)
     return registry.store(user_id).documents(
         kind=kind,
         quality=quality,
@@ -230,6 +246,7 @@ def documents(
         directory=directory,
         view=view,
         cursor=cursor,
+        model_response=task is not None,
     )
 
 
@@ -243,8 +260,8 @@ def graph(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    access(request)
-    return registry.store(user_id).graph(doc, offset, limit, cursor)
+    task = access(request)
+    return registry.store(user_id).graph(doc, offset, limit, cursor, model_response=task is not None)
 
 
 @router.get("/maintenance-status")
@@ -261,12 +278,57 @@ def maintenance_status(
     from ..wiki.maintenance_state import status
 
     task = access(request)
-    with registry._account_lock(user_id):
+    store = registry.store(user_id)
+    with store.borrow():
+        with registry._account_lock(user_id), registry.registration_lock(user_id):
+            registration = registry.config(user_id)
+            if store.registration_generation != registration["registration_generation"]:
+                raise WikiError("Wiki registration changed; retry with the current Store", 503)
+            return status(store, registration, user_id,
+                          doc=doc, directory=directory, view=view, limit=limit, cursor=cursor,
+                          actor=actor_for(task, request.path_params.get("app_id")), model_response=task is not None)
+
+
+@router.post("/maintenance-selections")
+def create_maintenance_selection(
+    body: MaintenanceSelectionRequest,
+    request: Request,
+    user_id: ScopeUser = None,
+    _: str = Depends(verify_token),
+):
+    from ..wiki import maintenance_selections
+
+    task = access(request)
+    store = registry.store(user_id)
+    with store.borrow(), WikiHistory(store).locked():
+        with registry._account_lock(user_id), registry.registration_lock(user_id):
+            registration = registry.config(user_id)
+            if store.registration_generation != registration["registration_generation"]:
+                raise maintenance_selections.error("registration_changed", "Wiki registration changed; retry with the current Store", 409)
+            return maintenance_selections.create(store, registration, user_id,
+                                                  actor=actor_for(task, request.path_params.get("app_id")),
+                                                  directory=body.directory, limit=body.limit)
+
+
+@router.get("/maintenance-selections/{selection_id}")
+def get_maintenance_selection(
+    selection_id: str,
+    request: Request,
+    limit: int | None = Query(None, ge=1, le=200),
+    cursor: str | None = None,
+    user_id: ScopeUser = None,
+    _: str = Depends(verify_token),
+):
+    from ..wiki import maintenance_selections
+
+    task = access(request)
+    store = registry.store(user_id)
+    with store.borrow(), registry._account_lock(user_id), registry.registration_lock(user_id):
         registration = registry.config(user_id)
-        store = registry.store(user_id)
-        return status(store, registration, user_id,
-                      doc=doc, directory=directory, view=view, limit=limit, cursor=cursor,
-                      actor=task.agent_id if task else "human")
+        if store.registration_generation != registration["registration_generation"]:
+            raise maintenance_selections.error("registration_changed", "Wiki registration changed; retry with the current Store", 409)
+        return maintenance_selections.read(store, registration, user_id, selection_id,
+                                            actor=actor_for(task, request.path_params.get("app_id")), limit=limit, cursor=cursor)
 
 
 @router.put("/config")
@@ -315,6 +377,7 @@ def info(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_to
     config = registry.config(user_id)
     store = registry.store(user_id)
     store.synchronize()
+    grant = tasks.current_grant(task, store=store) if task else None
     return {
         "vault_id": config["vault_id"],
         "curator_agent_id": config["curator_agent_id"],
@@ -323,7 +386,9 @@ def info(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_to
         "history_policy": POLICY,
         "snapshot_creation_enabled": False,
         "capabilities": CAPABILITIES,
-        "writable_files": list(task.writable) if task else [],
+        "writable_files": [item["current_path"] for item in grant["selected_documents"] if item["current_path"]] if grant else [],
+        "allowed_new_paths": grant["allowed_new_paths"] if grant else [],
+        "grant_version": 2 if grant else None,
         "excluded": [
             "PDF processing",
             "Codex Skills",
@@ -428,8 +493,11 @@ def search(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    access(request)
-    return registry.store(user_id).search(query, limit, offset, kind, include_assets, directory, intent, view, cursor)
+    task = access(request)
+    result = registry.store(user_id).search(query, limit, offset, kind, include_assets, directory, intent, view, cursor, model_response=task is not None)
+    # This is the exact fitted model projection: bypass response_model's later
+    # defaults/filtering, which could grow the envelope or erase clipping flags.
+    return JSONResponse(result) if task is not None else result
 
 
 @router.get("/read")
@@ -451,8 +519,8 @@ def read(
     result = registry.store(user_id).read(
         doc, start=start, length=length, expected_revision=expected_revision, page=page
     )
-    if view == "compact":
-        result = compact_read(result)
+    if view == "compact" or task is not None:
+        result = compact_read(result, view=view)
     tasks.record_read(task, result)
     return result
 
@@ -591,11 +659,16 @@ def restore_snapshot(
     )
 
 
-def curator(request: Request, user_id, path: str):
+def curator_task(request: Request, user_id):
     task = access(request, publish=True)
     config = registry.config(user_id)
     if task and task.agent_id != config["curator_agent_id"]:
         raise WikiError("Only this account's configured curator may publish", 403)
+    return task
+
+
+def curator(request: Request, user_id, path: str):
+    task = curator_task(request, user_id)
     tasks.require_path(task, registry.store(user_id), path)
     return task.agent_id if task else "human"
 
@@ -607,6 +680,7 @@ class Publish(Edit):
     tags: list[str] | None = None
     aliases: list[str] | None = None
     item_doc: str | None = None
+    reservation_id: str | None = None
 
 
 @router.post("/publish")
@@ -634,6 +708,7 @@ def publish(
         tags=body.tags,
         aliases=body.aliases,
         item_doc=body.item_doc,
+        reservation_id=body.reservation_id,
     )
 
 
@@ -647,11 +722,12 @@ def get_blocks(
     budget_chars: int | None = Query(None, ge=1, le=96000),
     offset: int = Query(0, ge=0),
     limit: int | None = Query(None, ge=1, le=100),
+    start: int | None = None,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
     task = access(request)
-    return WikiCuration(registry.store(user_id)).blocks(doc, view=view, ids=ids, expected_revision=expected_revision, budget_chars=budget_chars, offset=offset, limit=limit, task=task)
+    return WikiCuration(registry.store(user_id)).blocks(doc, view=view, ids=ids, expected_revision=expected_revision, budget_chars=budget_chars, offset=offset, limit=limit, start=start, task=task)
 
 
 @router.post("/revise")
@@ -695,16 +771,8 @@ def organize(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    actor = curator(request, user_id, body.path)
-    task = access(request)
-    tasks.require_read(
-        task, registry.store(user_id), body.path, body.expected_revision
-    )
-    for relation in body.relations:
-        tasks.require_source_read(task, registry.store(user_id), relation.model_dump())
-    if task:
-        for source in body.sources or []:
-            tasks.require_source_read(task, registry.store(user_id), source.model_dump())
+    task = curator_task(request, user_id)
+    actor = task.agent_id if task else "human"
     return WikiCuration(registry.store(user_id)).organize(
         body.path,
         body.expected_revision,
@@ -772,6 +840,7 @@ class Submission(BaseModel):
 
 
 class Maintenance(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     idempotency_key: str
     material: str = ""
     scope: str = "保留原文，补充 Key note、必要标签与关联"
@@ -780,6 +849,9 @@ class Maintenance(BaseModel):
     sources: list[Source] = []
     created_changes: dict[str, str] = {}
     review: ReviewObservation | None = None
+    selection_id: str | None = None
+    selection_ordinal: StrictInt | None = None
+    creation: CreationRequest | None = None
 
 
 @router.post("/maintain")
@@ -802,10 +874,14 @@ def maintain(
         body.paths,
         body.target,
         [s.model_dump() for s in body.sources],
-        task.agent_id if task else "human",
+        actor_for(task, request.path_params.get("app_id")),
         body.created_changes,
         review=body.review.model_dump() if body.review is not None else None,
         selection_task=task,
+        mcp_scope=_mcp_scope(request),
+        selection_id=body.selection_id,
+        selection_ordinal=body.selection_ordinal,
+        creation=body.creation.model_dump() if body.creation is not None else None,
     )
 
 
@@ -861,8 +937,8 @@ def list_jobs(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    access(request)
-    return WikiJobs(user_id).list(offset, limit, view=view, idempotency_key=idempotency_key)
+    task = access(request)
+    return WikiJobs(user_id).list(offset, limit, view=view, idempotency_key=idempotency_key, model_response=task is not None)
 
 
 @router.get("/jobs/{job_id}")
@@ -873,11 +949,17 @@ def get_job(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    access(request)
+    task = access(request)
     if view not in {"compact", "full"}:
         raise WikiError("Invalid maintenance view", 422)
     result = WikiJobs(user_id).get(job_id)
-    return WikiJobs.summary(result) if view == "compact" else result
+    if view == "compact":
+        result = WikiJobs.summary(result, exact_key=task is not None)
+        if task is not None:
+            from ..wiki.model_response import fit_prefix
+
+            return fit_prefix(lambda _: result, 0)
+    return result
 
 
 @router.post("/jobs/{job_id}/cancel")
@@ -903,3 +985,15 @@ def retry_job(
 ):
     access(request, write=True)
     return WikiJobs(user_id).retry(job_id)
+
+
+@router.post("/jobs/{job_id}/readmit")
+def readmit_job(
+    job_id: str,
+    body: GrantReadmissionRequest,
+    request: Request,
+    user_id: ScopeUser = None,
+    _: str = Depends(verify_token),
+):
+    access(request, human_only=True)
+    return WikiJobs(user_id).readmit(job_id, body.paths, body.creation.model_dump() if body.creation else None)

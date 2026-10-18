@@ -75,7 +75,7 @@ async def test_worker_and_cancelled_assignment_mark_the_actual_branch(client, tm
     jobs = WikiJobs(None)
     job = jobs.maintain("injection-worker", "", "organize", ["Library/note.md"], None, [], "human")
     jobs.update(job["id"], status="running", session_id=session.id)
-    tasks.assign(session.id, job["id"], ["Library/note.md"])
+    tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
     try:
         prompt = instructions("maintain", token)
@@ -134,7 +134,7 @@ async def test_actual_read_survives_guide_loading_but_not_a_fresh_task(client, t
     job = jobs.maintain("guide-read-reuse", "", "organize", [path], None, [], "human")
     session = SimpleNamespace(id="guide-read-worker", user_id=None, agent_id=config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
-    tasks.assign(session.id, job["id"], [path])
+    tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
 
     def headers():

@@ -12,7 +12,7 @@ import jieba
 from markdown_it import MarkdownIt
 from markdown_it.renderer import RendererHTML
 
-from .extract import HTML_BODY_VERSION, HTMLBodyAnalyzer, html_has_readable_body
+from .extract import HTML_BODY_VERSION, HTMLBodyAnalyzer
 from .formats import MARKDOWN_SQL
 
 VERSION = "sections-v8"
@@ -161,20 +161,6 @@ def sections(text: str, title: str) -> list[dict]:
             # Coordinates remain literal slices of the current extracted text.
             start = stop if stop == end else stop - min(1000, (stop - start) // 2)
     return result or [{"title": title, "start": parsed.body_start, "end": parsed.body_start, "section_role": "body", "readable_body": False}]
-
-
-def readable_body(content: str, part: dict) -> bool:
-    # Fenced examples inherit their surrounding section's heading. A code
-    # block inside a bookkeeping/related region cannot make it evidence.
-    if part["section_role"] in {"related_notes", "curator_note"} or (
-        part["section_role"] == "example"
-        and normalize(part["title"]) in {"相关笔记", "整理说明"}
-    ):
-        return False
-    # Render the complete logical region before inspecting its structure.
-    # Inline and block HTML share hidden/media rules; escaped literal code
-    # remains data. Neither this rendering nor the flag changes read offsets.
-    return html_has_readable_body(_markdown.render(content))
 
 
 def initialize(db) -> None:

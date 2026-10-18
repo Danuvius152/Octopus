@@ -26,8 +26,7 @@ def active_worker(config, paths):
     job = jobs.maintain("write-gate", "", "organize", paths, None, [], "human")
     session = SimpleNamespace(id="write-gate-worker", user_id=None, agent_id=config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
-    assigned = [*paths, *(path + ".md" for path in paths if not path.endswith((".md", ".markdown")))]
-    tasks.assign(session.id, job["id"], assigned)
+    tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
     try:
         yield {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}

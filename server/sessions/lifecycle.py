@@ -11,10 +11,15 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
 from ..attachments import delete_session_attachments
+from ..config import settings
+from ..credential_bindings import validate_credential_binding
+from ..harness import get_harness
 from ..large_prompts import delete_session_large_prompts
 from ..models import MessageContent, SessionDetail, SessionStatus
 from ..workspace import confine
@@ -36,6 +41,82 @@ _ARCHIVED_MESSAGE_WINDOW = 200
 
 class LifecycleMixin(SessionManagerBase):
 
+    async def require_active_agent(self, agent_id: str | None) -> dict[str, Any] | None:
+        if agent_id in self._closed_agents:
+            raise ValueError("Agent admission is closed")
+        agent = await self.db.get_agent(agent_id) if self.db and agent_id else None
+        if self.db and (agent is None or agent["archived"]):
+            raise ValueError("Agent not found or archived")
+        if agent_id in self._closed_agents:
+            raise ValueError("Agent admission is closed")
+        return agent
+
+    @asynccontextmanager
+    async def agent_operation(self, agent_id: str | None) -> AsyncIterator[None]:
+        """Reserve agent work; archive joins it outside the lock.
+
+        Global turn admission is checked by start_message, which also records
+        a refused application/delegation attempt. Session restoration must
+        remain available to confirm earlier receipts during shutdown recovery.
+        """
+        async with self._agent_lifecycle_lock:
+            await self.require_active_agent(agent_id)
+            completion = asyncio.get_running_loop().create_future()
+            owners = self._agent_operations.setdefault(agent_id, set())
+            owners.add(completion)
+        try:
+            yield
+        finally:
+            owners.discard(completion)
+            completion.set_result(None)
+
+    async def archive_agent(self, agent_id: str) -> None:
+        from ..agent_manager import AgentError, AgentManager
+
+        async with self._agent_lifecycle_lock:
+            agent = await self.db.get_agent(agent_id)
+            if agent is None:
+                raise AgentError("Agent not found")
+            if agent["is_system"]:
+                raise AgentError("The Default Agent cannot be archived")
+            task = self._agent_archive_tasks.get(agent_id)
+            if task is None or task.done():
+                self._closed_agents.add(agent_id)
+
+                async def finish() -> None:
+                    # No lifecycle lock spans creation, model retirement or DB
+                    # settlement. New creation and old-session sends are closed.
+                    pending = tuple(self._agent_operations.get(agent_id, ()))
+                    if pending:
+                        await asyncio.gather(*(asyncio.shield(item) for item in pending))
+                    if self._schedule_runner is not None:
+                        await self._schedule_runner.suspend_agent(agent_id)
+                    await self.evict_agent_sessions(agent_id)
+                    await AgentManager(self.db).archive_agent(agent_id)
+
+                task = asyncio.create_task(finish(), name=f"archive-agent-{agent_id}")
+                self._agent_archive_tasks[agent_id] = task
+                self._own_task(task)
+        await asyncio.shield(task)
+
+    async def unarchive_agent(self, agent_id: str, user_id: str | None) -> dict[str, Any]:
+        from ..agent_manager import AgentError, AgentManager
+
+        async with self._agent_lifecycle_lock:
+            agent = await self.db.get_agent(agent_id, user_id=user_id)
+            if agent is None or agent.get("user_id") != user_id:
+                raise AgentError("Agent not found")
+            operation = self._agent_archive_tasks.get(agent_id)
+            if operation is not None:
+                if not operation.done() or operation.cancelled() or operation.exception() is not None:
+                    raise ValueError("Agent archive retirement is not confirmed")
+            agent = await AgentManager(self.db).unarchive_agent(agent_id, user_id)
+            self._closed_agents.discard(agent_id)
+            self._agent_archive_tasks.pop(agent_id, None)
+        if self._schedule_runner is not None:
+            await self._schedule_runner.restore_agent(agent_id)
+        return agent
+
     async def _owner_extra_roots(self, user_id: str | None) -> list[str]:
         """The additional paths this account may work in (§6).
 
@@ -56,13 +137,26 @@ class LifecycleMixin(SessionManagerBase):
         return [str(r) for r in roots] if isinstance(roots, list) else []
 
     async def create_session(
+        self, agent_id: str | None, name: str | None = None,
+        working_dir: str | None = None, credential_id: str | None = None,
+        origin: str = "user", backend: str | None = None,
+        parent_session_id: str | None = None, delegation_request: str | None = None,
+        app_id: str | None = None,
+    ) -> Session:
+        async with self.agent_operation(agent_id):
+            return await self._create_session(
+                agent_id, name, working_dir, credential_id, origin, backend,
+                parent_session_id, delegation_request, app_id,
+            )
+
+    async def _create_session(
         self,
         agent_id: str | None,
         name: str | None = None,
         working_dir: str | None = None,
         credential_id: str | None = None,
         origin: str = "user",
-        backend: str = "claude-code",
+        backend: str | None = None,
         parent_session_id: str | None = None,
         delegation_request: str | None = None,
         app_id: str | None = None,
@@ -84,6 +178,13 @@ class LifecycleMixin(SessionManagerBase):
         agent = await self.db.get_agent(agent_id) if self.db else None
         if self.db and agent is None:
             raise ValueError(f"Agent {agent_id} not found")
+        backend = backend or (agent or {}).get("backend") or settings.default_backend
+        get_harness(backend)  # Reject unknown kinds rather than a silent fallback.
+        if self.db:
+            await validate_credential_binding(
+                self.db, credential_id or (agent or {}).get("credential_id"),
+                backend, (agent or {}).get("user_id"),
+            )
 
         if not name:
             label = (agent or {}).get("name", "Agent")
@@ -117,7 +218,6 @@ class LifecycleMixin(SessionManagerBase):
             # no owner, and `adopt_orphan_rows` settles that at upgrade.
             user_id=owner_id,
         )
-        self.sessions[sid] = session
         if self.db:
             await self.db.save_session(
                 session_id=session.id,
@@ -134,9 +234,22 @@ class LifecycleMixin(SessionManagerBase):
                 app_id=session.app_id,
                 user_id=session.user_id,
             )
+        self.sessions[sid] = session
         return session
 
     async def import_session(
+        self, name: str, working_dir: str | None = None,
+        claude_session_id: str | None = None, credential_id: str | None = None,
+        messages: list[MessageContent] | None = None, agent_id: str | None = None,
+        origin: str = "user", backend: str | None = None,
+    ) -> Session:
+        async with self.agent_operation(agent_id):
+            return await self._import_session(
+                name, working_dir, claude_session_id, credential_id, messages,
+                agent_id, origin, backend,
+            )
+
+    async def _import_session(
         self,
         name: str,
         working_dir: str | None = None,
@@ -145,9 +258,16 @@ class LifecycleMixin(SessionManagerBase):
         messages: list[MessageContent] | None = None,
         agent_id: str | None = None,
         origin: str = "user",
-        backend: str = "claude-code",
+        backend: str | None = None,
     ) -> Session:
         agent = await self.db.get_agent(agent_id) if (self.db and agent_id) else None
+        backend = backend or (agent or {}).get("backend") or settings.default_backend
+        get_harness(backend)
+        if self.db:
+            await validate_credential_binding(
+                self.db, credential_id or (agent or {}).get("credential_id"),
+                backend, (agent or {}).get("user_id"),
+            )
         owner_id = (agent or {}).get("user_id")
         extra_roots = await self._owner_extra_roots(owner_id)
         sid = uuid.uuid4().hex[:12]
@@ -166,7 +286,6 @@ class LifecycleMixin(SessionManagerBase):
             # owns the agent it is imported under.
             user_id=owner_id,
         )
-        self.sessions[sid] = session
         if self.db:
             await self.db.save_session(
                 session_id=session.id,
@@ -180,6 +299,7 @@ class LifecycleMixin(SessionManagerBase):
                 backend=session.backend,
                 user_id=session.user_id,
             )
+        self.sessions[sid] = session
         if messages:
             for msg in messages:
                 await self._persist_message(session, msg)
@@ -452,7 +572,7 @@ class LifecycleMixin(SessionManagerBase):
         for row in rows:
             if not row["archived"]:
                 continue
-            count = await self.db.count_messages(row["id"])
+            count, _next_seq, duplicates = await self.db.message_sequence_state(row["id"])
             out.append(
                 {
                     "id": row["id"],
@@ -461,6 +581,7 @@ class LifecycleMixin(SessionManagerBase):
                     "status": SessionStatus.idle.value,
                     "created_at": row["created_at"],
                     "message_count": count,
+                    "transcript_integrity": "duplicate_seq" if duplicates else "ok",
                     "claude_session_id": row["claude_session_id"],
                     "credential_id": row.get("credential_id"),
                     "agent_id": row.get("agent_id"),
@@ -505,7 +626,9 @@ class LifecycleMixin(SessionManagerBase):
             session_id, limit=_ARCHIVED_MESSAGE_WINDOW, newest_first=True
         )
         messages = [MessageContent(**m) for m in messages_raw]
-        total = await self.db.count_messages(session_id)
+        total, _next_seq, duplicates = await self.db.message_sequence_state(session_id)
+        if duplicates:
+            messages = []
         oldest = messages[0].seq if messages else None
         return SessionDetail(
             id=match["id"],
@@ -514,6 +637,7 @@ class LifecycleMixin(SessionManagerBase):
             status=SessionStatus.idle,
             created_at=match["created_at"],
             message_count=total,
+            transcript_integrity="duplicate_seq" if duplicates else "ok",
             claude_session_id=match["claude_session_id"],
             credential_id=match.get("credential_id"),
             agent_id=match.get("agent_id"),
@@ -536,11 +660,20 @@ class LifecycleMixin(SessionManagerBase):
             pending_queue=[],
             pending_questions=[],
             oldest_loaded_seq=oldest,
-            has_more_messages=bool(oldest),
-            next_message_seq=total,
+            has_more_messages=await self.db.has_messages_before(session_id, oldest),
+            next_message_seq=max((m.seq for m in messages if m.seq is not None), default=-1) + 1,
         )
 
     async def unarchive_session(
+        self, session_id: str, user_id: str | None = None,
+    ) -> Session:
+        binding = await self.db.get_session_binding(session_id) if self.db else None
+        if binding is None or (user_id is not None and binding["user_id"] != user_id):
+            raise ValueError(f"Archived session {session_id} not found")
+        async with self.agent_operation(binding["agent_id"]):
+            return await self._unarchive_session(session_id, user_id)
+
+    async def _unarchive_session(
         self, session_id: str, user_id: str | None = None
     ) -> Session:
         """Flip archived=0 in the DB and reload the row into memory.
@@ -582,7 +715,7 @@ class LifecycleMixin(SessionManagerBase):
             delegation_request=match.get("delegation_request"),
             **_session_fork_kwargs(match),
         )
-        session._message_count = await self.db.count_messages(session.id)
+        session.restore_message_state(*await self.db.message_sequence_state(session.id))
         self.sessions[session.id] = session
         await self._broadcast(
             {

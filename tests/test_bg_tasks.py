@@ -98,6 +98,9 @@ async def _make_session_row(db, session_id: str, working_dir: str) -> None:
 
 
 async def test_shutdown_drains_group_kill_created_while_stopping(manager, db, tmp_path, monkeypatch):
+    import shlex
+    import sys
+
     from server import bg_tasks
 
     await _make_session_row(db, "shutdown", str(tmp_path))
@@ -110,9 +113,15 @@ async def test_shutdown_drains_group_kill_created_while_stopping(manager, db, tm
 
     monkeypatch.setattr(bg_tasks.os, "killpg", signal_group)
     monkeypatch.setattr(bg_tasks, "_TERM_GRACE_SECONDS", 0.03, raising=False)
+    ready = tmp_path / "resists-term.ready"
+    command = ("import signal,time; from pathlib import Path; "
+               "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+               f"Path({str(ready)!r}).write_text('ready'); time.sleep(60)")
     record = await manager.start_task(
-        session_id="shutdown", command="sleep 60", working_dir=str(tmp_path),
+        session_id="shutdown", command="exec " + shlex.join([sys.executable, "-c", command]),
+        working_dir=str(tmp_path),
     )
+    await _wait_for(ready.exists)
     await manager.shutdown()
     assert signal.SIGKILL in signals, "shutdown returned with an owned group-kill still pending"
     assert (await manager.get_task(record.id)).status == "interrupted"

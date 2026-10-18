@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from server.wiki import origins, schema
+from server.wiki import origins, schema, source_bindings
 from server.wiki.history import WikiHistory, atomic
 from server.wiki.store import WikiError, WikiStore, revision
 
@@ -207,6 +207,32 @@ def external_journal(history, entry):
     journal = history.state / "external-change.json"
     atomic(journal, json.dumps(entry).encode())
     return journal
+
+
+def test_trash_restore_cannot_take_an_identity_active_at_another_path(history):
+    doc, state, raw, _ = opaque_origin(history, "elsewhere.md")
+    returned = b"A returned file with a stale trash receipt.\n"
+    history.store.path("note.md").write_bytes(returned)
+    entry = {
+        "version": 2, "id": uuid.uuid4().hex, "before": {},
+        "paths": ["note.md"], "actor": "human", "reason": "trash/restore",
+        "restored": {"path": "note.md", "document_id": doc["id"]},
+        "trash_id": "stale",
+    }
+    journal = external_journal(history, entry)
+    with pytest.raises(WikiError, match="Restored document identity changed"):
+        history.recover()
+    assert journal.exists()
+    # Ordinary reads retry recovery and must keep reporting the retained
+    # conflict. Inspect durable identities without bypassing that read guard.
+    with pytest.raises(WikiError, match="Restored document identity changed"):
+        history.store.read("elsewhere.md")
+    with history.store.connect() as db:
+        assert db.execute("SELECT id FROM document_identities WHERE path='elsewhere.md'").fetchone()[0] == doc["id"]
+        assert db.execute("SELECT id FROM document_identities WHERE path='note.md'").fetchone()[0] != doc["id"]
+    assert history.store.path("elsewhere.md").read_bytes() == raw
+    assert history.store.path("note.md").read_bytes() == returned
+    assert current_origin(history, doc["id"]) == state
 
 
 def test_external_capture_binds_unobserved_preimage_without_certifying_it(history):
@@ -619,14 +645,23 @@ def test_private_origin_state_never_appears_in_document_or_public_history(histor
 
 def downgrade_fixture_to_schema7(history):
     """Make the exact older table shape, retaining its real document/history rows."""
+    from server.wiki import maintenance_inputs
+    from tests.wiki_schema_fixtures import remove_future_selections
+
     store = history.store
     store.close()
     with sqlite3.connect(store.db_path) as db:
+        maintenance_inputs.discard_derived(db)
+        remove_future_selections(db)
         for action in ("insert", "update", "delete"):
             db.execute(f"DROP TRIGGER wiki_origin_{action}")
         db.execute("DROP TABLE material_origins")
         db.execute("DROP TABLE change_material_origins")
         db.execute("ALTER TABLE app_trash DROP COLUMN origin_state")
+        db.execute("ALTER TABLE app_trash DROP COLUMN source_plan")
+        for table in source_bindings.TABLES:
+            db.execute("DROP TABLE " + table)
+        db.execute("DROP TABLE wiki_protocols")
         db.execute("DELETE FROM wiki_schema WHERE version>=8")
     return store.root, store.state, store.vault_id
 

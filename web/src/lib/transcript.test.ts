@@ -19,6 +19,21 @@ const msg = (seq: number): Message => ({
  * are pinned here, because in the browser they look like ordinary scrolling.
  */
 describe("applyTranscript", () => {
+  it("accepts a reserved terminal that arrives after the stored snapshot", () => {
+    applyTranscript("s1", { messages: [msg(0)], next_message_seq: 1 });
+    handleWsMessage({ type: "result", session_id: "s1", seq: 1, terminal: true,
+      content: { kind: "outcome", request_id: "reserved", status: "success" } });
+    expect(useSessionStore.getState().messages.s1.map((row) => row.seq)).toEqual([0, 1]);
+    expect(useSessionStore.getState().lastAppliedSeq.s1).toBe(1);
+  });
+
+  it("quarantines ambiguous history instead of silently deduplicating its rows", () => {
+    applyTranscript("s1", { messages: [msg(4), msg(4)], next_message_seq: 5,
+      transcript_integrity: "duplicate_seq", has_more_messages: true });
+    expect(useSessionStore.getState().messages.s1).toEqual([]);
+    expect(useSessionStore.getState().hasMoreMessages.s1).toBe(false);
+    expect(useSessionStore.getState().lastAppliedSeq.s1).toBeUndefined();
+  });
   beforeEach(() => {
     useSessionStore.setState({
       token: "t",

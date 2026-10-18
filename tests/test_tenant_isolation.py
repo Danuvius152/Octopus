@@ -561,6 +561,7 @@ async def test_vera_cannot_reach_archers_work_through_any_surface(two_accounts):
     reads = [
         f"/api/sessions/{sid}",
         f"/api/sessions/{sid}/messages?before_seq=99",
+        f"/api/sessions/{sid}/transcript-export",
         f"/api/sessions/{sid}/files?path=README.md",
         f"/api/sessions/{sid}/files/meta?path=README.md",
         f"/api/sessions/{sid}/bg-tasks",

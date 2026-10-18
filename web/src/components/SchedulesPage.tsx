@@ -130,7 +130,7 @@ export function SchedulesPage({
         ) : (
           <div className="schedules-list flex flex-col gap-3.5">
             {schedules.map((sched) => {
-              const agent = agentById(sched.agent_id);
+              const agent = sched.agent_id ? agentById(sched.agent_id) : undefined;
               return (
                 <div key={sched.id} className={`schedule-item card overflow-hidden ${sched.enabled ? "" : "disabled"}`}>
                   <div className="flex items-start gap-3.5 px-5 py-4">
@@ -165,6 +165,7 @@ export function SchedulesPage({
                         role="switch"
                         aria-checked={sched.enabled}
                         aria-label={sched.enabled ? "Pause schedule" : "Resume schedule"}
+                        disabled={Boolean(sched.invalid_reason)}
                         className={`btn-toggle ${
                           sched.enabled ? "on" : "off"
                         } relative h-6 w-11 shrink-0 rounded-full transition-colors ${
@@ -207,6 +208,10 @@ export function SchedulesPage({
                       <div className="schedule-prompt mt-1.5 rounded-lg border border-gray-300 bg-gray-50 px-3.5 py-2.5 text-[13px] leading-relaxed text-gray-900">
                         {sched.prompt}
                       </div>
+                      {sched.invalid_reason && <p role="alert" className="mt-2 text-xs text-destructive">
+                        This schedule's target could not be verified. It is paused;
+                        delete it and create a schedule with a matching agent and conversation.
+                      </p>}
                     </div>
                     <div>
                       <div className="text-[12.5px] text-gray-700">Recent runs</div>

@@ -16,7 +16,7 @@ from __future__ import annotations
 import ast
 import pathlib
 
-from fastapi import Depends, FastAPI
+from fastapi import APIRouter, Depends, FastAPI, routing
 from fastapi.routing import APIRoute
 
 from server import deps
@@ -120,15 +120,39 @@ def _dependency_has_scope(dependency) -> bool:
     )
 
 
-def _routes() -> list[tuple[str, str, bool]]:
+def _routes(application: FastAPI = app) -> list[tuple[str, str, bool]]:
     out: list[tuple[str, str, bool]] = []
-    for route in app.routes:
-        if not isinstance(route, APIRoute):
+    # Newer FastAPI keeps included routers lazy. Its contexts expose the
+    # effective path and dependencies, including guards added by include_router.
+    iter_contexts = getattr(routing, "iter_route_contexts", iter)
+    for route in iter_contexts(application.routes):
+        if not isinstance(getattr(route, "original_route", route), APIRoute):
             continue
         scoped = _dependency_has_scope(route.dependant)
         for method in sorted(route.methods - {"HEAD", "OPTIONS"}):
             out.append((method, route.path, scoped))
     return out
+
+
+def test_nested_router_paths_and_inherited_guards_are_inspected():
+    async def endpoint():
+        return {}
+
+    child = APIRouter()
+    child.add_api_route("/data", endpoint, methods=["GET", "POST"])
+    parent = APIRouter()
+    parent.include_router(child, prefix="/inner")
+    application = FastAPI()
+    application.include_router(parent, prefix="/public")
+    application.include_router(
+        parent, prefix="/private", dependencies=[Depends(deps.scope_user_id)]
+    )
+    assert set(_routes(application)) == {
+        ("GET", "/public/inner/data", False),
+        ("POST", "/public/inner/data", False),
+        ("GET", "/private/inner/data", True),
+        ("POST", "/private/inner/data", True),
+    }
 
 
 def test_a_scope_named_endpoint_without_authorization_is_not_scoped():

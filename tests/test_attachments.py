@@ -121,6 +121,15 @@ def test_get_path_rejects_traversal(attachments_root):
     assert get_path("s", "..\\other") is None
 
 
+def test_upload_does_not_follow_a_session_directory_symlink(attachments_root):
+    outside = attachments_root / "other-session"
+    outside.mkdir()
+    (attachments_root / "s").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(AttachmentError):
+        save_upload("s", "evidence.txt", b"Do not write to the other session")
+    assert list(outside.iterdir()) == []
+
+
 def test_delete_session_attachments_wipes_dir(attachments_root):
     save_upload("s", "a.txt", b"1")
     save_upload("s", "b.txt", b"2")
@@ -317,11 +326,10 @@ async def test_send_message_no_attachments_unchanged(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_send_message_missing_attachment_id_is_dropped(
+async def test_send_message_missing_attachment_id_rejects_complete_input(
     client, attachments_root, monkeypatch
 ):
-    """An orphaned id (deleted file, wrong id) is silently skipped so the
-    user's text still goes through."""
+    """Execution rechecks the files and records a recoverable failure."""
     create = await client.post(
         "/api/sessions", headers=HEADERS, json={"name": "Drop"}
     )
@@ -336,13 +344,14 @@ async def test_send_message_missing_attachment_id_is_dropped(
 
     monkeypatch.setattr(session_manager, "_run_backend", fake_run)
 
-    async for _evt in session_manager._execute_claimed_request(
+    events = [event async for event in session_manager._execute_claimed_request(
         sid, "still send", attachment_ids=["nonexistent"]
-    ):
-        pass
+    )]
 
-    # No header (no real attachments resolved), prompt unchanged
-    assert captured["prompt"] == "still send"
+    assert captured == {}
+    result = next(event for event in events if event["type"] == "result")
+    assert result["code"] == "attachment_unavailable"
+    assert result["tool_input"]["rejected_input"]["content"] == "still send"
 
 
 @pytest.mark.asyncio

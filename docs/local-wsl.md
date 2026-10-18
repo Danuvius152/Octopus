@@ -14,6 +14,9 @@ AI 后端使用已经登录 ChatGPT 的 Linux 版 Codex。`.env` 设置
 界面和 API 都采用这个默认值，新建普通会话继承代理的后端；继续使用当前
 用户的 CLI 登录，无需复制或重新设置凭据。
 
+本机当前没有可用的 Claude 环境；开发与发布的真实模型验证只使用 Codex。
+这是本机配置与验证范围，项目仍支持两个后端，不修改其他使用者的后端选择。
+
 ## 配置和数据
 
 - 开发目录：`/home/jack/Octopus`。
@@ -56,21 +59,18 @@ Ubuntu 的标准虚拟环境需要 `python3-venv` 软件包，本机已经安装
 ```bash
 cd /home/jack/Octopus
 python3 -m venv .venv
-.venv/bin/pip install -e '.[test]' -c /home/jack/.octopus/python-constraints.txt
+.venv/bin/pip install -e '.[test]'
 
 cd web
 bun install --frozen-lockfile
 bun run build
 ```
 
-`python-constraints.txt` 保存本机验证过的 Python 依赖版本，不包含本地路径、
-凭据或项目的 editable 安装记录。当前源码依赖 MCP 1.x 的 FastMCP 接口，
-依赖声明中的 `mcp>=1.0` 会允许安装不兼容的 MCP 2.x；重装时保留这个约束文件。
-上游迁移接口后，需要重新验证对应的依赖版本。
-
-本机验证使用 FastAPI 0.136.3。FastAPI 0.137 起改变了路由列表的结构，
-项目现有的账户隔离结构测试依赖此前的结构，因此同样通过本地约束固定。
-参见 [FastAPI 0.137 的变更说明](https://fastapi.tiangolo.com/release-notes/#01370)。
+Python 依赖及兼容边界统一在 `pyproject.toml` 声明，当前 FastMCP 接口使用
+`mcp>=1.30,<2`，安装不需要额外的全量约束文件。接口迁移或更新依赖时，
+在独立虚拟环境验证安装、`pip check`、服务导入、MCP 命名空间和账户隔离；
+不要在运行服务共享的虚拟环境中试装。账户隔离结构检查同时支持直接路由和
+新版 FastAPI 的 included-router context，检查嵌套前缀和继承的实际权限依赖。
 
 本机使用 Windows 的 `http://127.0.0.1:7890` HTTP 代理。HTTP/HTTPS 的
 大写和小写代理变量均已持久写入 `~/.bashrc`，新终端不依赖上一终端的环境。
@@ -79,12 +79,38 @@ bun run build
 Windows 风格的 `127.*`
 不能代替 HTTPX 所需的明确地址，否则 MCP 回调和应用后端请求可能收到代理的 502。
 
+### 本地 Codex skills
+
+本机通过 Codex 原生的用户级发现目录共享已安装技能：
+`/home/jack/.agents/skills` 软链接到 `/home/jack/.codex/skills`。
+首次重建时，目标路径不存在才创建，不覆盖已有技能目录：
+
+```bash
+mkdir -p "$HOME/.agents"
+ln -s "$HOME/.codex/skills" "$HOME/.agents/skills"
+```
+
+Octopus 服务以 `jack` 运行，`HOME=/home/jack`，因此本地 CLI、已有和新建
+Codex agent、普通新会话都使用同一份用户技能。凭据仍使用
+`~/.octopus/codex/<credential_id>/` 作为独立 `CODEX_HOME`，不需要复制
+认证、配置或会话文件。下一轮启动 Codex 即可发现，无需重启 Octopus 或新建
+会话；已经运行的回合不必打断。框架和 agent prompt 无需添加技能清单。
+
+技能由 Codex 按名称、描述及自身调用策略按需加载；`grilling` 可按任务匹配，
+`grill-me` 的 `allow_implicit_invocation: false` 保留，需显式 `$grill-me`。
+自动发现不意味着所有技能都应自动触发。目录、软链接与调用策略见
+[官方 skills 说明](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills)。
+
 ## 本机测试
 
 发布所需检查与 Codex 选择条件以 [AGENTS.md](../AGENTS.md#after-every-code-change)
 为准，不在这里复制一份测试清单或固定通过数。下面只补充 WSL 环境、凭据入口
 和可选知识评测的使用方法；文档整理只做受影响链接、索引和差异检查，不触发
 全套测试、构建或付费模型请求。
+
+每次交付报告和审阅任务都应明确写出：Codex 的实际检查结果；Claude 当前
+不可用、真实 CLI/浏览器测试未执行，不计为通过，也不作为本机待补发布门禁。
+离线单元、协议与契约测试仍覆盖两个后端；它们不能代替 Claude 实机验证。
 
 仓库锁定的 Playwright 1.58.2 尚未提供 Ubuntu 26.04 平台包，本机使用它的
 Ubuntu 24.04 Chromium 构建，并已安装官方浏览器依赖。运行浏览器测试前指定
@@ -104,8 +130,8 @@ export PLAYWRIGHT_HOST_PLATFORM_OVERRIDE=ubuntu24.04-x64
 
 Codex 实机测试按 AGENTS 的 marker 选择。其中 research 测试需要
 目录式凭据，验证时使用临时目录中的符号链接指向现有 `~/.codex`，并通过
-`OCTOPUS_CODEX_HOME_DIR` 指定；无需复制认证文件或重新登录。Claude 实机测试
-需要另外安装并登录 Claude，本机按用户选择使用 Codex。
+`OCTOPUS_CODEX_HOME_DIR` 指定；无需复制认证文件或重新登录。当前不运行 Claude
+或跨后端的真实模型测试；只有用户明确要求并具备环境后才扩展验证范围。
 
 重跑 Codex 后端实机测试时，可以这样创建并清理临时凭据入口：
 
@@ -161,13 +187,17 @@ octopus_knowledge_evidence=$(mktemp -d /tmp/octopus-wiki-evals.XXXXXX)
 同进程因注册绑定更新而重叠的 Store 租约共享观察器与尚未提交的事件，最后一个
 租约释放后才关闭。需要离线打开 Store 时，应先停止拥有该索引的后端。
 
-schema9/文件事件协议1先持久接收，再原子应用身份与索引，最后精确确认。
+当前代码使用 schema10，首次打开 schema9 状态时在同一事务中升级来源证明、
+注册、选择和有限授权账本；事务失败则保持迁移前状态。文件事件协议仍为1：
+先持久接收，再原子应用身份与索引，最后精确确认。
 删除重建结束旧身份，已匹配重命名/原子保存沿用身份。索引失败保留事件重试；
 接收中断、无法配对的移动或通知溢出会保留不确定状态并返回 503。应核对阶段
 和证据，不能删除队列或用补偿扫描强行伪造 ready。
 
-旧 schema8 代码拒绝打开新索引；回退只可使用完整支持相同接收/应用协议的
-schema9 构建，不能仅放宽版本检查或恢复旧数据库覆盖当前写入。停机期间的
+schema10 迁移提交后，旧 schema9 代码会拒绝打开新账本。恢复只使用支持当前
+schema 及持久协议的已验证代码，或在保留现有状态的基础上前向修复；不额外
+制作旧版兼容构建，不维护第二份知识库。不能仅放宽版本检查或恢复旧数据库
+覆盖当前写入。停机期间的
 补偿扫描只能观察最终文件，不能恢复未被观察的瞬时身份历史。实现细节与
 证据边界见[开发总结 §4](plans/wiki-development-summary.md#4-当前运行合同)。
 
@@ -215,8 +245,10 @@ push、构建、重启或发布。用户明确要求文档提交时才提交，�
 4. 验证健康接口、登录页面、静态资源和真实浏览器，确认代码与构建产物属于
    本次提交；在服务快照运行
    `.venv/bin/python scripts/validate-release.py <服务快照> --base-url http://127.0.0.1:8000`
-   比对实际 HTML / JS / CSS 的 SHA-256。验收失败时恢复旧指向、重启旧服务
-   并验证，不清理旧快照；回退代码须兼容当前 schema/事件协议，不恢复旧 DB。
+   比对实际 HTML / JS / CSS 的 SHA-256。验收失败时，只有旧构建仍兼容实际
+   schema 和持久协议才可恢复旧指向并重启验证。schema10 迁移已提交时，
+   不自动切回旧 schema9 构建，保留当前状态并采用兼容代码恢复或前向修复；
+   不恢复旧 DB，不清理尚需诊断的代码快照。
 5. 验收全部通过且旧工作树干净、没有进程继续使用后，用 `git worktree remove`
    退役旧源码，不强制删除脏工作树。账户、数据库、工作区、Wiki、登录及共享
    配置/依赖保留。记录实际部署提交与结果到相应任务产物；必要时更新现有文档，

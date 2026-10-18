@@ -16,6 +16,15 @@ export function applyTranscript(
   data: Record<string, unknown>
 ): void {
   const store = useSessionStore.getState();
+  if (data.transcript_integrity === "duplicate_seq") {
+    store.setMessages(sessionId, []);
+    store.setMessageWindow(sessionId, null, false);
+    store.setSessions(store.sessions.map((session) => session.id === sessionId
+      ? { ...session, transcript_integrity: "duplicate_seq" } : session));
+    store.setArchivedSessions(store.archivedSessions.map((session) => session.id === sessionId
+      ? { ...session, transcript_integrity: "duplicate_seq" } : session));
+    return;
+  }
   const messages = (data.messages as MessageInput[]) || [];
   const snapshotHigh = typeof data.next_message_seq === "number"
     ? data.next_message_seq - 1 : Math.max(-1, ...messages.map((m) => m.seq ?? -1));

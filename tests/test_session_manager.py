@@ -628,7 +628,9 @@ async def test_resolve_credential_returns_decrypted_secret(manager):
 
 @pytest.mark.asyncio
 async def test_resolve_credential_returns_none_when_missing(manager):
-    session = await _new(manager,"S", credential_id="ghost")
+    session = await _new(manager, "S")
+    # A removed legacy binding is tolerated on read; new bindings must exist.
+    session.credential_id = "ghost"
     from server.harness import get_harness
 
     cred = await manager._resolve_credential(session, None, get_harness("claude-code"))
@@ -1299,6 +1301,11 @@ async def test_delete_session_clears_queue(manager, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_archive_creates_new_session_with_same_settings(manager):
+    await manager.db.save_credential(
+        credential_id="c-1", backend="claude-code", label="synthetic",
+        auth_type="api_key", secret_encrypted="not-used-by-this-test",
+        created_at="2026-10-17T00:00:00+00:00",
+    )
     old = await _new(manager,
         name="Work",
         working_dir="/tmp/work",

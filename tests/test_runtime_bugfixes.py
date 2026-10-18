@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
+from itertools import pairwise
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -41,6 +42,15 @@ async def eventually(check, timeout=3.0):
             await asyncio.sleep(0.01)
 
 
+def trusted_readmit(jobs, job_id):
+    with pytest.raises(WikiError, match="re-admission") as refused:
+        jobs.retry(job_id)
+    assert refused.value.status == 409
+    retained = jobs.get(job_id)
+    paths = [] if retained["payload"].get("material") else [item["path"] for item in retained["items"]]
+    return jobs.readmit(job_id, paths)
+
+
 async def test_startup_isolates_unavailable_vault_and_rejoins_without_restart(service, tmp_path, monkeypatch, caplog):
     db = Database(settings.db_path)
     await db.initialize()
@@ -68,8 +78,11 @@ async def test_startup_isolates_unavailable_vault_and_rejoins_without_restart(se
         await eventually(lambda: WikiJobs(healthy_owner).get(healthy_job)["status"] == "completed")
         # No tight retry loop while one mounted root is absent.
         await asyncio.sleep(0.25)
-        failures = [r for r in caplog.records if "Wiki worker unavailable" in r.message]
-        assert 1 <= len(failures) <= 3
+        failures = [r for r in caplog.records if "Wiki worker unavailable" in r.message and r.args[0] == broken_owner]
+        assert failures and failures[0].args[1] == 0.1
+        assert all(record.args[1] == 0.2 for record in failures[1:])
+        assert all(later.created - earlier.created >= earlier.args[1] * 0.9
+                   for earlier, later in pairwise(failures))
         assert "vault root is unavailable" in caplog.text
         (tmp_path / "disconnected").rename(broken_root)
         await eventually(lambda: WikiJobs(broken_owner).get(broken_job)["status"] == "completed")
@@ -184,7 +197,14 @@ async def test_live_registration_change_settles_old_worker_and_allows_retry(jobs
         assert not grants.assignments
         # Same idempotency key still identifies this durable job, no duplicate.
         assert current.maintain("registration-change", "# Original\nRetain source.\n", "organize", [], "Library/source.md", [], "human")["id"] == job["id"]
-        assert current.retry(job["id"])["status"] == "queued"
+        # The synthetic CLI opened extra probe scopes above. They must retire
+        # before re-admission, even though their old write authority is revoked.
+        with pytest.raises(WikiError, match="assignment has not retired") as owned:
+            current.readmit(job["id"], [])
+        assert owned.value.status == 409
+        for token in tokens:
+            grants.close(token)
+        assert trusted_readmit(current, job["id"])["status"] == "queued"
         resumed = WikiWorker()
         resumed.manager = test_wiki_jobs.Curator(current)
         await resumed.run(None)
@@ -220,7 +240,7 @@ async def test_publication_survives_registration_change_without_another_model_ru
         current = WikiJobs(None)
         assert current.get(job["id"])["status"] == "failed"
         published = current.store.path("Library/published.md").read_bytes()
-        current.retry(job["id"])
+        trusted_readmit(current, job["id"])
         resumed = WikiWorker()
         resumed.manager = test_wiki_jobs.Curator(current)
         await resumed.run(None)
@@ -269,7 +289,7 @@ async def test_unconfirmed_recording_survives_rebinding_without_regeneration(job
         assert first["status"] == "failed"
         assert first["items"][0]["recording_failure"]["request_id"] == "unconfirmed-original-request"
         retained = current.store.path("Library/unconfirmed.md").read_bytes()
-        attention = await test_wiki_jobs.process(current, current.retry(job["id"]), manager)
+        attention = await test_wiki_jobs.process(current, trusted_readmit(current, job["id"]), manager)
         assert attention["status"] == "completed_with_attention"
         assert manager.turns == 1
         manager.committed = True
@@ -281,7 +301,7 @@ async def test_unconfirmed_recording_survives_rebinding_without_regeneration(job
         await worker.stop()
 
 
-async def test_rebinding_keeps_blocked_recording_session_until_original_is_verified(jobs, monkeypatch):
+async def test_rebinding_keeps_blocked_recording_session_until_original_is_verified(jobs, client, monkeypatch):
     from server.harness import HarnessEvent
     from server.wiki.curation import WikiCuration
 
@@ -295,11 +315,19 @@ async def test_rebinding_keeps_blocked_recording_session_until_original_is_verif
             calls.append("model")
 
         async def stream(self):
+            from server.mcp_identity import mint, verify
+            from server.wiki.tasks import tasks
+
             session_id = jobs.get(job["id"])["session_id"]
             doc = jobs.store.read("Library/blocked.md")
-            await asyncio.to_thread(WikiCuration(jobs.store).organize, doc["path"], doc["revision"],
-                "Original conclusion and conditions.", [], [], [], "curator", "publish",
-                {"job_id": job["id"], "session_id": session_id})
+            token = tasks.open(manager.get_session(session_id), "maintain")
+            try:
+                task = tasks.call(tasks.active[token], verify(mint(session_id, wiki_task_id=token)))
+                tasks.record_read(task, doc)
+                await asyncio.to_thread(WikiCuration(jobs.store).organize, doc["path"], doc["revision"],
+                    "Original conclusion and conditions.", [], [], [], "curator", "publish", task=task)
+            finally:
+                tasks.close(token)
             yield HarnessEvent(type="result")
 
         async def stop(self):
@@ -316,23 +344,47 @@ async def test_rebinding_keeps_blocked_recording_session_until_original_is_verif
     monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: PublishingRun())
     monkeypatch.setattr(manager.db, "record_terminal", fail_recording)
     job = jobs.maintain("blocked-recording-rebind", "# Original\nKeep this source.\n", "organize", [], "Library/blocked.md", [], "human")
-    worker = WikiWorker()
+    worker = jobs_module.worker
+    assert not worker.tasks
     await worker.start(manager)
     try:
         await eventually(lambda: rebound and WikiJobs(None).get(job["id"])["status"] == "failed")
         current = WikiJobs(None)
         first = current.get(job["id"])
         assert first["items"][0].get("recording_failure")
+        published = current.store.path("Library/blocked.md").read_bytes()
         await asyncio.wait_for(asyncio.shield(worker.tasks[None]), 3)
         session = manager.get_session(first["session_id"])
         assert session is not None and session._recording_blocked is not None
+        reference = first["items"][0]["recording_failure"]
+        with pytest.raises(WikiError, match="execution has not retired") as blocked:
+            current.readmit(job["id"], [])
+        assert blocked.value.status == 409
+        assert session._current_request is None and not session._pending_queue
+        assert not session._backend_cleanup_tasks
+        paused = session._dispatch_paused
+        endpoint = f"/api/sessions/{session.id}/dispatch/resume?resume_queue=false"
+        failed = await client.post(endpoint, headers=test_wiki_jobs.wiki_api.HEADERS)
+        assert failed.status_code == 503
+        assert session._recording_blocked.request_id == reference["request_id"]
+        assert session._dispatch_paused == paused and calls == ["model"]
         monkeypatch.setattr(manager.db, "record_terminal", record_terminal)
-        resumed = WikiWorker()
-        resumed.manager = manager
-        current.retry(job["id"])
-        await resumed.run(None)
+        reconciled = await client.post(endpoint, headers=test_wiki_jobs.wiki_api.HEADERS)
+        assert reconciled.status_code == 200, reconciled.text
+        assert session._recording_blocked is None and session._dispatch_paused == paused
+        assert not session._pending_queue and calls == ["model"]
+        terminal = await manager.db.get_committed_terminal(session.id, reference["request_id"])
+        assert terminal["status"] == "success"
+        refused = await client.post(f"/api/wiki/jobs/{job['id']}/retry", headers=test_wiki_jobs.wiki_api.HEADERS)
+        assert refused.status_code == 409
+        accepted = await client.post(f"/api/wiki/jobs/{job['id']}/readmit", headers=test_wiki_jobs.wiki_api.HEADERS,
+                                     json={"paths": []})
+        assert accepted.status_code == 200, accepted.text
+        await eventually(lambda: current.get(job["id"])["status"] == "completed")
+        await asyncio.wait_for(asyncio.shield(worker.tasks[None]), 3)
         assert current.get(job["id"])["status"] == "completed"
         assert calls == ["model"]
+        assert current.store.path("Library/blocked.md").read_bytes() == published
         assert manager.get_session(session.id) is None
     finally:
         monkeypatch.setattr(manager.db, "record_terminal", record_terminal)
@@ -361,7 +413,7 @@ async def test_recording_reference_survives_a_cancellation_between_control_read_
             raced = True
             current.mark_cancelled(job_id)
             if retry_immediately:
-                current.retry(job_id)
+                trusted_readmit(current, job_id)
         return update(self, job_id, **fields)
 
     monkeypatch.setattr(WikiJobs, "update", racing_update)

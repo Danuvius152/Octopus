@@ -683,7 +683,7 @@ async def test_mcp_curator_executes_new_contracts_through_real_http(client, tmp_
     job = jobs.maintain("mcp-check", "", "检查当前文章", ["Library/note.md"], None, [], "human")
     session = await session_manager.create_session(config["curator_agent_id"], "MCP 合同", str(tmp_path))
     jobs.update(job["id"], status="running", session_id=session.id)
-    tasks.assign(session.id, job["id"], ["Library/note.md"])
+    tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
     from server.deps import get_session_manager
     from server.main import _wiki_error

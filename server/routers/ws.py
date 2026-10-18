@@ -75,21 +75,22 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                                     "message": "Invalid client request identity"}, session_scoped=False)
                     continue
 
-                def reject(message: str, session_id=session_id, client_request_id=client_request_id) -> None:
+                def reject(message: str, code: str | None = None, session_id=session_id, client_request_id=client_request_id) -> None:
                     # Account-local echo of submitted input, containing no
                     # session content. Missing/foreign resources share it.
                     delivery.offer({
                         "type": "submission" if client_request_id else "error",
                         "session_id": session_id, "message": message,
+                        **({"code": code} if code else {}),
                         **({"client_request_id": client_request_id, "accepted": False}
                            if client_request_id else {}),
                     }, session_scoped=False)
-                raw_aids = data.get("attachment_ids") or []
-                attachment_ids = (
-                    [a for a in raw_aids if isinstance(a, str)]
-                    if isinstance(raw_aids, list)
-                    else []
-                )
+                from ..attachments import AttachmentUnavailable
+
+                attachment_ids = data.get("attachment_ids", [])
+                if not isinstance(attachment_ids, list) or any(not isinstance(a, str) for a in attachment_ids):
+                    reject(str(AttachmentUnavailable()), code=AttachmentUnavailable.code)
+                    continue
                 # Allow attachment-only turns (no text), but require *some*
                 # signal so we don't kick a backend turn off an empty payload.
                 if not isinstance(session_id, str) or not session_id or not isinstance(content, str) or (not content and not attachment_ids):
@@ -119,6 +120,8 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                                         "client_request_id": client_request_id, "accepted": True,
                                         "request_id": receipt.request_id,
                                         "disposition": receipt.disposition})
+                except AttachmentUnavailable as e:
+                    reject(str(e), code=e.code)
                 except QuotaExceeded as e:
                     # Its own branch: this is "you, shortly" rather than
                     # "that request was wrong", and the difference is what the

@@ -11,3 +11,5 @@
 异常恢复先用原 job_id 或固定 idempotency_key 查 jobs 默认摘要；只在确实需要单项回执或失败详情时取完整结果，大结果用 view="full", export=true，按返回路径、bytes 和 SHA-256 核文件，短程序只读所需字段，不把大 JSON 拼进 shell 参数。检查工具实际 error/status，外层调用成功不代表操作成功。已保存但索引失败只恢复索引，不再生成或重放正文；成功且未变项不换 key 重排。冲突时在原范围重读当前版本，失败的提议和历史保留，不使用旧坐标或旧阅读覆盖。
 
 多输入任务中新建独立页面用 item_doc 指明所属项。publish 只用于获准、有独立用途的新页；不为文章入库强制创建来源副本或 Concept/Topic。普通文件保存、目录移动和自动索引不触发语义整理；人工小修后的明确维护按当前实际版本及必要上下文处理，不重复整理整库。
+
+原始 blocks 返回 content_end 小于 end 时，完整块的 hash/locator/start/end 不变，实际已读范围是 content_start..content_end。将 next_offset 和 next_start（作为 start 参数）一同带入下一次 blocks 请求；只读定位符不算已读正文。不得把原块 end 当作本次返回内容的末尾。

@@ -394,6 +394,7 @@ def test_invalid_ledger_binding_or_watermark_fails_closed(inbox, field, value):
     sequence = receive(inbox, batch_id="binding-control")
     # Field names are a fixed parametrized allowlist, never external input.
     with sqlite3.connect(inbox.db_path) as db:
+        db.execute("PRAGMA recursive_triggers=ON")
         db.execute(f"UPDATE filesystem_state SET {field}=?", (value,))
     before = sql_rows(inbox, "SELECT * FROM filesystem_inbox WHERE seq=?", (sequence,))
     with pytest.raises(WikiError) as failure:
@@ -405,6 +406,7 @@ def test_invalid_ledger_binding_or_watermark_fails_closed(inbox, field, value):
 def test_applied_watermark_cannot_silently_hide_a_pending_receipt(inbox):
     sequence = receive(inbox, batch_id="watermark-control")
     with sqlite3.connect(inbox.db_path) as db:
+        db.execute("PRAGMA recursive_triggers=ON")
         db.execute("UPDATE filesystem_state SET applied_seq=?", (sequence,))
     with pytest.raises(WikiError, match="watermark|sequence") as failure:
         inbox.pending()

@@ -11,7 +11,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import origins
+from . import origins, source_bindings
 from .store import WikiError, is_maintainable_text, revision
 
 _owners = threading.local()
@@ -65,7 +65,7 @@ class WikiHistory:
         """The app bridge transfers its already-held exclusive flock to a worker."""
         if handle.closed:
             raise RuntimeError("The external vault lock has already been released")
-        held = getattr(_owners, "held", set())
+        held: set[str] = getattr(_owners, "held", set())
         _owners.held = held | {str(self.state.resolve())}
         try:
             yield
@@ -79,7 +79,7 @@ class WikiHistory:
 
     @contextlib.contextmanager
     def _locked(self, *, shared=False):
-        held = getattr(_owners, "held", set())
+        held: set[str] = getattr(_owners, "held", set())
         key = str(self.state.resolve())
         if key in held:
             yield
@@ -127,6 +127,9 @@ class WikiHistory:
         origin_state=origins.UNCHANGED,
         before_origin=origins.UNCHANGED,
         origin_builder=None,
+        source_plan=None,
+        before_source_plan=None,
+        source_transition=None,
     ):
         if change_id:
             with self.store.connect() as db:
@@ -155,9 +158,15 @@ class WikiHistory:
         }
         with self.store.connect() as db:
             if publication:
-                running = db.execute("SELECT 1 FROM jobs WHERE id=? AND session_id=? AND status='running'", (publication["job_id"], publication["session_id"])).fetchone()
-                if not running:
-                    raise WikiError("This maintenance assignment is no longer active", 403)
+                from . import grants
+
+                if publication.get("authority"):
+                    if publication.get("supporting_navigation"):
+                        grants.check_navigation(db, self.store, publication, path)
+                    else:
+                        grants.active(db, publication["authority"], self.store)
+                    if not publication.get("reservation_id") and not publication.get("supporting_navigation"):
+                        grants.authorize(db, publication["authority"], self.store, path)
             identity = db.execute(
                 "SELECT id FROM document_identities WHERE path=?", (path,)
             ).fetchone()
@@ -212,9 +221,13 @@ class WikiHistory:
                 db, row["id"], document_id, row["before_hash"], row["after_hash"],
                 before_state=before_origin, after_state=origin_state,
             )
+            source_bindings.record(db, row["id"], document_id, path, before, after,
+                                   before_state, after_state, selected=source_plan,
+                                   before_selected=before_source_plan, transition=source_transition)
             if status == "applied":
                 origins.apply(db, row["id"])
-            if publication:
+                source_bindings.apply(db, row["id"])
+            if publication and not publication.get("supporting_navigation") and publication["source_doc"] is not None:
                 first = db.execute("SELECT input_revision FROM job_publications WHERE job_id=? AND source_doc=? ORDER BY rowid LIMIT 1", (publication["job_id"], publication["source_doc"])).fetchone()
                 db.execute("INSERT INTO job_publications VALUES(?,?,?,?,?,?,0)", (
                     publication["job_id"], publication["source_doc"], first[0] if first else publication["input_revision"],
@@ -223,7 +236,11 @@ class WikiHistory:
             if status == "prepared":
                 from .operations import record
 
-                record(db, doc_id=document_id, path=path, before=row["before_hash"], after=row["after_hash"], operation=operation, reason=reason, publication=publication, change_id=row["id"], details=operation_details)
+                if publication and publication.get("reservation_id"):
+                    from . import grants
+
+                    grants.prepare_creation(db, publication, self.store, path, document_id, row["id"], row["after_hash"])
+                record(db, doc_id=document_id, path=path, before=row["before_hash"], after=row["after_hash"], operation=operation, reason=reason, publication=publication, change_id=row["id"], details=operation_details, store=self.store)
             if proposal is not None:
                 db.execute(
                     "INSERT INTO change_proposals VALUES(?,?)",
@@ -239,6 +256,7 @@ class WikiHistory:
                     "SELECT path,after_hash FROM changes WHERE id=?", (change_id,)
                 ).fetchone()
                 origins.apply(db, change_id)
+                source_bindings.apply(db, change_id)
                 if change and change["after_hash"] is None and not self.store.path(change["path"]).is_file():
                     self.store.detach_path(db, change["path"])
                     return
@@ -260,6 +278,11 @@ class WikiHistory:
                         )
 
     def recover(self):
+        if str(self.state.resolve()) not in getattr(_owners, "held", set()):
+            # Direct recovery enters the same exclusive owner as writer/read
+            # recovery. Nested synchronization must not replay the journal.
+            with self.locked():
+                return
         external = self.state / "external-change.json"
         if external.exists():
             entry = json.loads(external.read_text())
@@ -403,6 +426,7 @@ class WikiHistory:
         operation_details=None,
         origin_state=origins.UNCHANGED,
         origin_builder=None,
+        source_plan=None,
     ):
         # Consume earlier notifications before attaching/restoring a binding.
         # In particular, a journalled delete must not later retire its successor.
@@ -439,14 +463,19 @@ class WikiHistory:
 
             document = self.store.read(relative, length=1, expected_revision=current)
             with self.store.connect() as db:
-                receipt = record(db, doc_id=document["id"], path=relative, before=current, after=current, operation=operation, reason=reason, publication=publication, details=operation_details)
+                receipt = record(db, doc_id=document["id"], path=relative, before=current, after=current, operation=operation, reason=reason, publication=publication, details=operation_details, store=self.store)
             return {"path": relative, "revision": current, "change_id": None, "receipt_id": receipt, "changed": False, **self.store.index_state()}
-        row = self.record(relative, before, raw, actor, reason, "prepared", management, publication=publication, operation=operation, operation_details=operation_details, origin_state=origin_state, origin_builder=origin_builder)
+        row = self.record(relative, before, raw, actor, reason, "prepared", management, publication=publication, operation=operation, operation_details=operation_details, origin_state=origin_state, origin_builder=origin_builder, source_plan=source_plan)
         # flock coordinates Octopus writers, not an external editor. Preparing
         # the durable journal can take time: validate both identity and bytes
         # again before changing the live file. This is not a filesystem CAS;
         # an editor ignoring the lock can still race the final syscall.
         def check_target():
+            if publication:
+                from . import grants
+
+                with self.store.connect() as db:
+                    grants.check_write(db, self.store, publication, relative, change_id=row["id"])
             live = None
             try:
                 target = self.store.path(relative)
@@ -478,11 +507,18 @@ class WikiHistory:
                 if publication:
                     self.store.require_indexed(db, relative)
                     db.execute("UPDATE job_publications SET indexed=1 WHERE change_id=?", (row["id"],))
+                    if publication.get("reservation_id"):
+                        from . import grants
+
+                        grants.settle_creation(db, self.store, row["id"])
                 else:
                     self.store._index(db, relative)
         elif raw is None:
             with self.store.connect() as db:
                 db.execute("DELETE FROM documents WHERE path=?", (relative,))
+                from . import catalog
+
+                catalog.finish(db)
         with self.store.connect() as db:
             receipt = db.execute("SELECT id FROM operation_receipts WHERE change_id=?", (row["id"],)).fetchone()
         return {"change_id": row["id"], "path": relative, "revision": row["after_hash"], "receipt_id": receipt[0] if receipt else None, "changed": True, **self.store.index_state()}
@@ -496,12 +532,13 @@ class WikiHistory:
             raise WikiError("Invalid history pagination", 422)
         with self.store.connect() as db:
             rows = db.execute(
-                "SELECT c.*,r.before_available,r.after_available,r.resolved_at FROM changes c JOIN change_retention r ON r.change_id=c.id WHERE path=? ORDER BY created_at DESC,c.rowid DESC LIMIT ? OFFSET ?",
+                "SELECT c.*,r.before_available,r.after_available,r.resolved_at,p.operation AS proposal_operation FROM changes c JOIN change_retention r ON r.change_id=c.id LEFT JOIN change_proposals p ON p.change_id=c.id WHERE path=? ORDER BY created_at DESC,c.rowid DESC LIMIT ? OFFSET ?",
                 (path, limit + 1, offset),
             ).fetchall()
         items = []
         for row in rows[:limit]:
             item = dict(row)
+            proposal = item.pop("proposal_operation")
             item["recoverable"] = {
                 side: bool(row[f"{side}_available"])
                 and (
@@ -510,17 +547,12 @@ class WikiHistory:
                 )
                 for side in ("before", "after")
             }
-            with self.store.connect() as db:
-                proposal = db.execute(
-                    "SELECT operation FROM change_proposals WHERE change_id=?",
-                    (row["id"],),
-                ).fetchone()
-            if proposal and not row["resolved_at"]:
-                item["proposed_operation"] = json.loads(proposal[0])
-            if proposal:
+            if proposal is not None and not row["resolved_at"]:
+                item["proposed_operation"] = json.loads(proposal)
+            if proposal is not None:
                 item["recoverable"]["after"] = False
             if (
-                not proposal
+                proposal is None
                 and not row["resolved_at"]
                 and row["status"] == "conflict"
                 and row["after_hash"]
@@ -569,6 +601,7 @@ class WikiHistory:
                     (change_id,),
                 ).fetchone()
                 origin_state = origins.change_state(db, change_id, side)
+                selected_sources = source_bindings.change_plan(db, change_id, side)
             origins.bound(origin_state, row["document_id"], digest)
 
             def restored_origin(db, document_id, before, after):
@@ -587,6 +620,7 @@ class WikiHistory:
                 management,
                 restore_document_id=row["document_id"],
                 origin_builder=restored_origin,
+                source_plan={"plan": selected_sources},
             )
             self.resolve_proposals([change_id])
             return result
@@ -639,6 +673,7 @@ class WikiHistory:
                     "document_id": identity,
                     "management": dict(owned) if owned else None,
                     "origin_state": origins.preimage(origins.get(db, identity), identity, revision(raw)),
+                    "source_plan": source_bindings.capture(db, identity, relative, raw, dict(owned) if owned else None),
                 }
         return result
 
@@ -673,9 +708,36 @@ class WikiHistory:
         # A verified legacy rename can be implemented as copy/unlink. Preserve
         # that one transition in event order; do not discard unrelated deletes
         # or a later replacement of its destination.
+        restored = entry.get("restored")
+        policies = entry.get("source_policies")
+        if policies is None:
+            policies = {}
+            for relative in after:
+                if relative in before and before[relative]["hash"] == revision(after[relative]) and not (restored and restored["path"] == relative):
+                    # Legacy journals inventory the whole vault. A note that
+                    # did not change keeps its exact current observation;
+                    # recovering another file cannot replace its source proof.
+                    continue
+                old_path = next((old for old, new in moves if new == relative), relative)
+                if restored and restored["path"] == relative:
+                    raw_plan = restored.get("source_plan")
+                    prior = json.loads(raw_plan) if isinstance(raw_plan, str) else raw_plan
+                    mode = "selected"
+                elif old_path in before:
+                    prior = before[old_path].get("source_plan")
+                    mode = "continuation"
+                else:
+                    prior = None
+                    mode = "fresh" if entry.get("source_binding_protocol") == 1 else "unknown"
+                policies[relative] = {"mode": mode, "prior": prior, "context": entry["id"] + ":external:" + relative}
+            entry["source_policies"] = policies
+            journal = self.state / "external-change.json"
+            if journal.is_file() and json.loads(journal.read_text()).get("id") == entry["id"]:
+                atomic(journal, json.dumps(entry).encode())
         self.store.synchronize(
             dirty=False, removed_paths=set(before) - set(after),
             journal_moves=[(old, new, before[old]["document_id"]) for old, new in moves],
+            source_plans=policies,
         )
         with self.store.connect() as db:
             for old, new in moves:
@@ -711,16 +773,16 @@ class WikiHistory:
                 if len(candidates) == 1:
                     with self.store.connect() as db:
                         db.execute(
-                            "INSERT OR REPLACE INTO app_trash(trash_id,path,document_id,management,origin_state) VALUES(?,?,?,?,?)",
+                            "INSERT OR REPLACE INTO app_trash(trash_id,path,document_id,management,origin_state,source_plan) VALUES(?,?,?,?,?,?)",
                             (
                                 candidates[0],
                                 relative,
                                 old["document_id"],
                                 json.dumps(old["management"]),
                                 json.dumps(old.get("origin_state")),
+                                json.dumps(old.get("source_plan")),
                             ),
                         )
-        restored = entry.get("restored")
         if (
             restored
             and restored["path"] not in before
@@ -728,10 +790,21 @@ class WikiHistory:
             and restored.get("document_id")
         ):
             with self.store.connect() as db:
-                db.execute(
-                    "UPDATE document_identities SET path=NULL WHERE path=?",
+                identity = db.execute(
+                    "SELECT path FROM document_identities WHERE id=?",
+                    (restored["document_id"],),
+                ).fetchone()
+                if identity is None or identity["path"] not in {None, restored["path"]}:
+                    raise WikiError("Restored document identity changed; journal retained", 409)
+                current = db.execute(
+                    "SELECT id FROM document_identities WHERE path=?",
                     (restored["path"],),
-                )
+                ).fetchone()
+                if current is None or current["id"] != restored["document_id"]:
+                    # Synchronization may have indexed the returned file as a
+                    # new document. Retire that provisional identity and its
+                    # derived rows before reattaching the durable trash ID.
+                    self.store.detach_path(db, restored["path"])
                 db.execute(
                     "UPDATE document_identities SET path=?,file_key=? WHERE id=?",
                     (
@@ -755,7 +828,7 @@ class WikiHistory:
             raw = after.get(relative)
             if (previous["hash"] if previous else None) == (
                 revision(raw) if raw is not None else None
-            ):
+            ) and not (restored and restored["path"] == relative):
                 continue
             doc_id = (
                 previous["document_id"]
@@ -794,6 +867,8 @@ class WikiHistory:
                 change_id=uuid.uuid5(
                     uuid.NAMESPACE_URL, f"{entry['id']}:{relative}"
                 ).hex,
+                before_source_plan={"plan": previous.get("source_plan")} if previous else {"plan": None},
+                source_transition=policies.get(relative, {"mode": "unknown", "context": entry["id"] + ":deleted:" + relative}),
             )
             if raw is None and not any(old == relative for old, _ in moves):
                 with self.store.connect() as db:
@@ -893,6 +968,7 @@ class WikiHistory:
                         f"Restore snapshot {snapshot_id}",
                         manifest.get("managed_notes", {}).get(relative),
                         origin_state=None,
+                        source_plan={"plan": None},
                     )
                 )
             return {"items": results}

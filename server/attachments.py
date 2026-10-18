@@ -19,6 +19,7 @@ from __future__ import annotations
 import mimetypes
 import re
 import shutil
+import stat
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,15 @@ class AttachmentError(ValueError):
     """
 
 
+class AttachmentUnavailable(AttachmentError):
+    """Reject the complete input without revealing another session's files."""
+
+    code = "attachment_unavailable"
+
+    def __init__(self, message="Some attachments are unavailable. Re-upload the files in this conversation."):
+        super().__init__(message)
+
+
 @dataclass(frozen=True)
 class AttachmentRecord:
     id: str
@@ -66,12 +76,14 @@ def attachments_root() -> Path:
 
 def session_dir(session_id: str) -> Path:
     """Per-session subdirectory. Created if missing."""
-    if not session_id or "/" in session_id or "\\" in session_id:
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
         # Defensive — session ids are uuid4 hex prefixes, never user input,
         # but a wrong id slipping in shouldn't be able to scribble outside
         # the root.
         raise AttachmentError(f"invalid session_id: {session_id!r}")
     d = attachments_root() / session_id
+    if d.is_symlink():
+        raise AttachmentError("invalid attachment directory")
     d.mkdir(parents=True, exist_ok=True)
     return d
 
@@ -148,15 +160,45 @@ def get_path(session_id: str, attachment_id: str) -> Path | None:
     — we glob for the prefix so callers don't need to remember the
     sanitized filename.
     """
-    if not attachment_id or "/" in attachment_id or "\\" in attachment_id:
+    if (not isinstance(attachment_id, str) or not re.fullmatch(r"[0-9a-f]{12}", attachment_id)
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", session_id)):
         return None
     d = attachments_root() / session_id
-    if not d.is_dir():
+    if not d.is_dir() or d.is_symlink():
         return None
     matches = list(d.glob(f"{attachment_id}__*"))
-    if not matches:
+    if len(matches) != 1 or matches[0].is_symlink() or not matches[0].is_file():
         return None
     return matches[0].resolve()
+
+
+def validate_message_attachments(session_id: str, identifiers: list[str]) -> list[AttachmentRecord]:
+    """Validate every required file at admission and again before execution.
+
+    Files are retained for their owning session, including while requests are
+    queued. No global lookup or fork fallback may broaden a new submission.
+    Uploads accept any regular file type; the existing nonempty/size contract
+    applies to the current stored bytes as well as the original upload.
+    """
+    if not isinstance(identifiers, list):
+        raise AttachmentUnavailable()
+    if len(identifiers) > MAX_ATTACHMENTS_PER_MESSAGE:
+        raise AttachmentUnavailable(f"too many attachments: max {MAX_ATTACHMENTS_PER_MESSAGE}")
+    result = []
+    for identifier in identifiers:
+        try:
+            path = get_path(session_id, identifier)
+            if path is None:
+                raise AttachmentUnavailable()
+            observed = path.stat()
+            if not stat.S_ISREG(observed.st_mode) or not 0 < observed.st_size <= MAX_FILE_BYTES:
+                raise AttachmentUnavailable()
+            filename = path.name.split("__", 1)[1]
+            result.append(AttachmentRecord(identifier, filename, observed.st_size,
+                                           _detect_mime(filename, None), path))
+        except OSError as exc:
+            raise AttachmentUnavailable() from exc
+    return result
 
 
 def get_path_with_fork_fallback(

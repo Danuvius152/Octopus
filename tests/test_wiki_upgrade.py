@@ -35,7 +35,7 @@ async def registered(legacy, tmp_path):
 @pytest.mark.parametrize("phase", ["publish", "reopen"])
 async def test_failed_migration_can_resume_without_losing_identity_or_secrets(registered, monkeypatch, phase):
     db, vault, config, note = registered
-    original = upgrade.publish if phase == "publish" else registry._store
+    original = upgrade.publish if phase == "publish" else registry.reopen_for_upgrade
 
     def fail(*args):
         if phase == "reopen" and args[0] is None:
@@ -43,7 +43,7 @@ async def test_failed_migration_can_resume_without_losing_identity_or_secrets(re
         raise OSError("injected migration boundary")
 
     target = upgrade if phase == "publish" else registry
-    attribute = "publish" if phase == "publish" else "_store"
+    attribute = "publish" if phase == "publish" else "reopen_for_upgrade"
     monkeypatch.setattr(target, attribute, fail)
     with pytest.raises(BootstrapError, match="resume") as error:
         await bootstrap_first_account(db, username="owner", password="password1", session_manager=session_manager)
@@ -169,3 +169,33 @@ async def test_only_authenticated_migration_owner_can_inspect_and_resume(registe
         assert resumed.json()["wiki"]["vault_id"] == config["vault_id"]
         assert (await client.get("/api/wiki/config", headers=other_headers)).status_code == 404
         assert (await client.get("/api/wiki/config", headers=headers)).json()["vault_id"] == config["vault_id"]
+
+
+@pytest.mark.parametrize("unconfirmed", ["worker", "run"])
+async def test_upgrade_waits_for_actual_worker_and_run_retirement_before_copying(registered, monkeypatch, unconfirmed):
+    from server.wiki.jobs import worker
+
+    db, vault, _, note = registered
+    prepared = []
+    monkeypatch.setattr(worker, "_stopping", worker._stopping)
+    monkeypatch.setattr(session_manager, "_legacy_transition", session_manager._legacy_transition)
+
+    async def cannot_retire(*args, **kwargs):
+        assert None in registry._blocked
+        raise RuntimeError("execution retirement remains unconfirmed")
+
+    if unconfirmed == "worker":
+        monkeypatch.setattr(worker, "stop", cannot_retire)
+    else:
+        monkeypatch.setattr(session_manager, "retire_ownerless_runs", cannot_retire)
+    monkeypatch.setattr(upgrade, "prepare", lambda *_: prepared.append(True))
+    with pytest.raises(BootstrapError, match="cleanup is unconfirmed") as error:
+        await bootstrap_first_account(db, username="owner", password="password1", session_manager=session_manager)
+    assert error.value.status_code == 503
+    assert prepared == []
+    assert await db.get_user_by_username("owner") is None
+    assert upgrade.pending_upgrade()["phase"] == "preparing"
+    assert session_manager._legacy_transition and None in registry._blocked
+    assert (vault / "Library/note.md").read_text() == "# Source\nKeep this material.\n"
+    with sqlite3.connect(registry.state(None) / "index.sqlite3") as retained:
+        assert retained.execute("SELECT id FROM documents WHERE path='Library/note.md'").fetchone()[0] == note["id"]

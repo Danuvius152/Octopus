@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings
 
 
@@ -72,6 +72,16 @@ class Settings(BaseSettings):
     # stay in the registered existing location, separate from this state.
     wiki_dir: str = "~/.octopus/wiki"
     wiki_reconcile_seconds: float = Field(default=30, ge=1)
+    wiki_selection_page_size: int = Field(default=50, ge=1, le=200)
+    wiki_selection_max_page_size: int = Field(default=200, ge=1, le=200)
+    wiki_selection_max_candidates: int = Field(default=10000, ge=1)
+    wiki_selection_ttl_seconds: int = Field(default=86400, ge=1)
+
+    @model_validator(mode="after")
+    def validate_wiki_selection_limits(self):
+        if self.wiki_selection_page_size > self.wiki_selection_max_page_size:
+            raise ValueError("Wiki selection default page size exceeds its maximum")
+        return self
     # Per-agent durable state root (docs/plans/memory.md §2). Each agent gets
     # `<agents_dir>/<agent_id>/memory/` — the canonical native, agent-written
     # markdown memory both harnesses point at (Claude via

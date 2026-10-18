@@ -6,9 +6,10 @@ document responsible for one kind of information:
 | Location | Responsibility |
 | --- | --- |
 | Current guides and `architecture.md` | Product behavior, architecture and user instructions. |
-| [`plans/`](plans/) | Initiative status and remaining work; Wiki uses one development summary and one future plan. |
+| [`plans/`](plans/) | Initiative status and remaining work; Wiki uses one development summary and one future plan, with a dated handoff for the current review-driven bug fixes. |
 | [`local-wsl.md`](local-wsl.md) | Current local environment and operating procedures; repository action policy lives in [`AGENTS.md`](../AGENTS.md#repository-and-upstream-maintenance). |
 | [`post-mortems/`](post-mortems/) | Specific incidents and their evidence, rather than an ever-growing current-state checklist. |
+| [`review/`](review/) | Dated code and behavior reviews, with evidence, scope and remediation impact. |
 
 Update the responsible document when facts change and link to it from the
 others. Keep transient logs in task artifacts. Documentation-only work stays
@@ -16,9 +17,18 @@ uncommitted unless the user requests a commit; it does not trigger deployment.
 
 ## Current
 
+本机默认使用 Codex，Claude 当前不可用。发布与审阅应明确标注真实模型验证
+仅覆盖 Codex，Claude 实机测试未执行；具体门禁见
+[AGENTS.md](../AGENTS.md#local-codex-validation)，环境见
+[local-wsl.md](local-wsl.md#本机测试)。
+
 Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验收已完成（2026-10-17）。开发过程、当前合同和证据集中在总结；Sapphire、SmartReader 等后续功能单列未来计划。
 
+随后收到的代码审查整改尚未完成；已修范围、失败回归、未接入代码和模型验证范围见
+**[2026-10-17 缺陷修复交接](plans/wiki-bug-remediation-20261017.md)**。
+
 - **[共享 Wiki 开发过程总结](plans/wiki-development-summary.md)** — 本期已完成；实际交付、当前合同、证据边界与开发方法。
+- **[接管前后框架行为评估（2026-10-18）](review/before-takeover-behavior-review-20261018.md)** — 对照 before-takeover、线上版本和草稿；汇总当前 Codex 修复范围、优先级与验收，区分正常输出预算和条件项。
 - **[共享 Wiki 未来计划](plans/wiki-future-plan.md)** — Sapphire、SmartReader、共享能力及有触发条件的后续工作。
 - **[user-guide.md](user-guide.md)** — practical instructions for this local
   WSL + Codex installation: startup, agents, and phone access with the
@@ -82,6 +92,7 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | [Turn safety (Layer 1): timeout + process-group reaping](plans/turn-safety.md) | shipped | Bounded automatic recovery after idle stops, an optional whole-turn duration cap, and process-group reaping. |
 | [共享 Wiki：开发过程总结与当前合同](plans/wiki-development-summary.md) | shipped | Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验收已完成；保留当前合同、证据边界和开发方法。 |
 | [运行日志缺陷修复：设计访谈与行为契约](plans/runtime-log-repair-20261013.md) | shipped | Q12 修复及本地 Codex 验收已完成；Stop 暂停内存积压、人工纠偏优先、明确恢复；保留主要框架，Q11 持久队列不实施。 |
+| [Wiki 与运行基础缺陷修复：2026-10-17 交接](plans/wiki-bug-remediation-20261017.md) | stopped after F12 | F12/P02 r5 的实现、限定成本及完整离线门禁已获独立批准；按用户要求，完善文档后结束本轮。其他整改及整体验收仍有待办，尚未发布。 |
 | [共享 Wiki：未来计划与应用协同](plans/wiki-future-plan.md) | proposed | Sapphire、SmartReader 与条件性扩展的统一计划；保留未完成合同，不把本文当作开发或生产写入授权。 |
 | [运行时接口修补：接管、记录与调用身份](plans/runtime-interface-repair.md) | completed | Q13–Q30 中已确认实施的修补全部通过本机验收；按 Q31 合并 main 并上线 `01c16a6` 独立服务快照，已验证并清理两个旧 release；Q25 脱敏未纳入。 |
 

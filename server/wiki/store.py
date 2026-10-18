@@ -17,9 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-import yaml
-
-from . import catalog, portable_metadata, search_index
+from . import catalog, portable_metadata, search_index, source_bindings, uids
 from . import format as document_format
 from .extract import HTML_BODY_VERSION, SUPPORTED, extract
 from .formats import MARKDOWN_QUERY_CONTRACT, MARKDOWN_SQL
@@ -116,14 +114,19 @@ def vault_read(function):
 
 
 class WikiStore:
-    def __init__(self, root: Path, state: Path, vault_id: str) -> None:
+    registration_generation: str | None = None
+
+    def __init__(self, root: Path, state: Path, vault_id: str, *, on_construct=None) -> None:
         self._lifecycle = threading.Condition()
         self._local = threading.local()
         self._users = 0
         self._retired = False
+        self._events_released = True
         self.root = root.resolve()
         self.state = state
         self.vault_id = vault_id
+        if on_construct is not None:
+            on_construct(self)
         state.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.db_path = state / "index.sqlite3"
         from .events import VaultEvents
@@ -161,8 +164,9 @@ class WikiStore:
 
     def release_events(self):
         if not self._events_released:
+            self.events.release()
+            self._events_finalizer.detach()
             self._events_released = True
-            self._events_finalizer()
 
     @contextlib.contextmanager
     def borrow(self):
@@ -178,9 +182,11 @@ class WikiStore:
             with self._lifecycle:
                 lease.active = False
                 self._users -= 1
-                if not self._users and self._retired:
-                    self.release_events()
-                self._lifecycle.notify_all()
+                try:
+                    if not self._users and self._retired:
+                        self.release_events()
+                finally:
+                    self._lifecycle.notify_all()
 
     @contextlib.contextmanager
     def operation(self, lease: StoreBorrow | None = None):
@@ -203,9 +209,11 @@ class WikiStore:
                 self._local.depth = 0
                 with self._lifecycle:
                     self._users -= 1
-                    if not self._users and self._retired:
-                        self.release_events()
-                    self._lifecycle.notify_all()
+                    try:
+                        if not self._users and self._retired:
+                            self.release_events()
+                    finally:
+                        self._lifecycle.notify_all()
             return
         with self.borrow():
             self._local.depth = 1
@@ -225,38 +233,30 @@ class WikiStore:
         with self._lifecycle:
             while self._users:
                 self._lifecycle.wait()
+            # The last user may have failed to release the observer. Waking
+            # from its notification is not evidence that cleanup succeeded.
+            self.release_events()
 
     def index_state(self) -> dict[str, Any]:
         with self.operation():
             return self._index_state()
 
     def _index_state(self) -> dict[str, Any]:
+        from .index_state import DOCUMENT_ERROR, summary
+
         with self.connect() as db:
-            state = db.execute("SELECT * FROM index_state WHERE singleton=1").fetchone()
-            errors = [{"path": row["path"], "error": json.loads(row["metadata"]).get("error", "Extraction failed")} for row in db.execute("SELECT path,metadata FROM documents WHERE quality='error'")]
-            stream = db.execute("SELECT received_seq,applied_seq,armed_epoch,uncertain FROM filesystem_state WHERE singleton=1").fetchone()
-        durable_error = None
-        durable_pending = 0
-        if stream:
-            durable_pending = stream["received_seq"] - stream["applied_seq"]
-            durable_error = stream["uncertain"] or ("Filesystem reception is incomplete; durable receipt required" if stream["armed_epoch"] else None)
-        if state["error"]:
-            errors.append({"path": "", "error": state["error"]})
-        if durable_error:
-            errors.append({"path": "", "error": durable_error})
-        pending = max(int(self.events.needs_reconciliation), durable_pending, int(bool(durable_error)))
-        return {
-            "index_epoch": state["epoch"], "index_checked_at": state["checked_at"],
-            "pending_changes": pending,
-            "index_status": "unavailable" if state["error"] or durable_error else "updating" if pending else "partial" if errors else "ready",
-            "index_errors": errors, "observer_mode": self.events.mode,
-        }
+            db.execute("BEGIN")
+            state = summary(db, self.events.needs_reconciliation)
+            errors = [{"path": row["path"], "error": json.loads(row["metadata"]).get("frontmatter_error") or json.loads(row["metadata"]).get("error", "Extraction failed")} for row in db.execute(f"SELECT path,metadata FROM documents WHERE {DOCUMENT_ERROR}")]
+        errors.extend({"path": "", "error": error} for error in state.pop("index_diagnostics"))
+        state.pop("index_error_count")
+        return {**state, "index_errors": errors, "observer_mode": self.events.mode}
 
-    def synchronize(self, *, dirty=True, removed_paths=frozenset(), journal_moves=()) -> None:
+    def synchronize(self, *, dirty=True, removed_paths=frozenset(), journal_moves=(), source_plans=None) -> None:
         with self.operation():
-            self._synchronize(dirty=dirty, removed_paths=removed_paths, journal_moves=journal_moves)
+            self._synchronize(dirty=dirty, removed_paths=removed_paths, journal_moves=journal_moves, source_plans=source_plans)
 
-    def _synchronize(self, *, dirty=True, removed_paths=frozenset(), journal_moves=()) -> None:
+    def _synchronize(self, *, dirty=True, removed_paths=frozenset(), journal_moves=(), source_plans=None) -> None:
         """Consume only known changes; full compensation is a background job."""
         if getattr(self._synchronizing, "active", False):
             return
@@ -267,6 +267,8 @@ class WikiStore:
             try:
                 events = self.pending_changes(removed_paths=removed_paths)
                 changed = events.paths
+                source_plans = source_plans or {}
+                changed.update(source_plans)
                 if dirty:
                     with self.connect() as db:
                         changed.update(row[0] for row in db.execute("SELECT path FROM documents WHERE signature=''").fetchall())
@@ -276,6 +278,7 @@ class WikiStore:
                     return
                 if not changed:
                     with self.connect() as db:
+                        catalog.finish(db)
                         if self.events.journal is not None:
                             self.events.journal.mark_applied(db, events.receipts)
                     self.acknowledge_changes()
@@ -300,12 +303,13 @@ class WikiStore:
                         if target is not None and target.is_file() and target.suffix.lower() in SUPPORTED and not any(part.startswith(".") for part in PurePosixPath(relative).parts):
                             current = db.execute("SELECT signature FROM documents WHERE path=?", (relative,)).fetchone()
                             stat = target.stat()
-                            if relative in events.written or current is None or current[0] != f"{stat.st_mtime_ns}:{stat.st_size}:v3":
-                                self._index(db, relative)
+                            if relative in source_plans or relative in events.written or current is None or current[0] != f"{stat.st_mtime_ns}:{stat.st_size}:v3":
+                                self._index(db, relative, finalize=False, source_policy=source_plans.get(relative))
                     for relative in sorted(paths):
                         target = self.observed_path(relative)
                         if target is None or not target.is_file() or any(part.startswith(".") for part in PurePosixPath(relative).parts):
                             self.detach_path(db, relative)
+                    catalog.finish(db)
                     if self.events.journal is not None:
                         self.events.journal.mark_applied(db, events.receipts)
                 self.acknowledge_changes()
@@ -325,6 +329,7 @@ class WikiStore:
             db = sqlite3.connect(self.db_path, timeout=30)
             db.row_factory = sqlite3.Row
             try:
+                db.execute("PRAGMA recursive_triggers=ON")
                 with db:
                     yield db
             finally:
@@ -518,7 +523,7 @@ class WikiStore:
             db.execute("UPDATE wiki_edges SET status='missing' WHERE target_doc IN (SELECT id FROM document_identities WHERE path IS NULL)")
         db.execute("DELETE FROM managed_notes WHERE path=?", (relative,))
 
-    def _index(self, db: sqlite3.Connection, relative: str, *, raw: bytes | None = None) -> sqlite3.Row:
+    def _index(self, db: sqlite3.Connection, relative: str, *, raw: bytes | None = None, finalize: bool = True, source_policy=None) -> sqlite3.Row:
         path = self.path(relative)
         if not path.is_file() or path.suffix.lower() not in SUPPORTED:
             raise WikiError("Document not found", 404)
@@ -537,7 +542,14 @@ class WikiStore:
             "SELECT * FROM documents WHERE path=?", (relative,)
         ).fetchone()
         previous_metadata = json.loads(existing["metadata"]) if existing is not None else {}
+        if source_policy is not None:
+            managed = db.execute("SELECT * FROM managed_notes WHERE path=?", (relative,)).fetchone()
+            supplied = source_bindings.metadata(db, doc_id, relative, raw, dict(managed) if managed else None)
+            source_bindings.stage(db, source_bindings.incoming(
+                db, doc_id, relative, digest, source_bindings.entries(supplied), source_policy))
         if (
+            source_policy is None
+            and
             existing is not None
             and existing["id"] == doc_id
             and existing["signature"]
@@ -559,6 +571,8 @@ class WikiStore:
             if not search_index.current(db, existing):
                 search_index.index(db, existing, json.loads(existing["metadata"]))
                 db.execute("UPDATE index_state SET epoch=epoch+1 WHERE singleton=1")
+            if finalize:
+                catalog.finish(db)
             return db.execute(
                 "SELECT * FROM documents WHERE id=?", (existing["id"],)
             ).fetchone()
@@ -576,21 +590,6 @@ class WikiStore:
         metadata["metadata_validation_version"] = portable_metadata.VERSION
         if path.suffix.lower() == ".pdf":
             metadata["revision_kind"] = "stat"
-        front = re.match(
-            r"\A\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|$)", text[:65536], re.S
-        )
-        if front:
-            try:
-                fields = yaml.safe_load(front[1])
-                if isinstance(fields, dict):
-                    for name in ("tags", "aliases"):
-                        value = fields.get(name, [])
-                        if isinstance(value, str):
-                            value = [value]
-                        if isinstance(value, list):
-                            metadata[name] = [v for v in value if isinstance(v, str)]
-            except yaml.YAMLError:
-                metadata["frontmatter_error"] = "Invalid YAML; original retained"
         portable = re.search(r"<!-- octopus-wiki\s+(.*?)\s*-->", text, re.S)
         if portable:
             try:
@@ -608,17 +607,33 @@ class WikiStore:
         if exclusion:
             kind = "asset"
             metadata["asset_reason"] = exclusion
-        metadata |= document_format.parse(text).metadata(metadata)
+        parsed = document_format.parse(text)
+        if parsed.error and existing is not None and existing["id"] == doc_id:
+            if not previous_metadata.get("frontmatter_error") or previous_metadata.get("frontmatter_retained_from"):
+                for name in ("title", "description", "type", "status", "resource", "uid",
+                             "generated", "x_wiki", "sources", "verified", "tags", "aliases", "doc_role"):
+                    if name in previous_metadata:
+                        metadata[name] = previous_metadata[name]
+                metadata["frontmatter_retained_from"] = previous_metadata.get("frontmatter_retained_from") or {
+                    "doc": doc_id, "revision": existing["revision"],
+                }
+        projection = parsed.metadata(metadata)
+        if parsed.error and metadata.get("frontmatter_retained_from"):
+            projection["doc_role"] = metadata.get("doc_role", "unknown")
+        metadata |= projection
         if kind == "original":
             kind = {"source": "source", "reference": "source", "concept": "concept", "navigation": "topic", "synthesis": "topic"}.get(metadata.get("doc_role"), kind)
-        self.bind_uid(db, doc_id, metadata)
+        uids.observe(db, doc_id, metadata)
         title = next(
             (line[2:].strip() for line in text.splitlines() if line.startswith("# ")),
             path.stem,
         )
         title = metadata.get("title") or title
         db.execute(
-            "INSERT OR REPLACE INTO documents VALUES(?,?,?,?,?,?,?,?,?,?)",
+            """INSERT INTO documents VALUES(?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(id) DO UPDATE SET path=excluded.path,revision=excluded.revision,
+                title=excluded.title,kind=excluded.kind,text=excluded.text,pages=excluded.pages,
+                quality=excluded.quality,metadata=excluded.metadata,signature=excluded.signature""",
             (
                 doc_id,
                 relative,
@@ -641,29 +656,9 @@ class WikiStore:
 
         materials.index(db, row, raw)
         db.execute("UPDATE index_state SET epoch=epoch+1 WHERE singleton=1")
-        return row
-
-    def bind_uid(self, db, doc_id: str, metadata: dict) -> None:
-        claimed = metadata.get("uid")
-        if claimed:
-            try:
-                if not claimed.casefold().startswith("urn:uuid:"):
-                    raise ValueError("UID must be a UUID URN")
-                alias = "urn:uuid:" + str(uuid.UUID(claimed[9:]))
-                previous = db.execute("SELECT doc_id FROM uid_aliases WHERE uid=?", (alias,)).fetchone()
-                if previous is not None and previous[0] != doc_id:
-                    metadata["uid_conflict"] = {"uid": claimed, "existing_doc": previous[0]}
-                else:
-                    db.execute("INSERT OR IGNORE INTO uid_aliases VALUES(?,?)", (alias, doc_id))
-            except (ValueError, AttributeError):
-                metadata["uid_error"] = "Invalid UUID URN; original field retained"
-        preferred = db.execute("SELECT uid FROM uid_aliases WHERE doc_id=? ORDER BY rowid LIMIT 1", (doc_id,)).fetchone()
-        if preferred is None:
-            preferred = ("urn:uuid:" + str(uuid.UUID(doc_id)),)
-            db.execute("INSERT INTO uid_aliases VALUES(?,?)", (preferred[0], doc_id))
-        if claimed and claimed != preferred[0]:
-            metadata["portable_uid"] = claimed
-        metadata["uid"] = preferred[0]
+        if finalize:
+            catalog.finish(db)
+        return db.execute("SELECT * FROM documents WHERE id=?", (doc_id,)).fetchone()
 
     @vault_read
     def refresh(self) -> None:
@@ -703,7 +698,7 @@ class WikiStore:
                         "SELECT d.signature,n.version,p.revision,p.ownership,coalesce(m.regions,''),NOT EXISTS(SELECT 1 FROM search_sections s WHERE s.doc_id=d.id) OR EXISTS(SELECT 1 FROM search_sections s LEFT JOIN search_fts f ON f.rowid=s.id WHERE s.doc_id=d.id AND f.rowid IS NULL),json_extract(d.metadata,'$.format_version'),json_extract(d.metadata,'$.html_body_version'),o.state FROM documents d LEFT JOIN search_documents n ON n.doc_id=d.id LEFT JOIN raw_materials p ON p.doc_id=d.id LEFT JOIN managed_notes m ON m.path=d.path LEFT JOIN material_origins o ON o.doc_id=d.id WHERE d.path=?", (relative,)
                     ).fetchone()
                     if relative in queued.written or old is None or old[0] != f"{stat.st_mtime_ns}:{stat.st_size}:v3" or old[1] != search_index.VERSION or old[5] or old[6] != document_format.VERSION or (path.suffix.lower() in {".html", ".htm"} and old[7] != HTML_BODY_VERSION) or (not asset_reason(relative) and (old[2] is None or old[3] != materials.ownership(old[4], old[8]))):
-                        self._index(db, relative)
+                        self._index(db, relative, finalize=False)
             # Discover moves before detaching missing paths. This also covers
             # missing files when only the durable ledger survived a rebuild.
             for row in db.execute("SELECT path FROM document_identities WHERE path IS NOT NULL").fetchall():
@@ -713,6 +708,7 @@ class WikiStore:
             for row in db.execute("SELECT id,path FROM documents").fetchall():
                 if row["path"] not in found:
                     db.execute("DELETE FROM documents WHERE id=?", (row["id"],))
+            catalog.finish(db)
             db.execute("UPDATE index_state SET checked_at=?,error=NULL WHERE singleton=1", (datetime.now(UTC).isoformat(),))
             if self.events.journal is not None:
                 self.events.journal.mark_applied(db, queued.receipts)
@@ -800,7 +796,7 @@ class WikiStore:
                     for original in metadata.get("sources", []):
                         if original.get("doc") == source_id:
                             original["path"] = source["path"]
-                if ref.get("revision") and ref["status"] != "external" and current != ref.get("revision"):
+                if ref.get("revision") and ref["status"] not in {"external", "unknown"} and current != ref.get("revision"):
                     stale = True
                     ref["status"] = "changed" if current else "missing"
                 ref["current_revision"] = current
@@ -836,6 +832,7 @@ class WikiStore:
         intent: str | None = None,
         view: str = "full",
         cursor: str | None = None,
+        *, model_response: bool = False,
     ) -> dict[str, Any]:
         if not 1 <= limit <= 50 or offset < 0 or len(query) > 1000:
             raise WikiError("Invalid search pagination or query length", 422)
@@ -846,7 +843,7 @@ class WikiStore:
         from .retrieval import search
 
         try:
-            return search(self, query, limit, offset, kind, include_assets, directory, intent, view, cursor)
+            return search(self, query, limit, offset, kind, include_assets, directory, intent, view, cursor, model_response)
         except sqlite3.DatabaseError as exc:
             raise WikiError(f"Chapter search failed; rebuild derived search index: {exc}", 503) from exc
 
@@ -863,6 +860,7 @@ class WikiStore:
         directory=None,
         view="full",
         cursor=None,
+        model_response=False,
     ):
         if offset < 0 or not 1 <= limit <= 100:
             raise WikiError("Invalid document pagination", 422)
@@ -902,7 +900,7 @@ class WikiStore:
         from .read_response import compact_index
 
         state = self.index_state()
-        return {
+        result = {
             "items": items,
             "total": total,
             "next_offset": offset + limit if offset + limit < total else None,
@@ -910,13 +908,18 @@ class WikiStore:
             "view": view,
             **(compact_index(state) if view == "compact" else state),
         }
+        if model_response:
+            from .model_response import page
+
+            return page(items, result, offset, total, lambda following: continuation(following, epoch, fingerprint))
+        return result
 
     @vault_read
-    def graph(self, doc, offset=0, limit=100, cursor=None):
+    def graph(self, doc, offset=0, limit=100, cursor=None, *, model_response=False):
         if offset < 0 or not 1 <= limit <= 100:
             raise WikiError("Invalid graph pagination", 422)
         center = self.read(doc, length=1)
-        return catalog.graph(self, center["id"], offset, limit, cursor)
+        return catalog.graph(self, center["id"], offset, limit, cursor, model_response=model_response)
 
     @vault_read
     def read(

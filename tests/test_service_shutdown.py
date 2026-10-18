@@ -27,6 +27,7 @@ from server.research.manager import ResearchManager
 from server.sessions import SessionManager
 from server.wiki import jobs as wiki_jobs
 from server.wiki.registry import registry
+from server.wiki.store import WikiError
 
 
 @pytest.fixture
@@ -269,6 +270,10 @@ async def test_lifespan_shutdown_preserves_wiki_job_as_interrupted(service, tmp_
         )
         await asyncio.wait_for(ready.wait(), 5)
 
+    with pytest.raises(WikiError) as stopped:
+        wiki_jobs.WikiJobs(None)
+    assert stopped.value.status == 503
+    registry.resume_access()
     saved = wiki_jobs.WikiJobs(None).get(job["id"])
     assert saved["status"] == "interrupted"
     assert saved["items"][0]["status"] == "pending"

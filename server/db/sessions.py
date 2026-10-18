@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import time
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -30,6 +31,18 @@ _DELEGATION_RELATION = (
 
 
 class SessionsMixin(DatabaseBase):
+
+    async def get_session_binding(self, session_id: str) -> dict[str, Any] | None:
+        """Internal relationship lookup; callers must compare the exact owner."""
+        await self._ensure_connected()
+        cursor = await self.conn.execute(
+            "SELECT id, agent_id, user_id, archived FROM sessions WHERE id = ?",
+            (session_id,),
+        )
+        row = await cursor.fetchone()
+        if row is None:
+            return None
+        return {"id": row[0], "agent_id": row[1], "user_id": row[2], "archived": bool(row[3])}
 
     async def load_delegation_states(self) -> list[dict[str, Any]]:
         """Load future round snapshots, including archived child conversations."""
@@ -290,6 +303,52 @@ class SessionsMixin(DatabaseBase):
             "SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)
         )
 
+    async def message_sequence_state(self, session_id: str) -> tuple[int, int, int]:
+        """Row count, allocation floor and duplicate count are different facts."""
+        await self._ensure_connected()
+        cursor = await self.conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(seq) + 1, 0), COUNT(*) - COUNT(DISTINCT seq) "
+            "FROM messages WHERE session_id = ?", (session_id,),
+        )
+        row = await cursor.fetchone()
+        assert row is not None
+        return row[0], row[1], row[2]
+
+    async def has_messages_before(self, session_id: str, seq: int | None) -> bool:
+        if seq is None:
+            return False
+        await self._ensure_connected()
+        cursor = await self.conn.execute(
+            "SELECT 1 FROM messages WHERE session_id = ? AND seq < ? LIMIT 1", (session_id, seq),
+        )
+        return await cursor.fetchone() is not None
+
+    async def raw_message_rows(self, session_id: str, user_id: str | None) -> AsyncIterator[bytes]:
+        """A read-only export retaining storage ids and all duplicate sequences."""
+        await self.flush()
+
+        async def rows(reader: aiosqlite.Connection) -> AsyncIterator[bytes]:
+            cursor = await reader.execute(
+                "SELECT m.* FROM messages m JOIN sessions s ON s.id = m.session_id "
+                "WHERE m.session_id = ? AND s.user_id IS ? ORDER BY m.id", (session_id, user_id),
+            )
+            columns = [item[0] for item in cursor.description]
+            try:
+                while batch := await cursor.fetchmany(200):
+                    for row in batch:
+                        yield (json.dumps(dict(zip(columns, row, strict=True)), ensure_ascii=False) + "\n").encode()
+            finally:
+                await cursor.close()
+
+        if self._db_path == ":memory:":
+            async for row in rows(self.conn):
+                yield row
+        else:
+            uri = Path(self._db_path).resolve().as_uri() + "?mode=ro"
+            async with aiosqlite.connect(uri, uri=True) as reader:
+                async for row in rows(reader):
+                    yield row
+
     @serialized_write
     async def append_message(
         self,
@@ -362,7 +421,7 @@ class SessionsMixin(DatabaseBase):
         await self._ensure_connected()
         session_id = message["session_id"]
         cursor = await self.conn.execute(
-            "SELECT seq, role, type, content, created_at, is_error, session_id_ref, cost "
+            "SELECT seq, role, type, content, created_at, is_error, session_id_ref, cost, tool_input "
             "FROM messages WHERE session_id = ? AND terminal_request_id = ?",
             (session_id, request_id),
         )
@@ -370,12 +429,12 @@ class SessionsMixin(DatabaseBase):
         expected = (
             message["seq"], message["role"], message["type"],
             message.get("content"), message["created_at"],
-            message.get("is_error"), message.get("session_id_ref"), message.get("cost"),
+            message.get("is_error"), message.get("session_id_ref"), message.get("cost"), message.get("tool_input"),
         )
         def matches(record: Any) -> bool:
             actual = (*record[:3], json.loads(record[3]) if record[3] else None,
                       record[4], bool(record[5]) if record[5] is not None else None,
-                      record[6], record[7])
+                      record[6], record[7], json.loads(record[8]) if record[8] else None)
             return actual == expected
         if row is not None:
             if not matches(row):
@@ -391,7 +450,7 @@ class SessionsMixin(DatabaseBase):
         if self._db_path != ":memory:":
             async with aiosqlite.connect(Path(self._db_path).resolve().as_uri() + "?mode=ro", uri=True) as reader:
                 cursor = await reader.execute(
-                    "SELECT seq, role, type, content, created_at, is_error, session_id_ref, cost "
+                    "SELECT seq, role, type, content, created_at, is_error, session_id_ref, cost, tool_input "
                     "FROM messages WHERE session_id = ? AND terminal_request_id = ?",
                     (session_id, request_id),
                 )

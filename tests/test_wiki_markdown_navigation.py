@@ -142,7 +142,9 @@ def test_compact_navigation_bounds_errors_but_full_keeps_complete_diagnostics(st
         compact = operation(view="compact")
         assert len(compact["index_errors"]) == 3
         assert compact["index_error_count"] == 5 and compact["index_errors_truncated"] is True
-        assert all(len(item["path"]) == len(item["error"]) == 160 for item in compact["index_errors"])
+        assert compact["index_errors"] == [
+            {"path": item["path"], "error": item["error"][:160]} for item in state["index_errors"][:3]
+        ]
         assert operation(view="full")["index_errors"] == state["index_errors"]
 
 

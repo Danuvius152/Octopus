@@ -102,6 +102,7 @@ class SessionInfo(BaseModel):
     status: SessionStatus
     created_at: str
     message_count: int = 0
+    transcript_integrity: Literal["ok", "duplicate_seq"] = "ok"
     claude_session_id: str | None = None
     credential_id: str | None = None
     # Owning agent + who created the session ('user' | 'schedule' |
@@ -317,8 +318,8 @@ class SessionDetail(SessionInfo):
     pending_questions: list[PendingQuestionInfo] = []
     # Sub-agents still on screen for this session (native-subagents.md §4).
     subagents: list[SubagentRun] = []
-    # High-water mark of the messages above: the seq of the next message
-    # the server will assign. Frontends use this to set their dedup
+    # High-water mark of the exact returned rows, independent of the sequence
+    # allocator and its unconfirmed reservations. Frontends set their dedup
     # baseline so any subsequently-broadcast event with seq <=
     # next_message_seq-1 is treated as already applied.
     next_message_seq: int = 0
@@ -347,11 +348,12 @@ class WsToolDecision(BaseModel):
 # Schedules
 
 class ScheduleInfo(BaseModel):
+    invalid_reason: str | None = None
     # Recurrence is exactly one of `interval_seconds` (fire every N seconds) or
     # `cron` + `timezone` (5-field crontab in that tz). `recurrence_label` is
     # the human-readable description the UI shows.
     id: str
-    agent_id: str
+    agent_id: str | None = None
     wiki_mode: Literal["read", "maintain", "off"] | None = None
 
     name: str

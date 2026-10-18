@@ -13,14 +13,12 @@ from .history import WikiHistory, atomic, history_text
 from .registry import registry
 from .store import WikiError
 
-_pending: set[asyncio.Task] = set()
-_preparations: set[asyncio.Task] = set()
+_pending: dict[asyncio.Task, str | None] = {}
+_preparations: dict[asyncio.Task, str | None] = {}
 _active: set = set()
 _stopping = False
 _ALL = object()
 _blocked_owners: set[str | None] = set()
-_preparation_owners: dict[asyncio.Task, str | None] = {}
-_pending_owners: dict[asyncio.Task, str | None] = {}
 logger = logging.getLogger(__name__)
 
 
@@ -32,8 +30,8 @@ async def shutdown(*, timeout: float = 5.0, user_id=_ALL) -> None:
         _stopping = True
     else:
         _blocked_owners.add(user_id)
-    tasks = tuple(task for task in _pending | _preparations if user_id is _ALL or
-                  (_pending_owners.get(task) if task in _pending else _preparation_owners.get(task)) == user_id)
+    tasks = tuple(task for task, owner in (_pending | _preparations).items()
+                  if user_id is _ALL or owner == user_id)
     for task in tasks:
         if not task.done() and not task.cancelling():
             task.cancel("shutdown")
@@ -47,7 +45,8 @@ async def shutdown(*, timeout: float = 5.0, user_id=_ALL) -> None:
     ]
     if failures:
         raise RuntimeError("Wiki application writer teardown remains unconfirmed") from failures[0]
-    _pending.difference_update(tasks)
+    for task in tasks:
+        _pending.pop(task, None)
     active = [mutation for mutation in _active if user_id is _ALL or mutation.user_id == user_id]
     if active:
         results = await asyncio.gather(*(mutation.finish() for mutation in active), return_exceptions=True)
@@ -59,8 +58,8 @@ def reopen(user_id=_ALL) -> None:
     global _stopping
     if user_id is not _ALL:
         if (any(mutation.user_id == user_id for mutation in _active)
-                or any(task in _pending and owner == user_id for task, owner in _pending_owners.items())
-                or any(task in _preparations and owner == user_id for task, owner in _preparation_owners.items())):
+                or user_id in _pending.values()
+                or user_id in _preparations.values()):
             raise RuntimeError("Wiki application writers have not retired")
         _blocked_owners.discard(user_id)
         return
@@ -195,8 +194,7 @@ class AppMutation:
                 await complete_cleanup(cleanup())
 
         task = asyncio.create_task(wait(), name=f"wiki-app-{job_id}")
-        _pending.add(task)
-        _pending_owners[task] = self.user_id
+        _pending[task] = self.user_id
 
         def finished(task):
             if not task.cancelled() and (error := task.exception()) is not None:
@@ -204,16 +202,14 @@ class AppMutation:
                     "Wiki application journal failed", exc_info=error
                 )
                 return  # Shutdown must still report this unconfirmed journal.
-            _pending.discard(task)
-            _pending_owners.pop(task, None)
+            _pending.pop(task, None)
 
         task.add_done_callback(finished)
 
 
 async def begin(app_row, method, endpoint, query, body=b""):
     task = asyncio.create_task(_begin(app_row, method, endpoint, query, body), name="wiki-app-prepare")
-    _preparations.add(task)
-    _preparation_owners[task] = app_row.get("user_id")
+    _preparations[task] = app_row.get("user_id")
     try:
         return await complete_cleanup(_join_preparation(task))
     except asyncio.CancelledError:
@@ -223,8 +219,7 @@ async def begin(app_row, method, endpoint, query, body=b""):
                 await complete_cleanup(mutation.finish())
         raise
     finally:
-        _preparations.discard(task)
-        _preparation_owners.pop(task, None)
+        _preparations.pop(task, None)
 
 
 async def _join_preparation(task):
@@ -316,6 +311,7 @@ async def _begin(app_row, method, endpoint, query, body=b""):
                 entry = {
                     "id": uuid.uuid4().hex,
                     "version": 2,
+                    "source_binding_protocol": 1,
                     "paths": paths,
                     "before": history.capture_external(paths),
                     "actor": f"app:{app_row['id']}",

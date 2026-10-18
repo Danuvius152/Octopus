@@ -11,13 +11,13 @@ import {
 import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
 import {
   useSessionStore,
-  type AttachmentMetadata,
   type Message,
   type PendingQuestion,
   type SessionInfo,
 } from "../stores/sessionStore";
 import { ForkDialog } from "./ForkDialog";
 import { ResearchCard } from "./ResearchCard";
+import { TranscriptIntegrityNotice } from "./TranscriptIntegrityNotice";
 import { MessageBubble } from "./MessageBubble";
 import { DispatchQueue } from "./DispatchQueue";
 import { MessageTime } from "./MessageTime";
@@ -47,14 +47,9 @@ import { isSessionBusy } from "../lib/deferredFork";
 import { loadOlderMessages } from "../lib/transcript";
 import type { WikiMessageMode } from "../lib/wikiComposer";
 import { newSubmissionId, type SubmissionReply } from "../lib/submission";
+import { MAX_ATTACHMENTS_PER_MESSAGE, useDraftAttachments, type PendingAttachment } from "../hooks/useDraftAttachments";
 
 const EMPTY_MESSAGES: Message[] = [];
-
-// Mirror of server/attachments.py MAX_ATTACHMENTS_PER_MESSAGE. Kept as a
-// constant rather than a contract type because it's a UX cap (so we can
-// disable the file picker once full), not a wire shape.
-const MAX_ATTACHMENTS_PER_MESSAGE = 10;
-const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
 /** True on a device whose primary input can't hover — a phone or tablet.
  *
@@ -67,19 +62,6 @@ function isTouchDevice(): boolean {
     typeof window.matchMedia === "function" &&
     window.matchMedia("(hover: none)").matches
   );
-}
-
-// A file the user picked but hasn't sent yet. Lives in the composer
-// only — once the WS send_message fires, the server's user_message
-// broadcast carries the AttachmentMetadata into the chat history.
-interface PendingAttachment {
-  // Stable id used as React key + remove-target. Independent from the
-  // server-assigned attachment id (which only exists after upload).
-  uid: string;
-  file: File;
-  status: "uploading" | "ready" | "error";
-  meta?: AttachmentMetadata;
-  error?: string;
 }
 
 interface Props {
@@ -117,7 +99,8 @@ export function ChatView({
   onOpenSchedules,
 }: Props) {
   const [input, setInput] = useState("");
-  const [pendingAttachments, setPendingAttachments] = useState<PendingAttachment[]>([]);
+  const [requiredAttachmentCount, setRequiredAttachmentCount] = useState(0);
+  const submittedDrafts = useRef(new Map<string, { sessionId: string; text: string; attachments: PendingAttachment[] }>());
   const [rejectedDrafts, setRejectedDrafts] = useState<{
     id: string; sessionId: string; text: string; attachments: PendingAttachment[];
     reason: string;
@@ -140,6 +123,8 @@ export function ChatView({
   const dragCounter = useRef(0);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const { attachments: pendingAttachments, addFiles, removeAttachment, retryAttachment,
+    restoreAttachments, clearAttachments, unready, readyIds: readyAttachmentIds } = useDraftAttachments(activeSessionId);
   const messagesMap = useSessionStore((s) => s.messages);
   const streamingMap = useSessionStore((s) => s.streamingText);
   const messages = activeSessionId ? (messagesMap[activeSessionId] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES;
@@ -161,6 +146,7 @@ export function ChatView({
   // neutral fallback when the session has no owning agent.
   const agentLabel = activeAgent?.name || "Assistant";
   const isArchived = !!activeSession?.archived;
+  const transcriptDamaged = activeSession?.transcript_integrity === "duplicate_seq";
   const pendingQueueMap = useSessionStore((s) => s.pendingQueue);
   const dispatchStates = useSessionStore((s) => s.dispatchStates);
   const dispatchPaused = activeSessionId ? dispatchStates[activeSessionId]?.paused ?? false : false;
@@ -313,6 +299,33 @@ export function ChatView({
   const canSteer =
     !!activeSession?.can_steer && pendingAttachments.length === 0;
 
+  useEffect(() => {
+    for (const [requestId, draft] of submittedDrafts.current) {
+      const result = messagesMap[draft.sessionId]?.find((message) => message.outcome?.request_id === requestId);
+      if (result && result.outcome?.code !== "attachment_unavailable") submittedDrafts.current.delete(requestId);
+    }
+  }, [messagesMap]);
+
+  const restoreRejectedInput = useCallback((message: Message) => {
+    if (!activeSessionId || input.length > 0 || pendingAttachments.length > 0) return;
+    const recovery = message.tool_input?.rejected_input as { content?: unknown; attachment_ids?: unknown } | undefined;
+    if (typeof recovery?.content !== "string" || !Array.isArray(recovery.attachment_ids)) return;
+    const requestId = message.outcome?.request_id;
+    const draft = requestId ? submittedDrafts.current.get(requestId) : undefined;
+    setInput(recovery.content);
+    setHistory(HISTORY_IDLE);
+    if (draft) {
+      restoreAttachments(draft.attachments);
+      submittedDrafts.current.delete(requestId!);
+      setRequiredAttachmentCount(0);
+    } else {
+      // After a reload the browser no longer has File objects. Keep the
+      // complete-input requirement visible until files are selected again.
+      setRequiredAttachmentCount(recovery.attachment_ids.length);
+    }
+    textareaRef.current?.focus();
+  }, [activeSessionId, input.length, pendingAttachments.length, restoreAttachments]);
+
   // The body per message shape. Wrapped by `renderMessage` below, which is
   // where the hover-revealed timestamp is attached — one place, so every shape
   // gets it rather than each branch of MessageBubble growing its own.
@@ -372,6 +385,8 @@ export function ChatView({
           agentName={activeAgent?.name}
           agentAvatar={activeAgent?.avatar}
           onFork={(seq) => setForkDialog({ seq })}
+          onRestoreInput={() => restoreRejectedInput(msg)}
+          restoreInputDisabled={input.length > 0 || pendingAttachments.length > 0}
         />
       );
     },
@@ -381,6 +396,9 @@ export function ChatView({
       denyTool,
       answerQuestion,
       pendingQuestions,
+      restoreRejectedInput,
+      input.length,
+      pendingAttachments.length,
       activeAgent?.name,
       activeAgent?.avatar,
       agentLabel,
@@ -402,78 +420,6 @@ export function ChatView({
   );
 
   // ---- attachments: upload, paste, drop, picker, chips ------------------
-
-  const uploadOne = useCallback(
-    async (sessionId: string, file: File): Promise<AttachmentMetadata> => {
-      const token = useSessionStore.getState().token;
-      const form = new FormData();
-      form.append("file", file, file.name);
-      const res = await fetch(
-        `${window.location.origin}/api/sessions/${encodeURIComponent(
-          sessionId
-        )}/attachments`,
-        {
-          method: "POST",
-          headers: { Authorization: `Bearer ${token}` },
-          body: form,
-        }
-      );
-      if (!res.ok) {
-        const text = await res.text();
-        throw new Error(text || `upload failed (${res.status})`);
-      }
-      return (await res.json()) as AttachmentMetadata;
-    },
-    []
-  );
-
-  const addFiles = useCallback(
-    (files: File[]) => {
-      if (!activeSessionId || files.length === 0) return;
-      // Cap total at server's MAX_ATTACHMENTS_PER_MESSAGE; truncate the
-      // overflow rather than rejecting so the user gets *some* attached.
-      const room = MAX_ATTACHMENTS_PER_MESSAGE - pendingAttachments.length;
-      if (room <= 0) return;
-      const accepted = files.slice(0, room).filter((f) => {
-        if (f.size > MAX_FILE_BYTES) {
-          console.warn(`Attachment ${f.name} exceeds 25MB cap, skipping`);
-          return false;
-        }
-        return true;
-      });
-      const newPending: PendingAttachment[] = accepted.map((file) => ({
-        uid: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-        file,
-        status: "uploading",
-      }));
-      setPendingAttachments((prev) => [...prev, ...newPending]);
-      // Kick off uploads in parallel; each one mutates its own slot.
-      for (const p of newPending) {
-        uploadOne(activeSessionId, p.file)
-          .then((meta) => {
-            setPendingAttachments((prev) =>
-              prev.map((x) =>
-                x.uid === p.uid ? { ...x, status: "ready", meta } : x
-              )
-            );
-          })
-          .catch((err: Error) => {
-            setPendingAttachments((prev) =>
-              prev.map((x) =>
-                x.uid === p.uid
-                  ? { ...x, status: "error", error: err.message }
-                  : x
-              )
-            );
-          });
-      }
-    },
-    [activeSessionId, pendingAttachments.length, uploadOne]
-  );
-
-  const removeAttachment = useCallback((uid: string) => {
-    setPendingAttachments((prev) => prev.filter((x) => x.uid !== uid));
-  }, []);
 
   const handlePaste = useCallback(
     (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -523,12 +469,7 @@ export function ChatView({
     e.dataTransfer.dropEffect = "copy";
   }, []);
 
-  const hasUploadInFlight = pendingAttachments.some(
-    (a) => a.status === "uploading"
-  );
-  const readyAttachmentIds = pendingAttachments
-    .filter((a) => a.status === "ready" && a.meta)
-    .map((a) => a.meta!.id);
+  const hasUploadInFlight = unready || pendingAttachments.length < requiredAttachmentCount;
 
   // While a turn runs: the text the model is producing right now, or the
   // loading dots when it hasn't produced any yet (it's thinking, or running a
@@ -614,18 +555,12 @@ export function ChatView({
     setInput(`${cmd.name} `);
     setSlashIndex(0);
     setSlashDismissed(false);
-    // Keep editing in the textarea with the caret at the end.
-    requestAnimationFrame(() => {
-      const ta = textareaRef.current;
-      if (!ta) return;
-      ta.focus();
-      const end = ta.value.length;
-      ta.setSelectionRange(end, end);
-    });
+    // Focus now so completion cannot move a later text selection.
+    textareaRef.current?.focus();
   };
 
   const submitTurn = (content: string) => {
-    if (!activeSessionId) return;
+    if (!activeSessionId || hasUploadInFlight) return;
     const draft = {
       id: newSubmissionId(), sessionId: activeSessionId, text: input,
       attachments: pendingAttachments.filter((attachment) => attachment.status === "ready"),
@@ -638,16 +573,19 @@ export function ChatView({
     );
     setInput("");
     setHistory(HISTORY_IDLE);
-    // Drop both ready uploads (they're now associated with the message
-    // we just sent) and any failed uploads (the user can retry by
-    // re-attaching). Leave in-flight uploads alone — addFiles already
-    // prevents that case by blocking send while one is pending.
-    setPendingAttachments([]);
+    clearAttachments();
+    setRequiredAttachmentCount(0);
     if (submission) {
       void submission.then((reply) => {
         if (!reply.accepted) setRejectedDrafts((drafts) => [...drafts, {
           ...draft, reason: reply.message || "Your message was not accepted.",
         }]);
+        else if (reply.requestId && draft.attachments.length) {
+          const result = useSessionStore.getState().messages[draft.sessionId]?.find((message) => message.outcome?.request_id === reply.requestId);
+          if (!result || result.outcome?.code === "attachment_unavailable") submittedDrafts.current.set(reply.requestId, draft);
+        }
+      }).catch(() => {
+        setRejectedDrafts((drafts) => [...drafts, { ...draft, reason: "Delivery was not confirmed. Check the conversation before sending again." }]);
       });
     }
   };
@@ -1609,8 +1547,8 @@ export function ChatView({
                 onClick={() => {
                   if (!activeSessionId || isArchived || input.length > 0 || pendingAttachments.length > 0) return;
                   setInput(draft.text);
-                  if (draft.sessionId === activeSessionId) setPendingAttachments(draft.attachments);
-                  else addFiles(draft.attachments.map((attachment) => attachment.file));
+                  restoreAttachments(draft.attachments);
+                  setRequiredAttachmentCount(0);
                   setHistory(HISTORY_IDLE);
                   setRejectedDrafts((drafts) => drafts.filter((item) => item.id !== draft.id));
                   textareaRef.current?.focus();
@@ -1657,14 +1595,15 @@ export function ChatView({
   return (
     <div
       className="chat-view flex-1 flex flex-col min-h-0 relative"
-      onDragEnter={isArchived ? undefined : handleDragEnter}
-      onDragLeave={isArchived ? undefined : handleDragLeave}
-      onDragOver={isArchived ? undefined : handleDragOver}
-      onDrop={isArchived ? undefined : handleDrop}
+      onDragEnter={isArchived || transcriptDamaged ? undefined : handleDragEnter}
+      onDragLeave={isArchived || transcriptDamaged ? undefined : handleDragLeave}
+      onDragOver={isArchived || transcriptDamaged ? undefined : handleDragOver}
+      onDrop={isArchived || transcriptDamaged ? undefined : handleDrop}
     >
       {header}
       {forkBanner}
       {delegationBanner}
+      {transcriptDamaged && activeSessionId && <TranscriptIntegrityNotice key={activeSessionId} sessionId={activeSessionId} />}
 
       {activeSession && (
         <ModelPickerDialog
@@ -1741,16 +1680,16 @@ export function ChatView({
         </div>
       )}
 
-      {activeSessionId && <DispatchQueue key={activeSessionId} sessionId={activeSessionId} readOnly={isArchived} />}
+      {activeSessionId && <DispatchQueue key={activeSessionId} sessionId={activeSessionId} readOnly={isArchived || transcriptDamaged} />}
 
       {savedDrafts}
-      {isArchived ? (
+      {isArchived || transcriptDamaged ? (
         <div className="chat-archived-banner px-4 py-3 border-t border-border bg-muted/40 text-sm text-muted-foreground flex items-center justify-between gap-3 shrink-0">
-          <span>
+          {transcriptDamaged ? <span>History review is required before continuing this conversation.</span> : <span>
             This session is <strong className="text-foreground">archived</strong>{" "}
             — viewing read-only history. Unarchive from the sidebar to
             continue the conversation.
-          </span>
+          </span>}
         </div>
       ) : (
         <div className="chat-input-bar shrink-0 bg-background px-6 pb-5 pt-2">
@@ -1790,6 +1729,12 @@ export function ChatView({
               }}
             />
 
+            {pendingAttachments.length < requiredAttachmentCount && <div role="alert" className="px-3 pt-2 text-sm text-destructive">
+              Re-attach {requiredAttachmentCount} {requiredAttachmentCount === 1 ? "file" : "files"} to send the complete message.
+              <button type="button" className="ml-2 underline" onClick={() => {
+                setInput(""); clearAttachments(); setRequiredAttachmentCount(0);
+              }}>Discard draft</button>
+            </div>}
             {pendingAttachments.length > 0 && (
               <div
                 className="chat-attachment-chips flex flex-wrap gap-2 px-3 pt-2"
@@ -1820,7 +1765,8 @@ export function ChatView({
                       <span className="text-muted-foreground">uploading…</span>
                     )}
                     {p.status === "error" && (
-                      <span className="text-destructive">failed</span>
+                      <button type="button" className="text-destructive underline"
+                        aria-label={`Retry ${p.file.name}`} onClick={() => retryAttachment(p.uid)}>failed · retry</button>
                     )}
                     <button
                       type="button"

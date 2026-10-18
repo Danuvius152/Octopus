@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ChatView } from "./ChatView";
+import { VirtuosoMockContext } from "react-virtuoso";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import commandCasesText from "../../../tests/fixtures/wiki-command-cases.json?raw";
 
@@ -71,17 +72,39 @@ it("keeps the queue paused and reports a failed resume", async () => {
   vi.unstubAllGlobals();
 });
 
-function setup() {
-  const sendMessage = vi.fn();
-  render(<ChatView sendMessage={sendMessage} interrupt={vi.fn()}
+function setup(send?: Parameters<typeof ChatView>[0]["sendMessage"]) {
+  const sendMessage = vi.fn(send);
+  render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}><ChatView sendMessage={sendMessage} interrupt={vi.fn()}
     approveTool={vi.fn()} denyTool={vi.fn()} answerQuestion={vi.fn()}
-    connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />);
+    connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} /></VirtuosoMockContext.Provider>);
   return {
     sendMessage,
     input: screen.getByRole("textbox"),
     send: screen.getByRole("button", { name: "Send message" }),
   };
 }
+
+it("preserves a new selection made immediately after slash completion", () => {
+  const frames: FrameRequestCallback[] = [];
+  vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => frames.push(callback));
+  try {
+    const { input } = setup();
+    const field = input as HTMLTextAreaElement;
+    act(() => frames.splice(0).forEach((callback) => callback(0)));
+    fireEvent.change(input, { target: { value: "/rem" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    expect(field.value).toBe("/remember ");
+    expect(field.selectionStart).toBe(field.value.length);
+    field.setSelectionRange(0, field.value.length);
+    act(() => frames.splice(0).forEach((callback) => callback(0)));
+    expect(field.selectionStart).toBe(0);
+    expect(field.selectionEnd).toBe(field.value.length);
+    fireEvent.change(input, { target: { value: "/re" } });
+    expect(screen.getByRole("listbox", { name: "Slash commands" })).toBeVisible();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
 
 it.each(["without-randomUUID", "without-crypto"])("submits and restores rejected drafts %s", async (mode) => {
   vi.stubGlobal("crypto", mode === "without-crypto" ? undefined : { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) });
@@ -149,5 +172,141 @@ describe("shared Wiki without a composer switch", () => {
     const { input, sendMessage } = setup();
     fireEvent.keyDown(input, { key: "Enter" });
     expect(sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("session-owned attachment drafts", () => {
+  const other = { ...session, id: "other-session" };
+  let uploads: { sessionId: string; finish: (response: Response) => void; file: File }[];
+
+  beforeEach(() => {
+    uploads = [];
+    vi.stubGlobal("fetch", vi.fn((url: string, options: RequestInit) => new Promise<Response>((finish) => {
+      const sessionId = /\/sessions\/([^/]+)\/attachments$/.exec(url)?.[1];
+      if (!sessionId) throw new Error(`Unexpected fetch: ${url}`);
+      uploads.push({ sessionId, finish, file: (options.body as FormData).get("file") as File });
+    })));
+  });
+  afterEach(() => vi.unstubAllGlobals());
+
+  const pick = () => fireEvent.change(screen.getByTestId("attachment-file-input"), {
+    target: { files: [new File(["Required evidence"], "evidence.txt", { type: "text/plain" })] },
+  });
+  const switchTo = (id: string) => act(() => useSessionStore.setState({
+    sessions: [session, other], activeSessionId: id,
+  }));
+  const complete = (index: number, id: string) => act(async () => uploads[index].finish(new Response(JSON.stringify({
+    id, filename: "evidence.txt", size: 17, mime_type: "text/plain",
+  }))));
+
+  it("reuploads a ready A file for B and never sends A's id", async () => {
+    const { input, send, sendMessage } = setup();
+    fireEvent.change(input, { target: { value: "Use the whole input" } });
+    pick();
+    await complete(0, "A-file");
+    switchTo(other.id);
+    await waitFor(() => expect(uploads).toHaveLength(2));
+    expect(uploads.map((upload) => upload.sessionId)).toEqual([session.id, other.id]);
+    expect(send).toBeDisabled();
+    fireEvent.click(send);
+    expect(sendMessage).not.toHaveBeenCalled();
+    await complete(1, "B-file");
+    fireEvent.click(send);
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(other.id, "Use the whole input", ["B-file"], undefined);
+  });
+
+  it("ignores late uploads across A to B to A and removal", async () => {
+    const { send, sendMessage } = setup();
+    pick();
+    switchTo(other.id);
+    await waitFor(() => expect(uploads).toHaveLength(2));
+    switchTo(session.id);
+    await waitFor(() => expect(uploads).toHaveLength(3));
+    await complete(0, "old-A");
+    await complete(1, "old-B");
+    expect(send).toBeDisabled();
+    await complete(2, "current-A");
+    fireEvent.click(send);
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "", ["current-A"], undefined);
+    pick();
+    await waitFor(() => expect(uploads).toHaveLength(4));
+    fireEvent.click(screen.getByRole("button", { name: "Remove evidence.txt" }));
+    pick();
+    await waitFor(() => expect(uploads).toHaveLength(5));
+    await complete(3, "removed-file");
+    expect(screen.getAllByRole("button", { name: "Remove evidence.txt" })).toHaveLength(1);
+    expect(send).toBeDisabled();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    await complete(4, "replacement-file");
+    fireEvent.click(send);
+    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "", ["replacement-file"], undefined);
+  });
+
+  it("blocks partial sending after upload failure and retries the same file", async () => {
+    const { input, send, sendMessage } = setup();
+    fireEvent.change(input, { target: { value: "Required file" } });
+    pick();
+    await act(async () => uploads[0].finish(new Response("Upload rejected", { status: 400 })));
+    expect(send).toBeDisabled();
+    fireEvent.click(send);
+    expect(sendMessage).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Retry evidence.txt" }));
+    await waitFor(() => expect(uploads).toHaveLength(2));
+    expect(uploads[1].file.name).toBe(uploads[0].file.name);
+    await complete(1, "retried");
+    fireEvent.click(send);
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Required file", ["retried"], undefined);
+  });
+
+  it("restores a refused draft by reuploading even in its original session", async () => {
+    const { input, send } = setup(async () => ({ accepted: false, message: "attachment_unavailable" }));
+    fireEvent.change(input, { target: { value: "Retain all input" } });
+    pick();
+    await complete(0, "stale-file");
+    await act(async () => fireEvent.click(send));
+    fireEvent.click(screen.getByRole("button", { name: "Restore draft" }));
+    await waitFor(() => expect(uploads).toHaveLength(2));
+    expect(input).toHaveValue("Retain all input");
+    expect(send).toBeDisabled();
+    await complete(1, "fresh-file");
+    expect(send).not.toBeDisabled();
+  });
+
+  const recordQueuedFailure = () => act(() => useSessionStore.getState().addMessage(session.id, {
+    role: "system", type: "result",
+    content: { kind: "outcome", request_id: "accepted-files", status: "failed", code: "attachment_unavailable",
+      message: "Some attachments are unavailable. Re-upload the files in this conversation.", recovery: {} },
+    tool_input: { rejected_input: { content: "Queued complete input", attachment_ids: ["lost-file"] } },
+  }));
+
+  it("restores a queued-input failure using its original File objects", async () => {
+    const { input, send, sendMessage } = setup(async () => ({ accepted: true, requestId: "accepted-files" }));
+    fireEvent.change(input, { target: { value: "Queued complete input" } });
+    pick();
+    await complete(0, "lost-file");
+    await act(async () => fireEvent.click(send));
+    recordQueuedFailure();
+    fireEvent.click(await screen.findByRole("button", { name: "Restore draft and re-upload files" }));
+    await waitFor(() => expect(uploads).toHaveLength(2));
+    expect(input).toHaveValue("Queued complete input");
+    expect(send).toBeDisabled();
+    await complete(1, "replacement-file");
+    fireEvent.click(send);
+    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "Queued complete input", ["replacement-file"], undefined);
+  });
+
+  it("requires file reselection when restoring a durable failure after reload", async () => {
+    const { input, send, sendMessage } = setup();
+    recordQueuedFailure();
+    fireEvent.click(await screen.findByRole("button", { name: "Restore draft and re-upload files" }));
+    expect(input).toHaveValue("Queued complete input");
+    expect(send).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("Re-attach 1 file");
+    fireEvent.click(send);
+    expect(sendMessage).not.toHaveBeenCalled();
+    pick();
+    await complete(0, "reselected-file");
+    fireEvent.click(send);
+    expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Queued complete input", ["reselected-file"], undefined);
   });
 });

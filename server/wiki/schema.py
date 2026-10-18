@@ -3,7 +3,7 @@
 import re
 from datetime import UTC, datetime
 
-VERSION = 9
+VERSION = 10
 
 
 def validate_filesystem_ledger(db):
@@ -54,7 +54,7 @@ def validate_filesystem_ledger(db):
 
 
 def initialize(store):
-    from . import materials, search_index
+    from . import grants, materials, search_index
 
     with store.connect() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -63,6 +63,9 @@ def initialize(store):
 
         if (db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] or 0) > VERSION:
             raise WikiError("Wiki schema is newer than this framework; durable state retained", 503)
+        old_version = db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] or 0
+        if 3 <= old_version < 10 and not db.execute("SELECT 1 FROM sqlite_master WHERE name='wiki_edges'").fetchone() and db.execute("SELECT 1 FROM documents LIMIT 1").fetchone():
+            raise WikiError("Source-binding ledger v9 source-edge proof is missing; durable state retained", 503)
         if not db.execute("SELECT 1 FROM wiki_schema WHERE version=1").fetchone():
             db.execute("""CREATE TABLE IF NOT EXISTS documents (
                 id TEXT PRIMARY KEY,path TEXT UNIQUE NOT NULL,revision TEXT NOT NULL,
@@ -111,7 +114,13 @@ def initialize(store):
             db.execute("CREATE TABLE uid_aliases(uid TEXT PRIMARY KEY,doc_id TEXT NOT NULL)")
             db.execute("CREATE INDEX uid_alias_document ON uid_aliases(doc_id)")
             db.execute("INSERT INTO wiki_schema VALUES(2,?)", (datetime.now(UTC).isoformat(),))
-        from . import catalog
+        from . import (
+            catalog,
+            maintenance_inputs,
+            maintenance_selections,
+            protocols,
+            source_bindings,
+        )
 
         if not db.execute("SELECT 1 FROM wiki_schema WHERE version=3").fetchone():
             catalog.initialize(db)
@@ -176,6 +185,24 @@ def initialize(store):
             raise WikiError("Material-origin ledger is missing; durable state retained", 503)
         if "origin_state" not in {row[1] for row in db.execute("PRAGMA table_info(app_trash)")}:
             raise WikiError("Material-origin trash state is missing; durable state retained", 503)
+        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=10").fetchone():
+            source_bindings.migrate(db)
+            protocols.initialize(db)
+            db.execute("INSERT INTO wiki_protocols VALUES('maintenance_inputs',1)")
+            maintenance_inputs.adopt_legacy_jobs(db)
+            maintenance_selections.initialize(db)
+            grants.initialize(db)
+            grants.migrate_legacy(db, store)
+            db.execute("UPDATE documents SET signature=''")
+            db.execute("UPDATE index_state SET checked_at=NULL")
+            db.execute("INSERT INTO wiki_schema VALUES(10,?)", (datetime.now(UTC).isoformat(),))
+        source_bindings.validate(db)
+        protocols.require(db, "registration")
+        maintenance_selections.require(db)
+        grants.require(db)
+        if "source_plan" not in {row[1] for row in db.execute("PRAGMA table_info(app_trash)")}:
+            raise WikiError("Source-binding trash state is missing; durable state retained", 503)
+        maintenance_inputs.prepare_repair(db)
         search_missing = not {"search_documents", "search_sections", "search_fts"}.issubset(available)
         search_changed = search_missing or (
             "readable_body" not in {column[1] for column in db.execute("PRAGMA table_info(search_sections)")}
@@ -190,3 +217,7 @@ def initialize(store):
             catalog.initialize(db)
             db.execute("UPDATE documents SET signature=''")
             db.execute("UPDATE index_state SET checked_at=NULL")
+        if catalog.initialize(db):
+            db.execute("UPDATE documents SET signature=''")
+            db.execute("UPDATE index_state SET checked_at=NULL")
+        maintenance_inputs.initialize(db)

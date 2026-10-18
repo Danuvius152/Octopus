@@ -69,3 +69,66 @@ test("a rejected draft survives archive and restores its text and attachment to 
     if (nextId) await request.delete(`${API}/sessions/${nextId}`, { headers }).catch(() => {});
   }
 });
+
+test("session-owned uploads preserve the complete draft across conversations", async ({ page, request }) => {
+  const sessions = [];
+  for (const suffix of ["A", "B"]) {
+    const response = await request.post(`${API}/sessions`, { headers, data: {
+      name: `Attachment ownership ${suffix}`, working_dir: "/tmp", backend: "codex",
+    } });
+    expect(response.ok()).toBeTruthy();
+    sessions.push(await response.json());
+  }
+  const [first, second] = sessions;
+  try {
+    await page.goto("/");
+    await page.locator('input[type="password"]').fill("changeme");
+    await page.locator(".btn-login").click();
+    await page.locator(".agent-item", { hasText: "Octo" }).click();
+    await page.locator(".session-item", { hasText: first.name }).click();
+    await expect(page.locator(".conn-status.on")).toBeVisible();
+    const input = page.locator(".chat-input-bar textarea");
+    await input.fill("Use the complete evidence");
+    const firstUpload = page.waitForResponse((response) => response.url().endsWith(`/sessions/${first.id}/attachments`) && response.request().method() === "POST");
+    await page.getByTestId("attachment-file-input").setInputFiles({
+      name: "evidence.txt", mimeType: "text/plain", buffer: Buffer.from("complete required evidence"),
+    });
+    const firstFile = await (await firstUpload).json();
+    const secondUpload = page.waitForResponse((response) => response.url().endsWith(`/sessions/${second.id}/attachments`) && response.request().method() === "POST");
+    await page.locator(".session-item", { hasText: second.name }).click();
+    const secondFile = await (await secondUpload).json();
+    expect(secondFile.id).not.toBe(firstFile.id);
+    await expect(input).toHaveValue("Use the complete evidence");
+    await expect(page.locator(".attachment-pending")).not.toContainText("uploading");
+
+    // A forged mixed request must be rejected as a whole over the real socket.
+    const refusal = await page.evaluate(async ({ sessionId, ids }) => {
+      return await new Promise<Record<string, unknown>>((resolve, reject) => {
+        const socket = new WebSocket(`${location.origin.replace(/^http/, "ws")}/ws?token=changeme`);
+        const deadline = setTimeout(() => { socket.close(); reject(new Error("Attachment refusal not received")); }, 5000);
+        socket.onopen = () => socket.send(JSON.stringify({ type: "send_message", session_id: sessionId,
+          content: "Must not run with missing input", attachment_ids: ids, client_request_id: "foreign-file-input" }));
+        socket.onmessage = (event) => {
+          const value = JSON.parse(event.data);
+          if (value.type !== "submission" || value.client_request_id !== "foreign-file-input") return;
+          clearTimeout(deadline); socket.close(); resolve(value);
+        };
+      });
+    }, { sessionId: second.id, ids: [secondFile.id, firstFile.id] });
+    expect(refusal).toMatchObject({ accepted: false, code: "attachment_unavailable" });
+    const before = await (await request.get(`${API}/sessions/${second.id}`, { headers })).json();
+    expect(before.messages).toHaveLength(0);
+
+    await page.getByRole("button", { name: "Send message" }).click();
+    await expect(page.locator(".msg-user .attachment-chip", { hasText: "evidence.txt" })).toBeVisible();
+    const saved = await (await request.get(`${API}/sessions/${second.id}`, { headers })).json();
+    const submitted = saved.messages.find((message: { role: string }) => message.role === "user");
+    expect(submitted.content).toBe("Use the complete evidence");
+    expect(submitted.attachments).toMatchObject([{ id: secondFile.id }]);
+    const bytes = await request.get(`${API}/sessions/${second.id}/attachments/${secondFile.id}`, { headers });
+    expect(await bytes.text()).toBe("complete required evidence");
+    expect((await request.get(`${API}/sessions/${second.id}/attachments/${firstFile.id}`, { headers })).status()).toBe(404);
+  } finally {
+    for (const session of sessions) await request.delete(`${API}/sessions/${session.id}`, { headers }).catch(() => {});
+  }
+});

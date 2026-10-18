@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import pytest
 
 from server.config import settings
+from server.mcp_identity import mint, verify
 from server.wiki import origins
 from server.wiki.curation import WikiCuration
 from server.wiki.events import FileChanges, FileEvent, VaultEvents
@@ -82,9 +83,9 @@ def assigned_store(tmp_path, monkeypatch):
     job = jobs.maintain("event-replacement", "", "organize", [original["path"]], None, [], "human")
     session = SimpleNamespace(id="synthetic-worker", user_id=None, agent_id=config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
-    tasks.assign(session.id, job["id"], [original["path"]])
+    tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
-    task = tasks.active[token]
+    task = tasks.call(tasks.active[token], verify(mint(session.id, wiki_task_id=token)))
     tasks.record_read(task, original)
     yield store, original, task
     tasks.close(token)

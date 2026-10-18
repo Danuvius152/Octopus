@@ -212,6 +212,11 @@ Auth for the agent's backend uses your existing CLI login (`claude login` /
 `codex login`) by default — or add an API key under **Credentials** and attach
 it to an agent.
 
+Install development dependencies with `pip install -e '.[test]'`.
+Compatibility bounds live in `pyproject.toml`, including `mcp>=1.30,<2` for
+the supported FastMCP API. Validate dependency updates in a separate virtual
+environment with `pip check`, server import and MCP/account isolation tests.
+
 ### Development mode
 
 ```bash
@@ -241,6 +246,12 @@ in-process over streamable-HTTP
 **Frontend**: React 19 · TypeScript (strict) · Vite · zustand · Tailwind v4 · Radix
 
 ## Testing
+
+This WSL installation defaults to Codex. Claude is currently unavailable;
+Claude-only and mixed-provider live tests are not run and must not be reported
+as passed. Offline tests still cover both backends. See the
+[local validation scope](AGENTS.md#local-codex-validation) before running the
+provider-specific CLI/browser checks below.
 
 ```bash
 ./scripts/check.sh                # every gate: ruff · mypy · pytest · eslint · vitest · tsc · contracts · docs index

@@ -230,9 +230,8 @@ async def test_fire_materializes_scheduled_session_and_auto_archives(
 
 
 @pytest.mark.asyncio
-async def test_fire_uses_agent_id_from_job_args(setup, monkeypatch):
-    """The scheduled job carries agent_id (not session_id) and each fire
-    creates its own session — no persistent session reuse."""
+async def test_fire_creates_a_fresh_session_for_each_durable_schedule_run(setup, monkeypatch):
+    """Each authorized fire creates its own session, without session reuse."""
     mgr, db, runner = setup
     agent = await db.get_system_agent()
 
@@ -251,7 +250,12 @@ async def test_fire_uses_agent_id_from_job_args(setup, monkeypatch):
     monkeypatch.setattr(mgr, "create_session", tracking_create)
     monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
 
+    await db.save_schedule(
+        schedule_id="schX", agent_id=agent["id"], name="repeat", prompt="first",
+        interval_seconds=3600, created_at="2026-10-17T00:00:00+00:00",
+    )
     await runner._fire("schX", agent["id"], "first")
+    await db.update_schedule("schX", prompt="second")
     await runner._fire("schX", agent["id"], "second")
 
     # Two fires → two distinct fresh sessions.
@@ -881,6 +885,11 @@ async def test_fresh_fire_is_admitted_and_owned_by_dispatch(setup, monkeypatch):
             yield HarnessEvent(type="result")
 
     monkeypatch.setattr(mgr, "_run_backend", backend)
+    await db.save_schedule(
+        schedule_id="owned-schedule", agent_id=agent["id"], name="owned",
+        prompt="scheduled work", interval_seconds=3600,
+        created_at="2026-10-17T00:00:00+00:00",
+    )
     firing = asyncio.create_task(runner._fire("owned-schedule", agent["id"], "scheduled work"))
     await asyncio.wait_for(entered.wait(), 2)
     assert captured["source"] == "schedule"

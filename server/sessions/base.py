@@ -5,6 +5,7 @@ import json
 import logging
 import uuid
 from collections.abc import Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -152,10 +153,9 @@ class QueuedPrompt:
     """A user turn waiting to run.
 
     Carries both the raw prompt text and any attachments the user
-    uploaded with it — we resolve attachments → absolute paths only at
-    spawn time (not at enqueue time) so the agent sees the same prompt
-    shape regardless of whether the turn ran immediately or after a
-    queue drain.
+    uploaded with it. Admission validates every session-owned file; execution
+    validates again after queueing and resolves the absolute paths. A missing
+    required file fails the complete input before any model starts.
     """
 
     prompt: str
@@ -263,9 +263,16 @@ class Session:
     fork_metadata: str | None = None
     fork_revert_record: str | None = None
     fork_status: str | None = None
-    # Sequence allocator: may include a reserved, unconfirmed terminal row.
-    # Snapshot dedup watermarks must come from the rows actually loaded.
+    # Stored rows and reserved sequence numbers are deliberately separate.
     _message_count: int = field(default=0, repr=False)
+    _next_message_seq: int = field(default=0, repr=False)
+    _transcript_integrity: Literal["ok", "duplicate_seq"] = field(default="ok", repr=False)
+
+    def restore_message_state(self, count: int, next_seq: int, duplicates: int) -> None:
+        self._message_count = count
+        fork_floor = self.fork_after_seq + 1 if self.fork_after_seq is not None else 0
+        self._next_message_seq = max(self._next_message_seq, next_seq, fork_floor)
+        self._transcript_integrity = "duplicate_seq" if duplicates else "ok"
     # Set True for the lifetime of a fork-create saga against this session as
     # the PARENT (session-rewind.md §5.4). start_message() refuses while
     # set; cleared in fork_session's finally. A real mutex even though
@@ -361,6 +368,12 @@ class SessionManagerBase:
 
     async def _blit_attachments_to_descendant_forks(self, session_id: str) -> None:
         raise NotImplementedError  # provided by a mixin
+
+    async def require_active_agent(self, agent_id: str | None) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    def agent_operation(self, agent_id: str | None) -> AbstractAsyncContextManager[None]:
+        raise NotImplementedError
 
     def _own_task(self, task: asyncio.Task[Any]) -> None:
         raise NotImplementedError
@@ -580,6 +593,10 @@ class SessionManagerBase:
         # Short configuration operations share a lock, independently of turn
         # execution. Read/validate/write and turn snapshots must agree.
         self.configuration_lock = asyncio.Lock()
+        self._agent_lifecycle_lock = asyncio.Lock()
+        self._closed_agents: set[str] = set()
+        self._agent_operations: dict[str | None, set[asyncio.Future[None]]] = {}
+        self._agent_archive_tasks: dict[str, asyncio.Task[None]] = {}
         # key -> (callback, subscriber user_id or None for internal)
         self._broadcast_callbacks: dict[str, tuple[Callable, str | None]] = {}
         self.db: Database | None = None
@@ -602,7 +619,15 @@ class SessionManagerBase:
         self._schedule_runner = runner
 
     async def initialize(self, db: Database) -> None:
+        if self.db is not db:
+            # Lifespan binds a new runner after initialization. Retirement
+            # must never query a runner that still owns an earlier database.
+            self._schedule_runner = None
         self.configuration_lock = asyncio.Lock()
+        self._agent_lifecycle_lock = asyncio.Lock()
+        self._closed_agents.clear()
+        self._agent_operations.clear()
+        self._agent_archive_tasks.clear()
         self._admission_closed = False
         self.db = db
         # Turns in flight unwind before this connection does (see
@@ -631,7 +656,7 @@ class SessionManagerBase:
                 app_id=row.get("app_id"),
                 **_session_fork_kwargs(row),
             )
-            session._message_count = await db.count_messages(session.id)
+            session.restore_message_state(*await db.message_sequence_state(session.id))
             self.sessions[session.id] = session
         logger.info("Loaded %d sessions from database", len(rows))
         # Sweep forks left mid-saga by a crash (session-rewind.md §5.6.7).

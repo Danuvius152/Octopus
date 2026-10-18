@@ -115,9 +115,25 @@ async def test_background_updates_the_index_and_restart_preserves_identity(regis
 
         await asyncio.wait_for(wait_for_index(), timeout=3)
         assert service.search("后台更新")["items"][0]["id"] == original["id"]
+        updated_revision = service.read(original["id"])["revision"]
+        generation = registry.config(None)["registration_generation"]
     finally:
         await registry.stop()
-    assert registry.store(None).read(original["id"])["content"] == "# 后台更新\n无需查询触发的内容。\n"
+    with pytest.raises(WikiError) as stopped:
+        registry.store(None)
+    assert stopped.value.status == 503
+    await registry.start()
+    try:
+        restarted = registry.store(None)
+        assert restarted is not service
+        preserved = restarted.read(original["id"])
+        assert preserved["id"] == original["id"]
+        assert preserved["revision"] == updated_revision
+        assert preserved["content"] == "# 后台更新\n无需查询触发的内容。\n"
+        assert registry.config(None)["registration_generation"] == generation
+    finally:
+        await registry.stop()
+
 def test_reconfigured_store_cannot_report_stale_results_as_ready(registered):
     registry, root = registered
     previous = registry.store(None)

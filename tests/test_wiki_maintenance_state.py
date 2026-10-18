@@ -56,10 +56,11 @@ async def current_read(client, doc, headers=None):
 
 
 async def settle(client, jobs, config, path="Library/journal.md", *, job=None, operation="no_change", final_status="completed", settled=True):
-    job = job or jobs.maintain("baseline-" + path, "", "Review current words", [path], None, [], "human")
+    job = job or jobs.maintain("baseline-" + path, "", "Review current words", [path] if operation != "publish" else [], None, [], "human",
+                               creation={"purpose": "requested_knowledge_page", "paths": ["Library/summary.md"]} if operation == "publish" else None)
     session = SimpleNamespace(id="settle-worker", user_id=None, agent_id=config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
-    tasks.assign(session.id, job["id"], [i["path"] for i in job["items"]])
+    tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
     headers = {"Authorization": "Bearer " + mint(session.id, wiki_task_id=token)}
     try:
@@ -75,10 +76,12 @@ async def settle(client, jobs, config, path="Library/journal.md", *, job=None, o
     finally:
         tasks.close(token)
         tasks.unassign(session.id)
-    item = next(i for i in job["items"] if i["path"] == path)
+    item_path = "Library/summary.md" if operation == "publish" else path
+    item = next(i for i in job["items"] if i["path"] == item_path)
     if not settled:
         return value, jobs.get(job["id"])
-    assert jobs.recover_publication(job["id"], item)
+    recover = jobs.recover_creation if operation == "publish" else jobs.recover_publication
+    assert recover(job["id"], item)
     assert item["receipt_id"] == value["receipt_id"] and item["status"] == "done"
     jobs.update(job["id"], status=final_status, items=job["items"], session_id=None)
     return value, jobs.get(job["id"])
@@ -113,7 +116,7 @@ async def test_bare_command_requires_a_checked_current_library_selection(client,
     with entry(request=command) as (headers, task):
         observed = (await state(client, headers=headers))["items"]
         assert [i["current"]["path"] for i in observed] == ["Library/log.md"]
-        assert task.writable == () and not task.reads
+        assert not task.document_ids and not task.reservation_ids and not task.reads
         raw = await client.post("/api/wiki/maintain", headers=headers, json={"idempotency_key": "not-a-selection", "paths": ["Library/log.md"]})
         assert raw.status_code == 403
         queued = await client.post("/api/wiki/maintain", headers=headers, json=submission(observed[0]))
@@ -123,7 +126,7 @@ async def test_bare_command_requires_a_checked_current_library_selection(client,
         outside = (await state(client, "outside.md", headers=headers))["items"][0]
         assert (await client.post("/api/wiki/maintain", headers=headers, json=submission(outside))).status_code == 403
         assert (await state(client, headers=headers))["items"][0]["attempt_count"] == 1
-        assert not task.reads and not task.writable
+        assert not task.reads and not task.document_ids and not task.reservation_ids
         assert len(jobs.list()["items"]) == 1
 
 
@@ -174,7 +177,8 @@ async def test_status_has_no_private_body_error_or_receipt_payload_and_does_not_
     original = (vault / "Library/record.md").read_bytes()
     with entry(request="/wiki维护 record.md") as (headers, task):
         response = await state(client, "Library/record.md", headers=headers)
-        assert secret not in json.dumps(response) and not task.reads and not task.writable
+        assert secret not in json.dumps(response) and not task.reads
+        assert not task.document_ids and not task.reservation_ids
         with store.connect() as db:
             db.execute("UPDATE index_state SET error=?", (secret,))
         unavailable = await state(client, headers=headers)
@@ -298,6 +302,22 @@ async def test_renamed_literal_inlinks_include_outside_library_without_leaking_a
         assert (await client.post("/api/wiki/maintain", headers=headers, json=submission(other))).status_code == 403
 
 
+async def test_old_path_impact_uses_one_uri_decode_for_literal_percent_filename(client, tmp_path):
+    files = {
+        "Library/a%23b.md": "# Percent source\nOriginal conditions.\n",
+        "Library/a#b.md": "# Hash source\nDifferent evidence.\n",
+        "map.md": "# Map\n[percent](Library/a%2523b.md)\n[hash](Library/a%23b.md)\n",
+    }
+    vault, config, jobs = await prepare(client, tmp_path, files)
+    await settle(client, jobs, config, path="Library/a%23b.md")
+    (vault / "Library/a%23b.md").rename(vault / "Library/renamed.md")
+    assert (await current_read(client, "Library/renamed.md")).status_code == 200
+    result = await state(client, "Library/renamed.md", view="links")
+    assert result["total"] == 1
+    assert result["items"][0]["matched_path"] == "Library/a%23b.md"
+    assert result["items"][0]["source_path"] == "map.md"
+
+
 async def test_checked_no_change_replay_does_not_fail_on_its_own_new_baseline(client, tmp_path):
     vault, config, jobs = await prepare(client, tmp_path, {"Library/record.md": "---\nunknown_field: keep\n---\n# Record\n\nCurrent human additions; removed text stays removed.\n"})
     original = (vault / "Library/record.md").read_bytes()
@@ -411,17 +431,25 @@ async def test_normal_weber_mcp_can_observe_and_enqueue_but_not_write_or_reuse_e
                 async with ClientSession(reader, writer) as peer:
                     await peer.initialize()
                     visible = {tool.name for tool in (await peer.list_tools()).tools}
-                    assert {"maintenance_status", "maintain", "read"} <= visible
+                    assert {"maintenance_status", "maintenance_select", "maintenance_selection", "maintain", "read"} <= visible
                     assert not {"revise", "organize", "publish"} & visible
                     observed = json.loads((await peer.call_tool("maintenance_status", {"doc": "Library/journal.md"})).content[0].text)["items"][0]
-                    assert not tasks.active[token].reads and not tasks.active[token].writable
+                    selected = json.loads((await peer.call_tool("maintenance_select", {"limit": 1})).content[0].text)
+                    frozen = json.loads((await peer.call_tool("maintenance_selection", {"selection_id": selected["id"], "limit": 1})).content[0].text)
+                    assert frozen["items"] == selected["items"]
+                    assert frozen["items"][0]["review"] == observed["review"]
+                    assert not tasks.active[token].reads
+                    assert not tasks.active[token].document_ids and not tasks.active[token].reservation_ids
                     first_page = json.loads((await peer.call_tool("maintenance_status", {"limit": 1})).content[0].text)
                     for cursor in malformed_cursors(first_page["next_cursor"]):
                         rejected = json.loads((await peer.call_tool("maintenance_status", {"limit": 1, "cursor": cursor})).content[0].text)
                         assert rejected["status"] == 422, rejected
                     await peer.call_tool("read", {"doc": observed["current"]["id"]})
-                    queued = json.loads((await peer.call_tool("maintain", submission(observed))).content[0].text)
+                    queued = json.loads((await peer.call_tool("maintain", submission(observed) | {
+                        "selection_id": selected["id"], "selection_ordinal": frozen["items"][0]["ordinal"]})).content[0].text)
                     assert queued["status"] == "queued", queued
+                    evidence = json.loads((await peer.call_tool("jobs", {"job_id": queued["id"], "view": "full"})).content[0].text)
+                    assert evidence["selection_evidence"][0]["review"] == observed["review"]
                     assert len(jobs.list()["items"]) == 1
                     direct = await transport.put(f"http://127.0.0.1:{host.port}/api/wiki/document", json={"path": observed["current"]["path"], "expected_revision": observed["current"]["revision"], "content": "# Unauthorized replacement\n", "reason": "entry is not worker"})
                     assert direct.status_code == 403
@@ -429,6 +457,8 @@ async def test_normal_weber_mcp_can_observe_and_enqueue_but_not_write_or_reuse_e
                     assert (await peer.list_tools()).tools == []
                     expired = json.loads((await peer.call_tool("maintenance_status", {"doc": observed["current"]["id"]})).content[0].text)
                     assert expired["status"] == 403, expired
+                    expired_selection = json.loads((await peer.call_tool("maintenance_selection", {"selection_id": selected["id"]})).content[0].text)
+                    assert expired_selection["status"] == 403, expired_selection
     finally:
         tasks.close(token)
         await host.stop()
@@ -562,29 +592,31 @@ async def test_command_tokens_do_not_select_a_third_note(client, tmp_path, comma
 
 @pytest.mark.parametrize("drift", ["edit", "replacement"])
 async def test_final_item_read_cannot_rebind_a_checked_observation(client, tmp_path, monkeypatch, drift):
+    from server.wiki import maintenance_admission, maintenance_projection
+
     vault, _, jobs = await prepare(client, tmp_path)
     store = registry.store(None)
-    original_read = store.read
+    original_prepare = maintenance_admission.prepare
     changed = False
     with entry() as (headers, _):
         observed = (await state(client, "Library/journal.md", headers=headers))["items"][0]
 
-        def edit_between_checked_and_final_read(doc, *args, **kwargs):
+        def edit_after_final_preparation(*args, **kwargs):
             nonlocal changed
-            if doc == observed["current"]["path"] and not changed:
-                changed = True
-                path = vault / doc
-                if drift == "edit":
-                    path.write_text("# Journal\n\nA human edit after validation.\n")
-                else:
-                    raw = path.read_bytes()
-                    path.unlink()
-                    store.refresh()  # Observe deletion before recreating identical bytes.
-                    path.write_bytes(raw)
-                store.refresh()
-            return original_read(doc, *args, **kwargs)
+            original_prepare(*args, **kwargs)
+            changed = True
+            path = vault / observed["current"]["path"]
+            if drift == "edit":
+                path.write_text("# Journal\n\nA human edit after validation.\n")
+            else:
+                raw = path.read_bytes()
+                path.unlink()
+                store.refresh()  # Observe deletion before recreating identical bytes.
+                path.write_bytes(raw)
+            store.refresh()
+            assert maintenance_projection.settle(store)
 
-        monkeypatch.setattr(store, "read", edit_between_checked_and_final_read)
+        monkeypatch.setattr(maintenance_admission, "prepare", edit_after_final_preparation)
         rejected = await client.post("/api/wiki/maintain", headers=headers, json=submission(observed))
         assert changed and rejected.status_code == 409, rejected.text
         assert jobs.list()["items"] == []

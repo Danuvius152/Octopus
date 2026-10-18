@@ -33,6 +33,30 @@ class ReviewObservation(BaseModel):
     review_key: str
 
 
+class MaintenanceSelectionRequest(BaseModel):
+    """Observes candidates without selecting any files for a write grant."""
+
+    model_config = ConfigDict(extra="forbid")
+    directory: str = "Library"
+    limit: int | None = Field(default=None, ge=1, le=200, strict=True)
+
+
+class CreationRequest(BaseModel):
+    """A bounded work proposal; only trusted admission can issue its grant."""
+
+    model_config = ConfigDict(extra="forbid")
+    purpose: Literal["requested_knowledge_page"]
+    paths: list[str] | None = Field(default=None, max_length=16)
+
+
+class GrantReadmissionRequest(BaseModel):
+    """An owner explicitly narrows retained work; the original job is reused."""
+
+    model_config = ConfigDict(extra="forbid")
+    paths: list[str] = Field(default_factory=list, max_length=5000)
+    creation: CreationRequest | None = None
+
+
 class ReadBatch(BaseModel):
     items: list[ReadRequest] = Field(min_length=1, max_length=20)
     budget_chars: int = Field(default=24000, ge=1, le=96000)

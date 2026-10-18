@@ -38,11 +38,12 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .aio import drain_cancelled, stopped_within
+from .aio import complete_cleanup, drain_cancelled
 from .database import Database
 from .mcp_identity import McpScope, require_live_scope, work_is_open
 
@@ -136,6 +137,45 @@ def _short_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+def _group_exists(pgid: int) -> bool:
+    """Only the kernel's ESRCH confirms absence while members may fork."""
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+def _group_has_live_members_after_kill(pgid: int) -> bool:
+    """After group KILL, distinguish exited orphans from live processes.
+
+    A procfs census is not an absence proof while processes may fork. It is
+    used only after SIGKILL, never to withdraw the TERM grace/KILL owner.
+    """
+    if not _group_exists(pgid):
+        return False
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return True
+    for entry in proc.iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            if os.getpgid(int(entry.name)) != pgid:
+                continue
+            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            group, state, threads = int(fields[2]), fields[0], int(fields[17])
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+        except (OSError, IndexError, ValueError):
+            return True  # uncertain exit evidence must retain the cleanup owner
+        # Top-level procfs enumerates thread-group leaders. A zombie leader
+        # can still have live subthreads; its state alone cannot prove exit.
+        if group == pgid and (state not in {"Z", "X"} or threads != 1):
+            return True
+    return False
+
+
 _TRUNC_MARKER = b"\xe2\x80\xa6[truncated; tail bytes shown]\n"
 
 
@@ -183,6 +223,7 @@ class _RunningTask:
         self.registration_done = asyncio.Event()
         self.registered = False
         self.stop_reason: str | None = None
+        self.termination: asyncio.Task[None] | None = None
         self.stdout_buf = bytearray()
         self.stderr_buf = bytearray()
         self.stdout_truncated = False
@@ -390,6 +431,8 @@ class BgTaskManager:
                     running = _RunningTask(record, abandoned, limits, started_monotonic)
                     reservation.running = running
                     await self._terminate_proc(running, reason=reservation.stop_reason or "server_shutdown")
+                    if running.termination is not None:
+                        await asyncio.shield(running.termination)
                     waiter = asyncio.create_task(abandoned.wait())
                     done, _ = await asyncio.wait({waiter}, timeout=_STARTUP_DRAIN_SECONDS)
                     if not done or abandoned.returncode is None:
@@ -428,8 +471,14 @@ class BgTaskManager:
         except BaseException:
             rt.registration_done.set()
             rt.started_notice.set()
-            await self._terminate_proc(rt, reason="server_shutdown")
-            await stopped_within(asyncio.shield(rt.task), f"unregistered bg task {task_id}", timeout=7.0)
+            async def retire_unregistered() -> None:
+                await self._terminate_proc(rt, reason="server_shutdown")
+                # Keep the captured owner on failure; a refused registration
+                # must not report clean cancellation while its group runs.
+                assert rt.task is not None
+                await asyncio.wait_for(asyncio.shield(rt.task), timeout=7.0)
+
+            await complete_cleanup(retire_unregistered())
             raise
         finally:
             self._starting.pop(task_id, None)
@@ -645,6 +694,9 @@ class BgTaskManager:
             for reader_task in readers:
                 await drain_cancelled(reader_task, f"bg task {rt.record.id} reader")
 
+            if rt.termination is not None:
+                await asyncio.shield(rt.termination)
+
             # The reader set {stdout,stderr}_truncated when it had to
             # drop head bytes — finalize stamps a visible marker on
             # those streams so the model knows it's seeing the tail.
@@ -793,7 +845,14 @@ class BgTaskManager:
         # Don't await here — let the wait_for in _run_task notice the exit.
         # Schedule a SIGKILL fallback if the process resists SIGTERM.
         async def _kill_later() -> None:
-            await asyncio.sleep(_TERM_GRACE_SECONDS)
+            deadline = asyncio.get_running_loop().time() + _TERM_GRACE_SECONDS
+            while True:
+                if not await asyncio.to_thread(_group_exists, pgid):
+                    return
+                remaining = deadline - asyncio.get_running_loop().time()
+                if remaining <= 0:
+                    break
+                await asyncio.sleep(min(0.05, remaining))
             # The shell may have exited while a descendant ignores TERM and
             # still holds the output pipes. Reap the captured GROUP, not the
             # shell's current pid/returncode (which no longer identifies it).
@@ -804,7 +863,13 @@ class BgTaskManager:
             except PermissionError:
                 logger.exception("bg task %s: SIGKILL denied for pgid=%s", rt.record.id, pgid)
                 raise
+            # SIGKILL delivery is asynchronous. Ignore unreapable orphan
+            # zombies, but retain ownership if any group member is still live.
+            async with asyncio.timeout(1.0):
+                while await asyncio.to_thread(_group_has_live_members_after_kill, pgid):
+                    await asyncio.sleep(0.01)
         cleanup = asyncio.create_task(_kill_later(), name=f"bg-kill-{rt.record.id}")
+        rt.termination = cleanup
         self._cleanup_tasks.add(cleanup)
         cleanup.add_done_callback(self._cleanup_done)
         return True

@@ -1,5 +1,9 @@
 """New Markdown-only maintenance does not alter legacy text or recovery facts."""
 
+import hashlib
+import json
+import uuid
+
 import pytest
 
 from server.wiki import materials
@@ -79,10 +83,19 @@ async def test_ingest_skips_late_non_markdown_match(jobs, suffix):
 
 async def test_pending_non_markdown_submission_is_not_an_alias_target(jobs):
     raw = "# Original\nSame material.\n"
-    old = jobs.enqueue("legacy", {"kind": "submission", "material": raw, "scope": "old", "actor": "human", "target": "Library/old.txt"}, [])
+    # Retain a pre-Markdown-contract pending fact; current admission correctly
+    # rejects creating this old TXT target and must not be used as a fixture.
+    old = {"id": uuid.uuid4().hex}
+    payload = json.dumps({"kind": "submission", "material": raw, "scope": "old", "actor": "human", "target": "Library/old.txt"}, sort_keys=True)
+    with jobs.store.connect() as db:
+        db.execute("INSERT INTO jobs VALUES(?,?,?,?,?,'[]',NULL,NULL,'old-time','old-time')",
+                   (old["id"], "legacy", hashlib.sha256(payload.encode()).hexdigest(), payload, "queued"))
     new = jobs.maintain("current", raw, "review", [], "Library/current.md", [], "human")
     assert new["id"] != old["id"] and new["status"] == "queued"
     assert jobs.ingest(new["id"])["path"] == "Library/current.md"
+    with jobs.store.connect() as db:
+        assert db.execute("SELECT payload FROM jobs WHERE id=?", (old["id"],)).fetchone()[0] == payload
+        assert db.execute("SELECT count(*) FROM wiki_job_grants WHERE job_id=?", (old["id"],)).fetchone()[0] == 0
 
 
 async def test_historical_key_replays_its_original_non_markdown_result(jobs):

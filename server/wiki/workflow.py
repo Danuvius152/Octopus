@@ -36,8 +36,13 @@ def instructions(mode: str, task_id: str | None = None) -> str:
             card |= {
                 "vault_id": config["vault_id"],
                 "curator_agent_id": config["curator_agent_id"],
-                "writable_files": list(task.writable),
+                "writable_files": [],
             }
+            grant = tasks.current_grant(task) if worker else None
+            if grant:
+                card |= {"grant_version": 2, "registration_generation": grant["registration_generation"],
+                         "writable_files": [item["current_path"] for item in grant["selected_documents"] if item["current_path"]],
+                         "allowed_new_paths": grant["allowed_new_paths"]}
         except WikiError:
             card["state"] = "主库尚未绑定；用 info 确认状态"
         if task.job_id:
@@ -51,6 +56,7 @@ def instructions(mode: str, task_id: str | None = None) -> str:
     base += "injected_guides 标记本轮常驻内容；按需指南已有内容时复用，仅上下文缺失时再 load_guide。\n"
     base += guide("access") + "\n"
     if mode == "maintain" and worker:
+        base += "正文与新页按操作卡目标；已有导航 Markdown 可用 relations-only organize 补本批入口，不取得该页正文修改权。\n"
         base += guide("worker-v2")
     else:
         base += guide("query-v2")

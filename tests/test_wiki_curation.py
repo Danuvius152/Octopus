@@ -121,7 +121,7 @@ async def test_relation_requires_current_cited_read_and_keeps_old_note_read_only
     job = jobs.maintain("related", "", "organize", [target["path"]], None, [], "human")
     session = SimpleNamespace(id="verified-worker", user_id=None, agent_id=config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
-    tasks.assign(session.id, job["id"], [target["path"]])
+    tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
     headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
     body = {"path": target["path"], "expected_revision": target["revision"], "key_note": "保留原论点。", "reason": "strong relation", "relations": [{"doc": source["id"], "revision": source["revision"], "location": "L3-L4", "explanation": "同一具体论点，适用条件在来源中说明。"}]}
@@ -178,7 +178,7 @@ async def test_guides_follow_verified_job_role_instead_of_agent_name(client, not
     jobs = WikiJobs(None)
     job = jobs.maintain("guide", "", "organize", ["Library/note.md"], None, [], "human")
     jobs.update(job["id"], status="running", session_id=session.id)
-    tasks.assign(session.id, job["id"], ["Library/note.md"])
+    tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
     try:
         worker = instructions("maintain", token)

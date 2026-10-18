@@ -32,6 +32,15 @@ from .base import (
 
 class ForkingMixin(SessionManagerBase):
 
+    async def _require_unambiguous_transcript(self, parent: Session) -> None:
+        if self.db:
+            parent.restore_message_state(*await self.db.message_sequence_state(parent.id))
+        if parent._transcript_integrity != "ok":
+            raise ForkError(
+                "Transcript has duplicate sequences; export and review the original rows",
+                reason="duplicate_message_sequences", status_code=409,
+            )
+
     async def _recover_incomplete_forks(self) -> None:
         """Sweep forks left mid-saga by a crash (session-rewind.md §5.6.7).
         Dispatch on `fork_status`:
@@ -162,6 +171,24 @@ class ForkingMixin(SessionManagerBase):
             )
 
     async def fork_session(
+        self, parent_id: str, rewind_to_msg_seq: int, *,
+        revert_files: bool = False, label: str | None = None,
+        user_id: str | None = None,
+    ) -> Session:
+        parent = self.get_session(parent_id, user_id)
+        if parent is None:
+            raise ForkError(f"Session {parent_id} not found", reason="parent_not_found", status_code=404)
+        await self._require_unambiguous_transcript(parent)
+        try:
+            async with self.agent_operation(parent.agent_id):
+                return await self._fork_session(
+                    parent_id, rewind_to_msg_seq, revert_files=revert_files,
+                    label=label, user_id=user_id,
+                )
+        except ValueError as exc:
+            raise ForkError(str(exc), reason="agent_admission_closed", status_code=409) from exc
+
+    async def _fork_session(
         self,
         parent_id: str,
         rewind_to_msg_seq: int,
@@ -310,7 +337,7 @@ class ForkingMixin(SessionManagerBase):
                 fork_status="initializing",
             )
             # Copied M messages (seq 0..M-1); next assigned seq is M.
-            fork._message_count = M
+            fork.restore_message_state(len(copied), M, 0)
             self.sessions[fork_id] = fork
 
             # 6. prepare_fork (external state) with explicit compensation.
@@ -474,6 +501,20 @@ class ForkingMixin(SessionManagerBase):
         shutil.copytree(src, dest, symlinks=True)
 
     async def duplicate_session(
+        self, parent_id: str, *, label: str | None = None,
+        user_id: str | None = None,
+    ) -> Session:
+        parent = self.get_session(parent_id, user_id)
+        if parent is None:
+            raise ForkError(f"Session {parent_id} not found", reason="parent_not_found", status_code=404)
+        await self._require_unambiguous_transcript(parent)
+        try:
+            async with self.agent_operation(parent.agent_id):
+                return await self._duplicate_session(parent_id, label=label, user_id=user_id)
+        except ValueError as exc:
+            raise ForkError(str(exc), reason="agent_admission_closed", status_code=409) from exc
+
+    async def _duplicate_session(
         self,
         parent_id: str,
         *,
@@ -608,7 +649,7 @@ class ForkingMixin(SessionManagerBase):
                 forked_from_session_id=parent_id, fork_after_seq=last_seq,
                 fork_metadata=fork_meta, fork_status="initializing",
             )
-            fork._message_count = last_seq + 1
+            fork.restore_message_state(len(messages), last_seq + 1, 0)
             self.sessions[fork_id] = fork
 
             # 3. Native-copy the parent's real transcript so the fork resumes
@@ -728,6 +769,7 @@ class ForkingMixin(SessionManagerBase):
                 status_code=404,
             )
         M = rewind_to_msg_seq
+        await self._require_unambiguous_transcript(parent)
         messages = await self.db.load_messages(parent_id) if self.db else []
         by_seq = {m["seq"]: m for m in messages}
         if M < 0 or M not in by_seq:

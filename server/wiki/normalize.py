@@ -1,7 +1,10 @@
 """In-place article adaptation by insertion, never by body regeneration."""
 
+import json
+
 from . import format, material_proof, operations
 from .formats import require_markdown_maintenance
+from .references import path_uri
 from .sections import top_offset
 from .store import WikiError
 
@@ -53,19 +56,21 @@ def organize(curation, path, expected_revision, key_note, tags, aliases, relatio
         if sources is not None:
             for ref in sources:
                 tasks.require_source_read(task, store, ref)
-            refs = [{"resource": ref["path"], "revision": ref["revision"], "location": ref["location"]} for ref in curation.sources(sources)]
+            refs = curation.sources(sources)
         if relations:
             for relation in relations:
                 tasks.require_source_read(task, store, relation)
             linked = curation.sources(relations)
-            related = newline * 2 + "## 相关笔记" + newline * 2 + newline.join(f"- [[{ref['path']}]]：{relation['explanation']}" for ref, relation in zip(linked, relations, strict=True)) + newline
+            related = newline * 2 + "## 相关笔记" + newline * 2 + newline.join(f"- [[{path_uri(ref['path'])}]]：{relation['explanation']}" for ref, relation in zip(linked, relations, strict=True)) + newline
             trace.edit([(len(candidate), len(candidate), related)])
             candidate += related
-        curation.validate_links(destination, inserts, candidate=candidate)
-        if relations:
-            curation.validate_links(destination, candidate[candidate.rfind("## 相关笔记"):], candidate=candidate)
-        candidate = format.patch(candidate, fields=fields, tags=tags, aliases=aliases, sources=refs, uid=source["metadata"]["uid"], actor=actor)
+            refs = (refs if refs is not None else source["metadata"].get("sources", [])) + linked
+            if "sources" not in replaced:
+                replaced.append("sources")
+        candidate = format.patch(candidate, fields=fields, tags=tags, aliases=aliases, sources=refs, uid=source["metadata"].get("uid"), actor=actor)
         context = operations.publication(task, store, source, item_doc)
         trace.metadata(candidate)
-        result = curation.history.write_locked(destination, candidate.encode(), output_revision, actor, reason, operations.management(store, destination, candidate, replaced=replaced), publication=context, operation="normalize", origin_builder=trace.transition(context, allow_seed=True))
+        management = operations.management(store, destination, candidate, replaced=replaced)
+        curation.validate_links(destination, candidate, candidate=candidate, managed_metadata=json.loads(management["metadata"]) if management else {})
+        result = curation.history.write_locked(destination, candidate.encode(), output_revision, actor, reason, management, publication=context, operation="normalize", origin_builder=trace.transition(context, allow_seed=True))
         return result | {"source_path": path, "original_preserved": True}

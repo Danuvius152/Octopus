@@ -28,7 +28,9 @@ async def test_navigation_error_bounds_survive_http_and_mcp(client, tmp_path, mo
         assert value["index_error_count"] == error_count
         assert len(value["index_errors"]) == min(error_count, 3)
         assert bool(value.get("index_errors_truncated")) == bool(errors)
-        assert all(len(item["path"]) <= 160 and len(item["error"]) <= 160 for item in value["index_errors"])
+        assert value["index_errors"] == [
+            {"path": item["path"], "error": item["error"][:160]} for item in errors[:3]
+        ]
         assert value["index_status"] == ("partial" if errors else "ready")
         assert value["pending_changes"] == state["pending_changes"]
         full = await client.get("/api/wiki/" + endpoint, params=base | {"view": "full"}, headers=wiki_api.HEADERS)

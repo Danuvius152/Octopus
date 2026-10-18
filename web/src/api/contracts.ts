@@ -593,6 +593,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/transcript-export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Export Transcript */
+        get: operations["export_transcript_api_sessions__session_id__transcript_export_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/messages": {
         parameters: {
             query?: never;
@@ -1156,6 +1173,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/wiki/maintenance-selections": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Create Maintenance Selection */
+        post: operations["create_maintenance_selection_api_wiki_maintenance_selections_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/wiki/maintenance-selections/{selection_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Maintenance Selection */
+        get: operations["get_maintenance_selection_api_wiki_maintenance_selections__selection_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/wiki/config": {
         parameters: {
             query?: never;
@@ -1576,6 +1627,23 @@ export interface paths {
         put?: never;
         /** Retry Job */
         post: operations["retry_job_api_wiki_jobs__job_id__retry_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/wiki/jobs/{job_id}/readmit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Readmit Job */
+        post: operations["readmit_job_api_wiki_jobs__job_id__readmit_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3397,6 +3465,19 @@ export interface components {
             backend?: components["schemas"]["BackendKind"] | null;
         };
         /**
+         * CreationRequest
+         * @description A bounded work proposal; only trusted admission can issue its grant.
+         */
+        CreationRequest: {
+            /**
+             * Purpose
+             * @constant
+             */
+            purpose: "requested_knowledge_page";
+            /** Paths */
+            paths?: string[] | null;
+        };
+        /**
          * CredentialInfo
          * @description Credential metadata returned to clients — never includes the secret.
          *
@@ -3601,6 +3682,15 @@ export interface components {
             /** Label */
             label?: string | null;
         };
+        /**
+         * GrantReadmissionRequest
+         * @description An owner explicitly narrows retained work; the original job is reused.
+         */
+        GrantReadmissionRequest: {
+            /** Paths */
+            paths?: string[];
+            creation?: components["schemas"]["CreationRequest"] | null;
+        };
         /** HTTPValidationError */
         HTTPValidationError: {
             /** Detail */
@@ -3737,6 +3827,24 @@ export interface components {
                 [key: string]: string;
             };
             review?: components["schemas"]["ReviewObservation"] | null;
+            /** Selection Id */
+            selection_id?: string | null;
+            /** Selection Ordinal */
+            selection_ordinal?: number | null;
+            creation?: components["schemas"]["CreationRequest"] | null;
+        };
+        /**
+         * MaintenanceSelectionRequest
+         * @description Observes candidates without selecting any files for a write grant.
+         */
+        MaintenanceSelectionRequest: {
+            /**
+             * Directory
+             * @default Library
+             */
+            directory: string;
+            /** Limit */
+            limit?: number | null;
         };
         /** MessageContent */
         MessageContent: {
@@ -4018,6 +4126,8 @@ export interface components {
             aliases?: string[] | null;
             /** Item Doc */
             item_doc?: string | null;
+            /** Reservation Id */
+            reservation_id?: string | null;
         };
         /** RawEdit */
         RawEdit: {
@@ -4178,10 +4288,12 @@ export interface components {
         };
         /** ScheduleInfo */
         ScheduleInfo: {
+            /** Invalid Reason */
+            invalid_reason?: string | null;
             /** Id */
             id: string;
             /** Agent Id */
-            agent_id: string;
+            agent_id?: string | null;
             /** Wiki Mode */
             wiki_mode?: ("read" | "maintain" | "off") | null;
             /** Name */
@@ -4322,6 +4434,12 @@ export interface components {
              * @default 0
              */
             message_count: number;
+            /**
+             * Transcript Integrity
+             * @default ok
+             * @enum {string}
+             */
+            transcript_integrity: "ok" | "duplicate_seq";
             /** Claude Session Id */
             claude_session_id?: string | null;
             /** Credential Id */
@@ -4424,6 +4542,12 @@ export interface components {
              * @default 0
              */
             message_count: number;
+            /**
+             * Transcript Integrity
+             * @default ok
+             * @enum {string}
+             */
+            transcript_integrity: "ok" | "duplicate_seq";
             /** Claude Session Id */
             claude_session_id?: string | null;
             /** Credential Id */
@@ -6276,6 +6400,39 @@ export interface operations {
             };
         };
     };
+    export_transcript_api_sessions__session_id__transcript_export_get: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     older_messages_api_sessions__session_id__messages_get: {
         parameters: {
             query: {
@@ -7293,6 +7450,76 @@ export interface operations {
             };
         };
     };
+    create_maintenance_selection_api_wiki_maintenance_selections_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MaintenanceSelectionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_maintenance_selection_api_wiki_maintenance_selections__selection_id__get: {
+        parameters: {
+            query?: {
+                limit?: number | null;
+                cursor?: string | null;
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                selection_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_config_api_wiki_config_get: {
         parameters: {
             query?: {
@@ -7812,6 +8039,7 @@ export interface operations {
                 budget_chars?: number | null;
                 offset?: number;
                 limit?: number | null;
+                start?: number | null;
                 token?: string | null;
             };
             header?: never;
@@ -8164,6 +8392,43 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    readmit_job_api_wiki_jobs__job_id__readmit_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["GrantReadmissionRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

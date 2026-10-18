@@ -35,6 +35,7 @@ class EventInbox:
         db = sqlite3.connect(self.db_path, timeout=30)
         db.row_factory = sqlite3.Row
         try:
+            db.execute("PRAGMA recursive_triggers=ON")
             db.execute("BEGIN IMMEDIATE")
             yield db
             self.commit(db)

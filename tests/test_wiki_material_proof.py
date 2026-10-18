@@ -2,9 +2,11 @@
 
 import json
 import uuid
+from types import SimpleNamespace
 
 import pytest
 
+from server.mcp_identity import mint, verify
 from server.wiki import format, material_proof, materials, origins
 from server.wiki import history as history_module
 from server.wiki.contracts import PatchRevision
@@ -12,7 +14,7 @@ from server.wiki.curation import WikiCuration
 from server.wiki.history import WikiHistory
 from server.wiki.revise import revise
 from server.wiki.store import WikiError, WikiStore, revision
-from server.wiki.tasks import WikiTask, tasks
+from server.wiki.tasks import tasks
 from tests import test_wiki_jobs as job_tests
 
 jobs = job_tests.jobs
@@ -86,23 +88,32 @@ class CurrentWorker(job_tests.Curator):
         self.turns += 1
         with self.jobs.store.connect() as db:
             job_id = db.execute("SELECT id FROM jobs WHERE session_id=?", (session_id,)).fetchone()[0]
-        for item in self.jobs.get(job_id)["items"]:
-            if item["status"] != "pending":
-                continue
-            store = self.jobs.store
-            task = WikiTask(session_id, None, "curator", "maintain", job_id=job_id, writable=(item["path"],))
-            current = store.read(item["doc"])
-            tasks.record_read(task, current)
-            curation = WikiCuration(store)
-            if self.chain:
-                arrange(curation, current, task, finish=self.chain == 2)
-                current = store.read(current["id"])
+        session = SimpleNamespace(id=session_id, user_id=self.jobs.user_id,
+                                  agent_id=self.jobs.registration["curator_agent_id"])
+        token = tasks.open(session, "maintain")
+        task = tasks.call(tasks.active[token], verify(mint(session_id, user_id=self.jobs.user_id, wiki_task_id=token)))
+        try:
+            for item in self.jobs.get(job_id)["items"]:
+                if item["status"] != "pending" or (
+                    item.get("doc") not in task.document_ids
+                    and item.get("reservation_id") not in task.reservation_ids
+                ):
+                    continue
+                store = self.jobs.store
+                current = store.read(item["doc"])
                 tasks.record_read(task, current)
-            if self.chain != 2:
-                curation.organize(current["path"], current["revision"], None if self.chain else "Generated summary.",
-                                  [], [], None, "curator", "Use current byte evidence", task=task,
-                                  frontmatter_patch=PROFILE, reuse_existing_summary=bool(self.chain))
-        yield {"type": "result", "content": "Published with current operation receipts", "is_error": False}
+                curation = WikiCuration(store)
+                if self.chain:
+                    arrange(curation, current, task, finish=self.chain == 2)
+                    current = store.read(current["id"])
+                    tasks.record_read(task, current)
+                if self.chain != 2:
+                    curation.organize(current["path"], current["revision"], None if self.chain else "Generated summary.",
+                                      [], [], None, "curator", "Use current byte evidence", task=task,
+                                      frontmatter_patch=PROFILE, reuse_existing_summary=bool(self.chain))
+            yield {"type": "result", "content": "Published with current operation receipts", "is_error": False}
+        finally:
+            tasks.close(token)
 
 
 @pytest.mark.parametrize("chain", [0, 1, 2])
@@ -209,22 +220,16 @@ def test_metadata_trace_refuses_a_writer_that_also_changes_the_body():
         trace.metadata(patched.replace("retains", "drops"))
 
 
-@pytest.mark.parametrize("window", ["prepared", "replaced", "applied", "indexed"])
+@pytest.mark.parametrize("window", ["replaced", "applied", "indexed"])
 async def test_ingest_seed_recovers_in_the_same_actual_new_file_transaction(jobs, monkeypatch, window):
     raw = source_text(0, "\r\n", "\ufeff")
     job = jobs.maintain("crash-ingest", raw, "organize", [], "Library/Input.md", [], "human")
     target = jobs.store.path("Library/Input.md")
-    original_atomic = history_module.atomic
     original_status = WikiHistory.status
     original_index = jobs.store._index
 
     def crash():
         raise RuntimeError("injected byte-map ingest crash")
-
-    def replace(path, value, **kwargs):
-        if path == target and window == "prepared":
-            crash()
-        return original_atomic(path, value, **kwargs)
 
     def status(self, change_id, value):
         if value == "applied" and window == "replaced":
@@ -240,7 +245,6 @@ async def test_ingest_seed_recovers_in_the_same_actual_new_file_transaction(jobs
         return result
 
     with monkeypatch.context() as injected:
-        injected.setattr(history_module, "atomic", replace)
         injected.setattr(WikiHistory, "status", status)
         injected.setattr(jobs.store, "_index", index)
         with pytest.raises(RuntimeError, match="injected byte-map ingest crash"):
@@ -253,6 +257,39 @@ async def test_ingest_seed_recovers_in_the_same_actual_new_file_transaction(jobs
     with jobs.store.connect() as db:
         assert db.execute("SELECT count(*) FROM changes WHERE status='prepared'").fetchone()[0] == 0
     assert len(list(jobs.store.root.rglob("*.md"))) == 1
+
+
+async def test_prepared_ingest_without_output_retains_original_proof_and_never_recreates_automatically(jobs, monkeypatch):
+    raw = source_text(0, "\r\n", "\ufeff")
+    job = jobs.maintain("uncertain-ingest", raw, "organize", [], "Library/Input.md", [], "human")
+    target = jobs.store.path("Library/Input.md")
+    atomic = history_module.atomic
+
+    def before_replace(path, value, **kwargs):
+        if path == target:
+            raise RuntimeError("injected before material replace")
+        return atomic(path, value, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(history_module, "atomic", before_replace)
+        with pytest.raises(RuntimeError, match="before material replace"):
+            jobs.ingest(job["id"])
+    with jobs.store.connect() as db:
+        original = dict(db.execute("SELECT * FROM wiki_path_reservations WHERE job_id=?", (job["id"],)).fetchone())
+        proof = db.execute("SELECT after_state FROM change_material_origins WHERE change_id=?", (original["change_id"],)).fetchone()[0]
+        assert original["state"] == "prepared" and proof
+    with pytest.raises(WikiError) as blocked:
+        jobs.ingest(job["id"])
+    assert blocked.value.status == 409 and not target.exists()
+    assert jobs.get(job["id"])["payload"]["material"] == raw
+    with jobs.store.connect() as db:
+        current = dict(db.execute("SELECT * FROM wiki_path_reservations WHERE id=?", (original["id"],)).fetchone())
+        assert current["change_id"] == original["change_id"] and current["document_id"] == original["document_id"]
+        assert current["state"] in {"prepared", "blocked"}
+        assert db.execute("SELECT status FROM changes WHERE id=?", (original["change_id"],)).fetchone()[0] != "applied"
+        assert db.execute("SELECT after_state FROM change_material_origins WHERE change_id=?", (original["change_id"],)).fetchone()[0] == proof
+        assert db.execute("SELECT count(*) FROM changes").fetchone()[0] == 1
+        assert db.execute("SELECT count(*) FROM operation_receipts WHERE job_id=?", (job["id"],)).fetchone()[0] == 1
 
 
 @pytest.mark.parametrize("window", ["prepared", "replaced", "applied", "indexed"])

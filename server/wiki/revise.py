@@ -38,7 +38,7 @@ def revise(curation, body, actor, task):
         if body.operation == "no_change":
             tasks.require_read(task, store, path, body.expected_revision)
             with store.connect() as db:
-                receipt = operations.record(db, doc_id=document["id"], path=path, before=document["revision"], after=document["revision"], operation="no_change", reason=body.reason, publication=context)
+                receipt = operations.record(db, doc_id=document["id"], path=path, before=document["revision"], after=document["revision"], operation="no_change", reason=body.reason, publication=context, store=store)
             return {"id": document["id"], "path": path, "revision": document["revision"], "changed": False, "change_id": None, "receipt_id": receipt, "operation": "no_change", **store.index_state()}
         changes, fields, tags, aliases, refs = [], None, None, None, None
         candidate = text
@@ -61,7 +61,7 @@ def revise(curation, body, actor, task):
         else:
             by_locator = {part["locator"]: part for part in parts}
             intervals = []
-            corrected_ranges = {}
+            corrected_ranges: dict[str, list[tuple[int, int]]] = {}
             for edit in body.edits:
                 part = by_locator.get(edit.locator)
                 if part is None or part["sha256"] != edit.expected_block_hash:
@@ -97,18 +97,18 @@ def revise(curation, body, actor, task):
                 refs = []
                 for source in body.sources:
                     tasks.require_source_read(task, store, source.model_dump())
-                refs = [{"resource": ref["path"], "revision": ref["revision"], "location": ref["location"]} for ref in curation.sources([ref.model_dump() for ref in body.sources])]
-            for edit in body.edits:
-                curation.validate_links(path, edit.replacement, candidate=candidate)
+                refs = curation.sources([ref.model_dump() for ref in body.sources])
         if refs == document["metadata"].get("sources"):
             refs = None
-        candidate = format.patch(candidate, fields=fields, tags=tags, aliases=aliases, sources=refs, uid=document["metadata"]["uid"] if fields is not None else None, actor=actor if fields is not None else None)
+        replaced = [name for name, value in (("tags", tags), ("aliases", aliases), ("sources", refs)) if value is not None]
+        legacy_edits = operations.replaced_regions(store, path, candidate, replaced)
+        trace.edit(legacy_edits)
+        for start, end, replacement in reversed(legacy_edits):
+            candidate = candidate[:start] + replacement + candidate[end:]
+        candidate = format.patch(candidate, fields=fields, tags=tags, aliases=aliases, sources=refs, uid=document["metadata"].get("uid") if fields is not None else None, actor=actor if fields is not None else None)
         trace.metadata(candidate)
-        management = operations.management(store, path, candidate)
-        if management is not None and refs is not None:
-            legacy = json.loads(management["metadata"])
-            legacy.pop("sources", None)
-            management["metadata"] = json.dumps(legacy, ensure_ascii=False)
+        management = operations.management(store, path, candidate, replaced=replaced)
+        curation.validate_links(path, candidate, candidate=candidate, managed_metadata=json.loads(management["metadata"]) if management else {})
         allow_seed = body.operation == "confirm_sources" or any(value is not None for value in (fields, tags, aliases))
         result = curation.history.write_locked(path, candidate.encode(), document["revision"], actor, body.reason, management, publication=context, operation=body.operation, operation_details={"changed_ranges": changes}, origin_builder=trace.transition(context, allow_seed=allow_seed))
         return result | {"id": document["id"], "changed_ranges": changes, "original_preserved": False if changes else True, "operation": body.operation}

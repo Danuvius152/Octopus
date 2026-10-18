@@ -13,6 +13,7 @@ from apscheduler.triggers.date import DateTrigger
 
 from .models import SessionStatus
 from .schedule_ai import cron_trigger
+from .schedule_targets import ScheduleTargetError, resolve_schedule_target
 
 if TYPE_CHECKING:
     from server.database import Database
@@ -33,6 +34,7 @@ class ScheduleRunner:
         self._db = db
         self._closing = False
         self._shutdown_tasks: tuple[asyncio.Future, ...] | None = None
+        self._session_mgr.set_schedule_runner(self)
 
     def next_run_at(self, schedule_id: str) -> str | None:
         """ISO timestamp of the next fire, straight from APScheduler's own
@@ -51,6 +53,8 @@ class ScheduleRunner:
             raise RuntimeError("ScheduleRunner is shutting down")
         now = datetime.now(UTC)
         for row in await self._db.load_schedules():
+            if not await self._target_is_active(row):
+                continue
             if row.get("run_at"):
                 # One-time schedule: if the fire time is already past, it was
                 # missed while the server was down. Delete it rather than
@@ -160,6 +164,14 @@ class ScheduleRunner:
             return
         now = datetime.now(UTC).isoformat()
         row = await self._schedule_row(schedule_id)
+        # APScheduler arguments describe the timer that was registered. Only
+        # the current durable row can authorize a fire or supply trusted text.
+        if row is None or not row["enabled"] or not await self._target_is_active(row):
+            return
+        agent_id = row["agent_id"]
+        origin_session_id = row.get("origin_session_id")
+        run_at = row.get("run_at")
+        prompt = row["prompt"]
         body = self._compose_prompt(row, prompt)
         wiki_kwargs = {"trusted_request": prompt}
         if mode := (row or {}).get("wiki_mode"):
@@ -324,7 +336,9 @@ class ScheduleRunner:
         )
 
     async def add(self, row: dict) -> None:
-        if row["enabled"]:
+        if self._closing:
+            raise RuntimeError("ScheduleRunner is shutting down")
+        if row["enabled"] and await self._target_is_active(row):
             self._add_job(row)
 
     async def remove(self, schedule_id: str) -> None:
@@ -337,8 +351,34 @@ class ScheduleRunner:
 
     async def reschedule(self, row: dict) -> None:
         await self.remove(row["id"])
-        if row["enabled"]:
-            self._add_job(row)
+        await self.add(row)
+
+    async def _target_is_active(self, row: dict) -> bool:
+        try:
+            await resolve_schedule_target(
+                self._db, row["agent_id"], row.get("origin_session_id"),
+                allow_missing_origin=True,
+            )
+        except ScheduleTargetError as exc:
+            if exc.reason != "agent_archived":
+                # Preserve the original association and text for inspection.
+                await self._db.update_schedule(
+                    row["id"], enabled=False, invalid_reason=exc.reason,
+                )
+            await self.remove(row["id"])
+            logger.warning("Schedule %s suppressed: %s", row["id"], exc.reason)
+            return False
+        return row["agent_id"] not in self._session_mgr._closed_agents
+
+    async def suspend_agent(self, agent_id: str) -> None:
+        for row in await self._db.load_schedules():
+            if row["agent_id"] == agent_id:
+                await self.remove(row["id"])
+
+    async def restore_agent(self, agent_id: str) -> None:
+        for row in await self._db.load_schedules():
+            if row["agent_id"] == agent_id:
+                await self.reschedule(row)
 
     def begin_shutdown(self) -> None:
         """Stop launches and capture APScheduler's existing callback owner.

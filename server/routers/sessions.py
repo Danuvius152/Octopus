@@ -1,9 +1,11 @@
 from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 
 from ..auth import verify_token
+from ..config import settings
+from ..credential_bindings import CredentialBindingError
 from ..deps import ScopeUser, SessionMgr
 from ..harness import BackendForkNotSupported, StdinMode, get_harness
 from ..models import (
@@ -66,6 +68,7 @@ def _to_session_info(
         status=s.status,
         created_at=s.created_at,
         message_count=s._message_count if message_count is None else message_count,
+        transcript_integrity=s._transcript_integrity,
         claude_session_id=s.claude_session_id,
         credential_id=s.credential_id,
         agent_id=s.agent_id,
@@ -247,7 +250,7 @@ async def create_session(
     backend = (
         req.backend.value
         if req.backend is not None
-        else (agent.get("backend") if agent else None) or "claude-code"
+        else (agent.get("backend") if agent else None) or settings.default_backend
     )
     await _check_credential_backend(session_manager, req.credential_id, backend)
     try:
@@ -300,15 +303,21 @@ async def import_session(
         agent_id = sys_agent["id"] if sys_agent else None
     elif await session_manager.db.get_agent(agent_id, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
-    s = await session_manager.import_session(
-        name=req.name,
-        working_dir=req.working_dir,
-        claude_session_id=req.claude_session_id,
-        credential_id=req.credential_id,
-        messages=req.messages,
-        agent_id=agent_id,
-        backend=req.backend.value,
-    )
+    try:
+        s = await session_manager.import_session(
+            name=req.name,
+            working_dir=req.working_dir,
+            claude_session_id=req.claude_session_id,
+            credential_id=req.credential_id,
+            messages=req.messages,
+            agent_id=agent_id,
+            backend=req.backend.value,
+        )
+    except CredentialBindingError as exc:
+        code = status.HTTP_404_NOT_FOUND if "not found" in str(exc).lower() else status.HTTP_400_BAD_REQUEST
+        raise HTTPException(code, str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     messages_raw = await session_manager.db.load_messages(s.id)
     messages = [MessageContent(**m) for m in messages_raw]
     return SessionDetail(
@@ -345,7 +354,7 @@ async def import_session(
         # High-water mark: clients use this as the dedup baseline so any
         # WS event with seq < next_message_seq is treated as already
         # applied (it's in the messages list above).
-        next_message_seq=s._message_count,
+        next_message_seq=max((m.seq for m in messages if m.seq is not None), default=-1) + 1,
     )
 
 
@@ -366,6 +375,11 @@ async def get_session(
         if session_manager.get_session(session_id, user_id) is not s:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
         messages = [MessageContent(**m) for m in messages_raw]
+        s.restore_message_state(*await session_manager.db.message_sequence_state(s.id))
+        if s._transcript_integrity != "ok":
+            # Sequence-keyed clients cannot represent these rows faithfully.
+            # Keep them available through the storage-id-preserving export.
+            messages = []
         oldest = messages[0].seq if messages else None
         return SessionDetail(
             id=s.id,
@@ -374,6 +388,7 @@ async def get_session(
             status=s.status,
             created_at=s.created_at,
             message_count=s._message_count,
+            transcript_integrity=s._transcript_integrity,
             claude_session_id=s.claude_session_id,
             credential_id=s.credential_id,
             agent_id=s.agent_id,
@@ -399,9 +414,7 @@ async def get_session(
             ],
             subagents=[SubagentRun(**asdict(u)) for u in s._subagents.values()],
             oldest_loaded_seq=oldest,
-            # seq is dense from 0, so anything above 0 means there is older
-            # transcript the window left behind.
-            has_more_messages=bool(oldest),
+            has_more_messages=await session_manager.db.has_messages_before(s.id, oldest),
             # The allocator may include an unsaved terminal reservation, or
             # advance while this snapshot is loading. A dedup watermark must
             # describe these exact rows, never the in-memory allocator.
@@ -409,10 +422,25 @@ async def get_session(
         )
 
     # Archived session: not in memory; read history straight from DB.
-    archived_detail = await session_manager.load_archived_session_detail(session_id)
+    archived_detail = await session_manager.load_archived_session_detail(session_id, user_id)
     if archived_detail is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     return archived_detail
+
+
+@router.get("/{session_id}/transcript-export")
+async def export_transcript(
+    session_manager: SessionMgr, session_id: str, user_id: ScopeUser = None,
+    _: str = Depends(verify_token),
+):
+    binding = await session_manager.db.get_session_binding(session_id)
+    if binding is None or binding["user_id"] != user_id:
+        raise HTTPException(404, "Session not found")
+    return StreamingResponse(
+        session_manager.db.raw_message_rows(session_id, user_id),
+        media_type="application/x-ndjson",
+        headers={"Content-Disposition": 'attachment; filename="transcript.jsonl"'},
+    )
 
 
 @router.get("/{session_id}/messages", response_model=MessagePage)
@@ -452,6 +480,8 @@ async def older_messages(
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     if before_seq == 0:
         return MessagePage(messages=[], oldest_loaded_seq=None, has_more_messages=False)
+    if (await session_manager.db.message_sequence_state(session_id))[2]:
+        raise HTTPException(409, {"code": "duplicate_message_sequences", "message": "Export and review the original transcript rows before paging"})
     raw = await session_manager.db.load_messages(
         session_id, limit=limit, max_seq=before_seq - 1, newest_first=True
     )
@@ -460,7 +490,7 @@ async def older_messages(
     return MessagePage(
         messages=messages,
         oldest_loaded_seq=oldest,
-        has_more_messages=bool(oldest),
+        has_more_messages=await session_manager.db.has_messages_before(session_id, oldest),
     )
 
 

@@ -1,7 +1,6 @@
 """Persistent, account-scoped curator work with observable item outcomes."""
 
 import asyncio
-import contextlib
 import hashlib
 import json
 import logging
@@ -12,10 +11,12 @@ from pathlib import Path
 
 from ..aio import complete_cleanup
 from ..config import settings
-from . import materials
+from ..mcp_identity import McpScope
+from . import grants, maintenance_inputs, materials
 from .curation import WikiCuration
 from .formats import MARKDOWN_SQL, is_markdown_maintenance, require_markdown_maintenance
 from .history import WikiHistory
+from .maintenance_contract import MAINTENANCE_OPERATIONS
 from .registry import registry
 from .store import WikiError, asset_reason
 
@@ -33,27 +34,48 @@ class WikiJobs:
         self.registration = registry.config(user_id)
         self.store = registry.store(user_id)
         with self.store.connect() as db:
-            db.execute("""CREATE TABLE IF NOT EXISTS jobs (
-              id TEXT PRIMARY KEY,request_key TEXT UNIQUE NOT NULL,payload_hash TEXT NOT NULL,
-              payload TEXT NOT NULL,status TEXT NOT NULL,items TEXT NOT NULL,error TEXT,
-              session_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL
-            )""")
-            db.execute("""CREATE TABLE IF NOT EXISTS job_requests (
-              request_key TEXT PRIMARY KEY,request_hash TEXT NOT NULL,job_id TEXT NOT NULL
-            )""")
+            db.execute("BEGIN IMMEDIATE")
+            self.initialize_ledger(db)
+
+    @staticmethod
+    def initialize_ledger(db):
+        """WikiJobs owns its DDL and commits its initialization marker with it."""
+        from . import maintenance_selections
+
+        if not db.in_transaction:
+            raise ValueError("Job initialization requires an explicit transaction")
+        maintenance_selections.require(db)
+        grants.require(db)
+        if maintenance_inputs.jobs_initialized(db):
+            return False
+        db.execute("""CREATE TABLE jobs (
+          id TEXT PRIMARY KEY,request_key TEXT UNIQUE NOT NULL,payload_hash TEXT NOT NULL,
+          payload TEXT NOT NULL,status TEXT NOT NULL,items TEXT NOT NULL,error TEXT,
+          session_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL
+        )""")
+        db.execute("""CREATE TABLE job_requests (
+          request_key TEXT PRIMARY KEY,request_hash TEXT NOT NULL,job_id TEXT NOT NULL
+        )""")
+        db.execute("INSERT INTO wiki_protocols VALUES('maintenance_jobs',1)")
+        maintenance_selections.attach_jobs(db)
+        grants.attach_jobs(db)
+        maintenance_inputs.initialize(db)
+        return True
 
     @staticmethod
     def request_hash(request):
         return hashlib.sha256(json.dumps(request, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
 
-    def previous_request(self, key, request):
-        with self.store.connect() as db:
-            alias = db.execute("SELECT * FROM job_requests WHERE request_key=?", (key,)).fetchone()
-            previous = db.execute("SELECT * FROM jobs WHERE request_key=?", (key,)).fetchone()
+    def previous_request(self, key, request, *, db=None):
+        if db is None:
+            with self.store.connect() as connection:
+                return self.previous_request(key, request, db=connection)
+        alias = db.execute("SELECT * FROM job_requests WHERE request_key=?", (key,)).fetchone()
+        previous = db.execute("SELECT * FROM jobs WHERE request_key=?", (key,)).fetchone()
         if alias:
             if alias["request_hash"] != self.request_hash(request):
                 raise WikiError("Idempotency key already names a different maintenance request", 409)
-            return self.get(alias["job_id"])
+            return self.get(alias["job_id"], db=db)
         if previous:
             if json.loads(previous["payload"]).get("request") != request:
                 raise WikiError("Idempotency key already names a different maintenance request", 409)
@@ -78,21 +100,25 @@ class WikiJobs:
         }
         return result
 
-    def get(self, job_id):
-        with self.store.connect() as db:
-            row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
-            receipts = [dict(receipt) for receipt in db.execute("SELECT r.*,coalesce(c.status,'applied') AS status FROM operation_receipts r LEFT JOIN changes c ON c.id=r.change_id WHERE r.job_id=? ORDER BY r.rowid", (job_id,))]
+    def get(self, job_id, *, db=None):
+        from .maintenance_selections import evidence
+
+        if db is None:
+            with self.store.connect() as connection:
+                return self.get(job_id, db=connection)
+        row = db.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        receipts = [dict(receipt) for receipt in db.execute("SELECT r.*,coalesce(c.status,'applied') AS status FROM operation_receipts r LEFT JOIN changes c ON c.id=r.change_id WHERE r.job_id=? ORDER BY r.rowid", (job_id,))]
         if row is None:
             raise WikiError("Maintenance job not found", 404)
         for receipt in receipts:
             receipt["details"] = json.loads(receipt["details"])
-        return self.public(row) | {"receipts": receipts}
+        return self.public(row) | {"receipts": receipts, "selection_evidence": evidence(db, job_id), "grant": grants.view(db, job_id)}
 
     @staticmethod
-    def summary(row):
+    def summary(row, *, exact_key=False):
         """Navigation omits source material, instructions and individual receipts."""
         result = {key: row[key] for key in ("id", "request_key", "status", "session_id", "created_at", "updated_at")}
-        if len(result["request_key"]) > 1024:
+        if not exact_key and len(result["request_key"]) > 1024:
             result["request_key"] = result["request_key"][:1024]
             result["request_key_truncated"] = True
         items = json.loads(row["items"]) if isinstance(row["items"], str) else row["items"]
@@ -108,14 +134,14 @@ class WikiJobs:
             result["error_truncated"] = len(error) > 1024
         return result
 
-    def list(self, offset=0, limit=30, *, view="full", idempotency_key=None):
+    def list(self, offset=0, limit=30, *, view="full", idempotency_key=None, model_response=False):
         if offset < 0 or not 1 <= limit <= 100:
             raise WikiError("Invalid maintenance pagination", 422)
         if view not in {"compact", "full"}:
             raise WikiError("Invalid maintenance view", 422)
         columns = "*" if view == "full" else "id,request_key,status,error,session_id,created_at,updated_at,items"
         condition = ""
-        parameters = []
+        parameters: list[str | int] = []
         if idempotency_key is not None:
             condition = " WHERE request_key=? OR id=(SELECT job_id FROM job_requests WHERE request_key=?)"
             parameters.extend((idempotency_key, idempotency_key))
@@ -124,20 +150,51 @@ class WikiJobs:
                 f"SELECT {columns} FROM jobs{condition} ORDER BY created_at DESC LIMIT ? OFFSET ?",  # noqa: S608
                 (*parameters, limit + 1, offset),
             ).fetchall()
-        return {
-            "items": [(self.summary(row) if view == "compact" else self.public(row)) for row in rows[:limit]],
+        result = {
+            "items": [(self.summary(row, exact_key=model_response) if view == "compact" else self.public(row)) for row in rows[:limit]],
             "next_offset": offset + limit if len(rows) > limit else None,
         }
+        if model_response and view == "compact":
+            from .model_response import page
 
-    def enqueue(self, key, payload, items):
+            return page(result["items"], result, offset, offset + len(rows), lambda following: None)
+        return result
+
+    def enqueue(self, key, payload, items, *, task=None, mcp_scope=None):
+        creation = payload.get("creation")
+        grants.creation_policy(task, creation)
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         digest = hashlib.sha256(raw.encode()).hexdigest()
         with self.store.connect() as db:
             alias = db.execute("SELECT * FROM job_requests WHERE request_key=?", (key,)).fetchone()
             if alias:
+                grants.principal(task, mcp_scope, self.registration, payload.get("actor", "human"))
                 if alias["request_hash"] != self.request_hash(payload.get("request", payload)):
                     raise WikiError("Idempotency key already names a different submission", 409)
-                return self.get(alias["job_id"])
+                return self.get(alias["job_id"], db=db)
+        job_id = uuid.uuid4().hex
+        outputs = grants.targets(self.store, creation.get("paths") or [f"Library/Inbox/{job_id}-knowledge.md"]) if creation else []
+        material = (grants.targets(self.store, [payload.get("target") or f"Library/Inbox/{job_id}.md"])[0]
+                    if payload.get("material") and not items else None)
+        with WikiHistory(self.store).locked(), registry._account_lock(self.user_id), registry.registration_lock(self.user_id), self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if registry.config(self.user_id) != self.registration:
+                raise WikiError("Wiki registration changed before admission", 409)
+            policy = grants.principal(task, mcp_scope, self.registration, payload.get("actor", "human"))
+            for item in items:
+                if item.get("doc") and item.get("revision") and item.get("status") != "done":
+                    current = db.execute("SELECT path,revision FROM documents WHERE id=?", (item["doc"],)).fetchone()
+                    if not current or current["path"] != item["path"] or current["revision"] != item["revision"]:
+                        raise WikiError("Selected document identity or revision changed before admission", 409)
+            if task:
+                from .tasks import tasks
+
+                tasks.require_selection(task, payload.get("paths", []), self.store, db=db)
+            alias = db.execute("SELECT * FROM job_requests WHERE request_key=?", (key,)).fetchone()
+            if alias:
+                if alias["request_hash"] != self.request_hash(payload.get("request", payload)):
+                    raise WikiError("Idempotency key already names a different submission", 409)
+                return self.get(alias["job_id"], db=db)
             previous = db.execute(
                 "SELECT * FROM jobs WHERE request_key=?", (key,)
             ).fetchone()
@@ -146,9 +203,8 @@ class WikiJobs:
                     raise WikiError(
                         "Idempotency key already names a different submission", 409
                     )
-                return self.public(previous)
+                return self.get(previous["id"], db=db)
             now = datetime.now(UTC).isoformat()
-            job_id = uuid.uuid4().hex
             db.execute(
                 "INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (
@@ -165,6 +221,10 @@ class WikiJobs:
                 ),
             )
             db.execute("INSERT INTO job_requests VALUES(?,?,?)", (key, self.request_hash(payload.get("request", payload)), job_id))
+            created = grants.issue(db, self.registration, job_id, items, policy=policy,
+                                   creation=creation, outputs=outputs, material=material)
+            if created:
+                db.execute("UPDATE jobs SET items=? WHERE id=?", (json.dumps([*items, *created], ensure_ascii=False), job_id))
         worker.wake(self.user_id)
         return self.get(job_id)
 
@@ -193,29 +253,34 @@ class WikiJobs:
         return self.maintain(key, material, scope, [], None, sources, actor)
 
     def maintain(
-        self, key, material, scope, paths, target, sources, actor, created_changes=None, *, review=None, selection_task=None
+        self, key, material, scope, paths, target, sources, actor, created_changes=None, *, review=None, selection_task=None,
+        selection_id=None, selection_ordinal=None, mcp_scope: McpScope | None = None, creation=None
     ):
-        guard = registry._account_lock(self.user_id) if review is not None else contextlib.nullcontext()
-        # Workers already look up the registration inside the history lock.
-        # Never hold the account lock while waiting for that worker to finish.
-        with WikiHistory(self.store).locked(), guard:
-            return self._maintain(key, material, scope, paths, target, sources, actor, created_changes, review=review, selection_task=selection_task)
+        from .maintenance_selections import validate_pair
+
+        validate_pair(selection_id, selection_ordinal, review)
+        if review is not None:
+            if creation is not None:
+                raise WikiError("Checked daily maintenance cannot request new pages", 422)
+            from .maintenance_admission import admit
+
+            return admit(self, key, material, paths, target, sources, actor, created_changes or {}, review,
+                         selection_task, selection_id=selection_id, selection_ordinal=selection_ordinal, mcp_scope=mcp_scope)
+        with WikiHistory(self.store).locked():
+            return self._maintain(key, material, scope, paths, target, sources, actor, created_changes,
+                                  task=selection_task, mcp_scope=mcp_scope, creation=creation)
 
     def _maintain(
-        self, key, material, scope, paths, target, sources, actor, created_changes=None, *, review=None, selection_task=None
+        self, key, material, scope, paths, target, sources, actor, created_changes=None, *, task=None, mcp_scope=None, creation=None
     ):
         created_changes = created_changes or {}
-        if review is not None:
-            from .maintenance_state import DAILY_SCOPE
-
-            scope = DAILY_SCOPE
-        if not key.strip() or not (material.strip() or paths):
+        if not key.strip() or not (material.strip() or paths or creation):
             raise WikiError(
                 "Maintenance requires a key and material or explicit paths", 422
             )
         if material and paths:
             raise WikiError("Choose new material or explicitly selected files", 422)
-        if not material and not paths:
+        if not material and not paths and not creation:
             raise WikiError(
                 "Select files for maintenance; citations are read-only sources", 422
             )
@@ -228,15 +293,16 @@ class WikiJobs:
             "actor": actor,
             "created_changes": created_changes,
         }
-        if review is not None:
-            from .maintenance_state import check_submission
+        if creation is not None:
+            from .contracts import CreationRequest
 
-            request["review"] = review
-            previous = check_submission(self, key, request, review, selection_task)
-            if previous:
-                return previous
+            creation = CreationRequest.model_validate(creation).model_dump()
+            grants.creation_policy(task, creation)
+            request["creation"] = creation
         previous = self.previous_request(key, request)
         if previous:
+            with self.store.connect() as db:
+                grants.principal(task, mcp_scope, self.registration, actor)
             return previous
         refs = WikiCuration(self.store).sources(sources)
         if target:
@@ -254,9 +320,7 @@ class WikiJobs:
             raise WikiError("The new-file manifest must match the selected files", 422)
         for path in dict.fromkeys(paths):
             self.store.path(path)
-            document = self.store.read(path, length=1, **({"expected_revision": review["revision"]} if review is not None else {}))
-            if review is not None and (document["id"], document["path"], document["revision"]) != (review["doc"], review["path"], review["revision"]):
-                raise WikiError("The observed document changed before item admission", 409)
+            document = self.store.read(path, length=1)
             require_markdown_maintenance(document["path"])
             if created_changes:
                 WikiHistory(self.store)
@@ -298,6 +362,8 @@ class WikiJobs:
             "actor": actor,
             "request": request,
         }
+        if creation is not None:
+            payload["creation"] = creation
         if material:
             with self.store.connect() as db:
                 pending = db.execute("SELECT id,payload,items FROM jobs WHERE status IN ('queued','running','interrupted') ORDER BY created_at").fetchall()
@@ -308,19 +374,20 @@ class WikiJobs:
                     and (not pending_payload.get("target") or is_markdown_maintenance(pending_payload["target"]))
                     and all(is_markdown_maintenance(item["path"]) for item in json.loads(job["items"]))
                 )
-                if eligible and pending_payload.get("material") == material:
+                if eligible and pending_payload.get("material") == material and pending_payload.get("creation") == creation:
+                    grants.principal(task, mcp_scope, self.registration, actor)
                     return self.alias(key, request, job["id"])
             reused = materials.find(self.store, material.encode(), markdown_only=True)
-            if reused:
+            if reused and creation is None:
                 result = self.enqueue(key, payload, [{
                     "doc": reused["id"], "path": reused["path"], "revision": reused["revision"],
                     "quality": reused["quality"], "status": "done", "reused": True,
                     "output": reused["path"], "output_revision": reused["revision"],
-                }])
+                }], task=task, mcp_scope=mcp_scope)
                 return self.update(result["id"], status="completed")
             if target and self.store.path(target).exists():
                 raise WikiError("New-note target already exists with different material", 409)
-        return self.enqueue(key, payload, selected)
+        return self.enqueue(key, payload, selected, task=task, mcp_scope=mcp_scope)
 
     def curate(self, key, scope):
         with self.store.connect() as db:
@@ -384,10 +451,44 @@ class WikiJobs:
                             if request.source == "wiki")
             for request_id in refs:
                 await manager.cancel_request(job["session_id"], request_id)
+        await _io(self.release_unused, job_id)
         return await _io(self.get, job_id)
+
+    def release_unused(self, job_id):
+        """Release only unstarted paths after the stopped execution has retired."""
+        if registry.config(self.user_id) != self.registration:
+            return 0
+        with self.store.connect() as db:
+            grants.require(db)
+            row = db.execute("SELECT id,status,session_id,updated_at FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if row is None:
+                raise WikiError("Maintenance job not found", 404)
+            job = dict(row)
+            if (job["status"] not in {"cancelled", "failed", "interrupted", "completed", "completed_with_attention"}
+                    or not db.execute("SELECT 1 FROM wiki_path_reservations WHERE job_id=? AND state='reserved' LIMIT 1", (job_id,)).fetchone()):
+                return 0
+        try:
+            self.require_retired(job)
+        except WikiError as error:
+            if error.status == 409:
+                return 0
+            raise
+        # Join existing writers, but do not run publication recovery merely to
+        # release an unrelated unstarted path. Its original uncertainty stays put.
+        with WikiHistory(self.store).locked(shared=True), registry._account_lock(self.user_id), registry.registration_lock(self.user_id):
+            if registry.config(self.user_id) != self.registration:
+                return 0
+            with self.store.connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                current = db.execute("SELECT status,session_id,updated_at FROM jobs WHERE id=?", (job_id,)).fetchone()
+                if (current["status"], current["session_id"], current["updated_at"]) != (job["status"], job["session_id"], job["updated_at"]):
+                    return 0
+                self.require_retired(job)
+                return db.execute("UPDATE wiki_path_reservations SET state='released' WHERE job_id=? AND state='reserved'", (job_id,)).rowcount
 
     def recover_jobs(self):
         with self.store.connect() as db:
+            grants.block_ungranted(db, self.registration)
             rows = db.execute("SELECT id,items FROM jobs WHERE status IN ('running','interrupted')").fetchall()
             for row in rows:
                 items = json.loads(row["items"])
@@ -398,9 +499,16 @@ class WikiJobs:
                     "UPDATE jobs SET status='queued',error='Recovered after server restart',session_id=NULL,items=? WHERE id=? AND status IN ('running','interrupted')",
                     (json.dumps(items, ensure_ascii=False), row["id"]),
                 )
+        with self.store.connect() as db:
+            stopped = [row[0] for row in db.execute("""SELECT DISTINCT j.id FROM jobs j
+                JOIN wiki_path_reservations r ON r.job_id=j.id AND r.state='reserved'
+                WHERE j.status IN ('cancelled','failed','completed','completed_with_attention')""")]
+        for job_id in stopped:
+            self.release_unused(job_id)
 
     def next_queued(self):
         with self.store.connect() as db:
+            grants.block_ungranted(db, self.registration)
             row = db.execute(
                 "UPDATE jobs SET status='running',error=NULL WHERE id=(SELECT id FROM jobs WHERE status='queued' ORDER BY created_at LIMIT 1) AND status='queued' RETURNING id"
             ).fetchone()
@@ -408,7 +516,9 @@ class WikiJobs:
 
     def ingest(self, job_id):
         history = WikiHistory(self.store)
-        with history.locked():
+        with history.locked(), registry._account_lock(self.user_id), registry.registration_lock(self.user_id):
+            if registry.config(self.user_id) != self.registration:
+                raise WikiError("Wiki registration changed before material ingestion", 409)
             job = self.get(job_id)
             if job["status"] == "cancelled":
                 return None
@@ -421,6 +531,8 @@ class WikiJobs:
                     own_creation = db.execute("""SELECT 1 FROM changes c JOIN change_retention r ON r.change_id=c.id
                       WHERE c.path=? AND c.reason=? AND c.status='applied' AND c.before_hash IS NULL
                         AND r.document_id=?""", (existing["path"], f"Ingest job {job_id}", existing["id"])).fetchone()
+                with self.store.connect() as db:
+                    grants.bind_document(db, job_id, existing["id"], existing["path"], existing["revision"], "material")
                 return existing | {"reused": not bool(own_creation)}
             target = self.store.path(path)
             if target.exists():
@@ -437,6 +549,10 @@ class WikiJobs:
             else:
                 from .material_proof import ingest
 
+                with self.store.connect() as db:
+                    reservation = db.execute("SELECT id FROM wiki_path_reservations WHERE job_id=? AND purpose='framework_material' AND state='reserved'", (job_id,)).fetchone()
+                if not reservation:
+                    raise WikiError("Material creation needs verification of its admitted reservation", 409)
                 history.write_locked(
                     path,
                     payload["material"].encode(),
@@ -444,24 +560,190 @@ class WikiJobs:
                     payload["actor"],
                     f"Ingest job {job_id}",
                     origin_builder=ingest(job_id),
+                    operation="ingest",
+                    publication={"job_id": job_id, "session_id": None, "source_doc": None,
+                                 "source_path": path, "input_revision": None,
+                                 "reservation_id": reservation[0], "framework_material": True},
                 )
             return self.store.read(path, length=1)
 
+    def require_retired(self, job):
+        """A terminal database row cannot stand in for execution retirement."""
+        from .tasks import tasks
+
+        if ((str(self.store.state.resolve()), job["id"]) in WikiWorker.executing
+                or any(assignment["job_id"] == job["id"] for assignment in list(tasks.assignments.values()))
+                or any(task.job_id == job["id"] for task in list(tasks.active.values()))):
+            raise WikiError("The previous maintenance assignment has not retired", 409)
+        session = worker.manager.get_session(job["session_id"]) if worker.manager and job["session_id"] else None
+        if session is not None and (session._current_request is not None or session._pending_queue
+                                    or session._backend_cleanup_tasks or session._recording_blocked is not None):
+            raise WikiError("The previous maintenance execution has not retired", 409)
+
+    def readmit(self, job_id, paths, creation=None):
+        """Owner-only re-admission preserves the old job, key, payload and receipts."""
+        from .contracts import GrantReadmissionRequest
+
+        intent = GrantReadmissionRequest(paths=paths, creation=creation).model_dump()
+        paths = list(dict.fromkeys(intent["paths"]))
+        creation = intent["creation"]
+        encoded = json.dumps(intent, ensure_ascii=False, sort_keys=True)
+        request_hash = hashlib.sha256(encoded.encode()).hexdigest()
+        with WikiHistory(self.store).locked(), registry._account_lock(self.user_id), registry.registration_lock(self.user_id):
+            if registry.config(self.user_id) != self.registration:
+                raise WikiError("Wiki registration changed before scope re-admission", 409)
+            job = self.get(job_id)
+            with self.store.connect() as db:
+                accepted = db.execute("SELECT request_hash FROM wiki_grant_readmissions WHERE job_id=? AND registration_generation=?",
+                                      (job_id, self.registration["registration_generation"])).fetchone()
+                if accepted:
+                    if accepted[0] != request_hash:
+                        raise WikiError("This job was already re-admitted with a different finite scope", 409)
+                    return job
+            if job["status"] in {"running", "queued", "completed"}:
+                raise WikiError("Only stopped work awaiting scope review can be re-admitted", 409)
+            if job["grant"] is not None and job["grant"]["registration_generation"] == self.registration["registration_generation"]:
+                raise WikiError("This job already has a current grant; use retry", 409)
+            self.require_retired(job)
+            payload = job["payload"]
+            selected = []
+            material_target = None
+            material = payload.get("material", "")
+            if material:
+                if paths:
+                    raise WikiError("Material re-admission retains its original input; do not select other existing files", 422)
+                if job["grant"]:
+                    with self.store.connect() as db:
+                        recorded = db.execute("SELECT path,output_revision,change_id FROM wiki_path_reservations WHERE job_id=? AND purpose='framework_material' AND state IN ('prepared','blocked')", (job_id,)).fetchone()
+                    if recorded:
+                        self.store.read(recorded["path"], length=1, expected_revision=recorded["output_revision"])
+                        with self.store.connect() as db:
+                            db.execute("BEGIN IMMEDIATE")
+                            grants.settle_creation(db, self.store, recorded["change_id"])
+                        job = self.get(job_id)
+                reused = materials.find(self.store, material.encode(), markdown_only=True)
+                if reused:
+                    selected = [{"doc": reused["id"], "path": reused["path"], "revision": reused["revision"],
+                                 "quality": reused["quality"], "status": "pending"}]
+                else:
+                    material_target = grants.targets(self.store, [payload.get("target") or f"Library/Inbox/{job_id}.md"])[0]
+            else:
+                if not paths and not creation:
+                    raise WikiError("Select a finite set of existing notes or explicit new pages", 422)
+                for path in paths:
+                    current = self.store.read(path, length=1)
+                    if not grants._literal_target(current["path"], existing=True):
+                        raise WikiError("Re-admission is limited to exact Library Markdown targets", 422)
+                    selected.append({"doc": current["id"], "path": current["path"], "revision": current["revision"],
+                                     "quality": current["quality"], "status": "pending"})
+            previous_reservations = job["grant"]["reservations"] if job["grant"] else []
+            existing_creations = []
+            reacquire = []
+            if creation and job["grant"]:
+                requested = creation.get("paths") or [f"Library/Inbox/{job_id}-knowledge.md"]
+                by_path = {row["path"]: row for row in previous_reservations}
+                for path in requested:
+                    reservation = by_path.get(path)
+                    item = next((item for item in job["items"] if item.get("reservation_id") == (reservation or {}).get("id")), None)
+                    if reservation is None or reservation["state"] == "bound" or item is None:
+                        raise WikiError("Re-admission must retain an original unfinished creation target", 409)
+                    existing_creations.append(dict(item, status="pending"))
+                    if reservation["state"] == "released":
+                        prepared = grants.targets(self.store, [path])[0]
+                        if prepared["path_key"] != reservation["path_key"]:
+                            raise WikiError("The original physical creation target changed before re-admission", 409)
+                        reacquire.append(reservation)
+                outputs: list[dict[str, str]] = []
+            else:
+                outputs = grants.targets(self.store, creation.get("paths") or [f"Library/Inbox/{job_id}-knowledge.md"]) if creation else []
+            with self.store.connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                current = db.execute("SELECT status,error,items,session_id FROM jobs WHERE id=?", (job_id,)).fetchone()
+                if (current["status"] != job["status"] or current["error"] != job["error"]
+                        or current["session_id"] != job["session_id"] or json.loads(current["items"]) != job["items"]):
+                    raise WikiError("The retained job changed before scope re-admission", 409)
+                self.require_retired(job)
+                for item in selected:
+                    observed = db.execute("SELECT path,revision FROM documents WHERE id=?", (item["doc"],)).fetchone()
+                    if not observed or (observed["path"], observed["revision"]) != (item["path"], item["revision"]):
+                        raise WikiError("A selected identity changed before scope re-admission", 409)
+                header = db.execute("SELECT * FROM wiki_job_grants WHERE job_id=?", (job_id,)).fetchone()
+                if header is None:
+                    created = grants.issue(db, self.registration, job_id, [] if material else selected, policy="owner-readmission",
+                                           creation=creation, outputs=outputs, material=material_target)
+                    if material:
+                        for item in selected:
+                            grants.bind_document(db, job_id, item["doc"], item["path"], item["revision"], "material")
+                else:
+                    if header["vault_id"] != self.registration["vault_id"]:
+                        raise WikiError("Re-admission cannot transfer work to another vault", 409)
+                    if material_target:
+                        reserved = db.execute("SELECT * FROM wiki_path_reservations WHERE job_id=? AND purpose='framework_material' AND path=? AND state IN ('reserved','released')",
+                                              (job_id, material_target["path"])).fetchone()
+                        if not reserved:
+                            raise WikiError("The original material reservation needs verification", 409)
+                        if reserved["path_key"] != material_target["path_key"]:
+                            raise WikiError("The original material target changed before re-admission", 409)
+                        if reserved["state"] == "released":
+                            reacquire.append(dict(reserved))
+                    allowed = {row[0] for row in db.execute("SELECT doc_id FROM wiki_grant_documents WHERE job_id=?", (job_id,))}
+                    if {item["doc"] for item in selected} - allowed:
+                        raise WikiError("The retained grant does not name these identities; submit a new explicit task", 409)
+                    created = existing_creations
+                grants.reacquire(db, reacquire)
+                db.execute("INSERT INTO wiki_grant_readmissions VALUES(?,?,?,?,?,?)", (
+                    job_id, self.registration["registration_generation"], request_hash, encoded, job["error"], datetime.now(UTC).isoformat()))
+                completed = [item for item in job["items"] if item.get("status") == "done"]
+                done_ids = {item.get("doc") for item in completed}
+                selected = [item for item in selected if item["doc"] not in done_ids]
+                # Keep original execution evidence attached to the same identity.
+                recordings = {item["doc"]: item["recording_failure"] for item in job["items"]
+                              if item.get("doc") and item.get("recording_failure")}
+                for item in selected:
+                    if item["doc"] in recordings:
+                        item["recording_failure"] = recordings[item["doc"]]
+                db.execute("UPDATE jobs SET status='queued',error=NULL,session_id=NULL,items=?,updated_at=? WHERE id=?",
+                           (json.dumps([*completed, *selected, *created], ensure_ascii=False), datetime.now(UTC).isoformat(), job_id))
+        worker.wake(self.user_id)
+        return self.get(job_id)
+
     def retry(self, job_id):
-        with WikiHistory(self.store).locked():
+        with WikiHistory(self.store).locked(), registry._account_lock(self.user_id), registry.registration_lock(self.user_id):
+            if registry.config(self.user_id) != self.registration:
+                raise WikiError("Wiki registration changed before retry", 409)
             return self._retry(job_id)
 
     def _retry(self, job_id):
         job = self.get(job_id)
+        if grants.scope_blocked(job.get("error")) or job["grant"] is None:
+            raise WikiError("Complete trusted scope re-admission before retrying this job", 409)
+        if job["grant"]["registration_generation"] != self.registration["registration_generation"]:
+            raise WikiError("Complete trusted scope re-admission for the current registration", 409)
         if job["status"] in {"running", "queued", "completed"}:
             raise WikiError(
                 "Only cancelled, failed, interrupted or attention jobs can be retried",
                 409,
             )
+        self.require_retired(job)
+        with self.store.connect() as db:
+            released = [dict(row) for row in db.execute("SELECT * FROM wiki_path_reservations WHERE job_id=? AND state='released'", (job_id,))]
+        pending = {item["reservation_id"] for item in job["items"] if item.get("kind") == "creation" and item["status"] != "done"}
+        needs_material = bool(job["payload"].get("material") and not any(item.get("kind") != "creation" for item in job["items"]))
+        reacquire = [row for row in released if row["id"] in pending or row["purpose"] == "framework_material" and needs_material]
+        for row in reacquire:
+            target = grants.targets(self.store, [row["path"]])[0]
+            if target["path_key"] != row["path_key"]:
+                raise WikiError("The original physical creation target changed before retry", 409)
+        reacquired_ids = {row["id"] for row in reacquire}
         for item in job["items"]:
             if item["status"] != "done":
                 if item.get("recording_failure"):
                     item.update(status="pending", recording_recovery=True)
+                    continue
+                if item.get("kind") == "creation":
+                    if item["reservation_id"] in reacquired_ids or not self.recover_creation(job_id, item):
+                        item.update(status="pending")
+                        item.pop("error", None)
                     continue
                 if item.get("index_recovery") or self.publication(job_id, item["doc"]):
                     item.update(status="pending", index_recovery=True)
@@ -484,11 +766,20 @@ class WikiJobs:
                     item["quality"] = current["quality"]
                 item.pop("error", None)
                 item["status"] = "pending"
-        result = self.update(
-            job_id, status="queued", items=job["items"], error=None, session_id=None
-        )
+        with self.store.connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            current = db.execute("SELECT status,error,session_id,updated_at FROM jobs WHERE id=?", (job_id,)).fetchone()
+            if tuple(current) != (job["status"], job["error"], job["session_id"], job["updated_at"]):
+                raise WikiError("The retained maintenance job changed before retry", 409)
+            self.require_retired(job)
+            header = db.execute("SELECT * FROM wiki_job_grants WHERE job_id=?", (job_id,)).fetchone()
+            if not header or grants.current_generation(db, header) != self.registration["registration_generation"]:
+                raise WikiError("The retained grant changed before retry", 409)
+            grants.reacquire(db, reacquire)
+            db.execute("UPDATE jobs SET status='queued',items=?,error=NULL,session_id=NULL,updated_at=? WHERE id=?",
+                       (json.dumps(job["items"], ensure_ascii=False), datetime.now(UTC).isoformat(), job_id))
         worker.wake(self.user_id)
-        return result
+        return self.get(job_id)
 
     def resolve_conflicts(self, job_id, path):
         history = WikiHistory(self.store)
@@ -516,7 +807,8 @@ class WikiJobs:
                 r.doc_id AS output_doc,r.operation FROM operation_receipts r
                 LEFT JOIN changes c ON c.id=r.change_id
                 LEFT JOIN job_publications p ON p.change_id=r.change_id
-                WHERE r.job_id=? AND r.item_doc=? ORDER BY r.rowid DESC LIMIT 1""", (job_id, document_id)).fetchone()
+                WHERE r.job_id=? AND r.item_doc=? AND r.operation IN (""" + ",".join("?" for _ in MAINTENANCE_OPERATIONS)
+                + ") ORDER BY r.rowid DESC LIMIT 1", (job_id, document_id, *MAINTENANCE_OPERATIONS)).fetchone()
             if receipt:
                 return receipt
             return db.execute("SELECT p.*,c.status AS change_status,r.document_id AS output_doc FROM job_publications p JOIN changes c ON c.id=p.change_id JOIN change_retention r ON r.change_id=c.id WHERE p.job_id=? AND p.source_doc=? ORDER BY p.rowid DESC LIMIT 1", (job_id, document_id)).fetchone()
@@ -563,6 +855,57 @@ class WikiJobs:
             self.resolve_conflicts(job_id, item["path"])
             return True
 
+    def recover_creation(self, job_id, item):
+        """Verify the original create operation; never draft its content again."""
+        with WikiHistory(self.store).locked():
+            with self.store.connect() as db:
+                row = db.execute("SELECT * FROM wiki_path_reservations WHERE id=? AND job_id=?",
+                                 (item["reservation_id"], job_id)).fetchone()
+            if row is None:
+                item.update(status="attention", error="The exact creation reservation is unavailable")
+                return True
+            if row["state"] == "reserved":
+                return False
+            if row["state"] == "released":
+                item.update(status="attention", error="The creation path must be reserved again by trusted re-admission")
+                return True
+            try:
+                if row["state"] != "bound":
+                    self.store.read(row["path"], length=1, expected_revision=row["output_revision"])
+                    with self.store.connect() as db:
+                        db.execute("BEGIN IMMEDIATE")
+                        grants.settle_creation(db, self.store, row["change_id"])
+                        state = db.execute("SELECT state FROM wiki_path_reservations WHERE id=?", (row["id"],)).fetchone()[0]
+                        if state != "bound":
+                            raise WikiError("The original creation did not reach a verified applied state", 409)
+                output = self.store.read(row["document_id"], length=1)
+                with self.store.connect() as db:
+                    self.store.require_indexed(db, output["path"])
+                    # Only B's original creation or a later primary review of B
+                    # can settle it. Auxiliary navigation receipts prove neither.
+                    receipt = db.execute("""SELECT r.*,c.status AS change_status,p.indexed FROM operation_receipts r
+                        LEFT JOIN changes c ON c.id=r.change_id LEFT JOIN job_publications p ON p.change_id=r.change_id
+                        WHERE r.job_id=? AND r.doc_id=? AND r.output_revision=?
+                          AND r.item_doc=? AND r.operation IN (""" + ",".join("?" for _ in MAINTENANCE_OPERATIONS) + """)
+                          AND ((r.change_id=? AND json_extract(r.details,'$.creation_reservation_id')=?)
+                            OR json_extract(r.details,'$.input_source_doc')=?)
+                          AND (r.change_id IS NULL OR c.status='applied')
+                          AND (r.change_id=? OR p.indexed=1 OR r.change_id IS NULL) ORDER BY r.rowid DESC LIMIT 1""",
+                        (job_id, row["document_id"], output["revision"], row["document_id"], *MAINTENANCE_OPERATIONS,
+                         row["change_id"], row["id"], row["document_id"], row["change_id"])).fetchone()
+                if receipt is None or output["id"] != row["document_id"]:
+                    raise WikiError("The created identity or its recorded output changed; verify without recreating it", 409)
+            except WikiError as exc:
+                item.update(status="attention", index_recovery=True, error=str(exc))
+                return True
+            item.update(status="done", doc=output["id"], output=output["path"], output_revision=output["revision"],
+                        input_revision=receipt["input_revision"], receipt_id=receipt["id"],
+                        output_change_id=receipt["change_id"], operation=receipt["operation"],
+                        index_complete=True)
+            item.pop("error", None)
+            item.pop("index_recovery", None)
+            return True
+
     def reread(self, job_id, item, error, *, retryable=True):
         if item.get("recording_failure"):
             item.update(status="attention", error="Execution result recording remains unconfirmed; verify the original request without regenerating content")
@@ -601,6 +944,7 @@ class WikiJobs:
 class WikiWorker:
     RETRY_INITIAL_SECONDS = 5.0
     RETRY_MAX_SECONDS = 60.0
+    executing: dict[tuple[str, str], object] = {}
 
     def __init__(self):
         self.manager = None
@@ -739,8 +1083,22 @@ class WikiWorker:
                 await complete_cleanup(self.manager._await_backend_retirement(session))
                 if getattr(session, "_recording_blocked", None) is None:
                     await self.manager.archive_session(session.id, replace=False)
+        await _io(jobs.release_unused, job_id)
 
     async def process(self, jobs, job_id):
+        key = (str(jobs.store.state.resolve()), job_id)
+        if key in self.executing:
+            raise WikiError("The previous maintenance execution has not retired", 409)
+        owner = object()
+        self.executing[key] = owner
+        try:
+            return await self._process(jobs, job_id)
+        finally:
+            if self.executing.get(key) is owner:
+                self.executing.pop(key)
+            await _io(jobs.release_unused, job_id)
+
+    async def _process(self, jobs, job_id):
         config = registry.config(jobs.user_id)
         if config != jobs.registration:
             raise WikiError("Wiki registration changed; retry with the current binding", 409)
@@ -753,9 +1111,14 @@ class WikiWorker:
         payload = job["payload"]
         if job["status"] == "cancelled":
             return
+        if (job["grant"] is None or job["grant"]["registration_generation"] != config["registration_generation"]
+                or job["grant"]["vault_id"] != config["vault_id"]):
+            await _io(jobs.update, job_id, status="failed", session_id=None,
+                      error=json.dumps({"code": "scope_review_required", "reason": "A current trusted V2 grant is required"}))
+            return
         if payload["kind"] == "submission" and payload["material"]:
             path = payload.get("target") or f"Library/Inbox/{job_id}.md"
-            if not job["items"]:
+            if not any(item.get("kind") != "creation" for item in job["items"]):
                 doc = await _io(jobs.ingest, job_id)
                 if (
                     doc is None
@@ -799,6 +1162,12 @@ class WikiWorker:
             for item in batch:
                 if item.get("recording_failure"):
                     await self._recover_recorded_item(jobs, job_id, item)
+                    continue
+                if item.get("kind") == "creation":
+                    if await _io(jobs.recover_creation, job_id, item):
+                        continue
+                    readable.append(item)
+                    briefing.append({key: item[key] for key in ("kind", "path", "reservation_id")})
                     continue
                 if await _io(jobs.recover_publication, job_id, item):
                     continue
@@ -863,13 +1232,12 @@ class WikiWorker:
                 return
             from .tasks import tasks as grants
 
-            assigned = [item["path"] for item in readable]
-            grants.assign(session.id, job_id, assigned, registration=config)
+            grants.assign(session.id, job_id, readable, registration=config)
             prompt = (
                 "这是已明确授权的持久维护任务。按本次共享维护与写作指南执行。\n"
                 + "用户要求: "
                 + payload["scope"]
-                + "\n仅可修改这些文件（其他旧文只读）:\n"
+                + "\n正文与新页仅限这些目标；已有导航页可用 relations-only organize 补本批入口，其他关联页按需读取:\n"
                 + json.dumps(briefing, ensure_ascii=False)
                 + "\n重读原因与已用重读次数:\n"
                 + json.dumps([{key: item.get(key) for key in ("path", "retry_reason", "retry_count")} for item in readable], ensure_ascii=False)
@@ -916,6 +1284,10 @@ class WikiWorker:
             if (await _io(jobs.get, job_id))["status"] == "cancelled":
                 return
             for item in readable:
+                if item.get("kind") == "creation":
+                    if not await _io(jobs.recover_creation, job_id, item):
+                        item.update(status="attention", error="; ".join(errors) or "The requested new page has no durable creation receipt")
+                    continue
                 path = item["path"]
                 if Path(path).suffix.lower() not in {".md", ".markdown"}:
                     path += ".md"
@@ -997,8 +1369,10 @@ class WikiWorker:
             item.update(status="attention", error=outcome.get("message") or "Original maintenance execution was not successful")
             return
         try:
-            recovered = await _io(jobs.recover_publication, job_id, item)
+            recovered = await _io(jobs.recover_creation if item.get("kind") == "creation" else jobs.recover_publication, job_id, item)
             if not recovered:
+                if item.get("kind") == "creation":
+                    raise WikiError("Original execution has no verified creation output")
                 path = item["path"]
                 if Path(path).suffix.lower() not in {".md", ".markdown"}:
                     path += ".md"

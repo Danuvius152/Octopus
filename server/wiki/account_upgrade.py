@@ -69,7 +69,9 @@ def save(journal: dict) -> None:
 def _durable_digest(path: Path) -> dict:
     if not path.is_file():
         return {}
-    derived = {"documents", "search_documents", "search_sections", "search_fts", "raw_materials", "index_state", "watch_directories"}
+    from .maintenance_inputs import TABLES as maintenance_derived
+
+    derived = {"documents", "search_documents", "search_sections", "search_fts", "raw_materials", "index_state", "watch_directories"} | maintenance_derived.keys()
     with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
         if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
             raise WikiError("Wiki state integrity verification failed", 503)
@@ -211,9 +213,9 @@ async def upgrade_with_wiki(db, *, username, password, adopt, manager, user=None
     app_id = config.get("app_id")
     if manager is not None:
         manager._legacy_transition = True
-    registry._blocked.add(None)
+    registry.begin_transition(None)
     if owner:
-        registry._blocked.add(owner)
+        registry.begin_transition(owner)
     if app_id:
         backend_supervisor._blocked_apps.add(app_id)
     drained = False
@@ -232,7 +234,7 @@ async def upgrade_with_wiki(db, *, username, password, adopt, manager, user=None
 
         async def created(created_user):
             journal["user_id"] = created_user["id"]
-            registry._blocked.add(created_user["id"])
+            registry.begin_transition(created_user["id"])
             # Preserve publication phase on a recovery after a lost response.
             if journal["phase"] in {"prepared", "preparing"}:
                 journal["phase"] = "account_created"
@@ -246,7 +248,8 @@ async def upgrade_with_wiki(db, *, username, password, adopt, manager, user=None
             await _io(publish, journal)
             journal["phase"] = "reopening"
             await _io(save, journal)
-            await _io(registry._store, journal["user_id"])
+            await _io(registry.block, journal["user_id"])
+            await _io(registry.reopen_for_upgrade, journal["user_id"], journal)
             summary["wiki"] = {"adopted": True, "vault_id": config["vault_id"], "durable": journal["durable"]}
         else:
             summary["wiki"] = {"adopted": False}
@@ -254,7 +257,10 @@ async def upgrade_with_wiki(db, *, username, password, adopt, manager, user=None
         journal["summary"] = summary
         await _io(save, journal)
         registry.legacy_enabled = False
+        if not adopt:
+            await _io(registry.block, journal["user_id"])
         registry.unblock(journal["user_id"])
+        registry.resume_access()
         if manager is not None:
             manager._legacy_transition = False
         if app_id:
@@ -273,7 +279,7 @@ async def upgrade_with_wiki(db, *, username, password, adopt, manager, user=None
             journal["user_id"] = retained["id"]
             await _io(save, journal)
             registry.legacy_enabled = False
-            registry._blocked.add(retained["id"])
+            registry.begin_transition(retained["id"])
             if manager is not None:
                 manager._legacy_transition = True
             if app_id:
@@ -284,6 +290,7 @@ async def upgrade_with_wiki(db, *, username, password, adopt, manager, user=None
             raise BootstrapError("Account transition cleanup is unconfirmed; state retained. Retry the upgrade after its writers finish.",
                                  status_code=503) from exc
         registry.unblock(None)
+        registry.resume_access()
         if manager is not None:
             manager._legacy_transition = False
         if app_id:

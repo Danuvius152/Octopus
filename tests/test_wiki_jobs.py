@@ -1,6 +1,7 @@
 """Exact-material reuse, bounded retries and durable publication recovery."""
 
 import asyncio
+import json
 import sys
 import threading
 import uuid
@@ -10,6 +11,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from server.mcp_identity import mint, verify
 from server.wiki.curation import WikiCuration
 from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiJobs, WikiWorker
@@ -59,40 +61,58 @@ class Curator:
         pass
 
     async def _events(self, session_id, prompt, **kwargs):
+        from server.wiki.tasks import tasks
+
         self.turns += 1
         failed = False
         with self.jobs.store.connect() as db:
             job_id = db.execute(
                 "SELECT id FROM jobs WHERE session_id=?", (session_id,)
             ).fetchone()[0]
-        job = self.jobs.get(job_id)
-        for item in job["items"]:
-            if item["status"] != "pending":
-                continue
-            source = self.jobs.store.read(item["doc"])
-            if self.turns <= self.conflicts:
-                path = self.jobs.store.path(source["path"])
-                path.write_text(path.read_text() + f"\n人工补充 {self.turns}。\n")
-            try:
-                await asyncio.to_thread(
-                    WikiCuration(self.jobs.store).organize,
-                    item["path"],
-                    source["revision"],
-                    "原文的观点与适用条件。",
-                    [],
-                    [],
-                    self.sources,
-                    "curator",
-                    "test organization",
-                    {"job_id": job_id, "session_id": session_id},
-                )
-            except WikiError as exc:
-                failed = True
-                yield {"type": "error", "message": str(exc)}
-            else:
-                if self.crash:
-                    raise asyncio.CancelledError()
-        yield {"type": "result", "content": "published", "is_error": failed}
+        session = SimpleNamespace(id=session_id, user_id=self.jobs.user_id,
+                                  agent_id=self.jobs.registration["curator_agent_id"])
+        token = tasks.open(session, "maintain")
+        scope = verify(mint(session_id, user_id=self.jobs.user_id, wiki_task_id=token))
+        task = tasks.call(tasks.active[token], scope)
+        try:
+            job = self.jobs.get(job_id)
+            for item in job["items"]:
+                if item["status"] != "pending" or (
+                    item.get("doc") not in task.document_ids
+                    and item.get("reservation_id") not in task.reservation_ids
+                ):
+                    continue
+                source = self.jobs.store.read(item["doc"])
+                tasks.record_read(task, source)
+                following = source.get("next_start")
+                while following is not None:
+                    page = self.jobs.store.read(item["doc"], start=following, expected_revision=source["revision"])
+                    tasks.record_read(task, page)
+                    following = page.get("next_start")
+                for ref in self.sources:
+                    page = self.jobs.store.read(ref["doc"])
+                    tasks.record_read(task, page)
+                    while page.get("next_start") is not None:
+                        page = self.jobs.store.read(ref["doc"], start=page["next_start"], expected_revision=page["revision"])
+                        tasks.record_read(task, page)
+                if self.turns <= self.conflicts:
+                    path = self.jobs.store.path(source["path"])
+                    path.write_text(path.read_text() + f"\n人工补充 {self.turns}。\n")
+                try:
+                    await asyncio.to_thread(
+                        WikiCuration(self.jobs.store).organize,
+                        item["path"], source["revision"], "原文的观点与适用条件。", [], [], self.sources,
+                        "curator", "test organization", task=task,
+                    )
+                except WikiError as exc:
+                    failed = True
+                    yield {"type": "error", "message": str(exc)}
+                else:
+                    if self.crash:
+                        raise asyncio.CancelledError()
+            yield {"type": "result", "content": "published", "is_error": failed}
+        finally:
+            tasks.close(token)
 
 
 async def process(jobs, job, curator):
@@ -113,7 +133,7 @@ async def test_no_change_requires_actual_read_and_survives_worker_restart_withou
     job = jobs.maintain("review", "", "检查，已经满足时无需修改", ["Library/note.md"], None, [], "human")
     session = await wiki_api.session_manager.create_session(registry.config(None)["curator_agent_id"], "真实任务范围", str(tmp_path))
     jobs.update(job["id"], status="running", session_id=session.id)
-    tasks.assign(session.id, job["id"], ["Library/note.md"])
+    tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
     headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
     original = jobs.store.path("Library/note.md").read_bytes()
@@ -145,7 +165,19 @@ async def test_new_page_recovery_checks_assigned_input_revision_separately_from_
     job = jobs.maintain("new-page", "", "new explanation", ["Library/source.md"], None, [], "human")
     jobs.update(job["id"], status="running", session_id="new-page-worker")
     source = jobs.store.read("Library/source.md")
-    history.write_locked("Library/explanation.md", b"# Independent explanation\n", None, "curator", "new page", publication={"job_id": job["id"], "session_id": "new-page-worker", "source_doc": source["id"], "source_path": source["path"], "input_revision": source["revision"]}, operation="publish")
+    # Historical pre-V2 evidence remains readable without giving a current
+    # one-document worker permission to create this additional output.
+    creation = history.write("Library/explanation.md", b"# Independent explanation\n", None, "human", "historical output fixture")
+    output = jobs.store.read("Library/explanation.md")
+    with jobs.store.connect() as db:
+        db.execute("INSERT INTO job_publications VALUES(?,?,?,?,?,?,1)", (
+            job["id"], source["id"], source["revision"], creation["change_id"], output["path"], output["revision"],
+        ))
+        db.execute("INSERT INTO operation_receipts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
+            uuid.uuid4().hex, job["id"], source["id"], output["id"], output["path"], None,
+            output["revision"], "publish", "historical output fixture", creation["change_id"], datetime.now(UTC).isoformat(),
+            json.dumps({"input_source_doc": source["id"], "input_source_revision": source["revision"]}),
+        ))
     receipt = jobs.get(job["id"])["receipts"][0]
     assert receipt["input_revision"] is None
     assert receipt["details"]["input_source_revision"] == source["revision"]

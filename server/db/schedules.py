@@ -77,7 +77,8 @@ class SchedulesMixin(DatabaseBase):
         sql = (
             "SELECT s.id, s.agent_id, s.name, s.prompt, s.interval_seconds, s.cron, "
             "s.timezone, s.recurrence_label, s.enabled, s.created_at, s.last_run_at, "
-            "s.origin_session_id, s.run_at, s.last_run_session_id, s.wiki_mode FROM schedules s"
+            "s.origin_session_id, s.run_at, s.last_run_session_id, s.wiki_mode, "
+            "s.invalid_reason FROM schedules s"
         )
         params: list[Any] = []
         if user_id is not None:
@@ -102,6 +103,7 @@ class SchedulesMixin(DatabaseBase):
                 "run_at": row[12],
                 "last_run_session_id": row[13],
                 "wiki_mode": row[14],
+                "invalid_reason": row[15],
             }
             for row in rows
         ]
@@ -151,6 +153,7 @@ class SchedulesMixin(DatabaseBase):
             "last_run_at",
             "last_run_session_id",
             "wiki_mode",
+            "invalid_reason",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:

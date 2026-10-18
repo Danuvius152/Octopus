@@ -1,35 +1,11 @@
 """Resolve local note links for navigation; a link is never proof of reading."""
 
-import posixpath
 import re
 import unicodedata
 from html.parser import HTMLParser
 from pathlib import PurePosixPath
-from urllib.parse import unquote, urlsplit
 
 from .extract import blocks
-
-
-def local_links(text):
-    from .format import _markdown, parse
-
-    body = text[parse(text).body_start:]
-    for token in _markdown.parse(body):
-        for child in token.children or []:
-            if child.type in {"link_open", "image"}:
-                resource = child.attrGet("href") if child.type == "link_open" else child.attrGet("src")
-                if resource:
-                    try:
-                        url = urlsplit(resource)
-                    except ValueError:
-                        continue
-                    if not url.scheme and not url.netloc and (url.path or url.fragment):
-                        yield unquote(url.path), unquote(url.fragment), "markdown_link"
-            elif child.type == "text":
-                for match in re.finditer(r"\[\[([^\]\n]+)\]\]", child.content):
-                    target = match[1].split("|", 1)[0]
-                    path, _, anchor = target.partition("#")
-                    yield unquote(path), unquote(anchor), "wikilink"
 
 
 def note_name(path):
@@ -38,32 +14,6 @@ def note_name(path):
         if name.casefold().endswith(suffix):
             return name[:-len(suffix)]
     return name
-
-
-def resolve_link(path, parent, documents, *, wiki=False):
-    candidates = [posixpath.normpath(posixpath.join(parent, path))]
-    if wiki:
-        candidates.append(path.lstrip("/"))
-    for candidate in candidates:
-        for suffix in ("", ".md", ".markdown"):
-            found = [doc for doc in documents if doc["path"] == candidate + suffix]
-            if len(found) == 1:
-                return found[0]
-    if wiki and "/" not in path:
-        name = note_name(path)
-        found = [
-            doc
-            for doc in documents
-            if name
-            in {
-                note_name(doc["path"]),
-                doc["title"],
-                *doc["metadata"].get("aliases", []),
-            }
-        ]
-        if len(found) == 1:
-            return found[0]
-    return None
 
 
 def headings(text):
@@ -150,7 +100,6 @@ def block_span(text, identifier):
 
 
 def anchor_exists(text, anchor):
-    anchor = unquote(anchor)
     if anchor.startswith("^"):
         return block_span(text, anchor) is not None
     seen = {}

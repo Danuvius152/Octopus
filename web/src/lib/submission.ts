@@ -1,6 +1,8 @@
 export interface SubmissionReply {
   accepted: boolean;
   message?: string;
+  code?: string;
+  requestId?: string;
 }
 
 let sequence = 0;

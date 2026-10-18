@@ -39,6 +39,15 @@ async def test_terminal_ack_is_visible_to_independent_reader_and_retry_is_identi
         await database.record_terminal(**terminal(content={"status": "failed"}))
 
 
+async def test_terminal_ack_also_confirms_the_recoverable_input(database):
+    recovery = {"rejected_input": {"content": "Complete input", "attachment_ids": ["abcdef123456"]}}
+    await database.record_terminal(**terminal(tool_input=recovery))
+    await database.record_terminal(**terminal(tool_input=recovery))
+    with pytest.raises(ValueError, match="conflict"):
+        await database.record_terminal(**terminal(tool_input=None))
+    assert (await database.load_messages("s"))[0]["tool_input"] == recovery
+
+
 @pytest.mark.asyncio
 async def test_commit_uncertainty_reconciles_without_duplicate(database, monkeypatch):
     commit = database.conn.commit
@@ -116,10 +125,12 @@ async def test_recording_failure_preserves_choice_and_storage_only_recovery(data
     assert session._recording_blocked is settlement
     assert len(calls) == 1
     assert not any(frame["type"] == "result" for frame in frames)
-    reserved_count = session._message_count
+    reserved_cursor = session._next_message_seq
+    assert session._message_count == 0
     monkeypatch.setattr(database, "record_terminal", record)
     assert await manager._reconcile_recording(session)
-    assert session._message_count == reserved_count
+    assert session._next_message_seq == reserved_cursor
+    assert session._message_count == 1
     rows = await database.load_messages(session.id)
     assert len(rows) == 1 and rows[0]["content"]["status"] == "success"
     assert len([frame for frame in frames if frame["type"] == "result"]) == 1

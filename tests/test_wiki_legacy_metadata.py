@@ -316,7 +316,7 @@ async def test_worker_preserves_old_evidence_without_new_read_but_new_refs_keep_
     job = jobs.maintain("metadata regression", "", "organize", [NOTE], None, [], "human")
     session = SimpleNamespace(id="legacy-metadata-worker", user_id=None, agent_id=config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
-    tasks.assign(session.id, job["id"], [NOTE])
+    tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
     headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
     try:

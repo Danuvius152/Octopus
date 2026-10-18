@@ -20,6 +20,7 @@ from ..schedule_ai import (
     build_explicit_schedule,
     recurrence_label_for,
 )
+from ..schedule_targets import ScheduleTargetError, resolve_schedule_target
 from ..sessions import SessionManager
 
 logger = logging.getLogger(__name__)
@@ -124,6 +125,7 @@ async def create_schedule_for_agent(
     route, and the natural-language `from_text` route. `origin_session_id` (the
     session the command was issued from) makes each fire append into that
     conversation instead of a throwaway session."""
+    await validate_schedule_target(agent_id, origin_session_id)
     schedule_id = uuid.uuid4().hex[:12]
     now = datetime.now(UTC).isoformat()
     label = recurrence_label or recurrence_label_for(
@@ -162,6 +164,20 @@ async def create_schedule_for_agent(
     await _get_runner().add(row)
     await _broadcast_change()
     return row
+
+
+async def validate_schedule_target(agent_id: str | None, origin_session_id: str | None, *, allow_missing_origin: bool = False) -> None:
+    """Use the same domain check for all HTTP/internal creation paths."""
+    try:
+        await resolve_schedule_target(_get_db(), agent_id, origin_session_id, allow_missing_origin=allow_missing_origin)
+    except ScheduleTargetError as exc:
+        raise HTTPException(exc.status_code, str(exc)) from exc
+
+
+async def validate_schedule_enabling(existing: dict, updates: dict) -> None:
+    if updates.get("enabled"):
+        await validate_schedule_target(existing["agent_id"], existing.get("origin_session_id"), allow_missing_origin=True)
+        updates["invalid_reason"] = None
 
 
 def schedule_updates(existing: dict, req: UpdateScheduleRequest) -> dict:
@@ -283,6 +299,7 @@ async def update_schedule(
     if not updates:
         return to_schedule_info(existing)
 
+    await validate_schedule_enabling(existing, updates)
     await db.update_schedule(schedule_id, **updates)
     existing.update(updates)
     await _get_runner().reschedule(existing)
@@ -427,6 +444,7 @@ async def update_session_schedule(
     if not updates:
         return to_schedule_info(existing)
 
+    await validate_schedule_enabling(existing, updates)
     await _get_db().update_schedule(schedule_id, **updates)
     existing.update(updates)
     await _get_runner().reschedule(existing)

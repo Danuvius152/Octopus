@@ -206,13 +206,9 @@ async def archive_agent(session_manager: SessionMgr, agent_id: str, user_id: Sco
         # Keep retirement, persistence and notification under one owner. A
         # disconnected HTTP waiter cannot strand evicted sessions in live rows.
         try:
-            await session_manager.evict_agent_sessions(agent_id)
+            await session_manager.archive_agent(agent_id)
         except (ValueError, RuntimeError) as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
-        try:
-            await manager.archive_agent(agent_id)
-        except AgentError as exc:
-            raise _agent_http_error(exc)
         archived = await manager.get_agent(agent_id, user_id)
         if archived is None:
             raise HTTPException(status_code=404, detail="agent not found")
@@ -232,9 +228,11 @@ async def unarchive_agent(
     comes back pinned; its sessions stay archived — those come back from the
     archived-sessions page individually."""
     try:
-        agent = await _get_manager().unarchive_agent(agent_id, user_id)
+        agent = await session_manager.unarchive_agent(agent_id, user_id)
     except AgentError as e:
         raise _agent_http_error(e)
+    except ValueError as e:
+        raise HTTPException(409, str(e)) from e
     await _publish(session_manager, "agent_updated", agent)
     return AgentRead(**agent)
 
@@ -358,8 +356,10 @@ async def create_agent_schedule(
         create_schedule_for_agent,
         schedule_wiki_mode,
         to_schedule_info,
+        validate_schedule_target,
     )
 
+    await validate_schedule_target(agent_id, req.session_id)
     row = await create_schedule_for_agent(
         agent_id,
         req.name,
@@ -394,8 +394,11 @@ async def create_agent_schedule_from_text(
         create_schedule_for_agent,
         schedule_wiki_mode,
         to_schedule_info,
+        validate_schedule_target,
     )
 
+    # A rejected relationship must not launch even a one-shot parse.
+    await validate_schedule_target(agent_id, req.session_id)
     # The AI parse runs on the agent's own harness (claude-code or codex —
     # both support one-shot, D2), with its own model + credential resolved in
     # the shape that harness needs. No backend-kind branching.

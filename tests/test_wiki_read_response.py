@@ -179,6 +179,7 @@ def test_compact_preserves_warnings_and_marks_condensed_diagnostics():
     index = read_response.compact_index({"index_errors": [{"path": "x" * 200, "error": "y" * 200}] * 10})
     assert index["index_error_count"] == 10 and index["index_errors_truncated"]
     assert len(index["index_errors"]) == 3
+    assert index["index_errors"][0]["path"] == "x" * 200
     limited = read_response.compact_document({"metadata": {"limitations": ["A" * 500, "B", "C", "D"]}})
     assert limited["warnings"]["limitations"] == ["A" * 240, "B", "C"]
     assert limited["warnings"]["limitations_count"] == 4

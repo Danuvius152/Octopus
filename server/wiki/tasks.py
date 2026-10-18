@@ -1,9 +1,12 @@
 """Short-lived task grants. Content and resumed history never grant access."""
 
+from __future__ import annotations
+
 import secrets
 import shlex
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
+from ..mcp_identity import McpScope
 from .store import WikiError
 
 
@@ -15,9 +18,11 @@ class WikiTask:
     mode: str
     request: str = ""
     job_id: str | None = None
-    writable: tuple[str, ...] = ()
-    new_pages: bool = False
+    document_ids: tuple[str, ...] = ()
+    reservation_ids: tuple[str, ...] = ()
     registration: dict | None = field(default=None, compare=False)
+    call_scope: McpScope | None = field(default=None, compare=False)
+    active_task: WikiTask | None = field(default=None, compare=False, repr=False)
     reads: dict = field(default_factory=dict, compare=False)
     read_sizes: dict = field(default_factory=dict, compare=False)
     raw_reads: dict = field(default_factory=dict, compare=False)
@@ -29,11 +34,13 @@ class WikiTasks:
         self.active: dict[str, WikiTask] = {}
         self.assignments: dict[str, dict] = {}
 
-    def assign(self, session_id, job_id, paths, *, registration=None):
+    def assign(self, session_id, job_id, items, *, registration=None):
+        """Capture the host-selected batch, independently of later path moves."""
+        items = tuple(items)
         self.assignments[session_id] = {
             "job_id": job_id,
-            "writable": tuple(paths),
-            "new_pages": True,
+            "document_ids": tuple(dict.fromkeys(item["doc"] for item in items if item.get("doc"))),
+            "reservation_ids": tuple(dict.fromkeys(item["reservation_id"] for item in items if item.get("reservation_id"))),
             "registration": dict(registration) if registration is not None else None,
         }
 
@@ -76,15 +83,32 @@ class WikiTasks:
     def is_curator_worker(self, task):
         if task is None or task.mode != "maintain" or not task.job_id:
             return False
-        from .jobs import WikiJobs
+        try:
+            self.current_grant(task, strict=True)
+        except WikiError:
+            return False
+        return True
+
+    def current_grant(self, task, *, store=None, strict=False):
+        if task is None or not task.job_id:
+            return None
+        from . import grants
         from .registry import registry
 
         try:
-            config = registry.config(task.user_id)
-            job = WikiJobs(task.user_id).get(task.job_id)
+            store = store or registry.store(task.user_id)
+            with store.connect() as db:
+                db.execute("BEGIN")
+                grants.active(db, task, store, require_scope=task.call_scope is not None)
+                return grants.view(db, task.job_id, document_ids=task.document_ids, reservation_ids=task.reservation_ids)
         except WikiError:
-            return False
-        return task.agent_id == config["curator_agent_id"] and job["status"] == "running" and job["session_id"] == task.session_id
+            if strict:
+                raise
+            return None
+
+    @staticmethod
+    def call(task, scope):
+        return replace(task, call_scope=scope, active_task=task) if task.job_id else task
 
     def require(self, scope, *, write: bool = False, publish: bool = False) -> WikiTask:
         task = self.active.get(scope.wiki_task_id) if scope else None
@@ -108,44 +132,19 @@ class WikiTasks:
             return
         if not task.job_id:
             raise WikiError("Enqueue an explicitly scoped maintenance job first", 403)
-        from .jobs import WikiJobs
-
-        job = WikiJobs(task.user_id).get(task.job_id)
-        if job["status"] != "running" or job["session_id"] != task.session_id:
-            raise WikiError("This maintenance assignment is no longer active", 403)
+        from . import grants
         from .formats import require_markdown_maintenance
 
         target = store.path(path)
         require_markdown_maintenance(path)
-        if path in task.writable:
-            from .store import is_maintainable_text
+        exists = target.is_file()
+        if exists:
+            store.read(path, length=1)
+        with store.connect() as db:
+            db.execute("BEGIN")
+            grants.authorize(db, task, store, path, create=not exists)
 
-            if not is_maintainable_text(path):
-                raise WikiError("This is an excluded maintenance asset", 422)
-            selected = next((item for item in job["items"] if item["path"] == path), None)
-            paired = next((item for item in job["items"] if item["path"] + ".md" == path), None)
-            expected_id = selected["doc"] if selected else paired.get("paired_doc") if paired else None
-            if not selected and not paired:
-                raise WikiError("This path has no current document assignment", 403)
-            current_id = store.read(path, length=1)["id"] if target.is_file() else None
-            if current_id != expected_id:
-                raise WikiError("The assigned document identity was deleted or replaced", 403)
-            return
-        from .store import asset_reason
-
-        if (
-            task.new_pages
-            and path.startswith("Library/")
-            and not target.exists()
-            and not asset_reason(path)
-        ):
-            return
-        raise WikiError(
-            "This file is outside the maintenance write scope; related old notes are read-only",
-            403,
-        )
-
-    def require_selection(self, task, paths, store=None, *, checked=False):
+    def require_selection(self, task, paths, store=None, *, checked=False, db=None):
         if task is None or not paths:
             return
         if task.job_id:
@@ -171,7 +170,7 @@ class WikiTasks:
         if store is not None:
             from .maintenance_state import selected_document
 
-            with store.connect() as db:
+            def permitted(db):
                 whole = selected_document(db, selection.strip()) if selection.strip() else None
                 selectors = [selection.strip()] if whole is not None else words
                 selected = set()
@@ -179,7 +178,16 @@ class WikiTasks:
                     if (row := selected_document(db, selector)) is not None:
                         selected.add(row["id"])
                 if all((row := selected_document(db, path)) is not None and row["id"] in selected for path in paths):
+                    return True
+                return False
+
+            if db is not None:
+                if permitted(db):
                     return
+            else:
+                with store.connect() as connection:
+                    if permitted(connection):
+                        return
         raise WikiError("Select an unambiguous current file explicitly, or use a checked daily maintenance observation", 403)
 
     def record_read(self, task, document):

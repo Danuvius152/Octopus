@@ -197,9 +197,9 @@ async def lifespan(app: FastAPI):
         from .wiki.account_upgrade import pending_upgrade
         if pending := pending_upgrade():
             session_manager._legacy_transition = True
-            wiki_registry._blocked.add(None)
+            wiki_registry.begin_transition(None)
             if pending.get("user_id"):
-                wiki_registry._blocked.add(pending["user_id"])
+                wiki_registry.begin_transition(pending["user_id"])
         started.add("wiki_registry")
         await wiki_registry.start()
         from .wiki.cleanup import sweep as sweep_wiki_history
@@ -347,7 +347,7 @@ app = FastAPI(title="Octopus", version="0.1.0", lifespan=lifespan)
 
 @app.exception_handler(WikiError)
 async def _wiki_error(_request: Request, exc: WikiError) -> JSONResponse:
-    return JSONResponse(status_code=exc.status, content={"detail": str(exc)})
+    return JSONResponse(status_code=exc.status, content={"detail": str(exc), **getattr(exc, "response", {})})
 
 @app.exception_handler(WorkspaceError)
 async def _workspace_error(_request: Request, exc: WorkspaceError) -> JSONResponse:

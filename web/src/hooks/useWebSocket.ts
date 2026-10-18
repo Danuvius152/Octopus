@@ -265,6 +265,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
         type: "result",
         content: data.content ?? data.message,
         is_error: data.is_error as boolean | undefined,
+        tool_input: data.tool_input as Message["tool_input"],
         cost: data.cost as number,
         session_id: data.claude_session_id as string,
       });
@@ -496,6 +497,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
           status: "idle",
           created_at: new Date().toISOString(),
           message_count: 0,
+          transcript_integrity: "ok",
           claude_session_id: null,
           credential_id: prev?.credential_id ?? null,
           agent_id: prev?.agent_id ?? null,
@@ -681,7 +683,10 @@ export function useWebSocket() {
             const pending = submissions.current.get(data.client_request_id);
             if (pending && pending.sessionId === data.session_id) {
               submissions.current.delete(data.client_request_id);
-              pending.finish({ accepted: data.accepted === true, message: data.message });
+              pending.finish({ accepted: data.accepted === true, message: data.message,
+                ...(typeof data.code === "string" ? { code: data.code } : {}),
+                ...(typeof data.request_id === "string" ? { requestId: data.request_id } : {}),
+              });
             }
           } else {
             handleWsMessage(data);

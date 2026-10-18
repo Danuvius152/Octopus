@@ -136,6 +136,10 @@ def _account_state_stays_in_tmp(tmp_path_factory, monkeypatch):
     from server.wiki.registry import registry
     monkeypatch.setattr(registry, "legacy_enabled", True)
     monkeypatch.setattr(registry, "_blocked", set())
+    # Lifespan tests stop the shared registry. A fresh test installation must
+    # reopen through the real drain checks, without clearing resource owners.
+    if registry._stopped:
+        registry.resume_access()
     monkeypatch.setattr(session_manager, "_legacy_transition", False)
     monkeypatch.setattr(app_bridge, "_stopping", False)
     monkeypatch.setattr(app_bridge, "_blocked_owners", set())

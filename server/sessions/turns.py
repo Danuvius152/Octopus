@@ -20,8 +20,7 @@ from typing import Any, Literal
 from .. import fork_helpers
 from .. import monitor as _monitor
 from ..aio import drain_cancelled
-from ..attachments import MAX_ATTACHMENTS_PER_MESSAGE
-from ..attachments import get_path as get_attachment_path
+from ..attachments import AttachmentUnavailable, validate_message_attachments
 from ..config import settings
 from ..harness import (
     Harness,
@@ -51,7 +50,6 @@ from .base import (
     Session,
     SessionManagerBase,
     _augment_prompt_with_attachments,
-    _guess_mime,
     _split_tool_list,
     logger,
 )
@@ -264,6 +262,7 @@ class TurnsMixin(SessionManagerBase):
         message: str | None = None, code: str | None = None,
         result: HarnessEvent | None = None, metadata: dict[str, Any] | None = None,
         provider_code: str | None = None,
+        rejected_input: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Reserve, persist and broadcast one final outcome, even during Stop.
 
@@ -282,13 +281,14 @@ class TurnsMixin(SessionManagerBase):
             settlement.outcome = outcome
             settlement.stored = MessageContent(
                 role=MessageRole.system, type="result", content=outcome.model_dump(),
+                tool_input={"rejected_input": rejected_input} if rejected_input is not None else None,
                 is_error=status != "success",
                 session_id=result.session_id if result else session.claude_session_id,
                 cost=settlement.cost, created_at=datetime.now(UTC).isoformat(),
             )
             if self.db:
-                settlement.seq = session._message_count
-                session._message_count += 1
+                settlement.seq = session._next_message_seq
+                session._next_message_seq += 1
             event = {
                 "type": "result", "session_id": session.id,
                 "request_id": settlement.request_id, "work_id": settlement.work_id,
@@ -304,6 +304,8 @@ class TurnsMixin(SessionManagerBase):
                 for key in ("credential_id", "backend"):
                     if key in metadata:
                         event[key] = metadata[key]
+            if rejected_input is not None:
+                event["tool_input"] = settlement.stored.tool_input
             settlement.event = self._tag_persisted(event, settlement.seq, settlement.stored)
             task = asyncio.create_task(self._record_and_publish(session, settlement))
             settlement.final_task = task
@@ -325,7 +327,9 @@ class TurnsMixin(SessionManagerBase):
                         content=stored.content, is_error=stored.is_error,
                         session_id_ref=stored.session_id, cost=stored.cost,
                         created_at=stored.created_at,
+                        **({"tool_input": stored.tool_input} if stored.tool_input is not None else {}),
                     )
+                    session.restore_message_state(*await self.db.message_sequence_state(session.id))
             except Exception:
                 # A commit acknowledgement may be lost after the write succeeds.
                 # Only storage reconciliation can prove which happened.
@@ -428,8 +432,8 @@ class TurnsMixin(SessionManagerBase):
         """
         if not self.db:
             return None
-        seq = session._message_count
-        session._message_count += 1
+        seq = session._next_message_seq
+        session._next_message_seq += 1
         # Decided here rather than in the DB layer so the caller's own
         # MessageContent carries it onto the WS event as well as into the row.
         msg.created_at = msg.created_at or datetime.now(UTC).isoformat()
@@ -451,6 +455,7 @@ class TurnsMixin(SessionManagerBase):
             created_at=msg.created_at,
             runtime_metadata=msg.runtime_metadata.model_dump() if msg.runtime_metadata else None,
         )
+        session._message_count += 1
         return seq
 
     def _own_task(self, task: asyncio.Task[Any]) -> None:
@@ -657,7 +662,7 @@ class TurnsMixin(SessionManagerBase):
             return False
         if session._dispatch_release_task is not None and not session._dispatch_release_task.done():
             return False
-        if self._admission_closed or session._admission_closed:
+        if self._admission_closed or session._admission_closed or session.agent_id in self._closed_agents:
             return False
         if session._active_task and not session._active_task.done():
             return False
@@ -693,11 +698,13 @@ class TurnsMixin(SessionManagerBase):
         session = self.sessions.get(session_id)
         if session is None:
             raise ValueError(f"Session {session_id} not found")
+        if session._transcript_integrity != "ok":
+            raise ValueError("Transcript has duplicate sequences; export and review it before continuing")
         from ..mcp_identity import work_is_open
-        if attachment_ids and len(attachment_ids) > MAX_ATTACHMENTS_PER_MESSAGE:
-            raise ValueError(f"too many attachments: max {MAX_ATTACHMENTS_PER_MESSAGE}")
         if delivery_id and delivery_id in session._delivery_receipts:
             return replace(session._delivery_receipts[delivery_id], disposition="duplicate")
+        await self.require_active_agent(session.agent_id)
+        validate_message_attachments(session_id, attachment_ids if attachment_ids is not None else [])
         if self._admission_closed or self._legacy_transition or session._admission_closed or not work_is_open(work_id):
             queued = QueuedPrompt(prompt="", attachment_ids=[])
             receipt = self._new_receipt(session, queued, "closed")
@@ -727,7 +734,7 @@ class TurnsMixin(SessionManagerBase):
                 raise ValueError(f"Session {session_id} not found")
             if delivery_id and delivery_id in session._delivery_receipts:
                 return replace(session._delivery_receipts[delivery_id], disposition="duplicate")
-            if self._admission_closed or self._legacy_transition or session._admission_closed or not work_is_open(work_id):
+            if self._admission_closed or self._legacy_transition or session._admission_closed or session.agent_id in self._closed_agents or not work_is_open(work_id):
                 receipt = self._new_receipt(session, queued, "closed")
                 self._withdraw_requests(session, [queued], reason="shutdown" if self._admission_closed else "withdrawn")
                 return receipt
@@ -768,7 +775,7 @@ class TurnsMixin(SessionManagerBase):
         session = self.sessions.get(session_id)
         if session is None:
             return
-        if not work_is_open(queued.work_id):
+        if session.agent_id in self._closed_agents or not work_is_open(queued.work_id):
             self._withdraw_requests(session, [queued], reason="withdrawn")
             return
         queued.started = True
@@ -1066,38 +1073,19 @@ class TurnsMixin(SessionManagerBase):
         session._settlement = settlement
         wiki_task_id = None
         try:
+            # Revalidate queued input before opening a Wiki task, recording a
+            # user message or starting a model. One bad file rejects the turn.
+            files = validate_message_attachments(session_id, attachment_ids if attachment_ids is not None else [])
             wiki_mode = wiki_tasks.mode_for(session, wiki_mode)
             session._wiki_mode = wiki_mode
             session._wiki_task_id = wiki_tasks.open(
                 session, wiki_mode, prompt if trusted_request is None else trusted_request
             ) if wiki_mode in {"auto", "read", "maintain"} else None
             wiki_task_id = session._wiki_task_id
-            # Resolve attachment ids → on-disk paths so the prompt can
-            # cite absolute paths the agent's `Read` tool will open.
-            # Missing files are dropped (with a logged warning) rather
-            # than failing the whole turn — the user already typed the
-            # prompt; an orphaned id from a deleted file shouldn't eat it.
-            attachments_meta: list[AttachmentMetadata] = []
-            attachment_paths: list[str] = []
-            for aid in attachment_ids or []:
-                path = get_attachment_path(session_id, aid)
-                if path is None or not path.is_file():
-                    logger.warning(
-                        "Session %s: dropped missing attachment %s", session_id, aid
-                    )
-                    continue
-                # Reconstruct the user-visible filename from the on-disk
-                # `<id>__<filename>` layout.
-                fname = path.name.split("__", 1)[1] if "__" in path.name else path.name
-                attachments_meta.append(
-                    AttachmentMetadata(
-                        id=aid,
-                        filename=fname,
-                        size=path.stat().st_size,
-                        mime_type=_guess_mime(fname),
-                    )
-                )
-                attachment_paths.append(str(path))
+            attachments_meta = [AttachmentMetadata(
+                id=file.id, filename=file.filename, size=file.size, mime_type=file.mime_type,
+            ) for file in files]
+            attachment_paths = [str(file.path) for file in files]
 
             # Capture the turn-start git anchor onto the user-message row
             # (session-rewind.md §5.6.3): this row's git state IS the
@@ -1202,6 +1190,11 @@ class TurnsMixin(SessionManagerBase):
                 session, settlement, status="interrupted", message=message, code=code,
             )
             raise
+        except AttachmentUnavailable as exc:
+            yield await self._settle_turn(
+                session, settlement, status="failed", message=str(exc), code=exc.code,
+                rejected_input={"content": prompt, "attachment_ids": attachment_ids or []},
+            )
         except Exception as exc:
             logger.exception("Request initialization failed in session %s", session_id)
             yield await self._settle_turn(
@@ -2328,7 +2321,7 @@ class TurnsMixin(SessionManagerBase):
                 or session._wiki_mode not in {None, "auto"}):
             return False
         async with session._steer_lock:
-            if self._admission_closed or session._admission_closed or not session._steer_open:
+            if self._admission_closed or session._admission_closed or session.agent_id in self._closed_agents or not session._steer_open:
                 return False
             if len(session._steer_queue) >= _MAX_PENDING_STEERS:
                 logger.info(

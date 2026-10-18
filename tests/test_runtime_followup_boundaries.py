@@ -90,12 +90,16 @@ def test_prepared_mutations_recheck_live_target_and_never_replay_conflict(tmp_pa
 
 
 async def test_publication_race_keeps_attention_and_unindexed_receipt(client, notes, monkeypatch):
+    from server.mcp_identity import verify
+    from server.wiki.operations import publication as publication_context
+    from server.wiki.tasks import tasks
+    from tests.test_wiki_grant_v2 import assigned
+
     root, store, config = notes
     document = await read(client)
     jobs = WikiJobs(None)
     job = jobs.maintain("race", "", "organize", [NOTE], None, [], "human")
     jobs.update(job["id"], status="running", session_id="worker")
-    publication = {"job_id": job["id"], "session_id": "worker", "source_doc": document["id"], "source_path": NOTE, "input_revision": document["revision"]}
     history = WikiHistory(store)
     record = history.record
     human = b"# Preserved human save\n"
@@ -107,8 +111,13 @@ async def test_publication_race_keeps_attention_and_unindexed_receipt(client, no
         return row
 
     monkeypatch.setattr(history, "record", racing)
-    with history.locked(), pytest.raises(WikiError):
-        history.write_locked(NOTE, b"# Proposal\n", document["revision"], "worker", "publish", publication=publication)
+    with assigned(job, config) as (headers, active):
+        task = tasks.call(active, verify(headers["Authorization"].removeprefix("Bearer ")))
+        publication = publication_context(task, store, document)
+        with history.locked(), pytest.raises(WikiError, match="journal preparation") as conflict:
+            history.write_locked(NOTE, b"# Proposal\n", document["revision"], "worker", "publish",
+                                 publication=publication, operation="organize")
+        assert conflict.value.status == 409
     item = dict(jobs.get(job["id"])["items"][0])
     assert jobs.recover_publication(job["id"], item)
     assert item["status"] == "attention" and not item["index_complete"]
@@ -478,7 +487,7 @@ async def test_snapshot_waits_for_inflight_sql_commit_and_does_not_claim_future_
 
     async def load_then_advance(*args, **kwargs):
         messages = await load(*args, **kwargs)
-        session._message_count += 1  # A later reservation after SQL loaded.
+        session._next_message_seq += 1  # A later reservation after SQL loaded.
         return messages
 
     monkeypatch.setattr(db, "load_messages", load_then_advance)

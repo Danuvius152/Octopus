@@ -55,9 +55,11 @@ interface MessageBubbleProps {
   // user messages when set + the message has a known seq. Called with the
   // rewind target seq.
   onFork?: (seq: number) => void;
+  onRestoreInput?: () => void;
+  restoreInputDisabled?: boolean;
 }
 
-function OutcomeResult({ message }: { message: Message }) {
+function OutcomeResult({ message, onRestoreInput, restoreInputDisabled }: Pick<MessageBubbleProps, "message" | "onRestoreInput" | "restoreInputDisabled">) {
   const outcome = normalizeMessage(message).outcome!;
   const labels = { success: "Done", failed: "Failed", interrupted: "Interrupted", unknown: "Ended · outcome not recorded" };
   const retries = Object.values(outcome.recovery).reduce((sum, count) => sum + count, 0);
@@ -69,6 +71,9 @@ function OutcomeResult({ message }: { message: Message }) {
     </span>
     {retries > 0 && <span className="text-xs text-muted-foreground">{retries} {retries === 1 ? "recovery" : "recoveries"}</span>}
     {outcome.message && <div className="max-w-[85%] whitespace-pre-wrap break-words text-sm">{outcome.message}</div>}
+    {outcome.code === "attachment_unavailable" && Boolean(message.tool_input?.rejected_input) && onRestoreInput &&
+      <button type="button" className="text-sm text-primary underline" disabled={restoreInputDisabled}
+        onClick={onRestoreInput}>Restore draft and re-upload files</button>}
   </div>;
 }
 
@@ -151,6 +156,8 @@ export function MessageBubble({
   agentAvatar,
   plain = false,
   onFork,
+  onRestoreInput,
+  restoreInputDisabled,
 }: MessageBubbleProps) {
   const assistantLabel = agentName || "Assistant";
   // Mirror the header's avatar treatment: show the agent's emoji, falling
@@ -293,7 +300,7 @@ export function MessageBubble({
       );
 
     case "result":
-      return <OutcomeResult message={message} />;
+      return <OutcomeResult message={message} onRestoreInput={onRestoreInput} restoreInputDisabled={restoreInputDisabled} />;
 
     case "recovery":
       return <RecoveryMessage message={message} />;
