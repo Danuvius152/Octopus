@@ -309,8 +309,6 @@ class TurnsMixin(SessionManagerBase):
             settlement.event = self._tag_persisted(event, settlement.seq, settlement.stored)
             task = asyncio.create_task(self._record_and_publish(session, settlement))
             settlement.final_task = task
-            self._finalization_tasks.add(task)
-            task.add_done_callback(self._finalization_tasks.discard)
             self._own_task(task)
         return await asyncio.shield(settlement.final_task)
 
@@ -367,8 +365,6 @@ class TurnsMixin(SessionManagerBase):
         if settlement.final_task is not None and not settlement.final_task.done():
             await asyncio.shield(settlement.final_task)
         task = asyncio.create_task(self._record_and_publish(session, settlement))
-        self._finalization_tasks.add(task)
-        task.add_done_callback(self._finalization_tasks.discard)
         self._own_task(task)
         await asyncio.shield(task)
         return session._recording_blocked is None
@@ -528,13 +524,11 @@ class TurnsMixin(SessionManagerBase):
 
         task = asyncio.create_task(retire(), name=f"backend-retirement-{session.id}")
         session._backend_retirements[id(backend)] = (backend, task)
-        session._backend_cleanup_tasks.add(task)
         self._own_task(task)
         # Failed retirement stays attached: a subsequent attempt must not start
         # against a writer whose exit could not be confirmed.
         def finished(done: asyncio.Task[None]) -> None:
             if not done.cancelled() and done.exception() is None:
-                session._backend_cleanup_tasks.discard(done)
                 captured = session._backend_retirements.get(id(backend))
                 if captured is not None and captured[1] is done:
                     session._backend_retirements.pop(id(backend))
@@ -542,7 +536,7 @@ class TurnsMixin(SessionManagerBase):
         return task
 
     async def _await_backend_retirement(self, session: Session, *, timeout: float | None = None) -> None:
-        tasks = tuple(session._backend_cleanup_tasks)
+        tasks = tuple(task for _, task in session._backend_retirements.values())
         if not tasks:
             return
         limit = _BACKEND_RETIRE_TIMEOUT if timeout is None else min(_BACKEND_RETIRE_TIMEOUT, max(0.0, timeout))
@@ -589,7 +583,7 @@ class TurnsMixin(SessionManagerBase):
         # A cancelling driver may create its final recorder while it unwinds.
         # Refresh the owned set until all producers retire within one budget.
         while True:
-            owned = {*tasks, *self._owned_tasks, *self._finalization_tasks}
+            owned = {*tasks, *self._owned_tasks}
             pending = {task for task in owned if not task.done()}
             if not pending:
                 break
@@ -619,7 +613,7 @@ class TurnsMixin(SessionManagerBase):
             if s.user_id == user_id and (
                 (s._active_task is not None and not s._active_task.done())
                 or (s._dispatch_release_task is not None and not s._dispatch_release_task.done())
-                or bool(s._backend_cleanup_tasks)
+                or bool(s._backend_retirements)
             )
         )
 
@@ -639,7 +633,7 @@ class TurnsMixin(SessionManagerBase):
             return
         if session._active_task and not session._active_task.done():
             return  # this one is already counted; the message will queue
-        if session._backend_cleanup_tasks:
+        if session._backend_retirements:
             return  # Rejected before spawn; the existing writer owns this slot.
         if self.running_turns_for(session.user_id) >= cap:
             raise QuotaExceeded(
@@ -850,7 +844,7 @@ class TurnsMixin(SessionManagerBase):
         # The capacity slot stays owned until captured writers have retired.
         # This task survives repeated cancellation of the original driver.
         retired = True
-        if session._backend_cleanup_tasks:
+        if session._backend_retirements:
             try:
                 await self._await_backend_retirement(session)
             except Exception:

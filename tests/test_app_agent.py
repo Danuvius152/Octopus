@@ -274,7 +274,7 @@ async def test_agent_is_addressed_by_name_and_defaults_to_the_apps_own(
 
 
 @pytest.mark.asyncio
-async def test_listing_agents_says_who_can_be_addressed(aam, am, db):
+async def test_listing_agents_says_who_can_be_addressed(aam, am, db, turns):
     await _make_app(am, db)
     await AgentManager(db).create_agent(name="Vera", description="researcher")
     listed = await aam.list_agents()

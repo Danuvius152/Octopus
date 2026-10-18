@@ -148,10 +148,10 @@ it("uses authoritative queue snapshots and rejects duplicate or older revisions"
     items: [{ request_id: "bg-1", source: "bg", summary: "completed command", priority: false }],
   };
   handleWsMessage({ type: "queued", session_id: "dispatch-test", content: "legacy event text", dispatch_state: snapshot });
-  expect(useSessionStore.getState().pendingQueue["dispatch-test"]).toEqual(["completed command"]);
+  expect(useSessionStore.getState().dispatchStates["dispatch-test"].items[0].summary).toBe("completed command");
   handleWsMessage({ type: "queued", session_id: "dispatch-test", content: "duplicate", dispatch_state: snapshot });
   handleWsMessage({ type: "dequeued", session_id: "dispatch-test", dispatch_state: { ...snapshot, revision: 2, paused: false, items: [] } });
-  expect(useSessionStore.getState().pendingQueue["dispatch-test"]).toEqual(["completed command"]);
+  expect(useSessionStore.getState().dispatchStates["dispatch-test"].items[0].summary).toBe("completed command");
 });
 
 it("preserves the server's request source instead of treating marker text as identity", () => {

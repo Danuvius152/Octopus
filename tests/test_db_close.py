@@ -161,7 +161,7 @@ async def test_shutdown_keeps_database_open_until_terminal_writer_finishes(tmp_p
             await db.close()
         assert not db._closed
         await db._ensure_connected()
-        assert manager._finalization_tasks
+        assert not receipt._completion.done()
         assert (await manager.start_message(session.id, "late", source="bg")).disposition == "closed"
         release.set()
         completion = await asyncio.wait_for(receipt.wait(), 3)
@@ -169,7 +169,7 @@ async def test_shutdown_keeps_database_open_until_terminal_writer_finishes(tmp_p
         assert completion.recording_state == "committed"
         assert len(starts) == 1
         await db.close()
-        assert db._closed and not manager._finalization_tasks
+        assert db._closed and completion.recording_state == "committed"
     finally:
         release.set()
         await manager.drain_turns()

@@ -82,20 +82,20 @@ async def test_stale_timer_cannot_launch_work(domain, monkeypatch, state):
         await db.archive_agent(agent["id"])
     create = AsyncMock(side_effect=ValueError("unexpected launch"))
     monkeypatch.setattr(manager, "create_session", create)
-    await runner._fire("schedule", agent["id"], "old prompt")
+    await runner._fire("schedule")
     create.assert_not_called()
 
 
 async def test_fire_reloads_target_and_trusted_prompt(domain, monkeypatch):
     db, manager, runner, agent, other = domain
     origin = await manager.create_session(agent["id"])
-    stale = await manager.create_session(other["id"])
+    await manager.create_session(other["id"])
     await save(db, agent, origin_session_id=origin.id, wiki_mode="read")
     receipt = AsyncMock()
     receipt.accepted = True
     start = AsyncMock(return_value=receipt)
     monkeypatch.setattr(manager, "start_message", start)
-    await runner._fire("schedule", other["id"], "old prompt", stale.id)
+    await runner._fire("schedule")
     args, kwargs = start.call_args
     assert args[0] == origin.id
     assert args[1].endswith("current prompt")
@@ -109,7 +109,7 @@ async def test_legacy_mismatched_target_is_quarantined(domain, monkeypatch):
     await save(db, agent, origin_session_id=wrong.id)
     start = AsyncMock()
     monkeypatch.setattr(manager, "start_message", start)
-    await runner._fire("schedule", agent["id"], "current prompt", wrong.id)
+    await runner._fire("schedule")
     start.assert_not_called()
     row = (await db.load_schedules())[0]
     assert row["enabled"] is False
@@ -193,7 +193,7 @@ async def test_archive_closes_creation_restore_and_existing_session_sends(domain
             await manager.unarchive_agent(agent["id"], None)
         create = AsyncMock(side_effect=AssertionError("closed agent must not run"))
         monkeypatch.setattr(manager, "create_session", create)
-        await runner._fire("schedule", agent["id"], "stale")
+        await runner._fire("schedule")
         create.assert_not_called()
         assert (await db.load_schedules())[0]["enabled"] is True
     finally:

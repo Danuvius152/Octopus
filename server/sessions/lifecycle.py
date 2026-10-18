@@ -27,7 +27,7 @@ from .base import (
     _BACKEND_RETIRE_TIMEOUT,
     Session,
     SessionManagerBase,
-    _session_fork_kwargs,
+    _session_from_row,
     fork_info_fields,
     resolve_working_dir,
 )
@@ -708,28 +708,7 @@ class LifecycleMixin(SessionManagerBase):
         await self.db.update_session_field(session_id, archived=False)
         # Reload into the in-memory map so writes (sendMessage etc.)
         # immediately route to this session.
-        session = Session(
-            id=match["id"],
-            name=match["name"],
-            working_dir=match["working_dir"],
-            created_at=match["created_at"],
-            claude_session_id=match["claude_session_id"],
-            credential_id=match.get("credential_id"),
-            agent_id=match.get("agent_id"),
-            origin=match.get("origin") or "user",
-            backend=match.get("backend") or "claude-code",
-            model=match.get("model"),
-            reasoning_effort=match.get("reasoning_effort"),
-            service_tier=match.get("service_tier"),
-            user_id=match.get("user_id"),
-            # Preserve the delegation chain fields when unarchiving —
-            # without these, an unarchived delegation child would lose
-            # its parent_session_id pointer and the "Delegated from"
-            # banner / cycle walk would break.
-            parent_session_id=match.get("parent_session_id"),
-            delegation_request=match.get("delegation_request"),
-            **_session_fork_kwargs(match),
-        )
+        session = _session_from_row(match)
         session.restore_message_state(*await self.db.message_sequence_state(session.id))
         self.sessions[session.id] = session
         await self._broadcast(

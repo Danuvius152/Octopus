@@ -2512,7 +2512,7 @@ async def test_shutdown_sweep_is_bounded_by_a_hung_process():
             await mgr.stop_all_held_processes()
         assert _time.monotonic() - t0 < _HELD_STOP_TIMEOUT + 1.0
         assert sess._backend is None
-        assert sess._backend_cleanup_tasks
+        assert sess._backend_retirements
     finally:
         release.set()
         await mgr.drain_turns()
@@ -3056,9 +3056,8 @@ async def test_failed_attempt_retirement_blocks_recovery_and_next_request(manage
         first.allow_retirement = True
         await first.stop()
         assert not first.is_alive()
-        await asyncio.gather(*session._backend_cleanup_tasks, return_exceptions=True)
-        session._backend_cleanup_tasks.clear()
-        session._backend_retirements.clear()
+        await asyncio.gather(*(task for _, task in session._backend_retirements.values()), return_exceptions=True)
+        session._backend_retirements.pop(id(first))
 
 
 @pytest.mark.asyncio

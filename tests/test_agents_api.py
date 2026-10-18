@@ -312,11 +312,14 @@ async def test_archive_agent_retirement_refusal_keeps_agent_and_session_live(cli
     session = await session_manager.create_session(agent["id"], "Needs retirement", "/tmp")
 
     class UnreapedRun:
+        confirmed = False
+
         async def interrupt(self):
             raise RuntimeError("Backend retirement remains unconfirmed")
 
         async def stop(self):
-            raise RuntimeError("Backend retirement remains unconfirmed")
+            if not self.confirmed:
+                raise RuntimeError("Backend retirement remains unconfirmed")
 
     session._backend = UnreapedRun()
     try:
@@ -327,10 +330,12 @@ async def test_archive_agent_retirement_refusal_keeps_agent_and_session_live(cli
         assert session_manager.get_session(session.id) is session
         assert not next(row for row in await session_manager.db.load_sessions(include_archived=True) if row["id"] == session.id)["archived"]
     finally:
-        # The simulated run has no process. Remove only its completed fault
-        # evidence so the fixture can exercise normal database teardown.
-        assert all(task.done() for task in session._backend_cleanup_tasks)
-        session._backend_cleanup_tasks.clear()
+        # Confirm this fake writer's exit before releasing its retained fault.
+        backend, task = next(iter(session._backend_retirements.values()))
+        assert task.done() and task.exception() is not None
+        backend.confirmed = True
+        await backend.stop()
+        session._backend_retirements.pop(id(backend))
 
 
 @pytest.mark.asyncio

@@ -1,8 +1,8 @@
 """Shared plumbing for connector MCP servers (connectors.md §5.3).
 
-Each connector MCP server runs as a grandchild of the FastAPI process and
-calls back to it for the per-installation access token. Tokens are cached
-in-process until just before expiry so we don't HTTP every tool call. Results
+Each shared connector namespace calls back to the host for the current
+installation's token. The host owns token refresh and persistence; a namespace
+serves multiple installations and must not retain their bearer tokens. Results
 are capped so a large payload can't trip the CLI premature-exit bug
 (docs/post-mortems/2026-05-18-bg-pipeline-hardening.md §2).
 """
@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from typing import Any
 
 import httpx
@@ -29,13 +28,9 @@ _HTTP_TIMEOUT = 10.0
 class ConnectorContext:
     """Reads the host callback env and brokers the installation's token.
 
-    Env (api base / auth token / installation id) is read lazily so tests can
-    set it after import; only the fetched token is cached on the instance.
+    Callback identity is resolved on every call, including the legacy
+    environment-based diagnostic path.
     """
-
-    def __init__(self) -> None:
-        self._access_token: str | None = None
-        self._token_exp: float = 0.0
 
     # Resolved per call from the request's verified scope and from settings.
     # These used to read the process environment, which worked when each
@@ -61,11 +56,7 @@ class ConnectorContext:
         return {"Authorization": f"Bearer {self.auth_token}"}
 
     def access_token(self) -> str | None:
-        """Fresh access token for this installation, or None if unavailable.
-        Caches until ~30s before expiry; non-expiring tokens cache for 1h."""
-        now = time.time()
-        if self._access_token and now < self._token_exp - 30:
-            return self._access_token
+        """Read the current installation's authoritative token from the host."""
         if not self.ready():
             logger.error("connector MCP misconfigured: missing callback env")
             return None
@@ -84,10 +75,7 @@ class ConnectorContext:
                               error_code=f"token_http_{r.status_code}")
             return None
         body = r.json()
-        self._access_token = body["access_token"]
-        exp = body.get("expires_at_epoch") or 0.0
-        self._token_exp = exp if exp else now + 3600
-        return self._access_token
+        return body["access_token"]
 
     def mark_needs_reconnect(self, error_code: str = "invalid_grant") -> None:
         if not self.ready():
@@ -102,9 +90,6 @@ class ConnectorContext:
             )
         except httpx.HTTPError as e:
             logger.warning("mark-needs-reconnect failed: %s", e)
-        # Drop the cached token so the next call re-fetches (and 401s cleanly).
-        self._access_token = None
-        self._token_exp = 0.0
 
 
 def _record_connector(installation_id, *, ok: bool, error_code: str | None = None,

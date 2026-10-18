@@ -365,7 +365,7 @@ async def test_rebinding_keeps_blocked_recording_session_until_original_is_verif
             current.readmit(job["id"], [])
         assert blocked.value.status == 409
         assert session._current_request is None and not session._pending_queue
-        assert not session._backend_cleanup_tasks
+        assert not session._backend_retirements
         paused = session._dispatch_paused
         endpoint = f"/api/sessions/{session.id}/dispatch/resume?resume_queue=false"
         failed = await client.post(endpoint, headers=test_wiki_jobs.wiki_api.HEADERS)

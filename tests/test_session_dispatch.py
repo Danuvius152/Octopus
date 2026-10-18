@@ -509,8 +509,8 @@ async def test_unconfirmed_old_backend_retirement_blocks_replacement(dispatch, m
             await manager._acquire_backend(session, None, None, None, retirement_timeout=.01)
         assert entered.is_set()
         assert created == []
-        assert len(session._backend_cleanup_tasks) == 1
-        cleanup = next(iter(session._backend_cleanup_tasks))
+        assert len(session._backend_retirements) == 1
+        cleanup = next(iter(session._backend_retirements.values()))[1]
         assert not cleanup.cancelled() and not cleanup.done()
         reaped.set()
         await cleanup
@@ -540,7 +540,7 @@ async def test_cancelled_acquire_waiter_keeps_old_retirement_owned(dispatch):
         acquiring.cancel()
         with pytest.raises(asyncio.CancelledError):
             await acquiring
-        cleanup = next(iter(session._backend_cleanup_tasks))
+        cleanup = next(iter(session._backend_retirements.values()))[1]
         assert not cleanup.cancelled() and cleanup in manager._owned_tasks
         reaped.set()
         await cleanup

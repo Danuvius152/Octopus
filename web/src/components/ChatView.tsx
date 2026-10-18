@@ -46,6 +46,7 @@ import {
 import { Button } from "./ui/button";
 import { isSessionBusy } from "../lib/deferredFork";
 import { loadOlderMessages } from "../lib/transcript";
+import { applySessionSnapshot } from "../lib/hydrateSession";
 import type { WikiMessageMode } from "../lib/wikiComposer";
 import { newSubmissionId, type SubmissionReply } from "../lib/submission";
 import { MAX_ATTACHMENTS_PER_MESSAGE, useDraftAttachments, type PendingAttachment } from "../hooks/useDraftAttachments";
@@ -1260,17 +1261,14 @@ export function ChatView({
     }
     if (fork.agent_id) store.setActiveAgentId(fork.agent_id);
     store.setActiveSessionId(fork.id);
+    const generation = store.dispatchGeneration;
     try {
       const res = await fetch(`${window.location.origin}/api/sessions/${fork.id}`, {
         headers: { Authorization: `Bearer ${store.token}` },
       });
       if (res.ok) {
         const data = await res.json();
-        store.setMessages(fork.id, data.messages || []);
-        store.setPendingQueue(fork.id, []);
-        store.setPendingQuestions(fork.id, []);
-        if (typeof data.next_message_seq === "number")
-          store.setLastAppliedSeq(fork.id, data.next_message_seq - 1);
+        applySessionSnapshot(fork.id, data, generation);
       }
     } catch {
       /* ignore — the session is selected regardless */
@@ -1303,17 +1301,14 @@ export function ChatView({
     }
     if (fork.agent_id) store.setActiveAgentId(fork.agent_id);
     store.setActiveSessionId(fork.id);
+    const generation = store.dispatchGeneration;
     try {
       const res = await fetch(`${window.location.origin}/api/sessions/${fork.id}`, {
         headers: { Authorization: `Bearer ${store.token}` },
       });
       if (res.ok) {
         const data = await res.json();
-        store.setMessages(fork.id, data.messages || []);
-        store.setPendingQueue(fork.id, []);
-        store.setPendingQuestions(fork.id, []);
-        if (typeof data.next_message_seq === "number")
-          store.setLastAppliedSeq(fork.id, data.next_message_seq - 1);
+        applySessionSnapshot(fork.id, data, generation);
       }
     } catch {
       /* ignore — the session is selected regardless */

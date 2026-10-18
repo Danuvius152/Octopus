@@ -81,7 +81,7 @@ it("reconnects after overflow and reloads the result, tasks, questions and pause
     expect(state.messages[sid].filter((m) => m.type === "result")).toHaveLength(1);
     expect(state.messages[sid][0].outcome?.request_id).toBe("selected-request");
     expect(state.dispatchStates[sid]).toEqual(dispatch);
-    expect(state.pendingQueue[sid]).toEqual(["Queued result"]);
+    expect(state.dispatchStates[sid].items[0].summary).toBe("Queued result");
     expect(state.pendingQuestions[sid]).toEqual([question]);
     expect(state.bgTasks[sid]).toEqual([task]);
     expect(state.delegations[sid]).toEqual([delegation]);

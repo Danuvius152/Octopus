@@ -72,6 +72,36 @@ afterEach(() => {
 });
 
 describe("AgentFormPage", () => {
+  it("loads connector enablement, rolls back a failed toggle and removes deleted installations", async () => {
+    let patches = 0;
+    fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url.endsWith("/connectors")) return json({ installation_ids: ["installation"] });
+      if (init?.method === "PATCH") {
+        patches += 1;
+        return new Response(null, { status: patches === 1 ? 500 : 204 });
+      }
+      return json([]);
+    });
+    mount("ag1");
+    act(() => useSessionStore.getState().setConnectorInstallations([{
+      id: "installation", kind: "github", label: "GitHub account", auth_type: "oauth",
+      external_account_id: "owner", scopes: [], enable_by_default: false, needs_reconnect: false,
+      token_expires_at: null, last_refresh_error_code: null, created_at: "2026-10-19",
+    }]));
+    const checkbox = await screen.findByRole("checkbox", { name: /GitHub account/ });
+    await waitFor(() => expect(checkbox).toBeChecked());
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(patches).toBe(1));
+    await waitFor(() => expect(checkbox).toBeChecked());
+    fireEvent.click(checkbox);
+    await waitFor(() => expect(patches).toBe(2));
+    await waitFor(() => expect(checkbox).not.toBeChecked());
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/api/agents/ag1/connectors/installation"),
+      expect.objectContaining({ method: "PATCH", body: JSON.stringify({ enabled: false }) }));
+    act(() => useSessionStore.getState().removeConnectorInstallation("installation"));
+    expect(screen.queryByRole("checkbox", { name: /GitHub account/ })).toBeNull();
+  });
+
   it("saves Codex model, reasoning and Fast defaults", async () => {
     fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
       if (String(url).includes("/backends/codex/models")) return json({

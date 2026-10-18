@@ -303,6 +303,15 @@ async def oauth_complete(
         # unguessable login id is why this has never gone wrong, not a reason it
         # is authorised (multi-tenancy.md §5).
         raise HTTPException(status_code=404, detail="unknown login_id")
+    if req.credential_id is not None:
+        existing = await db.get_credential(req.credential_id, user_id)
+        if existing is None or existing["user_id"] != user_id:
+            raise HTTPException(status_code=404, detail="credential not found")
+        if existing["backend"] != BackendKind.claude_code.value:
+            raise HTTPException(
+                status_code=400,
+                detail="credential backend mismatch for re-authorization",
+            )
     try:
         session = await _login_driver(BackendKind.claude_code.value).submit_code(
             req.login_id, req.code
@@ -345,16 +354,10 @@ async def oauth_complete(
     # needs_reconnect flag so every agent/session already bound to this
     # credential id keeps working (harness-credential-reauth.md §5).
     if req.credential_id is not None:
-        existing = await db.get_credential(req.credential_id)
-        if existing is None:
-            raise HTTPException(status_code=404, detail="credential not found")
-        if existing["backend"] != BackendKind.claude_code.value:
-            raise HTTPException(
-                status_code=400,
-                detail="credential backend mismatch for re-authorization",
-            )
-        await db.update_credential(
+        updated = await db.reauthorize_credential(
             req.credential_id,
+            user_id=user_id,
+            backend=BackendKind.claude_code.value,
             label=req.label,
             secret_encrypted=secret_encrypted,
             token_expires_at=token_expires_at,
@@ -362,8 +365,8 @@ async def oauth_complete(
             needs_reconnect=False,
             last_refresh_error_code=None,
         )
-        updated = await db.get_credential(req.credential_id)
-        assert updated is not None
+        if updated is None:
+            raise HTTPException(status_code=404, detail="credential not found")
         return _row_to_info(updated)
 
     cid = uuid.uuid4().hex[:12]

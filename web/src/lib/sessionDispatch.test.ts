@@ -26,7 +26,7 @@ it("loads dispatch pause on selection and keeps a newer live snapshot", async ()
   handleWsMessage({ type: "dispatch_state", session_id: "selected", dispatch_state: snapshot("service-a", 4) });
   await selectSession("selected");
   expect(useSessionStore.getState().dispatchStates.selected.revision).toBe(4);
-  expect(useSessionStore.getState().pendingQueue.selected).toEqual(["completed command"]);
+  expect(useSessionStore.getState().dispatchStates.selected.items[0].summary).toBe("completed command");
 });
 
 it("accepts a restarted service and rejects a delayed retired service across sessions", () => {
@@ -35,7 +35,7 @@ it("accepts a restarted service and rejects a delayed retired service across ses
   handleWsMessage({ type: "dispatch_state", session_id: "other", dispatch_state: snapshot("service-a", 100) });
   expect(useSessionStore.getState().dispatchStates.selected.paused).toBe(false);
   expect(useSessionStore.getState().dispatchStates.other).toBeUndefined();
-  expect(useSessionStore.getState().pendingQueue.selected).toEqual([]);
+  expect(useSessionStore.getState().pendingQueue.selected).toBeUndefined();
 });
 
 it("ignores an older-instance HTTP response that finishes after a fresh websocket", async () => {

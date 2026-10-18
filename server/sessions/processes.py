@@ -170,7 +170,7 @@ class ProcessesMixin(SessionManagerBase):
             backend = session._backend
             if backend is not None:
                 self._retire_backend(session, backend, reason="service_shutdown")
-            if not session._backend_cleanup_tasks:
+            if not session._backend_retirements:
                 continue
             # Observe captured retirement under the existing sweep budget.
             # An unconfirmed exit keeps its owner and is a shutdown failure.

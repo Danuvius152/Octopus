@@ -268,17 +268,14 @@ interface SessionStore {
   credentials: CredentialInfo[];
   setCredentials: (c: CredentialInfo[]) => void;
 
-  // Connectors (connectors.md). Installations are global; the catalog lists
-  // installable kinds. Per-agent enablement (which installations an agent may
-  // call) is keyed by agentId → installation ids.
+  // Connector catalog and installations (connectors.md). AgentFormPage owns
+  // its enablement draft, backed by the agent connector routes.
   connectorCatalog: ConnectorCatalogEntry[];
   setConnectorCatalog: (c: ConnectorCatalogEntry[]) => void;
   connectorInstallations: ConnectorInstallationInfo[];
   setConnectorInstallations: (c: ConnectorInstallationInfo[]) => void;
   upsertConnectorInstallation: (c: ConnectorInstallationInfo) => void;
   removeConnectorInstallation: (id: string) => void;
-  agentConnectorIds: Record<string, string[]>;
-  setAgentConnectorIds: (agentId: string, ids: string[]) => void;
 
   // Text the model is streaming right now, per session, accumulated from
   // `assistant_delta` frames and dropped the moment the completed block
@@ -306,7 +303,6 @@ interface SessionStore {
   // the authoritative dispatch snapshot, never inferred from queue events.
   pendingQueue: Record<string, string[]>;
   setPendingQueue: (sessionId: string, queue: string[]) => void;
-  clearPending: (sessionId: string) => void;
 
   // Deferred /fork requests (session-fork.md). When `/fork` is typed
   // while a session is busy, we record the intent here instead of erroring;
@@ -348,7 +344,6 @@ interface SessionStore {
   // looking up the delegation_id in this map.
   // (agent-collaboration.md §6)
   delegations: Record<string, Delegation[]>;
-  upsertDelegation: (parentSessionId: string, d: Delegation) => void;
   setDelegations: (parentSessionId: string, ds: Delegation[]) => void;
 
   // Sidebar visibility toggle for `origin === "delegation"` sessions.
@@ -730,18 +725,6 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       connectorInstallations: s.connectorInstallations.filter(
         (i) => i.id !== id
       ),
-      // Also drop it from every agent's enabled set so the UI stays consistent.
-      agentConnectorIds: Object.fromEntries(
-        Object.entries(s.agentConnectorIds).map(([aid, ids]) => [
-          aid,
-          ids.filter((x) => x !== id),
-        ])
-      ),
-    })),
-  agentConnectorIds: {},
-  setAgentConnectorIds: (agentId, ids) =>
-    set((s) => ({
-      agentConnectorIds: { ...s.agentConnectorIds, [agentId]: ids },
     })),
 
   wikiJobs: {},
@@ -775,6 +758,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const changed = s.dispatchGeneration !== null && s.dispatchGeneration !== snapshot.generation;
       const previous = changed ? undefined : s.dispatchStates[sessionId];
       if (previous && snapshot.revision <= previous.revision) return s;
+      let pendingQueue: Record<string, string[]> = changed ? {} : s.pendingQueue;
+      if (Object.hasOwn(pendingQueue, sessionId)) {
+        pendingQueue = { ...pendingQueue };
+        delete pendingQueue[sessionId];
+      }
       applied = true;
       return {
         dispatchGeneration: snapshot.generation,
@@ -782,7 +770,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         retiredDispatchGenerations: changed
           ? [...s.retiredDispatchGenerations, s.dispatchGeneration!] : s.retiredDispatchGenerations,
         dispatchStates: { ...(changed ? {} : s.dispatchStates), [sessionId]: snapshot },
-        pendingQueue: { ...(changed ? {} : s.pendingQueue), [sessionId]: snapshot.items.map((item) => item.summary) },
+        pendingQueue,
       };
     });
     return applied;
@@ -794,13 +782,6 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const next = { ...s.pendingQueue };
       if (queue.length === 0) delete next[sessionId];
       else next[sessionId] = queue;
-      return { pendingQueue: next };
-    }),
-  clearPending: (sessionId) =>
-    set((s) => {
-      if (!s.pendingQueue[sessionId]) return s;
-      const next = { ...s.pendingQueue };
-      delete next[sessionId];
       return { pendingQueue: next };
     }),
 
@@ -900,22 +881,6 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     set((s) => ({ research: { ...s.research, [sessionId]: jobs } })),
 
   delegations: {},
-  upsertDelegation: (parentSessionId, d) =>
-    set((s) => {
-      const current = s.delegations[parentSessionId] || [];
-      const idx = current.findIndex((x) => x.delegation_id === d.delegation_id && x.work_id === d.work_id);
-      const next =
-        idx >= 0
-          ? [
-              ...current.slice(0, idx),
-              { ...current[idx], ...d },
-              ...current.slice(idx + 1),
-            ]
-          : [...current, d];
-      return {
-        delegations: { ...s.delegations, [parentSessionId]: next },
-      };
-    }),
   setDelegations: (parentSessionId, ds) =>
     set((s) => ({
       delegations: { ...s.delegations, [parentSessionId]: ds },

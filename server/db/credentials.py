@@ -110,6 +110,26 @@ class CredentialsMixin(DatabaseBase):
         return self._row_to_credential(row)
 
     @serialized_write
+    async def reauthorize_credential(
+        self, credential_id: str, *, user_id: str | None, backend: str,
+        **fields: Any,
+    ) -> dict[str, Any] | None:
+        """Check the target and replace its secret under the same write owner.
+
+        OAuth exchange happens outside storage. Deletion or account adoption
+        during that await must not turn a validated target into an unscoped
+        write. None here names the install owner, not an unfiltered query.
+        """
+        if user_id is None and await self._count("SELECT COUNT(*) FROM users"):
+            return None
+        existing = await self.get_credential(credential_id, user_id)
+        if (existing is None or existing["user_id"] != user_id
+                or existing["backend"] != backend):
+            return None
+        await self.update_credential(credential_id, **fields)
+        return await self.get_credential(credential_id, user_id)
+
+    @serialized_write
     async def update_credential(self, credential_id: str, **fields: Any) -> None:
         await self._ensure_connected()
         meta_allowed = {

@@ -104,6 +104,33 @@ def _session_fork_kwargs(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _session_from_row(row: dict[str, Any]) -> Session:
+    """Restore persisted settings; execution state always starts fresh.
+
+    Empty optional settings use the same None normalization on startup and
+    unarchive. Sequence recovery and publication remain owned by the caller.
+    """
+    return Session(
+        id=row["id"],
+        name=row["name"],
+        working_dir=row["working_dir"],
+        created_at=row["created_at"],
+        claude_session_id=row["claude_session_id"],
+        credential_id=row.get("credential_id"),
+        agent_id=row.get("agent_id"),
+        origin=row.get("origin") or "user",
+        backend=row.get("backend") or "claude-code",
+        model=row.get("model") or None,
+        reasoning_effort=row.get("reasoning_effort") or None,
+        service_tier=row.get("service_tier") or None,
+        user_id=row.get("user_id") or None,
+        parent_session_id=row.get("parent_session_id"),
+        delegation_request=row.get("delegation_request"),
+        app_id=row.get("app_id"),
+        **_session_fork_kwargs(row),
+    )
+
+
 def fork_info_fields(
     *,
     backend: str,
@@ -326,7 +353,6 @@ class Session:
     _delivery_receipts: dict[str, SubmissionReceipt] = field(default_factory=dict, repr=False)
     _request_completions: dict[str, asyncio.Future[RequestCompletion]] = field(default_factory=dict, repr=False)
     _inline_requests: dict[str, list[QueuedPrompt]] = field(default_factory=dict, repr=False)
-    _backend_cleanup_tasks: set[asyncio.Task[None]] = field(default_factory=set, repr=False)
     _backend_retirements: dict[int, tuple[HarnessRun, asyncio.Task[None]]] = field(default_factory=dict, repr=False)
     _recording_blocked: Any | None = field(default=None, repr=False)
     # Steers: messages typed while THIS turn is running, to be handed to the
@@ -584,7 +610,6 @@ class SessionManagerBase:
     )
 
     def __init__(self) -> None:
-        self._finalization_tasks: set[asyncio.Task[Any]] = set()
         self.sessions: dict[str, Session] = {}
         self._dispatch_generation = uuid.uuid4().hex
         self._admission_closed = False
@@ -637,25 +662,7 @@ class SessionManagerBase:
         db.add_close_hook(self.drain_turns)
         rows = await db.load_sessions()
         for row in rows:
-            session = Session(
-                id=row["id"],
-                name=row["name"],
-                working_dir=row["working_dir"],
-                created_at=row["created_at"],
-                claude_session_id=row["claude_session_id"],
-                credential_id=row.get("credential_id"),
-                agent_id=row.get("agent_id"),
-                origin=row.get("origin") or "user",
-                backend=row.get("backend") or "claude-code",
-                model=row.get("model") or None,
-                reasoning_effort=row.get("reasoning_effort") or None,
-                service_tier=row.get("service_tier") or None,
-                user_id=row.get("user_id") or None,
-                parent_session_id=row.get("parent_session_id"),
-                delegation_request=row.get("delegation_request"),
-                app_id=row.get("app_id"),
-                **_session_fork_kwargs(row),
-            )
+            session = _session_from_row(row)
             session.restore_message_state(*await db.message_sequence_state(session.id))
             self.sessions[session.id] = session
         logger.info("Loaded %d sessions from database", len(rows))

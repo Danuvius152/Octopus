@@ -683,7 +683,7 @@ class WikiJobs:
         active = ([*session._pending_queue, *([session._current_request] if session._current_request else [])]
                   if session is not None else [])
         if session is not None and (any(not references or request.request_id in references for request in active)
-                                    or session._backend_cleanup_tasks
+                                    or session._backend_retirements
                                     or session._recording_blocked is not None and
                                     (not references or session._recording_blocked.request_id in references)):
             raise WikiError("The previous maintenance execution has not retired", 409)

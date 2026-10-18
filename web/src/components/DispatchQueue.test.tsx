@@ -37,7 +37,7 @@ it("checks saved state using Resume while preserving a separately paused queue",
   await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry saving" })));
   expect(fetch).toHaveBeenCalledWith(expect.stringContaining("/api/sessions/session/dispatch/resume?resume_queue=false"), expect.objectContaining({ method: "POST" }));
   expect(useSessionStore.getState().dispatchStates.session.paused).toBe(true);
-  expect(useSessionStore.getState().pendingQueue.session).toEqual(["Waiting result"]);
+  expect(screen.getByText("Waiting result")).toBeTruthy();
   expect(screen.getByRole("button", { name: "Resume processing" })).toBeTruthy();
   expect(screen.queryByText("Result saving failed or is unconfirmed.")).toBeNull();
 });
@@ -50,4 +50,20 @@ it("keeps the saving block after an unsuccessful check", async () => {
   expect(screen.getByText("Storage still unavailable")).toBeTruthy();
   expect(useSessionStore.getState().dispatchStates.session.recording_failure).toEqual(blocked.recording_failure);
   expect(screen.getByRole("button", { name: "Retry saving" })).not.toBeDisabled();
+});
+
+it("uses legacy queue only until a modern snapshot arrives, including empty items", () => {
+  useSessionStore.getState().setPendingQueue("session", ["Legacy waiting"]);
+  render(<DispatchQueue sessionId="session" />);
+  expect(screen.getByText("Legacy waiting")).toBeTruthy();
+  act(() => useSessionStore.getState().applyDispatchState("session", { ...blocked, recording_failure: null }));
+  expect(screen.queryByText("Legacy waiting")).toBeNull();
+  expect(useSessionStore.getState().pendingQueue.session).toBeUndefined();
+  act(() => useSessionStore.getState().setPendingQueue("session", ["Late legacy response"]));
+  expect(screen.queryByText("Late legacy response")).toBeNull();
+  act(() => {
+    useSessionStore.getState().setPendingQueue("other", ["Old service queue"]);
+    useSessionStore.getState().applyDispatchState("session", { ...blocked, generation: "new-service", revision: 0, recording_failure: null });
+  });
+  expect(useSessionStore.getState().pendingQueue).toEqual({});
 });

@@ -35,7 +35,7 @@ def test_truncate_caps_and_marks():
     assert "truncated" in out
 
 
-def test_context_token_fetch_and_cache(monkeypatch):
+def test_context_reads_authoritative_token_on_every_call(monkeypatch):
     monkeypatch.setenv("OCTOPUS_API_BASE", "http://host")
     monkeypatch.setenv("OCTOPUS_AUTH_TOKEN", "tok")
     monkeypatch.setenv("OCTOPUS_INSTALLATION_ID", "i-1")
@@ -49,8 +49,8 @@ def test_context_token_fetch_and_cache(monkeypatch):
     monkeypatch.setattr(_shared.httpx, "get", fake_get)
     ctx = _shared.ConnectorContext()
     assert ctx.access_token() == "AT"
-    assert ctx.access_token() == "AT"  # cached → no second HTTP
-    assert calls["n"] == 1
+    assert ctx.access_token() == "AT"
+    assert calls["n"] == 2
 
 
 def test_context_token_401_returns_none(monkeypatch):
@@ -66,7 +66,7 @@ def test_context_not_ready_returns_none(monkeypatch):
     assert _shared.ConnectorContext().access_token() is None
 
 
-def test_mark_needs_reconnect_posts_and_clears_cache(monkeypatch):
+def test_mark_needs_reconnect_posts_for_current_installation(monkeypatch):
     monkeypatch.setenv("OCTOPUS_API_BASE", "http://host")
     monkeypatch.setenv("OCTOPUS_AUTH_TOKEN", "tok")
     monkeypatch.setenv("OCTOPUS_INSTALLATION_ID", "i-1")
@@ -78,12 +78,9 @@ def test_mark_needs_reconnect_posts_and_clears_cache(monkeypatch):
 
     monkeypatch.setattr(_shared.httpx, "post", fake_post)
     ctx = _shared.ConnectorContext()
-    ctx._access_token = "stale"
-    ctx._token_exp = 9e18
     ctx.mark_needs_reconnect("invalid_grant")
     assert cap["url"].endswith("/api/connectors/i-1/mark-needs-reconnect")
     assert cap["params"] == {"error_code": "invalid_grant"}
-    assert ctx._access_token is None  # cache dropped
 
 
 # --- GitHub tools ----------------------------------------------------------

@@ -48,10 +48,11 @@ anywhere leaves the system consistent:
    secrets keyed to a token nobody has.
 4. **Swap the live token** in `settings`. From here the new token is the one
    the server checks.
-5. **Drop the processes that carry the old one in their environment**: held CLI
-   processes (their MCP children call back with `OCTOPUS_AUTH_TOKEN`) and
-   application backends (their `OCTOPUS_APP_TOKEN` is derived from the master
-   token). Both respawn on demand with the new value.
+5. **Drop held CLI processes that may carry the old callback environment**.
+   They respawn on demand. Application backends are left running: their
+   whitelisted environment does not inherit the install token, and their
+   `OCTOPUS_APP_TOKEN` is derived from the master key. An install-token change
+   does not invalidate their token or in-flight requests.
 
 No restart: the server changes its own configuration and its own memory in the
 same breath. Nothing to keep in sync by hand, so nothing can drift.

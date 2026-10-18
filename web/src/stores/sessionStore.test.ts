@@ -258,12 +258,11 @@ describe("sessionStore", () => {
     expect(state.messages["s2"][0].content).toBe("msg for s2");
   });
 
-  it("manages connector installations and per-agent enablement", () => {
+  it("manages connector installations", () => {
     const {
       setConnectorInstallations,
       upsertConnectorInstallation,
       removeConnectorInstallation,
-      setAgentConnectorIds,
     } = useSessionStore.getState();
     const mk = (id: string, kind: string, label: string) => ({
       id,
@@ -291,15 +290,10 @@ describe("sessionStore", () => {
         ?.label
     ).toBe("renamed@x.com");
 
-    // Enable both for an agent, then removing an installation prunes it from
-    // every agent's enabled set.
-    setAgentConnectorIds("a1", ["i1", "i2"]);
-    expect(useSessionStore.getState().agentConnectorIds["a1"]).toEqual(["i1", "i2"]);
     removeConnectorInstallation("i1");
     expect(
       useSessionStore.getState().connectorInstallations.map((i) => i.id)
     ).toEqual(["i2"]);
-    expect(useSessionStore.getState().agentConnectorIds["a1"]).toEqual(["i2"]);
   });
 
   // --- the mobile drawer (mobile.md §2) --------------------------------

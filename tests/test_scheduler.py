@@ -209,7 +209,7 @@ async def test_fire_materializes_scheduled_session_and_auto_archives(
         created_at="2026-01-01T00:00:00+00:00",
     )
 
-    await runner._fire("sch1", agent["id"], "do it")
+    await runner._fire("sch1")
 
     # A fresh session ran the prompt under the agent...
     assert ran["prompt"].endswith("do it")
@@ -254,9 +254,9 @@ async def test_fire_creates_a_fresh_session_for_each_durable_schedule_run(setup,
         schedule_id="schX", agent_id=agent["id"], name="repeat", prompt="first",
         interval_seconds=3600, created_at="2026-10-17T00:00:00+00:00",
     )
-    await runner._fire("schX", agent["id"], "first")
+    await runner._fire("schX")
     await db.update_schedule("schX", prompt="second")
-    await runner._fire("schX", agent["id"], "second")
+    await runner._fire("schX")
 
     # Two fires → two distinct fresh sessions.
     assert len(created_sessions) == 2
@@ -303,7 +303,7 @@ async def test_fire_appends_into_live_origin_session(setup, monkeypatch):
         origin_session_id=origin.id,
     )
 
-    await runner._fire("sch1", agent["id"], "summarize", origin.id)
+    await runner._fire("sch1")
 
     # Ran in the origin session, not a fresh one.
     assert started["session_id"] == origin.id
@@ -347,7 +347,7 @@ async def test_fire_falls_back_to_fresh_session_when_origin_gone(setup, monkeypa
         origin_session_id="ghost-session-that-was-deleted",
     )
 
-    await runner._fire("sch2", agent["id"], "do it", "ghost-session-that-was-deleted")
+    await runner._fire("sch2")
 
     # A fresh schedule-origin session ran the prompt and was auto-archived.
     fired_sid = ran["session_id"]
@@ -360,9 +360,8 @@ async def test_fire_falls_back_to_fresh_session_when_origin_gone(setup, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_add_job_carries_origin_session_id_to_fire(setup):
-    """`_add_job` threads origin_session_id from the schedule row into the job's
-    args so the fire knows which session to append into."""
+async def test_add_job_captures_only_schedule_identity(setup):
+    """The current durable row supplies the target and prompt when fired."""
     mgr, db, runner = setup
     agent = await db.get_system_agent()
     await db.save_schedule(
@@ -379,8 +378,7 @@ async def test_add_job_carries_origin_session_id_to_fire(setup):
 
     job = runner._scheduler.get_job("sch3")
     assert job is not None
-    # args = [schedule_id, agent_id, prompt, origin_session_id]
-    assert job.args[3] == "origin-abc"
+    assert job.args == (row["id"],)
 
 
 @pytest.mark.asyncio
@@ -469,8 +467,8 @@ async def test_run_at_schedule_registers_date_trigger(setup):
     job = runner._scheduler.get_job("once1")
     assert job is not None
     assert isinstance(job.trigger, DateTrigger)
-    # run_at is threaded into args so _fire knows to delete after firing.
-    assert job.args[4] == run_at
+    # The durable run_at still controls once-only cleanup when this ID fires.
+    assert job.args == ("once1",)
 
 
 @pytest.mark.asyncio
@@ -497,7 +495,7 @@ async def test_run_at_schedule_deleted_after_fire(setup, monkeypatch):
     assert len(await db.load_schedules()) == 1
 
     # Simulate fire: _fire deletes the row regardless of success.
-    await runner._fire("once2", agent["id"], "do it once", run_at="2030-01-15T09:00:00+00:00")
+    await runner._fire("once2")
 
     # Row gone from DB.
     assert await db.load_schedules() == []
@@ -531,7 +529,7 @@ async def test_run_at_schedule_deleted_after_fire_with_origin_session(setup, mon
     )
     assert len(await db.load_schedules()) == 1
 
-    await runner._fire("once3", agent["id"], "remind me", origin.id, "2030-01-15T09:00:00+00:00")
+    await runner._fire("once3")
 
     assert started["session_id"] == origin.id
     # DB row auto-deleted after the one-time fire.
@@ -776,7 +774,7 @@ async def test_a_fire_is_skipped_while_the_previous_one_is_still_running(
     )
 
     # Fire once — it records the session it ran in…
-    await runner._fire("busy1", agent["id"], "do it")
+    await runner._fire("busy1")
     assert len(sends) == 1
     first_sid = (await db.load_schedules())[0]["last_run_session_id"]
     assert first_sid == sends[0]
@@ -786,12 +784,12 @@ async def test_a_fire_is_skipped_while_the_previous_one_is_still_running(
     await db.update_schedule("busy1", last_run_session_id=stuck.id)
     stuck.status = SessionStatus.running
 
-    await runner._fire("busy1", agent["id"], "do it")
+    await runner._fire("busy1")
     assert len(sends) == 1, "a second run started while the first was going"
 
     # Once it finishes, the schedule resumes on the next tick.
     stuck.status = SessionStatus.idle
-    await runner._fire("busy1", agent["id"], "do it")
+    await runner._fire("busy1")
     assert len(sends) == 2
 
 
@@ -820,7 +818,7 @@ async def test_a_gone_or_idle_previous_session_never_blocks(setup, monkeypatch):
     )
     await db.update_schedule("gone1", last_run_session_id="deleted-long-ago")
 
-    await runner._fire("gone1", agent["id"], "p")
+    await runner._fire("gone1")
     assert len(sends) == 1
 
 
@@ -852,16 +850,16 @@ async def test_a_fire_does_not_pile_up_behind_another_fire_in_a_chat(
         origin_session_id=origin.id,
     )
 
-    await runner._fire("chat1", agent["id"], "summarize", origin.id)
+    await runner._fire("chat1")
     assert len(started) == 1
 
     # Something is now waiting in that session's queue.
     origin._pending_queue.append(object())
-    await runner._fire("chat1", agent["id"], "summarize", origin.id)
+    await runner._fire("chat1")
     assert len(started) == 1, "a second fire queued behind the first"
 
     origin._pending_queue.clear()
-    await runner._fire("chat1", agent["id"], "summarize", origin.id)
+    await runner._fire("chat1")
     assert len(started) == 2
 
 
@@ -890,7 +888,7 @@ async def test_fresh_fire_is_admitted_and_owned_by_dispatch(setup, monkeypatch):
         prompt="scheduled work", interval_seconds=3600,
         created_at="2026-10-17T00:00:00+00:00",
     )
-    firing = asyncio.create_task(runner._fire("owned-schedule", agent["id"], "scheduled work"))
+    firing = asyncio.create_task(runner._fire("owned-schedule"))
     await asyncio.wait_for(entered.wait(), 2)
     assert captured["source"] == "schedule"
     assert captured["driver"] is not None and captured["inner"] is not None

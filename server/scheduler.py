@@ -107,14 +107,7 @@ class ScheduleRunner:
         if self._closing:
             raise RuntimeError("ScheduleRunner is shutting down")
         # Recurrence priority: run_at (one-time) > cron > interval.
-        args = [
-            row["id"],
-            row["agent_id"],
-            row["prompt"],
-            row.get("origin_session_id"),
-            row.get("run_at"),
-        ]
-        common = dict(id=row["id"], args=args, replace_existing=True)
+        common = dict(id=row["id"], args=[row["id"]], replace_existing=True)
         if row.get("run_at"):
             run_date = datetime.fromisoformat(row["run_at"])
             self._scheduler.add_job(self._fire, DateTrigger(run_date=run_date), **common)
@@ -129,14 +122,7 @@ class ScheduleRunner:
                 self._fire, "interval", seconds=row["interval_seconds"], **common
             )
 
-    async def _fire(
-        self,
-        schedule_id: str,
-        agent_id: str,
-        prompt: str,
-        origin_session_id: str | None = None,
-        run_at: str | None = None,
-    ) -> None:
+    async def _fire(self, schedule_id: str) -> None:
         """Run the schedule's prompt for this fire.
 
         Two modes (agent-refactor.md §5.3/§5.6):
@@ -164,8 +150,7 @@ class ScheduleRunner:
             return
         now = datetime.now(UTC).isoformat()
         row = await self._schedule_row(schedule_id)
-        # APScheduler arguments describe the timer that was registered. Only
-        # the current durable row can authorize a fire or supply trusted text.
+        # Only the current durable row can authorize a fire or supply text.
         if row is None or not row["enabled"] or not await self._target_is_active(row):
             return
         agent_id = row["agent_id"]

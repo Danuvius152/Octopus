@@ -106,9 +106,12 @@ login flow but targets the **existing** credential id, so bindings stay
 valid and the flag clears.
 
 - **Claude** (`POST /credentials/oauth/complete`): optional
-  `credential_id`. When set, `update_credential(secret, token_expires_at,
-  needs_reconnect=False, last_refresh_error_code=None, status=active,
-  label)` in place instead of inserting a new row.
+  `credential_id`. The target must belong to the login's account and use the
+  Claude backend before the code is exchanged. After exchange, storage checks
+  the target owner again under the same write lock as the in-place update,
+  clearing reconnect/status fields without changing the credential ID. A
+  deleted, adopted or foreign target returns 404 without replacing its secret;
+  install-owner None is an explicit owner here, not an unfiltered DB query.
 - **Codex** (`POST /credentials/codex/start`): optional
   `reauth_credential_id`. The login re-runs `codex login` with
   `CODEX_HOME = codex_home_for(reauth_credential_id)` — i.e. it overwrites

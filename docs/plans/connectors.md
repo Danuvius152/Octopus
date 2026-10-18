@@ -308,11 +308,11 @@ Concretely:
 - Reads `OCTOPUS_API_BASE`, `OCTOPUS_AUTH_TOKEN`,
   `OCTOPUS_SESSION_ID`, and `OCTOPUS_INSTALLATION_ID` from env
   (compare `server/mcp_servers/ask.py:107-114`).
-- On each tool call, fetches a fresh access token from
-  `GET /api/connectors/{installation_id}/token` (with retry on a
-  ConnectionError — the host may be momentarily busy). A small
-  in-process cache holds the token until its `expires_at`, so we
-  don't HTTP every call.
+- On each tool call, resolves the current verified installation/owner and
+  fetches its access token from `GET /api/connectors/{installation_id}/token`.
+  The in-process namespace serves multiple installations, so it retains no
+  bearer cache. The host owns expiry, refresh and persistence; the legacy
+  stdio diagnostic path still resolves its callback identity from env.
 - Calls the third-party API using the kind's official SDK
   (`google-api-python-client` for Gmail, `notion-client` for Notion).
 - **Caps result size.** Returns are truncated to 32 KB of text by
@@ -452,9 +452,9 @@ small HTML page that says "Connected — you can close this tab" and
 finished.
 
 **`GET /api/connectors/{id}/token`** is the only route the
-MCP-subprocess calls. It returns `{access_token, expires_at_epoch}`
-— never the refresh token (refresh is server-side; the MCP server
-re-fetches when its cached `expires_at` is near). Concurrency-safe:
+connector namespace calls for tokens. It returns `{access_token, expires_at_epoch}`
+— never the refresh token. The namespace fetches on every tool call, while
+refresh remains server-side and only occurs near expiry. Concurrency-safe:
 guarded by an `asyncio.Lock` per installation_id so two MCP servers
 hitting an expired token at the same time refresh once.
 

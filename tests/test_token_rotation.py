@@ -9,6 +9,9 @@ the failure this feature exists to prevent is a database nobody can decrypt.
 from __future__ import annotations
 
 import asyncio
+import sys
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -29,6 +32,57 @@ from server.token_rotation import (
 OLD = "old-token-1234"
 NEW = "new-token-abcdef-9876"
 HEADERS = {"Authorization": f"Bearer {OLD}"}
+
+
+async def test_rotation_keeps_running_app_and_inflight_request(db, env_file, tmp_path, monkeypatch):
+    import httpx
+
+    from server import app_backends
+    from server.applications import app_scope_token
+
+    directory = tmp_path / "app"
+    directory.mkdir()
+    (directory / "backend.py").write_text(
+        "import os, time\nfrom pathlib import Path\nfrom http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n"
+        "class Handler(BaseHTTPRequestHandler):\n"
+        " def do_GET(self):\n"
+        "  Path('entered').touch()\n"
+        "  while not Path('release').exists(): time.sleep(.01)\n"
+        "  self.send_response(200); self.end_headers(); self.wfile.write(b'complete')\n"
+        "ThreadingHTTPServer(('127.0.0.1', int(os.environ['PORT'])), Handler).serve_forever()\n"
+    )
+    script = directory / "start.sh"
+    script.write_text(f'#!/bin/sh\nexec "{sys.executable}" -u backend.py\n')
+    script.chmod(0o700)
+    supervisor = app_backends.BackendSupervisor()
+    monkeypatch.setattr(app_backends, "backend_supervisor", supervisor)
+    held_cleanup = AsyncMock()
+    token = app_scope_token("test-app")
+    request = None
+    try:
+        running = await supervisor.ensure_running("test-app", str(directory))
+        assert running.state == app_backends.RUNNING
+        pid = running.pid
+        async with httpx.AsyncClient(trust_env=False) as client:
+            request = asyncio.create_task(client.get(f"http://127.0.0.1:{running.port}/slow"))
+
+            async def entered():
+                while not (directory / "entered").exists():
+                    await asyncio.sleep(.01)
+
+            await asyncio.wait_for(entered(), 3)
+            await rotate_auth_token(db, NEW, session_mgr=SimpleNamespace(stop_all_held_processes=held_cleanup))
+            held_cleanup.assert_awaited_once()
+            assert running.process.returncode is None and running.pid == pid
+            assert app_scope_token("test-app") == token
+            (directory / "release").touch()
+            response = await request
+            assert response.status_code == 200 and response.text == "complete"
+    finally:
+        (directory / "release").touch()
+        if request is not None:
+            await asyncio.gather(request, return_exceptions=True)
+        await supervisor.shutdown()
 
 
 @pytest.fixture

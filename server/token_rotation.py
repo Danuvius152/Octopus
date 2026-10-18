@@ -352,18 +352,13 @@ async def _reencrypt_secrets(
 
 
 async def _drop_stale_processes(session_mgr: Any | None) -> None:
-    """Held CLI processes and application backends were handed the old token
-    at spawn — the MCP children call back with `OCTOPUS_AUTH_TOKEN`, and an
-    app backend's `OCTOPUS_APP_TOKEN` is derived from the master token. Both
-    respawn on demand."""
+    """Retire held CLI processes that may carry the old callback environment.
+
+    Application backends receive a master-key app token, not the install
+    token, so their processes and in-flight requests remain valid.
+    """
     if session_mgr is not None:
         try:
             await session_mgr.stop_all_held_processes()
         except Exception:
             logger.exception("could not stop held CLI processes after rotation")
-    try:
-        from .app_backends import backend_supervisor
-
-        await backend_supervisor.stop_all()
-    except Exception:
-        logger.exception("could not stop application backends after rotation")
