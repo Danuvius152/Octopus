@@ -706,7 +706,8 @@ class TurnsMixin(SessionManagerBase):
         await self.require_active_agent(session.agent_id)
         validate_message_attachments(session_id, attachment_ids if attachment_ids is not None else [])
         if self._admission_closed or self._legacy_transition or session._admission_closed or not work_is_open(work_id):
-            queued = QueuedPrompt(prompt="", attachment_ids=[])
+            queued = QueuedPrompt(prompt="", attachment_ids=[], source=source, work_id=work_id,
+                                  **({"request_id": request_id} if request_id else {}))
             receipt = self._new_receipt(session, queued, "closed")
             self._withdraw_requests(session, [queued], reason="shutdown" if self._admission_closed else "withdrawn")
             return receipt
@@ -1076,10 +1077,11 @@ class TurnsMixin(SessionManagerBase):
             # Revalidate queued input before opening a Wiki task, recording a
             # user message or starting a model. One bad file rejects the turn.
             files = validate_message_attachments(session_id, attachment_ids if attachment_ids is not None else [])
-            wiki_mode = wiki_tasks.mode_for(session, wiki_mode)
+            wiki_mode = wiki_tasks.mode_for(session, wiki_mode, request_id=settlement.request_id)
             session._wiki_mode = wiki_mode
             session._wiki_task_id = wiki_tasks.open(
-                session, wiki_mode, prompt if trusted_request is None else trusted_request
+                session, wiki_mode, prompt if trusted_request is None else trusted_request,
+                request_id=settlement.request_id,
             ) if wiki_mode in {"auto", "read", "maintain"} else None
             wiki_task_id = session._wiki_task_id
             attachments_meta = [AttachmentMetadata(

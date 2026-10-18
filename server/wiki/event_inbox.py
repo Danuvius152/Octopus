@@ -18,13 +18,14 @@ PROTOCOL = 1
 
 
 class EventInbox:
-    def __init__(self, db_path, root, vault_id):
+    def __init__(self, db_path, root, vault_id, *, recovery=None):
         self.db_path = db_path
         self.root = str(root)
         self.vault_id = vault_id
+        self.recovery = recovery
         with self.connect() as db:
             db.execute("INSERT OR IGNORE INTO filesystem_state(singleton,protocol,root,vault_id) VALUES(1,?,?,?)", (PROTOCOL, self.root, self.vault_id))
-            self.check(db)
+            self.check(db, allow_armed=recovery is not None)
 
     @staticmethod
     def commit(db):
@@ -45,14 +46,11 @@ class EventInbox:
         finally:
             db.close()
 
-    def check(self, db, *, allow_armed=False):
+    def state(self, db):
+        """Validate receipt continuity without discarding uncertain evidence."""
         state = db.execute("SELECT * FROM filesystem_state WHERE singleton=1").fetchone()
         if state is None or (state["protocol"], state["root"], state["vault_id"]) != (PROTOCOL, self.root, self.vault_id):
             raise WikiError("Filesystem inbox binding/protocol changed; durable evidence retained", 503)
-        if state["uncertain"]:
-            raise WikiError("Filesystem history is uncertain; inspect the durable inbox before reopening writes: " + state["uncertain"], 503)
-        if state["armed_epoch"] and not allow_armed:
-            raise WikiError("Filesystem reception was interrupted before durable receipt; history is uncertain", 503)
         if state["applied_seq"] > state["received_seq"]:
             raise WikiError("Invalid filesystem inbox watermark; durable evidence retained", 503)
         pending = db.execute("SELECT count(*),min(seq),max(seq) FROM filesystem_inbox WHERE status='pending'").fetchone()
@@ -61,22 +59,39 @@ class EventInbox:
             raise WikiError("Filesystem inbox receipt sequence is incomplete; durable evidence retained", 503)
         return state
 
+    def check(self, db, *, allow_armed=False):
+        from . import recovery_state
+
+        state = self.state(db)
+        recovery_state.access(db, self.root, self.vault_id, self.recovery)
+        if state["uncertain"] and not (self.recovery is not None and self.recovery.intake):
+            raise WikiError("Filesystem history is uncertain; inspect the durable inbox before reopening writes: " + state["uncertain"], 503)
+        if state["armed_epoch"] and not allow_armed:
+            raise WikiError("Filesystem reception was interrupted before durable receipt; history is uncertain", 503)
+        return state
+
     def arm(self, epoch):
+        attempted = False
         try:
             with self.connect() as db:
                 self.check(db)
                 db.execute("UPDATE filesystem_state SET armed_epoch=? WHERE singleton=1", (epoch,))
+                attempted = True
         except Exception:
             # A commit can report failure after the durable result is visible.
+            if not attempted:
+                raise
             with sqlite3.connect(self.db_path) as db:
-                armed = db.execute("SELECT armed_epoch FROM filesystem_state WHERE singleton=1").fetchone()
-            if armed is None or armed[0] != epoch:
+                db.row_factory = sqlite3.Row
+                state = self.check(db, allow_armed=True)
+            if state["armed_epoch"] != epoch:
                 raise
 
     def receive(self, records, epoch, root_generation, *, armed=True, batch_id=None):
         payload = json.dumps({"protocol": PROTOCOL, "root": self.root, "vault_id": self.vault_id, "root_generation": root_generation, "records": records}, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(payload.encode()).hexdigest()
         batch_id = batch_id or uuid.uuid4().hex
+        attempted = False
         try:
             with self.connect() as db:
                 state = self.check(db, allow_armed=armed)
@@ -95,21 +110,30 @@ class EventInbox:
                     seq = None
                 if armed:
                     db.execute("UPDATE filesystem_state SET armed_epoch=NULL WHERE singleton=1")
+                attempted = True
             return seq
         except Exception:
+            if not attempted:
+                raise
             with sqlite3.connect(self.db_path) as db:
+                db.row_factory = sqlite3.Row
+                state = self.check(db, allow_armed=True)
                 row = db.execute("SELECT seq,payload_hash FROM filesystem_inbox WHERE batch_id=?", (batch_id,)).fetchone()
-                state = db.execute("SELECT armed_epoch FROM filesystem_state WHERE singleton=1").fetchone()
-            if row is not None and row[1] == digest and state is not None and state[0] is None:
+            if row is not None and row[1] == digest and state["armed_epoch"] is None:
                 return row[0]
-            if not records and state is not None and state[0] is None:
+            if not records and state["armed_epoch"] is None:
                 return None
             raise
 
     def pending(self):
         with self.connect() as db:
-            state = self.check(db)
-            rows = db.execute("SELECT * FROM filesystem_inbox WHERE status='pending' ORDER BY seq").fetchall()
+            self.check(db)
+            return self.pending_rows(db)
+
+    def pending_rows(self, db):
+        """Also usable by owner metadata inspection on its read-only snapshot."""
+        state = self.state(db)
+        rows = db.execute("SELECT * FROM filesystem_inbox WHERE status='pending' ORDER BY seq").fetchall()
         result = []
         for row in rows:
             raw = row["payload"]
@@ -164,5 +188,8 @@ class EventInbox:
 
     def uncertain(self, reason):
         with self.connect() as db:
+            if self.recovery is not None and self.recovery.intake:
+                self.recovery.uncertain(db, reason)
+                return
             db.execute("UPDATE filesystem_state SET uncertain=? WHERE singleton=1", (reason,))
         raise WikiError("Filesystem history is uncertain; durable evidence retained: " + reason, 503)

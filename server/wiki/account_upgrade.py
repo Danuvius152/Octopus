@@ -22,7 +22,7 @@ def journal_path() -> Path:
     return Path(settings.users_root).expanduser() / ".first-account-upgrade.json"
 
 
-def pending_upgrade() -> dict | None:
+def pending_upgrade(*, include_complete=False) -> dict | None:
     path = journal_path()
     if not path.exists():
         return None
@@ -32,7 +32,7 @@ def pending_upgrade() -> dict | None:
             raise ValueError("unsupported migration journal")
         if journal.get("phase") not in {"preparing", "prepared", "account_created", "publishing", "published", "reopening", "activating", "complete"}:
             raise ValueError("unknown migration phase")
-        if journal["phase"] == "complete":
+        if journal["phase"] == "complete" and not include_complete:
             return None
         identifier = journal.get("upgrade_id")
         if not isinstance(identifier, str) or uuid.UUID(identifier).hex != identifier:
@@ -54,7 +54,7 @@ def pending_upgrade() -> dict | None:
         uuid.UUID(config["vault_id"])
         if not isinstance(config.get("curator_agent_id"), str) or not config["curator_agent_id"]:
             raise ValueError("missing recorded curator binding")
-        return journal if journal.get("phase") != "complete" else None
+        return journal
     except (ValueError, OSError, TypeError, KeyError, AttributeError) as exc:
         raise WikiError("Account migration journal needs operator verification", 503) from exc
 
@@ -64,6 +64,33 @@ def save(journal: dict) -> None:
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     atomic(path, json.dumps(journal, ensure_ascii=False, sort_keys=True).encode())
     path.chmod(0o600)
+
+
+def subscriber_digest(subscriber):
+    """Original immutable coordinates, shared by adoption and receive replay."""
+    coordinates = [subscriber[key] for key in ("job_id", "owner", "kind", "target", "request_id", "client_id")]
+    return hashlib.sha256(json.dumps(coordinates, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+
+
+def adopts_notice(user_id, vault_id, delivery):
+    """Only the recorded first-account transfer can interpret a legacy owner.
+
+    This does not rewrite subscriber/event identities or authorize a target.
+    The receiver still verifies the original session/app's current ownership.
+    """
+    if not user_id or delivery["owner"] != "legacy":
+        return False
+    journal = pending_upgrade(include_complete=True)
+    if (journal is None or not journal["adopt"] or journal["user_id"] != user_id
+            or journal["phase"] not in {"activating", "complete"} or journal["config"]["vault_id"] != vault_id
+            or journal.get("notice_subscribers", {}).get(delivery["subscriber_id"]) != subscriber_digest(delivery)):
+        return False
+    marker = registry.state(user_id) / ".upgrade-owner.json"
+    try:
+        return (not marker.is_symlink() and json.loads(marker.read_text())["upgrade_id"] == journal["upgrade_id"]
+                and registry.config(user_id)["vault_id"] == vault_id)
+    except (OSError, ValueError, KeyError):
+        return False
 
 
 def _durable_digest(path: Path) -> dict:
@@ -124,6 +151,15 @@ def prepare(journal: dict) -> None:
     journal["files"] = _manifest(source)
     if _manifest(stage) != journal["files"]:
         raise WikiError("Wiki history and snapshot file verification failed", 503)
+    journal["notice_subscribers"] = {}
+    with sqlite3.connect((stage / "index.sqlite3").as_uri() + "?mode=ro", uri=True) as db:
+        db.row_factory = sqlite3.Row
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='wiki_job_subscribers'").fetchone():
+            from . import job_events
+
+            job_events.require(db)
+            journal["notice_subscribers"] = {row["id"]: subscriber_digest(row) for row in
+                                              db.execute("SELECT * FROM wiki_job_subscribers WHERE owner='legacy'")}
     for path in [stage, *stage.rglob("*")]:
         path.chmod(0o700 if path.is_dir() else 0o600)
         if path.is_file():

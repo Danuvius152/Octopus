@@ -92,7 +92,7 @@ class AssetCurator:
 
     async def start_message(self, session_id, prompt, **kwargs):
         assert kwargs["source"] == "wiki"
-        return await receipt_from_events(self._events(session_id, prompt, **kwargs))
+        return await receipt_from_events(self._events(session_id, prompt, **kwargs), kwargs["request_id"])
 
     async def cancel_request(self, *args):
         return True
@@ -103,7 +103,7 @@ class AssetCurator:
     async def _events(self, session_id, prompt, **kwargs):
         session = next(session for session in self.sessions if session.id == session_id)
         assert kwargs["wiki_mode"] == "maintain"
-        token = tasks.open(session, "maintain", prompt)
+        token = tasks.open(session, "maintain", prompt, request_id=kwargs["request_id"])
         headers = {"Authorization": f"Bearer {mint(session_id, wiki_task_id=token)}"}
         task = tasks.active[token]
         try:

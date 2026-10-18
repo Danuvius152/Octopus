@@ -12,6 +12,11 @@ def summary(db, observed_pending):
         durable_error = stream["uncertain"] or (
             "Filesystem reception is incomplete; durable receipt required" if stream["armed_epoch"] else None
         )
+    from . import recovery_state
+
+    recovery = recovery_state.active(db)
+    if recovery is not None:
+        durable_error = "Filesystem recovery is unfinished: " + recovery["phase"]
     if durable_error:
         diagnostics.append(durable_error)
     pending = max(int(observed_pending), stream["received_seq"] - stream["applied_seq"] if stream else 0,

@@ -6,16 +6,17 @@ from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, ConfigDict, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from ..auth import verify_token
 from ..deps import ScopeUser, SessionMgr
 from ..mcp_identity import McpScope, verify
-from ..wiki import WikiError, registry
+from ..wiki import WikiError, job_events, registry
 from ..wiki.contracts import (
     CreationRequest,
     GrantReadmissionRequest,
     GuideModule,
+    JobControlRequest,
     MaintenanceSelectionRequest,
     ReadBatch,
     ReadView,
@@ -94,7 +95,7 @@ async def app_wiki(request: Request, app_id: str, operation: str):
         ):
             handlers[("POST", operation)] = (
                 cancel_job if parts[2] == "cancel" else retry_job,
-                None,
+                JobControlRequest,
             )
     handler = handlers.get((request.method, operation))
     if handler is None:
@@ -107,7 +108,8 @@ async def app_wiki(request: Request, app_id: str, operation: str):
 
             kwargs["body"] = TypeAdapter(Revision).validate_python(await request.json())
         elif schema:
-            kwargs["body"] = schema.model_validate(await request.json())
+            payload = await request.json() if await request.body() else {}
+            kwargs["body"] = schema.model_validate(payload)
         elif operation == "search":
             kwargs |= {
                 "query": request.query_params["query"],
@@ -214,10 +216,81 @@ def access(
     return None
 
 
+def requester_for(request: Request, user_id, task):
+    if task is not None:
+        return job_events.from_task(task)
+    app_id = request.path_params.get("app_id")
+    return job_events.Requester(user_id, "app" if app_id else "human", client_id=app_id or "")
+
+
 class WikiConfig(BaseModel):
     root: str
     curator_agent_id: str
     app_id: str | None = None
+
+
+class RecoveryRetention(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    doc: str = Field(min_length=1, max_length=512)
+    path: str = Field(min_length=1, max_length=4096)
+    expected_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class RecoveryPlan(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    retain: list[RecoveryRetention] = Field(default_factory=list, max_length=5000)
+
+
+class RecoveryApproval(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+@router.get("/recovery")
+def recovery_inspect(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    access(request, human_only=True)
+    return registry.recoveries().inspect(user_id)
+
+
+@router.post("/recovery/export")
+def recovery_export(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    access(request, human_only=True)
+    return registry.recoveries().export(user_id)
+
+
+@router.post("/recovery/plan")
+def recovery_plan(body: RecoveryPlan, request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    access(request, human_only=True)
+    return registry.recoveries().plan(user_id, [entry.model_dump() for entry in body.retain])
+
+
+@router.get("/recovery/{recovery_id}/plan")
+def recovery_full_plan(recovery_id: str, request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    access(request, human_only=True)
+    return registry.recoveries().full_plan(user_id, recovery_id)
+
+
+@router.post("/recovery/{recovery_id}/approve")
+def recovery_approve(recovery_id: str, body: RecoveryApproval, request: Request,
+                     user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    access(request, human_only=True)
+    return registry.recoveries().approve(user_id, recovery_id, body.plan_hash)
+
+
+@router.post("/recovery/{recovery_id}/apply")
+def recovery_apply(recovery_id: str, body: RecoveryApproval, request: Request,
+                   user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    access(request, human_only=True)
+    return registry.recoveries().apply(user_id, recovery_id, body.plan_hash)
+
+
+@router.get("/recovery/{recovery_id}")
+def recovery_status(recovery_id: str, request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    access(request, human_only=True)
+    return registry.recoveries().status(user_id, recovery_id)
 
 
 @router.get("/documents")
@@ -372,12 +445,13 @@ def get_config(
 def info(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
     from ..wiki.capabilities import CAPABILITIES
     from ..wiki.retention import POLICY
+    from ..wiki.workflow import view
 
     task = access(request)
     config = registry.config(user_id)
     store = registry.store(user_id)
     store.synchronize()
-    grant = tasks.current_grant(task, store=store) if task else None
+    current = view(task) if task else None
     return {
         "vault_id": config["vault_id"],
         "curator_agent_id": config["curator_agent_id"],
@@ -386,9 +460,10 @@ def info(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_to
         "history_policy": POLICY,
         "snapshot_creation_enabled": False,
         "capabilities": CAPABILITIES,
-        "writable_files": [item["current_path"] for item in grant["selected_documents"] if item["current_path"]] if grant else [],
-        "allowed_new_paths": grant["allowed_new_paths"] if grant else [],
-        "grant_version": 2 if grant else None,
+        "writable_files": current.card.get("writable_files", []) if current else [],
+        "allowed_new_paths": current.card.get("allowed_new_paths", []) if current else [],
+        "grant_version": current.card.get("grant_version") if current else None,
+        **({"operation": current.card} if current else {}),
         "excluded": [
             "PDF processing",
             "Codex Skills",
@@ -400,13 +475,15 @@ def info(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_to
 
 @router.get("/guide")
 def get_guide(request: Request, module: GuideModule, user_id: ScopeUser = None, _: str = Depends(verify_token)):
-    from ..wiki.workflow import load_guide
+    from ..wiki.workflow import view
 
     task = access(request)
     scope = verify(request.headers.get("authorization", "").split(" ", 1)[-1])
     if task is None or scope is None or task.user_id != user_id:
         raise WikiError("Wiki guides require an active authorized turn", 403)
-    return {"module": module, "content": load_guide(module, scope.wiki_task_id)}
+    current = view(task)
+    return {"module": module, "content": current.load(module),
+            "policy_version": current.card["policy_version"], "guide_hash": current.card["guide_hash"]}
 
 
 class SearchSection(BaseModel):
@@ -882,6 +959,7 @@ def maintain(
         selection_id=body.selection_id,
         selection_ordinal=body.selection_ordinal,
         creation=body.creation.model_dump() if body.creation is not None else None,
+        requester=requester_for(request, user_id, task),
     )
 
 
@@ -895,12 +973,17 @@ def submit(
     task = access(request, write=True)
     if task and task.job_id:
         raise WikiError("Workers cannot enqueue more maintenance", 403)
-    result = WikiJobs(user_id).submit(
+    result = WikiJobs(user_id).maintain(
         body.idempotency_key,
         body.material,
         body.scope,
+        [],
+        None,
         [s.model_dump() for s in body.sources],
-        task.agent_id if task else "human",
+        actor_for(task, request.path_params.get("app_id")),
+        selection_task=task,
+        mcp_scope=_mcp_scope(request),
+        requester=requester_for(request, user_id, task),
     )
     return result
 
@@ -921,7 +1004,8 @@ async def curate(
     import anyio
 
     result = await anyio.to_thread.run_sync(
-        lambda: WikiJobs(user_id).curate(body.idempotency_key, body.scope)
+        lambda: WikiJobs(user_id).curate(body.idempotency_key, body.scope,
+                                       requester=requester_for(request, user_id, None))
     )
     worker.wake(user_id)
     return result
@@ -966,25 +1050,37 @@ def get_job(
 async def cancel_job(
     job_id: str,
     request: Request,
+    body: JobControlRequest | None = None,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    access(request, write=True)
+    task = access(request, write=True)
+    if task and task.job_id and task.job_id != job_id:
+        raise WikiError("A worker can control only its original assigned job", 403)
     import anyio
 
     jobs = await anyio.to_thread.run_sync(lambda: WikiJobs(user_id))
-    return await jobs.cancel(job_id, worker.manager)
+    result = await jobs.cancel(job_id, worker.manager, **(body.model_dump() if body else {}))
+    return control_result(result) if task is not None else result
 
 
 @router.post("/jobs/{job_id}/retry")
 def retry_job(
     job_id: str,
     request: Request,
+    body: JobControlRequest | None = None,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    access(request, write=True)
-    return WikiJobs(user_id).retry(job_id)
+    task = access(request, write=True)
+    if task and task.job_id and task.job_id != job_id:
+        raise WikiError("A worker can control only its original assigned job", 403)
+    result = WikiJobs(user_id).retry(job_id, **(body.model_dump() if body else {}))
+    return control_result(result) if task is not None else result
+
+
+def control_result(result):
+    return {key: result[key] for key in ("id", "status", "state_version", "attempt", "settlement_phase", "progress")}
 
 
 @router.post("/jobs/{job_id}/readmit")

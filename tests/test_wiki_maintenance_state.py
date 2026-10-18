@@ -626,6 +626,8 @@ async def test_final_item_read_cannot_rebind_a_checked_observation(client, tmp_p
 @pytest.mark.parametrize("item_status", ["pending", "running"])
 @pytest.mark.parametrize("newer_input", [False, True])
 async def test_unreceipted_unfinished_work_blocks_another_actor(client, tmp_path, job_status, item_status, newer_input):
+    from server.wiki.store import WikiError
+
     vault, config, jobs = await prepare(client, tmp_path)
     retained = jobs.maintain("legacy-retained", "", "Review selected note", ["Library/journal.md"], None, [], "earlier-actor")
     retained["items"][0]["status"] = item_status
@@ -644,8 +646,20 @@ async def test_unreceipted_unfinished_work_blocks_another_actor(client, tmp_path
         assert len(jobs.list()["items"]) == 1
     if job_status == "interrupted":
         jobs.recover_jobs()
-    else:
-        jobs.retry(retained["id"])
+        unknown = jobs.get(retained["id"])
+        assert unknown["status"] == "interrupted" and unknown["items"][0]["execution_unknown"]
+        original = (vault / "Library/journal.md").read_bytes()
+        with pytest.raises(WikiError, match="original unknown execution") as denied:
+            jobs.retry(retained["id"])
+        assert denied.value.status == 409
+        assert jobs.get(retained["id"])["items"] == unknown["items"]
+        assert jobs.get(retained["id"])["attempt"] == unknown["attempt"]
+        assert len(jobs.list()["items"]) == 1
+        assert (vault / "Library/journal.md").read_bytes() == original
+        return
+    # An explicitly failed input can retry; a missing original execution
+    # after interruption cannot be treated as proof of non-admission.
+    jobs.retry(retained["id"])
     pending = (await state(client, "Library/journal.md"))["items"][0]
     assert not pending["actionable"] and pending["attempts"][0]["status"] == "queued"
     await settle(client, jobs, config, job=jobs.get(retained["id"]))

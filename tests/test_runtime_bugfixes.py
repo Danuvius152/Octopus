@@ -147,7 +147,7 @@ async def test_live_registration_change_settles_old_worker_and_allows_retry(jobs
 
         async def stream(self):
             session = next(s for s in manager.sessions.values() if s.origin == "wiki")
-            tokens.append(grants.open(session, "maintain"))
+            tokens.append(grants.open(session, "maintain", request_id=session._current_request.request_id))
             entered.set()
             await release.wait()
             from server.harness import HarnessEvent
@@ -199,11 +199,14 @@ async def test_live_registration_change_settles_old_worker_and_allows_retry(jobs
         assert current.maintain("registration-change", "# Original\nRetain source.\n", "organize", [], "Library/source.md", [], "human")["id"] == job["id"]
         # The synthetic CLI opened extra probe scopes above. They must retire
         # before re-admission, even though their old write authority is revoked.
-        with pytest.raises(WikiError, match="assignment has not retired") as owned:
+        reason = "original cancellation and result recording" if ending == "cancel" else "assignment has not retired"
+        with pytest.raises(WikiError, match=reason) as owned:
             current.readmit(job["id"], [])
         assert owned.value.status == 409
         for token in tokens:
             grants.close(token)
+        if ending == "cancel":
+            await current.cancel(job["id"], manager)
         assert trusted_readmit(current, job["id"])["status"] == "queued"
         resumed = WikiWorker()
         resumed.manager = test_wiki_jobs.Curator(current)
@@ -271,7 +274,7 @@ async def test_unconfirmed_recording_survives_rebinding_without_regeneration(job
             config = registry.config(None)
             config[binding] = "replacement-binding"
             registry.configure(None, Path(config["root"]), config["curator_agent_id"], config["app_id"])
-            request_id = "unconfirmed-original-request"
+            request_id = self.original_request_id = kwargs["request_id"]
             completion = asyncio.get_running_loop().create_future()
             completion.set_result(RequestCompletion(input_request_id=request_id, request_id=request_id,
                 state="recording_failed", recording_state="unconfirmed",
@@ -287,7 +290,7 @@ async def test_unconfirmed_recording_survives_rebinding_without_regeneration(job
         current = WikiJobs(None)
         first = current.get(job["id"])
         assert first["status"] == "failed"
-        assert first["items"][0]["recording_failure"]["request_id"] == "unconfirmed-original-request"
+        assert first["items"][0]["recording_failure"]["request_id"] == manager.original_request_id
         retained = current.store.path("Library/unconfirmed.md").read_bytes()
         attention = await test_wiki_jobs.process(current, trusted_readmit(current, job["id"]), manager)
         assert attention["status"] == "completed_with_attention"
@@ -320,7 +323,8 @@ async def test_rebinding_keeps_blocked_recording_session_until_original_is_verif
 
             session_id = jobs.get(job["id"])["session_id"]
             doc = jobs.store.read("Library/blocked.md")
-            token = tasks.open(manager.get_session(session_id), "maintain")
+            session = manager.get_session(session_id)
+            token = tasks.open(session, "maintain", request_id=session._current_request.request_id)
             try:
                 task = tasks.call(tasks.active[token], verify(mint(session_id, wiki_task_id=token)))
                 tasks.record_read(task, doc)
@@ -397,31 +401,36 @@ async def test_rebinding_keeps_blocked_recording_session_until_original_is_verif
 @pytest.mark.parametrize("binding", ["curator_agent_id", "app_id"])
 @pytest.mark.parametrize("retry_immediately", [False, True])
 async def test_recording_reference_survives_a_cancellation_between_control_read_and_write(jobs, monkeypatch, binding, retry_immediately):
+    from server.wiki import job_execution
+
     WikiHistory(jobs.store).write("Library/cancel-race.md", b"# Original\nRetained.\n", None, "human", "source")
     job = jobs.maintain("cancel-recording-race", "", "organize", ["Library/cancel-race.md"], None, [], "human")
     captured = jobs.update(job["id"], status="running", session_id="original-session")
+    reference = job_execution.prepare(jobs, captured, captured["items"], "original-session", "original-request")
     config = registry.config(None)
     config[binding] = "replacement-binding"
     registry.configure(None, Path(config["root"]), config["curator_agent_id"], config["app_id"])
     current = WikiJobs(None)
-    update = WikiJobs.update
+    transition = job_execution.transition
     raced = False
 
-    def racing_update(self, job_id, **fields):
+    def racing_transition(control, job_id, original, phase, **fields):
         nonlocal raced
-        if not raced and any(item.get("recording_failure") for item in fields.get("items", [])):
+        if not raced:
             raced = True
             current.mark_cancelled(job_id)
             if retry_immediately:
-                trusted_readmit(current, job_id)
-        return update(self, job_id, **fields)
+                with pytest.raises(WikiError, match="cancellation"):
+                    current.retry(job_id)
+        return transition(control, job_id, original, phase, **fields)
 
-    monkeypatch.setattr(WikiJobs, "update", racing_update)
-    completion = SimpleNamespace(request_id="original-request", recording_state="unconfirmed")
-    await WikiWorker()._mark_recording_failure(jobs, job["id"], captured, captured["items"], "original-session", completion)
+    monkeypatch.setattr(job_execution, "transition", racing_transition)
+    completion = SimpleNamespace(input_request_id="original-request", request_id="original-request",
+                                 outcome=None, recording_state="unconfirmed")
+    await WikiWorker()._mark_recording_failure(jobs, job["id"], reference, completion)
     result = current.get(job["id"])
     assert raced
-    assert result["status"] == ("queued" if retry_immediately else "cancelled")
+    assert result["status"] == "cancelled" and result["attempt"] == reference["attempt"]
     assert result["items"][0]["recording_failure"]["request_id"] == "original-request"
 
 

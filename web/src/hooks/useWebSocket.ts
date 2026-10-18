@@ -8,6 +8,7 @@ import {
 } from "../lib/hydrateSession";
 import { readRuntimeMetadata } from "../lib/toolIdentity";
 import { refreshSchedules } from "../lib/refreshSchedules";
+import { refreshWikiJobs } from "../lib/wikiJobs";
 import type { WikiMessageMode } from "../lib/wikiComposer";
 import {
   useSessionStore,
@@ -96,6 +97,9 @@ export function handleWsMessage(data: Record<string, unknown>) {
   }
 
   switch (type) {
+    case "wiki_job_changed":
+      if (sessionId === getState().activeSessionId) void refreshWikiJobs(sessionId).catch(() => {});
+      break;
     case "dispatch_state":
       applyDispatchState(sessionId, data.dispatch_state);
       break;

@@ -50,6 +50,15 @@ for backend in all_backends():
     )
 
 from server.main import app as app
+from tests.e2e_wiki_cards import install as install_wiki_cards
+
+# Keep the test-only API ahead of the product SPA catch-all.
+spa = next((route for route in app.router.routes if route.name == "spa"), None)
+if spa is not None:
+    app.router.routes.remove(spa)
+install_wiki_cards(app)
+if spa is not None:
+    app.router.routes.append(spa)
 
 product_lifespan = app.router.lifespan_context
 

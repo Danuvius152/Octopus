@@ -89,7 +89,7 @@ def _current(jobs, db, key, request, review, task, mcp_scope: McpScope | None):
     return dict(current), None
 
 
-def commit(jobs, key, request, review, task, *, selection_id=None, selection_ordinal=None, mcp_scope: McpScope | None = None):
+def commit(jobs, key, request, review, task, *, selection_id=None, selection_ordinal=None, mcp_scope: McpScope | None = None, requester=None):
     """Caller holds history/account/registration locks; this is the final TX."""
     with jobs.store.connect() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -116,11 +116,12 @@ def commit(jobs, key, request, review, task, *, selection_id=None, selection_ord
             job_id = previous["id"]
         if selection_id is not None:
             selections.accept(db, job_id, selection_id, selection_ordinal, review)
+        jobs.subscribe(db, job_id, requester)
         result = jobs.get(job_id, db=db)
     return result, created
 
 
-def admit(jobs, key, material, paths, target, sources, actor, created_changes, review, task, *, selection_id=None, selection_ordinal=None, mcp_scope: McpScope | None = None):
+def admit(jobs, key, material, paths, target, sources, actor, created_changes, review, task, *, selection_id=None, selection_ordinal=None, mcp_scope: McpScope | None = None, requester=None):
     from .jobs import worker
 
     if material or target or sources or created_changes or paths != [review["path"]] or not key.strip():
@@ -137,7 +138,8 @@ def admit(jobs, key, material, paths, target, sources, actor, created_changes, r
                 raise selections.error("registration_changed", "Wiki registration changed before admission", 409)
             try:
                 result, created = commit(jobs, key, request, review, task,
-                                         selection_id=selection_id, selection_ordinal=selection_ordinal, mcp_scope=mcp_scope)
+                                         selection_id=selection_id, selection_ordinal=selection_ordinal,
+                                         mcp_scope=mcp_scope, requester=requester)
             except sqlite3.DatabaseError as exc:
                 raise selections.unavailable() from exc
     if created:

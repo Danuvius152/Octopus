@@ -39,6 +39,7 @@ class Curator:
         self.turns = 0
         self.sessions = 0
         self.db = self
+        self.terminals = {}
 
     async def get_agent(self, *args):
         return {"backend": "codex"}
@@ -52,7 +53,20 @@ class Curator:
 
     async def start_message(self, session_id, prompt, **kwargs):
         assert kwargs["source"] == "wiki"
-        return await receipt_from_events(self._events(session_id, prompt, **kwargs))
+        request_id = kwargs["request_id"]
+        try:
+            receipt = await receipt_from_events(self._events(session_id, prompt, **kwargs), request_id)
+        except BaseException:
+            self.terminals[(session_id, request_id)] = {"request_id": request_id, "status": "failed"}
+            raise
+        self.terminals[(session_id, request_id)] = (await receipt.wait()).outcome.model_dump()
+        return receipt
+
+    def get_session(self, session_id):
+        return None
+
+    async def get_committed_terminal(self, session_id, request_id):
+        return self.terminals.get((session_id, request_id))
 
     async def cancel_request(self, *args):
         return True
@@ -71,7 +85,10 @@ class Curator:
             ).fetchone()[0]
         session = SimpleNamespace(id=session_id, user_id=self.jobs.user_id,
                                   agent_id=self.jobs.registration["curator_agent_id"])
-        token = tasks.open(session, "maintain")
+        original = self.jobs.get(job_id)
+        reference = next((item["worker_request"] for item in original["items"]
+                          if item.get("worker_request", {}).get("session_id") == session_id), {})
+        token = tasks.open(session, "maintain", request_id=kwargs.get("request_id", reference.get("request_id", "")))
         scope = verify(mint(session_id, user_id=self.jobs.user_id, wiki_task_id=token))
         task = tasks.call(tasks.active[token], scope)
         try:
@@ -419,7 +436,7 @@ async def test_new_material_does_not_reuse_unsearchable_txt_html(
         assert different["status"] == "queued"
 
 
-async def test_restart_after_reserved_retry_does_not_reset_budget(jobs):
+async def test_restart_before_prepared_request_keeps_budget_and_marks_unknown_without_model(jobs):
     history = WikiHistory(jobs.store)
     history.write("Library/note.md", b"# Note\noriginal\n", None, "human", "create")
     job = jobs.maintain(
@@ -439,9 +456,12 @@ async def test_restart_after_reserved_retry_does_not_reset_budget(jobs):
     jobs.recover_jobs()
     curator.create_session = original_create
     result = await process(jobs, job, curator)
-    assert result["status"] == "completed"
+    assert result["status"] == "completed_with_attention"
     assert result["items"][0]["retry_count"] == 1
-    assert curator.turns == 1
+    assert result["items"][0]["execution_unknown"] == {"session_id": None}
+    assert curator.turns == 0
+    with pytest.raises(WikiError, match="new explicit task"):
+        jobs.retry(job["id"])
 
 
 async def test_active_publication_protects_unindexed_output_until_recovered(
@@ -584,13 +604,22 @@ async def test_published_item_recovery_never_generates_again_or_consumes_reread_
     restarted = WikiJobs(None)
     if scenario == "cancelled_source_changed":
         restarted.mark_cancelled(job["id"])
-        restarted.retry(job["id"])
+        with pytest.raises(WikiError, match="Confirm the original cancellation"):
+            restarted.retry(job["id"])
+        await restarted.settle_cancelled(job["id"], curator)
+        outcome = restarted.get(job["id"])
+        assert outcome["settlement_phase"] == "unconfirmed"
+        assert outcome["items"][0]["status"] == "attention"
+        with pytest.raises(WikiError, match="Confirm the original cancellation"):
+            restarted.retry(job["id"])
     elif scenario == "index_error_source_changed":
         restarted.retry(job["id"])
     else:
         restarted.recover_jobs()
-    outcome = await process(restarted, job, curator)
-    assert outcome["status"] == ("completed" if scenario == "missing_fts" else "completed_with_attention"), outcome
+    if scenario != "cancelled_source_changed":
+        outcome = await process(restarted, job, curator)
+    expected = "cancelled" if scenario == "cancelled_source_changed" else "completed" if scenario == "missing_fts" else "completed_with_attention"
+    assert outcome["status"] == expected, outcome
     assert curator.turns == 1
     assert outcome["items"][0].get("retry_count", 0) == 0
     assert jobs.store.path("Library/note.md").read_bytes() == before
@@ -673,7 +702,7 @@ async def test_recording_failure_retry_verifies_original_without_new_model(jobs)
 
     class RecordingCurator(Curator):
         committed = False
-        request_id = "original-recording-request"
+        request_id = None
 
         def get_session(self, session_id):
             return None  # A later process has no runtime pending outcome.
@@ -684,6 +713,7 @@ async def test_recording_failure_retry_verifies_original_without_new_model(jobs)
 
         async def start_message(self, session_id, prompt, **kwargs):
             assert kwargs["source"] == "wiki"
+            self.request_id = kwargs["request_id"]
             async for _ in self._events(session_id, prompt, **kwargs):
                 pass
             future = asyncio.get_running_loop().create_future()
@@ -957,21 +987,26 @@ async def test_shutdown_interrupts_curator_and_preserves_queued_jobs(jobs, shutd
 
 
 async def test_shutdown_cause_survives_shielded_wiki_write(jobs, shutdown_worker, monkeypatch):
+    from server.wiki import job_execution
+
     worker, manager, ready = shutdown_worker
     current = jobs.maintain("shutdown-write", "Original source", "organize", [], "Library/write.md", [], "human")
     entered, release = asyncio.Event(), threading.Event()
     loop = asyncio.get_running_loop()
-    update = WikiJobs.update
+    transition = job_execution.transition
 
-    def delayed_update(self, job_id, **fields):
-        result = update(self, job_id, **fields)
-        if job_id == current["id"] and any(item.get("worker_request") for item in fields.get("items", [])):
+    def delayed_transition(owner, job_id, reference, phase, **fields):
+        result = transition(owner, job_id, reference, phase, **fields)
+        if job_id == current["id"] and phase == "accepted":
+            captured = owner.get(job_id)["items"][0]["worker_request"]
+            assert (captured["attempt"], captured["session_id"], captured["request_id"]) == (
+                reference["attempt"], reference["session_id"], reference["request_id"])
             loop.call_soon_threadsafe(entered.set)
             if not release.wait(timeout=5):
                 raise TimeoutError("test Wiki writer was not released")
         return result
 
-    monkeypatch.setattr(WikiJobs, "update", delayed_update)
+    monkeypatch.setattr(job_execution, "transition", delayed_transition)
     try:
         await worker.start(manager)
         await asyncio.wait_for(entered.wait(), 3)

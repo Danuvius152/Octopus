@@ -27,6 +27,11 @@ class WikiTask:
     read_sizes: dict = field(default_factory=dict, compare=False)
     raw_reads: dict = field(default_factory=dict, compare=False)
     raw_read_sizes: dict = field(default_factory=dict, compare=False)
+    request_id: str = ""
+    origin: str = "user"
+    app_id: str | None = None
+    assigned_request_id: str | None = None
+    assigned_attempt: int | None = None
 
 
 class WikiTasks:
@@ -34,7 +39,7 @@ class WikiTasks:
         self.active: dict[str, WikiTask] = {}
         self.assignments: dict[str, dict] = {}
 
-    def assign(self, session_id, job_id, items, *, registration=None):
+    def assign(self, session_id, job_id, items, *, registration=None, request_id=None, attempt=None):
         """Capture the host-selected batch, independently of later path moves."""
         items = tuple(items)
         self.assignments[session_id] = {
@@ -42,12 +47,14 @@ class WikiTasks:
             "document_ids": tuple(dict.fromkeys(item["doc"] for item in items if item.get("doc"))),
             "reservation_ids": tuple(dict.fromkeys(item["reservation_id"] for item in items if item.get("reservation_id"))),
             "registration": dict(registration) if registration is not None else None,
+            "assigned_request_id": request_id,
+            "assigned_attempt": attempt,
         }
 
     def unassign(self, session_id):
         self.assignments.pop(session_id, None)
 
-    def mode_for(self, session, requested: str | None) -> str | None:
+    def mode_for(self, session, requested: str | None, *, request_id=None) -> str | None:
         """Default registered accounts to autonomous use; retain explicit restrictions."""
         if requested == "off":
             return "read"  # Legacy clients may disable maintenance, never shared lookup.
@@ -60,19 +67,27 @@ class WikiTasks:
                 or (session.user_id is None and not registry.legacy_enabled)
                 or not (registry.state(session.user_id) / "config.json").is_file()):
             return None
-        return "maintain" if session.id in self.assignments else "auto"
+        assignment = self.assignments.get(session.id)
+        assigned = assignment and assignment.get("assigned_request_id") in {None, request_id}
+        return "maintain" if assigned else "auto"
 
-    def open(self, session, mode: str, request: str = "") -> str:
+    def open(self, session, mode: str, request: str = "", *, request_id: str = "") -> str:
         if mode not in {"auto", "read", "maintain"}:
             raise WikiError("Unknown wiki task mode")
         token = secrets.token_hex(24)
+        assignment = self.assignments.get(session.id, {})
+        if assignment.get("assigned_request_id") not in {None, request_id}:
+            assignment = {}
         self.active[token] = WikiTask(
             session.id,
             session.user_id,
             session.agent_id,
             mode,
             request,
-            **self.assignments.get(session.id, {}),
+            request_id=request_id,
+            origin=getattr(session, "origin", "user"),
+            app_id=getattr(session, "app_id", None),
+            **assignment,
         )
         return token
 
@@ -89,7 +104,7 @@ class WikiTasks:
             return False
         return True
 
-    def current_grant(self, task, *, store=None, strict=False):
+    def current_grant(self, task, *, store=None, strict=False, include_selection=False):
         if task is None or not task.job_id:
             return None
         from . import grants
@@ -100,7 +115,12 @@ class WikiTasks:
             with store.connect() as db:
                 db.execute("BEGIN")
                 grants.active(db, task, store, require_scope=task.call_scope is not None)
-                return grants.view(db, task.job_id, document_ids=task.document_ids, reservation_ids=task.reservation_ids)
+                grant = grants.view(db, task.job_id, document_ids=task.document_ids, reservation_ids=task.reservation_ids)
+                if grant is not None and include_selection:
+                    selected = [row[0] for row in db.execute(
+                        "SELECT DISTINCT selection_id FROM job_selection_evidence WHERE job_id=? ORDER BY selection_id LIMIT 9", (task.job_id,))]
+                    grant |= {"selection_ids": selected[:8], "selection_ids_truncated": len(selected) > 8}
+                return grant
         except WikiError:
             if strict:
                 raise

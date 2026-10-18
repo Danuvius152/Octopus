@@ -593,6 +593,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/wiki-jobs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Wiki Jobs */
+        get: operations["wiki_jobs_api_sessions__session_id__wiki_jobs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/transcript-export": {
         parameters: {
             query?: never;
@@ -1116,6 +1133,125 @@ export interface paths {
         put?: never;
         /** Cancel Research */
         post: operations["cancel_research_api_sessions__session_id__research__research_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/wiki/recovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recovery Inspect */
+        get: operations["recovery_inspect_api_wiki_recovery_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/wiki/recovery/export": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Recovery Export */
+        post: operations["recovery_export_api_wiki_recovery_export_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/wiki/recovery/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Recovery Plan */
+        post: operations["recovery_plan_api_wiki_recovery_plan_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/wiki/recovery/{recovery_id}/plan": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recovery Full Plan */
+        get: operations["recovery_full_plan_api_wiki_recovery__recovery_id__plan_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/wiki/recovery/{recovery_id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Recovery Approve */
+        post: operations["recovery_approve_api_wiki_recovery__recovery_id__approve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/wiki/recovery/{recovery_id}/apply": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Recovery Apply */
+        post: operations["recovery_apply_api_wiki_recovery__recovery_id__apply_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/wiki/recovery/{recovery_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recovery Status */
+        get: operations["recovery_status_api_wiki_recovery__recovery_id__get"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3765,6 +3901,102 @@ export interface components {
             /** Revoked At */
             revoked_at?: string | null;
         };
+        /** JobCard */
+        JobCard: {
+            /** Job Id */
+            job_id: string;
+            /** State Version */
+            state_version: number;
+            /** Attempt */
+            attempt: number;
+            /** Status */
+            status: string;
+            /**
+             * Settlement Phase
+             * @enum {string}
+             */
+            settlement_phase: "none" | "pending" | "confirmed" | "unconfirmed";
+            /** Worker Session Id */
+            worker_session_id: string | null;
+            /** Scope */
+            scope: string;
+            /** Scope Truncated */
+            scope_truncated: boolean;
+            progress: components["schemas"]["JobProgress"];
+            /** Outcome Refs */
+            outcome_refs: components["schemas"]["JobOutcome"][];
+            /** Outcome Count */
+            outcome_count: number;
+            /** Outcome Refs Truncated */
+            outcome_refs_truncated: boolean;
+            effects?: components["schemas"]["JobEffects"];
+            /**
+             * Recording Pending
+             * @default 0
+             */
+            recording_pending: number;
+            /** Error */
+            error: string | null;
+            /** Error Truncated */
+            error_truncated: boolean;
+            /** Created At */
+            created_at: string;
+            /** Updated At */
+            updated_at: string;
+            /** Vault Id */
+            vault_id: string;
+            /** Subscriber Id */
+            subscriber_id: string;
+            /** Origin Request Id */
+            origin_request_id: string;
+            /** Received At */
+            received_at: string;
+        };
+        /** JobControlRequest */
+        JobControlRequest: {
+            /** Expected Attempt */
+            expected_attempt?: number | null;
+            /** Expected Vault Id */
+            expected_vault_id?: string | null;
+        };
+        /** JobEffects */
+        JobEffects: {
+            /**
+             * Recorded
+             * @default 0
+             */
+            recorded: number;
+            /**
+             * Applied
+             * @default 0
+             */
+            applied: number;
+            /**
+             * Index Pending
+             * @default 0
+             */
+            index_pending: number;
+        };
+        /** JobOutcome */
+        JobOutcome: {
+            /** Doc Id */
+            doc_id: string | null;
+            /** Path */
+            path: string;
+            /** Revision */
+            revision: string;
+        };
+        /** JobProgress */
+        JobProgress: {
+            /** Total */
+            total: number;
+            /** Completed */
+            completed: number;
+            /** Attention */
+            attention: number;
+            /** Failed */
+            failed: number;
+        };
         /** LoginRequest */
         LoginRequest: {
             /** Username */
@@ -4181,6 +4413,25 @@ export interface components {
             length: number;
             /** Expected Revision */
             expected_revision?: string | null;
+        };
+        /** RecoveryApproval */
+        RecoveryApproval: {
+            /** Plan Hash */
+            plan_hash: string;
+        };
+        /** RecoveryPlan */
+        RecoveryPlan: {
+            /** Retain */
+            retain?: components["schemas"]["RecoveryRetention"][];
+        };
+        /** RecoveryRetention */
+        RecoveryRetention: {
+            /** Doc */
+            doc: string;
+            /** Path */
+            path: string;
+            /** Expected Revision */
+            expected_revision: string;
         };
         /** RegisterRequest */
         RegisterRequest: {
@@ -6400,6 +6651,41 @@ export interface operations {
             };
         };
     };
+    wiki_jobs_api_sessions__session_id__wiki_jobs_get: {
+        parameters: {
+            query?: {
+                offset?: number;
+                limit?: number;
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobCard"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     export_transcript_api_sessions__session_id__transcript_export_get: {
         parameters: {
             query?: {
@@ -7326,6 +7612,243 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recovery_inspect_api_wiki_recovery_get: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recovery_export_api_wiki_recovery_export_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recovery_plan_api_wiki_recovery_plan_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RecoveryPlan"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recovery_full_plan_api_wiki_recovery__recovery_id__plan_get: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                recovery_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recovery_approve_api_wiki_recovery__recovery_id__approve_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                recovery_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RecoveryApproval"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recovery_apply_api_wiki_recovery__recovery_id__apply_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                recovery_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RecoveryApproval"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recovery_status_api_wiki_recovery__recovery_id__get: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                recovery_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -8358,7 +8881,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["JobControlRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -8391,7 +8918,11 @@ export interface operations {
             };
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["JobControlRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

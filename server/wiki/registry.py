@@ -72,6 +72,7 @@ class WikiRegistry:
         self._starting: object | None = None
         self._close_gate = threading.Lock()
         self._drain_locks: dict[str | None, Any] = {}
+        self._recoveries = None
 
     @property
     def legacy_enabled(self):
@@ -152,7 +153,7 @@ class WikiRegistry:
             else Path(settings.wiki_dir).expanduser()
         )
 
-    def config(self, user_id: str | None) -> dict[str, Any]:
+    def config(self, user_id: str | None, *, require_root=True) -> dict[str, Any]:
         path = self.state(user_id) / "config.json"
         if not path.is_file():
             raise WikiError("No local wiki is registered for this account", 404)
@@ -162,7 +163,7 @@ class WikiRegistry:
                 raise ValueError("unsupported configuration structure")
             if not isinstance(config.get("root"), str) or not Path(config["root"]).is_absolute():
                 raise ValueError("root must be an absolute path")
-            if not Path(config["root"]).is_dir():
+            if require_root and not Path(config["root"]).is_dir():
                 raise ValueError("vault root is unavailable")
             if not isinstance(config.get("curator_agent_id"), str) or not config["curator_agent_id"]:
                 raise ValueError("curator binding is missing")
@@ -270,6 +271,33 @@ class WikiRegistry:
 
     def store(self, user_id: str | None) -> WikiStore:
         return self._store(user_id)
+
+    def recoveries(self):
+        from .recovery import RecoveryManager
+
+        with self._lock:
+            if self._recoveries is None:
+                self._recoveries = RecoveryManager(self)
+            return self._recoveries
+
+    def publish_recovery(self, user_id, store, permit):
+        """Publish the verified same-observer receiver after its durable receipt."""
+        with self._account_lock(user_id), self.registration_lock(user_id), self._lock:
+            config = self.config(user_id)
+            if (config != permit.config or permit.manager.registry is not self or store.events is not permit.observer
+                    or self._closing or self._stopped or user_id not in self._blocked
+                    or self._drained.get(user_id) != (self._owner_epochs.get(user_id, 0), self._incarnation)):
+                raise WikiError("Filesystem recovery publication binding or drain changed", 503)
+            with store.connect() as db:
+                permit.check(db)
+                receipt = db.execute("SELECT phase,completion_receipt FROM filesystem_recoveries WHERE id=?", (permit.recovery_id,)).fetchone()
+                if receipt is None or receipt["phase"] != "complete" or not receipt["completion_receipt"]:
+                    raise WikiError("Filesystem recovery handoff is not durably complete", 503)
+            key = self._key(user_id, self.state(user_id).resolve(), config)
+            self._stores[key] = store
+            store._recovery = None
+            self._advance(user_id)
+            self._blocked.discard(user_id)
 
     def _allowed(self, user_id, capability=None):
         if capability is not None:
@@ -448,6 +476,8 @@ class WikiRegistry:
                 captured = [*self._stores.values(), *self._retired_stores]
                 self._retired_stores.update((store, key[0]) for key, store in self._stores.items())
                 self._stores.clear()
+            if self._recoveries is not None:
+                self._recoveries.close()
             for permit in pending:
                 if not permit.finished.wait(30):
                     raise WikiError("Wiki construction cleanup is unconfirmed; registry remains closed", 503)

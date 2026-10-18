@@ -24,6 +24,7 @@ from ..models import (
 )
 from ..session_manager import ForkError, fork_info_fields
 from ..sessions import SessionManager
+from ..wiki.contracts import JobCard
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 
@@ -356,6 +357,21 @@ async def import_session(
         # applied (it's in the messages list above).
         next_message_seq=max((m.seq for m in messages if m.seq is not None), default=-1) + 1,
     )
+
+
+@router.get("/{session_id}/wiki-jobs", response_model=list[JobCard])
+async def wiki_jobs(
+    session_manager: SessionMgr,
+    session_id: str,
+    user_id: ScopeUser = None,
+    offset: int = Query(0, ge=0),
+    limit: int = Query(30, ge=1, le=100),
+    _: str = Depends(verify_token),
+):
+    binding = await session_manager.db.get_session_binding(session_id)
+    if binding is None or binding["user_id"] != user_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    return await session_manager.db.wiki_job_cards(session_id, user_id, offset=offset, limit=limit)
 
 
 @router.get("/{session_id}", response_model=SessionDetail)

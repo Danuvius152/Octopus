@@ -3,7 +3,7 @@
 import re
 from datetime import UTC, datetime
 
-VERSION = 10
+VERSION = 11
 
 
 def validate_filesystem_ledger(db):
@@ -221,3 +221,11 @@ def initialize(store):
             db.execute("UPDATE documents SET signature=''")
             db.execute("UPDATE index_state SET checked_at=NULL")
         maintenance_inputs.initialize(db)
+        from . import job_events, recovery_state
+
+        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=11").fetchone():
+            job_events.initialize(db)
+            recovery_state.initialize(db)
+            db.execute("INSERT INTO wiki_schema VALUES(11,?)", (datetime.now(UTC).isoformat(),))
+        job_events.require(db)
+        recovery_state.require(db)

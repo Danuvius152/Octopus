@@ -95,9 +95,10 @@ async def test_cancel_keeps_an_uncertain_prepared_path_and_retry_never_recreates
         "idempotency_key": "must-not-steal", "creation": {"purpose": "requested_knowledge_page", "paths": [item["path"]]}})
     assert conflict.status_code == 409
     retried = await client.post(f"/api/wiki/jobs/{job['id']}/retry", headers=wiki_api.HEADERS)
-    assert retried.status_code == 200, retried.text
-    assert retried.json()["items"][0]["status"] == "attention"
-    assert retried.json()["grant"]["allowed_new_paths"] == (["Library/unstarted.md"] if also_unstarted else [])
+    assert retried.status_code == 409, retried.text
+    retained = jobs.get(job["id"])
+    assert retained["status"] == "cancelled" and retained["settlement_phase"] == "unconfirmed"
+    assert retained["items"][0]["status"] == "attention"
     after = reservations(jobs, job["id"])[item["reservation_id"]]
     assert (after["document_id"], after["change_id"]) == (before["document_id"], before["change_id"])
     assert not (root / item["path"]).exists()

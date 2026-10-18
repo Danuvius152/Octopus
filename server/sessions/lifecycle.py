@@ -308,7 +308,7 @@ class LifecycleMixin(SessionManagerBase):
         return session
 
     async def archive_session(
-        self, session_id: str, *, replace: bool = True
+        self, session_id: str, *, replace: bool = True, only_request_id: str | None = None,
     ) -> Session | None:
         """Hide the current session and return a fresh one with the same
         user-visible settings (name / working_dir / credential_id).
@@ -327,21 +327,32 @@ class LifecycleMixin(SessionManagerBase):
         is nothing to repoint (agent-refactor.md §5.2).
 
         If the old session has a running turn, it's interrupted first.
+        An automatic owner may supply only_request_id: under the admission
+        lock, any later request leaves the session open and is never stopped.
         """
         old = self.sessions.get(session_id)
         if old is None:
             raise ValueError(f"Session {session_id} not found")
 
-        task = asyncio.create_task(self._archive_live_session(old, replace=replace),
+        task = asyncio.create_task(self._archive_live_session(old, replace=replace, only_request_id=only_request_id),
                                    name=f"archive-session-{session_id}")
         self._own_task(task)
         return await asyncio.shield(task)
 
-    async def _retire_archived_session(self, session: Session, reservation: object) -> None:
+    async def _retire_archived_session(
+        self, session: Session, reservation: object, *, only_request_id: str | None = None,
+    ) -> bool:
         """Close explicit admission and finish captured work before hiding it."""
         async with session._dispatch_lock:
             if self.sessions.get(session.id) is not session:
                 raise ValueError(f"Session {session.id} not found")
+            if only_request_id is not None:
+                requests = [*session._pending_queue, *session._steer_queue,
+                            *([session._current_request] if session._current_request else [])]
+                if (any(request.request_id != only_request_id for request in requests)
+                        or session._recording_blocked is not None
+                        and session._recording_blocked.request_id != only_request_id):
+                    return False
             if session._admission_closed or session._archive_reservation is not None:
                 raise ValueError(f"Session {session.id} is already being archived")
             if session._recording_blocked is not None:
@@ -371,11 +382,15 @@ class LifecycleMixin(SessionManagerBase):
         await self._await_backend_retirement(session)
         if session._recording_blocked is not None:
             raise ValueError("Result recording must be verified before archiving the session")
+        return True
 
-    async def _archive_live_session(self, old: Session, *, replace: bool) -> Session | None:
+    async def _archive_live_session(
+        self, old: Session, *, replace: bool, only_request_id: str | None = None,
+    ) -> Session | None:
         reservation = object()
         try:
-            await self._retire_archived_session(old, reservation)
+            if not await self._retire_archived_session(old, reservation, only_request_id=only_request_id):
+                return None
             return await self._finish_session_archive(old, replace=replace)
         finally:
             if old._archive_reservation is reservation:

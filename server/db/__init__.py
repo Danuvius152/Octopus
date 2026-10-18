@@ -30,6 +30,7 @@ from .research import ResearchMixin
 from .schedules import SchedulesMixin
 from .sessions import SessionsMixin
 from .users import UsersMixin
+from .wiki_jobs import WikiJobsMixin
 
 
 class Database(
@@ -43,6 +44,7 @@ class Database(
     ApplicationsMixin,
     NotifiersMixin,
     UsersMixin,
+    WikiJobsMixin,
     DatabaseBase,
 ):
     """SQLite persistence (aiosqlite, WAL, FK cascade).

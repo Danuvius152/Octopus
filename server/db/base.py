@@ -358,6 +358,7 @@ class DatabaseBase:
     OWNED_TABLES: tuple[str, ...] = (
         "agents",
         "sessions",
+        "wiki_job_notifications",
         "applications",
         "backend_credentials",
         "connector_installations",

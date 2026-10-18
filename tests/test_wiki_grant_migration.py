@@ -190,8 +190,10 @@ async def test_completed_v9_rows_are_not_reinterpreted_as_new_authority(client, 
     with jobs.store.connect() as db:
         assert db.execute("SELECT payload FROM jobs").fetchone()[0] == raw
         assert db.execute("SELECT count(*) FROM wiki_job_grants").fetchone()[0] == 0
-    with pytest.raises(WikiError, match="re-admission"):
-        jobs.retry("old-job")
+    # Replaying completed work returns its existing result, including on old
+    # jobs with no surviving write grant. It does not create new authority.
+    assert jobs.retry("old-job") == job
+    assert jobs.next_queued() is None
 
 
 @pytest.mark.parametrize("path", ["Library/note.md", "Library/assets/project/notes.md", "Library/ASSETS/project/notes.markdown", None])

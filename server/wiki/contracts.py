@@ -57,6 +57,61 @@ class GrantReadmissionRequest(BaseModel):
     creation: CreationRequest | None = None
 
 
+class JobControlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    expected_attempt: int | None = Field(default=None, ge=0, strict=True)
+    expected_vault_id: str | None = None
+
+
+class JobProgress(BaseModel):
+    total: int = Field(ge=0)
+    completed: int = Field(ge=0)
+    attention: int = Field(ge=0)
+    failed: int = Field(ge=0)
+
+
+class JobOutcome(BaseModel):
+    doc_id: str | None
+    path: str
+    revision: str
+
+
+class JobEffects(BaseModel):
+    recorded: int = Field(default=0, ge=0)
+    applied: int = Field(default=0, ge=0)
+    index_pending: int = Field(default=0, ge=0)
+
+
+class JobSnapshot(BaseModel):
+    """A bounded notification; the job detail retains the complete evidence."""
+    model_config = ConfigDict(extra="forbid")
+    job_id: str
+    state_version: int = Field(ge=1)
+    attempt: int = Field(ge=0)
+    status: str
+    settlement_phase: Literal["none", "pending", "confirmed", "unconfirmed"]
+    worker_session_id: str | None
+    scope: str = Field(max_length=512)
+    scope_truncated: bool
+    progress: JobProgress
+    outcome_refs: list[JobOutcome] = Field(max_length=10)
+    outcome_count: int = Field(ge=0)
+    outcome_refs_truncated: bool
+    effects: JobEffects = Field(default_factory=JobEffects)
+    recording_pending: int = Field(default=0, ge=0)
+    error: str | None = Field(max_length=512)
+    error_truncated: bool
+    created_at: str
+    updated_at: str
+
+
+class JobCard(JobSnapshot):
+    vault_id: str
+    subscriber_id: str
+    origin_request_id: str
+    received_at: str
+
+
 class ReadBatch(BaseModel):
     items: list[ReadRequest] = Field(min_length=1, max_length=20)
     budget_chars: int = Field(default=24000, ge=1, le=96000)

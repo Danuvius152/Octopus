@@ -1,11 +1,35 @@
 """Remove only verified empty future structures when constructing old schemas."""
 
 
+def remove_future_job_events(db):
+    from server.wiki import job_events, recovery_state
+
+    job_events.require(db)
+    recovery_state.require(db)
+    for table in recovery_state.TABLES:
+        assert db.execute("SELECT count(*) FROM " + table).fetchone()[0] == 0
+    for trigger in recovery_state.TRIGGERS:
+        db.execute("DROP TRIGGER " + trigger)
+    for table in reversed(recovery_state.TABLES):
+        db.execute("DROP TABLE " + table)
+    db.execute("DELETE FROM wiki_protocols WHERE name='filesystem_recovery'")
+    for table in job_events.TABLES:
+        assert db.execute("SELECT count(*) FROM " + table).fetchone()[0] == 0
+    for trigger in job_events.TRIGGERS | job_events.job_triggers():
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?", (trigger,)).fetchone():
+            db.execute("DROP TRIGGER " + trigger)
+    for table in reversed(job_events.TABLES):
+        db.execute("DROP TABLE " + table)
+    db.execute("DELETE FROM wiki_protocols WHERE name='wiki_job_events'")
+    db.execute("DELETE FROM wiki_schema WHERE version=11")
+
+
 def remove_future_selections(db):
     from server.wiki import grants, maintenance_selections
 
     # Reject a damaged current fixture and any accepted/observed state rather
     # than silently discarding durable evidence to make a migration test pass.
+    remove_future_job_events(db)
     maintenance_selections.require(db)
     grants.require(db)
     for table in grants.TABLES:

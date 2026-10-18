@@ -3,8 +3,9 @@
 Unlike the bare-CLI *_real tests (which use host ambient auth), deep research
 runs through an Octopus credential. The codex credential is directory-backed
 (its own CODEX_HOME with auth.json), so we discover a usable one on disk and
-bind a session to its id — no DB credential row needed, since codex resolution
-is purely path-based. Gated + skipped when no usable codex credential exists.
+register its metadata in the isolated DB before binding a session to its id.
+Authentication stays in that directory; no login secret is copied into the DB.
+Gated + skipped when no usable codex credential exists.
 Costs real API calls + ~30-60s. Drives the WHOLE stack:
 ResearchManager → orchestrator → real codex web_search → cited report → inject.
 """
@@ -16,6 +17,7 @@ import functools
 import os
 import subprocess
 import tempfile
+from datetime import UTC, datetime
 
 import pytest
 
@@ -80,6 +82,10 @@ async def test_real_codex_deep_research_end_to_end(tmp_path, monkeypatch):
     db = Database(":memory:")
     await db.initialize()
     try:
+        await db.save_credential(
+            cred_id, "codex", "Configured Codex", "oauth", "",
+            datetime.now(UTC).isoformat(),
+        )
         mgr = SessionManager()
         await mgr.initialize(db)
         rm = ResearchManager()
@@ -106,8 +112,7 @@ async def test_real_codex_deep_research_end_to_end(tmp_path, monkeypatch):
         monkeypatch.setattr(rm_mod, "run_research", small_run)
 
         agent = await db.get_system_agent()
-        # Bind the session to the directory-backed codex credential id — the
-        # manager resolves it to its CODEX_HOME (no DB row needed).
+        # Binding validates the DB metadata; execution resolves CODEX_HOME.
         session = await mgr.create_session(
             agent["id"], "Research", str(tmp_path), backend="codex",
             credential_id=cred_id,

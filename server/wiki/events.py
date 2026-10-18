@@ -357,3 +357,12 @@ class VaultEvents:
                 for key, observer in list(_OBSERVERS.items()):
                     if observer is self:
                         del _OBSERVERS[key]
+
+    def retire_exclusive(self) -> None:
+        """Retire a replaced root only after every other observer lease left."""
+        from .store import WikiError
+
+        with _OBSERVERS_LOCK:
+            if self._closed or self._references != 1:
+                raise WikiError("Previous filesystem observer leases have not retired; recovery stays closed", 503)
+            self.release()

@@ -364,7 +364,8 @@ async def test_only_navigation_output_does_not_complete_primary_or_unstarted_cre
         async def start_message(self, session_id, prompt, **kwargs):
             async def events():
                 self.turns += 1
-                token = tasks.open(SimpleNamespace(id=session_id, user_id=None, agent_id=config["curator_agent_id"]), "maintain")
+                token = tasks.open(SimpleNamespace(id=session_id, user_id=None, agent_id=config["curator_agent_id"]), "maintain",
+                                   request_id=kwargs["request_id"])
                 try:
                     headers = {"Authorization": "Bearer " + mint(session_id, wiki_task_id=token)}
                     source, navigation = await read_pair(client, headers, "Library/index.md")
@@ -375,7 +376,7 @@ async def test_only_navigation_output_does_not_complete_primary_or_unstarted_cre
                     yield {"type": "result", "content": "Navigation was updated", "is_error": False}
                 finally:
                     tasks.close(token)
-            return await receipt_from_events(events())
+            return await receipt_from_events(events(), kwargs["request_id"])
 
     curator = NavigationCurator(jobs)
     result = await process(jobs, job, curator)

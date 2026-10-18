@@ -116,12 +116,14 @@ def vault_read(function):
 class WikiStore:
     registration_generation: str | None = None
 
-    def __init__(self, root: Path, state: Path, vault_id: str, *, on_construct=None) -> None:
+    def __init__(self, root: Path, state: Path, vault_id: str, *, on_construct=None, recovery=None) -> None:
         self._lifecycle = threading.Condition()
         self._local = threading.local()
         self._users = 0
         self._retired = False
         self._events_released = True
+        self._recovery = recovery
+        self._schema_ready = False
         self.root = root.resolve()
         self.state = state
         self.vault_id = vault_id
@@ -148,6 +150,13 @@ class WikiStore:
             raise
         self._synchronizing = threading.local()
         try:
+            self._schema_ready = True
+            with self.connect():
+                pass  # Check the durable handoff gate before ordinary initialization.
+            if recovery is not None:
+                if self.events is not recovery.observer:
+                    raise WikiError("Filesystem recovery observer changed", 503)
+                return
             self.events.bind_journal(self.db_path, self.vault_id)
             with self.connect() as db:
                 checked = db.execute("SELECT checked_at FROM index_state WHERE singleton=1").fetchone()[0]
@@ -174,6 +183,8 @@ class WikiStore:
         with self._lifecycle:
             if self._retired:
                 raise WikiError("This Wiki Store has retired; acquire the current registration", 503)
+            if self._recovery is None and getattr(getattr(getattr(self, "events", None), "journal", None), "recovery", None) is not None:
+                raise WikiError("Filesystem recovery owns this observer; ordinary access stays closed", 503)
             self._users += 1
             lease = StoreBorrow(self)
         try:
@@ -330,6 +341,10 @@ class WikiStore:
             db.row_factory = sqlite3.Row
             try:
                 db.execute("PRAGMA recursive_triggers=ON")
+                if self._schema_ready:
+                    from . import recovery_state
+
+                    recovery_state.access(db, self.root, self.vault_id, self._recovery)
                 with db:
                     yield db
             finally:
@@ -523,7 +538,7 @@ class WikiStore:
             db.execute("UPDATE wiki_edges SET status='missing' WHERE target_doc IN (SELECT id FROM document_identities WHERE path IS NULL)")
         db.execute("DELETE FROM managed_notes WHERE path=?", (relative,))
 
-    def _index(self, db: sqlite3.Connection, relative: str, *, raw: bytes | None = None, finalize: bool = True, source_policy=None) -> sqlite3.Row:
+    def _index(self, db: sqlite3.Connection, relative: str, *, raw: bytes | None = None, finalize: bool = True, source_policy=None, prepared=None) -> sqlite3.Row:
         path = self.path(relative)
         if not path.is_file() or path.suffix.lower() not in SUPPORTED:
             raise WikiError("Document not found", 404)
@@ -542,13 +557,18 @@ class WikiStore:
             "SELECT * FROM documents WHERE path=?", (relative,)
         ).fetchone()
         previous_metadata = json.loads(existing["metadata"]) if existing is not None else {}
-        if source_policy is not None:
+        if prepared is not None and "source_draft" in prepared:
+            draft = prepared["source_draft"]
+            if (draft["source_doc"], draft["path"], draft["revision"]) != (doc_id, relative, digest):
+                raise WikiError("Prepared recovery source proof changed", 409)
+            source_bindings.stage(db, draft)
+        elif source_policy is not None:
             managed = db.execute("SELECT * FROM managed_notes WHERE path=?", (relative,)).fetchone()
             supplied = source_bindings.metadata(db, doc_id, relative, raw, dict(managed) if managed else None)
             source_bindings.stage(db, source_bindings.incoming(
                 db, doc_id, relative, digest, source_bindings.entries(supplied), source_policy))
         if (
-            source_policy is None
+            prepared is None and source_policy is None
             and
             existing is not None
             and existing["id"] == doc_id
@@ -577,7 +597,7 @@ class WikiStore:
                 "SELECT * FROM documents WHERE id=?", (existing["id"],)
             ).fetchone()
         try:
-            extracted = extract(raw, path.suffix.lower())
+            extracted = prepared["extracted"] if prepared is not None else extract(raw, path.suffix.lower())
         except Exception as exc:
             extracted = {
                 "text": "",
@@ -586,7 +606,7 @@ class WikiStore:
                 "metadata": {"error": f"{type(exc).__name__}: {exc}"},
             }
         text = extracted["text"]
-        metadata = extracted["metadata"]
+        metadata = dict(extracted["metadata"])
         metadata["metadata_validation_version"] = portable_metadata.VERSION
         if path.suffix.lower() == ".pdf":
             metadata["revision_kind"] = "stat"
@@ -607,7 +627,7 @@ class WikiStore:
         if exclusion:
             kind = "asset"
             metadata["asset_reason"] = exclusion
-        parsed = document_format.parse(text)
+        parsed = prepared["parsed"] if prepared is not None else document_format.parse(text)
         if parsed.error and existing is not None and existing["id"] == doc_id:
             if not previous_metadata.get("frontmatter_error") or previous_metadata.get("frontmatter_retained_from"):
                 for name in ("title", "description", "type", "status", "resource", "uid",

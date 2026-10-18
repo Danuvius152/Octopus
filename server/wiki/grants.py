@@ -396,6 +396,11 @@ def active(db, task, store, *, require_scope=True):
             or store.registration_generation != config["registration_generation"]
             or task.registration is not None and task.registration != config):
         raise WikiError("This exact maintenance assignment is no longer active", 403)
+    if task.assigned_request_id is not None:
+        state = db.execute("SELECT attempt FROM wiki_job_state WHERE job_id=?", (task.job_id,)).fetchone()
+        if (task.request_id != task.assigned_request_id or state is None
+                or state[0] != task.assigned_attempt):
+            raise WikiError("This original maintenance request or attempt is no longer active", 403)
 
 
 def authorize(db, task, store, path, *, create=False):

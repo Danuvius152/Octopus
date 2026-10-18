@@ -66,7 +66,17 @@ def index(db, row, raw):
 
 def find(store, raw, *, markdown_only=False):
     """Caller holds the writer lock. Recheck candidate bytes before reusing."""
+    store.synchronize()
+    found = _find_current(store, raw, markdown_only=markdown_only)
+    if found is not None:
+        return found
+    # A miss still needs compensation: an existing file can change through
+    # an outside hardlink without notifying this vault's directory watches.
     store.refresh()
+    return _find_current(store, raw, markdown_only=markdown_only)
+
+
+def _find_current(store, raw, *, markdown_only):
     with store.connect() as db:
         candidates = db.execute(
             "SELECT doc_id,path FROM raw_materials WHERE original_hash=? ORDER BY path",

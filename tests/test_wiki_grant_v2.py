@@ -405,7 +405,7 @@ async def test_worker_executes_each_finite_output_and_does_not_skip_material_ing
             async def events():
                 self.turns += 1
                 session = SimpleNamespace(id=session_id, user_id=None, agent_id=config["curator_agent_id"])
-                token = tasks.open(session, "maintain")
+                token = tasks.open(session, "maintain", request_id=kwargs["request_id"])
                 headers = {"Authorization": "Bearer " + mint(session_id, wiki_task_id=token)}
                 task = tasks.active[token]
                 assert verify(headers["Authorization"].removeprefix("Bearer ")).wiki_task_id == token
@@ -429,7 +429,7 @@ async def test_worker_executes_each_finite_output_and_does_not_skip_material_ing
                     yield {"type": "result", "content": "All assigned outputs published", "is_error": False}
                 finally:
                     tasks.close(token)
-            return await receipt_from_events(events())
+            return await receipt_from_events(events(), kwargs["request_id"])
 
     curator = HttpCurator(jobs)
     result = await process(jobs, job, curator)

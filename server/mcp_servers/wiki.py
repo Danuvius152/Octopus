@@ -30,34 +30,14 @@ class TaskWiki(FastMCP):
         from ..mcp_identity import current_scope
         from ..wiki.store import WikiError
         from ..wiki.tasks import tasks
+        from ..wiki.workflow import view
 
         try:
             scope = current_scope()
             task = tasks.call(tasks.require(scope), scope)
         except WikiError:
             return []
-        names = {
-            "info",
-            "search",
-            "read",
-            "read_many",
-            "list_documents",
-            "graph",
-            "inspect_image",
-            "jobs",
-            "load_guide",
-            "maintenance_status",
-            "maintenance_select",
-            "maintenance_selection",
-        }
-        if task.mode in {"auto", "maintain"}:
-            if tasks.is_curator_worker(task):
-                names |= {"organize", "blocks", "restructure", "revise", "load_guide"}
-                grant = tasks.current_grant(task)
-                if grant and grant["allow_new_pages"]:
-                    names.add("publish")
-            elif not task.job_id:
-                names.add("maintain")
+        names = view(task).tools
         return [tool for tool in await super().list_tools() if tool.name in names]
 
 
@@ -447,6 +427,26 @@ def restructure(
     New explanations retain attribution; original bytes and private history stay.
     """
     return call("POST", "restructure", body=locals())
+
+
+@mcp.tool()
+def cancel_job(job_id: str, expected_attempt: int | None = None, expected_vault_id: str | None = None) -> dict:
+    """Close writes for this job; pending/unconfirmed means execution or recording is not yet settled.
+
+    Supply the attempt and vault from the current job to reject a stale control.
+    Previously accepted content and operation receipts are retained.
+    """
+    return call("POST", f"jobs/{job_id}/cancel", body={"expected_attempt": expected_attempt, "expected_vault_id": expected_vault_id})
+
+
+@mcp.tool()
+def retry_job(job_id: str, expected_attempt: int | None = None, expected_vault_id: str | None = None) -> dict:
+    """Resume unfinished work after retirement; completed jobs return their original result.
+
+    Unconfirmed original recording is verified without starting another model.
+    Cancellation pending/unconfirmed blocks retry. Original receipts and reread budgets remain.
+    """
+    return call("POST", f"jobs/{job_id}/retry", body={"expected_attempt": expected_attempt, "expected_vault_id": expected_vault_id})
 
 
 @mcp.tool()

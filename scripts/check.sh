@@ -49,9 +49,8 @@ run_gate() {
 }
 
 gate_pytest() {
-  # The hermetic tier: no CLI, no network, no model. `-m "not real"` is the
-  # marker expression that replaced a 13-entry --ignore list.
-  "$ROOT/.venv/bin/pytest" tests/ -m "not real" -q
+  # The release tier never opts into natural-answer evaluation or a CLI.
+  "$ROOT/.venv/bin/pytest" tests/ -m "not real and not knowledge_eval" -q
 }
 
 gate_vitest() { cd "$ROOT/web" && bun run test; }
@@ -75,7 +74,7 @@ gate_e2e() { cd "$ROOT/web" && bun run test:e2e; }
 
 run_gate "backend lint (ruff)"                 gate_ruff
 run_gate "backend types (mypy)"                gate_mypy
-run_gate "backend unit (pytest -m 'not real')" gate_pytest
+run_gate "backend unit (hermetic release selection)" gate_pytest
 run_gate "frontend lint (eslint)"              gate_eslint
 run_gate "frontend unit (vitest)"              gate_vitest
 run_gate "typecheck (tsc -b)"                  gate_tsc

@@ -90,7 +90,7 @@ class CurrentWorker(job_tests.Curator):
             job_id = db.execute("SELECT id FROM jobs WHERE session_id=?", (session_id,)).fetchone()[0]
         session = SimpleNamespace(id=session_id, user_id=self.jobs.user_id,
                                   agent_id=self.jobs.registration["curator_agent_id"])
-        token = tasks.open(session, "maintain")
+        token = tasks.open(session, "maintain", request_id=kwargs["request_id"])
         task = tasks.call(tasks.active[token], verify(mint(session_id, user_id=self.jobs.user_id, wiki_task_id=token)))
         try:
             for item in self.jobs.get(job_id)["items"]:

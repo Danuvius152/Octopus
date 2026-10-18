@@ -145,6 +145,28 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
 
+-- The receive receipt is also the persistent Wiki card. No model turn or
+-- transcript mutation is involved; deletion of its old session keeps the
+-- owner's job evidence and cannot retarget the notification to another user.
+CREATE TABLE IF NOT EXISTS wiki_job_notifications (
+    vault_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    subscriber_id TEXT NOT NULL,
+    user_id TEXT,
+    job_id TEXT NOT NULL,
+    state_version INTEGER NOT NULL CHECK(state_version>0),
+    kind TEXT NOT NULL CHECK(kind IN ('chat','schedule','app','human')),
+    target TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    body TEXT NOT NULL CHECK(json_valid(body)),
+    outcome TEXT NOT NULL CHECK(outcome IN ('delivered','unavailable')),
+    received_at TEXT NOT NULL,
+    PRIMARY KEY(vault_id,event_id,subscriber_id)
+);
+CREATE INDEX IF NOT EXISTS wiki_job_notifications_target
+  ON wiki_job_notifications(user_id,target,vault_id,job_id,state_version DESC);
+
 -- A schedule belongs to the Agent ("every morning, summarize my inbox"),
 -- not to a throwaway thread. Each fire materializes a fresh session under
 -- the agent (scheduler.py). No persistent session_id here anymore.

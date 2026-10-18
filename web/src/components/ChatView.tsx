@@ -17,6 +17,7 @@ import {
 } from "../stores/sessionStore";
 import { ForkDialog } from "./ForkDialog";
 import { ResearchCard } from "./ResearchCard";
+import { WikiJobCards } from "./WikiJobCards";
 import { TranscriptIntegrityNotice } from "./TranscriptIntegrityNotice";
 import { MessageBubble } from "./MessageBubble";
 import { DispatchQueue } from "./DispatchQueue";
@@ -1676,6 +1677,7 @@ export function ChatView({
 
       {activeSessionId && (
         <div className="research-card-wrap shrink-0 px-4 empty:hidden">
+          <WikiJobCards key={activeSessionId} sessionId={activeSessionId} />
           <ResearchCard sessionId={activeSessionId} />
         </div>
       )}

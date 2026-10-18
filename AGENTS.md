@@ -47,35 +47,35 @@ pagination, receipt, settlement and CLI/browser checks remain required.
    machine with both providers must validate both. Select live tests by marker,
    not by listing filenames:
 
-   - `pytest -m "not real"` — the hermetic tier: 1,286 tests, ~47 s, no CLI
-     required. This is what the pre-commit hook and `scripts/check.sh` run.
-   - `pytest -m real` — the 34 tests that drive a live model. `real_claude`
-     (24) and `real_codex` (8) want a CLI that is installed *and signed in*;
-     one two-hop case carries both. `claude_bin` (1) and `codex_bin` (2) want
-     only the binary, because a test of `codex login` must not require already
-     being logged in.
+   - `pytest -m "not real and not knowledge_eval"` — the hermetic tier, with
+     no CLI required. This is the release selection; `knowledge_eval` remains
+     opt-in even if its fixtures do not call a model.
+   - `pytest -m real` — all live-provider cases. `real_claude` and `real_codex`
+     want an installed, signed-in CLI; mixed-provider cases require both.
+     `claude_bin` and `codex_bin` need only the binary. Apply the local provider
+     selection below instead of probing providers this installation lacks.
 
    The markers resolve in `tests/conftest.py:pytest_runtest_setup`, so the
    availability probe fires at setup and never at import — evaluating it at
    import is what used to make a plain `--collect-only` spawn a real `claude`
    call (16.44 s vs 0.80 s). Run with the nvm bin prepended so `codex`
    resolves (see Conventions).
-2. **Frontend unit tests**: `cd web && bun run test` (284 tests)
+2. **Frontend unit tests**: `cd web && bun run test`.
 3. **TypeScript check**: `cd web && bun run typecheck` (`tsc -b --force`).
    Not `tsc --noEmit`: `web/tsconfig.json` is a solution file — `"files": []`
    plus two references — so `--noEmit` on it checks *zero* files and exits 0
    whatever is broken. It passed for months while `bun run build` failed.
-4. **E2E tests**: `cd web && bun run test:e2e` (105 tests, no skips, ~4.5 min,
-   Playwright auto-starts servers). It *is* the two buckets, run as two
+4. **E2E tests**: `cd web && bun run test:e2e` (Playwright auto-starts servers).
+   It *is* the two buckets, run as two
    invocations — not one run that covers both. The accounts spec needs a second
    backend and dev server of its own (`playwright.config.ts`: claiming an
    install retires the token every other spec signs in with), and with those two
    idle servers up the real-CLI half failed a different Chat test on each of two
    runs. So the buckets are also the unit of iteration —
-   `bun run test:e2e:fast` (67 pure-UI tests, ~45 s — login / accounts /
+   `bun run test:e2e:fast` (pure UI — login / accounts /
    sessions /
    dialogs / sidebar / sidebar pins / virtualized chat / attachments / etc.) and
-   `bun run test:e2e:llm` (38 real-LLM tests, ~4.2 min, **one worker** — two
+   `bun run test:e2e:llm` (real LLM, **one worker** — two
    concurrent real-CLI turns on this box time out about one run in three, a
    different test each time, and serially the bucket is faster anyway — chat, /schedule,
    an agent scheduling itself, /showme, /archive, mcp__bg__run, AskUserQuestion, agent-collaboration,
@@ -109,17 +109,16 @@ valid protocol checks.
 
 ## Test Coverage
 
-| Suite | Tool | Command | Count | Scope |
-|-------|------|---------|-------|-------|
-| Backend unit | pytest | `pytest -m "not real"` | 1286 | The whole backend, hermetically: config, models, session manager, database + migrations, REST + WS routers, harness layer, connectors, delegations, applications, scheduler, research, token rotation, accounts + keys + workspace confinement + tenant isolation (behavioural *and* structural — no route may go unscoped), the in-process MCP namespaces, monitoring. No CLI, no network. ~45 s. |
-| Real-CLI tier | pytest | `pytest -m real` | 34 | The cases that must drive a live model: both backends end to end, delegation chains, an agent scheduling itself, memory read-back, fork copy, codex login. Needs a signed-in CLI. |
-| Frontend unit | vitest | `cd web && bun run test` | 284 | Zustand store, `useWebSocket`, and every component with logic worth pinning — delegation and sub-agent cards, fork dialog, app icons and backends, streaming buffer, sidebar fold and pins, the All tab, mobile drawer, viewport height, the sign-in screen's two eras, the account page. ~4 s. |
-| E2E | Playwright | `cd web && bun run test:e2e` | 105 | The product as a user meets it, in a real browser: login, sessions, real Claude turns, steering, queue + interrupt, mobile layout, connectors, applications, sidebar pins (drag + keyboard reorder), `/rewind`, `/research`, the monitor page, and accounts end to end (claim the install, invite, register, isolation, sign-out, password change) against a backend of their own. `:fast` (67, ~45 s) skips the `@llm` half; `:llm` (38, ~3.7 min) is the rest, and `test:e2e` is the two in sequence. |
+| Suite | Tool | Command | Scope |
+|-------|------|---------|-------|
+| Backend unit | pytest | `pytest -m "not real and not knowledge_eval"` | Config, models, session lifecycle, DB/migrations, REST/WS, harness protocols, integrations, scheduling, accounts, workspace/tenant isolation, MCP and Wiki. No CLI or network. |
+| Real-CLI tier | pytest | Local marker selection above | Actual available-provider execution, recording, recovery, delegation and CLI contracts. Deselected providers are not passes. |
+| Frontend unit | vitest | `cd web && bun run test` | Stores, HTTP/WS handling and components, including persistent task cards and account/service generation boundaries. |
+| E2E | Playwright | `cd web && bun run test:e2e` | Real browser and server persistence. Run the offline `:fast` bucket separately from the configured-provider `:llm` bucket. |
 
 For what any individual test covers, ask the suite rather than this table:
-`pytest --collect-only -q`, or `-m real` / `-m "not real"` to see a tier. A
-hand-written inventory of 1,320 tests cannot stay true, and it cost ~16 KB of
-every session's context to try.
+`pytest --collect-only -q` with the relevant marker selection. Record actual
+counts and provider scope from that run's logs; counts here would become stale.
 
 ## Project Structure
 
@@ -268,13 +267,11 @@ agents, which gained `POST /api/agents/{id}/unarchive` for the same section).
 > For live HMR, run `cd web && bun dev` and hit the dev server's port
 > (5173) instead of the backend.
 >
-> **Shipping to the running service**: restart the backend *before*
-> rebuilding the frontend (`sudo systemctl restart octopus`, wait for
-> `/health`, then `bun run build`). The other order leaves a new SPA
-> calling an old server — on 2026-09-27 a fresh sidebar's `POST
-> /agents/{id}/unpin` got 405 for the two minutes until the restart. An
-> open tab still on the old `index.html` will 404 its hashed assets
-> after the rebuild either way; a reload fixes it.
+> **Shipping to the running service**: follow
+> [自动发布](docs/local-wsl.md#自动发布). Build and validate the candidate
+> snapshot before the switch, wait for natural drain, then atomically switch
+> the backend and its matching built assets. The development tree and the
+> running release are separate; restarting does not publish unverified edits.
 
 ```bash
 # Backend

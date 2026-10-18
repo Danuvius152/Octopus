@@ -116,6 +116,7 @@ def test_recovered_delete_detaches_before_a_same_hash_creation_receipt_can_be_re
     assert history.store.read("Library/note.md")["id"] != original["id"]
     # No model is called: the old creation receipt fails at the enqueue gate.
     monkeypatch.setattr(registry, "store", lambda _user_id: history.store)
+    monkeypatch.setattr(registry, "state", lambda _user_id: history.state)
     monkeypatch.setattr(registry, "config", lambda _user_id: {
         "root": str(history.store.root), "vault_id": history.store.vault_id,
         "curator_agent_id": "curator", "app_id": None,

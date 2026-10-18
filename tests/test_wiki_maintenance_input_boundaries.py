@@ -92,12 +92,18 @@ def test_review_request_key_replacement_removes_old_job_members(prepared, operat
         db.execute("PRAGMA recursive_triggers=ON")
         db.execute("BEGIN IMMEDIATE")
         key = db.execute("SELECT request_key FROM jobs WHERE id=?", (first["id"],)).fetchone()[0]
+        control = tuple(db.execute("SELECT state_version,attempt FROM wiki_job_state WHERE job_id=?", (second["id"],)).fetchone())
         if operation == "insert":
             db.execute("""INSERT OR REPLACE INTO jobs
                           SELECT id,?,payload_hash,payload,status,items,error,session_id,created_at,updated_at
                           FROM jobs WHERE id=?""", (key, second["id"]))
         else:
             db.execute("UPDATE OR REPLACE jobs SET request_key=? WHERE id=?", (key, second["id"]))
+        current = tuple(db.execute("SELECT state_version,attempt FROM wiki_job_state WHERE job_id=?", (second["id"],)).fetchone())
+        assert current[1] == control[1]
+        if operation == "insert":
+            assert current[0] > control[0]
+        assert db.execute("SELECT 1 FROM wiki_job_outbox WHERE job_id=?", (first["id"],)).fetchone()
         for table in ("maintenance_job_members", "maintenance_job_items", "maintenance_job_dirty"):
             assert not db.execute("SELECT 1 FROM " + table + " WHERE job_id=?", (first["id"],)).fetchone()
         assert not inputs.publish_documents(db, old, {docs["b"]["id"]: summary(docs["b"])})

@@ -15,6 +15,7 @@ import type {
   SubagentRun as ApiSubagentRun,
   SessionStatus as ApiSessionStatus,
   RuntimeMetadata,
+  WikiJobCard,
 } from "../api";
 
 // Re-export contract types under the names the rest of the frontend
@@ -296,6 +297,8 @@ interface SessionStore {
   setSubagents: (sessionId: string, runs: SubagentRun[]) => void;
 
   dispatchStates: Record<string, DispatchState>;
+  wikiJobs: Record<string, WikiJobCard[]>;
+  mergeWikiJobs: (sessionId: string, cards: WikiJobCard[]) => void;
   dispatchGeneration: string | null;
   retiredDispatchGenerations: string[];
   applyDispatchState: (sessionId: string, state: unknown, expectedGeneration?: string | null) => boolean;
@@ -441,9 +444,10 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   token: localStorage.getItem("octopus_token") || "",
   setToken: (t) => {
     localStorage.setItem("octopus_token", t);
-    set(t ? { token: t } : {
+    const wikiJobs = get().token === t ? get().wikiJobs : {};
+    set(t ? { token: t, wikiJobs } : {
       token: t, dispatchStates: {}, dispatchGeneration: null,
-      retiredDispatchGenerations: [], pendingQueue: {},
+      retiredDispatchGenerations: [], pendingQueue: {}, wikiJobs,
     });
   },
 
@@ -740,6 +744,23 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       agentConnectorIds: { ...s.agentConnectorIds, [agentId]: ids },
     })),
 
+  wikiJobs: {},
+  mergeWikiJobs: (sessionId, cards) => set((state) => {
+    const current = state.wikiJobs[sessionId] || [];
+    const values = new Map(current.map((card) => [`${card.vault_id}/${card.job_id}`, card]));
+    let changed = false;
+    for (const card of cards) {
+      const key = `${card.vault_id}/${card.job_id}`;
+      const previous = values.get(key);
+      if (!previous || card.state_version > previous.state_version) {
+        values.set(key, card);
+        changed = true;
+      }
+    }
+    if (!changed) return state;
+    return { wikiJobs: { ...state.wikiJobs, [sessionId]: [...values.values()]
+      .sort((a, b) => b.received_at.localeCompare(a.received_at)) } };
+  }),
   dispatchStates: {},
   dispatchGeneration: null,
   retiredDispatchGenerations: [],

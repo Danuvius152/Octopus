@@ -90,9 +90,9 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | [The schedule an agent sets for itself](plans/schedule-tool.md) | shipped | `mcp__schedule__*` over session-scoped routes: an agent sets, lists, re-times and pauses its own schedules. |
 | [Three small affordances: message time, composer history, `/model`](plans/composer-and-time.md) | shipped | hover a message for its time, ArrowUp for what you sent, `/model` to switch model for one session. |
 | [Turn safety (Layer 1): timeout + process-group reaping](plans/turn-safety.md) | shipped | Bounded automatic recovery after idle stops, an optional whole-turn duration cap, and process-group reaping. |
+| [Wiki 与运行基础缺陷修复：2026-10-17 交接](plans/wiki-bug-remediation-20261017.md) | shipped | 简化后的 A01/A02/A03/A05 实现与本机验收；A04/A06/A07 不在范围。§16 记录当前合同与交付证据，§1–§15 保留历史。 |
 | [共享 Wiki：开发过程总结与当前合同](plans/wiki-development-summary.md) | shipped | Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验收已完成；保留当前合同、证据边界和开发方法。 |
 | [运行日志缺陷修复：设计访谈与行为契约](plans/runtime-log-repair-20261013.md) | shipped | Q12 修复及本地 Codex 验收已完成；Stop 暂停内存积压、人工纠偏优先、明确恢复；保留主要框架，Q11 持久队列不实施。 |
-| [Wiki 与运行基础缺陷修复：2026-10-17 交接](plans/wiki-bug-remediation-20261017.md) | stopped after F12 | F12/P02 r5 的实现、限定成本及完整离线门禁已获独立批准；按用户要求，完善文档后结束本轮。其他整改及整体验收仍有待办，尚未发布。 |
 | [共享 Wiki：未来计划与应用协同](plans/wiki-future-plan.md) | proposed | Sapphire、SmartReader 与条件性扩展的统一计划；保留未完成合同，不把本文当作开发或生产写入授权。 |
 | [运行时接口修补：接管、记录与调用身份](plans/runtime-interface-repair.md) | completed | Q13–Q30 中已确认实施的修补全部通过本机验收；按 Q31 合并 main 并上线 `01c16a6` 独立服务快照，已验证并清理两个旧 release；Q25 脱敏未纳入。 |
 
