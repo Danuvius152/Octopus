@@ -395,6 +395,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/apps/{app_id}/agent/conversations/{conversation_id}/requests/{request_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get App Request Status */
+        get: operations["get_app_request_status_apps__app_id__agent_conversations__conversation_id__requests__request_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/apps/{app_id}/agent/agents": {
         parameters: {
             query?: never;
@@ -602,6 +619,23 @@ export interface paths {
         };
         /** Wiki Jobs */
         get: operations["wiki_jobs_api_sessions__session_id__wiki_jobs_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/submissions/{client_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Submission Status */
+        get: operations["get_submission_status_api_sessions__session_id__submissions__client_id__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1133,6 +1167,23 @@ export interface paths {
         put?: never;
         /** Cancel Research */
         post: operations["cancel_research_api_sessions__session_id__research__research_id__cancel_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/research/{research_id}/seen": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Acknowledge Research */
+        post: operations["acknowledge_research_api_sessions__session_id__research__research_id__seen_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3004,17 +3055,21 @@ export interface components {
         };
         /**
          * AnswerDelegationQuestionRequest
-         * @description Body for the parent's `answer_agent_question` tool call.
-         *
-         *     `choice` is the label the parent's model picked from the option
-         *     list rendered in the `[agent-question:…]` injection. We deliberately
-         *     don't expose `question_id` at the MCP boundary: a child rarely
-         *     has more than one pending question, and the manager picks the
-         *     oldest if it does.
+         * @description Complete ordered/ID-indexed answers; choice retains single-question compatibility.
          */
         AnswerDelegationQuestionRequest: {
             /** Choice */
-            choice: string;
+            choice?: string | null;
+            /** Answers */
+            answers?: {
+                [key: string]: unknown;
+            }[] | {
+                [key: string]: {
+                    [key: string]: unknown;
+                };
+            } | null;
+            /** Question Id */
+            question_id?: string | null;
         };
         /**
          * AnswerItem
@@ -3056,6 +3111,8 @@ export interface components {
         AppAgentReply: {
             /** Conversation Id */
             conversation_id: string;
+            /** Request Id */
+            request_id: string;
             /** Reply */
             reply: string;
             /** Cost */
@@ -4453,6 +4510,13 @@ export interface components {
             /** Explanation */
             explanation: string;
         };
+        /** ResearchSeenRequest */
+        ResearchSeenRequest: {
+            /** Request Id */
+            request_id: string;
+            /** Version */
+            version: number;
+        };
         /** Restore */
         Restore: {
             /** Change Id */
@@ -4748,6 +4812,10 @@ export interface components {
              * @default []
              */
             messages: components["schemas"]["MessageContent"][];
+            /** Active Attempt */
+            active_attempt?: {
+                [key: string]: string;
+            } | null;
             /** Oldest Loaded Seq */
             oldest_loaded_seq?: number | null;
             /**
@@ -6192,6 +6260,39 @@ export interface operations {
             };
         };
     };
+    get_app_request_status_apps__app_id__agent_conversations__conversation_id__requests__request_id__get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                app_id: string;
+                conversation_id: string;
+                request_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     list_app_agents_apps__app_id__agent_agents_get: {
         parameters: {
             query?: never;
@@ -6673,6 +6774,40 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["JobCard"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    get_submission_status_api_sessions__session_id__submissions__client_id__get: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+                client_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */
@@ -7612,6 +7747,44 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    acknowledge_research_api_sessions__session_id__research__research_id__seen_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+                research_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResearchSeenRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

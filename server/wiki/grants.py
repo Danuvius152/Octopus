@@ -274,7 +274,7 @@ def principal(task, scope, registration, actor):
         if scope is not None:
             raise WikiError("The original Wiki entry turn has ended", 403)
         return actor
-    if (scope is None or not scope_is_live(scope) or tasks.active.get(scope.wiki_task_id) is not task
+    if (scope is None or not scope_is_live(scope) or tasks.resolve(scope) is not task
             or (scope.session_id, scope.user_id) != (task.session_id, task.user_id)
             or task.mode not in {"auto", "maintain"} or task.job_id
             or actor_for(task) != actor
@@ -383,7 +383,7 @@ def active(db, task, store, *, require_scope=True):
     root = task.active_task or task
     scope = task.call_scope
     if require_scope and (scope is None or not scope_is_live(scope)
-            or tasks.active.get(scope.wiki_task_id) is not root
+            or tasks.resolve(scope) is not root
             or (scope.session_id, scope.user_id) != (task.session_id, task.user_id)):
         raise WikiError("The original maintenance run is no longer authorized", 403)
     row = db.execute("SELECT status,session_id FROM jobs WHERE id=?", (task.job_id,)).fetchone()

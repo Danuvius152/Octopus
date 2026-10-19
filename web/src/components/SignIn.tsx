@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "../lib/accountFetch";
 import { useEffect, useState, type KeyboardEvent } from "react";
 import type { AuthStateResponse, LoginResponse } from "../api";
 import { Button } from "./ui/button";

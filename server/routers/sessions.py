@@ -374,6 +374,18 @@ async def wiki_jobs(
     return await session_manager.db.wiki_job_cards(session_id, user_id, offset=offset, limit=limit)
 
 
+@router.get("/{session_id}/submissions/{client_id}")
+async def get_submission_status(session_manager: SessionMgr, session_id: str, client_id: str,
+                                user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    from ..sessions.client_submissions import submission_status
+    if not await session_manager.session_belongs_to(session_id, user_id):
+        raise HTTPException(404, "Session not found")
+    receipt = await submission_status(session_manager, session_id, client_id)
+    if receipt is None:
+        raise HTTPException(404, "Submission not found")
+    return receipt
+
+
 @router.get("/{session_id}", response_model=SessionDetail)
 async def get_session(
     session_manager: SessionMgr,
@@ -419,6 +431,8 @@ async def get_session(
             **_fork_fields(s),
             messages=messages,
             pending_queue=[qp.prompt for qp in s._pending_queue],
+            active_attempt={"request_id": s._current_request.request_id, "attempt_id": s._question_attempt_id}
+            if s._current_request and s._question_attempt_id else None,
             dispatch_state=DispatchState(**session_manager.dispatch_snapshot(s.id)),
             pending_questions=[
                 PendingQuestionInfo(

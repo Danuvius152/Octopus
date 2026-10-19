@@ -72,6 +72,98 @@ async def frame(outgoing):
     return json.loads(message["text"])
 
 
+async def receipt_frame(outgoing, kind):
+    while True:
+        result = await frame(outgoing)
+        if result.get("type") == kind:
+            return result
+
+
+async def test_submission_identity_survives_ack_loss_reconnect_and_manager_restart(runtime, monkeypatch, tmp_path):
+    manager, db = runtime
+    agent = await db.get_system_agent()
+    session = await manager.create_session(agent["id"], "deduplicated", str(tmp_path), backend="codex")
+    monkeypatch.setattr(manager, "_schedule_dispatch", lambda session: False)
+    payload = {"type": "send_message", "session_id": session.id, "content": "execute once", "client_request_id": "same-input"}
+    async def submit(owner, data):
+        async with connection(owner, settings.auth_token) as client:
+            await client[0].put({"type": "websocket.receive", "text": json.dumps(data)})
+            return await receipt_frame(client[1], "submission")
+    first = await submit(manager, payload)
+    second = await submit(manager, payload)
+    assert first["accepted"] and second["accepted"]
+    assert first["request_id"] == second["request_id"]
+    assert len(session._pending_queue) == 1
+    conflict = await submit(manager, {**payload, "content": "different operation"})
+    assert conflict["accepted"] is False and conflict["code"] == "submission_conflict"
+    restarted = SessionManager()
+    await restarted.initialize(db)
+    third = await submit(restarted, payload)
+    assert third["request_id"] == first["request_id"] and third["accepted"]
+    assert restarted.get_session(session.id)._pending_queue == []
+
+
+async def test_control_receipts_bind_stop_and_reject_a_new_attempt(runtime, monkeypatch, tmp_path):
+    from unittest.mock import AsyncMock
+
+    from server.sessions.base import QueuedPrompt
+    manager, db = runtime
+    agent = await db.get_system_agent()
+    session = await manager.create_session(agent["id"], "scoped Stop", str(tmp_path), backend="codex")
+    session._current_request = QueuedPrompt("first", [], request_id="r1")
+    session._question_attempt_id = "a1"
+    interrupt = AsyncMock(return_value=True)
+    monkeypatch.setattr(manager, "interrupt", interrupt)
+    async with connection(manager, settings.auth_token) as client:
+        async def send(data):
+            await client[0].put({"type": "websocket.receive", "text": json.dumps(data)})
+            return await receipt_frame(client[1], "command_receipt")
+        payload = {"type": "interrupt", "session_id": session.id, "client_command_id": "stop-1", "request_id": "r1", "attempt_id": "a1",
+                   "generation": manager.dispatch_snapshot(session.id)["generation"]}
+        first = await send(payload)
+        assert first["accepted"]
+        session._current_request = QueuedPrompt("next", [], request_id="r2")
+        session._question_attempt_id = "a2"
+        assert (await send(payload))["accepted"]  # returns the old receipt only
+        stale = await send({**payload, "client_command_id": "late-stop"})
+        assert stale["accepted"] is False and stale["code"] == "stale_command"
+        assert interrupt.await_count == 1
+
+
+async def test_idle_stop_and_specific_question_tool_commands_reject_stale_scope(runtime, tmp_path):
+    from server.sessions.base import PendingApproval, PendingQuestion
+
+    manager, db = runtime
+    agent = await db.get_system_agent()
+    session = await manager.create_session(agent["id"], "scoped controls", str(tmp_path), backend="codex")
+    async with connection(manager, settings.auth_token) as client:
+        async def send(operation, **fields):
+            payload = {"type": operation, "session_id": session.id, "client_command_id": str(len(session._command_receipts)),
+                       "request_id": None, "attempt_id": None, **fields}
+            await client[0].put({"type": "websocket.receive", "text": json.dumps(payload)})
+            return await receipt_frame(client[1], "command_receipt")
+        snapshot = manager.dispatch_snapshot(session.id)
+        assert not (await send("interrupt", generation="retired", revision=snapshot["revision"]))["accepted"]
+        assert not session._dispatch_paused
+        assert (await send("interrupt", generation=snapshot["generation"], revision=snapshot["revision"]))["accepted"]
+        assert not (await send("interrupt", generation=snapshot["generation"], revision=snapshot["revision"]))["accepted"]
+        session._question_attempt_id = "new-attempt"
+        pending = PendingQuestion("question", [{"question": "Which?", "options": [{"label": "A"}]}],
+                                  request_id="request", attempt_id="new-attempt")
+        session._pending_questions[pending.question_id] = pending
+        answers = [{"selected": ["A"]}]
+        assert not (await send("answer_question", request_id="request", attempt_id="old-attempt", question_id="question", answers=answers))["accepted"]
+        assert session._pending_questions["question"] is pending
+        assert (await send("answer_question", request_id="request", attempt_id="new-attempt", question_id="question", answers=answers))["accepted"]
+        future = asyncio.get_running_loop().create_future()
+        session._pending_approvals["tool"] = PendingApproval("Write", {}, "tool", future,
+            request_id="request", attempt_id="new-attempt", tool_call_id="exact-call")
+        assert not (await send("approve_tool", request_id="request", attempt_id="new-attempt", tool_use_id="tool", tool_call_id="old-call"))["accepted"]
+        assert not future.done()
+        assert (await send("deny_tool", request_id="request", attempt_id="new-attempt", tool_use_id="tool", tool_call_id="exact-call", reason="declined"))["accepted"]
+        assert future.done()
+
+
 @pytest.mark.parametrize("mode", [None, "read", "maintain"])
 async def test_agent_bearer_cannot_enter_human_websocket(runtime, monkeypatch, tmp_path, mode):
     from server.mcp_identity import mint, register_run, revoke_run

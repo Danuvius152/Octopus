@@ -23,6 +23,7 @@ from .agents import AgentsMixin
 from .applications import ApplicationsMixin
 from .base import DatabaseBase
 from .bg_tasks import BgTasksMixin
+from .client_submissions import ClientSubmissionsMixin
 from .connectors import ConnectorsMixin
 from .credentials import CredentialsMixin
 from .notifiers import NotifiersMixin
@@ -34,6 +35,7 @@ from .wiki_jobs import WikiJobsMixin
 
 
 class Database(
+    ClientSubmissionsMixin,
     SessionsMixin,
     AgentsMixin,
     SchedulesMixin,

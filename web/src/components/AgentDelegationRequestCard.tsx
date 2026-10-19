@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "../lib/accountFetch";
 /**
  * Inline card rendered next to a `mcp__ask_agent__ask` tool_use. The
  * tool_use itself shows the model's call shape (target agent name,

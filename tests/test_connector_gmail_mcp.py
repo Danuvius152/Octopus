@@ -5,6 +5,7 @@ monkeypatching the module's httpx; tools are called directly."""
 from __future__ import annotations
 
 import base64
+import json
 
 import pytest
 
@@ -66,6 +67,22 @@ def test_search_lists_and_projects(monkeypatch, authed):
     assert "alice@x.com" in out
     assert "Hello" in out
     assert "hi there" in out
+
+
+@pytest.mark.parametrize("failed", [["m1"], ["m1", "m2"]])
+def test_search_reports_metadata_failures_instead_of_false_empty(monkeypatch, failed):
+    def api(method, path, **kwargs):
+        if path == "/users/me/messages":
+            return {"messages": [{"id": "m1"}, {"id": "m2"}]}, None
+        message_id = path.rsplit("/", 1)[-1]
+        if message_id in failed:
+            return {}, "Gmail temporarily unavailable"
+        return {"id": message_id}, None
+    monkeypatch.setattr(gm, "_api", api)
+    result = json.loads(gm.search("query"))
+    assert result["complete"] is False
+    assert [entry["id"] for entry in result["failures"]] == failed
+    assert len(result["messages"]) == 2 - len(failed)
 
 
 def test_get_decodes_plain_body(monkeypatch, authed):

@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "./accountFetch";
 import type { SessionInfo } from "../stores/sessionStore";
 import { useSessionStore } from "../stores/sessionStore";
 import { applyTranscript } from "./transcript";
@@ -9,6 +10,7 @@ const API = window.location.origin;
 /** Fields `GET /api/sessions/{id}` adds on top of SessionInfo. */
 const DETAIL_ONLY_FIELDS = [
   "messages",
+  "active_attempt",
   "pending_queue",
   "dispatch_state",
   "pending_questions",
@@ -42,7 +44,7 @@ export async function hydrateSession(sessionId: string): Promise<void> {
     });
     if (!res.ok) return;
     const data = await res.json();
-    if (applySessionSnapshot(sessionId, data, store.dispatchGeneration)) {
+    if (applySessionSnapshot(sessionId, data, store.dispatchGeneration, store.subagents[sessionId] || {})) {
       addSessionInfo(sessionInfoFromDetail(data));
     }
   } catch {
@@ -71,10 +73,16 @@ export function applyDispatchSnapshot(
 /** Reject a retired service before any part of its detail can be rehydrated. */
 export function applySessionSnapshot(
   sessionId: string, detail: Record<string, unknown>, expectedGeneration?: string | null,
+  baselineSubagents?: Record<string, SubagentRun>,
 ): boolean {
   if (!applyDispatchSnapshot(sessionId, detail, expectedGeneration)) return false;
   applyTranscript(sessionId, detail);
   const store = useSessionStore.getState();
+  const active = detail.active_attempt as { request_id?: unknown; attempt_id?: unknown } | undefined;
+  if (!store.activeAttempts[sessionId] && typeof active?.request_id === "string" && typeof active.attempt_id === "string" &&
+      store.dispatchStates[sessionId]?.active_request_id === active.request_id) {
+    store.setActiveAttempt(sessionId, { request_id: active.request_id, attempt_id: active.attempt_id });
+  }
   const snapshotMessages = (detail.messages as { seq?: number }[]) || [];
   const snapshotHigh = typeof detail.next_message_seq === "number"
     ? detail.next_message_seq - 1 : Math.max(-1, ...snapshotMessages.map((message) => message.seq ?? -1));
@@ -89,7 +97,7 @@ export function applySessionSnapshot(
   const pending = new Map([...(detail.pending_questions as PendingQuestion[] || []), ...newerPending]
     .map((question) => [question.question_id, question]));
   store.setPendingQuestions(sessionId, [...pending.values()]);
-  store.setSubagents(sessionId, (detail.subagents as SubagentRun[]) || []);
+  store.setSubagents(sessionId, (detail.subagents as SubagentRun[]) || [], baselineSubagents);
   return true;
 }
 

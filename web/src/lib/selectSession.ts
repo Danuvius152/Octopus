@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "./accountFetch";
 import { addSessionInfo, applySessionSnapshot, sessionInfoFromDetail } from "./hydrateSession";
 import { useSessionStore } from "../stores/sessionStore";
 
@@ -31,12 +32,12 @@ export async function selectSession(
       // A session created server-side (an application's build session, a
       // delegation child) may not be in the sidebar list yet. We already have
       // its detail in hand — adopt it rather than spending another request.
-      if (applySessionSnapshot(sessionId, data, store.dispatchGeneration)) {
+      if (applySessionSnapshot(sessionId, data, store.dispatchGeneration, store.subagents[sessionId] || {})) {
         addSessionInfo(sessionInfoFromDetail(data));
       }
     }
     if (bgRes.ok) {
-      useSessionStore.getState().setBgTasks(sessionId, await bgRes.json());
+      useSessionStore.getState().setBgTasks(sessionId, await bgRes.json(), store.bgTasks[sessionId] || []);
     }
   } catch {
     // A failed snapshot load leaves the session selected but empty; the WS

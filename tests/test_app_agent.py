@@ -17,6 +17,7 @@ import contextlib
 import json
 import os
 from dataclasses import replace
+from datetime import UTC, datetime
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -507,8 +508,67 @@ async def test_ask_that_outlives_its_wait_says_where_the_answer_went(
     with pytest.raises(AppAgentError) as e:
         await aam.ask(row, message="hi")
     assert e.value.status_code == 504
+    assert e.value.recovery["conversation_id"] == turns.prompts[-1][0]
+    assert e.value.recovery["request_id"]
+    assert e.value.recovery["state"] == "running"
+    assert e.value.recovery["status_url"].endswith(e.value.recovery["request_id"])
     # The record is released, so the conversation isn't wedged forever.
     assert aam._turns == {}
+
+
+async def test_request_status_recovers_only_the_original_completed_attempt(aam, am, db, turns):
+    row = await _make_app(am, db)
+    turns.emit = False
+    turn = await aam.begin_turn(row, message="request to recover")
+    aam._release_turn(turn)
+    for seq, (attempt, text) in enumerate([("failed", "obsolete"), ("completed", "one"), ("completed", "two")]):
+        await db.append_message(session_id=turn.session_id, seq=seq, role="assistant", type="text", content=text,
+            tool_input={"attempt_context": {"request_id": turn.request_id, "attempt_id": attempt}})
+    await db.record_terminal(request_id=turn.request_id, session_id=turn.session_id, seq=3, role="system", type="result",
+        created_at=datetime.now(UTC).isoformat(),
+        content={"kind": "outcome", "request_id": turn.request_id, "status": "success"},
+        tool_input={"attempt_context": {"request_id": turn.request_id, "attempt_id": "completed"}})
+    await db.flush()
+    status = await aam.get_request_status(row["id"], turn.session_id, turn.request_id)
+    assert status["state"] == "completed" and status["reply"] == "one\n\ntwo"
+    with pytest.raises(AppAgentError):
+        await aam.get_request_status("other-app", turn.session_id, turn.request_id)
+
+
+async def test_request_status_does_not_commit_an_unconfirmed_terminal(aam, am, db, turns):
+    row = await _make_app(am, db)
+    turns.emit = False
+    turn = await aam.begin_turn(row, message="request to recover")
+    aam._release_turn(turn)
+    await db.append_message(session_id=turn.session_id, seq=0, role="system", type="result",
+        terminal_request_id=turn.request_id,
+        content={"kind": "outcome", "request_id": turn.request_id, "status": "success"})
+    assert db.conn.in_transaction
+    status = await aam.get_request_status(row["id"], turn.session_id, turn.request_id)
+    assert status["state"] == "unknown"
+    assert db.conn.in_transaction
+
+
+async def test_reading_a_confirmed_request_does_not_commit_another_request(tmp_path):
+    database = Database(str(tmp_path / "app-status.db"))
+    await database.initialize()
+    manager = SessionManager()
+    await manager.initialize(database)
+    agent = await database.get_system_agent()
+    session = await manager.create_session(agent["id"], "App status", str(tmp_path), origin=ORIGIN_APP, app_id="app")
+    observer = AppAgentManager()
+    observer.db, observer.session_mgr = database, manager
+    try:
+        await database.record_terminal(request_id="confirmed", session_id=session.id, seq=0,
+            role="system", type="result", created_at=datetime.now(UTC).isoformat(),
+            content={"kind": "outcome", "request_id": "confirmed", "status": "success"})
+        await database.append_message(session_id=session.id, seq=1, role="system", type="result",
+            terminal_request_id="uncertain", content={"kind": "outcome", "request_id": "uncertain", "status": "success"})
+        assert (await observer.get_request_status("app", session.id, "confirmed"))["state"] == "completed"
+        assert await database.get_committed_terminal(session.id, "uncertain") is None
+        assert database.conn.in_transaction
+    finally:
+        await database.close()
 
 
 # ---------------------------------------------------------------- the stream
@@ -524,10 +584,9 @@ async def test_stream_frames_arrive_in_order(aam, am, db, turns):
     assert kinds[-1] == "done"
     assert "delta" in kinds and "message" in kinds and "tool" in kinds
     assert "".join(e["text"] for e in events if e["type"] == "delta") == "Sure — the article "
-    # A tool event names the tool and nothing else: its arguments are none of
-    # the app's business.
+    # Correlation identifies the attempt without exposing tool arguments.
     assert [e for e in events if e["type"] == "tool"] == [
-        {"type": "tool", "name": "WebFetch"}
+        {"type": "tool", "name": "WebFetch", "request_id": turn.request_id, "attempt_id": None}
     ]
     assert events[-1]["reply"] == turns.reply
 
@@ -617,6 +676,26 @@ async def test_http_requires_a_credential(client):
             f"/apps/{row['id']}/agent/ask", json={"message": "hi"}
         )
     ).status_code == 401
+
+
+async def test_http_first_timeout_returns_app_scoped_original_request_status(client, monkeypatch):
+    a, b = await _api_app(client, "Timeout app"), await _api_app(client, "Other timeout app")
+    scoped = {"X-Octopus-App-Token": app_scope_token(a["id"])}
+    client.turns.emit = False
+    monkeypatch.setattr(app_agent_mod, "ASK_TIMEOUT_SECONDS", .01)
+    response = await client.post(f"/apps/{a['id']}/agent/ask", headers=scoped, json={"message": "first ask"})
+    assert response.status_code == 504
+    recovery = response.json()["detail"]
+    assert recovery["code"] == "ask_timeout" and recovery["request_id"] and recovery["conversation_id"]
+    admitted = len(client.turns.prompts)
+    status = await client.get(recovery["status_url"], headers=scoped)
+    assert status.status_code == 200 and status.json()["request_id"] == recovery["request_id"]
+    assert len(client.turns.prompts) == admitted
+    assert (await client.get(recovery["status_url"])).status_code == 401
+    other_url = recovery["status_url"].replace(f"/apps/{a['id']}/", f"/apps/{b['id']}/")
+    assert (await client.get(other_url, headers=scoped)).status_code == 401
+    other_token = {"X-Octopus-App-Token": app_scope_token(b["id"])}
+    assert (await client.get(other_url, headers=other_token)).status_code == 404
 
 
 @pytest.mark.asyncio

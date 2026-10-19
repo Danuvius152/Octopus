@@ -1177,11 +1177,14 @@ async def test_delegation_waits_for_real_turn_recovery(dm, mgr, db, monkeypatch,
             yield HarnessEvent(type="session_started", session_id="saved-thread")
             if self.recovering:
                 yield HarnessEvent(type="text", content="final review")
+                yield HarnessEvent(type="text", content="second finding")
                 yield HarnessEvent(type="result", session_id="saved-thread")
             elif failure == "idle":
+                yield HarnessEvent(type="text", content="obsolete partial review")
                 yield HarnessEvent(type="tool_use", tool_name="Read", tool_use_id="read-1")
                 await self.unblocked.wait()
             else:
+                yield HarnessEvent(type="text", content="obsolete partial review")
                 yield HarnessEvent(type="result", is_error=True, content="API Error: 529 Overloaded")
 
     runs = iter([RecoveryRun(), RecoveryRun(recovering=True)])
@@ -1192,6 +1195,10 @@ async def test_delegation_waits_for_real_turn_recovery(dm, mgr, db, monkeypatch,
     assert len(injected) == 1
     assert injected[0][0] == parent.id
     assert "[agent-reply:Vera" in injected[0][1] and "final review" in injected[0][1]
+    assert "second finding" in injected[0][1]
+    assert "obsolete partial review" not in injected[0][1]
+    text_events = [e for e in events if e["type"] == "assistant_text"]
+    assert len({e["attempt_id"] for e in text_events}) == 2
 
 
 @pytest.mark.asyncio
@@ -2067,7 +2074,7 @@ async def test_answer_pending_question_happy(dm, mgr, db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_answer_pending_question_pads_multi_question_batch(
+async def test_answer_pending_question_requires_complete_multi_question_batch(
     dm, mgr, db, monkeypatch
 ):
     monkeypatch.setattr(mgr, "start_message", _noop_start_message)
@@ -2096,12 +2103,39 @@ async def test_answer_pending_question_pads_multi_question_batch(
 
     monkeypatch.setattr(mgr, "answer_question", fake_answer)
 
-    await dm.answer_pending_question(rec.delegation_id, "A")
-    # First question gets the parent's choice; the rest get blank
-    # selected, same shape the human UI sends when entries are skipped.
-    assert seen["answers"][0] == {"selected": ["A"], "text": None}
-    assert seen["answers"][1] == {"selected": [], "text": None}
-    assert seen["answers"][2] == {"selected": [], "text": None}
+    with pytest.raises(DelegationError) as exc:
+        await dm.answer_pending_question(rec.delegation_id, "A")
+    assert exc.value.status_code == 400
+    assert not seen and "q-1" in child._pending_questions
+    answers = [{"selected": ["A"]}, {"text": "custom second"}, {"selected": ["C"]}]
+    await dm.answer_pending_question(rec.delegation_id, answers=answers, question_id="q-1")
+    assert seen["answers"] == [{"selected": ["A"], "text": None},
+                                {"selected": [], "text": "custom second"},
+                                {"selected": ["C"], "text": None}]
+
+
+async def test_delegated_answers_preserve_multiple_choices_and_stable_question_identity(dm, mgr, db, monkeypatch):
+    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    octo = await db.get_system_agent()
+    await _make_agent(db, "Vera")
+    parent = await _make_session(mgr, octo["id"])
+    rec = await dm.start_delegation(parent_session_id=parent.id, agent_name="vera", request="r")
+    child = mgr.get_session(rec.delegation_id)
+    _seed_pending_question(child, "batch", [
+        {"id": "colors", "question": "Colors?", "multiSelect": True, "options": [{"label": "A"}, {"label": "B"}]},
+        {"id": "note", "question": "Note?", "options": []},
+    ])
+    seen = []
+    async def answer(sid, qid, answers):
+        seen.append(answers)
+        return True
+    monkeypatch.setattr(mgr, "answer_question", answer)
+    with pytest.raises(DelegationError):
+        await dm.answer_pending_question(rec.delegation_id, answers=[{"text": "incomplete"}], question_id="batch")
+    with pytest.raises(DelegationError):
+        await dm.answer_pending_question(rec.delegation_id, answers=[{"text": "x"}, {"text": "y"}], question_id="old-batch")
+    await dm.answer_pending_question(rec.delegation_id, answers={"colors": {"selected": ["A", "B"]}, "note": {"text": "details"}}, question_id="batch")
+    assert seen == [[{"selected": ["A", "B"], "text": None}, {"selected": [], "text": "details"}]]
 
 
 @pytest.mark.asyncio

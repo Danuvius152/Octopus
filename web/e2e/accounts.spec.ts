@@ -255,6 +255,43 @@ test.describe("Accounts", () => {
       .toBe(401);
   });
 
+  test("same-page reauthentication clears the previous account's transcript and draft", async ({ page, request }) => {
+    await signIn(page, OWNER);
+    const bearer = await page.evaluate(() => localStorage.getItem("octopus_token") ?? "");
+    const imported = await request.post(`${API}/sessions/import`, {
+      headers: { Authorization: `Bearer ${bearer}` },
+      data: { name: "Private owner transcript", backend: "codex",
+        messages: [{ role: "user", type: "text", content: "OWNER-PRIVATE-MESSAGE" }] },
+    });
+    expect(imported.status()).toBe(201);
+    await page.reload();
+    await page.locator(".agent-item").first().click();
+    await page.locator(".session-item", { hasText: "Private owner transcript" }).click();
+    await expect(page.getByText("OWNER-PRIVATE-MESSAGE", { exact: true })).toBeVisible();
+    await page.locator("textarea").fill("OWNER-PRIVATE-DRAFT");
+    await page.getByTestId("attachment-file-input").setInputFiles({ name: "owner-private.txt", mimeType: "text/plain", buffer: Buffer.from("Private attachment") });
+    await expect(page.getByRole("button", { name: "Remove owner-private.txt" })).toBeVisible();
+    expect((await request.post(`${API}/auth/logout`, { headers: { Authorization: `Bearer ${bearer}` } })).ok()).toBeTruthy();
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await expect(page.locator("#username")).toBeVisible();
+    await page.locator("#username").fill(GUEST.username);
+    await page.locator("#password").fill(GUEST.password);
+    await page.locator("button.btn-login").click();
+    await expect(page.locator(".account-handle")).toHaveText(GUEST.username);
+    await expect(page.getByText("OWNER-PRIVATE-MESSAGE", { exact: true })).toHaveCount(0);
+    await expect(page.locator(".session-item", { hasText: "Private owner transcript" })).toHaveCount(0);
+    // This invited account has no agents yet. Create its own without a
+    // reload, preserving the same-page identity transition under test.
+    await page.locator(".btn-agent-add").click();
+    await page.locator("#agent-name").fill("Guest reauthentication agent");
+    await page.locator(".btn-agent-save").click();
+    await page.locator(".agent-item", { hasText: "Guest reauthentication agent" }).locator(".btn-session-add").click();
+    await page.locator('.session-create input[placeholder="Session name"]').fill("Guest after reauthentication");
+    await page.locator("button.btn-create").click();
+    await expect(page.locator("textarea")).toHaveValue("");
+    await expect(page.getByRole("button", { name: "Remove owner-private.txt" })).toHaveCount(0);
+  });
+
   test("changing the password ends the other sessions", async ({ page, request }) => {
     await signIn(page, GUEST);
     const stale = (

@@ -54,6 +54,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 # Keep the import-path mirror from bg.py — the harness spawns us with
 # arbitrary cwd, so import-style "server.foo" needs the repo root on
@@ -310,7 +311,11 @@ def cancel_agent_task(
 
 
 @mcp.tool(name="answer")
-def answer_agent_question(delegation_id: str, choice: str) -> str:
+def answer_agent_question(
+    delegation_id: str, choice: str | None = None,
+    answers: list[dict[str, Any]] | dict[str, dict[str, Any]] | None = None,
+    question_id: str | None = None,
+) -> str:
     """Answer a question a delegated agent raised. Use this when a
     follow-up turn arrives with the prefix
     `[agent-question:<name> delegation=<id> …]` AND you can answer it
@@ -326,10 +331,13 @@ def answer_agent_question(delegation_id: str, choice: str) -> str:
     Args:
         delegation_id: The id from the `[agent-question:…]` prefix.
             Same id `ask_agent` returned originally.
-        choice: The label you picked from the option list. For a
-            single-choice question, one label. For multi-select, the
-            label you most want — only the first selection is sent
-            in v1 (multi-select forwarding is a future polish).
+        choice: A single label, supported only for a one-question batch.
+        answers: Complete answers in question order, or keyed by each question's
+            id or zero-based index. Each value has selected (a list of labels,
+            including all choices for multi-select) or text (a free-text answer).
+            Never leave other questions unanswered.
+        question_id: The batch identity from the follow-up; prevents answering a
+            later batch after this one has already closed.
 
     Returns:
         A short text confirmation. The other agent's turn resumes
@@ -342,14 +350,18 @@ def answer_agent_question(delegation_id: str, choice: str) -> str:
         return "Error: ask_agent server is misconfigured (env vars missing)."
     if not (delegation_id or "").strip():
         return "Error: `delegation_id` must be a non-empty string."
-    if not (choice or "").strip():
-        return "Error: `choice` must be a non-empty string."
+    if answers is None and not (choice or "").strip():
+        return "Error: provide complete `answers` or a non-empty single-question `choice`."
 
     url = (
         f"{api}/api/sessions/{sid}/delegations/"
         f"{delegation_id}/answer"
     )
-    body = {"choice": choice}
+    body: dict[str, Any] = {"choice": choice} if choice is not None else {}
+    if answers is not None:
+        body["answers"] = answers
+    if question_id is not None:
+        body["question_id"] = question_id
     try:
         r = httpx.post(url, json=body, headers=hdrs, timeout=10.0)
     except httpx.HTTPError as e:
@@ -366,8 +378,9 @@ def answer_agent_question(delegation_id: str, choice: str) -> str:
             f"Error answering delegation `{delegation_id}` "
             f"({r.status_code}): {r.text[:300]}"
         )
+    description = f"`{choice}`" if answers is None else "a complete answer batch"
     return (
-        f"Answered delegation `{delegation_id}` with `{choice}`. The "
+        f"Answered delegation `{delegation_id}` with {description}. The "
         f"other agent will resume; their reply will arrive as a "
         f"follow-up turn."
     )

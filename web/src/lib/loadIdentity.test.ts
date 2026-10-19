@@ -21,6 +21,34 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("loadIdentity", () => {
+  it.each([200, 401])("ignores an old account identity response (%i)", async (status) => {
+    let finish!: (value: unknown) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise((resolve) => { finish = resolve; })));
+    const pending = loadIdentity();
+    useSessionStore.getState().setToken("b-token");
+    const identity = { label: "B", user_id: "b", is_admin: false };
+    useSessionStore.getState().setIdentity(identity);
+    finish({ ok: status === 200, status, json: async () => ({ label: "A", user_id: "a", is_admin: true }) });
+    await pending;
+    expect(useSessionStore.getState().token).toBe("b-token");
+    expect(useSessionStore.getState().identity).toEqual(identity);
+  });
+
+  it("clears account data on identity loss and preserves a verified token rotation", () => {
+    const store = useSessionStore.getState();
+    store.setIdentity({ label: "A", user_id: "a", is_admin: true });
+    store.setActiveSessionId("private-a");
+    store.setMessages("private-a", [{ role: "user", type: "text", content: "private" }]);
+    const generation = useSessionStore.getState().accountGeneration;
+    store.setToken("rotated-a", { sameAccount: true });
+    expect(useSessionStore.getState().accountGeneration).toBe(generation);
+    expect(useSessionStore.getState().messages["private-a"]).toHaveLength(1);
+    store.setToken("");
+    expect(useSessionStore.getState().messages).toEqual({});
+    expect(useSessionStore.getState().activeSessionId).toBeNull();
+    expect(useSessionStore.getState().identity).toBeNull();
+    expect(useSessionStore.getState().accountGeneration).toBe(generation + 1);
+  });
   it("stores what the route answers", async () => {
     const body = { label: "archer", user_id: "u1", is_admin: true };
     vi.stubGlobal("fetch", vi.fn(async () => ({ ok: true, json: async () => body })));

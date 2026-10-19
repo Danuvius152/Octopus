@@ -230,6 +230,9 @@ class PendingApproval:
     tool_input: dict[str, Any]
     tool_use_id: str
     future: asyncio.Future
+    request_id: str | None = None
+    attempt_id: str | None = None
+    tool_call_id: str | None = None
 
 
 @dataclass
@@ -336,6 +339,8 @@ class Session:
     # (inline-steering.md §7). None whenever no process is being held.
     _held_run_at: float | None = field(default=None, repr=False)
     _pending_approvals: dict[str, PendingApproval] = field(default_factory=dict, repr=False)
+    _command_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    _command_receipts: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict, repr=False)
     _pending_questions: dict[str, PendingQuestion] = field(default_factory=dict, repr=False)
     # question_id -> background timer that auto-answers if the user
     # never replies (see SessionManager._schedule_question_timeout).

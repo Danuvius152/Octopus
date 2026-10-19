@@ -44,14 +44,10 @@ class CancelDelegationRequest(BaseModel):
 
 
 class AnswerDelegationQuestionRequest(BaseModel):
-    """Body for the parent's `answer_agent_question` tool call.
-
-    `choice` is the label the parent's model picked from the option
-    list rendered in the `[agent-question:…]` injection. We deliberately
-    don't expose `question_id` at the MCP boundary: a child rarely
-    has more than one pending question, and the manager picks the
-    oldest if it does."""
-    choice: str
+    """Complete ordered/ID-indexed answers; choice retains single-question compatibility."""
+    choice: str | None = None
+    answers: list[dict[str, Any]] | dict[str, dict[str, Any]] | None = None
+    question_id: str | None = None
 
 
 class FollowUpDelegationRequest(BaseModel):
@@ -243,7 +239,7 @@ async def answer_delegation_question(
         )
     try:
         return await delegation_manager.answer_pending_question(
-            delegation_id, req.choice
+            delegation_id, req.choice, answers=req.answers, question_id=req.question_id,
         )
     except DelegationError as e:
         raise HTTPException(e.status_code, str(e))

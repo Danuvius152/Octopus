@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "../lib/accountFetch";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { IconArchive, IconPlus, IconTrash, IconUsers } from "@tabler/icons-react";
 import { setAgentPinned } from "../api/agents";

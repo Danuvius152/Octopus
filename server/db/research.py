@@ -8,12 +8,48 @@ changed.
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
 from typing import Any
 
 from .base import DatabaseBase, serialized_write
 
 
 class ResearchMixin(DatabaseBase):
+
+    @serialized_write
+    async def advance_research_delivery(self, job_id: str, request_id: str, stage: str, *, error: str | None = None) -> dict[str, Any] | None:
+        row = await self.get_research_job(job_id)
+        if row is None:
+            return None
+        previous = row.get("delivery_receipt") or {}
+        if previous.get("request_id") not in {None, request_id}:
+            raise ValueError("Research delivery belongs to another request")
+        terminal = {"processed", "failed", "recording_unconfirmed"}
+        if previous.get("stage") in terminal or previous.get("stage") == stage or (previous.get("stage") == "processing" and stage == "queued"):
+            return previous
+        receipt = {**previous, "request_id": request_id, "stage": stage,
+                   "version": previous.get("version", 0) + 1, "error": error}
+        if stage == "processed":
+            receipt["processed_at"] = datetime.now(UTC).isoformat()
+        await self.conn.execute("UPDATE research_jobs SET delivery_receipt=? WHERE id=?", (json.dumps(receipt), job_id))
+        await self.conn.commit()
+        return receipt
+
+    @serialized_write
+    async def acknowledge_research_delivery(self, job_id: str, request_id: str, version: int) -> dict[str, Any] | None:
+        row = await self.get_research_job(job_id)
+        receipt = (row or {}).get("delivery_receipt")
+        if not receipt or receipt.get("request_id") != request_id or receipt.get("version") != version:
+            return None
+        receipt = {**receipt, "browser_confirmed_version": version, "browser_confirmed_at": datetime.now(UTC).isoformat()}
+        await self.conn.execute("UPDATE research_jobs SET delivery_receipt=? WHERE id=?", (json.dumps(receipt), job_id))
+        await self.conn.commit()
+        return receipt
+
+    async def pending_research_deliveries(self) -> list[dict[str, Any]]:
+        cursor = await self.conn.execute(f"SELECT {self._RESEARCH_COLS} FROM research_jobs WHERE delivery_receipt IS NOT NULL")
+        return [row for raw in await cursor.fetchall() if (row := self._row_to_research_job(raw))["delivery_receipt"]["stage"] in {"queued", "processing", "unknown"}]
 
 
     @serialized_write

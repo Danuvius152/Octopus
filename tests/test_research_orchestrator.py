@@ -7,6 +7,7 @@ so there's no network, no CLI, no backend — just the orchestration logic.
 from __future__ import annotations
 
 import asyncio
+import json
 
 import pytest
 
@@ -41,7 +42,7 @@ def test_parse_findings_and_verdict():
     ]
     assert schemas.parse_verdict('{"refuted": true}') is True
     assert schemas.parse_verdict('{"refuted": false}') is False
-    assert schemas.parse_verdict("unparseable") is False  # default: not refuted
+    assert schemas.parse_verdict("unparseable") is None
 
 
 def test_dedup_and_rank_prefers_cross_angle_corroboration():
@@ -148,3 +149,48 @@ async def test_run_research_survives_leaf_errors():
     assert report.findings == []
     assert report.angles == ["my question"]
     assert report.report == "final report"
+
+
+@pytest.mark.parametrize("verdict", [LeafResult(text="", error="timeout"), LeafResult(text="garbage"),
+                                    LeafResult(text='{"refuted": "unknown"}')])
+async def test_failed_verification_is_never_counted_as_verified(verdict):
+    progress = []
+    async def reason(prompt):
+        return LeafResult(text='["angle"]' if "Decompose" in prompt else "report")
+    async def search(prompt):
+        return verdict if "Fact-check" in prompt else LeafResult(text='[{"claim":"c","url":"u"}]')
+    async def on_progress(event):
+        progress.append(event)
+    report = await run_research("q", working_dir="/tmp", search=search, reason=reason,
+                                on_progress=on_progress)
+    assert progress[-1].counts["verified"] == 0
+    assert progress[-1].counts["unverified"] == 1
+    assert report.findings[0].verification == "failed"
+
+
+@pytest.mark.parametrize(("votes", "expected"), [
+    ([{"refuted": False, "verified": True}, {"refuted": False, "verified": True}, None], "verified"),
+    ([{"refuted": False, "verified": True}, {"refuted": False}, None], "unverified"),
+    ([{"refuted": False}, None, None], "unverified"),
+    ([None, None, None], "failed"),
+])
+async def test_verification_requires_positive_majority_despite_failed_votes(votes, expected):
+    remaining = iter(votes)
+    progress, syntheses = [], []
+    async def reason(prompt):
+        if "Decompose" in prompt:
+            return LeafResult(text='["angle"]')
+        syntheses.append(prompt)
+        return LeafResult(text="report")
+    async def search(prompt):
+        if "Fact-check" not in prompt:
+            return LeafResult(text='[{"claim":"c","url":"u"}]')
+        vote = next(remaining)
+        return LeafResult(text=json.dumps(vote)) if vote is not None else LeafResult(text="", error="timeout")
+    async def on_progress(event):
+        progress.append(event)
+    report = await run_research("q", working_dir="/tmp", search=search, reason=reason,
+        limits=ResearchLimits(votes_per_claim=3), on_progress=on_progress)
+    assert report.findings[0].verification == expected
+    assert progress[-1].counts["verified"] == int(expected == "verified")
+    assert f"[{expected}] c" in syntheses[0]

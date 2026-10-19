@@ -21,7 +21,10 @@
             "stale_session": 0,
             "premature_exit": 0
           },
-          "kind": "outcome"
+          "kind": "outcome",
+          "recording_integrity": "complete",
+          "recording_issues": {},
+          "recording_locations": []
         },
         "is_error": false
       }
@@ -46,7 +49,10 @@
         "stale_session": 0,
         "premature_exit": 0
       },
-      "kind": "outcome"
+      "kind": "outcome",
+      "recording_integrity": "complete",
+      "recording_issues": {},
+      "recording_locations": []
     },
     "is_error": false
   }

@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "./accountFetch";
 import { useSessionStore, type Message } from "../stores/sessionStore";
 import type { MessageInput } from "./turnOutcome";
 
@@ -31,8 +32,16 @@ export function applyTranscript(
   const currentHigh = store.lastAppliedSeq[sessionId] ?? -1;
   const oldest = typeof data.oldest_loaded_seq === "number" ? data.oldest_loaded_seq : null;
   const currentOldest = store.oldestSeq[sessionId];
-  const preservePrefix = typeof oldest === "number" && typeof currentOldest === "number" && currentOldest < oldest;
-  const retained = (store.messages[sessionId] ?? []).filter((m) => typeof m.seq === "number" &&
+  const current = store.messages[sessionId] ?? [];
+  // A prefix can only be kept when every row up to the snapshot is present.
+  // Otherwise its old cursor hides a disconnected middle after a long outage.
+  const prefixSeqs = current.filter((m) => typeof m.seq === "number" &&
+    typeof oldest === "number" && m.seq < oldest).map((m) => m.seq!).sort((a, b) => a - b);
+  const preservePrefix = typeof oldest === "number" && typeof currentOldest === "number" &&
+    currentOldest < oldest && prefixSeqs[0] === currentOldest &&
+    prefixSeqs.length === oldest - currentOldest &&
+    prefixSeqs.every((seq, index) => seq === currentOldest + index);
+  const retained = current.filter((m) => typeof m.seq === "number" &&
     (m.seq > snapshotHigh || (preservePrefix && m.seq < oldest!)));
   const merged = [...retained, ...messages];
   const sequenced = new Map(merged.filter((m) => typeof m.seq === "number").map((m) => [m.seq!, m]));

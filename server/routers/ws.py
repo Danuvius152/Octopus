@@ -62,6 +62,10 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                 continue
 
             msg_type = data.get("type")
+            if "client_command_id" in data:
+                from ..sessions.commands import process_command
+                delivery.offer(await process_command(session_manager, data, user_id), session_scoped=False)
+                continue
 
             if msg_type == "send_message":
                 session_id = data.get("session_id")
@@ -102,6 +106,12 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                     session = session_manager.get_session(session_id)
                     if session is None or session.user_id != user_id:
                         raise ValueError("Session not found")
+                    if client_request_id:
+                        from ..sessions.client_submissions import submit_client_message
+                        response = await submit_client_message(session_manager, session_id, content, attachment_ids, client_request_id,
+                                                               wiki_mode=explicit_mode(content, data.get("wiki_mode")))
+                        delivery.offer({"type": "submission", **response}, session_scoped=False)
+                        continue
                     # The only steerable caller: this is a person typing.
                     # Everything else that injects a turn (bg results,
                     # delegation replies, schedules, research) needs its own

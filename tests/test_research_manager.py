@@ -60,6 +60,37 @@ def _fake_report(question="q"):
     )
 
 
+async def test_delivery_receipts_distinguish_queue_processing_and_current_browser_confirmation(rm, mgr, db, monkeypatch):
+    from server.models import TurnOutcome
+    from server.sessions.submission import RequestCompletion, SubmissionReceipt
+    future = asyncio.get_running_loop().create_future()
+    async def fake_start(*args, **kwargs):
+        return SubmissionReceipt("accepted", "report-follow-up", future)
+    async def fake_run(*args, **kwargs):
+        return _fake_report()
+    monkeypatch.setattr(mgr, "start_message", fake_start)
+    monkeypatch.setattr(rm_mod, "run_research", fake_run)
+    session = await _session(mgr, db)
+    row = await rm.start(session.id, "question")
+    await rm._tasks[row["id"]]
+    receipt = (await db.get_research_job(row["id"]))["delivery_receipt"]
+    assert receipt["stage"] == "queued" and "processed_at" not in receipt
+    assert await db.acknowledge_research_delivery(row["id"], "wrong-request", receipt["version"]) is None
+    await mgr._broadcast({"type": "dequeued", "session_id": session.id, "request_id": "report-follow-up"})
+    processing = (await db.get_research_job(row["id"]))["delivery_receipt"]
+    assert processing["stage"] == "processing"
+    future.set_result(RequestCompletion("report-follow-up", "report-follow-up", "completed",
+        TurnOutcome(request_id="report-follow-up", status="success"), "committed"))
+    await rm._delivery_tasks[row["id"]]
+    final = (await db.get_research_job(row["id"]))["delivery_receipt"]
+    assert final["stage"] == "processed" and final["processed_at"]
+    assert await db.acknowledge_research_delivery(row["id"], "report-follow-up", receipt["version"]) is None
+    acknowledged = await db.acknowledge_research_delivery(row["id"], "report-follow-up", final["version"])
+    assert acknowledged["browser_confirmed_version"] == final["version"]
+    assert (await db.advance_research_delivery(row["id"], "report-follow-up", "processing"))["stage"] == "processed"
+    await rm.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_research_jobs_crud_and_sweep(mgr, db):
     session = await _session(mgr, db)  # research_jobs.session_id FKs to sessions

@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "../lib/accountFetch";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconArrowUp,
@@ -21,6 +22,7 @@ import { WikiJobCards } from "./WikiJobCards";
 import { TranscriptIntegrityNotice } from "./TranscriptIntegrityNotice";
 import { MessageBubble } from "./MessageBubble";
 import { DispatchQueue } from "./DispatchQueue";
+import { CommandNotices } from "./CommandNotices";
 import { MessageTime } from "./MessageTime";
 import { ModelPickerDialog } from "./ModelPickerDialog";
 import { isImeComposing } from "../lib/composerKeys";
@@ -71,16 +73,17 @@ interface Props {
     sessionId: string,
     content: string,
     attachmentIds?: string[],
-    wikiMode?: WikiMessageMode
+    wikiMode?: WikiMessageMode,
+    submissionId?: string
   ) => void | Promise<SubmissionReply>;
-  interrupt: (sessionId: string) => void;
-  approveTool: (sessionId: string, toolUseId: string) => void;
-  denyTool: (sessionId: string, toolUseId: string) => void;
+  interrupt: (sessionId: string) => void | Promise<SubmissionReply>;
+  approveTool: (sessionId: string, toolUseId: string) => void | Promise<SubmissionReply>;
+  denyTool: (sessionId: string, toolUseId: string) => void | Promise<SubmissionReply>;
   answerQuestion: (
     sessionId: string,
     questionId: string,
     answers: AnswerPayload[]
-  ) => void;
+  ) => void | Promise<SubmissionReply>;
   connected: boolean;
   onToggleSidebar: () => void;
   // Open the all-agents Schedules overview (App owns the dialog). Used by the
@@ -106,6 +109,8 @@ export function ChatView({
   const [rejectedDrafts, setRejectedDrafts] = useState<{
     id: string; sessionId: string; text: string; attachments: PendingAttachment[];
     reason: string;
+    uncertain?: { id: string; content: string; attachmentIds?: string[] };
+    confirming?: boolean;
   }[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
   // Fork dialog (session-rewind.md §6.1-6.2). `null` = closed; `{}` = the
@@ -126,7 +131,8 @@ export function ChatView({
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const { attachments: pendingAttachments, addFiles, removeAttachment, retryAttachment,
-    restoreAttachments, clearAttachments, unready, readyIds: readyAttachmentIds } = useDraftAttachments(activeSessionId);
+    restoreAttachments, clearAttachments, rejectedFiles, dismissRejectedFiles, unready,
+    readyIds: readyAttachmentIds } = useDraftAttachments(activeSessionId);
   const messagesMap = useSessionStore((s) => s.messages);
   const streamingMap = useSessionStore((s) => s.streamingText);
   const messages = activeSessionId ? (messagesMap[activeSessionId] ?? EMPTY_MESSAGES) : EMPTY_MESSAGES;
@@ -581,6 +587,9 @@ export function ChatView({
       void submission.then((reply) => {
         if (!reply.accepted) setRejectedDrafts((drafts) => [...drafts, {
           ...draft, reason: reply.message || "Your message was not accepted.",
+          ...(reply.state === "unknown" && reply.clientRequestId ? { uncertain: {
+            id: reply.clientRequestId, content, attachmentIds: readyAttachmentIds.length ? readyAttachmentIds : undefined,
+          } } : {}),
         }]);
         else if (reply.requestId && draft.attachments.length) {
           const result = useSessionStore.getState().messages[draft.sessionId]?.find((message) => message.outcome?.request_id === reply.requestId);
@@ -589,6 +598,21 @@ export function ChatView({
       }).catch(() => {
         setRejectedDrafts((drafts) => [...drafts, { ...draft, reason: "Delivery was not confirmed. Check the conversation before sending again." }]);
       });
+    }
+  };
+
+  const confirmSubmission = async (draft: typeof rejectedDrafts[number]) => {
+    if (!draft.uncertain || draft.confirming) return;
+    setRejectedDrafts((drafts) => drafts.map((item) => item.id === draft.id ? { ...item, confirming: true } : item));
+    const original = draft.uncertain;
+    try {
+      const reply = await sendMessage(draft.sessionId, original.content, original.attachmentIds, undefined, original.id);
+      if (!reply) return;
+      setRejectedDrafts((drafts) => reply.accepted ? drafts.filter((item) => item.id !== draft.id) : drafts.map((item) => item.id === draft.id
+        ? { ...item, confirming: false, reason: reply.message || "Admission confirmation failed.",
+          uncertain: reply.state === "unknown" || reply.code === "not_sent" ? original : undefined } : item));
+    } catch {
+      setRejectedDrafts((drafts) => drafts.map((item) => item.id === draft.id ? { ...item, confirming: false } : item));
     }
   };
 
@@ -1268,7 +1292,7 @@ export function ChatView({
       });
       if (res.ok) {
         const data = await res.json();
-        applySessionSnapshot(fork.id, data, generation);
+        applySessionSnapshot(fork.id, data, generation, store.subagents[fork.id] || {});
       }
     } catch {
       /* ignore — the session is selected regardless */
@@ -1308,7 +1332,7 @@ export function ChatView({
       });
       if (res.ok) {
         const data = await res.json();
-        applySessionSnapshot(fork.id, data, generation);
+        applySessionSnapshot(fork.id, data, generation, store.subagents[fork.id] || {});
       }
     } catch {
       /* ignore — the session is selected regardless */
@@ -1538,10 +1562,13 @@ export function ChatView({
                     setTimeout(() => URL.revokeObjectURL(url), 0);
                   }}>Download {attachment.file.name}</button></p>)}
               </details>
+              {draft.uncertain && <Button size="sm" variant="outline" className="mt-2"
+                disabled={draft.confirming || !connected}
+                onClick={() => void confirmSubmission(draft)}>{draft.confirming ? "Confirming…" : "Retry admission confirmation"}</Button>}
               <Button size="sm" variant="outline" className="mt-2"
-                disabled={!activeSessionId || isArchived || input.length > 0 || pendingAttachments.length > 0}
+                disabled={Boolean(draft.uncertain) || !activeSessionId || isArchived || input.length > 0 || pendingAttachments.length > 0}
                 onClick={() => {
-                  if (!activeSessionId || isArchived || input.length > 0 || pendingAttachments.length > 0) return;
+                  if (draft.uncertain || !activeSessionId || isArchived || input.length > 0 || pendingAttachments.length > 0) return;
                   setInput(draft.text);
                   restoreAttachments(draft.attachments);
                   setRequiredAttachmentCount(0);
@@ -1678,6 +1705,7 @@ export function ChatView({
       )}
 
       {activeSessionId && <DispatchQueue key={activeSessionId} sessionId={activeSessionId} readOnly={isArchived || transcriptDamaged} />}
+      {activeSessionId && <CommandNotices sessionId={activeSessionId} />}
 
       {savedDrafts}
       {isArchived || transcriptDamaged ? (
@@ -1726,6 +1754,11 @@ export function ChatView({
               }}
             />
 
+            {rejectedFiles.length > 0 && <div role="alert" className="px-3 pt-2 text-sm text-destructive">
+              <p>These files were not attached:</p>
+              <ul>{rejectedFiles.map((file, index) => <li key={index}>{file.name}: {file.reason}</li>)}</ul>
+              <button type="button" className="underline" onClick={dismissRejectedFiles}>Continue with attached files</button>
+            </div>}
             {pendingAttachments.length < requiredAttachmentCount && <div role="alert" className="px-3 pt-2 text-sm text-destructive">
               Re-attach {requiredAttachmentCount} {requiredAttachmentCount === 1 ? "file" : "files"} to send the complete message.
               <button type="button" className="ml-2 underline" onClick={() => {

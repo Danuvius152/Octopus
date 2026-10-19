@@ -57,18 +57,19 @@ async def test_raw_question_real_websocket_identity_and_terminal_control(tmp_pat
 
     async def start_message(session_id, question, **kwargs):
         submitted.append({"question": question, "kwargs": kwargs})
+        admitted_request = kwargs["request_id"]
 
         async def publish():
             await asyncio.sleep(0.01)
             await manager._broadcast({"type": "assistant_text", "session_id": session_id, "content": "A source-dependent answer."})
-            for request_id in ["stale-request", "human-request"]:
+            for request_id in ["stale-request", admitted_request]:
                 await manager._broadcast({"type": "result", "session_id": session_id, "request_id": request_id,
                                           "terminal": True, "is_error": outcome == "failed",
                                           "content": {"status": outcome, "request_id": request_id}})
 
         if outcome != "rejected":
             publishers.append(asyncio.create_task(publish()))
-        return SimpleNamespace(accepted=outcome != "rejected", request_id="human-request", disposition="accepted")
+        return SimpleNamespace(accepted=outcome != "rejected", request_id=admitted_request, disposition="accepted")
 
     monkeypatch.setattr(manager, "start_message", start_message)
     api = await start_callback_api(router, mcp=False, websocket=True, overrides={get_session_manager: lambda: manager})
@@ -76,13 +77,16 @@ async def test_raw_question_real_websocket_identity_and_terminal_control(tmp_pat
     question = "为什么最大值和最小值都要保留？"
     try:
         if outcome == "success":
-            assert await probe.ask(question) == "A source-dependent answer."
-            assert probe.last_request_id == "human-request"
-            assert probe.last_events[-1]["content"]["request_id"] == "human-request"
+            assert await asyncio.wait_for(probe.ask(question), 5) == "A source-dependent answer."
+            assert probe.last_request_id == submitted[0]["kwargs"]["request_id"]
+            assert probe.last_events[-1]["content"]["request_id"] == probe.last_request_id
         else:
             with pytest.raises(AssertionError if outcome == "failed" else RuntimeError):
-                await probe.ask(question)
-        assert submitted == [{"question": question, "kwargs": {"attachment_ids": [], "steerable": True}}]
+                await asyncio.wait_for(probe.ask(question), 5)
+        assert len(submitted) == 1 and submitted[0]["question"] == question
+        kwargs = submitted[0]["kwargs"]
+        assert isinstance(kwargs["request_id"], str) and len(kwargs["request_id"]) == 32
+        assert {key: value for key, value in kwargs.items() if key != "request_id"} == {"attachment_ids": [], "steerable": True}
         session = manager.get_session(probe.last_session_id)
         assert session.origin == "user" and session.parent_session_id is None
         if outcome == "success":

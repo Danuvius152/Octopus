@@ -159,6 +159,7 @@ class DatabaseBase:
             "injection_status": row[10],
             "injected_at": row[11],
             "knowledge_context": row[12],
+            "delivery_receipt": json.loads(row[13]) if row[13] else None,
         }
 
     # Column lists and canned SQL shared by the domain mixins.
@@ -217,7 +218,7 @@ class DatabaseBase:
     )
     _RESEARCH_COLS = (
         "id, session_id, question, status, phase, error, report_path, cost, "
-        "created_at, completed_at, injection_status, injected_at, knowledge_context"
+        "created_at, completed_at, injection_status, injected_at, knowledge_context, delivery_receipt"
     )
     _APPLICATION_COLS = (
         "id, name, description, icon, icon_src, agent_id, session_id, "
@@ -249,6 +250,7 @@ class DatabaseBase:
          "ALTER TABLE bg_tasks ADD COLUMN knowledge_context TEXT"),
         ("research_jobs", "knowledge_context",
          "ALTER TABLE research_jobs ADD COLUMN knowledge_context TEXT"),
+        ("research_jobs", "delivery_receipt", "ALTER TABLE research_jobs ADD COLUMN delivery_receipt TEXT"),
         # Per-backend auth.
         ("sessions", "credential_id", "ALTER TABLE sessions ADD COLUMN credential_id TEXT"),
         # /archive — hides the row from the default list, keeps it in the DB.

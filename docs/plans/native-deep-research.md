@@ -81,8 +81,13 @@ simply doesn't offer research. We never build search ourselves.
 3. **Dedup + rank** — pure Python over the returned findings (no model, no web).
 4. **Verify** — for the top-ranked claims, K independent web sub-turns each
    (adversarial "try to refute", web-allowed); majority-refute kills the claim.
+   Only a strict majority of explicit positive verification counts as verified.
+   Valid non-refutation without supporting evidence stays unverified; no valid
+   verdict is a verification failure, retained with that label rather than
+   counted as verified.
 5. **Synthesize** — one `run_oneshot` (tool-free) merges survivors into a cited
-   report from the gathered `{claim, url}` set.
+   report from the gathered `{claim, url}` set and their verification labels,
+   explicitly qualifying unsupported findings.
 
 A single `asyncio.Semaphore` (config, default ~4–6) bounds ALL concurrent
 sub-turns/oneshots so we never spawn the ~75-subprocess storm the CLI Workflow
@@ -157,7 +162,14 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
   `injected_at`/`delivery_error`/`report_path`. Because the report is delivered
   by queuing a `start_message` injection (§7), a job can be `completed` while
   its report still sits behind an active user turn — the card/DB must show
-  "done, injection queued" distinctly from "delivered" to avoid confusing UI.
+  completion separately from admission. `injection_status=delivered` is a
+  legacy admission fact, not evidence the model processed the report.
+  `delivery_receipt` binds the follow-up request and version, distinguishing
+  queued, processing, processed, failed, recording_unconfirmed and unknown.
+  A browser confirms the exact displayed version through the account-only
+  `POST /api/sessions/{sid}/research/{rid}/seen` route; this is separate from
+  model processing and does not assert human reading. Restart reconciles
+  committed outcomes or records unknown, without replaying the request.
   Terminal injection is **idempotent** (like delegations' `_terminal_injected`).
   Cancellation is a **state transition recorded before** interrupting live work
   (mirrors delegation cancel ordering). A boot sweep marks running jobs

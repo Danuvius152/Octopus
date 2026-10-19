@@ -19,6 +19,30 @@ const msg = (seq: number): Message => ({
  * are pinned here, because in the browser they look like ordinary scrolling.
  */
 describe("applyTranscript", () => {
+  it.each([11, 200, 201])("replaces a disconnected prefix before tail window %i", (oldest) => {
+    applyTranscript("s1", { messages: Array.from({ length: 11 }, (_, seq) => msg(seq)),
+      oldest_loaded_seq: 0, next_message_seq: 11, has_more_messages: false });
+    const start = oldest + 1;
+    handleWsMessage({ type: "user_message", session_id: "s1", seq: start + 200, content: "live" });
+    applyTranscript("s1", { messages: Array.from({ length: 200 }, (_, index) => msg(start + index)),
+      oldest_loaded_seq: start, next_message_seq: start + 200, has_more_messages: true });
+    const state = useSessionStore.getState();
+    expect(state.messages.s1.map((row) => row.seq)).toEqual(Array.from({ length: 201 }, (_, index) => start + index));
+    expect(state.oldestSeq.s1).toBe(start);
+    expect(state.hasMoreMessages.s1).toBe(true);
+  });
+
+  it.each([10, 11])("preserves a contiguous paginated prefix at seam %i", (oldest) => {
+    applyTranscript("s1", { messages: Array.from({ length: 11 }, (_, seq) => msg(seq)),
+      oldest_loaded_seq: 0, next_message_seq: 11, has_more_messages: false });
+    applyTranscript("s1", { messages: [msg(oldest), msg(oldest + 1)],
+      oldest_loaded_seq: oldest, next_message_seq: oldest + 2, has_more_messages: true });
+    expect(useSessionStore.getState().messages.s1.map((row) => row.seq))
+      .toEqual(Array.from({ length: oldest + 2 }, (_, seq) => seq));
+    expect(useSessionStore.getState().oldestSeq.s1).toBe(0);
+    expect(useSessionStore.getState().hasMoreMessages.s1).toBe(false);
+  });
+
   it("accepts a reserved terminal that arrives after the stored snapshot", () => {
     applyTranscript("s1", { messages: [msg(0)], next_message_seq: 1 });
     handleWsMessage({ type: "result", session_id: "s1", seq: 1, terminal: true,

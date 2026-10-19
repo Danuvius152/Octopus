@@ -165,6 +165,129 @@ async def wait_dispatch_idle(manager, session_id):
             await asyncio.sleep(0.01)
 
 
+@pytest.mark.parametrize("diagnostic,code,preparations", [
+    ("503 service unavailable", None, 2),
+    ("Your authentication token has expired", "auth_expired", 1),
+    ("controller protocol identity mismatch", "preparation_failed", 1),
+])
+async def test_preparation_failures_use_bounded_classification(runtime, monkeypatch, diagnostic, code, preparations):
+    manager, _, session, _, _, events = runtime
+    session.claude_session_id = "review-thread"
+    calls = []
+    async def prepare(*args):
+        calls.append(args)
+        if len(calls) == 1:
+            raise RuntimeError(diagnostic)
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, prepare_resume=prepare))
+    monkeypatch.setattr(manager, "_TRANSIENT_RETRY_BASE_DELAY", 0)
+    await manager.start_message(session.id, "test preparation")
+    await wait_dispatch_idle(manager, session.id)
+    outcomes = [event for event in events if event["type"] == "result"]
+    assert len(outcomes) == 1
+    assert outcomes[0]["content"]["code"] == code
+    assert outcomes[0]["content"]["status"] == ("success" if code is None else "failed")
+    assert len(calls) == preparations
+
+
+async def test_corrupt_protocol_reports_incomplete_success_without_reexecution(runtime, monkeypatch):
+    manager, database, session, _, starts, events = runtime
+    def argv(context):
+        starts.put_nowait(context)
+        return [sys.executable, "-u", "-c", "print('{broken');print('{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Executed once\"}}');print('{\"type\":\"turn.completed\",\"usage\":{}}')"], {"cwd": context.working_dir}
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    await manager.start_message(session.id, "execute once")
+    await wait_dispatch_idle(manager, session.id)
+    outcomes = [event["content"] for event in events if event["type"] == "result"]
+    assert len(outcomes) == 1 and outcomes[0]["status"] == "success"
+    assert outcomes[0]["recording_integrity"] == "incomplete"
+    assert outcomes[0]["recording_issues"]["invalid_json"] == 1
+    assert starts.qsize() == 1
+    stored = await database.load_messages(session.id)
+    assert stored[-1]["content"]["recording_integrity"] == "incomplete"
+    location = stored[-1]["content"]["recording_locations"][0]
+    assert location["kind"] == "invalid_json" and location["line"] == 1
+    assert set(location) == {"attempt_id", "kind", "line", "characters", "sha256"}
+
+
+@pytest.mark.parametrize("diagnostic,expected,spawns", [
+    ("Your authentication token has expired", "auth_expired", 1),
+    ("503 service unavailable", "transient_exhausted", 3),
+    ("insufficient quota", None, 1),
+])
+async def test_long_execution_diagnostics_classify_tail_without_exposing_stderr(runtime, monkeypatch, diagnostic, expected, spawns):
+    manager, _, session, _, starts, events = runtime
+    secret = "secret-material-keep-private"
+    def argv(context):
+        starts.put_nowait(context)
+        stderr = "access_token=" + secret + "\n" + "diagnostic " * 1000 + diagnostic
+        code = f"import sys;sys.stderr.write({stderr!r});print('{{\"type\":\"turn.failed\",\"error\":{{\"message\":\"execution failed\"}}}}')"
+        return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(manager, "_TRANSIENT_RETRY_BASE_DELAY", 0)
+    receipt = await manager.start_message(session.id, "classify full evidence")
+    completion = await asyncio.wait_for(receipt.wait(), 5)
+    assert completion.outcome.status == "failed"
+    assert completion.outcome.code == expected
+    assert starts.qsize() == spawns
+    assert secret not in json.dumps(events)
+    assert len(completion.outcome.message or "") <= 2001
+
+
+async def test_first_app_timeout_recovers_late_completed_attempt_without_resubmission(runtime, monkeypatch, tmp_path):
+    from server import app_agent as app_module
+    from server.app_agent import AppAgentError, AppAgentManager
+    from server.applications import ApplicationManager
+
+    manager, db, _, _, starts, _ = runtime
+    monkeypatch.setattr(settings, "applications_dir", str(tmp_path / "apps"))
+    monkeypatch.setattr(app_module, "ASK_TIMEOUT_SECONDS", .05)
+    monkeypatch.setattr(manager, "_TRANSIENT_RETRY_BASE_DELAY", 0)
+    apps = ApplicationManager()
+    apps.bind(session_mgr=manager, db=db)
+    app_agent = AppAgentManager()
+    app_agent.bind(manager, db, apps)
+    worker = next(a for a in await db.load_agents() if a["name"] == "Review worker")
+    await db.save_application(app_id="timeout-app", name="Recovery app", description="Recover original requests",
+        agent_id=worker["id"], session_id=None, app_dir=str(tmp_path / "apps" / "recovery"),
+        entrypoint="index.html", status="ready", created_at="now", updated_at="now")
+    row = await db.get_application("timeout-app")
+    release = tmp_path / "release-app-turn"
+    def argv(context):
+        starts.put_nowait(context)
+        code = "import json,time,os\n"
+        code += "print(json.dumps({'type':'thread.started','thread_id':'app-thread'}),flush=True)\n"
+        if starts.qsize() == 1:
+            code += "print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'obsolete'}}),flush=True)\n"
+            code += "print(json.dumps({'type':'turn.failed','error':{'message':'503 service unavailable'}}),flush=True)\n"
+        else:
+            code += f"while not os.path.exists({str(release)!r}): time.sleep(.01)\n"
+            code += "for text in ['answer one','answer two']: print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':text}}),flush=True)\n"
+            code += "print(json.dumps({'type':'turn.completed','usage':{}}),flush=True)\n"
+        return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    try:
+        with pytest.raises(AppAgentError) as exc:
+            await app_agent.ask(row, message="first request")
+        recovery = exc.value.recovery
+        sid, rid = recovery["conversation_id"], recovery["request_id"]
+        assert (await app_agent.get_request_status(row["id"], sid, rid))["state"] in {"running", "queued"}
+        release.touch()
+        await wait_dispatch_idle(manager, sid)
+        status = await app_agent.get_request_status(row["id"], sid, rid)
+        assert status["state"] == "completed"
+        assert status["reply"] == "answer one\n\nanswer two"
+        assert starts.qsize() == 2
+        assert len(app_agent.list_conversations(row["id"])) == 1
+    finally:
+        release.touch()
+        app_agent.shutdown()
+        apps.shutdown()
+
+
 async def begin_ownerless_run(runtime):
     manager, _, session, _, starts, events = runtime
     await manager.start_message(session.id, "held before account")
@@ -268,6 +391,48 @@ async def test_bootstrap_retires_held_process_and_resumes_transcript_under_new_o
     assert new_scope.user_id == summary["user_id"]
     assert after.resume_id == "held-thread"
     await wait_dispatch_idle(manager, held.id)
+
+
+async def test_wiki_held_process_reuses_transport_with_fresh_turn_authority(runtime, monkeypatch, tmp_path):
+    from server.wiki.store import WikiError
+    from server.wiki.tasks import tasks
+
+    manager, _, parent, _, starts, events = runtime
+    release = tmp_path / "release-wiki-turn"
+    def argv(context):
+        starts.put_nowait(context)
+        code = "import json,sys,time,os\n"
+        code += "for line in sys.stdin:\n"
+        code += " print(json.dumps({'type':'assistant','message':{'content':[{'type':'text','text':'working'}]}}),flush=True)\n"
+        code += f" while not os.path.exists({str(release)!r}): time.sleep(.01)\n"
+        code += " print(json.dumps({'type':'result','subtype':'success','session_id':'wiki-held-thread','is_error':False}),flush=True)\n"
+        return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
+    harness = get_harness("claude-code")
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
+    session = await manager.create_session(parent.agent_id, "Wiki held", str(tmp_path), backend="claude-code")
+    first = await manager.start_message(session.id, "first", wiki_mode="read")
+    context = await asyncio.wait_for(starts.get(), 5)
+    scope = verify(next(entry.credential for entry in context.mcp_servers if entry.key == "wiki"))
+    await wait_until(lambda: any(e.get("type") == "assistant_text" and e.get("session_id") == session.id for e in events))
+    old_task = tasks.require(scope)
+    assert old_task.request_id == first.request_id
+    release.touch()
+    assert (await asyncio.wait_for(first.wait(), 5)).state == "completed"
+    await wait_dispatch_idle(manager, session.id)
+    with pytest.raises(WikiError):
+        tasks.require(scope)
+    release.unlink()
+    events.clear()
+    second = await manager.start_message(session.id, "second", wiki_mode="read")
+    await wait_until(lambda: any(e.get("type") == "assistant_text" and e.get("session_id") == session.id for e in events))
+    assert starts.empty(), "a changed Wiki task must not respawn the held process"
+    assert tasks.require(scope).request_id == second.request_id
+    assert tasks.resolve(scope) is not old_task
+    release.touch()
+    assert (await asyncio.wait_for(second.wait(), 5)).state == "completed"
+    await wait_dispatch_idle(manager, session.id)
+    with pytest.raises(WikiError):
+        tasks.require(scope)
 
 
 async def test_account_transition_does_not_fan_out_unadopted_question_answer(runtime, monkeypatch):

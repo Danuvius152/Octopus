@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { IconHelpCircle } from "@tabler/icons-react";
 import type { PendingQuestion } from "../stores/sessionStore";
+import type { SubmissionReply } from "../lib/submission";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 
@@ -11,10 +12,11 @@ export interface AnswerPayload {
 
 interface Props {
   question: PendingQuestion;
-  onSubmit: (questionId: string, answers: AnswerPayload[]) => void;
+  onSubmit: (questionId: string, answers: AnswerPayload[]) => void | Promise<SubmissionReply>;
 }
 
 export function QuestionPrompt({ question, onSubmit }: Props) {
+  const [submitting, setSubmitting] = useState(false);
   // For each sub-question, hold either selected option labels or a free-text
   // "Other" answer. `selected` is an array even for single-select so the
   // submit serializer is uniform.
@@ -49,9 +51,11 @@ export function QuestionPrompt({ question, onSubmit }: Props) {
     return (a.selected?.length || 0) > 0;
   });
 
-  const handleSubmit = () => {
-    if (!canSubmit) return;
-    onSubmit(question.question_id, answers);
+  const handleSubmit = async () => {
+    if (!canSubmit || submitting) return;
+    setSubmitting(true);
+    try { await onSubmit(question.question_id, answers); }
+    finally { setSubmitting(false); }
   };
 
   return (
@@ -127,9 +131,9 @@ export function QuestionPrompt({ question, onSubmit }: Props) {
         <Button
           className="btn btn-approve"
           onClick={handleSubmit}
-          disabled={!canSubmit}
+          disabled={!canSubmit || submitting}
         >
-          Submit
+          {submitting ? "Confirming…" : "Submit"}
         </Button>
       </div>
     </div>

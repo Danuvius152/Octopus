@@ -38,6 +38,7 @@ its page **and** from its backend.
 /apps/{app_id}/agent/agents                      GET    who can I talk to
 /apps/{app_id}/agent/conversations               GET    my threads
 /apps/{app_id}/agent/conversations/{cid}         GET    one thread's messages
+/apps/{app_id}/agent/conversations/{cid}/requests/{rid} GET original request status
 /apps/{app_id}/agent/conversations/{cid}         DELETE forget a thread
 /apps/{app_id}/agent/ask                         POST   one question, one answer (JSON)
 /apps/{app_id}/agent/chat                        POST   the same turn, streamed (SSE)
@@ -47,6 +48,14 @@ It sits under `/apps/{id}/` for the same reason the backend proxy does: the
 page reaches it at `agent/…` relative to itself, with no base URL to configure
 and no CORS. `ask` and `chat` are the same operation with two deliveries —
 a backend script wants one JSON blob, a chat UI wants tokens as they land.
+
+Successful replies and the initial SSE conversation event include `request_id`.
+An `ask` timeout returns HTTP 504 with structured `detail` containing
+`conversation_id`, `request_id`, `state` and `status_url`, including on a first
+call without a conversation ID. Poll that original request instead of resubmitting
+the operation. After a restart, an unavailable outcome is explicitly `unknown`.
+SSE events carry request/attempt identities; a `reset` event clears text from an
+abandoned attempt. A final reply retains all text blocks of the completed attempt.
 
 ## 3. A conversation is a session
 

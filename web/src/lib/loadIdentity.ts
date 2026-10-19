@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "./accountFetch";
 import { useSessionStore, type Identity } from "../stores/sessionStore";
 
 /** Ask who this browser is signed in as, and act on what the server says.
@@ -28,6 +29,7 @@ export async function loadIdentity(): Promise<void> {
     const res = await fetch(`${window.location.origin}/api/auth/identity`, {
       headers: { Authorization: `Bearer ${token}` },
     });
+    if (useSessionStore.getState().token !== token) return;
     if (res.status === 401) {
       setIdentity(null);
       setToken("");

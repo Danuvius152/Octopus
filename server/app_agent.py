@@ -74,10 +74,11 @@ _BUS_KEY = "app_agent"
 class AppAgentError(Exception):
     """Something the caller did wrong, with the status code to answer with."""
 
-    def __init__(self, message: str, *, status_code: int = 400) -> None:
+    def __init__(self, message: str, *, status_code: int = 400, recovery: dict[str, Any] | None = None) -> None:
         super().__init__(message)
         self.message = message
         self.status_code = status_code
+        self.recovery = recovery
 
 
 @dataclass
@@ -91,11 +92,15 @@ class _Turn:
     queue: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue)
     done: asyncio.Event = field(default_factory=asyncio.Event)
     text: list[str] = field(default_factory=list)
+    attempt_id: str | None = None
     error: str | None = None
     cost: float | None = None
 
     def reply(self) -> str:
         return "\n\n".join(t for t in self.text if t).strip()
+
+    def emit(self, event: dict[str, Any]) -> None:
+        self.queue.put_nowait({**event, "request_id": self.request_id, "attempt_id": self.attempt_id})
 
 
 class AppAgentManager:
@@ -134,7 +139,7 @@ class AppAgentManager:
 
     def _fail_turn(self, turn: _Turn, message: str) -> None:
         turn.error = message
-        turn.queue.put_nowait({"type": "error", "message": message})
+        turn.emit({"type": "error", "message": message})
         turn.done.set()
 
     async def _observe_completion(self, turn: _Turn, receipt) -> None:
@@ -146,7 +151,7 @@ class AppAgentManager:
         elif completion.outcome is not None and completion.outcome.status != "success":
             self._fail_turn(turn, completion.outcome.message or "The agent did not complete this request")
         else:
-            turn.queue.put_nowait({"type": "done", "reply": turn.reply(), "cost": turn.cost})
+            turn.emit({"type": "done", "reply": turn.reply(), "cost": turn.cost})
             turn.done.set()
 
     # ------------------------------------------------------------- read-side
@@ -243,6 +248,9 @@ class AppAgentManager:
                 "The agent is still working — read the conversation later for "
                 "the answer",
                 status_code=504,
+                recovery={"code": "ask_timeout", "conversation_id": turn.session_id,
+                          "request_id": turn.request_id, "state": "running",
+                          "status_url": f"/apps/{turn.app_id}/agent/conversations/{turn.session_id}/requests/{turn.request_id}"},
             )
         finally:
             self._release_turn(turn)
@@ -250,9 +258,39 @@ class AppAgentManager:
             raise AppAgentError(turn.error, status_code=502)
         return {
             "conversation_id": turn.session_id,
+            "request_id": turn.request_id,
             "reply": turn.reply(),
             "cost": turn.cost,
         }
+
+    async def get_request_status(self, app_id: str, conversation_id: str, request_id: str) -> dict[str, Any]:
+        """Observe the original admitted request; never start a replacement."""
+        session = self._require_conversation(app_id, conversation_id)
+        result: dict[str, Any] = {"conversation_id": conversation_id, "request_id": request_id}
+        messages = await self._require_db().load_committed_request_messages(conversation_id, request_id)
+        terminal = next((row for row in reversed(messages) if row["type"] == "result"
+                         and isinstance(row["content"], dict) and row["content"].get("request_id") == request_id), None)
+        if terminal:
+            context = (terminal.get("tool_input") or {}).get("attempt_context") or {}
+            attempt_id = context.get("attempt_id")
+            text = [row["content"] for row in messages if row["role"] == "assistant" and row["type"] == "text"
+                    and isinstance(row["content"], str)
+                    and (row.get("tool_input") or {}).get("attempt_context", {}).get("request_id") == request_id
+                    and (not attempt_id or (row.get("tool_input") or {}).get("attempt_context", {}).get("attempt_id") == attempt_id)]
+            return {**result, "state": "completed" if terminal["content"]["status"] == "success" else "failed",
+                    "outcome": terminal["content"], "reply": "\n\n".join(text), "cost": terminal.get("cost")}
+        blocked = session._recording_blocked
+        if blocked is not None and blocked.request_id == request_id:
+            return {**result, "state": "recording_unconfirmed"}
+        current = session._current_request
+        if current is not None and current.request_id == request_id:
+            return {**result, "state": "running"}
+        if any(item.request_id == request_id for item in session._pending_queue):
+            return {**result, "state": "queued"}
+        turn = self._turns.get(conversation_id)
+        if turn is not None and turn.request_id == request_id and not turn.done.is_set():
+            return {**result, "state": "running"}
+        return {**result, "state": "unknown", "message": "No confirmed outcome is available. Do not blindly resubmit the operation."}
 
     async def stream_turn(self, turn: _Turn) -> AsyncIterator[dict[str, Any]]:
         """A turn already started, delivered as it happens (§2 — the SSE
@@ -267,7 +305,7 @@ class AppAgentManager:
         connection drops mid-answer, then `delta`/`tool`/`question` as they
         arrive, then exactly one terminal `done` or `error`.
         """
-        yield {"type": "conversation", "conversation_id": turn.session_id}
+        yield {"type": "conversation", "conversation_id": turn.session_id, "request_id": turn.request_id}
         try:
             while True:
                 try:
@@ -557,32 +595,43 @@ class AppAgentManager:
             return
 
         kind = msg.get("type")
+        attempt_id = msg.get("attempt_id")
+        if attempt_id and attempt_id != turn.attempt_id:
+            previous = turn.attempt_id
+            turn.attempt_id = attempt_id
+            turn.text.clear()
+            if previous is not None:
+                turn.emit({"type": "reset"})
+        if kind == "recovery" and msg.get("retrying"):
+            turn.text.clear()
+            turn.emit({"type": "reset"})
         if kind == "recording_failed":
             turn.error = "The agent finished, but saving its result is unconfirmed. Open the conversation to retry saving."
-            turn.queue.put_nowait({"type": "error", "code": "recording_unconfirmed", "message": turn.error})
+            turn.emit({"type": "error", "code": "recording_unconfirmed", "message": turn.error})
             turn.done.set()
             return
         if kind in ("result", "error") and msg.get("retrying"):
+            turn.text.clear()
             return
         if kind == "assistant_delta":
             content = msg.get("content")
             if content:
-                turn.queue.put_nowait({"type": "delta", "text": content})
+                turn.emit({"type": "delta", "text": content})
             return
         if kind == "assistant_text":
             content = msg.get("content")
             if content:
                 turn.text.append(content)
-                turn.queue.put_nowait({"type": "message", "text": content})
+                turn.emit({"type": "message", "text": content})
             return
         if kind == "tool_use":
             # Just the name: an app can say "searching the web…" without
             # being handed the tool's arguments, which are none of its
             # business and may quote the user's files.
-            turn.queue.put_nowait({"type": "tool", "name": msg.get("tool") or ""})
+            turn.emit({"type": "tool", "name": msg.get("tool") or ""})
             return
         if kind == "question_request":
-            turn.queue.put_nowait(
+            turn.emit(
                 {
                     "type": "question",
                     "question_id": msg.get("question_id"),
@@ -593,10 +642,10 @@ class AppAgentManager:
         if kind == "result":
             if msg.get("is_error"):
                 turn.error = str(msg.get("message") or "the agent's turn ended with an error")
-                turn.queue.put_nowait({"type": "error", "message": turn.error})
+                turn.emit({"type": "error", "message": turn.error})
             else:
                 turn.cost = msg.get("cost")
-                turn.queue.put_nowait(
+                turn.emit(
                     {
                         "type": "done",
                         "reply": turn.reply(),
@@ -607,7 +656,7 @@ class AppAgentManager:
             return
         if kind == "error":
             turn.error = str(msg.get("message") or "session error")
-            turn.queue.put_nowait({"type": "error", "message": turn.error})
+            turn.emit({"type": "error", "message": turn.error})
             turn.done.set()
             return
 

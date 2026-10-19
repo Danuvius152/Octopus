@@ -107,6 +107,43 @@ async def test_engine_skips_malformed_lines(tmp_path):
     events = await asyncio.wait_for(_drain(run), timeout=3.0)
     await run.stop()
     assert [e.type for e in events] == ["good"]
+    assert run.protocol_issues == {"invalid_json": 1}
+
+
+async def test_unknown_extension_and_diagnostics_preserve_integrity(tmp_path):
+    run = Harness(_stream_profile('WARNING: native diagnostic', '{"type":"future.extension"}', '{"type":"result"}')).create_run()
+    await run.start("p", str(tmp_path))
+    await asyncio.wait_for(_drain(run), 3)
+    await run.stop()
+    assert run.protocol_issues == {}
+
+
+async def test_parser_exception_has_bounded_noncontent_evidence(tmp_path):
+    run = Harness(_stream_profile('{"type":"bad"}', '{"type":"result"}')).create_run()
+    original = run._parser.parse
+    def parse(obj):
+        if obj.get("type") == "bad":
+            raise ValueError("fixture")
+        return original(obj)
+    run._parser.parse = parse
+    await run.start("p", str(tmp_path))
+    await asyncio.wait_for(_drain(run), 3)
+    await run.stop()
+    assert run.protocol_issues == {"parser_exception": 1}
+    assert set(run.protocol_locations[0]) == {"kind", "line", "characters", "sha256"}
+
+
+async def test_oversized_protocol_line_marks_interrupted_recording(tmp_path, monkeypatch):
+    from server.harness import run as run_module
+    monkeypatch.setattr(run_module, "_STDOUT_LINE_LIMIT_BYTES", 1024)
+    profile = _stream_profile()
+    profile = RuntimeProfile(**{**profile.__dict__, "build_turn_argv": lambda ctx: (
+        [sys.executable, "-c", "print('x'*2048)"], {"cwd": ctx.working_dir})})
+    run = Harness(profile).create_run()
+    await run.start("p", str(tmp_path))
+    await asyncio.wait_for(_drain(run), 3)
+    await run.stop()
+    assert run.protocol_issues == {"stdout_interrupted": 1}
 
 
 @pytest.mark.asyncio
@@ -715,6 +752,52 @@ def test_spawn_signature_is_stable_across_turns():
     a = Harness(profile).create_run(RunConfig(connectors=[(_Conn(), _Inst())], **cfg))
     b = Harness(profile).create_run(RunConfig(connectors=[(_Conn(), _Inst())], **cfg))
     assert a.spawn_signature("/tmp", None) == b.spawn_signature("/tmp", None)
+
+
+def test_held_wiki_process_signature_is_independent_of_short_lived_task():
+    profile = _sig_profile()
+    a = Harness(profile).create_run(RunConfig(session_id="wiki-held", wiki_task_id="first", wiki_mode="read"))
+    b = Harness(profile).create_run(RunConfig(session_id="wiki-held", wiki_task_id="second", wiki_mode="read"))
+    assert a.spawn_signature("/tmp", None) == b.spawn_signature("/tmp", None)
+
+
+def test_held_wiki_transport_is_bound_only_to_its_active_authorized_task():
+    from types import SimpleNamespace
+
+    from server.mcp_identity import register_run, revoke_run, verify
+    from server.wiki.grants import principal
+    from server.wiki.store import WikiError
+    from server.wiki.tasks import tasks
+    session = SimpleNamespace(id="wiki-held", user_id=None, agent_id=None)
+    first = tasks.open(session, "auto", request_id="r1")
+    second = tasks.open(session, "auto", request_id="r2")
+    run = Harness(_sig_profile()).create_run(RunConfig(session_id=session.id, wiki_task_id=first, wiki_mode="auto"))
+    register_run(run.run_lease_id, session.id, None, None)
+    try:
+        run.bind_wiki_task(first)
+        context = run._make_context("p", "/tmp", None, None)
+        scope = verify(next(entry.credential for entry in context.mcp_servers if entry.key == "wiki"))
+        old_task = tasks.require(scope)
+        assert old_task.request_id == "r1"
+        assert principal(old_task, scope, {}, "session:wiki-held") == "auto"
+        tasks.close(first)
+        with pytest.raises(WikiError):
+            tasks.require(scope)
+        run.bind_wiki_task(second)
+        assert tasks.require(scope).request_id == "r2"
+        assert tasks.resolve(scope) is not old_task
+        # An entry call captured before rebinding cannot acquire the next
+        # turn's authority at its final admission transaction.
+        with pytest.raises(WikiError, match="no longer authorized"):
+            principal(old_task, scope, {}, "session:wiki-held")
+        assert principal(tasks.require(scope), scope, {}, "session:wiki-held") == "auto"
+        revoke_run(run.run_lease_id)
+        with pytest.raises(WikiError):
+            tasks.require(scope)
+    finally:
+        revoke_run(run.run_lease_id)
+        tasks.close(first)
+        tasks.close(second)
 
 
 def test_spawn_signature_changes_with_anything_baked_in_at_spawn():

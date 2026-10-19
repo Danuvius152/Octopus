@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "../lib/accountFetch";
 import { useCallback, useEffect, useRef } from "react";
 import { newSubmissionId, type SubmissionReply } from "../lib/submission";
 import {
@@ -97,6 +98,12 @@ export function handleWsMessage(data: Record<string, unknown>) {
   }
 
   switch (type) {
+    case "attempt_started":
+      if (typeof data.request_id === "string" && typeof data.attempt_id === "string") {
+        clearStreamingText(sessionId);
+        getState().setActiveAttempt(sessionId, { request_id: data.request_id, attempt_id: data.attempt_id });
+      }
+      break;
     case "wiki_job_changed":
       if (sessionId === getState().activeSessionId) void refreshWikiJobs(sessionId).catch(() => {});
       break;
@@ -136,7 +143,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
     // so this one has to sign in again (token-rotation.md §3).
     case "auth_token_rotated": {
       const next = data.token as string | null | undefined;
-      getState().setToken(typeof next === "string" && next ? next : "");
+      getState().setToken(typeof next === "string" && next ? next : "", { sameAccount: true });
       break;
     }
 
@@ -260,6 +267,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
       break;
 
     case "result":
+      if (getState().activeAttempts[sessionId]?.request_id === data.request_id) getState().setActiveAttempt(sessionId, null);
       // A turn can end with no completed text block at all — an interrupt, a
       // failure, or a turn that only ran tools. Whatever was streaming is not
       // going to be superseded by a real message, so drop it here.
@@ -461,6 +469,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
         phase: "done",
         sources: (data.sources as string[]) ?? undefined,
         verified: (data.verified as number) ?? undefined,
+        unverified: (data.unverified as number) ?? undefined,
         injection_status: (data.injection_status as ResearchJob["injection_status"]) ?? "pending",
       });
       break;
@@ -471,6 +480,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
         id: data.research_id as string,
         injection_status: data.injection_status as ResearchJob["injection_status"],
         error: (data.error as string) ?? null,
+        ...(data.delivery_receipt ? { delivery_receipt: data.delivery_receipt as ResearchJob["delivery_receipt"] } : {}),
       });
       break;
     }
@@ -580,10 +590,13 @@ export function useWebSocket() {
     sessionId: string;
     finish: (reply: SubmissionReply) => void;
   }>());
+  const controls = useRef(new Map<string, { sessionId: string; operation: string; finish: (reply: SubmissionReply) => void }>());
 
   useEffect(() => {
     if (!token) return;
+    const accountGeneration = getState().accountGeneration;
     const pendingSubmissions = submissions.current;
+    const pendingControls = controls.current;
 
     function connect() {
       if (wsRef.current?.readyState === WebSocket.OPEN ||
@@ -593,12 +606,13 @@ export function useWebSocket() {
       wsRef.current = ws;
 
       ws.onopen = () => {
-        if (wsRef.current !== ws) return;
+        if (wsRef.current !== ws || getState().accountGeneration !== accountGeneration || getState().token !== token) return;
         getState().setConnected(true);
         if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
 
         // Re-fetch state after reconnect
-        const { activeSessionId, token: t, dispatchGeneration } = getState();
+        const snapshotStart = getState();
+        const { activeSessionId, token: t, dispatchGeneration } = snapshotStart;
         if (t) {
           fetch(`${window.location.origin}/api/sessions`, {
             headers: { Authorization: `Bearer ${t}` },
@@ -624,7 +638,7 @@ export function useWebSocket() {
               .then((r) => (r.ok ? r.json() : null))
               .then((data) => {
                 if (!data) return;
-                applySessionSnapshot(activeSessionId, data, dispatchGeneration);
+                applySessionSnapshot(activeSessionId, data, dispatchGeneration, snapshotStart.subagents[activeSessionId] || {});
               })
               .catch(() => {});
             // Bg tasks: same reload, independent endpoint. Chat history
@@ -636,7 +650,7 @@ export function useWebSocket() {
             )
               .then((r) => (r.ok ? r.json() : null))
               .then((tasks) => {
-                if (tasks) getState().setBgTasks(activeSessionId, tasks);
+                if (tasks) getState().setBgTasks(activeSessionId, tasks, snapshotStart.bgTasks[activeSessionId] || []);
               })
               .catch(() => {});
             fetch(
@@ -659,7 +673,7 @@ export function useWebSocket() {
             )
               .then((r) => (r.ok ? r.json() : null))
               .then((jobs) => {
-                if (jobs) getState().setResearch(activeSessionId, jobs);
+                if (jobs) getState().setResearch(activeSessionId, jobs, snapshotStart.research[activeSessionId] || []);
               })
               .catch(() => {});
           }
@@ -667,11 +681,15 @@ export function useWebSocket() {
       };
 
       ws.onclose = (event) => {
-        if (wsRef.current !== ws) return;
+        if (wsRef.current !== ws || getState().accountGeneration !== accountGeneration || getState().token !== token) return;
         for (const pending of submissions.current.values()) {
-          pending.finish({ accepted: false, message: "Delivery was not confirmed. Check the conversation before sending again." });
+          pending.finish({ accepted: false, state: "unknown", message: "Admission was not confirmed. Retry confirmation with the same submission identity." });
         }
         submissions.current.clear();
+        for (const pending of controls.current.values()) {
+          pending.finish({ accepted: false, state: "unknown", message: "Command delivery is unknown after disconnect. Refresh the conversation before trying again." });
+        }
+        controls.current.clear();
         getState().setConnected(false);
         // 4001 is the server saying this token is not accepted (it was
         // rotated while we were away, or revoked). Reconnecting every three
@@ -690,7 +708,7 @@ export function useWebSocket() {
       };
 
       ws.onmessage = (e) => {
-        if (wsRef.current !== ws) return;
+        if (wsRef.current !== ws || getState().accountGeneration !== accountGeneration || getState().token !== token) return;
         try {
           const data = JSON.parse(e.data);
           if (data.type === "submission") {
@@ -698,9 +716,16 @@ export function useWebSocket() {
             if (pending && pending.sessionId === data.session_id) {
               submissions.current.delete(data.client_request_id);
               pending.finish({ accepted: data.accepted === true, message: data.message,
+                ...(data.state === "unknown" ? { state: "unknown" as const } : {}),
                 ...(typeof data.code === "string" ? { code: data.code } : {}),
                 ...(typeof data.request_id === "string" ? { requestId: data.request_id } : {}),
               });
+            }
+          } else if (data.type === "command_receipt") {
+            const pending = controls.current.get(data.client_command_id);
+            if (pending && pending.sessionId === data.session_id && pending.operation === data.operation) {
+              controls.current.delete(data.client_command_id);
+              pending.finish({ accepted: data.accepted === true, message: data.message, code: data.code });
             }
           } else {
             handleWsMessage(data);
@@ -715,9 +740,13 @@ export function useWebSocket() {
 
     return () => {
       for (const pending of pendingSubmissions.values()) {
-        pending.finish({ accepted: false, message: "Delivery was not confirmed. Check the conversation before sending again." });
+        pending.finish({ accepted: false, state: "unknown", message: "Admission was not confirmed. Retry confirmation with the same submission identity." });
       }
       pendingSubmissions.clear();
+      for (const pending of pendingControls.values()) {
+        pending.finish({ accepted: false, state: "unknown", message: "Command delivery was not confirmed. Refresh the conversation before trying again." });
+      }
+      pendingControls.clear();
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       reconnectTimer.current = undefined;
       wsRef.current?.close();
@@ -728,11 +757,13 @@ export function useWebSocket() {
   const send = useCallback((data: Record<string, unknown>) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(data));
+      return true;
     }
+    return false;
   }, []);
 
   const sendMessage = useCallback(
-    (sessionId: string, content: string, attachmentIds?: string[], wikiMode?: WikiMessageMode) => {
+    (sessionId: string, content: string, attachmentIds?: string[], wikiMode?: WikiMessageMode, submissionId?: string) => {
       // Don't optimistically add to chat — the backend broadcasts a
       // user_message event whether the prompt fires immediately or after
       // dequeue, so a single broadcast handler keeps state consistent.
@@ -745,60 +776,104 @@ export function useWebSocket() {
         payload.attachment_ids = attachmentIds;
       }
       if (wikiMode) payload.wiki_mode = wikiMode;
-      const clientRequestId = newSubmissionId();
+      const clientRequestId = submissionId || newSubmissionId();
       payload.client_request_id = clientRequestId;
       if (wsRef.current?.readyState !== WebSocket.OPEN) {
-        return Promise.resolve({ accepted: false, message: "Disconnected. Your message was not sent." });
+        return Promise.resolve({ accepted: false, code: "not_sent", message: "Disconnected. Your message was not sent." });
       }
       return new Promise<SubmissionReply>((finish) => {
         const timeout = setTimeout(() => {
           submissions.current.delete(clientRequestId);
-          finish({ accepted: false, message: "Delivery was not confirmed. Check the conversation before sending again." });
+          finish({ accepted: false, state: "unknown", clientRequestId, message: "Admission was not confirmed. Retry confirmation with the same submission identity." });
         }, 30_000);
         submissions.current.set(clientRequestId, { sessionId, finish: (reply) => {
           clearTimeout(timeout);
-          finish(reply);
+          finish(reply.state === "unknown" ? { ...reply, clientRequestId } : reply);
         } });
         try {
-          send(payload);
+          if (!send(payload)) throw new Error("Disconnected");
         } catch {
           clearTimeout(timeout);
           submissions.current.delete(clientRequestId);
-          finish({ accepted: false, message: "Your message could not be sent." });
+          finish({ accepted: false, code: "not_sent", message: "Your message could not be sent." });
         }
       });
     },
     [send]
   );
 
+  const sendCommand = useCallback((data: Record<string, unknown>) => {
+    const id = newSubmissionId();
+    const sessionId = String(data.session_id);
+    const operation = String(data.type);
+    const generation = getState().accountGeneration;
+    const update = (state: "pending" | "accepted" | "failed" | "unknown", message?: string) => {
+      if (getState().accountGeneration === generation) getState().setControlCommand({ id, sessionId, operation, state, message });
+    };
+    update("pending");
+    return new Promise<SubmissionReply>((resolve) => {
+      const timeout = setTimeout(() => {
+        controls.current.delete(id);
+        finish({ accepted: false, state: "unknown", message: "Command confirmation timed out. Refresh before trying again." });
+      }, 15_000);
+      const finish = (reply: SubmissionReply) => {
+        clearTimeout(timeout);
+        update(reply.state === "unknown" ? "unknown" : reply.accepted ? "accepted" : "failed", reply.message);
+        resolve(reply);
+      };
+      controls.current.set(id, { sessionId, operation, finish });
+      try {
+        if (!send({ ...data, client_command_id: id })) {
+          controls.current.delete(id);
+          finish({ accepted: false, message: "Disconnected. The command was not sent." });
+        }
+      } catch {
+        controls.current.delete(id);
+        finish({ accepted: false, message: "The command could not be sent." });
+      }
+    });
+  }, [send]);
+
   const interrupt = useCallback(
     (sessionId: string) => {
-      send({ type: "interrupt", session_id: sessionId });
+      const state = getState();
+      const requestId = state.dispatchStates[sessionId]?.active_request_id ?? null;
+      const active = state.activeAttempts[sessionId];
+      return sendCommand({ type: "interrupt", session_id: sessionId, request_id: requestId,
+        attempt_id: active?.request_id === requestId ? active.attempt_id : null,
+        generation: state.dispatchStates[sessionId]?.generation ?? null,
+        revision: state.dispatchStates[sessionId]?.revision ?? null });
     },
-    [send]
+    [sendCommand]
   );
 
   const approveTool = useCallback(
     (sessionId: string, toolUseId: string) => {
-      send({
+      const identity = [...(getState().messages[sessionId] || [])].reverse().find((m) => m.tool_use_id === toolUseId)?.runtime_metadata;
+      return sendCommand({
         type: "approve_tool",
         session_id: sessionId,
         tool_use_id: toolUseId,
+        request_id: identity?.request_id ?? null, attempt_id: identity?.attempt_id ?? null,
+        tool_call_id: identity?.tool_call_id ?? null,
       });
     },
-    [send]
+    [sendCommand]
   );
 
   const denyTool = useCallback(
     (sessionId: string, toolUseId: string, reason?: string) => {
-      send({
+      const identity = [...(getState().messages[sessionId] || [])].reverse().find((m) => m.tool_use_id === toolUseId)?.runtime_metadata;
+      return sendCommand({
         type: "deny_tool",
         session_id: sessionId,
         tool_use_id: toolUseId,
         reason: reason || "",
+        request_id: identity?.request_id ?? null, attempt_id: identity?.attempt_id ?? null,
+        tool_call_id: identity?.tool_call_id ?? null,
       });
     },
-    [send]
+    [sendCommand]
   );
 
   const answerQuestion = useCallback(
@@ -807,14 +882,16 @@ export function useWebSocket() {
       questionId: string,
       answers: { selected?: string[]; text?: string }[]
     ) => {
-      send({
+      const question = getState().pendingQuestions[sessionId]?.find((q) => q.question_id === questionId);
+      return sendCommand({
         type: "answer_question",
         session_id: sessionId,
         question_id: questionId,
         answers,
+        request_id: question?.request_id ?? null, attempt_id: question?.attempt_id ?? null,
       });
     },
-    [send]
+    [sendCommand]
   );
 
   return { send, sendMessage, interrupt, approveTool, denyTool, answerQuestion };

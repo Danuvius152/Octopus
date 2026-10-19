@@ -31,6 +31,7 @@ from ..harness import (
     RunConfig,
     get_harness,
 )
+from ..harness.events import HarnessPreparationError
 from ..harness.model_settings import effective_settings
 from ..large_prompts import spill_if_large
 from ..models import (
@@ -66,6 +67,9 @@ if TYPE_CHECKING:
 class _Settlement:
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     work_id: str | None = None
+    attempt_id: str | None = None
+    protocol_issues: dict[str, int] = field(default_factory=dict)
+    protocol_locations: list[dict[str, Any]] = field(default_factory=list)
     started_at: float | None = None
     recovery: dict[str, int] = field(default_factory=lambda: {
         "transient": 0, "idle": 0, "stale_session": 0, "premature_exit": 0,
@@ -120,6 +124,7 @@ class _Attempt:
     saw_error_event: bool = False
     error_code: str | None = None
     error_text: str = ""
+    preparation_failed: bool = False
     # Streaming-text coalescing (inline-steering.md §4 S1). The CLI emits one
     # delta per token; forwarding each as its own WS frame would be a frame
     # per token and a React render per token. We batch them into at most one
@@ -281,7 +286,13 @@ class TurnsMixin(SessionManagerBase):
                 message=safe_diagnostic(message), code=code,
                 provider_code=getattr(result, "error_code", None) or provider_code,
                 recovery=dict(settlement.recovery),
+                recording_integrity="incomplete" if settlement.protocol_issues else "complete",
+                recording_issues=dict(settlement.protocol_issues),
+                recording_locations=list(settlement.protocol_locations),
             )
+            if settlement.protocol_issues:
+                note = "Some backend protocol records could not be read. Execution was not repeated; the transcript may be incomplete."
+                outcome.message = f"{outcome.message}\n{note}" if outcome.message else note
 
             settlement.outcome = outcome
             settlement.stored = MessageContent(
@@ -291,12 +302,18 @@ class TurnsMixin(SessionManagerBase):
                 session_id=result.session_id if result else session.claude_session_id,
                 cost=settlement.cost, created_at=datetime.now(UTC).isoformat(),
             )
+            if settlement.attempt_id:
+                settlement.stored.tool_input = {
+                    **(settlement.stored.tool_input or {}),
+                    "attempt_context": {"request_id": settlement.request_id, "attempt_id": settlement.attempt_id},
+                }
             if self.db:
                 settlement.seq = session._next_message_seq
                 session._next_message_seq += 1
             event = {
                 "type": "result", "session_id": session.id,
                 "request_id": settlement.request_id, "work_id": settlement.work_id,
+                "attempt_id": settlement.attempt_id,
                 "claude_session_id": settlement.stored.session_id,
                 "content": outcome.model_dump(), "is_error": status != "success",
                 "cost": settlement.cost, "code": code, "message": outcome.message,
@@ -387,10 +404,14 @@ class TurnsMixin(SessionManagerBase):
             attempt=attempt, maximum=maximum, delay=delay,
         )
         stored = MessageContent(role=MessageRole.system, type="recovery", content=payload.model_dump())
+        if settlement and settlement.attempt_id:
+            stored.tool_input = {"attempt_context": {"request_id": settlement.request_id,
+                                                      "attempt_id": settlement.attempt_id}}
         seq = await self._persist_message(session, stored)
         return self._tag_persisted(
             {"type": "recovery", "session_id": session.id,
              "request_id": payload.request_id, "content": stored.content,
+             "attempt_id": settlement.attempt_id if settlement else None,
              "message": payload.message, "code": code, "terminal": False,
              "retrying": phase == "retrying"}, seq, stored,
         )
@@ -1526,6 +1547,8 @@ class TurnsMixin(SessionManagerBase):
         to re-render and no transcript to resume: just hand it the next
         message.
         """
+        if hasattr(attempt.backend, "bind_wiki_task"):
+            attempt.backend.bind_wiki_task(session._wiki_task_id)
         if attempt.reused:
             await attempt.backend.send_turn(attempt.prompt)
         else:
@@ -1816,6 +1839,11 @@ class TurnsMixin(SessionManagerBase):
         msg_content = self._event_to_message_content(event)
         msg_seq: int | None = None
         if msg_content is not None:
+            if event.type == "text":
+                msg_content.tool_input = {**(msg_content.tool_input or {}), "attempt_context": {
+                    "request_id": session._settlement.request_id if session._settlement else "untracked",
+                    "attempt_id": attempt.attempt_id,
+                }}
             if pending_question is not None:
                 msg_content.tool_input = {
                     **(msg_content.tool_input or {}),
@@ -1847,13 +1875,14 @@ class TurnsMixin(SessionManagerBase):
     @staticmethod
     def _failure_blob(attempt: _Attempt) -> str:
         """Everything a failed attempt said, for the pattern matchers: the
-        terminal event's content/raw plus the CLI's stderr, capped.
+        terminal event's content/raw plus the CLI's stderr. Display summaries
+        are bounded separately; classification must also see trailing evidence.
 
         getattr: a real HarnessRun exposes stderr_text; lightweight test and
         backend stand-ins may not.
         """
         stderr_text = getattr(attempt.backend, "stderr_text", "") or ""
-        return (attempt.error_text + "\n" + stderr_text)[:8000]
+        return attempt.error_text + "\n" + stderr_text
 
     async def _timeout_decision(
         self, session: Session, turn: _Turn, attempt: _Attempt
@@ -2132,6 +2161,13 @@ class TurnsMixin(SessionManagerBase):
             decision = await self._auth_decision(session, turn, blob, error_code=attempt.failure_code)
             if decision is not None:
                 return decision
+            if attempt.preparation_failed:
+                decision = await self._transient_decision(session, turn, blob, error_code=attempt.failure_code)
+                if decision is not None:
+                    return decision
+                return _Decision.stop({"code": "preparation_failed"})
+            if getattr(attempt.backend, "protocol_issues", None):
+                return _Decision.stop({"code": "protocol_incomplete"})
             decision = await self._stale_session_decision(session, turn, blob)
             if decision is not None:
                 return decision
@@ -2224,6 +2260,7 @@ class TurnsMixin(SessionManagerBase):
             attempt = _Attempt(
                 backend=backend, prompt=turn.current_prompt, reused=reused
             )
+            settlement.attempt_id = attempt.attempt_id
             if hasattr(backend, "bind_tool_context"):
                 backend.bind_tool_context(turn.settlement.request_id, attempt.attempt_id)
             def touch_current_attempt(
@@ -2241,6 +2278,8 @@ class TurnsMixin(SessionManagerBase):
                 if hasattr(backend, "bind_activity") else None
             )
             await self._begin_question_attempt(session, attempt.attempt_id, attempt.watchdog)
+            yield {"type": "attempt_started", "session_id": session.id,
+                   "request_id": settlement.request_id, "attempt_id": attempt.attempt_id}
             watchdog = self._start_turn_watchdog(
                 backend, attempt.watchdog, started_at=turn.started_at
             )
@@ -2262,7 +2301,11 @@ class TurnsMixin(SessionManagerBase):
                     for frame in await self._handle_stream_event(
                         session, attempt, event
                     ):
+                        frame["attempt_id"] = attempt.attempt_id
                         yield frame
+            except HarnessPreparationError as exc:
+                attempt.preparation_failed = True
+                self._capture_error_text(attempt, HarnessEvent(type="error", content=str(exc), error_code=exc.error_code))
             except asyncio.CancelledError:
                 task = asyncio.current_task()
                 if attempt.timeout is None or task is None or task.cancelling():
@@ -2284,6 +2327,12 @@ class TurnsMixin(SessionManagerBase):
                 )
 
             turn.produced_output = turn.produced_output or attempt.produced_output
+            for kind, count in getattr(backend, "protocol_issues", {}).items():
+                settlement.protocol_issues[kind] = settlement.protocol_issues.get(kind, 0) + count
+            settlement.protocol_locations.extend(
+                {**location, "attempt_id": attempt.attempt_id}
+                for location in getattr(backend, "protocol_locations", [])[:max(0, 8 - len(settlement.protocol_locations))]
+            )
             if attempt.result is not None and attempt.result.cost is not None:
                 settlement.cost = (settlement.cost or 0) + attempt.result.cost
             decision = await self._after_attempt(session, turn, attempt)

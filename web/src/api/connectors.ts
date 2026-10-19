@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "../lib/accountFetch";
 /** Typed fetch wrappers for the /api/connectors routes (connectors.md §5.5).
  *
  * Installations are global; enablement is agent-scoped. The OAuth install is

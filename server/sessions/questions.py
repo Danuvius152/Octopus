@@ -290,6 +290,8 @@ class QuestionsMixin(SessionManagerBase):
             return False
         if await self._resolve_expired_question(session, question_id):
             return False
+        if session._pending_questions.get(question_id) is not pending:
+            return False
         answer_text = self._format_answers(pending.questions, answers)
         return await self._deliver_question_answer(
             session, question_id, answer_text, auto=False

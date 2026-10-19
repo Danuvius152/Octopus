@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "./accountFetch";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { selectSession } from "./selectSession";
 

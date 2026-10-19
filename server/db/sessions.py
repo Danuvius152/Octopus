@@ -589,6 +589,28 @@ class SessionsMixin(DatabaseBase):
         async with aiosqlite.connect(Path(self._db_path).resolve().as_uri() + "?mode=ro", uri=True) as reader:
             return await read(reader)
 
+    async def load_committed_request_messages(self, session_id: str, request_id: str) -> list[dict[str, Any]]:
+        """Read one request's outcome and text in one committed snapshot.
+
+        Recovery queries must never flush this connection's uncertain batch,
+        even when the queried request itself was committed earlier.
+        """
+        await self._ensure_connected()
+        async def read(reader: aiosqlite.Connection) -> list[dict[str, Any]]:
+            cursor = await reader.execute(
+                "SELECT role,type,content,tool_input,cost FROM messages WHERE session_id=? AND "
+                "(terminal_request_id=? OR (role='assistant' AND type='text' "
+                "AND json_extract(tool_input,'$.attempt_context.request_id')=?)) ORDER BY seq",
+                (session_id, request_id, request_id),
+            )
+            return [{"role": row[0], "type": row[1], "content": json.loads(row[2]) if row[2] else None,
+                     "tool_input": json.loads(row[3]) if row[3] else None, "cost": row[4]}
+                    for row in await cursor.fetchall()]
+        if self._db_path == ":memory:":
+            return [] if self.conn.in_transaction else await read(self.conn)
+        async with aiosqlite.connect(Path(self._db_path).resolve().as_uri() + "?mode=ro", uri=True) as reader:
+            return await read(reader)
+
     @serialized_write
     async def load_messages(
         self,

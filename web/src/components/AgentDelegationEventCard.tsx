@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "../lib/accountFetch";
 /**
  * Renders one of the three turn-injection artifacts a delegation can
  * produce, parsed from the user-message text the backend's

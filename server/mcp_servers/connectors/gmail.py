@@ -129,6 +129,7 @@ def search(query: str, limit: int = 10) -> str:
     if err:
         return err
     out = []
+    failures = []
     for ref in listing.get("messages", []) or []:
         msg, merr = _api(
             "GET",
@@ -139,6 +140,7 @@ def search(query: str, limit: int = 10) -> str:
             },
         )
         if merr:
+            failures.append({"id": ref["id"], "error": merr})
             continue
         out.append(
             {
@@ -150,6 +152,10 @@ def search(query: str, limit: int = 10) -> str:
                 "snippet": msg.get("snippet", ""),
             }
         )
+    if failures:
+        return truncate(to_text({"messages": out, "complete": False, "failures": failures,
+                                 "matched_in_page": len(listing.get("messages", []) or []),
+                                 "has_more": bool(listing.get("nextPageToken"))}))
     return truncate(to_text(out))
 
 

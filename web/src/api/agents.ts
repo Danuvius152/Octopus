@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "../lib/accountFetch";
 /** Typed fetch wrappers for the agent sidebar-pin routes (sidebar-pins.md).
  *
  * The rest of the agent CRUD still talks to `/api/agents` from the

@@ -22,6 +22,7 @@ from .schemas import (
     parse_angles,
     parse_findings,
     parse_verdict,
+    positively_verified,
     scope_prompt,
     search_prompt,
     synthesize_prompt,
@@ -152,7 +153,11 @@ async def run_research(
                 for _ in range(limits.votes_per_claim)
             ]
         votes = [task.result() for task in vote_tasks]
-        refutes = sum(1 for v in votes if not v.error and parse_verdict(v.text))
+        valid = [v for v in votes if not v.error and parse_verdict(v.text) is not None]
+        refutes = sum(parse_verdict(v.text) is True for v in valid)
+        supports = sum(positively_verified(v.text) for v in valid)
+        f.verification = ("verified" if supports >= kill_threshold else
+                          "unverified" if valid else "failed")
         leaf_cost = sum(v.cost or 0.0 for v in votes)
         return refutes < kill_threshold, leaf_cost
 
@@ -167,15 +172,19 @@ async def run_research(
                 survivors.append(f)
 
     # 5. Synthesize ------------------------------------------------------------
-    await _emit("synthesize", f"Writing the report from {len(survivors)} verified finding(s)…",
-                verified=len(survivors))
+    verified = sum(f.verification == "verified" for f in survivors)
+    unverified = len(survivors) - verified
+    verification_failed = sum(f.verification == "failed" for f in survivors)
+    counts = {"verified": verified, "unverified": unverified, "verification_failed": verification_failed}
+    await _emit("synthesize", f"Writing the report from {verified} verified and {unverified} unverified finding(s)…",
+                **counts)
     synth_res = await reason(synthesize_prompt(question, survivors))
     cost += synth_res.cost or 0.0
     report_text = synth_res.text or "(the model produced no report)"
 
     sources = sorted({f.url for f in survivors if f.url})
     await _emit("done", "Research complete.",
-                verified=len(survivors), sources=len(sources))
+                **counts, sources=len(sources))
     return ResearchReport(
         question=question,
         report=report_text,

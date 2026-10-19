@@ -13,6 +13,8 @@ from .store import WikiError
 if TYPE_CHECKING:
     from ..knowledge import KnowledgeContext
 
+RUN_WIKI_SCOPE = "run-bound-wiki"
+
 
 @dataclass(frozen=True)
 class WikiTask:
@@ -43,6 +45,32 @@ class WikiTasks:
     def __init__(self):
         self.active: dict[str, WikiTask] = {}
         self.assignments: dict[str, dict] = {}
+        self.run_bindings: dict[str, str] = {}
+
+    def bind_run(self, lease: str, task_id: str | None, session_id: str | None, user_id: str | None) -> None:
+        self.run_bindings.pop(lease, None)
+        if task_id is None:
+            return
+        task = self.active.get(task_id)
+        if task is None or (task.session_id, task.user_id) != (session_id, user_id):
+            raise WikiError("The run cannot bind another task's Wiki authority", 403)
+        self.run_bindings[lease] = task_id
+
+    def unbind_run(self, lease: str) -> None:
+        self.run_bindings.pop(lease, None)
+
+    def token_for_scope(self, scope) -> str | None:
+        if scope is None:
+            return None
+        if scope.wiki_task_id != RUN_WIKI_SCOPE:
+            return scope.wiki_task_id
+        from ..mcp_identity import scope_is_live
+        if not scope.run_lease_id or not scope_is_live(scope):
+            return None
+        return self.run_bindings.get(scope.run_lease_id)
+
+    def resolve(self, scope) -> WikiTask | None:
+        return self.active.get(self.token_for_scope(scope))
 
     def assign(self, session_id, job_id, items, *, registration=None, request_id=None, attempt=None):
         """Capture the host-selected batch, independently of later path moves."""
@@ -103,6 +131,9 @@ class WikiTasks:
     def close(self, token: str | None) -> None:
         if token:
             self.active.pop(token, None)
+            for lease, bound in list(self.run_bindings.items()):
+                if bound == token:
+                    self.unbind_run(lease)
 
     def is_curator_worker(self, task):
         if task is None or task.mode != "maintain" or not task.job_id:
@@ -140,7 +171,7 @@ class WikiTasks:
         return replace(task, call_scope=scope, active_task=task) if task.job_id else task
 
     def require(self, scope, *, write: bool = False, publish: bool = False) -> WikiTask:
-        task = self.active.get(scope.wiki_task_id) if scope else None
+        task = self.resolve(scope)
         if task is None or (task.session_id, task.user_id) != (
             scope.session_id,
             scope.user_id,

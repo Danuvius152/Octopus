@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "../lib/accountFetch";
 import { useCallback, useEffect, useState } from "react";
 import {
   IconArchive,
@@ -92,7 +93,7 @@ export function SidebarAgents() {
 
   useEffect(() => {
     if (!token) return;
-    fetchAgents();
+    void fetchAgents().catch(() => {});
     fetchSessions();
     fetch(`${API}/api/backends`, { headers })
       .then((r) => (r.ok ? r.json() : null))

@@ -101,6 +101,9 @@ UNSCOPED_BY_DESIGN: dict[tuple[str, str], str] = {
     ("GET", "/apps/{app_id}/agent/conversations/{conversation_id}"): (
         "scoped by `_viewer`"
     ),
+    ("GET", "/apps/{app_id}/agent/conversations/{conversation_id}/requests/{request_id}"): (
+        "scoped by `_app_for_agent_api` and the conversation's app_id"
+    ),
     ("DELETE", "/apps/{app_id}/agent/conversations/{conversation_id}"): (
         "scoped by `_viewer`"
     ),

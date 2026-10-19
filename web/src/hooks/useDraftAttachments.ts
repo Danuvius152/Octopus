@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "../lib/accountFetch";
 import { useCallback, useEffect, useRef, useState, type SetStateAction } from "react";
 import { useSessionStore, type AttachmentMetadata } from "../stores/sessionStore";
 import { newSubmissionId } from "../lib/submission";
@@ -15,6 +16,8 @@ export interface PendingAttachment {
   error?: string;
 }
 
+interface RejectedFile { name: string; reason: string }
+
 function uploadState(file: File, ownerSessionId: string | null, generation: number) {
   const error = file.size === 0 ? "The file is empty" : file.size > MAX_FILE_BYTES ? "The file exceeds 25 MB" : undefined;
   return { ownerSessionId, generation, status: error ? "error" as const : "uploading" as const, meta: undefined, error };
@@ -22,11 +25,12 @@ function uploadState(file: File, ownerSessionId: string | null, generation: numb
 
 /** A File is the draft; an upload ID belongs to one session and attempt. */
 export function useDraftAttachments(activeSessionId: string | null) {
-  const [draft, setDraft] = useState<{ owner: string | null; attachments: PendingAttachment[] }>({ owner: activeSessionId, attachments: [] });
+  const [draft, setDraft] = useState<{ owner: string | null; attachments: PendingAttachment[]; rejected: RejectedFile[] }>(
+    { owner: activeSessionId, attachments: [], rejected: [] });
   if (draft.owner !== activeSessionId) {
     // Adjust derived state before React commits the new session. Uploads
     // belong in the effect; the synchronous owner transition does not.
-    setDraft({ owner: activeSessionId, attachments: draft.attachments.map((file) => ({
+    setDraft({ owner: activeSessionId, rejected: draft.rejected, attachments: draft.attachments.map((file) => ({
       ...file, ...uploadState(file.file, activeSessionId, file.generation + 1),
     })) });
   }
@@ -81,12 +85,17 @@ export function useDraftAttachments(activeSessionId: string | null) {
   }, []);
 
   const addFiles = useCallback((files: File[]) => {
-    setDraft((current) => current.owner === null ? current : ({ ...current, attachments: [
-      ...current.attachments, ...files.slice(0, MAX_ATTACHMENTS_PER_MESSAGE - current.attachments.length)
-        .map((file): PendingAttachment => ({
+    setDraft((current) => {
+      if (current.owner === null) return current;
+      const remaining = Math.max(0, MAX_ATTACHMENTS_PER_MESSAGE - current.attachments.length);
+      return { ...current, rejected: [...current.rejected, ...files.slice(remaining).map((file) => ({
+        name: file.name, reason: `At most ${MAX_ATTACHMENTS_PER_MESSAGE} attachments per message`,
+      }))], attachments: [
+        ...current.attachments, ...files.slice(0, remaining).map((file): PendingAttachment => ({
           uid: newSubmissionId(), file, ...uploadState(file, current.owner, 1),
         })),
-    ] }));
+      ] };
+    });
   }, []);
   const removeAttachment = useCallback((uid: string) => {
     setAttachments((current) => current.filter((file) => file.uid !== uid));
@@ -102,9 +111,11 @@ export function useDraftAttachments(activeSessionId: string | null) {
       ...file, ...uploadState(file.file, activeSessionId, file.generation + 1),
     })));
   }, [activeSessionId, setAttachments]);
-  const clearAttachments = useCallback(() => setAttachments([]), [setAttachments]);
-  const unready = attachments.some((file) => file.ownerSessionId !== activeSessionId || file.status !== "ready" || !file.meta);
+  const dismissRejectedFiles = useCallback(() => setDraft((current) => ({ ...current, rejected: [] })), []);
+  const clearAttachments = useCallback(() => setDraft((current) => ({ ...current, attachments: [], rejected: [] })), []);
+  const unready = draft.rejected.length > 0 || attachments.some((file) => file.ownerSessionId !== activeSessionId || file.status !== "ready" || !file.meta);
   const readyIds = attachments.filter((file) => file.ownerSessionId === activeSessionId && file.status === "ready" && file.meta)
     .map((file) => file.meta!.id);
-  return { attachments, addFiles, removeAttachment, retryAttachment, restoreAttachments, clearAttachments, unready, readyIds };
+  return { attachments, rejectedFiles: draft.rejected, dismissRejectedFiles, addFiles, removeAttachment, retryAttachment,
+    restoreAttachments, clearAttachments, unready, readyIds };
 }

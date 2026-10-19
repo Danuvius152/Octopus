@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "../lib/accountFetch";
 /**
  * Modal lightbox that renders a file from a session's working_dir.
  *

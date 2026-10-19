@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "./accountFetch";
 import { useSessionStore, type Schedule } from "../stores/sessionStore";
 
 /** Reload the schedule list into the store.

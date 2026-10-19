@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "../lib/accountFetch";
 import { useCallback, useEffect } from "react";
 import { IconEye, IconRestore } from "@tabler/icons-react";
 import {
@@ -61,7 +62,8 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
   // active session is archived (it's in archivedSessions) and renders the
   // read-only banner + history. Mirrors SessionList's old selectSession.
   const view = async (s: SessionInfo) => {
-    const generation = useSessionStore.getState().dispatchGeneration;
+    const snapshotStart = useSessionStore.getState();
+    const generation = snapshotStart.dispatchGeneration;
     setActiveAgentId(s.agent_id ?? null);
     setActiveSessionId(s.id);
     onOpenChange(false);
@@ -72,10 +74,10 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
       ]);
       if (detailRes.ok) {
         const data = await detailRes.json();
-        applySessionSnapshot(s.id, data, generation);
+        applySessionSnapshot(s.id, data, generation, snapshotStart.subagents[s.id] || {});
       }
       if (bgRes.ok) {
-        useSessionStore.getState().setBgTasks(s.id, await bgRes.json());
+        useSessionStore.getState().setBgTasks(s.id, await bgRes.json(), snapshotStart.bgTasks[s.id] || []);
       }
     } catch {
       // ignore

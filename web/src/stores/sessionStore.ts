@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { mergeCardSnapshot } from "../lib/cardSnapshots";
+import type { ControlCommandStatus } from "../lib/submission";
 import { normalizeMessage, type MessageInput } from "../lib/turnOutcome";
 import { readDispatchState, type DispatchState } from "../lib/sessionDispatch";
 import type {
@@ -147,8 +149,14 @@ export interface Identity {
 }
 
 interface SessionStore {
+  activeAttempts: Record<string, { request_id: string; attempt_id: string }>;
+  setActiveAttempt: (sessionId: string, attempt: { request_id: string; attempt_id: string } | null) => void;
+  controlCommands: Record<string, ControlCommandStatus>;
+  setControlCommand: (command: ControlCommandStatus) => void;
+  dismissControlCommand: (id: string) => void;
   token: string;
-  setToken: (t: string) => void;
+  accountGeneration: number;
+  setToken: (t: string, options?: { sameAccount: boolean; identity?: Identity }) => void;
 
   /** Who this browser is signed in as (multi-tenancy.md §3), or null before
    * the answer arrives. Held here rather than fetched per component because
@@ -291,7 +299,7 @@ interface SessionStore {
   // re-seeded from the session snapshot on reconnect.
   subagents: Record<string, Record<string, SubagentRun>>;
   upsertSubagent: (sessionId: string, run: SubagentRun) => void;
-  setSubagents: (sessionId: string, runs: SubagentRun[]) => void;
+  setSubagents: (sessionId: string, runs: SubagentRun[], baseline?: Record<string, SubagentRun>) => void;
 
   dispatchStates: Record<string, DispatchState>;
   wikiJobs: Record<string, WikiJobCard[]>;
@@ -336,7 +344,7 @@ interface SessionStore {
   // to the `mcp__bg__run` tool_use block that started it.
   bgTasks: Record<string, BgTask[]>;
   upsertBgTask: (sessionId: string, task: BgTask) => void;
-  setBgTasks: (sessionId: string, tasks: BgTask[]) => void;
+  setBgTasks: (sessionId: string, tasks: BgTask[], baseline?: BgTask[]) => void;
 
   // Agent-to-agent delegations spawned by a parent session.
   // Keyed by parent sessionId → list of delegation records. The
@@ -374,7 +382,7 @@ interface SessionStore {
   // as a normal injected turn.
   research: Record<string, ResearchJob[]>;
   upsertResearch: (sessionId: string, job: Partial<ResearchJob> & { id: string }) => void;
-  setResearch: (sessionId: string, jobs: ResearchJob[]) => void;
+  setResearch: (sessionId: string, jobs: ResearchJob[], baseline?: ResearchJob[]) => void;
 }
 
 export interface ResearchJob {
@@ -387,6 +395,15 @@ export interface ResearchJob {
   counts?: Record<string, number>;
   sources?: string[];
   verified?: number;
+  unverified?: number;
+  delivery_receipt?: {
+    request_id: string;
+    version: number;
+    stage: "queued" | "processing" | "processed" | "failed" | "recording_unconfirmed" | "unknown";
+    error?: string | null;
+    browser_confirmed_version?: number;
+    browser_confirmed_at?: string;
+  } | null;
   error?: string | null;
   injection_status?: "pending" | "delivered" | "failed";
 }
@@ -434,16 +451,35 @@ export interface Delegation {
 }
 
 export const useSessionStore = create<SessionStore>((set, get) => ({
+  activeAttempts: {},
+  setActiveAttempt: (sessionId, attempt) => set((s) => ({ activeAttempts: attempt
+    ? { ...s.activeAttempts, [sessionId]: attempt } : dropKey(s.activeAttempts, sessionId) })),
+  controlCommands: {},
+  setControlCommand: (command) => set((s) => ({ controlCommands: { ...s.controlCommands, [command.id]: command } })),
+  dismissControlCommand: (id) => set((s) => ({ controlCommands: dropKey(s.controlCommands, id) })),
   identity: null,
-  setIdentity: (identity) => set({ identity }),
+  setIdentity: (identity) => {
+    const current = get();
+    if (identity && current.identity && identity.user_id !== current.identity.user_id) {
+      set({ ...useSessionStore.getInitialState(), token: current.token, identity,
+        accountGeneration: current.accountGeneration + 1,
+        showDelegations: current.showDelegations, sidebarCollapsed: current.sidebarCollapsed });
+    } else set({ identity });
+  },
 
   token: localStorage.getItem("octopus_token") || "",
-  setToken: (t) => {
+  accountGeneration: 0,
+  setToken: (t, options) => {
     localStorage.setItem("octopus_token", t);
-    const wikiJobs = get().token === t ? get().wikiJobs : {};
-    set(t ? { token: t, wikiJobs } : {
-      token: t, dispatchStates: {}, dispatchGeneration: null,
-      retiredDispatchGenerations: [], pendingQueue: {}, wikiJobs,
+    const current = get();
+    if (t === current.token) return;
+    // Authenticated rotation and first-account adoption can prove continuity.
+    if (t && current.token && options?.sameAccount) {
+      set({ token: t, ...(options.identity ? { identity: options.identity } : {}) }); return;
+    }
+    set({ ...useSessionStore.getInitialState(), token: t,
+      accountGeneration: current.accountGeneration + 1,
+      showDelegations: current.showDelegations, sidebarCollapsed: current.sidebarCollapsed,
     });
   },
 
@@ -687,12 +723,14 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         },
       };
     }),
-  setSubagents: (sessionId, runs) =>
+  setSubagents: (sessionId, runs, baseline) =>
     set((s) => ({
       subagents: {
         ...s.subagents,
         [sessionId]: Object.fromEntries(
-          runs.filter((r) => r.tool_call_id).map((r) => [r.tool_call_id!, r])
+          mergeCardSnapshot(runs.filter((r) => r.tool_call_id), Object.values(s.subagents[sessionId] || {}),
+            baseline === undefined ? undefined : Object.values(baseline), (r) => r.tool_call_id!)
+            .map((r) => [r.tool_call_id!, r])
         ),
       },
     })),
@@ -854,8 +892,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         : [...current, task];
       return { bgTasks: { ...s.bgTasks, [sessionId]: next } };
     }),
-  setBgTasks: (sessionId, tasks) =>
-    set((s) => ({ bgTasks: { ...s.bgTasks, [sessionId]: tasks } })),
+  setBgTasks: (sessionId, tasks, baseline) =>
+    set((s) => ({ bgTasks: { ...s.bgTasks, [sessionId]: mergeCardSnapshot(tasks, s.bgTasks[sessionId] || [], baseline, (t) => t.id) } })),
 
   research: {},
   upsertResearch: (sessionId, job) =>
@@ -878,8 +916,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       ];
       return { research: { ...s.research, [sessionId]: next } };
     }),
-  setResearch: (sessionId, jobs) =>
-    set((s) => ({ research: { ...s.research, [sessionId]: jobs } })),
+  setResearch: (sessionId, jobs, baseline) =>
+    set((s) => ({ research: { ...s.research, [sessionId]: mergeCardSnapshot(jobs, s.research[sessionId] || [], baseline, (t) => t.id) } })),
 
   delegations: {},
   setDelegations: (parentSessionId, ds) =>

@@ -129,9 +129,10 @@ def capture(session, scope: McpScope | None, *, prompt: str, selected: str | Non
     require_live_scope(scope, session.id)
     context = session._knowledge_context
     settlement = session._settlement
+    from .wiki.tasks import tasks
     if (scope.user_id != session.user_id or context is None or settlement is None
             or getattr(session._backend, "run_lease_id", None) != scope.run_lease_id
-            or scope.wiki_task_id != session._wiki_task_id or session._work_id != scope.work_id):
+            or tasks.token_for_scope(scope) != session._wiki_task_id or session._work_id != scope.work_id):
         raise ValueError("The original requesting run is no longer active")
     return AdmittedRequest(RequestRef(session.id, settlement.request_id, session.user_id), context, scope.work_id)
 

@@ -145,6 +145,15 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
 
+CREATE TABLE IF NOT EXISTS client_submissions (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    receipt TEXT,
+    PRIMARY KEY (session_id, client_id)
+);
+
 -- The receive receipt is also the persistent Wiki card. No model turn or
 -- transcript mutation is involved; deletion of its old session keeps the
 -- owner's job evidence and cannot retarget the notification to another user.
@@ -403,6 +412,7 @@ CREATE TABLE IF NOT EXISTS research_jobs (
     completed_at TEXT,
     injection_status TEXT NOT NULL DEFAULT 'pending',  -- pending|delivered|failed
     injected_at TEXT,
+    delivery_receipt TEXT,
     knowledge_context TEXT,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );

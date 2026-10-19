@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "../lib/accountFetch";
 import { useCallback, useEffect, useState } from "react";
 import {
   IconCopy,
@@ -155,7 +156,9 @@ export function AccountPage({ onToggleSidebar }: { onToggleSidebar?: () => void 
                * just created. */
               onClaimed={(newToken, summary) => {
                 setClaimSummary(summary);
-                setToken(newToken);
+                setToken(newToken, summary.user_id && summary.username ? {
+                  sameAccount: true, identity: { user_id: summary.user_id, label: summary.username, is_admin: true },
+                } : undefined);
               }}
             />
           )}

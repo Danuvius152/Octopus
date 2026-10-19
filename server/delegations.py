@@ -131,6 +131,7 @@ class DelegationRunState:
     )
     state: str = "running"  # running | completed | failed | cancelled | interrupted
     captured_text: list[str] = field(default_factory=list)
+    captured_attempt_id: str | None = None
     finished_at: str | None = None
     error: str | None = None
     # Defence-in-depth: terminal injection must fire at most once per
@@ -1095,7 +1096,14 @@ class DelegationManager:
         if "work_id" in msg and msg["work_id"] != rec.work_id:
             return
         kind = msg.get("type")
+        attempt_id = msg.get("attempt_id")
+        if attempt_id and attempt_id != rec.captured_attempt_id:
+            rec.captured_text.clear()
+            rec.captured_attempt_id = attempt_id
+        if kind == "recovery" and msg.get("retrying"):
+            rec.captured_text.clear()
         if kind in ("result", "error") and msg.get("retrying"):
+            rec.captured_text.clear()
             return  # the logical turn is still running its recovery attempts
         if kind == "assistant_text":
             text = msg.get("content")
@@ -1175,7 +1183,10 @@ class DelegationManager:
             f"question_id={question_id}]\n{body}\n\n"
             f"Decide: answer them by calling "
             f"`mcp__ask_agent__answer(delegation_id="
-            f"\"{rec.delegation_id}\", choice=…)`; or, if you don't "
+            f"\"{rec.delegation_id}\", question_id=\"{question_id}\", answers=…)` "
+            f"with one answer per question (selected labels or free text; keyed "
+            f"by question ID/zero-based index, or in order). `choice=…` is "
+            f"supported only for a single-question batch. If you don't "
             f"know, use your own `mcp__ask__user` to ask the user "
             f"and forward their answer; or cancel via "
             f"`mcp__ask_agent__cancel`."
@@ -1227,16 +1238,11 @@ class DelegationManager:
         return "\n".join(lines)
 
     async def answer_pending_question(
-        self, delegation_id: str, choice: str
+        self, delegation_id: str, choice: str | None = None, *,
+        answers: list[dict[str, Any]] | dict[str, dict[str, Any]] | None = None,
+        question_id: str | None = None,
     ) -> dict[str, Any]:
-        """Drain the oldest pending question on the delegation's child
-        session by feeding it the parent's chosen label.
-
-        Multiple-question batches are rare (the ask MCP tool accepts
-        1-4 questions per call; the common shape is 1). When there
-        are >1 we apply `choice` to the first question and leave the
-        rest with empty `selected` — same defaulting the human UI
-        does when the user skips an option."""
+        """Answer a complete batch; legacy choice is limited to one question."""
         if self.session_mgr is None:
             raise DelegationError(
                 "DelegationManager not bound", status_code=500
@@ -1262,20 +1268,43 @@ class DelegationManager:
                 "No pending question on the child session",
                 status_code=409,
             )
-        question_id, pending = next(iter(child._pending_questions.items()))
-        choice = (choice or "").strip()
-        if not choice:
-            raise DelegationError(
-                "`choice` must be a non-empty string", status_code=400
-            )
-        answers = [{"selected": [choice], "text": None}]
-        # Pad multi-question batches with empty selections; same shape
-        # the frontend submits when a user clicks-through without
-        # answering some entries.
-        for _ in pending.questions[1:]:
-            answers.append({"selected": [], "text": None})
+        question_id = question_id or next(iter(child._pending_questions))
+        pending = child._pending_questions.get(question_id)
+        if pending is None:
+            raise DelegationError("The specified question is no longer pending", status_code=409)
+        questions = pending.questions
+        if answers is None:
+            if len(questions) != 1 or not (choice or "").strip():
+                raise DelegationError("Provide answers for every question; choice supports a single question only", status_code=400)
+            answers = [{"selected": [choice.strip()]}]
+        elif choice is not None:
+            raise DelegationError("Provide either choice or answers", status_code=400)
+        if isinstance(answers, dict):
+            indices = [str(index) for index in range(len(questions))]
+            ids = [str(question.get("id") or index) for index, question in enumerate(questions)]
+            keys = indices if set(answers) == set(indices) else ids
+            if len(set(keys)) != len(questions) or set(answers) != set(keys):
+                raise DelegationError("Answers must identify every question by ID or zero-based index", status_code=400)
+            answers = [answers[key] for key in keys]
+        if not isinstance(answers, list) or len(answers) != len(questions):
+            raise DelegationError("Provide exactly one answer for every question", status_code=400)
+        normalized = []
+        for question, answer in zip(questions, answers, strict=True):
+            if not isinstance(answer, dict):
+                raise DelegationError("Each answer must be an object", status_code=400)
+            selected, text = answer.get("selected") or [], answer.get("text")
+            if (not isinstance(selected, list) or any(not isinstance(label, str) or not label for label in selected)
+                    or (text is not None and not isinstance(text, str))):
+                raise DelegationError("Use selected labels or free text", status_code=400)
+            text = text.strip() if text else None
+            labels = {option["label"] for option in question.get("options", []) if "label" in option}
+            if (not selected and not text) or (selected and text) or len(set(selected)) != len(selected):
+                raise DelegationError("Each question needs a nonempty selection or free-text answer", status_code=400)
+            if (labels and any(label not in labels for label in selected)) or (len(selected) > 1 and not question.get("multiSelect")):
+                raise DelegationError("The selected labels do not match this question", status_code=400)
+            normalized.append({"selected": selected, "text": text})
         ok = await self.session_mgr.answer_question(
-            rec.delegation_id, question_id, answers
+            rec.delegation_id, question_id, normalized
         )
         if not ok:
             # Race: the human UI answered between our get and our set.

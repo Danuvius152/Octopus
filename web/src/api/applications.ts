@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "../lib/accountFetch";
 /** Typed fetch wrappers for the /api/applications routes (applications.md §5).
  *
  * Applications are agent-built static web apps: the row lives here, the files

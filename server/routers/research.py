@@ -28,6 +28,11 @@ class StartResearchRequest(BaseModel):
     question: str = Field(min_length=1)
 
 
+class ResearchSeenRequest(BaseModel):
+    request_id: str = Field(min_length=1)
+    version: int = Field(ge=1)
+
+
 def _public_job(row: dict[str, Any]) -> dict[str, Any]:
     """The context is a server-owned contract, never public job metadata."""
     return {key: value for key, value in row.items() if key != "knowledge_context"}
@@ -114,3 +119,18 @@ async def cancel_research(
         return _public_job(await research_manager.cancel(research_id))
     except ResearchError as e:
         raise HTTPException(e.status_code, e.message)
+
+
+@router.post("/{session_id}/research/{research_id}/seen")
+async def acknowledge_research(session_manager: SessionMgr, session_id: str, research_id: str,
+                               req: ResearchSeenRequest, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    await _own_session(session_manager, session_id, user_id)
+    if verify(_) is not None:
+        raise HTTPException(403, "A model cannot confirm browser receipt")
+    row = await session_manager.db.get_research_job(research_id)
+    if row is None or row["session_id"] != session_id:
+        raise HTTPException(404, "research job not found")
+    receipt = await session_manager.db.acknowledge_research_delivery(research_id, req.request_id, req.version)
+    if receipt is None:
+        raise HTTPException(409, "The delivery state changed")
+    return {"delivery_receipt": receipt}

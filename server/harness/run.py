@@ -17,6 +17,7 @@ import hashlib
 import json
 import logging
 import os
+import re
 import shutil
 import signal
 import uuid as uuid_module
@@ -219,6 +220,9 @@ class HarnessRun:
         self._stdout_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._stderr_lines: list[str] = []
+        self.protocol_issues: dict[str, int] = {}
+        self.protocol_locations: list[dict[str, Any]] = []
+        self._stdout_line_number = 0
         self._stream_closed: bool = False
         self._activity_generation = 0
         self._activity_callback: Callable[[float | None], None] | None = None
@@ -259,6 +263,10 @@ class HarnessRun:
         # Resolve working_dir to ABSOLUTE before handing it to the CLI: MCP
         # grandchildren inherit cwd, so a relative path would be double-resolved.
         abs_wd = str(Path(working_dir).resolve())
+        wiki_scope_id = self._config.wiki_task_id
+        if self.reusable and self._config.session_id and wiki_scope_id:
+            from ..wiki.tasks import RUN_WIKI_SCOPE
+            wiki_scope_id = RUN_WIKI_SCOPE
         callback_env = assembly.build_callback_env(self._config.session_id)
         mcp_servers = assembly.select_mcp_servers(
             self._config.mcp_servers,
@@ -266,7 +274,7 @@ class HarnessRun:
             callback_env,
             session_id=self._config.session_id,
             user_id=self._config.user_id,
-            wiki_task_id=self._config.wiki_task_id,
+            wiki_task_id=wiki_scope_id,
             run_lease_id=self.run_lease_id,
             work_id=self.work_id,
         )
@@ -342,6 +350,10 @@ class HarnessRun:
             self._preparation_task = preparation
             try:
                 await preparation
+            except Exception as exc:
+                from .events import HarnessPreparationError
+                self._begin_retirement()
+                raise HarnessPreparationError(str(exc), error_code=getattr(exc, "error_code", None)) from exc
             except BaseException:
                 self._begin_retirement()
                 raise
@@ -493,7 +505,7 @@ class HarnessRun:
         parts = [
             self._profile.backend,
             self.work_id or "",
-            self._config.wiki_task_id or "",
+            ("run-bound-wiki" if self.reusable and self._config.session_id and self._config.wiki_task_id else self._config.wiki_task_id or ""),
             self._config.wiki_mode or "",
             self._config.system_prompt or "",
             self._config.model or "",
@@ -567,8 +579,17 @@ class HarnessRun:
         # turn would duplicate messages.
         self._event_queue = asyncio.Queue()
         self._stream_closed = False
+        self.protocol_issues.clear()
+        self.protocol_locations.clear()
         self._parser.begin_turn()
         self._initial_uuid = await self.send_user_frame(prompt)
+
+    def bind_wiki_task(self, task_id: str | None) -> None:
+        if self.reusable and self._config.session_id:
+            from ..wiki.tasks import tasks
+            if self._lease_closed:
+                raise RuntimeError("A retired process cannot bind Wiki authority")
+            tasks.bind_run(self.run_lease_id, task_id, self._config.session_id, self._config.user_id)
 
     async def stream(self) -> AsyncIterator[HarnessEvent]:
         while True:
@@ -584,6 +605,8 @@ class HarnessRun:
         self.invalidate_activity()
         from ..mcp_identity import revoke_run
         revoke_run(self.run_lease_id)
+        from ..wiki.tasks import tasks
+        tasks.unbind_run(self.run_lease_id)
         if self._stop_task is None:
             self._stop_task = asyncio.create_task(self._stop(), name="harness-retirement")
         return self._stop_task
@@ -686,6 +709,8 @@ class HarnessRun:
         if self._stream_closed:
             return
         self._stream_closed = True
+        from ..wiki.tasks import tasks
+        tasks.unbind_run(self.run_lease_id)
         try:
             self._event_queue.put_nowait(_STREAM_END)
         except asyncio.QueueFull:
@@ -758,8 +783,13 @@ class HarnessRun:
             await drain()
 
     async def _handle_line(self, line: str) -> None:
+        self._stdout_line_number += 1
         obj = parse_json_line(line)
         if obj is None:
+            # Known diagnostic prefixes carry no protocol record. Unknown
+            # JSON objects remain legal extensions; malformed records do not.
+            if not re.match(r"^(?:DEBUG|INFO|WARN(?:ING)?|ERROR)(?::|\s)", line):
+                self._note_protocol_issue("invalid_json", line)
             return
         if self._activity_observer is not None:
             self._activity_observer.observe_stdout(obj)
@@ -794,6 +824,13 @@ class HarnessRun:
         if out.end_of_stream:
             self._close_stream()
 
+    def _note_protocol_issue(self, kind: str, line: str = "") -> None:
+        self.protocol_issues[kind] = self.protocol_issues.get(kind, 0) + 1
+        if len(self.protocol_locations) < 8:
+            self.protocol_locations.append({"kind": kind, "line": self._stdout_line_number,
+                                            "characters": len(line),
+                                            "sha256": hashlib.sha256(line.encode()).hexdigest()})
+
     async def _read_stdout(self) -> None:
         assert self._process and self._process.stdout
         try:
@@ -804,12 +841,14 @@ class HarnessRun:
                 try:
                     await self._handle_line(line)
                 except Exception:
+                    self._note_protocol_issue("parser_exception", line)
                     logger.exception(
                         "%s event parse crashed on: %s", self._profile.backend, line[:200]
                     )
         except asyncio.CancelledError:
             raise
         except Exception:
+            self._note_protocol_issue("stdout_interrupted")
             logger.exception("stdout reader crashed")
         finally:
             if not self._stream_closed:

@@ -54,7 +54,7 @@ describe("ResearchCard", () => {
       research: { s1: [job({ status: "completed", phase: "done", injection_status: "delivered", verified: 3, sources: ["u"] })] },
     });
     render(<ResearchCard sessionId="s1" />);
-    expect(screen.getByText(/Report delivered below/)).toBeTruthy();
+    expect(screen.getByText(/Report accepted for follow-up; processing unconfirmed/)).toBeTruthy();
     expect(screen.getByText(/3 verified findings/)).toBeTruthy();
     expect(screen.queryByTitle("Cancel research")).toBeNull();
   });
@@ -64,6 +64,20 @@ describe("ResearchCard", () => {
     render(<ResearchCard sessionId="s1" />);
     expect(screen.queryByText(/Report delivered below/)).toBeNull();
     expect(screen.getByText(/delivery pending/)).toBeTruthy();
+  });
+
+  it("confirms the exact displayed delivery version separately from processing", async () => {
+    const receipt = { request_id: "follow-up", version: 3, stage: "processed" as const };
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify({ delivery_receipt: {
+      ...receipt, browser_confirmed_version: 3, browser_confirmed_at: "now",
+    } })));
+    useSessionStore.getState().setResearch("s1", [job({ status: "completed", delivery_receipt: receipt })]);
+    render(<ResearchCard sessionId="s1" />);
+    expect(screen.getByText(/Follow-up processed/)).toBeTruthy();
+    await waitFor(() => expect(screen.getByText(/Browser received this status/)).toBeTruthy());
+    expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining("/research/r1/seen"), expect.objectContaining({
+      method: "POST", body: JSON.stringify({ request_id: "follow-up", version: 3 }),
+    }));
   });
 
   it("shows retained material and the suppressed delivery reason after reload", () => {

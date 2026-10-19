@@ -1034,6 +1034,10 @@ async def test_run_backend_translates_events_end_to_end(manager):
     manager._make_run = fake_factory  # type: ignore[method-assign]
 
     ws_msgs = [m async for m in manager._run_backend(session, "go")]
+    assert ws_msgs[0]["type"] == "attempt_started"
+    attempt_id = ws_msgs[0]["attempt_id"]
+    ws_msgs = ws_msgs[1:]
+    assert all(m["attempt_id"] == attempt_id for m in ws_msgs)
     types = [m["type"] for m in ws_msgs]
     assert types == ["assistant_text", "tool_use", "tool_result", "result"]
     assert ws_msgs[0]["content"] == "hello"
@@ -1119,6 +1123,9 @@ async def test_run_backend_auto_respawns_on_premature_exit_after_tool(manager):
     manager._make_run = lambda s, agent=None, connectors=None: next(backends_iter)  # type: ignore[method-assign,assignment]
 
     ws_msgs: list[dict[str, Any]] = [m async for m in manager._run_backend(session, "go")]
+    attempts = [m for m in ws_msgs if m["type"] == "attempt_started"]
+    assert len(attempts) == 2 and attempts[0]["attempt_id"] != attempts[1]["attempt_id"]
+    ws_msgs = [m for m in ws_msgs if m["type"] != "attempt_started"]
     types = [m["type"] for m in ws_msgs]
 
     # First invocation's events, then a recovery marker, then the
@@ -1192,6 +1199,8 @@ async def test_run_backend_bounds_recovery_to_single_retry(manager):
     # Events from both invocations are surfaced, with the recovery
     # marker between them and one final failed logical result because the
     # recovery also failed.
+    assert len([m for m in ws_msgs if m["type"] == "attempt_started"]) == 2
+    ws_msgs = [m for m in ws_msgs if m["type"] != "attempt_started"]
     types = [m["type"] for m in ws_msgs]
     assert types == ["tool_use", "tool_result", "recovery", "tool_use", "tool_result", "result"]
     assert ws_msgs[2]["message"] == "(auto-resumed after CLI exited mid-turn)"

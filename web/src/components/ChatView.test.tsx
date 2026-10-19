@@ -14,6 +14,7 @@ const session = {
 
 beforeEach(() => {
   useSessionStore.setState({
+    token: "",
     activeSessionId: session.id, sessions: [session], agents: [],
     messages: {}, streamingText: {}, pendingQueue: {}, pendingQuestions: {},
     dispatchStates: {}, dispatchGeneration: null, retiredDispatchGenerations: [],
@@ -191,6 +192,19 @@ describe("session-owned attachment drafts", () => {
 
   const pick = () => fireEvent.change(screen.getByTestId("attachment-file-input"), {
     target: { files: [new File(["Required evidence"], "evidence.txt", { type: "text/plain" })] },
+  });
+
+  it.each(["selection", "drop", "paste"])("reports over-limit files from %s before sending", (method) => {
+    const { input, send } = setup();
+    const files = Array.from({ length: 11 }, (_, i) => new File(["x"], `evidence-${i}.txt`));
+    if (method === "selection") fireEvent.change(screen.getByTestId("attachment-file-input"), { target: { files } });
+    if (method === "drop") fireEvent.drop(input, { dataTransfer: { files } });
+    if (method === "paste") fireEvent.paste(input, { clipboardData: { files } });
+    expect(uploads).toHaveLength(10);
+    expect(send).toBeDisabled();
+    expect(screen.getByRole("alert")).toHaveTextContent("evidence-10.txt: At most 10 attachments per message");
+    fireEvent.click(screen.getByRole("button", { name: "Continue with attached files" }));
+    expect(screen.queryByText("These files were not attached:")).toBeNull();
   });
   const switchTo = (id: string) => act(() => useSessionStore.setState({
     sessions: [session, other], activeSessionId: id,

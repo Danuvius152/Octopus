@@ -41,6 +41,7 @@ class Finding:
     claim: str
     url: str
     angle: str = ""
+    verification: str = "unverified"
 
 
 # ------------------------------------------------------------------ scope
@@ -144,24 +145,33 @@ def verify_prompt(claim: str, url: str, question: str) -> str:
     return (
         "Fact-check the CLAIM using your web tools. Actively search for evidence "
         "that CONTRADICTS it. Return ONLY a JSON object with keys "
-        '"refuted" (true/false) and "note" (one short sentence). Mark refuted '
+        '"refuted" (true/false), "verified" (true/false), and "note" (one short sentence). Mark refuted '
         "true ONLY if you find credible contradicting evidence; if it checks "
-        "out or is merely unverifiable, refuted is false.\n\n"
+        "out or is merely unverifiable, refuted is false. Mark verified true "
+        "ONLY when credible evidence positively supports the claim; an absence "
+        "of contradiction alone is not verification.\n\n"
         f"CLAIM: {claim}\nSOURCE: {url}\nQUESTION: {question}"
     )
 
 
-def parse_verdict(text: str) -> bool:
-    """Return True if the verifier REFUTED the claim. Defaults to NOT refuted
-    when the reply is unparseable (don't kill a claim on a parse failure)."""
+def parse_verdict(text: str) -> bool | None:
+    """Keep an invalid verdict distinct from a valid non-refutation."""
     val = _extract_json(text)
     if isinstance(val, dict):
         r = val.get("refuted")
         if isinstance(r, bool):
             return r
         if isinstance(r, str):
-            return r.strip().lower() in ("true", "yes", "1")
-    return False
+            if r.strip().lower() in ("true", "yes", "1"):
+                return True
+            if r.strip().lower() in ("false", "no", "0"):
+                return False
+    return None
+
+
+def positively_verified(text: str) -> bool:
+    val = _extract_json(text)
+    return isinstance(val, dict) and val.get("verified") is True and parse_verdict(text) is False
 
 
 # ------------------------------------------------------------------ synthesize
@@ -169,15 +179,17 @@ def parse_verdict(text: str) -> bool:
 
 def synthesize_prompt(question: str, findings: list[Finding]) -> str:
     bullets = "\n".join(
-        f"- {f.claim}" + (f"  [source: {f.url}]" if f.url else "")
+        f"- [{f.verification}] {f.claim}" + (f"  [source: {f.url}]" if f.url else "")
         for f in findings
     )
     if not bullets:
-        bullets = "(no verified findings)"
+        bullets = "(no findings)"
     return (
         "Write a concise, well-structured research report that answers the "
-        "QUESTION using ONLY the VERIFIED FINDINGS below. Cite sources inline "
+        "QUESTION using ONLY the FINDINGS below. Each finding has a verification "
+        "status: explicitly qualify unverified findings; failed verification or "
+        "absence of refutation is not supporting evidence. Cite sources inline "
         "as [url]. If the findings are insufficient, say so plainly. Use "
         "Markdown.\n\n"
-        f"QUESTION: {question}\n\nVERIFIED FINDINGS:\n{bullets}"
+        f"QUESTION: {question}\n\nFINDINGS:\n{bullets}"
     )

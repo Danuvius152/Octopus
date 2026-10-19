@@ -13,6 +13,14 @@ from dataclasses import dataclass, field
 from typing import Any
 
 
+class HarnessPreparationError(RuntimeError):
+    """Preparation failed before model execution; no prompt was dispatched."""
+
+    def __init__(self, message: str, *, error_code: str | None = None) -> None:
+        super().__init__(message)
+        self.error_code = error_code
+
+
 @dataclass
 class HarnessCredential:
     """Resolved credential, ready for a profile to apply to its subprocess.

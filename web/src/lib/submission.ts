@@ -3,6 +3,16 @@ export interface SubmissionReply {
   message?: string;
   code?: string;
   requestId?: string;
+  state?: "unknown";
+  clientRequestId?: string;
+}
+
+export interface ControlCommandStatus {
+  id: string;
+  sessionId: string;
+  operation: string;
+  state: "pending" | "accepted" | "failed" | "unknown";
+  message?: string;
 }
 
 let sequence = 0;

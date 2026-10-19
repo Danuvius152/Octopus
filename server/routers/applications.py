@@ -509,7 +509,16 @@ async def _app_for_agent_api(request: Request, app_id: str) -> dict:
 
 
 def _agent_error(e: AppAgentError) -> HTTPException:
-    return HTTPException(e.status_code, e.message)
+    return HTTPException(e.status_code, {"message": e.message, **e.recovery} if e.recovery else e.message)
+
+
+@static_router.get("/apps/{app_id}/agent/conversations/{conversation_id}/requests/{request_id}")
+async def get_app_request_status(request: Request, app_id: str, conversation_id: str, request_id: str):
+    await _app_for_agent_api(request, app_id)
+    try:
+        return await app_agent_manager.get_request_status(app_id, conversation_id, request_id)
+    except AppAgentError as e:
+        raise _agent_error(e)
 
 
 @static_router.get(

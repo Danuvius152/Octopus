@@ -200,6 +200,9 @@ class TurnOutcome(BaseModel):
     code: str | None = None
     provider_code: str | None = None
     recovery: dict[str, int] = Field(default_factory=dict)
+    recording_integrity: Literal["complete", "incomplete"] = "complete"
+    recording_issues: dict[str, int] = Field(default_factory=dict)
+    recording_locations: list[dict[str, Any]] = Field(default_factory=list, max_length=8)
 
 
 class ToolReceipt(BaseModel):
@@ -307,6 +310,7 @@ class MessagePage(BaseModel):
 
 class SessionDetail(SessionInfo):
     messages: list[MessageContent] = []
+    active_attempt: dict[str, str] | None = None
     # The transcript is windowed to the most recent MESSAGE_WINDOW messages:
     # 46,000 rows live in this database and the largest single session holds
     # 4,873, which the client used to be handed in full on every open. These two
@@ -1014,6 +1018,7 @@ class AppAgentTurnRequest(BaseModel):
 
 class AppAgentReply(BaseModel):
     conversation_id: str
+    request_id: str
     reply: str
     cost: float | None = None
 

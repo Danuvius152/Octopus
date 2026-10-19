@@ -1,3 +1,4 @@
+import { accountFetch as fetch } from "./lib/accountFetch";
 import { useEffect, useState } from "react";
 import { IconMenu2 } from "@tabler/icons-react";
 import { AccountPage } from "./components/AccountPage";
@@ -28,10 +29,11 @@ function App() {
   useViewportHeight();
   const token = useSessionStore((s) => s.token);
   const setToken = useSessionStore((s) => s.setToken);
+  const accountGeneration = useSessionStore((s) => s.accountGeneration);
 
   if (!token) return <SignIn onSignedIn={setToken} />;
 
-  return <AuthenticatedApp />;
+  return <AuthenticatedApp key={accountGeneration} />;
 }
 
 function AuthenticatedApp() {

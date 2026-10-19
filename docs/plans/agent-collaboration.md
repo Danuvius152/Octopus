@@ -391,21 +391,24 @@ tool, `mcp__ask_agent__answer(delegation_id, choice)`, and also points
 to `mcp__ask__user` and `mcp__ask_agent__cancel` as the escalation and
 failure paths (`server/delegations.py:610`).
 
-### 5.5 `mcp__ask_agent__answer(delegation_id, choice)` — closing the loop
+### 5.5 `mcp__ask_agent__answer` — closing the loop
 
 A new MCP tool on the `ask_agent` server. Body posts to
 `POST /api/sessions/{parent_sid}/delegations/{child_sid}/answer` with
-the chosen option label (or freeform text if the question allowed it).
+`question_id` and complete `answers`: an ordered list, or a mapping keyed by
+question ID or zero-based index. Each entry contains `selected` labels (all
+choices for a multi-select question) or `text` for a free-text answer. The
+legacy `choice` argument remains supported for a single-question batch.
 
 Server-side: `DelegationManager.answer_pending_question` drains the
 oldest pending entry on the child by calling the same
 `SessionManager.answer_question` path used by the UI. The model is the
 parent agent; the websocket UI is unaware. Both producers (human
 click, parent tool call) compete to drain the same queue; first one
-wins. If both happen, the second one 409s. Multi-question batches are
-rare; as shipped, the parent's `choice` applies to the first question
-and the remainder are padded with empty selections
-(`server/delegations.py:675`).
+wins. If both happen, the second one 409s. An incomplete batch is rejected
+without closing the pending questions; other questions are never padded with
+empty answers. Passing the batch identity prevents a delayed answer from
+consuming a later question.
 
 If the parent's model decides it can't answer, it has three options
 expressible in its normal language/tool loop:

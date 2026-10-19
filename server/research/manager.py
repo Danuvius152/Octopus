@@ -82,6 +82,8 @@ class ResearchManager:
         self._job_sem: asyncio.Semaphore | None = None
         self._closing = False
         self._shutdown_tasks: dict[str, asyncio.Task] | None = None
+        self._delivery_tasks: dict[str, asyncio.Task] = {}
+        self._delivery_jobs: dict[str, tuple[str, str]] = {}
 
     def bind(self, session_mgr: SessionManager, db: Database) -> None:
         self.session_mgr = session_mgr
@@ -89,12 +91,19 @@ class ResearchManager:
         self._job_sem = asyncio.Semaphore(max(1, settings.research_max_concurrent_jobs))
         self._closing = False
         self._shutdown_tasks = None
+        session_mgr.on_broadcast("research.delivery", self._on_delivery_progress)
 
     async def recover_interrupted(self) -> int:
         """Boot sweep — mark prior-process `running` jobs interrupted."""
         if self.db is None:
             return 0
         n = await self.db.mark_in_flight_research_jobs_interrupted(_now())
+        for row in await self.db.pending_research_deliveries():
+            request_id = row["delivery_receipt"]["request_id"]
+            outcome = await self.db.get_committed_terminal(row["session_id"], request_id)
+            stage = "processed" if outcome and outcome.get("status") == "success" else "failed" if outcome else "unknown"
+            await self.db.advance_research_delivery(row["id"], request_id, stage,
+                                                   error=None if outcome else "Delivery observation was interrupted; the request was not replayed.")
         if n:
             logger.info("research: marked %d interrupted job(s) on boot", n)
         return n
@@ -286,7 +295,8 @@ class ResearchManager:
             "session_id": session_id,
             "research_id": job_id,
             "sources": report.sources,
-            "verified": len(report.findings),
+            "verified": sum(getattr(f, "verification", "unverified") == "verified" for f in report.findings),
+            "unverified": sum(getattr(f, "verification", "unverified") != "verified" for f in report.findings),
             "injection_status": "pending",
         })
         await self._inject_report(job_id, session_id, question, report)
@@ -328,7 +338,44 @@ class ResearchManager:
             logger.warning("research %s: report injection failed: %s", job_id, e)
             await self._settle_delivery(job_id, session_id, error=f"delivery failed: {e}")
             return
+        self._delivery_jobs[receipt.request_id] = (job_id, session_id)
+        current = self.session_mgr.get_session(session_id)
+        processing = current and current._current_request and current._current_request.request_id == receipt.request_id
+        await self._advance_delivery(job_id, session_id, receipt.request_id, "processing" if processing else "queued")
         await self._settle_delivery(job_id, session_id)
+        task = asyncio.create_task(self._observe_delivery(job_id, session_id, receipt), name=f"research-delivery-{job_id}")
+        self._delivery_tasks[job_id] = task
+        self._tasks[f"delivery:{job_id}"] = task
+        def finished(done):
+            if self._delivery_tasks.get(job_id) is done:
+                self._delivery_tasks.pop(job_id, None)
+            self._delivery_jobs.pop(receipt.request_id, None)
+            self._tasks.pop(f"delivery:{job_id}", None)
+            if not done.cancelled() and done.exception() is not None:
+                logger.error("Research delivery observation failed", exc_info=done.exception())
+        task.add_done_callback(finished)
+
+    async def _advance_delivery(self, job_id, session_id, request_id, stage, *, error=None):
+        receipt = await self.db.advance_research_delivery(job_id, request_id, stage, error=error)
+        if receipt:
+            await self._broadcast({"type": "research_delivery", "session_id": session_id, "research_id": job_id,
+                                   "injection_status": "delivered", "delivery_receipt": receipt})
+
+    async def _on_delivery_progress(self, event):
+        owner = self._delivery_jobs.get(event.get("request_id"))
+        if event.get("type") == "dequeued" and owner and owner[1] == event.get("session_id"):
+            await self._advance_delivery(*owner, event["request_id"], "processing")
+
+    async def _observe_delivery(self, job_id, session_id, receipt):
+        try:
+            completion = await receipt.wait()
+            successful = (completion.state == "completed" and completion.recording_state == "committed"
+                          and completion.outcome is not None and completion.outcome.status == "success")
+            stage = "processed" if successful else "recording_unconfirmed" if completion.recording_state in {"failed", "unconfirmed"} else "failed"
+            await self._advance_delivery(job_id, session_id, receipt.request_id, stage, error=None if successful else completion.reason or completion.state)
+        except asyncio.CancelledError:
+            await self._advance_delivery(job_id, session_id, receipt.request_id, "unknown", error="Delivery observation stopped; the request was not replayed.")
+            raise
 
     async def _settle_delivery(self, job_id: str, session_id: str, *, error: str | None = None) -> None:
         """Persist and publish delivery independently of report completion."""
@@ -422,7 +469,9 @@ class ResearchManager:
         if self._closing:
             return
         self._closing = True
-        self._shutdown_tasks = dict(self._tasks)
+        self._shutdown_tasks = {**self._tasks, **{f"delivery:{key}": task for key, task in self._delivery_tasks.items()}}
+        if self.session_mgr is not None:
+            self.session_mgr.remove_broadcast("research.delivery")
         for task in self._shutdown_tasks.values():
             if not task.done() and not task.cancelling():
                 task.cancel()
