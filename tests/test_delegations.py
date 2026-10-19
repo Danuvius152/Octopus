@@ -23,6 +23,11 @@ captured prompts are what matters.
 
 from __future__ import annotations
 
+import json
+import uuid
+from contextlib import asynccontextmanager
+from types import SimpleNamespace
+
 import pytest
 from httpx import ASGITransport, AsyncClient
 
@@ -96,6 +101,41 @@ async def _make_session(
         origin=origin,
         parent_session_id=parent_session_id,
     )
+
+
+@asynccontextmanager
+async def _model_scope(dm, rec):
+    """An explicit execution identity where these tests replace the harness.
+
+    The separate knowledge delegation tests exercise real dispatch. These
+    lifecycle tests retain their fake start boundary without posing a human
+    API action as a nested model call.
+    """
+    from server.knowledge import encode
+    from server.mcp_identity import mint, register_run, revoke_run, verify
+
+    manager, database = dm.session_mgr, dm.db
+    session = manager.get_session(rec.delegation_id)
+    assert rec.owned_context is not None
+    context = rec.owned_context.execution
+    request_id, lease = uuid.uuid4().hex, uuid.uuid4().hex
+    messages = await database.load_messages(session.id)
+    await database.record_request(
+        request_id=request_id, session_id=session.id, seq=len(messages), role="user", type="text", content=rec.request,
+        tool_input={"request_context": {"request_id": request_id, "work_id": rec.work_id,
+                                        "source": "delegation", "knowledge": json.loads(encode(context))}},
+    )
+    previous = session._knowledge_context, session._settlement, session._backend
+    session._knowledge_context = context
+    session._settlement = SimpleNamespace(request_id=request_id, work_id=rec.work_id)
+    session._backend = SimpleNamespace(run_lease_id=lease)
+    register_run(lease, session.id, session.user_id, rec.work_id)
+    try:
+        yield verify(mint(session.id, user_id=session.user_id, wiki_task_id=session._wiki_task_id,
+                          run_lease_id=lease, work_id=rec.work_id))
+    finally:
+        revoke_run(lease)
+        session._knowledge_context, session._settlement, session._backend = previous
 
 
 # ---------------------------------------------------------------------------
@@ -411,9 +451,10 @@ async def test_nested_chain_intermediate_stays_alive_while_grandchild_runs(
     vera_sess = mgr.get_session(vera_rec.delegation_id)
     assert vera_sess is not None
     # Vera → Pete.
-    pete_rec = await dm.start_delegation(
-        parent_session_id=vera_sess.id, agent_name="pete", request="r2",
-    )
+    async with _model_scope(dm, vera_rec) as scope:
+        pete_rec = await dm.start_delegation(
+            parent_session_id=vera_sess.id, agent_name="pete", request="r2", scope=scope,
+        )
     # Vera is now waiting for Pete; she has no active work of her own.
     vera_sess._active_task = None
 
@@ -810,9 +851,10 @@ async def test_parent_delegation_waits_for_its_own_sub_delegation(
         parent_session_id=parent.id, agent_name="vera", request="ask pete",
     )
     vera_sid = vera_rec.delegation_id
-    pete_rec = await dm.start_delegation(
-        parent_session_id=vera_sid, agent_name="pete", request="reply HOP-7",
-    )
+    async with _model_scope(dm, vera_rec) as scope:
+        pete_rec = await dm.start_delegation(
+            parent_session_id=vera_sid, agent_name="pete", request="reply HOP-7", scope=scope,
+        )
     pete_sid = pete_rec.delegation_id
     injected.clear()
 
@@ -883,9 +925,10 @@ async def test_parent_delegation_waits_when_its_sub_delegation_finished_first(
         parent_session_id=parent.id, agent_name="vera", request="ask pete",
     )
     vera_sid = vera_rec.delegation_id
-    pete_rec = await dm.start_delegation(
-        parent_session_id=vera_sid, agent_name="pete", request="reply HOP-7",
-    )
+    async with _model_scope(dm, vera_rec) as scope:
+        pete_rec = await dm.start_delegation(
+            parent_session_id=vera_sid, agent_name="pete", request="reply HOP-7", scope=scope,
+        )
     pete_sid = pete_rec.delegation_id
     injected.clear()
 
@@ -1494,11 +1537,12 @@ async def test_cancel_cascades_to_descendants(dm, mgr, db, monkeypatch):
     vera_rec = await dm.start_delegation(
         parent_session_id=octo_sess.id, agent_name="vera", request="r1",
     )
-    pete_rec = await dm.start_delegation(
-        parent_session_id=vera_rec.delegation_id,
-        agent_name="pete",
-        request="r2",
-    )
+    async with _model_scope(dm, vera_rec) as scope:
+        pete_rec = await dm.start_delegation(
+            parent_session_id=vera_rec.delegation_id,
+            agent_name="pete",
+            request="r2", scope=scope,
+        )
     assert pete_rec.state == "running"
     injected.clear()
 

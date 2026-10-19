@@ -26,6 +26,15 @@ from typing import TYPE_CHECKING, Any
 from ..aio import complete_cleanup
 from ..config import settings
 from ..harness import get_harness, has_backend
+from ..knowledge import (
+    OwnedTaskContext,
+    capture,
+    decode_owned,
+    derive,
+    encode,
+    receive_return,
+)
+from ..mcp_identity import McpScope, work_is_open
 from ..workspace import paths_for
 from .orchestrator import ResearchLimits, ResearchProgress, run_research
 
@@ -69,6 +78,7 @@ class ResearchManager:
         self.session_mgr: SessionManager | None = None
         self.db: Database | None = None
         self._tasks: dict[str, asyncio.Task] = {}
+        self._contexts: dict[str, OwnedTaskContext] = {}
         self._job_sem: asyncio.Semaphore | None = None
         self._closing = False
         self._shutdown_tasks: dict[str, asyncio.Task] | None = None
@@ -91,7 +101,9 @@ class ResearchManager:
 
     # ----------------------------------------------------------------- start
 
-    async def start(self, session_id: str, question: str) -> dict[str, Any]:
+    async def start(
+        self, session_id: str, question: str, *, scope: McpScope | None = None,
+    ) -> dict[str, Any]:
         """Create + launch a research job for `session_id`. Returns the row."""
         if self._closing:
             raise ResearchError("ResearchManager is shutting down", status_code=503)
@@ -104,6 +116,13 @@ class ResearchManager:
         session = self.session_mgr.get_session(session_id)
         if session is None:
             raise ResearchError(f"session {session_id} not found", status_code=404)
+        try:
+            # Capture before any await. A model call can never become a fresh
+            # human request merely because its original lease has retired.
+            parent = capture(session, scope, prompt=question)
+            owned = derive(parent, question, sources=("web",))
+        except ValueError as error:
+            raise ResearchError(str(error), status_code=409) from error
         if not has_backend(session.backend):
             raise ResearchError(f"unknown backend {session.backend!r}", status_code=400)
         harness = get_harness(session.backend)
@@ -118,15 +137,17 @@ class ResearchManager:
         ready: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         # Own the whole launch before SQLite or subscribers can suspend it.
         task = asyncio.create_task(
-            self._start_job(job_id, session_id, question, ready),
+            self._start_job(job_id, session_id, question, ready, owned),
             name=f"research-{job_id}",
         )
         self._tasks[job_id] = task
+        self._contexts[job_id] = owned
 
         def finished(done: asyncio.Task) -> None:
             error = None if done.cancelled() else done.exception()
             if error is None:
                 self._tasks.pop(job_id, None)
+                self._contexts.pop(job_id, None)
             if not ready.done():
                 ready.set_exception(error or ResearchError(
                     "ResearchManager is shutting down" if self._closing else "research launch cancelled",
@@ -143,10 +164,17 @@ class ResearchManager:
     async def _start_job(
         self, job_id: str, session_id: str, question: str,
         ready: asyncio.Future[dict[str, Any]],
+        owned: OwnedTaskContext,
     ) -> None:
         assert self.db is not None
         try:
-            await self.db.create_research_job(job_id, session_id, question, _now())
+            await self.db.create_research_job(
+                job_id, session_id, question, _now(), knowledge_context=encode(owned),
+            )
+            if not work_is_open(owned.return_binding.work_id):
+                await self._finalize_failed(job_id, session_id, "cancelled", "original research work is closed")
+                ready.set_exception(ResearchError("Original research work is closed", status_code=409))
+                return
             await self._broadcast({
                 "type": "research_started",
                 "session_id": session_id,
@@ -184,6 +212,8 @@ class ResearchManager:
                     style=harness.profile.credential_style,
                     context=f"research {job_id}",
                 )
+                if not work_is_open(self._contexts[job_id].return_binding.work_id):
+                    raise asyncio.CancelledError("original research work is closed")
 
                 async def on_progress(p: ResearchProgress) -> None:
                     await self.db.update_research_job(job_id, phase=p.phase)
@@ -257,6 +287,7 @@ class ResearchManager:
             "research_id": job_id,
             "sources": report.sources,
             "verified": len(report.findings),
+            "injection_status": "pending",
         })
         await self._inject_report(job_id, session_id, question, report)
 
@@ -269,23 +300,53 @@ class ResearchManager:
         row = await self.db.get_research_job(job_id)
         if row and row.get("injection_status") == "delivered":
             return
+        session = self.session_mgr.get_session(session_id)
+        owned = decode_owned(row.get("knowledge_context")) if row else None
+        work_id = owned.return_binding.work_id if owned else None
+        context = receive_return(
+            owned, session_id=session_id, user_id=session.user_id if session else None,
+            work_id=work_id,
+        )
+        if (row is None or row["session_id"] != session_id or row["status"] != "completed"
+                or session is None or context is None):
+            await self._settle_delivery(job_id, session_id,
+                error="delivery suppressed: original request contract is missing, closed or mismatched")
+            return
         prompt = (
             f"[deep-research:{job_id}] Research complete for: {question}\n\n"
             f"{report.report}"
         )
         try:
-            receipt = await self.session_mgr.start_message(session_id, prompt, source="research", delivery_id=f"research:{job_id}")
-            if not receipt.accepted:
-                await self.db.update_research_job(job_id, injection_status="failed", error="delivery suppressed: session admission is closed")
-                return
-            await self.db.update_research_job(
-                job_id, injection_status="delivered", injected_at=_now()
+            receipt = await self.session_mgr.start_message(
+                session_id, prompt, source="research", delivery_id=f"research:{job_id}",
+                work_id=work_id, knowledge_context=context,
             )
+            if not receipt.accepted:
+                await self._settle_delivery(job_id, session_id, error="delivery suppressed: session admission is closed")
+                return
         except Exception as e:  # noqa: BLE001 — parent may be gone; tolerate
             logger.warning("research %s: report injection failed: %s", job_id, e)
-            await self.db.update_research_job(
-                job_id, injection_status="failed", error=f"delivery failed: {e}"
+            await self._settle_delivery(job_id, session_id, error=f"delivery failed: {e}")
+            return
+        await self._settle_delivery(job_id, session_id)
+
+    async def _settle_delivery(self, job_id: str, session_id: str, *, error: str | None = None) -> None:
+        """Persist and publish delivery independently of report completion."""
+        assert self.db is not None and self.session_mgr is not None
+        status = "failed" if error else "delivered"
+        await self.db.update_research_job(job_id, injection_status=status, error=error,
+                                          injected_at=None if error else _now())
+        if error:
+            row = await self.db.get_research_job(job_id)
+            location = (row or {}).get("report_path") or "the research job record"
+            await self.session_mgr.retain_result_notice(
+                session_id, f"research:{job_id}",
+                f"Research {job_id}: report retained as material at {location}.\n{error}. No automatic follow-up was started.",
             )
+        await self._broadcast({
+            "type": "research_delivery", "session_id": session_id, "research_id": job_id,
+            "injection_status": status, "error": error,
+        })
 
     async def _finalize_failed(
         self, job_id: str, session_id: str, status: str, error: str
@@ -314,6 +375,15 @@ class ResearchManager:
                 raise
 
     # ---------------------------------------------------------------- cancel
+
+    async def cancel_work(self, work_id: str) -> None:
+        """Cancel the jobs captured by a closed delegated work, including launch."""
+        jobs = [job_id for job_id, context in self._contexts.items()
+                if context.return_binding.work_id == work_id]
+        for job_id in jobs:
+            task = self._tasks.get(job_id)
+            if task is not None and not task.done() and not task.cancelling():
+                task.cancel()
 
     async def cancel(self, job_id: str) -> dict[str, Any]:
         if self.db is None:

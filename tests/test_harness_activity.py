@@ -22,6 +22,104 @@ async def test_empty_reasoning_updates_activity_without_display():
     assert run._event_queue.empty()
     run.unbind_activity(token)
 
+
+@pytest.mark.parametrize("sessions_exists", [False, True])
+async def test_native_rollout_published_after_thread_identity_is_still_observed(tmp_path, caplog, sessions_exists):
+    from server.harness.codex_activity import CodexActivityObserver
+
+    thread = "018f0000-1111-7222-8333-444444444444"
+    turn = "018f0000-5555-7666-8777-888888888888"
+    root = tmp_path / "sessions"
+    if sessions_exists:
+        root.mkdir()
+    ticks = []
+    observer = CodexActivityObserver({"CODEX_HOME": str(tmp_path)}, ticks.append,
+                                    wall_clock=lambda: 101.0, monotonic=lambda: 11.0)
+    observer.observe_stdout({"type": "thread.started", "thread_id": thread})
+    observer.consume_stderr(f"2026-10-19T00:00:00Z INFO codex_exec: Sent prompt with event ID: {turn}")
+    await observer.poll_once()
+    root.mkdir(exist_ok=True)
+    path = root / f"rollout-late-{thread}.jsonl"
+    path.write_text(json.dumps({"type": "session_meta", "payload": {"id": thread}}) + "\n" + json.dumps({
+        "type": "event_msg", "payload": {"type": "item_completed", "thread_id": thread,
+        "turn_id": turn, "item": {"type": "Reasoning", "id": "late-reasoning"},
+        "started_at_ms": 101000, "completed_at_ms": 101000},
+    }) + "\n")
+    await observer.drain_observations()
+    assert ticks == [11.0]
+    assert observer.identity_confirmed
+    assert "rollout_missing" not in caplog.text
+    await observer.close()
+
+
+async def test_terminal_discovery_finishes_a_late_fork_rollout_in_a_large_store(tmp_path, caplog):
+    from server.harness.codex_activity import CodexActivityObserver
+
+    thread = "018f0000-1111-4222-8333-444444444444"
+    turn = "018f0000-5555-7666-8777-888888888888"
+    root = tmp_path / "sessions"
+    root.mkdir()
+    for index in range(3000):
+        (root / f"unrelated-{index}.jsonl").touch()
+    ticks = []
+    observer = CodexActivityObserver({"CODEX_HOME": str(tmp_path)}, ticks.append,
+                                    wall_clock=lambda: 101.0, monotonic=lambda: 11.0)
+    observer.observe_stdout({"type": "thread.started", "thread_id": thread})
+    observer.consume_stderr(f"2026-10-19T00:00:00Z INFO codex_exec: Sent prompt with event ID: {turn}")
+    for _ in range(6):
+        await observer.poll_once()
+    path = root / f"rollout-late-{thread}.jsonl"
+    path.write_text(json.dumps({"type": "session_meta", "payload": {"id": thread}}) + "\n" + json.dumps({
+        "type": "event_msg", "payload": {"type": "item_completed", "thread_id": thread,
+        "turn_id": turn, "item": {"type": "Reasoning", "id": "late-fork"},
+        "started_at_ms": 101000, "completed_at_ms": 101000},
+    }) + "\n")
+    await observer.drain_observations()
+    observer.invalidate()
+    await observer.close()
+    assert ticks == [11.0]
+    assert "rollout_missing" not in caplog.text
+
+
+async def test_terminal_discovery_reports_its_limit_without_adopting_an_unverified_match(tmp_path, caplog, monkeypatch):
+    from contextlib import contextmanager
+
+    from server.harness import codex_activity
+
+    thread = "018f0000-1111-4222-8333-444444444444"
+    turn = "018f0000-5555-7666-8777-888888888888"
+    root = tmp_path / "sessions"
+    root.mkdir()
+    for index in range(100):
+        (root / f"unrelated-{index}.jsonl").touch()
+    ticks = []
+    observer = codex_activity.CodexActivityObserver({"CODEX_HOME": str(tmp_path)}, ticks.append,
+                                                  wall_clock=lambda: 101.0, monotonic=lambda: 11.0)
+    observer.observe_stdout({"type": "thread.started", "thread_id": thread})
+    observer.consume_stderr(f"2026-10-19T00:00:00Z INFO codex_exec: Sent prompt with event ID: {turn}")
+    await observer.poll_once()
+    path = root / f"rollout-late-{thread}.jsonl"
+    path.write_text(json.dumps({"type": "session_meta", "payload": {"id": thread}}) + "\n" + json.dumps({
+        "type": "event_msg", "payload": {"type": "item_completed", "thread_id": thread,
+        "turn_id": turn, "item": {"type": "Reasoning", "id": "limited-fork"},
+        "started_at_ms": 101000, "completed_at_ms": 101000},
+    }) + "\n")
+    scan = codex_activity.os.scandir
+
+    @contextmanager
+    def candidate_first(directory):
+        with scan(directory) as entries:
+            yield iter(sorted(entries, key=lambda entry: entry.name != path.name))
+
+    monkeypatch.setattr(codex_activity.os, "scandir", candidate_first)
+    monkeypatch.setattr(codex_activity, "_FINAL_DISCOVERY_ENTRIES", 8)
+    await observer.drain_observations()
+    observer.invalidate()
+    await observer.close()
+    assert ticks == []
+    assert "rollout_discovery_limit" in caplog.text
+    assert "rollout_missing" not in caplog.text
+
 @pytest.mark.asyncio
 async def test_native_metadata_requires_current_process_identity(tmp_path):
     from server.harness.codex_activity import CodexActivityObserver

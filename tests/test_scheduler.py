@@ -5,10 +5,20 @@ import asyncio
 import pytest
 
 from server.database import Database
+from server.knowledge import encode, for_account
 from server.models import SessionStatus
 from server.scheduler import ScheduleRunner
 from server.session_manager import SessionManager
 from tests.submission import accepted_receipt
+
+
+async def save_schedule(db, **fields):
+    """Seed a new trusted definition; missing-context legacy rows are tested separately."""
+    agent = await db.get_agent(fields["agent_id"])
+    context = for_account(session_id=fields.get("origin_session_id") or "schedule-entry",
+                          request_id=fields["schedule_id"], user_id=agent["user_id"],
+                          prompt=fields["prompt"], selected=fields.get("wiki_mode"))
+    await db.save_schedule(**fields, knowledge_context=encode(context))
 
 
 @pytest.fixture
@@ -43,7 +53,7 @@ async def test_scheduler_shutdown_waits_for_its_cancelled_callback_cleanup(setup
             await release.wait()
             await db.update_schedule("shutdown-schedule", last_run_at="cleanup-confirmed")
 
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="shutdown-schedule", agent_id=agent["id"], name="shutdown",
         prompt="do it", interval_seconds=3600, created_at="2026-01-01T00:00:00+00:00",
     )
@@ -71,7 +81,7 @@ async def test_scheduler_shutdown_waits_for_its_cancelled_callback_cleanup(setup
 async def test_scheduler_shutdown_closes_admission_before_awaiting(setup):
     _mgr, db, runner = setup
     agent = await db.get_system_agent()
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="too-late", agent_id=agent["id"], name="late", prompt="late",
         interval_seconds=3600, created_at="2026-01-01T00:00:00+00:00",
     )
@@ -200,7 +210,7 @@ async def test_fire_materializes_scheduled_session_and_auto_archives(
 
     monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
 
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="sch1",
         agent_id=agent["id"],
         name="daily",
@@ -250,7 +260,7 @@ async def test_fire_creates_a_fresh_session_for_each_durable_schedule_run(setup,
     monkeypatch.setattr(mgr, "create_session", tracking_create)
     monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
 
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="schX", agent_id=agent["id"], name="repeat", prompt="first",
         interval_seconds=3600, created_at="2026-10-17T00:00:00+00:00",
     )
@@ -276,7 +286,7 @@ async def test_fire_appends_into_live_origin_session(setup, monkeypatch):
 
     started: dict = {}
 
-    async def fake_start(session_id, prompt, *, source, trusted_request):
+    async def fake_start(session_id, prompt, *, source, knowledge_context):
         assert source == "schedule"
         started["session_id"] = session_id
         started["prompt"] = prompt
@@ -293,7 +303,7 @@ async def test_fire_appends_into_live_origin_session(setup, monkeypatch):
     monkeypatch.setattr(mgr, "start_message", fake_start)
     monkeypatch.setattr(mgr, "create_session", tracking_create)
 
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="sch1",
         agent_id=agent["id"],
         name="daily",
@@ -337,7 +347,7 @@ async def test_fire_falls_back_to_fresh_session_when_origin_gone(setup, monkeypa
 
     monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
 
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="sch2",
         agent_id=agent["id"],
         name="daily",
@@ -364,7 +374,7 @@ async def test_add_job_captures_only_schedule_identity(setup):
     """The current durable row supplies the target and prompt when fired."""
     mgr, db, runner = setup
     agent = await db.get_system_agent()
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="sch3",
         agent_id=agent["id"],
         name="n",
@@ -389,7 +399,7 @@ async def test_cron_schedule_registers_cron_trigger(setup):
 
     mgr, db, runner = setup
     agent = await db.get_system_agent()
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="cron1",
         agent_id=agent["id"],
         name="morning",
@@ -416,7 +426,7 @@ async def test_initialize_deletes_missed_run_at_schedules(setup):
     agent = await db.get_system_agent()
 
     # A one-time schedule with a fire time in the distant past.
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="missed1",
         agent_id=agent["id"],
         name="missed",
@@ -426,7 +436,7 @@ async def test_initialize_deletes_missed_run_at_schedules(setup):
         recurrence_label="Once on Jan 1 2020",
     )
     # A normal interval schedule that should survive.
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="recurring1",
         agent_id=agent["id"],
         name="recurring",
@@ -452,7 +462,7 @@ async def test_run_at_schedule_registers_date_trigger(setup):
     mgr, db, runner = setup
     agent = await db.get_system_agent()
     run_at = "2030-01-15T09:00:00+00:00"
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="once1",
         agent_id=agent["id"],
         name="one-time",
@@ -483,7 +493,7 @@ async def test_run_at_schedule_deleted_after_fire(setup, monkeypatch):
 
     monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
 
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="once2",
         agent_id=agent["id"],
         name="one-time",
@@ -510,14 +520,14 @@ async def test_run_at_schedule_deleted_after_fire_with_origin_session(setup, mon
 
     started: dict = {}
 
-    async def fake_start(session_id, prompt, *, source, trusted_request):
+    async def fake_start(session_id, prompt, *, source, knowledge_context):
         assert source == "schedule"
         started["session_id"] = session_id
         return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", fake_start)
 
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="once3",
         agent_id=agent["id"],
         name="one-time",
@@ -544,7 +554,7 @@ async def test_repoint_schedules_origin():
     await db.initialize()
     try:
         agent = await db.get_system_agent()
-        await db.save_schedule(
+        await save_schedule(db,
             schedule_id="a",
             agent_id=agent["id"],
             name="anchored",
@@ -553,7 +563,7 @@ async def test_repoint_schedules_origin():
             interval_seconds=60,
             origin_session_id="old-sess",
         )
-        await db.save_schedule(
+        await save_schedule(db,
             schedule_id="b",
             agent_id=agent["id"],
             name="other",
@@ -585,7 +595,7 @@ async def test_schedule_recurrence_columns_roundtrip():
     await db.initialize()
     try:
         agent = await db.get_system_agent()
-        await db.save_schedule(
+        await save_schedule(db,
             schedule_id="s1",
             agent_id=agent["id"],
             name="n",
@@ -613,7 +623,7 @@ async def test_run_at_column_roundtrip():
     try:
         agent = await db.get_system_agent()
         run_at = "2030-01-15T09:00:00+00:00"
-        await db.save_schedule(
+        await save_schedule(db,
             schedule_id="once-db",
             agent_id=agent["id"],
             name="one-time task",
@@ -676,7 +686,7 @@ async def test_migrate_schedule_recurrence_from_legacy_shape():
         assert rows[0]["run_at"] is None
 
         # A cron schedule can now be inserted (interval_seconds nullable).
-        await db.save_schedule(
+        await save_schedule(db,
             schedule_id="cron2",
             agent_id=agent["id"],
             name="n",
@@ -764,7 +774,7 @@ async def test_a_fire_is_skipped_while_the_previous_one_is_still_running(
             yield
 
     monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="busy1",
         agent_id=agent["id"],
         name="slow",
@@ -808,7 +818,7 @@ async def test_a_gone_or_idle_previous_session_never_blocks(setup, monkeypatch):
             yield
 
     monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="gone1",
         agent_id=agent["id"],
         name="n",
@@ -834,13 +844,13 @@ async def test_a_fire_does_not_pile_up_behind_another_fire_in_a_chat(
 
     started: list[str] = []
 
-    async def fake_start(session_id, prompt, *, source, trusted_request):
+    async def fake_start(session_id, prompt, *, source, knowledge_context):
         assert source == "schedule"
         started.append(prompt)
         return accepted_receipt()
 
     monkeypatch.setattr(mgr, "start_message", fake_start)
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="chat1",
         agent_id=agent["id"],
         name="daily",
@@ -883,7 +893,7 @@ async def test_fresh_fire_is_admitted_and_owned_by_dispatch(setup, monkeypatch):
             yield HarnessEvent(type="result")
 
     monkeypatch.setattr(mgr, "_run_backend", backend)
-    await db.save_schedule(
+    await save_schedule(db,
         schedule_id="owned-schedule", agent_id=agent["id"], name="owned",
         prompt="scheduled work", interval_seconds=3600,
         created_at="2026-10-17T00:00:00+00:00",

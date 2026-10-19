@@ -15,7 +15,8 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import Any, Literal
+from functools import partial
+from typing import TYPE_CHECKING, Any, Literal
 
 from .. import fork_helpers
 from .. import monitor as _monitor
@@ -47,6 +48,7 @@ from .base import (
     _MAX_PENDING_STEERS,
     PendingQuestion,
     QueuedPrompt,
+    RecordedInput,
     Session,
     SessionManagerBase,
     _augment_prompt_with_attachments,
@@ -55,6 +57,9 @@ from .base import (
 )
 from .diagnostics import safe_diagnostic
 from .submission import RequestCompletion, SubmissionReceipt
+
+if TYPE_CHECKING:
+    from ..knowledge import KnowledgeContext
 
 
 @dataclass
@@ -416,6 +421,7 @@ class TurnsMixin(SessionManagerBase):
         *,
         git_head: str | None = None,
         git_status_clean: bool | None = None,
+        sequence: int | None = None,
     ) -> int | None:
         """Persist and return the assigned seq (or None if no DB).
 
@@ -428,12 +434,20 @@ class TurnsMixin(SessionManagerBase):
         """
         if not self.db:
             return None
-        seq = session._next_message_seq
-        session._next_message_seq += 1
+        seq = session._next_message_seq if sequence is None else sequence
+        session._next_message_seq = max(session._next_message_seq, seq + 1)
         # Decided here rather than in the DB layer so the caller's own
         # MessageContent carries it onto the WS event as well as into the row.
         msg.created_at = msg.created_at or datetime.now(UTC).isoformat()
-        await self.db.append_message(
+        request_context = (msg.tool_input or {}).get("request_context", {})
+        request_id = request_context.get("request_id") if isinstance(request_context, dict) else None
+        record = (
+            partial(self.db.record_request, request_id=request_id)
+            if msg.role == MessageRole.user and isinstance(request_id, str)
+            and isinstance(request_context.get("knowledge"), dict)
+            else self.db.append_message
+        )
+        await record(
             session_id=session.id,
             seq=seq,
             role=msg.role.value,
@@ -453,6 +467,39 @@ class TurnsMixin(SessionManagerBase):
         )
         session._message_count += 1
         return seq
+
+    async def _record_request_input(
+        self, session: Session, queued: QueuedPrompt,
+        *, attachments: list[AttachmentMetadata] | None = None,
+    ) -> tuple[int | None, MessageContent]:
+        """Confirm one immutable input, whether dispatched inline or queued."""
+        from ..knowledge import encode
+
+        if queued.knowledge_context is None:
+            raise ValueError("Request input has no verified knowledge context")
+        if queued.recorded_input is None:
+            git_head, git_status_clean = await fork_helpers.capture_git_anchor(session.working_dir)
+            message = MessageContent(
+                role=MessageRole.user, type="text", content=queued.prompt,
+                attachments=attachments or [],
+                tool_input={"request_context": {
+                    "request_id": queued.request_id, "source": queued.source,
+                    "work_id": queued.work_id,
+                    "knowledge": json.loads(encode(queued.knowledge_context)),
+                }},
+            )
+            queued.recorded_input = RecordedInput(
+                session._next_message_seq if self.db else None, message,
+                git_head, git_status_clean,
+            )
+        recorded = queued.recorded_input
+        if not recorded.confirmed:
+            recorded.seq = await self._persist_message(
+                session, recorded.message, git_head=recorded.git_head,
+                git_status_clean=recorded.git_status_clean, sequence=recorded.seq,
+            )
+            recorded.confirmed = True
+        return recorded.seq, recorded.message
 
     def _own_task(self, task: asyncio.Task[Any]) -> None:
         self._owned_tasks.add(task)
@@ -681,6 +728,7 @@ class TurnsMixin(SessionManagerBase):
         question_id: str | None = None,
         request_id: str | None = None,
         trusted_request: str | None = None,
+        knowledge_context: KnowledgeContext | None = None,
     ) -> SubmissionReceipt:
         """Accept a request through the in-memory dispatch gate.
 
@@ -705,11 +753,20 @@ class TurnsMixin(SessionManagerBase):
             receipt = self._new_receipt(session, queued, "closed")
             self._withdraw_requests(session, [queued], reason="shutdown" if self._admission_closed else "withdrawn")
             return receipt
+        from ..knowledge import for_entry
+
+        request_id = request_id or uuid.uuid4().hex
+        knowledge_context = knowledge_context or for_entry(
+            session, prompt if trusted_request is None else trusted_request,
+            request_id=request_id, selected=wiki_mode,
+        )
+        if knowledge_context.origin.user_id != session.user_id:
+            raise ValueError("Request knowledge belongs to another account")
         queued = QueuedPrompt(
             prompt=prompt, attachment_ids=list(attachment_ids or []),
-            wiki_mode=wiki_mode, source=source, delivery_id=delivery_id, work_id=work_id,
+            wiki_mode=knowledge_context.mode, source=source, delivery_id=delivery_id, work_id=work_id,
             question_session_id=question_session_id, question_id=question_id,
-            trusted_request=prompt if trusted_request is None else trusted_request,
+            trusted_request=knowledge_context.trusted_request, knowledge_context=knowledge_context,
             **({"request_id": request_id} if request_id else {}),
         )
         # Stop closes the steering window synchronously before yielding. A
@@ -958,6 +1015,36 @@ class TurnsMixin(SessionManagerBase):
                 )
             await self._broadcast(self._dispatch_event(session), user_id=session.user_id)
 
+    async def retain_result_notice(self, session_id: str, delivery_id: str, content: str) -> bool:
+        """Save one visible material-only notice without admitting new work."""
+        session = self.sessions.get(session_id)
+        if session is None:
+            return False
+        async with session._dispatch_lock:
+            if self.sessions.get(session_id) is not session:
+                return False
+            if delivery_id in session._delivery_notice_ids:
+                return True
+            exists = self.db and await self.db.has_delivery_notice(session_id, delivery_id)
+            notice = None
+            seq = None
+            if not exists:
+                notice = MessageContent(
+                    role=MessageRole.system, type="delivery_notice", content=content,
+                    tool_input={"delivery_id": delivery_id},
+                )
+                seq = await self._persist_message(session, notice)
+            if self.db:
+                # A matching local row may be from an uncertain earlier batch.
+                await self.db.flush()
+            session._delivery_notice_ids.add(delivery_id)
+        if notice is not None:
+            await self._broadcast(self._tag_persisted({
+                "type": "delivery_notice", "session_id": session_id,
+                "content": notice.content, "tool_input": notice.tool_input,
+            }, seq, notice), user_id=session.user_id)
+        return True
+
     async def deliver_bg_result(self, rec) -> bool:  # type: ignore[no-untyped-def]
         """Inject a synthesized user message into a session when a bg
         task completes. Threaded through the same start_message path
@@ -977,6 +1064,7 @@ class TurnsMixin(SessionManagerBase):
         chat history on resume, which is the right cue.
         """
         from ..bg_tasks import render_delivery_prompt
+        from ..knowledge import decode_owned, receive_return
 
         session = self.sessions.get(rec.session_id)
         if session is None:
@@ -986,12 +1074,25 @@ class TurnsMixin(SessionManagerBase):
                 rec.session_id,
             )
             return False
+        work_id = getattr(rec, "work_id", None)
+        knowledge_context = receive_return(
+            decode_owned(getattr(rec, "knowledge_context", None)),
+            session_id=session.id, user_id=session.user_id, work_id=work_id,
+        )
+        if knowledge_context is None:
+            logger.info("bg task %s retained as material: no open original request contract", rec.id)
+            await self.retain_result_notice(
+                session.id, f"bg:{rec.id}",
+                f"Background task {rec.id}: output retained in the task record. "
+                "The original request contract is missing, closed or could not be verified; no automatic continuation was started.",
+            )
+            return False
         prompt = render_delivery_prompt(rec)
         try:
             receipt = await self.start_message(
                 rec.session_id, prompt, attachment_ids=None,
                 source="bg", delivery_id=f"bg:{rec.id}",
-                work_id=getattr(rec, "work_id", None),
+                work_id=work_id, knowledge_context=knowledge_context,
             )
         except Exception:
             logger.exception(
@@ -1028,6 +1129,8 @@ class TurnsMixin(SessionManagerBase):
             request_id=queued.request_id,
             source=queued.source, work_id=queued.work_id,
             trusted_request=queued.trusted_request,
+            knowledge_context=queued.knowledge_context,
+            queued_request=queued,
             **({"wiki_mode": queued.wiki_mode} if queued.wiki_mode else {})
         ):
             pass  # The executor persists and broadcasts each event.
@@ -1043,6 +1146,8 @@ class TurnsMixin(SessionManagerBase):
         source: str = "human",
         work_id: str | None = None,
         trusted_request: str | None = None,
+        knowledge_context: KnowledgeContext | None = None,
+        queued_request: QueuedPrompt | None = None,
     ) -> AsyncIterator[dict[str, Any]]:
         session = self.sessions.get(session_id)
         if session is None:
@@ -1071,44 +1176,35 @@ class TurnsMixin(SessionManagerBase):
             # Revalidate queued input before opening a Wiki task, recording a
             # user message or starting a model. One bad file rejects the turn.
             files = validate_message_attachments(session_id, attachment_ids if attachment_ids is not None else [])
-            wiki_mode = wiki_tasks.mode_for(session, wiki_mode, request_id=settlement.request_id)
-            session._wiki_mode = wiki_mode
-            session._wiki_task_id = wiki_tasks.open(
-                session, wiki_mode, prompt if trusted_request is None else trusted_request,
-                request_id=settlement.request_id,
-            ) if wiki_mode in {"auto", "read", "maintain"} else None
-            wiki_task_id = session._wiki_task_id
+            from ..knowledge import for_entry
+
+            knowledge_context = knowledge_context or for_entry(
+                session, prompt if trusted_request is None else trusted_request,
+                request_id=settlement.request_id, selected=wiki_mode,
+            )
+            wiki_mode = wiki_tasks.mode_for(session, knowledge_context.mode, request_id=settlement.request_id)
+            assignment = wiki_tasks.assignments.get(session.id)
+            worker = assignment and assignment.get("assigned_request_id") in {None, settlement.request_id}
+            if wiki_mode == "maintain" and not knowledge_context.maintenance.may_submit and not worker:
+                wiki_mode = "read"
             attachments_meta = [AttachmentMetadata(
                 id=file.id, filename=file.filename, size=file.size, mime_type=file.mime_type,
             ) for file in files]
             attachment_paths = [str(file.path) for file in files]
 
-            # Capture the turn-start git anchor onto the user-message row
-            # (session-rewind.md §5.6.3): this row's git state IS the
-            # branch-point state if the user later forks here. (None, None)
-            # when working_dir isn't a git repo.
-            git_head, git_status_clean = await fork_helpers.capture_git_anchor(
-                session.working_dir
+            request = queued_request or QueuedPrompt(
+                prompt=prompt, attachment_ids=list(attachment_ids or []),
+                request_id=settlement.request_id, source=source, work_id=work_id,
+                knowledge_context=knowledge_context, trusted_request=knowledge_context.trusted_request,
             )
-
-            # Record user message — content is the *raw* prompt the user
-            # typed; the augmented `<attachments>` block is only what we
-            # hand to the backend.
-            user_msg = MessageContent(
-                role=MessageRole.user,
-                type="text",
-                content=prompt,
-                attachments=attachments_meta,
-                tool_input={"request_context": {
-                    "request_id": settlement.request_id, "source": source, "work_id": work_id,
-                }},
-            )
-            seq = await self._persist_message(
-                session,
-                user_msg,
-                git_head=git_head,
-                git_status_clean=git_status_clean,
-            )
+            seq, user_msg = await self._record_request_input(session, request, attachments=attachments_meta)
+            session._knowledge_context = knowledge_context
+            session._wiki_mode = wiki_mode
+            session._wiki_task_id = wiki_tasks.open(
+                session, wiki_mode, knowledge_context.trusted_request,
+                request_id=settlement.request_id, knowledge=knowledge_context,
+            ) if wiki_mode in {"auto", "read", "maintain"} else None
+            wiki_task_id = session._wiki_task_id
             event: dict[str, Any] = {
                 "type": "user_message",
                 "session_id": session_id,
@@ -1130,9 +1226,16 @@ class TurnsMixin(SessionManagerBase):
             # Attachments wrap the raw prompt; the `/showme` viewer flow now
             # resolves on the client + dedicated resolution endpoint instead of
             # being rewritten into a backend command.
+            from ..knowledge import render
             from ..wiki.tasks import command_prompt
 
             wiki_prompt = command_prompt(prompt, wiki_mode)
+            if knowledge_context.origin.request_id != settlement.request_id:
+                # This turn's body is a result or subtask, so preserve the
+                # fixed original requirements as dispatch context. Keep it
+                # in the spillable frame rather than an unbounded argv/system
+                # prompt or a configuration change on every held-process turn.
+                wiki_prompt = render(knowledge_context) + "\n\n" + wiki_prompt
             augmented_prompt = _augment_prompt_with_attachments(
                 wiki_prompt, attachment_paths
             )
@@ -1201,6 +1304,7 @@ class TurnsMixin(SessionManagerBase):
             if session._settlement is settlement:
                 session._wiki_task_id = None
                 session._wiki_mode = None
+                session._knowledge_context = None
                 session.status = SessionStatus.idle
             try:
                 if self.db:
@@ -2354,6 +2458,10 @@ class TurnsMixin(SessionManagerBase):
         the count of frames written is tracked on the session so the run loop
         can tell whether anything was delivered after `result`.
         """
+        from ..knowledge import AdmittedRequest, RequestRef, revise
+        from ..mcp_identity import work_is_open
+        from ..wiki.tasks import tasks as wiki_tasks
+
         written = 0
         while True:
             await session._steer_ready.wait()
@@ -2370,32 +2478,62 @@ class TurnsMixin(SessionManagerBase):
                     if not session._steer_open or not session._steer_queue:
                         break
                     queued = session._steer_queue[0]
+                    owner = session._settlement
+                    previous = session._knowledge_context
+                    if owner is None or previous is None or queued.knowledge_context is None:
+                        logger.warning("session %s: steer has no verified active request contract", session.id)
+                        return written
                     try:
-                        await backend.send_user_frame(queued.prompt)
+                        if queued.recorded_input is None:
+                            edit = AdmittedRequest(
+                                RequestRef(session.id, queued.request_id, session.user_id),
+                                queued.knowledge_context, queued.work_id,
+                            )
+                            merged = revise(previous, edit, {
+                                "prompt": queued.prompt if queued.trusted_request is None else queued.trusted_request,
+                            }, human=True)
+                            queued.knowledge_context = merged
+                            queued.trusted_request = merged.trusted_request
+                            queued.wiki_mode = merged.mode
+                        seq, message = await self._record_request_input(session, queued)
                     except Exception:
                         logger.exception(
-                            "failed writing steer for session %s; it will be "
-                            "queued as the next turn instead",
-                            session.id,
+                            "failed confirming steer for session %s; input retained for queued retry", session.id,
                         )
-                        # Left in the queue: the turn's cleanup moves it to the
-                        # normal pending queue, so the message still runs.
+                        return written
+
+                    # Stop can close the window synchronously while storage
+                    # yields. Never hand that saved input to a different turn.
+                    if (not session._steer_open or session._backend is not backend
+                            or session._settlement is not owner or session._knowledge_context is not previous
+                            or not work_is_open(owner.work_id)):
+                        return written
+                    merged = queued.knowledge_context
+                    token = session._wiki_task_id
+                    previous_task = wiki_tasks.active.get(token) if token else None
+                    installed_task = replace(previous_task, request=merged.trusted_request, knowledge=merged) if previous_task else None
+                    # The engine can call a tool as soon as it receives bytes.
+                    # Install only confirmed constraints before sending them.
+                    session._knowledge_context = merged
+                    if token and installed_task is not None:
+                        wiki_tasks.active[token] = installed_task
+                    try:
+                        await backend.send_user_frame(queued.prompt)
+                    except BaseException as error:
+                        if session._knowledge_context is merged:
+                            session._knowledge_context = previous
+                        if token and wiki_tasks.active.get(token) is installed_task:
+                            assert previous_task is not None
+                            wiki_tasks.active[token] = previous_task
+                        if not isinstance(error, Exception):
+                            raise
+                        logger.exception(
+                            "failed writing steer for session %s; saved input retained for queued retry", session.id,
+                        )
                         return written
                     session._steer_queue.pop(0)
-                    owner = session._settlement
-                    if owner is not None:
-                        session._inline_requests.setdefault(owner.request_id, []).append(queued)
+                    session._inline_requests.setdefault(owner.request_id, []).append(queued)
                 written += 1
-                # Persist + broadcast only once it's actually been handed over,
-                # so the transcript order matches what the engine saw.
-                message = MessageContent(
-                    role=MessageRole.user, type="text", content=queued.prompt,
-                    tool_input={"request_context": {
-                        "request_id": queued.request_id, "source": queued.source,
-                        "work_id": queued.work_id,
-                    }},
-                )
-                seq = await self._persist_message(session, message)
                 await self._broadcast(
                     self._tag_persisted({
                         "type": "steered",
@@ -2470,6 +2608,12 @@ class TurnsMixin(SessionManagerBase):
         subagents = (agent or {}).get("subagents") or []
         if not isinstance(subagents, list):
             subagents = []
+
+        from ..knowledge import render
+
+        knowledge_instructions = render(session._knowledge_context, original=False)
+        if knowledge_instructions:
+            system_prompt = "\n\n".join(filter(None, (system_prompt, knowledge_instructions)))
 
         return RunConfig(
             session_id=session.id,

@@ -80,7 +80,11 @@ export function ResearchCard({ sessionId }: { sessionId: string }) {
                 </span>
               ) : job.status === "completed" ? (
                 <span>
-                  Report delivered below
+                  {job.injection_status === "delivered"
+                    ? "Report delivered below"
+                    : job.injection_status === "failed"
+                      ? `Report retained as material${job.error ? ` — ${job.error}` : ""}`
+                      : "Report ready; delivery pending"}
                   {typeof job.verified === "number"
                     ? ` · ${job.verified} verified finding${job.verified === 1 ? "" : "s"}`
                     : ""}

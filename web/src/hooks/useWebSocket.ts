@@ -461,6 +461,16 @@ export function handleWsMessage(data: Record<string, unknown>) {
         phase: "done",
         sources: (data.sources as string[]) ?? undefined,
         verified: (data.verified as number) ?? undefined,
+        injection_status: (data.injection_status as ResearchJob["injection_status"]) ?? "pending",
+      });
+      break;
+    }
+
+    case "research_delivery": {
+      getState().upsertResearch(sessionId, {
+        id: data.research_id as string,
+        injection_status: data.injection_status as ResearchJob["injection_status"],
+        error: (data.error as string) ?? null,
       });
       break;
     }

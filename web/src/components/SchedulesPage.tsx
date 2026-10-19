@@ -1,4 +1,4 @@
-import { useCallback, useEffect } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { IconArrowRight, IconClock, IconTrash } from "@tabler/icons-react";
 import { useSessionStore, type Agent, type Schedule } from "../stores/sessionStore";
 import { refreshSchedules } from "../lib/refreshSchedules";
@@ -6,6 +6,52 @@ import { selectSession } from "../lib/selectSession";
 import { PageHeader } from "./PageHeader";
 
 const API = window.location.origin;
+
+function ScheduleKnowledgeControl({ schedule }: { schedule: Schedule }) {
+  const token = useSessionStore((s) => s.token);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const missing = schedule.invalid_reason === "knowledge_contract_missing";
+  const mode = missing ? "" : schedule.wiki_mode === "off" ? "read" : schedule.wiki_mode ?? "auto";
+
+  const change = async (wikiMode: string) => {
+    setSaving(true);
+    setError(null);
+    try {
+      const response = await fetch(`${API}/api/schedules/${schedule.id}`, {
+        method: "PATCH",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ wiki_mode: wikiMode }),
+      });
+      if (!response.ok) {
+        const body = await response.json().catch(() => null);
+        throw new Error(typeof body?.detail === "string" ? body.detail : "Could not update Wiki maintenance.");
+      }
+      await refreshSchedules();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not update Wiki maintenance.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return <div className="mt-3 text-[12.5px] text-gray-700">
+    <label>
+      Wiki maintenance
+      <select aria-label={`Wiki maintenance for ${schedule.name}`} value={mode}
+        disabled={saving || Boolean(schedule.invalid_reason && !missing)}
+        className="ml-2 rounded border border-gray-300 bg-gray-50 px-2 py-1 text-gray-900"
+        onChange={(event) => void change(event.target.value)}>
+        {missing && <option value="" disabled>Choose permission</option>}
+        <option value="auto">Automatic</option>
+        <option value="read">Read only</option>
+        <option value="maintain">Selected targets in message</option>
+      </select>
+    </label>
+    {missing && <p className="mt-1">Review the message and choose permission for future runs. The schedule stays paused.</p>}
+    {error && <p role="alert" className="mt-1 text-destructive">{error}</p>}
+  </div>;
+}
 
 /** Format the next fire the way the design's header does: "next 09:00". */
 function formatNext(iso: string | null | undefined): string | null {
@@ -208,7 +254,8 @@ export function SchedulesPage({
                       <div className="schedule-prompt mt-1.5 rounded-lg border border-gray-300 bg-gray-50 px-3.5 py-2.5 text-[13px] leading-relaxed text-gray-900">
                         {sched.prompt}
                       </div>
-                      {sched.invalid_reason && <p role="alert" className="mt-2 text-xs text-destructive">
+                      <ScheduleKnowledgeControl schedule={sched} />
+                      {sched.invalid_reason && sched.invalid_reason !== "knowledge_contract_missing" && <p role="alert" className="mt-2 text-xs text-destructive">
                         This schedule's target could not be verified. It is paused;
                         delete it and create a schedule with a matching agent and conversation.
                       </p>}

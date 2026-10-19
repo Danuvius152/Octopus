@@ -266,7 +266,9 @@ async def test_stop_releases_blocked_steering_and_preserves_undelivered_message(
         "undelivered steer",
     ]
     await manager.resume_dispatch(session.id)
-    assert await asyncio.wait_for(started.get(), 2) == "undelivered steer"
+    retried = await asyncio.wait_for(started.get(), 2)
+    assert retried.endswith("undelivered steer")
+    assert "first" in retried
 
 
 async def test_deleting_running_session_does_not_leave_failed_dispatch_task(dispatch):
@@ -438,7 +440,9 @@ async def test_failed_inline_delivery_retains_receipt_for_queued_execution(dispa
     await manager.interrupt(session.id)
     assert (await asyncio.wait_for(original.wait(), 2)).outcome.status == "interrupted"
     await manager.resume_dispatch(session.id)
-    assert await asyncio.wait_for(started.get(), 2) == "fallback input"
+    retried = await asyncio.wait_for(started.get(), 2)
+    assert retried.endswith("fallback input")
+    assert "first" in retried
     completed = await asyncio.wait_for(steer.wait(), 2)
     assert completed.request_id == steer.request_id
     assert completed.outcome.status == "success"

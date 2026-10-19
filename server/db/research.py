@@ -18,25 +18,25 @@ class ResearchMixin(DatabaseBase):
 
     @serialized_write
     async def create_research_job(
-        self, job_id: str, session_id: str, question: str, created_at: str
+        self, job_id: str, session_id: str, question: str, created_at: str,
+        knowledge_context: str | None = None,
     ) -> None:
         await self._ensure_connected()
         await self.conn.execute(
             "INSERT INTO research_jobs "
-            "(id, session_id, question, status, phase, created_at, injection_status) "
-            "VALUES (?, ?, ?, 'running', 'scope', ?, 'pending')",
-            (job_id, session_id, question, created_at),
+            "(id, session_id, question, status, phase, created_at, injection_status, knowledge_context) "
+            "VALUES (?, ?, ?, 'running', 'scope', ?, 'pending', ?)",
+            (job_id, session_id, question, created_at, knowledge_context),
         )
         await self.conn.commit()
 
     @serialized_write
     async def update_research_job(self, job_id: str, **fields: Any) -> None:
-        """Patch any of: status, phase, error, report_path, cost, completed_at,
-        injection_status, injected_at."""
+        """Patch progress, delivery status or the server-encoded context."""
         await self._ensure_connected()
         allowed = {
             "status", "phase", "error", "report_path", "cost", "completed_at",
-            "injection_status", "injected_at",
+            "injection_status", "injected_at", "knowledge_context",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:

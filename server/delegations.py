@@ -55,9 +55,18 @@ if TYPE_CHECKING:
     from .session_manager import SessionManager
 
 from .bg_tasks import bg_task_manager
+from .knowledge import (
+    OwnedTaskContext,
+    capture,
+    decode_owned,
+    derive,
+    encode,
+    receive_return,
+)
 from .mcp_identity import McpScope, close_work, require_live_scope, work_is_open
 from .monitor import Event as _MonEvent
 from .monitor import record as _mon_record
+from .research.manager import research_manager
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +105,7 @@ class _PersistedRound(BaseModel):
     awaiting_sub_relay: bool
     deferred_request_id: str | None
     terminal_disposition: str | None
+    knowledge_context: str | None = None
 
 
 @dataclass
@@ -115,7 +125,7 @@ class DelegationRunState:
     # a new record, so an in-flight cancellation retains its original target.
     work_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     parent_work_id: str | None = None
-    wiki_mode: str | None = None
+    owned_context: OwnedTaskContext | None = field(default=None, repr=False)
     created_at: str = field(
         default_factory=lambda: datetime.now(UTC).isoformat()
     )
@@ -209,6 +219,7 @@ class DelegationManager:
             "awaiting_sub_relay": rec._awaiting_sub_relay,
             "deferred_request_id": rec._deferred_request_id,
             "terminal_disposition": rec._terminal_disposition,
+            "knowledge_context": encode(rec.owned_context) if rec.owned_context is not None else None,
         }, sort_keys=True, separators=(",", ":"))
 
     async def _missing_relationship(self, rec: DelegationRunState) -> DelegationError | None:
@@ -343,6 +354,7 @@ class DelegationManager:
                 _persisted_state=saved, _metric_recorded=True,
                 _terminal_disposition=data.terminal_disposition or "not_replayed",
                 _deferred_request_id=data.deferred_request_id,
+                owned_context=decode_owned(data.knowledge_context),
             )
             if rec.state == "running":
                 request_id = await self.db.get_latest_delegation_request(
@@ -405,7 +417,12 @@ class DelegationManager:
                 status_code=404,
             )
 
-        parent_work_id = scope.work_id if scope is not None else parent._work_id
+        try:
+            caller = capture(parent, scope, prompt=request)
+        except ValueError as exc:
+            raise DelegationError(str(exc), status_code=409) from exc
+        owned_context = derive(caller, request)
+        parent_work_id = caller.work_id
         self._require_caller(scope, parent_session_id, parent_work_id)
 
         target = await self._resolve_target_agent(agent_name, parent.user_id)
@@ -457,7 +474,7 @@ class DelegationManager:
             target_agent_name=target["name"],
             request=request,
             parent_work_id=parent_work_id,
-            wiki_mode=parent._wiki_mode,
+            owned_context=owned_context,
         )
         # Register BEFORE start_message: the broadcast may fire
         # synchronously from inside start_message on a fast harness
@@ -520,7 +537,10 @@ class DelegationManager:
             working_dir=parent.working_dir,
         )
         try:
-            receipt = await self.session_mgr.start_message(child.id, composed, source="delegation", work_id=rec.work_id, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {}))
+            receipt = await self.session_mgr.start_message(
+                child.id, composed, source="delegation", work_id=rec.work_id,
+                knowledge_context=owned_context.execution,
+            )
         except asyncio.CancelledError:
             await retain_abandoned_setup()
             raise
@@ -590,6 +610,7 @@ class DelegationManager:
             affected.extend(self.session_mgr.close_work(item.work_id))
         for item in branch:
             await bg_task_manager.cancel_work(item.work_id)
+            await research_manager.cancel_work(item.work_id)
         await self.session_mgr.finish_work_cancellation(affected)
         for item in reversed(branch):
             if item.state == "cancelled":
@@ -644,8 +665,16 @@ class DelegationManager:
             raise DelegationError(
                 "request must be a non-empty string", status_code=400
             )
-        if self.session_mgr.get_session(parent_session_id) is None:
+        parent = self.session_mgr.get_session(parent_session_id)
+        if parent is None:
             raise DelegationError("Parent session is no longer live", status_code=404)
+        try:
+            caller = capture(parent, scope, prompt=request)
+        except ValueError as exc:
+            raise DelegationError(str(exc), status_code=409) from exc
+        owned_context = derive(caller, request)
+        parent_work_id = caller.work_id
+        self._require_caller(scope, parent_session_id, parent_work_id)
         rec = self._records.get(delegation_id)
         if rec is None or rec.parent_session_id != parent_session_id:
             raise DelegationError(
@@ -662,7 +691,6 @@ class DelegationManager:
         if self._records.get(delegation_id) is not rec:
             raise DelegationError("Delegation already has a new round", status_code=409)
         parent = self.session_mgr.get_session(parent_session_id)
-        parent_work_id = scope.work_id if scope else (parent._work_id if parent else None)
         self._require_caller(scope, parent_session_id, parent_work_id)
 
         previous = rec
@@ -673,7 +701,7 @@ class DelegationManager:
             _terminal_injecting=False, _awaiting_sub_relay=False, request=request,
             _deferred_request_id=None,
             _recording_error=False, _save_task=None,
-            wiki_mode=parent._wiki_mode if parent else None,
+            owned_context=owned_context,
             created_at=datetime.now(UTC).isoformat(),
         )
         self._records[delegation_id] = rec
@@ -752,7 +780,10 @@ class DelegationManager:
             self._require_caller(scope, parent_session_id, parent_work_id)
             if rec.state != "running" or not work_is_open(rec.work_id) or self._records.get(delegation_id) is not rec:
                 return rec
-            receipt = await self.session_mgr.start_message(rec.delegation_id, composed, source="delegation", work_id=rec.work_id, **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {}))
+            receipt = await self.session_mgr.start_message(
+                rec.delegation_id, composed, source="delegation", work_id=rec.work_id,
+                knowledge_context=owned_context.execution,
+            )
             if not receipt.accepted:
                 rec.state = "cancelled"
                 rec.error = "Child request suppressed: admission is closed"
@@ -1131,6 +1162,10 @@ class DelegationManager:
         same queue on success — first to drain wins.
         """
         assert self.session_mgr is not None
+        context = self._return_context(rec)
+        if context is None:
+            logger.info("Delegation %s question retained without an admitted return contract", rec.delegation_id)
+            return
         question_id = msg.get("question_id") or ""
         questions = msg.get("questions") or []
         body = self._render_question_body(questions)
@@ -1151,7 +1186,7 @@ class DelegationManager:
                 delivery_id=f"agent-question:{rec.work_id}:{question_id}",
                 work_id=rec.parent_work_id,
                 question_session_id=rec.delegation_id, question_id=question_id,
-                **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {})
+                knowledge_context=context,
             )
             if not receipt.accepted:
                 logger.info("Delegation %s question suppressed by closed parent work", rec.delegation_id)
@@ -1289,6 +1324,18 @@ class DelegationManager:
             await self._save_round(rec)
             logger.info("Delegation %s terminal return suppressed by closed parent work", rec.delegation_id)
             return
+        context = self._return_context(rec)
+        if context is None:
+            rec._terminal_disposition = "unbound"
+            await self._save_round(rec)
+            logger.info("Delegation %s terminal retained without an admitted return contract", rec.delegation_id)
+            await self.session_mgr.retain_result_notice(
+                rec.parent_session_id, f"agent-terminal:{rec.work_id}",
+                f"Delegation {rec.delegation_id}: the result is retained in the child conversation. "
+                "The original request is unavailable, so no automatic reply was started.",
+            )
+            await self._archive_terminal(rec)
+            return
         rec._terminal_injecting = True
         if rec.state == "completed":
             body = ("".join(rec.captured_text)).strip()
@@ -1309,7 +1356,7 @@ class DelegationManager:
             receipt = await self.session_mgr.start_message(
                 rec.parent_session_id, prompt, source="delegation",
                 delivery_id=f"agent-terminal:{rec.work_id}", work_id=rec.parent_work_id,
-                **({"wiki_mode": rec.wiki_mode} if rec.wiki_mode else {})
+                knowledge_context=context,
             )
             rec._terminal_disposition = receipt.disposition
             rec._terminal_injected = receipt.accepted
@@ -1329,6 +1376,19 @@ class DelegationManager:
         finally:
             rec._terminal_injecting = False
         await self._save_round(rec)
+        await self._archive_terminal(rec)
+
+    def _return_context(self, rec: DelegationRunState):
+        """Resolve the fixed immediate caller, independently of its retired lease."""
+        assert self.session_mgr is not None
+        parent = self.session_mgr.get_session(rec.parent_session_id)
+        if parent is None:
+            return None
+        return receive_return(rec.owned_context, session_id=parent.id,
+                              user_id=parent.user_id, work_id=rec.parent_work_id)
+
+    async def _archive_terminal(self, rec: DelegationRunState) -> None:
+        assert self.session_mgr is not None
         # Regardless of whether the parent notification above
         # succeeded (it may not, if the parent itself was deleted
         # while the child was running — in which case we already

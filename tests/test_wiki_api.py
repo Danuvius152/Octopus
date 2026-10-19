@@ -1719,7 +1719,7 @@ ThreadingHTTPServer(('127.0.0.1', int(os.environ['PORT'])), H).serve_forever()
         manager.shutdown()
 
 
-async def test_schedule_wiki_grant_requires_verified_intent_at_creation(
+async def test_schedule_contract_requires_live_scope_or_verified_human_intent_at_creation(
     client, tmp_path, monkeypatch
 ):
     from types import SimpleNamespace
@@ -1751,8 +1751,7 @@ async def test_schedule_wiki_grant_requires_verified_intent_at_creation(
     ordinary = await client.post(
         endpoint, headers=plain, json={"prompt": "一般检查", "interval_seconds": 3600}
     )
-    assert ordinary.status_code == 201, ordinary.text
-    assert ordinary.json()["wiki_mode"] is None
+    assert ordinary.status_code == 403, ordinary.text
     human = await client.post(
         endpoint,
         headers=HEADERS,
@@ -1778,11 +1777,9 @@ async def test_schedule_wiki_grant_requires_verified_intent_at_creation(
             headers=scoped,
             json={"prompt": "查证", "wiki_mode": "read", "interval_seconds": 3600},
         )
-        assert read.status_code == 201, read.text
-        rows = await session_manager.db.load_schedules()
-        assert (
-            next(r for r in rows if r["id"] == read.json()["id"])["wiki_mode"] == "read"
-        )
+        assert read.status_code == 403, read.text
+        # A task-only token cannot invent the committed request/run contract.
+        # Real live caller inheritance is exercised by knowledge_schedules.
     finally:
         tasks.close(token)
 

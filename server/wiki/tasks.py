@@ -5,9 +5,13 @@ from __future__ import annotations
 import secrets
 import shlex
 from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING
 
 from ..mcp_identity import McpScope
 from .store import WikiError
+
+if TYPE_CHECKING:
+    from ..knowledge import KnowledgeContext
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,7 @@ class WikiTask:
     app_id: str | None = None
     assigned_request_id: str | None = None
     assigned_attempt: int | None = None
+    knowledge: KnowledgeContext | None = field(default=None, compare=False)
 
 
 class WikiTasks:
@@ -71,9 +76,12 @@ class WikiTasks:
         assigned = assignment and assignment.get("assigned_request_id") in {None, request_id}
         return "maintain" if assigned else "auto"
 
-    def open(self, session, mode: str, request: str = "", *, request_id: str = "") -> str:
+    def open(self, session, mode: str, request: str = "", *, request_id: str = "",
+             knowledge: KnowledgeContext | None = None) -> str:
         if mode not in {"auto", "read", "maintain"}:
             raise WikiError("Unknown wiki task mode")
+        if knowledge is not None and knowledge.origin.user_id != session.user_id:
+            raise WikiError("The knowledge request belongs to another account", 403)
         token = secrets.token_hex(24)
         assignment = self.assignments.get(session.id, {})
         if assignment.get("assigned_request_id") not in {None, request_id}:
@@ -87,6 +95,7 @@ class WikiTasks:
             request_id=request_id,
             origin=getattr(session, "origin", "user"),
             app_id=getattr(session, "app_id", None),
+            knowledge=knowledge,
             **assignment,
         )
         return token
@@ -147,6 +156,31 @@ class WikiTasks:
                 raise WikiError("This maintenance assignment's registration has changed", 403)
         return task
 
+    @staticmethod
+    def may_submit(task):
+        return bool(task is None or (task.mode in {"auto", "maintain"} and not task.job_id
+                    and (task.knowledge is None or task.knowledge.maintenance.may_submit)))
+
+    def require_submitter(self, task, registration=None):
+        if not self.may_submit(task):
+            raise WikiError("This request cannot submit new Wiki maintenance", 403)
+        if task is not None and task.knowledge is not None and registration is not None:
+            expected = (registration["vault_id"], registration["registration_generation"])
+            if task.knowledge.registration != expected:
+                raise WikiError("The knowledge request's original Wiki registration is unavailable or changed", 403)
+
+    def require_submission(self, task, proposal, store, db, scope, registration, *, actual_paths=(), checked=False):
+        """One final gate for the entire effective maintenance proposal."""
+        from . import grants
+
+        policy = grants.principal(task, scope, registration, proposal.get("actor", "human"))
+        creation = proposal.get("creation") or {}
+        material_target = (proposal["target"],) if proposal.get("material") and proposal.get("target") else ()
+        effects = tuple(dict.fromkeys((*proposal.get("paths", ()), *(creation.get("paths") or ()),
+                                     *material_target, *actual_paths)))
+        self.require_selection(task, effects, store, checked=checked, db=db)
+        return policy
+
     def require_path(self, task, store, path):
         if task is None:
             return
@@ -165,13 +199,19 @@ class WikiTasks:
             grants.authorize(db, task, store, path, create=not exists)
 
     def require_selection(self, task, paths, store=None, *, checked=False, db=None):
+        self.require_submitter(task)
         if task is None or not paths:
             return
-        if task.job_id:
-            raise WikiError("A running worker cannot expand its assigned files", 403)
-        if task.mode == "auto":
-            return  # The agent declares exact paths in the maintenance request.
-        if checked and daily_command(task.request):
+        if task.knowledge is not None:
+            selections = task.knowledge.maintenance.required_selections
+        else:
+            selections = (task.request,) if task.mode == "maintain" else ()
+        for selection in selections:
+            self._require_selection_basis(selection, paths, store, checked=checked, db=db)
+
+    @staticmethod
+    def _require_selection_basis(request, paths, store, *, checked, db):
+        if checked and daily_command(request):
             from .formats import is_markdown_maintenance
 
             if all(path.startswith("Library/") and is_markdown_maintenance(path) for path in paths):
@@ -179,7 +219,7 @@ class WikiTasks:
             raise WikiError("Daily maintenance is limited to current Library Markdown changes", 403)
         # Only the trusted request's first line selects existing files. Article
         # body, retrieved notes and model-supplied scope descriptions cannot.
-        first_line = next(iter(task.request.splitlines()), "")
+        first_line = next(iter(request.splitlines()), "")
         _, selection = wiki_command(first_line)
         try:
             words = shlex.split(selection)

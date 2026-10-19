@@ -161,7 +161,11 @@ async def test_shutdown_owns_cancelled_startup_until_its_process_handle_arrives(
         await cleanup
         assert (await asyncio.gather(startup, return_exceptions=True))[0].__class__ is asyncio.CancelledError
         assert processes[0].returncode is not None
-        assert await manager.list_tasks("spawn-race") == []
+        retained = await manager.list_tasks("spawn-race")
+        assert len(retained) == 1
+        assert retained[0].status == "interrupted"
+        assert retained[0].stop_reason == "server_shutdown"
+        assert retained[0].knowledge_context is not None
     finally:
         release_handle.set()
         await asyncio.gather(startup, *(task for task in [cleanup] if task is not None), return_exceptions=True)
@@ -820,6 +824,7 @@ async def test_rest_start_and_get_bg_task(api_client):
     body = r.json()
     task_id = body["id"]
     assert body["status"] == "running"
+    assert "knowledge_context" not in body
 
     # Wait for the task to finish.
     for _ in range(100):
@@ -831,8 +836,22 @@ async def test_rest_start_and_get_bg_task(api_client):
             break
         await asyncio.sleep(0.05)
     final = g.json()
+    assert "knowledge_context" not in final
     assert final["status"] == "completed"
     assert "hello" in final["stdout"]
+
+
+async def test_rest_rejects_client_supplied_knowledge_context(api_client):
+    client, wd = api_client
+    session = await session_manager.create_session(
+        (await session_manager.db.get_system_agent())["id"], name="contract", working_dir=str(wd),
+    )
+    response = await client.post(
+        f"/api/sessions/{session.id}/bg-tasks", headers=HEADERS,
+        json={"command": "touch must-not-run", "knowledge_context": '{"version":1}'},
+    )
+    assert response.status_code == 422
+    assert not (wd / "must-not-run").exists()
 
 
 async def test_rest_task_keeps_its_explicit_limits_in_details_and_results(api_client):
@@ -1014,7 +1033,8 @@ async def test_rest_session_required(api_client):
 # ---------------------------------------------------------------------------
 
 
-async def test_deliver_bg_result_starts_a_new_session_turn(api_client):
+@pytest.mark.parametrize("context_present", [True, False])
+async def test_deliver_bg_result_starts_a_new_session_turn(api_client, context_present):
     """End-to-end: a completed bg task's deliver_cb runs, calls
     session_manager.deliver_bg_result → start_message → broadcasts a
     user_message with the [bg-task-result] marker. We don't run a real
@@ -1032,6 +1052,12 @@ async def test_deliver_bg_result_starts_a_new_session_turn(api_client):
     session_manager.on_broadcast("test", collect)
 
     try:
+        from server.knowledge import AdmittedRequest, admit, derive, encode
+
+        original = admit(
+            session_id=sess.id, request_id="original", user_id=sess.user_id,
+            prompt="/wiki Explain the check.",
+        )
         rec = BgTaskRecord(
             id="bg-fake",
             session_id=sess.id,
@@ -1045,8 +1071,13 @@ async def test_deliver_bg_result_starts_a_new_session_turn(api_client):
             truncated=False,
             started_at="2026-01-01T00:00:00Z",
             completed_at="2026-01-01T00:00:05Z",
+            knowledge_context=encode(derive(AdmittedRequest(original.origin, original), "echo done")) if context_present else None,
         )
         delivered = await session_manager.deliver_bg_result(rec)
+        if not context_present:
+            assert delivered is False
+            assert not any(message.get("type") == "user_message" for message in captured)
+            return
         assert delivered is True
 
         # The user_message broadcast happens synchronously inside

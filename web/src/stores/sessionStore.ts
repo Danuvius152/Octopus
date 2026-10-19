@@ -388,6 +388,7 @@ export interface ResearchJob {
   sources?: string[];
   verified?: number;
   error?: string | null;
+  injection_status?: "pending" | "delivered" | "failed";
 }
 
 export interface BgTask {

@@ -8,12 +8,36 @@ changed.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING, Any
 
+from ..aio import complete_cleanup
+from ..knowledge import require_open
 from .base import DatabaseBase, serialized_write
+
+if TYPE_CHECKING:
+    from ..knowledge import AdmittedRequest
+
+
+class ScheduleChangedError(ValueError):
+    """The definition changed after this edit was prepared."""
 
 
 class SchedulesMixin(DatabaseBase):
+
+    @asynccontextmanager
+    async def _definition_write(self, request: AdmittedRequest | None) -> AsyncIterator[None]:
+        """Isolate the definition from deferred logs; close or commit it once."""
+        await self.flush()
+        require_open(request)
+        try:
+            yield
+            require_open(request)
+            await self.conn.commit()
+        except BaseException:
+            await complete_cleanup(self.conn.rollback())
+            raise
 
     @serialized_write
     async def save_schedule(
@@ -31,33 +55,43 @@ class SchedulesMixin(DatabaseBase):
         origin_session_id: str | None = None,
         run_at: str | None = None,
         wiki_mode: str | None = None,
+        knowledge_context: str | None = None,
+        request: AdmittedRequest | None = None,
     ) -> None:
         """Persist a schedule. Recurrence is one of `interval_seconds`, `cron`
         (with `timezone`), or `run_at` (ISO datetime, fires once then auto-deletes).
         `origin_session_id`, when set, is the session the `/schedule` command was
         typed in — fires append into it instead of a throwaway session."""
         await self._ensure_connected()
-        await self.conn.execute(
-            "INSERT INTO schedules (id, agent_id, origin_session_id, name, prompt, "
-            "interval_seconds, cron, timezone, recurrence_label, enabled, "
-            "created_at, run_at, wiki_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (
-                schedule_id,
-                agent_id,
-                origin_session_id,
-                name,
-                prompt,
-                interval_seconds,
-                cron,
-                timezone,
-                recurrence_label,
-                int(enabled),
-                created_at,
-                run_at,
-                wiki_mode,
-            ),
-        )
-        await self.conn.commit()
+        async with self._definition_write(request):
+            await self.conn.execute(
+                "INSERT INTO schedules (id, agent_id, origin_session_id, name, prompt, "
+                "interval_seconds, cron, timezone, recurrence_label, enabled, "
+                "created_at, run_at, wiki_mode, knowledge_context) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    schedule_id,
+                    agent_id,
+                    origin_session_id,
+                    name,
+                    prompt,
+                    interval_seconds,
+                    cron,
+                    timezone,
+                    recurrence_label,
+                    int(enabled),
+                    created_at,
+                    run_at,
+                    wiki_mode,
+                    knowledge_context,
+                ),
+            )
+
+    @asynccontextmanager
+    async def schedule_definition(self, schedule_id: str) -> AsyncIterator[dict[str, Any] | None]:
+        """Keep a runner's definition read and registration in the same write fence."""
+        async with self._writing():
+            yield next((row for row in await self.load_schedules() if row["id"] == schedule_id), None)
 
     async def load_schedules(
         self, user_id: str | None = None
@@ -78,7 +112,7 @@ class SchedulesMixin(DatabaseBase):
             "SELECT s.id, s.agent_id, s.name, s.prompt, s.interval_seconds, s.cron, "
             "s.timezone, s.recurrence_label, s.enabled, s.created_at, s.last_run_at, "
             "s.origin_session_id, s.run_at, s.last_run_session_id, s.wiki_mode, "
-            "s.invalid_reason FROM schedules s"
+            "s.invalid_reason, s.knowledge_context FROM schedules s"
         )
         params: list[Any] = []
         if user_id is not None:
@@ -104,6 +138,7 @@ class SchedulesMixin(DatabaseBase):
                 "last_run_session_id": row[13],
                 "wiki_mode": row[14],
                 "invalid_reason": row[15],
+                "knowledge_context": row[16],
             }
             for row in rows
         ]
@@ -139,7 +174,8 @@ class SchedulesMixin(DatabaseBase):
         return [r for r in await self.load_schedules() if r["id"] in affected]
 
     @serialized_write
-    async def update_schedule(self, schedule_id: str, **fields: Any) -> None:
+    async def update_schedule(self, schedule_id: str, *, expected: dict | None = None,
+                              request: AdmittedRequest | None = None, **fields: Any) -> None:
         await self._ensure_connected()
         allowed = {
             "name",
@@ -154,6 +190,7 @@ class SchedulesMixin(DatabaseBase):
             "last_run_session_id",
             "wiki_mode",
             "invalid_reason",
+            "knowledge_context",
         }
         updates = {k: v for k, v in fields.items() if k in allowed}
         if not updates:
@@ -162,8 +199,16 @@ class SchedulesMixin(DatabaseBase):
             updates["enabled"] = int(updates["enabled"])
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [schedule_id]
-        await self.conn.execute(
-            f"UPDATE schedules SET {set_clause} WHERE id = ?",
-            values,
-        )
-        await self.conn.commit()
+        # Operational fire timestamps do not change the definition. Every
+        # definition field does, including an omitted permission or target.
+        definition = allowed - {"last_run_at", "last_run_session_id"}
+        compare = {key: expected.get(key) for key in sorted(definition)} if expected is not None else {}
+        where = " AND ".join(f"{key} IS ?" for key in compare)
+        values.extend(compare.values())
+        async with self._definition_write(request):
+            cursor = await self.conn.execute(
+                f"UPDATE schedules SET {set_clause} WHERE id = ?" + (f" AND {where}" if where else ""),
+                values,
+            )
+            if expected is not None and cursor.rowcount != 1:
+                raise ScheduleChangedError("Schedule changed during this edit; reload and retry")

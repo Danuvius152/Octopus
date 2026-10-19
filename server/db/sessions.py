@@ -303,6 +303,17 @@ class SessionsMixin(DatabaseBase):
             "SELECT COUNT(*) FROM messages WHERE session_id = ?", (session_id,)
         )
 
+    async def has_delivery_notice(self, session_id: str, delivery_id: str) -> bool:
+        """A bounded lookup for one retained-result notice, not a task receipt."""
+        await self._ensure_connected()
+        cursor = await self.conn.execute(
+            "SELECT 1 FROM messages WHERE session_id = ? AND role = 'system' "
+            "AND type = 'delivery_notice' AND CASE WHEN json_valid(tool_input) THEN "
+            "json_extract(tool_input, '$.delivery_id') = ? ELSE 0 END LIMIT 1",
+            (session_id, delivery_id),
+        )
+        return await cursor.fetchone() is not None
+
     async def message_sequence_state(self, session_id: str) -> tuple[int, int, int]:
         """Row count, allocation floor and duplicate count are different facts."""
         await self._ensure_connected()
@@ -410,6 +421,100 @@ class SessionsMixin(DatabaseBase):
         self._defer_commit()
         self._pending_appends += 1
         await self._maybe_flush()
+
+    @serialized_write
+    async def record_request(self, *, request_id: str, **message: Any) -> None:
+        """Confirm one input and its server-owned context before execution.
+
+        The message sequence and request identity are both fixed on retry.
+        Context is compared as data here, never interpreted as authority.
+        Ordinary transcript appends keep their existing deferred commits.
+        """
+        await self._ensure_connected()
+        tool_input = message.get("tool_input")
+        context = tool_input.get("request_context") if isinstance(tool_input, dict) else None
+        if (
+            not request_id or not isinstance(context, dict)
+            or context.get("request_id") != request_id
+            or not isinstance(context.get("knowledge"), dict)
+        ):
+            raise ValueError("request context identity is missing or inconsistent")
+
+        columns = (
+            "session_id", "seq", "role", "type", "content", "tool_name",
+            "tool_input", "tool_use_id", "is_error", "session_id_ref", "cost",
+            "attachments", "git_head", "git_status_clean", "created_at",
+            "runtime_metadata", "terminal_request_id",
+        )
+        # No extra request registry: the input's existing sequence owns the
+        # context. Also find the same request at a different sequence, which
+        # would otherwise make an uncertain retry duplicate the input.
+        query = (
+            f"SELECT {', '.join(columns)} FROM messages WHERE session_id = ? "
+            "AND (seq = ? OR CASE WHEN json_valid(tool_input) THEN "
+            "json_extract(tool_input, '$.request_context.request_id') = ? ELSE 0 END)"
+        )
+        params = (message["session_id"], message["seq"], request_id)
+        cursor = await self.conn.execute(query, params)
+        rows = list(await cursor.fetchall())
+        if len(rows) > 1:
+            raise ValueError("request record conflict")
+        message = dict(message)
+        if not message.get("created_at"):
+            message["created_at"] = rows[0][14] if rows else datetime.now(UTC).isoformat()
+
+        json_columns = {"content", "tool_input", "attachments", "runtime_metadata"}
+
+        def canonical(value: Any) -> str | None:
+            return json.dumps(value, sort_keys=True, separators=(",", ":")) if value is not None else None
+
+        expected = []
+        for column in columns:
+            value = message.get(column)
+            if column == "attachments" and not value:
+                value = None
+            if column in json_columns:
+                value = canonical(value)
+            elif column in {"is_error", "git_status_clean"} and value is not None:
+                value = int(value)
+            expected.append(value)
+
+        def matches(row: Any) -> bool:
+            return all(
+                (canonical(json.loads(value)) if column in json_columns and value is not None else value) == wanted
+                for column, value, wanted in zip(columns, row, expected, strict=True)
+            )
+
+        if rows:
+            if not matches(rows[0]):
+                raise ValueError("request record conflict")
+        else:
+            await self.append_message(**message)
+
+        # Even a matching local row may be from a failed commit attempt.
+        # Always acknowledge a real commit before checking independent state.
+        await self.conn.commit()
+        if self.conn.in_transaction:
+            raise OSError("request commit was not acknowledged")
+
+        async def verify(reader: aiosqlite.Connection) -> None:
+            cursor = await reader.execute(query, params)
+            committed = list(await cursor.fetchall())
+            if len(committed) != 1 or not matches(committed[0]):
+                raise OSError("request commit could not be verified")
+
+        if self._db_path == ":memory:":
+            # Explicit test-only semantics: no independent reader is possible,
+            # so an acknowledged transaction is the strongest available fact.
+            await verify(self.conn)
+        else:
+            uri = Path(self._db_path).resolve().as_uri() + "?mode=ro"
+            async with aiosqlite.connect(uri, uri=True) as reader:
+                await verify(reader)
+        self._dirty = False
+        self._dirty_since = None
+        self._pending_appends = 0
+        self._last_flush = time.monotonic()
 
     @serialized_write
     async def record_terminal(self, *, request_id: str, **message: Any) -> None:

@@ -15,6 +15,14 @@ import { useSessionStore } from "../stores/sessionStore";
 
 afterEach(cleanup);
 
+it("renders a persisted material-only delivery notice after history reload", () => {
+  const content = "Task result retained; no automatic reply was started.";
+  const { getByText } = render(<MessageBubble sessionId="retained" message={{
+    role: "system", type: "delivery_notice", content,
+  }} />);
+  expect(getByText(content)).toBeTruthy();
+});
+
 it("keeps a native follow-up card separate from the same helper's earlier result", () => {
   const sessionId = "native-follow-up";
   useSessionStore.getState().setSubagents(sessionId, [

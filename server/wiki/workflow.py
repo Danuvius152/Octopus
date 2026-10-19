@@ -79,7 +79,14 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
                   != (config["vault_id"], config["registration_generation"])):
         grant = None
     worker = grant is not None
-    submitter = bool(live and mode in {"auto", "maintain"} and not task.job_id)
+    submitter = bool(live and tasks.may_submit(task))
+    if submitter and task.knowledge is not None:
+        try:
+            if config is None:
+                raise WikiError("The Wiki registration is unavailable", 403)
+            tasks.require_submitter(task, config)
+        except WikiError:
+            submitter = False
     role = "worker" if worker else "ended_worker" if task and task.job_id else "submitter" if submitter else "query"
     names = set(QUERY_TOOLS) if live else set()
     if worker or submitter:
@@ -103,6 +110,8 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
     card: dict[str, Any] = {
         "policy_version": POLICY_VERSION, "guide_hash": digest, "schema_version": SCHEMA_VERSION,
         "actor_role": role, "mode": mode,
+        "may_submit": submitter,
+        "source_requirements": list(task.knowledge.sources) if task and task.knowledge else [],
         "organization": "Library 分类；Key note；细粒度标签；必要关联",
         "excluded": "PDF 不处理；工具/tmp/配套静态资产按需读取",
         "injected_guides": injected, "available_guides": sorted(available), "available_tools": sorted(names),
@@ -138,7 +147,7 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
             body.append("当前维护 assignment 已结束或不可用；只可查询，不发起或继续维护。")
         elif submitter:
             body.append(bundle["auto-entry" if mode == "auto" else "entry"])
-        elif mode == "read":
+        elif task is not None or mode == "read":
             body.append("本轮只读：可查询，不可提交维护或写入。")
     if len(json.dumps(card, ensure_ascii=False).encode()) > CARD_MAX_BYTES:
         raise WikiError("Wiki operation card exceeds its response budget; use current job details", 503)

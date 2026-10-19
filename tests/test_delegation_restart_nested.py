@@ -21,12 +21,13 @@ def gated_cli(runtime, tmp_path, monkeypatch):
 
     def argv(context):
         starts.put_nowait(context)
+        current_request = context.prompt.rsplit("\n---\n", 1)[-1]
         code = "import json,time\nfrom pathlib import Path\n"
         code += "print(json.dumps({'type':'thread.started','thread_id':'nested-thread'}),flush=True)\n"
-        if "outer gate" in context.prompt:
+        if "outer gate" in current_request:
             code += "print(json.dumps({'type':'item.completed','item':{'id':'item_0','type':'agent_message','text':'waiting for helper'}}),flush=True)\n"
             code += f"while not Path({str(release)!r}).exists(): time.sleep(.01)\n"
-        elif "held" in context.prompt:
+        elif "held" in current_request:
             code += "print(json.dumps({'type':'item.completed','item':{'id':'item_0','type':'agent_message','text':'helper running'}}),flush=True)\n"
             code += "time.sleep(60)\n"
         else:
@@ -61,10 +62,11 @@ async def test_nested_first_turn_success_is_interrupted_when_its_relay_never_fin
     outer = await first_boot.delegations.start_delegation(
         parent_session_id=first_boot.parent_id, agent_name="Worker", request="outer gate review",
     )
-    await asyncio.wait_for(starts.get(), 5)
+    outer_context = await asyncio.wait_for(starts.get(), 5)
     await asyncio.wait_for(outer_ready.wait(), 5)
     descendant = await first_boot.delegations.start_delegation(
         parent_session_id=outer.delegation_id, agent_name="Grandchild", request="held helper review",
+        scope=verify(next(entry.credential for entry in outer_context.mcp_servers if entry.key == "bg")),
     )
     await asyncio.wait_for(starts.get(), 5)
     await asyncio.wait_for(child_ready.wait(), 5)

@@ -202,7 +202,8 @@ CREATE TABLE IF NOT EXISTS schedules (
     -- run" to what actually happened, and the runner refuses to start a fire
     -- while the previous one is still going (scheduler.md — overlap guard).
     last_run_session_id TEXT,
-    run_at TEXT  -- nullable ISO datetime; when set, fires once at that time then auto-deletes
+    run_at TEXT,  -- nullable ISO datetime; when set, fires once at that time then auto-deletes
+    knowledge_context TEXT
 );
 
 CREATE TABLE IF NOT EXISTS backend_credentials (
@@ -377,6 +378,7 @@ CREATE TABLE IF NOT EXISTS bg_tasks (
     timeout_seconds INTEGER,
     stop_reason TEXT,
     work_id TEXT,
+    knowledge_context TEXT,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 
@@ -401,6 +403,7 @@ CREATE TABLE IF NOT EXISTS research_jobs (
     completed_at TEXT,
     injection_status TEXT NOT NULL DEFAULT 'pending',  -- pending|delivered|failed
     injected_at TEXT,
+    knowledge_context TEXT,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 

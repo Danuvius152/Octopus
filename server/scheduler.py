@@ -11,6 +11,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.date import DateTrigger
 
+from .knowledge import decode_context
 from .models import SessionStatus
 from .schedule_ai import cron_trigger
 from .schedule_targets import ScheduleTargetError, resolve_schedule_target
@@ -158,9 +159,9 @@ class ScheduleRunner:
         run_at = row.get("run_at")
         prompt = row["prompt"]
         body = self._compose_prompt(row, prompt)
-        wiki_kwargs = {"trusted_request": prompt}
-        if mode := (row or {}).get("wiki_mode"):
-            wiki_kwargs["wiki_mode"] = mode
+        context = decode_context(row.get("knowledge_context"))
+        assert context is not None  # _target_is_active validated this exact definition snapshot.
+        wiki_kwargs = {"knowledge_context": context}
 
         try:
             if origin_session_id and self._session_mgr.get_session(origin_session_id):
@@ -262,11 +263,11 @@ class ScheduleRunner:
         """The schedule's current row, or None if it was deleted between the
         job firing and this lookup."""
         try:
-            rows = await self._db.load_schedules()
+            async with self._db.schedule_definition(schedule_id) as row:
+                return dict(row) if row is not None else None
         except Exception:
             logger.exception("Schedule %s: could not read its row", schedule_id)
             return None
-        return next((r for r in rows if r["id"] == schedule_id), None)
 
     @staticmethod
     def _compose_prompt(row: dict | None, prompt: str) -> str:
@@ -323,8 +324,12 @@ class ScheduleRunner:
     async def add(self, row: dict) -> None:
         if self._closing:
             raise RuntimeError("ScheduleRunner is shutting down")
-        if row["enabled"] and await self._target_is_active(row):
-            self._add_job(row)
+        # A prepared HTTP edit can be overtaken before registration. Fetch
+        # the committed definition under the writer fence, never register its
+        # old snapshot after a newer update has completed.
+        async with self._db.schedule_definition(row["id"]) as current:
+            if current is not None and current["enabled"] and await self._target_is_active(current):
+                self._add_job(current)
 
     async def remove(self, schedule_id: str) -> None:
         try:
@@ -340,10 +345,15 @@ class ScheduleRunner:
 
     async def _target_is_active(self, row: dict) -> bool:
         try:
-            await resolve_schedule_target(
+            agent = await resolve_schedule_target(
                 self._db, row["agent_id"], row.get("origin_session_id"),
                 allow_missing_origin=True,
             )
+            context = decode_context(row.get("knowledge_context"))
+            if context is None:
+                raise ScheduleTargetError("knowledge_contract_missing", "Schedule needs explicit human authorization")
+            if context.origin.user_id != agent.get("user_id"):
+                raise ScheduleTargetError("knowledge_owner_mismatch", "Schedule knowledge belongs to another account")
         except ScheduleTargetError as exc:
             if exc.reason != "agent_archived":
                 # Preserve the original association and text for inspection.

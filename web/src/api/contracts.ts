@@ -2957,7 +2957,7 @@ export interface components {
             /** Prompt */
             prompt: string;
             /** Wiki Mode */
-            wiki_mode?: ("read" | "maintain" | "off") | null;
+            wiki_mode?: ("auto" | "read" | "maintain" | "off") | null;
             /** Name */
             name?: string | null;
             /** Cron */
@@ -3576,7 +3576,7 @@ export interface components {
         /** CreateScheduleRequest */
         CreateScheduleRequest: {
             /** Wiki Mode */
-            wiki_mode?: ("read" | "maintain" | "off") | null;
+            wiki_mode?: ("auto" | "read" | "maintain" | "off") | null;
             /** Name */
             name: string;
             /** Prompt */
@@ -4527,7 +4527,7 @@ export interface components {
          */
         ScheduleFromTextRequest: {
             /** Wiki Mode */
-            wiki_mode?: ("read" | "maintain" | "off") | null;
+            wiki_mode?: ("auto" | "read" | "maintain" | "off") | null;
             /** Text */
             text: string;
             /** Timezone */
@@ -4546,7 +4546,7 @@ export interface components {
             /** Agent Id */
             agent_id?: string | null;
             /** Wiki Mode */
-            wiki_mode?: ("read" | "maintain" | "off") | null;
+            wiki_mode?: ("auto" | "read" | "maintain" | "off") | null;
             /** Name */
             name: string;
             /** Prompt */
@@ -5148,7 +5148,7 @@ export interface components {
          */
         UpdateScheduleRequest: {
             /** Wiki Mode */
-            wiki_mode?: ("read" | "maintain" | "off") | null;
+            wiki_mode?: ("auto" | "read" | "maintain" | "off") | null;
             /** Name */
             name?: string | null;
             /** Prompt */

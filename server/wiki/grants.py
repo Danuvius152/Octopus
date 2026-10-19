@@ -269,6 +269,7 @@ def principal(task, scope, registration, actor):
     from .maintenance_contract import actor_for
     from .tasks import tasks
 
+    tasks.require_submitter(task, registration)
     if task is None:
         if scope is not None:
             raise WikiError("The original Wiki entry turn has ended", 403)
@@ -288,8 +289,7 @@ def creation_policy(task, creation):
     if task is not None:
         from .tasks import tasks
 
-        if task.job_id or task.mode not in {"auto", "maintain"}:
-            raise WikiError("This turn cannot request creation grants", 403)
+        tasks.require_submitter(task)
         if task.mode == "maintain":
             if not creation.get("paths"):
                 raise WikiError("Select the new page's exact target in the original maintenance command", 403)

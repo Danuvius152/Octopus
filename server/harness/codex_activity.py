@@ -44,6 +44,7 @@ _NATIVE_TOOLS = {"spawn_agent", "followup_task", "send_message", "interrupt_agen
 _MAX_LINE = 256 * 1024
 _MAX_READ = 1024 * 1024
 _DISCOVERY_BATCH_SIZE = 1024
+_FINAL_DISCOVERY_ENTRIES = 64 * 1024
 
 
 def _uuid(value: Any) -> str | None:
@@ -77,6 +78,7 @@ class CodexActivityObserver:
         self._turn: str | None = None
         self._path: Path | None = None
         self._discovery: Generator[None, None, Path | None] | None = None
+        self._retry_discovery_at = 0.0
         self._inode: tuple[int, int] | None = None
         self._offset = 0
         self._partial = b""
@@ -163,28 +165,44 @@ class CodexActivityObserver:
             return
         self._thread = self._stdout_thread = thread
 
-    def _discover(self) -> Path | None:
+    def _discover(self, *, final: bool = False) -> Path | None:
         if self._root.is_symlink():
             self._disable("rollout_root_symlink")
             return None
         if self._thread is None:
             return None
+        if not final and self._monotonic() < self._retry_discovery_at:
+            return None
         if not self._root.is_dir():
-            if not self._closed and self._turn and self._stdout_thread:
+            # thread.started can precede the CLI writer's first file. Missing
+            # metadata is a terminal diagnostic, not a reason to abandon the
+            # current process's still-pending observations.
+            self._retry_discovery_at = self._monotonic() + 1.0
+            if final and not self._closed and self._turn and self._stdout_thread:
                 self._disable("rollout_missing")
             return None
         if self._discovery is None:
             self._discovery = self._find_rollout()
-        for _ in range(_DISCOVERY_BATCH_SIZE):
+        # A final convergence has no later poll. Finish discovery within one
+        # finite entry budget, including the ambiguity check after a match.
+        # Ordinary polling keeps its incremental batch size.
+        budget = _FINAL_DISCOVERY_ENTRIES if final else _DISCOVERY_BATCH_SIZE
+        for _ in range(budget):
             try:
                 next(self._discovery)
             except StopIteration as done:
                 self._discovery = None
                 if isinstance(done.value, Path):
                     return done.value
-                if not self._closed and self._turn and self._stdout_thread:
+                self._retry_discovery_at = self._monotonic() + 1.0
+                if final and not self._closed and self._turn and self._stdout_thread:
                     self._disable("rollout_missing")
                 return None
+        if final and not self._closed and not self._disabled:
+            self._disable("rollout_discovery_limit")
+            if self._discovery is not None:
+                self._discovery.close()
+                self._discovery = None
         return None
 
     def _find_rollout(self) -> Generator[None, None, Path | None]:
@@ -227,9 +245,9 @@ class CodexActivityObserver:
                 return found
         return None
 
-    def _open(self) -> int | None:
+    def _open(self, *, final: bool = False) -> int | None:
         if self._path is None:
-            self._path = self._discover()
+            self._path = self._discover(final=final)
         if self._path is None:
             return None
         # Open each component relative to captured directory descriptors. This
@@ -455,7 +473,7 @@ class CodexActivityObserver:
             return [], []
         fd = None
         try:
-            fd = self._open()
+            fd = self._open(final=drain)
             if fd is None:
                 return [], []
             if baseline:

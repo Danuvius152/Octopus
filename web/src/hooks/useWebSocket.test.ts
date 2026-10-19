@@ -4,6 +4,20 @@ import { act, renderHook } from "@testing-library/react";
 import { handleWsMessage, shouldApplyWsEvent, useWebSocket } from "./useWebSocket";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 
+it("tracks report completion separately from follow-up delivery", () => {
+  useSessionStore.setState({ research: {} });
+  handleWsMessage({ type: "research_started", session_id: "research-owner", research_id: "report", question: "Compare X" });
+  handleWsMessage({ type: "research_completed", session_id: "research-owner", research_id: "report", verified: 2, sources: ["source"] });
+  expect(useSessionStore.getState().research["research-owner"][0]).toMatchObject({
+    status: "completed", injection_status: "pending", verified: 2,
+  });
+  handleWsMessage({ type: "research_delivery", session_id: "research-owner", research_id: "report",
+    injection_status: "failed", error: "Original work is closed" });
+  expect(useSessionStore.getState().research["research-owner"][0]).toMatchObject({
+    status: "completed", injection_status: "failed", error: "Original work is closed", verified: 2,
+  });
+});
+
 it.each(["native", "without-randomUUID", "without-crypto"])("matches submission receipts in %s browsers", async (mode) => {
   if (mode === "without-randomUUID") vi.stubGlobal("crypto", { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) });
   if (mode === "without-crypto") vi.stubGlobal("crypto", undefined);

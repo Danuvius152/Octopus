@@ -1,0 +1,318 @@
+"""Asynchronous jobs keep their own committed request and direct caller."""
+
+from __future__ import annotations
+
+import asyncio
+import sys
+import uuid
+from dataclasses import replace
+
+import pytest
+
+from server.bg_tasks import BgTaskManager, BgTaskRecord
+from server.database import Database
+from server.harness import Harness, HarnessEvent, get_harness
+from server.harness.registry import _REGISTRY
+from server.knowledge import AdmittedRequest, admit, decode_owned, derive, encode
+from server.mcp_identity import (
+    McpScope,
+    close_work,
+    register_run,
+    revoke_run,
+    scope_is_live,
+)
+from server.research.manager import ResearchManager
+from server.session_manager import SessionManager
+from tests.fake_run import FakeRunBase
+
+CREATED_AT = "2026-10-19T12:00:00+00:00"
+
+
+def _install_research_provider(monkeypatch, on_start):
+    """Use the actual pipeline with a synthetic provider at its public seam."""
+    profile = replace(
+        get_harness("claude-code").profile, binary=sys.executable,
+        build_oneshot_argv=lambda ctx: (
+            [sys.executable, "-c", 'print(\'["one angle"]\')'], {"cwd": ctx.working_dir},
+        ),
+        parse_oneshot_stdout=lambda output: output,
+    )
+    harness = Harness(profile)
+    monkeypatch.setitem(_REGISTRY, "claude-code", harness)
+
+    def create(config):
+        class Run(FakeRunBase):
+            run_lease_id = uuid.uuid4().hex
+
+            async def start(self, prompt, *args, **kwargs):
+                if config.session_id is not None:
+                    register_run(self.run_lease_id, config.session_id, config.user_id, config.work_id)
+                await on_start(config, prompt, self)
+
+            def set_idle_handler(self, handler):
+                pass
+
+            async def stream(self):
+                yield HarnessEvent(type="result", is_error=False)
+
+            async def stop(self):
+                revoke_run(self.run_lease_id)
+
+            async def interrupt(self):
+                revoke_run(self.run_lease_id)
+
+        return Run()
+
+    monkeypatch.setattr(harness, "create_run", create)
+
+
+@pytest.fixture
+async def database(tmp_path):
+    db = Database(str(tmp_path / "async-jobs.db"))
+    await db.initialize()
+    await db.save_session("parent", "Parent", str(tmp_path), CREATED_AT)
+    try:
+        yield db
+    finally:
+        await db.close()
+
+
+async def test_background_contract_is_committed_before_process_launch(database, tmp_path, monkeypatch):
+    context = admit(
+        session_id="parent", request_id="read-request", user_id=None,
+        prompt="/wiki Compare X and Y.",
+    )
+    owned = derive(AdmittedRequest(context.origin, context), "Run an offline check.")
+    manager = BgTaskManager()
+    delivered = asyncio.Queue()
+
+    async def broadcast(event):
+        pass
+
+    manager.bind(database, delivered.put, broadcast)
+    await manager.start()
+    reader = Database(str(tmp_path / "async-jobs.db"))
+    await reader.initialize()
+    spawn = asyncio.create_subprocess_exec
+    seen = []
+
+    async def checked_spawn(*args, **kwargs):
+        rows = await reader.list_bg_tasks_for_session("parent")
+        assert len(rows) == 1
+        seen.append(decode_owned(rows[0]["knowledge_context"]))
+        return await spawn(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", checked_spawn)
+    try:
+        started = await manager.start_task(
+            session_id="parent", command="true", working_dir=str(tmp_path), owned_context=owned,
+        )
+        result = await asyncio.wait_for(delivered.get(), 5)
+        assert seen == [owned]
+        assert decode_owned(started.knowledge_context) == owned
+        assert decode_owned(result.knowledge_context).return_binding.context == context
+    finally:
+        await manager.shutdown()
+        await reader.close()
+
+
+async def test_background_commit_failure_never_launches_a_process(database, tmp_path, monkeypatch):
+    manager = BgTaskManager()
+
+    async def ignored(value):
+        pass
+
+    manager.bind(database, ignored, ignored)
+    await manager.start()
+
+    async def failed_commit():
+        raise OSError("contract commit rejected")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(database.conn, "commit", failed_commit)
+        with pytest.raises(OSError, match="contract commit rejected"):
+            await manager.start_task(
+                session_id="parent", command="touch must-not-run", working_dir=str(tmp_path),
+            )
+    assert not (tmp_path / "must-not-run").exists()
+    await asyncio.wait_for(manager.shutdown(), 0.2)
+
+
+async def test_research_return_restores_original_read_request_at_backend_boundary(
+    database, tmp_path, monkeypatch,
+):
+    observed = asyncio.Queue()
+    leaves = []
+
+    async def on_start(config, prompt, run):
+        if config.session_id is None:
+            leaves.append(config)
+        else:
+            await observed.put((config, prompt))
+
+    _install_research_provider(monkeypatch, on_start)
+    sessions = SessionManager()
+    await sessions.initialize(database)
+    agent = await database.get_system_agent()
+    session = await sessions.create_session(agent["id"], "Research", str(tmp_path))
+    research = ResearchManager()
+    research.bind(sessions, database)
+    try:
+        job = await research.start(session.id, "/wiki Compare X and Y.")
+        owned = decode_owned(job["knowledge_context"])
+        assert owned is not None
+        assert owned.return_binding.context.mode == "read"
+        config, prompt = await asyncio.wait_for(observed.get(), 5)
+        assert config.wiki_mode == "read"
+        assert f"[deep-research:{job['id']}]" in prompt
+        assert "/wiki Compare X and Y." in prompt
+        assert leaves
+        assert all(leaf.mcp_servers == [] and leaf.connectors == [] and leaf.memory_dir is None for leaf in leaves)
+    finally:
+        await research.shutdown()
+        await sessions.drain_turns()
+
+
+@pytest.mark.parametrize("return_state", ["retired_lease", "new_root", "closed_work", "missing_context", "unknown_context", "cancelled_work"])
+async def test_research_return_uses_fixed_parent_after_lease_retires(
+    database, tmp_path, monkeypatch, return_state,
+):
+    sessions = SessionManager()
+    await sessions.initialize(database)
+    agent = await database.get_system_agent()
+    session = await sessions.create_session(agent["id"], "Scoped research", str(tmp_path))
+    research = ResearchManager()
+    research.bind(sessions, database)
+    launched = []
+    resumed = asyncio.Queue()
+    scopes = []
+    work_id = None if return_state == "new_root" else "research-work-" + uuid.uuid4().hex
+    leaf_started = asyncio.Event()
+    release_leaf = asyncio.Event()
+
+    async def on_start(config, prompt, run):
+        if config.session_id is None:
+            if return_state in {"cancelled_work", "new_root"}:
+                leaf_started.set()
+                await release_leaf.wait()
+            return
+        if launched:
+            if f"[deep-research:{launched[0]['id']}]" in prompt:
+                await resumed.put(config)
+            return
+        scope = McpScope(
+            session.id, user_id=session.user_id, wiki_task_id=config.wiki_task_id,
+            run_lease_id=run.run_lease_id, work_id=config.work_id,
+        )
+        scopes.append(scope)
+        launched.append(await research.start(session.id, "External evidence only", scope=scope))
+
+    _install_research_provider(monkeypatch, on_start)
+
+    delivery = asyncio.Event()
+
+    async def finished(event):
+        if event["type"] == "research_delivery":
+            delivery.set()
+        if event["type"] != "research_completed":
+            return
+        if return_state == "closed_work":
+            close_work(work_id)
+        elif return_state in {"missing_context", "unknown_context"}:
+            await database.update_research_job(
+                event["research_id"], knowledge_context=(
+                    None if return_state == "missing_context" else '{"version":999,"value":{}}'
+                ),
+            )
+
+    sessions.on_broadcast("return-contract", finished)
+    try:
+        original = await sessions.start_message(session.id, "/wiki Compare X and Y.", work_id=work_id)
+        assert (await original.wait()).outcome.status == "success"
+        assert len(launched) == 1
+        assert not scope_is_live(scopes[0])
+        if return_state == "cancelled_work":
+            await asyncio.wait_for(leaf_started.wait(), 5)
+            close_work(work_id)
+            await research.cancel_work(work_id)
+        elif return_state == "new_root":
+            await asyncio.wait_for(leaf_started.wait(), 5)
+            later = await sessions.start_message(session.id, "A separate ordinary request.")
+            assert (await later.wait()).outcome.status == "success"
+            release_leaf.set()
+        async with asyncio.timeout(5):
+            while True:
+                row = await database.get_research_job(launched[0]["id"])
+                if (row["status"] != "running" if return_state == "cancelled_work"
+                        else row["injection_status"] != "pending"):
+                    break
+                await asyncio.sleep(0.01)
+        if return_state != "cancelled_work":
+            await asyncio.wait_for(delivery.wait(), 5)
+        if return_state == "cancelled_work":
+            assert row["status"] == "cancelled"
+            assert row["report_path"] is None
+            assert resumed.empty()
+        elif return_state in {"retired_lease", "new_root"}:
+            assert row["status"] == "completed"
+            config = await asyncio.wait_for(resumed.get(), 5)
+            assert config.wiki_mode == "read"
+            assert config.work_id == work_id
+            assert row["injection_status"] == "delivered"
+        else:
+            assert row["status"] == "completed"
+            assert row["injection_status"] == "failed"
+            assert resumed.empty()
+            assert row["report_path"]
+            inputs = [message for message in await database.load_messages(session.id) if message["role"] == "user"]
+            assert len(inputs) == 1
+            notices = [message for message in await database.load_messages(session.id) if message["type"] == "delivery_notice"]
+            assert len(notices) == 1
+            assert "retained as material" in notices[0]["content"]
+            assert row["report_path"] in notices[0]["content"]
+    finally:
+        release_leaf.set()
+        await research.shutdown()
+        await sessions.drain_turns()
+
+
+@pytest.mark.parametrize("contract", ["missing", "unknown", "closed"])
+async def test_background_material_retention_is_visible_once_without_starting_a_turn(database, tmp_path, contract):
+    sessions = SessionManager()
+    await sessions.initialize(database)
+    context = admit(session_id="parent", request_id="original", user_id=None, prompt="/wiki Read X")
+    work_id = "closed-material-" + uuid.uuid4().hex if contract == "closed" else None
+    owned = derive(AdmittedRequest(context.origin, context, work_id), "Check X")
+    if work_id:
+        close_work(work_id)
+    rec = BgTaskRecord(
+        "material-one", "parent", "true", None, "/tmp", "completed", 0,
+        "retained output", "", False, CREATED_AT, CREATED_AT,
+        work_id=work_id, knowledge_context=(
+            None if contract == "missing" else '{"version":999,"value":{}}'
+            if contract == "unknown" else encode(owned)
+        ),
+    )
+    await database.create_bg_task(
+        rec.id, rec.session_id, rec.command, rec.description, rec.working_dir, rec.started_at,
+        work_id=rec.work_id, knowledge_context=rec.knowledge_context,
+    )
+    await database.update_bg_task(rec.id, status="completed", stdout=rec.stdout, exit_code=0)
+    task_before = await database.get_bg_task(rec.id)
+    reader = Database(str(tmp_path / "async-jobs.db"))
+    await reader.initialize()
+    try:
+        assert await asyncio.gather(sessions.deliver_bg_result(rec), sessions.deliver_bg_result(rec)) == [False, False]
+        messages = await reader.load_messages("parent")
+        assert [message["type"] for message in messages] == ["delivery_notice"]
+        assert messages[0]["role"] == "system"
+        assert "material-one" in messages[0]["content"]
+        assert "retained" in messages[0]["content"]
+        assert sessions.dispatch_snapshot("parent")["items"] == []
+        restored = SessionManager()
+        await restored.initialize(database)
+        assert await restored.deliver_bg_result(rec) is False
+        assert await reader.load_messages("parent") == messages
+        assert await database.get_bg_task(rec.id) == task_before
+    finally:
+        await reader.close()

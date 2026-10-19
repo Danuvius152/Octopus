@@ -61,6 +61,23 @@ def gate_sql(monkeypatch, database, predicate):
     return entered, release
 
 
+def gate_background_spawn(monkeypatch):
+    """Hold the OS handle after spawn; ownership was already committed."""
+    from server import bg_tasks
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    spawn = asyncio.create_subprocess_exec
+
+    async def delayed(*args, **kwargs):
+        proc = await spawn(*args, **kwargs)
+        entered.set()
+        await release.wait()
+        return proc
+
+    monkeypatch.setattr(bg_tasks.asyncio, "create_subprocess_exec", delayed)
+    return entered, release
+
+
 async def wait_until(predicate, timeout=5):
     async with asyncio.timeout(timeout):
         while not predicate():
@@ -520,10 +537,18 @@ async def test_background_stops_surviving_group_after_parent_exits(background, t
             pass
 
 
-async def test_background_total_limit_runs_while_database_registration_waits(background, runtime, monkeypatch, tmp_path):
+async def test_background_total_limit_runs_while_started_publication_waits(background, runtime, monkeypatch, tmp_path):
     manager, session, delivered, _ = background
-    _, database, _, _, _, _ = runtime
-    entered, release = gate_sql(monkeypatch, database, lambda sql: sql.startswith("INSERT INTO bg_tasks"))
+    entered, release = asyncio.Event(), asyncio.Event()
+    broadcast = manager._broadcast_cb
+
+    async def held_started(event):
+        if event["type"] == "bg_started":
+            entered.set()
+            await release.wait()
+        await broadcast(event)
+
+    monkeypatch.setattr(manager, "_broadcast_cb", held_started)
     pid_file = tmp_path / "registering.pid"
     code = f"import os,time; open({str(pid_file)!r},'w').write(str(os.getpid())); print('started',flush=True); time.sleep(30)"
     creation = asyncio.create_task(manager.start_task(
@@ -552,7 +577,7 @@ async def test_background_total_limit_runs_while_database_registration_waits(bac
             pass
 
 
-async def test_cancelled_background_registration_reaps_process_without_terminal_receipt(background, runtime, monkeypatch, tmp_path):
+async def test_cancelled_background_registration_does_not_start_a_process_or_terminal_receipt(background, runtime, monkeypatch, tmp_path):
     manager, session, delivered, broadcasts = background
     _, database, _, _, _, _ = runtime
     entered, _ = gate_sql(monkeypatch, database, lambda sql: sql.startswith("INSERT INTO bg_tasks"))
@@ -563,12 +588,11 @@ async def test_cancelled_background_registration_reaps_process_without_terminal_
         idle_timeout_seconds=0,
     ))
     await asyncio.wait_for(entered.wait(), 5)
-    await wait_until(pid_file.exists)
-    pid = int(pid_file.read_text())
+    assert not pid_file.exists(), "uncommitted launch started an OS process"
     creation.cancel()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(creation, 8)
-    assert not process_alive(pid)
+    assert not pid_file.exists()
     assert await manager.list_tasks(session.id) == []
     assert delivered == broadcasts == []
 

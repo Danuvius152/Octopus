@@ -89,16 +89,33 @@ class WikiJobs:
             raise WikiError("Maintenance notifications belong to the original account", 403)
         return job_events.subscribe(db, job_id, requester)
 
+    @staticmethod
+    def effect_paths(db, job):
+        """Include effective destinations even when the submitted paths were empty."""
+        grant = job.get("grant") or {}
+        return tuple(dict.fromkeys(
+            [item["path"] for item in job["items"] if item.get("path")]
+            + [row[0] for row in db.execute("SELECT path FROM wiki_path_reservations WHERE job_id=?", (job["id"],))]
+            + [item["current_path"] for item in grant.get("selected_documents", ()) if item.get("current_path")]
+        ))
+
     def replay(self, key, request, *, task=None, mcp_scope=None, requester=None, alias_job=None):
         """Even an idempotent return admits its subscriber in the final writer TX."""
         with registry._account_lock(self.user_id), registry.registration_lock(self.user_id), self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             if registry.config(self.user_id) != self.registration:
                 raise WikiError("Wiki registration changed before admission", 409)
-            grants.principal(task, mcp_scope, self.registration, request.get("actor", "human"))
+            from .tasks import tasks
+
+            tasks.require_submission(task, request, self.store, db, mcp_scope, self.registration)
             previous = self.previous_request(key, request, db=db)
-            if previous is None and alias_job is not None:
+            new_alias = previous is None and alias_job is not None
+            if new_alias:
                 previous = self.get(alias_job, db=db)
+            if previous is not None:
+                tasks.require_submission(task, request, self.store, db, mcp_scope, self.registration,
+                                         actual_paths=self.effect_paths(db, previous))
+            if new_alias:
                 db.execute("INSERT INTO job_requests VALUES(?,?,?)", (key, self.request_hash(request), alias_job))
             if previous is not None:
                 self.subscribe(db, previous["id"], requester)
@@ -196,20 +213,26 @@ class WikiJobs:
             db.execute("BEGIN IMMEDIATE")
             if registry.config(self.user_id) != self.registration:
                 raise WikiError("Wiki registration changed before admission", 409)
-            policy = grants.principal(task, mcp_scope, self.registration, payload.get("actor", "human"))
+            from .tasks import tasks
+
+            effects = [item["path"] for item in items if item.get("path")]
+            effects += [item["path"] for item in outputs]
+            if material is not None:
+                effects.append(material["path"])
+            policy = tasks.require_submission(task, payload, self.store, db, mcp_scope, self.registration,
+                                              actual_paths=effects)
             for item in items:
                 if item.get("doc") and item.get("revision") and item.get("status") != "done":
                     current = db.execute("SELECT path,revision FROM documents WHERE id=?", (item["doc"],)).fetchone()
                     if not current or current["path"] != item["path"] or current["revision"] != item["revision"]:
                         raise WikiError("Selected document identity or revision changed before admission", 409)
-            if task:
-                from .tasks import tasks
-
-                tasks.require_selection(task, payload.get("paths", []), self.store, db=db)
             alias = db.execute("SELECT * FROM job_requests WHERE request_key=?", (key,)).fetchone()
             if alias:
                 if alias["request_hash"] != self.request_hash(payload.get("request", payload)):
                     raise WikiError("Idempotency key already names a different submission", 409)
+                previous_job = self.get(alias["job_id"], db=db)
+                tasks.require_submission(task, payload, self.store, db, mcp_scope, self.registration,
+                                         actual_paths=self.effect_paths(db, previous_job))
                 self.subscribe(db, alias["job_id"], requester)
                 return self.get(alias["job_id"], db=db)
             previous = db.execute(
@@ -220,6 +243,9 @@ class WikiJobs:
                     raise WikiError(
                         "Idempotency key already names a different submission", 409
                     )
+                previous_job = self.get(previous["id"], db=db)
+                tasks.require_submission(task, payload, self.store, db, mcp_scope, self.registration,
+                                         actual_paths=self.effect_paths(db, previous_job))
                 self.subscribe(db, previous["id"], requester)
                 return self.get(previous["id"], db=db)
             now = datetime.now(UTC).isoformat()
@@ -409,7 +435,9 @@ class WikiJobs:
                 raise WikiError("New-note target already exists with different material", 409)
         return self.enqueue(key, payload, selected, task=task, mcp_scope=mcp_scope, requester=requester)
 
-    def curate(self, key, scope, *, requester=None):
+    def curate(self, key, scope, *, requester=None, task=None, mcp_scope=None):
+        from .maintenance_contract import actor_for
+
         with self.store.connect() as db:
             existing = db.execute(
                 "SELECT id FROM jobs WHERE request_key=?", (key,)
@@ -426,6 +454,10 @@ class WikiJobs:
                 db.execute("BEGIN IMMEDIATE")
                 if registry.config(self.user_id) != self.registration:
                     raise WikiError("Wiki registration changed before admission", 409)
+                from .tasks import tasks
+
+                tasks.require_submission(task, {"actor": actor_for(task)}, self.store, db, mcp_scope, self.registration,
+                                         actual_paths=self.effect_paths(db, job))
                 self.subscribe(db, job["id"], requester)
                 return self.get(job["id"], db=db)
         self.store.refresh()
@@ -450,9 +482,12 @@ class WikiJobs:
                 "kind": "curation",
                 "scope": scope,
                 "new_only": False,
+                "actor": actor_for(task),
             },
             items,
             requester=requester,
+            task=task,
+            mcp_scope=mcp_scope,
         )
 
     def require_control(self, job, expected_attempt=None, expected_vault_id=None):

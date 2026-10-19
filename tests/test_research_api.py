@@ -75,12 +75,26 @@ async def test_start_get_list_research(client, monkeypatch):
     assert r.status_code == 201, r.text
     rid = r.json()["id"]
     assert r.json()["status"] == "running"
+    assert "knowledge_context" not in r.json()
 
     # GET single + list
     got = await client.get(f"/api/sessions/{session['id']}/research/{rid}", headers=HEADERS)
     assert got.status_code == 200 and got.json()["question"] == "what is X?"
+    assert "knowledge_context" not in got.json()
     lst = await client.get(f"/api/sessions/{session['id']}/research", headers=HEADERS)
     assert any(j["id"] == rid for j in lst.json())
+    assert all("knowledge_context" not in job for job in lst.json())
+
+
+@pytest.mark.asyncio
+async def test_research_rejects_client_supplied_knowledge_context(client):
+    session = await _session(client)
+    response = await client.post(
+        f"/api/sessions/{session['id']}/research",
+        json={"question": "what is X?", "knowledge_context": '{"version":1}'},
+        headers=HEADERS,
+    )
+    assert response.status_code == 422
 
 
 @pytest.mark.asyncio

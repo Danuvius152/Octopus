@@ -6,11 +6,11 @@ import sqlite3
 import uuid
 from datetime import UTC, datetime
 
-from ..mcp_identity import McpScope, scope_is_live
+from ..mcp_identity import McpScope
 from . import maintenance_selections as selections
 from .formats import is_markdown_maintenance
 from .history import WikiHistory
-from .maintenance_contract import DAILY_SCOPE, PURPOSE, actor_for, digest
+from .maintenance_contract import DAILY_SCOPE, PURPOSE, digest
 from .maintenance_projection import dirty_ids, settle
 from .maintenance_view import MaintenanceSnapshot
 from .registry import registry
@@ -32,19 +32,9 @@ def prepare(jobs, review):
 
 
 def _authorize(jobs, db, key, request, review, task, mcp_scope: McpScope | None):
-    if mcp_scope is not None and (task is None or not scope_is_live(mcp_scope)
-            or mcp_scope.wiki_task_id is None
-            or tasks.active.get(mcp_scope.wiki_task_id) is not task
-            or (mcp_scope.session_id, mcp_scope.user_id) != (task.session_id, task.user_id)):
-        raise WikiError("The maintenance request's original model run is no longer authorized", 403)
-    if task is not None:
-        if (mcp_scope is None
-                or task.user_id != jobs.user_id or actor_for(task) != request["actor"]
-                or task.mode not in {"auto", "maintain"}):
-            raise WikiError("The maintenance entry turn is no longer authorized", 403)
-        if task.registration is not None and task.registration != jobs.registration:
-            raise WikiError("The maintenance assignment registration changed", 403)
-    tasks.require_selection(task, request["paths"], jobs.store, checked=True, db=db)
+    if task is not None and task.user_id != jobs.user_id:
+        raise WikiError("The maintenance request belongs to another account", 403)
+    tasks.require_submission(task, request, jobs.store, db, mcp_scope, jobs.registration, checked=True)
     observation = {name: value for name, value in review.items() if name != "review_key"}
     expected = "wiki-daily-v1:" + digest([jobs.user_id, jobs.registration, request["actor"], PURPOSE, observation])
     if key != review["review_key"] or key != expected:

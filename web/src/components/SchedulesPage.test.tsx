@@ -92,3 +92,36 @@ describe("SchedulesPage run history", () => {
     expect(screen.getByText(/last run/)).toBeTruthy();
   });
 });
+
+describe("Schedule knowledge controls", () => {
+  it("lets a human authorize a paused legacy task without enabling it", async () => {
+    const old = schedule({ enabled: false, invalid_reason: "knowledge_contract_missing" });
+    let stored = old;
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      if (init?.method === "PATCH") {
+        expect(JSON.parse(String(init.body))).toEqual({ wiki_mode: "read" });
+        stored = { ...old, wiki_mode: "read", invalid_reason: null };
+        return Response.json(stored);
+      }
+      return Response.json([stored]);
+    });
+    mount([old]);
+    await waitFor(() => expect(screen.getByRole("switch").hasAttribute("disabled")).toBe(true));
+    fireEvent.change(screen.getByLabelText("Wiki maintenance for Daily digest"), { target: { value: "read" } });
+    await waitFor(() => expect(screen.getByRole("switch").hasAttribute("disabled")).toBe(false));
+    expect(screen.getByRole("switch").getAttribute("aria-checked")).toBe("false");
+  });
+
+  it("shows a rejected control change without applying it locally", async () => {
+    const old = schedule({ wiki_mode: "read" });
+    vi.mocked(fetch).mockImplementation(async (_url, init) =>
+      init?.method === "PATCH"
+        ? Response.json({ detail: "The original scope is unavailable" }, { status: 422 })
+        : Response.json([old])
+    );
+    mount([old]);
+    fireEvent.change(screen.getByLabelText("Wiki maintenance for Daily digest"), { target: { value: "auto" } });
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("The original scope is unavailable"));
+    expect((screen.getByLabelText("Wiki maintenance for Daily digest") as HTMLSelectElement).value).toBe("read");
+  });
+});

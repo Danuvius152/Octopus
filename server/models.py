@@ -354,7 +354,7 @@ class ScheduleInfo(BaseModel):
     # the human-readable description the UI shows.
     id: str
     agent_id: str | None = None
-    wiki_mode: Literal["read", "maintain", "off"] | None = None
+    wiki_mode: Literal["auto", "read", "maintain", "off"] | None = None
 
     name: str
     prompt: str
@@ -383,7 +383,7 @@ class ScheduleInfo(BaseModel):
 
 
 class CreateScheduleRequest(BaseModel):
-    wiki_mode: Literal["read", "maintain", "off"] | None = None
+    wiki_mode: Literal["auto", "read", "maintain", "off"] | None = None
 
     name: str
     prompt: str
@@ -401,7 +401,7 @@ class ScheduleFromTextRequest(BaseModel):
     into a recurrence + prompt. `timezone` is the user's IANA tz (browser-
     detected) so "9am" means their local 9am; `now` lets tests pin the clock."""
 
-    wiki_mode: Literal["read", "maintain", "off"] | None = None
+    wiki_mode: Literal["auto", "read", "maintain", "off"] | None = None
 
     text: str = Field(min_length=1)
     timezone: str | None = None
@@ -436,7 +436,7 @@ class AgentScheduleRequest(BaseModel):
     """
 
     prompt: str = Field(min_length=1)
-    wiki_mode: Literal["read", "maintain", "off"] | None = None
+    wiki_mode: Literal["auto", "read", "maintain", "off"] | None = None
 
     name: str | None = None
     cron: str | None = None
@@ -455,7 +455,7 @@ class UpdateScheduleRequest(BaseModel):
     recurrence), and `timezone` alone re-reads the existing cron in the new
     zone."""
 
-    wiki_mode: Literal["read", "maintain", "off"] | None = None
+    wiki_mode: Literal["auto", "read", "maintain", "off"] | None = None
 
     name: str | None = None
     prompt: str | None = None

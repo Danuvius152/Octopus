@@ -2561,10 +2561,17 @@ async def test_interrupt_releases_the_session_handle_immediately(manager):
 
 
 def _steerable_session(mgr, open_window=True, session_id="s-steer"):
+    from server.knowledge import admit
     from server.session_manager import Session
+    from server.sessions.turns import _Settlement
 
     sess = Session(id=session_id, name="steer", working_dir="/tmp")
     sess._steer_open = open_window
+    sess._knowledge_context = admit(
+        session_id=session_id, request_id="original", user_id=None,
+        prompt="original request", selected="auto",
+    )
+    sess._settlement = _Settlement(request_id="original")
     mgr.sessions[session_id] = sess
     return sess
 
@@ -2615,9 +2622,9 @@ async def test_a_message_with_attachments_is_never_steered():
     assert await mgr._try_steer(sess, queued) is False
 
 
-async def test_writer_delivers_steers_and_persists_them_after_the_write():
-    """A steer is persisted when it's actually handed over, so the transcript
-    order matches what the engine saw — not when it was typed."""
+async def test_writer_confirms_steers_before_handing_them_to_the_backend():
+    """The explicit persistence stand-in confirms the input before delivery."""
+    from server.knowledge import admit
     from server.session_manager import QueuedPrompt
 
     mgr = SessionManager()
@@ -2630,10 +2637,11 @@ async def test_writer_delivers_steers_and_persists_them_after_the_write():
         reusable = True
 
         async def send_user_frame(self, text, frame_uuid=None):
+            assert persisted == [text]
             written.append(text)
             return "uuid"
 
-    async def fake_persist(session, content):
+    async def fake_persist(session, content, **kwargs):
         persisted.append(content.content)
         return len(persisted)
 
@@ -2644,8 +2652,14 @@ async def test_writer_delivers_steers_and_persists_them_after_the_write():
     mgr._persist_message = fake_persist
     mgr._broadcast = fake_broadcast
 
-    await mgr._try_steer(sess, QueuedPrompt(prompt="stop that", attachment_ids=[]))
-    task = asyncio.create_task(mgr._steer_writer(sess, _Backend()))
+    queued = QueuedPrompt(prompt="stop that", attachment_ids=[])
+    queued.knowledge_context = admit(
+        session_id=sess.id, request_id=queued.request_id, user_id=None, prompt=queued.prompt,
+    )
+    await mgr._try_steer(sess, queued)
+    backend = _Backend()
+    sess._backend = backend
+    task = asyncio.create_task(mgr._steer_writer(sess, backend))
     await asyncio.sleep(0.05)
     async with sess._steer_lock:
         sess._steer_open = False
@@ -2663,6 +2677,7 @@ async def test_writer_wakes_without_waiting_for_an_event():
     """The writer waits on the steer queue, not on the event stream. During a
     long tool call no events arrive at all, and that is exactly when someone
     reaches for the keyboard."""
+    from server.knowledge import admit
     from server.session_manager import QueuedPrompt
 
     mgr = SessionManager()
@@ -2676,12 +2691,18 @@ async def test_writer_wakes_without_waiting_for_an_event():
             delivered.set()
             return "uuid"
 
-    mgr._persist_message = lambda s, c: asyncio.sleep(0)
-    mgr._broadcast = lambda ev: asyncio.sleep(0)
+    mgr._persist_message = lambda s, c, **kwargs: asyncio.sleep(0)
+    mgr._broadcast = lambda ev, **kwargs: asyncio.sleep(0)
 
-    task = asyncio.create_task(mgr._steer_writer(sess, _Backend()))
+    backend = _Backend()
+    sess._backend = backend
+    task = asyncio.create_task(mgr._steer_writer(sess, backend))
     await asyncio.sleep(0.02)          # writer is idle, no events anywhere
-    await mgr._try_steer(sess, QueuedPrompt(prompt="stop", attachment_ids=[]))
+    queued = QueuedPrompt(prompt="stop", attachment_ids=[])
+    queued.knowledge_context = admit(
+        session_id=sess.id, request_id=queued.request_id, user_id=None, prompt=queued.prompt,
+    )
+    await mgr._try_steer(sess, queued)
     await asyncio.wait_for(delivered.wait(), timeout=1.0)   # woke on its own
     task.cancel()
     try:

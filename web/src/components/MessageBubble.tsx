@@ -305,10 +305,10 @@ export function MessageBubble({
     case "recovery":
       return <RecoveryMessage message={message} />;
 
-    // Ephemeral, client-side system note (e.g. the /schedule command's
-    // confirmation or a parse-error hint). Centered pill, not attributed to
-    // the user or to Claude. Not persisted — clears on reload.
+    // Client hints and durable notices for retained results share the same
+    // presentation, without attributing them to the user or the assistant.
     case "notice":
+    case "delivery_notice":
       return (
         <div className="msg msg-notice flex justify-center py-1">
           <span

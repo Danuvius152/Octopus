@@ -121,6 +121,7 @@ class DatabaseBase:
             "timeout_seconds": row[13],
             "stop_reason": row[14],
             "work_id": row[15],
+            "knowledge_context": row[16],
         }
     @staticmethod
     def _row_to_connector(row: sqlite3.Row) -> dict[str, Any]:
@@ -157,6 +158,7 @@ class DatabaseBase:
             "completed_at": row[9],
             "injection_status": row[10],
             "injected_at": row[11],
+            "knowledge_context": row[12],
         }
 
     # Column lists and canned SQL shared by the domain mixins.
@@ -211,11 +213,11 @@ class DatabaseBase:
     _BG_TASK_COLS = (
         "id, session_id, command, description, working_dir, status, "
         "exit_code, stdout, stderr, truncated, started_at, completed_at, "
-        "idle_timeout_seconds, timeout_seconds, stop_reason, work_id"
+        "idle_timeout_seconds, timeout_seconds, stop_reason, work_id, knowledge_context"
     )
     _RESEARCH_COLS = (
         "id, session_id, question, status, phase, error, report_path, cost, "
-        "created_at, completed_at, injection_status, injected_at"
+        "created_at, completed_at, injection_status, injected_at, knowledge_context"
     )
     _APPLICATION_COLS = (
         "id, name, description, icon, icon_src, agent_id, session_id, "
@@ -243,6 +245,10 @@ class DatabaseBase:
          "ALTER TABLE bg_tasks ADD COLUMN timeout_seconds INTEGER"),
         ("bg_tasks", "stop_reason", "ALTER TABLE bg_tasks ADD COLUMN stop_reason TEXT"),
         ("bg_tasks", "work_id", "ALTER TABLE bg_tasks ADD COLUMN work_id TEXT"),
+        ("bg_tasks", "knowledge_context",
+         "ALTER TABLE bg_tasks ADD COLUMN knowledge_context TEXT"),
+        ("research_jobs", "knowledge_context",
+         "ALTER TABLE research_jobs ADD COLUMN knowledge_context TEXT"),
         # Per-backend auth.
         ("sessions", "credential_id", "ALTER TABLE sessions ADD COLUMN credential_id TEXT"),
         # /archive — hides the row from the default list, keeps it in the DB.
@@ -291,6 +297,10 @@ class DatabaseBase:
     # rebuild `schedules` and a column added earlier would not survive the
     # rebuild.
     _LATE_COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+        # A definition outlives its creating session. Its server-owned context
+        # is opaque here; legacy rows keep NULL and gain no new authority.
+        ("schedules", "knowledge_context",
+         "ALTER TABLE schedules ADD COLUMN knowledge_context TEXT"),
         # Default harness for an agent's new sessions.
         ("agents", "backend",
          "ALTER TABLE agents ADD COLUMN backend TEXT NOT NULL DEFAULT 'claude-code'"),
@@ -830,6 +840,9 @@ class DatabaseBase:
             await self.conn.commit()
         if not await self._has_column("schedules", "invalid_reason"):
             await self.conn.execute("ALTER TABLE schedules ADD COLUMN invalid_reason TEXT")
+            await self.conn.commit()
+        if not await self._has_column("schedules", "knowledge_context"):
+            await self.conn.execute("ALTER TABLE schedules ADD COLUMN knowledge_context TEXT")
             await self.conn.commit()
 
     async def _column_info(self, table: str) -> list[tuple[Any, ...]]:

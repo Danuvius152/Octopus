@@ -12,10 +12,11 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..auth import verify_token
 from ..deps import ScopeUser, SessionMgr
+from ..mcp_identity import verify
 from ..research import ResearchError, research_manager
 from ..sessions import SessionManager
 
@@ -23,7 +24,13 @@ router = APIRouter(prefix="/api/sessions", tags=["research"])
 
 
 class StartResearchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
     question: str = Field(min_length=1)
+
+
+def _public_job(row: dict[str, Any]) -> dict[str, Any]:
+    """The context is a server-owned contract, never public job metadata."""
+    return {key: value for key, value in row.items() if key != "knowledge_context"}
 
 
 async def _own_session(
@@ -49,9 +56,10 @@ async def start_research(
 ) -> dict[str, Any]:
     """Launch a deep-research job. Returns immediately with the job row; the
     final report is injected into the session as a turn when it finishes."""
-    await _own_session(session_manager, session_id, user_id)
+    if session_manager.get_session(session_id, user_id) is None:
+        raise HTTPException(404, "Session not found")
     try:
-        return await research_manager.start(session_id, req.question)
+        return _public_job(await research_manager.start(session_id, req.question, scope=verify(_)))
     except ResearchError as e:
         raise HTTPException(e.status_code, e.message)
 
@@ -66,7 +74,7 @@ async def list_research(
     await _own_session(session_manager, session_id, user_id)
     if research_manager.db is None:
         return []
-    return await research_manager.db.list_research_jobs_for_session(session_id)
+    return [_public_job(row) for row in await research_manager.db.list_research_jobs_for_session(session_id)]
 
 
 @router.get("/{session_id}/research/{research_id}")
@@ -83,7 +91,7 @@ async def get_research(
     row = await research_manager.db.get_research_job(research_id)
     if row is None or row["session_id"] != session_id:
         raise HTTPException(404, "research job not found")
-    return row
+    return _public_job(row)
 
 
 @router.post("/{session_id}/research/{research_id}/cancel")
@@ -103,6 +111,6 @@ async def cancel_research(
     if existing is None or existing["session_id"] != session_id:
         raise HTTPException(404, "research job not found")
     try:
-        return await research_manager.cancel(research_id)
+        return _public_job(await research_manager.cancel(research_id))
     except ResearchError as e:
         raise HTTPException(e.status_code, e.message)

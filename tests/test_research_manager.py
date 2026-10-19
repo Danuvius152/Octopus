@@ -78,9 +78,11 @@ async def test_research_jobs_crud_and_sweep(mgr, db):
 async def test_start_completes_and_injects_report(rm, mgr, db, monkeypatch):
     injected: list[tuple[str, str]] = []
 
-    async def fake_start_message(session_id, prompt, *, source, delivery_id):
+    async def fake_start_message(session_id, prompt, *, source, delivery_id, work_id, knowledge_context):
         assert source == "research"
         assert delivery_id.startswith("research:")
+        assert knowledge_context.trusted_request == "what is X?"
+        assert work_id is None
         injected.append((session_id, prompt))
         return accepted_receipt()
 

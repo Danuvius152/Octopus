@@ -39,12 +39,14 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .aio import complete_cleanup, drain_cancelled
 from .database import Database
+from .knowledge import OwnedTaskContext, capture, derive, encode
 from .mcp_identity import McpScope, require_live_scope, work_is_open
 
 logger = logging.getLogger(__name__)
@@ -118,6 +120,7 @@ class BgTaskRecord:
     timeout_seconds: int | None = None
     stop_reason: str | None = None
     work_id: str | None = None
+    knowledge_context: str | None = None
 
 
 def _now_iso() -> str:
@@ -356,6 +359,7 @@ class BgTaskManager:
         idle_timeout_seconds: int = IDLE_AFTER_OUTPUT_TIMEOUT_SECS,
         work_id: str | None = None,
         scope: McpScope | None = None,
+        owned_context: OwnedTaskContext | None = None,
     ) -> BgTaskRecord:
         """Create the row, spawn the process, return immediately.
 
@@ -372,6 +376,25 @@ class BgTaskManager:
             raise BgTaskError(str(exc)) from exc
         if scope is not None:
             work_id = scope.work_id
+            if owned_context is None:
+                raise BgTaskError("The original request context is required")
+        if owned_context is None:
+            # A separately authenticated internal API action is a fresh root,
+            # never a guess at the session's latest model request.
+            binding = await self._db.get_session_binding(session_id)
+            if binding is None:
+                raise BgTaskError("Background task session no longer exists")
+            parent = capture(SimpleNamespace(
+                id=session_id, user_id=binding["user_id"], agent_id=binding["agent_id"],
+            ), None, prompt=command)
+            owned_context = derive(parent, command)
+        if owned_context.return_binding.reference.session_id != session_id:
+            raise BgTaskError("Background task request belongs to a different session")
+        if scope is not None and owned_context.return_binding.reference.user_id != scope.user_id:
+            raise BgTaskError("Background task request belongs to a different account")
+        if (scope is not None or work_id is not None) and owned_context.return_binding.work_id != work_id:
+            raise BgTaskError("Background task request belongs to a different work")
+        work_id = owned_context.return_binding.work_id
         if not work_is_open(work_id):
             raise BgTaskError("Delegated work is closed")
         try:
@@ -403,9 +426,34 @@ class BgTaskManager:
             idle_timeout_seconds=limits.idle_timeout_seconds,
             timeout_seconds=limits.timeout_seconds,
             work_id=work_id,
+            knowledge_context=encode(owned_context),
         )
         reservation = _StartingTask(work_id, owner=asyncio.current_task())
         self._starting[task_id] = reservation
+
+        # Capture and commit ownership before any OS process can execute.
+        # A failed/uncertain commit never falls through to process creation.
+        try:
+            await self._db.create_bg_task(
+                task_id=task_id, session_id=session_id, command=command,
+                description=description, working_dir=working_dir, started_at=started_at,
+                idle_timeout_seconds=limits.idle_timeout_seconds,
+                timeout_seconds=limits.timeout_seconds, work_id=work_id,
+                knowledge_context=record.knowledge_context,
+            )
+            if self._shutting_down or reservation.stop_reason or not work_is_open(work_id):
+                raise BgTaskError("Background task admission closed before process launch")
+        except BaseException:
+            try:
+                await complete_cleanup(self._db.update_bg_task(
+                    task_id, status="interrupted", completed_at=_now_iso(),
+                    stop_reason=reservation.stop_reason or "startup_failed",
+                ))
+            finally:
+                # No process was launched. Storage failure still propagates;
+                # a reservation without an OS resource must not await itself.
+                self._starting.pop(task_id, None)
+            raise
 
         # Spawn through /bin/sh -c so the model can use shell syntax
         # (pipes, redirects, &&) — same trust model as the SDK's Bash
@@ -442,51 +490,34 @@ class BgTaskManager:
                     logger.exception("Failed to reap aborted bg startup %s", task_id)
                     raise
                 else:
+                    await self._db.update_bg_task(
+                        task_id, status="interrupted", completed_at=_now_iso(),
+                        stop_reason=reservation.stop_reason or "server_shutdown",
+                    )
                     self._starting.pop(task_id, None)
             cleanup = asyncio.create_task(reap_aborted_start(), name=f"bg-startup-cleanup-{task_id}")
             self._cleanup_tasks.add(cleanup)
             cleanup.add_done_callback(self._cleanup_done)
             raise
         except Exception as e:
+            await self._db.update_bg_task(
+                task_id, status="failed", completed_at=_now_iso(), stop_reason="startup_failed",
+            )
             self._starting.pop(task_id, None)
-            # Don't even persist a row — the task never existed. The
-            # MCP tool will surface this as an error string the model
-            # can read and adjust its plan.
             raise BgTaskError(f"failed to spawn bg task: {e}") from e
 
         creation = replace(record)
         rt = _RunningTask(record, proc, limits, started_monotonic)
+        rt.registered = True
+        rt.registration_done.set()
         reservation.running = rt
         self._running[task_id] = rt
         rt.task = asyncio.create_task(self._run_task(rt), name=f"bg-task-{task_id}")
-        if reservation.stop_reason or not work_is_open(work_id):
-            await self._terminate_proc(rt, reason=reservation.stop_reason or "work_cancelled")
+        self._starting.pop(task_id, None)
+        # The process is supervised from spawn, independently of listeners.
         try:
-            await self._db.create_bg_task(
-                task_id=task_id, session_id=session_id, command=command,
-                description=description, working_dir=working_dir, started_at=started_at,
-                idle_timeout_seconds=limits.idle_timeout_seconds,
-                timeout_seconds=limits.timeout_seconds, work_id=work_id,
-            )
-        except BaseException:
-            rt.registration_done.set()
-            rt.started_notice.set()
-            async def retire_unregistered() -> None:
-                await self._terminate_proc(rt, reason="server_shutdown")
-                # Keep the captured owner on failure; a refused registration
-                # must not report clean cancellation while its group runs.
-                assert rt.task is not None
-                await asyncio.wait_for(asyncio.shield(rt.task), timeout=7.0)
-
-            await complete_cleanup(retire_unregistered())
-            raise
-        finally:
-            self._starting.pop(task_id, None)
-        rt.registered = True
-        rt.registration_done.set()
-        # The process is supervised from spawn, independently of registration
-        # and listeners. Terminal persistence waits until the row exists.
-        try:
+            if reservation.stop_reason or not work_is_open(work_id):
+                await self._terminate_proc(rt, reason=reservation.stop_reason or "work_cancelled")
             if self._broadcast_cb:
                 await self._broadcast_cb({
                     "type": "bg_started", "session_id": session_id,
@@ -540,6 +571,7 @@ class BgTaskManager:
                 timeout_seconds=r["timeout_seconds"],
                 stop_reason=r["stop_reason"],
                 work_id=r["work_id"],
+                knowledge_context=r["knowledge_context"],
             )
             for r in rows
         ]
@@ -566,6 +598,7 @@ class BgTaskManager:
             timeout_seconds=r["timeout_seconds"],
             stop_reason=r["stop_reason"],
             work_id=r["work_id"],
+            knowledge_context=r["knowledge_context"],
         )
 
     # ------------------------------------------------------------------ orchestration

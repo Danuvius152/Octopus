@@ -29,21 +29,22 @@ class BgTasksMixin(DatabaseBase):
         idle_timeout_seconds: int | None = None,
         timeout_seconds: int | None = None,
         work_id: str | None = None,
+        knowledge_context: str | None = None,
     ) -> None:
         await self._ensure_connected()
         await self.conn.execute(
             "INSERT INTO bg_tasks "
             "(id, session_id, command, description, working_dir, status, "
-            " stdout, stderr, truncated, started_at, idle_timeout_seconds, timeout_seconds, work_id) "
-            "VALUES (?, ?, ?, ?, ?, 'running', '', '', 0, ?, ?, ?, ?)",
+            " stdout, stderr, truncated, started_at, idle_timeout_seconds, timeout_seconds, work_id, knowledge_context) "
+            "VALUES (?, ?, ?, ?, ?, 'running', '', '', 0, ?, ?, ?, ?, ?)",
             (task_id, session_id, command, description, working_dir, started_at,
-             idle_timeout_seconds, timeout_seconds, work_id),
+             idle_timeout_seconds, timeout_seconds, work_id, knowledge_context),
         )
         await self.conn.commit()
 
     @serialized_write
     async def update_bg_task(self, task_id: str, **fields: Any) -> None:
-        """Patch any of: status, exit_code, stdout, stderr, truncated, completed_at."""
+        """Patch task progress or its server-encoded return context."""
         await self._ensure_connected()
         allowed = {
             "status",
@@ -53,6 +54,7 @@ class BgTasksMixin(DatabaseBase):
             "truncated",
             "completed_at",
             "stop_reason",
+            "knowledge_context",
         }
         updates: dict[str, Any] = {}
         for k, v in fields.items():

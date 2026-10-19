@@ -163,8 +163,9 @@ def create_schedule(
             the user sees it where the schedule was set up. False — each fire
             gets its own throwaway session; use it for noisy background
             routines that shouldn't fill up the chat.
-        wiki_mode: Optional read/maintain intent. Can only be persisted
-            while this turn already has the corresponding explicit Wiki grant.
+        wiki_mode: Optional maintenance restriction (auto/read/maintain/off).
+            Inherits this request's limits even when omitted; it cannot add
+            permission. Source requirements are preserved separately.
 
     Returns:
         The schedule's id and when it will first run — tell the user both.
@@ -253,6 +254,7 @@ def update_schedule(
     run_at: str | None = None,
     timezone: str | None = None,
     enabled: bool | None = None,
+    wiki_mode: str | None = None,
 ) -> str:
     """Change one of your schedules: pause or resume it, re-word what it
     runs, or move when it runs.
@@ -275,6 +277,9 @@ def update_schedule(
         run_at: New ISO datetime, turning it into a one-time schedule.
         timezone: New IANA timezone for the cron / one-time run.
         enabled: False to pause, True to resume.
+        wiki_mode: Optional restriction for future fires. Omission retains the
+            saved control. Agent edits can only narrow the saved and current
+            request limits; changing the prompt never grants permission.
 
     Returns:
         The schedule as it now stands, including its next fire time.
@@ -295,13 +300,14 @@ def update_schedule(
         ("run_at", run_at),
         ("timezone", timezone),
         ("enabled", enabled),
+        ("wiki_mode", wiki_mode),
     ):
         if value not in (None, ""):
             body[key] = value
     if not body:
         return (
             "Error: nothing to change — pass at least one of prompt, name, "
-            "cron, interval_seconds, run_at, timezone or enabled."
+            "cron, interval_seconds, run_at, timezone, enabled or wiki_mode."
         )
 
     try:

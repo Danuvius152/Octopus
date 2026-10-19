@@ -17,7 +17,11 @@ from server.session_manager import session_manager
 from tests import test_tenant_isolation as tenants
 from tests import test_wiki_api as wiki_api
 from tests.test_runtime_review_races import background as background
-from tests.test_runtime_review_races import gate_sql, process_alive, wait_until
+from tests.test_runtime_review_races import (
+    gate_background_spawn,
+    process_alive,
+    wait_until,
+)
 from tests.test_runtime_review_races import runtime as runtime
 from tests.test_wiki_maintenance_state import (
     current_read,
@@ -152,8 +156,7 @@ async def test_frontmatter_diagnostic_is_shared_by_reads_and_checked_maintenance
 @pytest.mark.parametrize("cancel_count", [1, 2])
 async def test_cancelled_registration_waits_for_a_group_that_closed_its_pipes(background, runtime, monkeypatch, tmp_path, cancel_count):
     manager, session, delivered, broadcasts = background
-    _, database, _, _, _, _ = runtime
-    entered, _ = gate_sql(monkeypatch, database, lambda sql: sql.startswith("INSERT INTO bg_tasks"))
+    entered, release_handle = gate_background_spawn(monkeypatch)
     monkeypatch.setattr(bg_tasks, "_TERM_GRACE_SECONDS", 0.2)
     child_pid = tmp_path / "closed-pipe-child.pid"
     child = ("import os,signal,time; signal.signal(signal.SIGTERM,signal.SIG_IGN); "
@@ -171,18 +174,21 @@ async def test_cancelled_registration_waits_for_a_group_that_closed_its_pipes(ba
         await wait_until(child_pid.exists)
         pid = int(child_pid.read_text())
         creation.cancel()
+        release_handle.set()
         if cancel_count == 2:
-            captured = next(iter(manager._running.values()))
-            await wait_until(lambda: captured.termination is not None)
+            await wait_until(lambda: any(item.running and item.running.termination is not None for item in manager._starting.values()))
             creation.cancel()
-            await asyncio.sleep(0)
-            assert not creation.done(), "second cancellation abandoned captured cleanup"
+            assert manager._cleanup_tasks, "second cancellation abandoned captured cleanup"
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(creation, 8)
+        await manager.shutdown()
         assert not process_alive(pid)
-        assert await manager.list_tasks(session.id) == []
+        retained = await manager.list_tasks(session.id)
+        assert len(retained) == 1 and retained[0].status == "interrupted"
+        assert retained[0].knowledge_context is not None
         assert delivered == broadcasts == []
     finally:
+        release_handle.set()
         creation.cancel()
         await asyncio.gather(creation, return_exceptions=True)
         if pid is not None and process_alive(pid):
@@ -222,8 +228,7 @@ async def test_unconfirmed_group_shutdown_keeps_owner_and_withholds_terminal(bac
 
 async def test_fork_after_a_process_snapshot_cannot_cancel_the_kill_fallback(background, runtime, monkeypatch, tmp_path):
     manager, session, delivered, broadcasts = background
-    _, database, _, _, _, _ = runtime
-    entered, _ = gate_sql(monkeypatch, database, lambda sql: sql.startswith("INSERT INTO bg_tasks"))
+    entered, release_handle = gate_background_spawn(monkeypatch)
     monkeypatch.setattr(bg_tasks, "_TERM_GRACE_SECONDS", 0.2)
     ready, fork_now, child_pid = (tmp_path / name for name in ("parent.ready", "fork.now", "late-child.pid"))
     code = "\n".join([
@@ -286,14 +291,18 @@ async def test_fork_after_a_process_snapshot_cannot_cancel_the_kill_fallback(bac
         monkeypatch.setattr(bg_tasks.os, "killpg", held_group_probe)
         monkeypatch.setattr(Path, "iterdir", stale_members)
         creation.cancel()
+        release_handle.set()
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(creation, 8)
+        await manager.shutdown()
         assert snapshot is not None and child_pid.exists()
         pid = int(child_pid.read_text())
         assert not process_alive(pid), "late same-group child outlived cancellation"
         assert delivered == broadcasts == []
-        assert await manager.list_tasks(session.id) == []
+        retained = await manager.list_tasks(session.id)
+        assert len(retained) == 1 and retained[0].status == "interrupted"
     finally:
+        release_handle.set()
         fork_now.touch()
         creation.cancel()
         await asyncio.gather(creation, return_exceptions=True)

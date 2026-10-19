@@ -348,16 +348,21 @@ async def list_agent_schedules(agent_id: str, user_id: ScopeUser = None, _: str 
 )
 async def create_agent_schedule(
     request: Request,
+    session_manager: SessionMgr,
     agent_id: str, req: CreateScheduleRequest, user_id: ScopeUser = None, _: str = Depends(verify_token)
 ):
-    if await _get_manager().get_agent(agent_id, user_id) is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
+    from ..knowledge import derive
     from .schedules import (
         create_schedule_for_agent,
-        schedule_wiki_mode,
+        schedule_edit,
         to_schedule_info,
         validate_schedule_target,
     )
+    edit, human = schedule_edit(request, session_manager, req.prompt, user_id=user_id,
+                            selected=req.wiki_mode, session_id=req.session_id)
+    context = derive(edit, req.prompt, selected=req.wiki_mode).execution
+    if await _get_manager().get_agent(agent_id, user_id) is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
 
     await validate_schedule_target(agent_id, req.session_id)
     row = await create_schedule_for_agent(
@@ -366,7 +371,8 @@ async def create_agent_schedule(
         req.prompt,
         interval_seconds=req.interval_seconds,
         origin_session_id=req.session_id,
-        wiki_mode=schedule_wiki_mode(request, req.prompt, req.wiki_mode),
+        knowledge_context=context,
+        requesting=edit,
     )
     return to_schedule_info(row)
 
@@ -385,17 +391,20 @@ async def create_agent_schedule_from_text(
     <prompt>` fast-path, else a one-shot AI parse on the agent's own harness)
     into a recurrence + prompt, then creates the schedule. Parse failures
     surface as 422 with a user-facing detail."""
-    agent = await _get_manager().get_agent(agent_id, user_id)
-    if agent is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
     from ..harness import get_harness
+    from ..knowledge import derive
     from ..schedule_ai import ScheduleParseError, parse_schedule_text
     from .schedules import (
         create_schedule_for_agent,
-        schedule_wiki_mode,
+        schedule_edit,
         to_schedule_info,
         validate_schedule_target,
     )
+    edit, human = schedule_edit(request, session_manager, req.text, user_id=user_id,
+                            selected=req.wiki_mode, session_id=req.session_id)
+    agent = await _get_manager().get_agent(agent_id, user_id)
+    if agent is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
 
     # A rejected relationship must not launch even a one-shot parse.
     await validate_schedule_target(agent_id, req.session_id)
@@ -432,6 +441,7 @@ async def create_agent_schedule_from_text(
         recurrence_label=parsed.recurrence_label,
         origin_session_id=req.session_id,
         run_at=parsed.run_at,
-        wiki_mode=schedule_wiki_mode(request, req.text, req.wiki_mode),
+        knowledge_context=derive(edit, parsed.prompt, selected=req.wiki_mode).execution,
+        requesting=edit,
     )
     return to_schedule_info(row)

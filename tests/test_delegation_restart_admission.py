@@ -8,6 +8,7 @@ import pytest
 
 from server.agent_manager import AgentManager
 from server.delegations import DelegationError
+from server.mcp_identity import verify
 from tests.test_delegation_restart import runtime as runtime
 from tests.test_delegation_restart import wait_finished
 from tests.test_delegation_restart_nested import gated_cli as gated_cli
@@ -108,7 +109,7 @@ async def test_nested_setup_save_failure_does_not_leave_parent_waiting_for_unsta
     outer = await current.delegations.start_delegation(
         parent_session_id=current.parent_id, agent_name="Worker", request="outer gate review",
     )
-    await asyncio.wait_for(starts.get(), 5)
+    outer_context = await asyncio.wait_for(starts.get(), 5)
     save = current.database.compare_and_set_delegation_state
     fail = True
 
@@ -123,6 +124,7 @@ async def test_nested_setup_save_failure_does_not_leave_parent_waiting_for_unsta
     with pytest.raises(DelegationError, match="saving failed"):
         await current.delegations.start_delegation(
             parent_session_id=outer.delegation_id, agent_name="Leaf", request="never admitted leaf review",
+            scope=verify(next(entry.credential for entry in outer_context.mcp_servers if entry.key == "bg")),
         )
     inner = current.delegations.list_delegations(outer.delegation_id)[0]
     assert inner.state == "cancelled"

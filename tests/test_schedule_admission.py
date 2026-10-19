@@ -9,6 +9,7 @@ from httpx import ASGITransport, AsyncClient
 from server.agent_manager import AgentManager
 from server.database import Database
 from server.deps import get_session_manager
+from server.knowledge import encode, for_account
 from server.main import app
 from server.routers import agents, schedules
 from server.scheduler import ScheduleRunner
@@ -39,10 +40,12 @@ async def domain(monkeypatch):
 
 
 async def save(db, agent, **fields):
+    context = for_account(session_id=fields.get("origin_session_id") or "schedule-entry", request_id="schedule-request",
+                          user_id=agent["user_id"], prompt="current prompt", selected=fields.get("wiki_mode"))
     await db.save_schedule(
         schedule_id="schedule", agent_id=agent["id"], name="check",
         prompt="current prompt", interval_seconds=3600,
-        created_at="2026-10-17T00:00:00+00:00", **fields,
+        created_at="2026-10-17T00:00:00+00:00", knowledge_context=encode(context), **fields,
     )
 
 
@@ -99,8 +102,8 @@ async def test_fire_reloads_target_and_trusted_prompt(domain, monkeypatch):
     args, kwargs = start.call_args
     assert args[0] == origin.id
     assert args[1].endswith("current prompt")
-    assert kwargs["trusted_request"] == "current prompt"
-    assert kwargs["wiki_mode"] == "read"
+    assert kwargs["knowledge_context"].trusted_request == "current prompt"
+    assert kwargs["knowledge_context"].mode == "read"
 
 
 async def test_legacy_mismatched_target_is_quarantined(domain, monkeypatch):

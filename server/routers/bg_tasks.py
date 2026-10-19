@@ -14,10 +14,12 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
+from pydantic import ConfigDict
 
 from ..auth import verify_token
 from ..bg_tasks import BgTaskError, BgTaskLimits, BgTaskRecord, bg_task_manager
 from ..deps import ScopeUser, SessionMgr
+from ..knowledge import capture, derive
 from ..mcp_identity import verify
 from ..sessions import SessionManager
 
@@ -25,6 +27,7 @@ router = APIRouter(prefix="/api/sessions", tags=["bg-tasks"])
 
 
 class StartBgTaskRequest(BgTaskLimits):
+    model_config = ConfigDict(extra="forbid")
     command: str
     description: str | None = None
 
@@ -85,6 +88,10 @@ async def start_bg_task(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, "command must be non-empty")
     working_dir = _require_session(session_manager, session_id, user_id)
     try:
+        scope = verify(_)
+        session = session_manager.get_session(session_id, user_id)
+        parent = capture(session, scope, prompt=req.command)
+        owned = derive(parent, req.command)
         rec = await bg_task_manager.start_task(
             session_id=session_id,
             command=req.command,
@@ -92,8 +99,11 @@ async def start_bg_task(
             description=req.description,
             idle_timeout_seconds=req.idle_timeout_seconds,
             timeout_seconds=req.timeout_seconds,
-            scope=verify(_),
+            scope=scope,
+            owned_context=owned,
         )
+    except ValueError as e:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     except BgTaskError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     return _record_to_json(rec)

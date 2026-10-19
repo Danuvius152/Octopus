@@ -51,12 +51,29 @@ describe("ResearchCard", () => {
 
   it("shows a result line and no cancel when completed", () => {
     useSessionStore.setState({
-      research: { s1: [job({ status: "completed", phase: "done", verified: 3, sources: ["u"] })] },
+      research: { s1: [job({ status: "completed", phase: "done", injection_status: "delivered", verified: 3, sources: ["u"] })] },
     });
     render(<ResearchCard sessionId="s1" />);
     expect(screen.getByText(/Report delivered below/)).toBeTruthy();
     expect(screen.getByText(/3 verified findings/)).toBeTruthy();
     expect(screen.queryByTitle("Cancel research")).toBeNull();
+  });
+
+  it("does not claim delivery while the report awaits admission", () => {
+    useSessionStore.setState({ research: { s1: [job({ status: "completed", phase: "done" })] } });
+    render(<ResearchCard sessionId="s1" />);
+    expect(screen.queryByText(/Report delivered below/)).toBeNull();
+    expect(screen.getByText(/delivery pending/)).toBeTruthy();
+  });
+
+  it("shows retained material and the suppressed delivery reason after reload", () => {
+    useSessionStore.getState().setResearch("s1", [job({
+      status: "completed", phase: "done", injection_status: "failed", error: "Original work is closed",
+    })]);
+    render(<ResearchCard sessionId="s1" />);
+    expect(screen.queryByText(/Report delivered below/)).toBeNull();
+    expect(screen.getByText(/Report retained as material/)).toBeTruthy();
+    expect(screen.getByText(/Original work is closed/)).toBeTruthy();
   });
 
   it("shows the error on failure", () => {

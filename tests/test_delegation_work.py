@@ -261,9 +261,11 @@ async def test_nested_cancellation_closes_descendants_without_waking_closed_bran
     child = await delegations.start_delegation(
         parent_session_id=parent.id, agent_name="Worker", request="held child",
     )
-    await starts.get()
+    child_context = await starts.get()
+    child_token = next(entry.credential for entry in child_context.mcp_servers if entry.key == "bg")
     grandchild = await delegations.start_delegation(
         parent_session_id=child.delegation_id, agent_name="Grandchild", request="held grandchild",
+        scope=verify(child_token),
     )
     context = await starts.get()
     token = next(entry.credential for entry in context.mcp_servers if entry.key == "bg")
@@ -410,7 +412,14 @@ async def test_shutdown_retires_in_flight_background_startup(work_runtime, monke
             await creating
         await manager.work_test_bg.shutdown()
         assert len(processes) == 1 and processes[0].returncode is not None
-        assert await manager.work_test_bg.list_tasks(parent.id) == []
+        retained = await manager.work_test_bg.list_tasks(parent.id)
+        assert len(retained) == 1 and retained[0].status == "interrupted"
+        saved = await manager.db.get_bg_task(retained[0].id)
+        assert saved["status"] == "interrupted" and saved["completed_at"] is not None
+        assert saved["knowledge_context"] == retained[0].knowledge_context
+        from server.knowledge import decode_owned
+
+        assert decode_owned(saved["knowledge_context"]).return_binding.reference.session_id == parent.id
     finally:
         monkeypatch.setattr(bg_tasks, "_STARTUP_DRAIN_SECONDS", startup_bound)
         release.set()
@@ -443,7 +452,17 @@ async def test_aborted_start_keeps_process_handle_for_cleanup(work_runtime, monk
     async with asyncio.timeout(3):
         while processes[0].returncode is None:
             await asyncio.sleep(0.01)
-    assert await manager.work_test_bg.list_tasks(parent.id) == []
+    async with asyncio.timeout(3):
+        while (await manager.work_test_bg.list_tasks(parent.id))[0].status == "running":
+            await asyncio.sleep(0.01)
+    retained = await manager.work_test_bg.list_tasks(parent.id)
+    assert len(retained) == 1 and retained[0].status == "interrupted"
+    saved = await manager.db.get_bg_task(retained[0].id)
+    assert saved["status"] == "interrupted" and saved["completed_at"] is not None
+    assert saved["knowledge_context"] == retained[0].knowledge_context
+    from server.knowledge import decode_owned
+
+    assert decode_owned(saved["knowledge_context"]).return_binding.reference.session_id == parent.id
 
 
 async def test_archived_completed_round_still_owns_background_process(work_runtime, tmp_path):

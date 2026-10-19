@@ -9,7 +9,7 @@ from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..config import settings
 from ..database import Database
@@ -25,6 +25,9 @@ from ..models import (
 )
 from ..oauth_errors import RefreshErrorCode
 from .submission import RequestCompletion, SubmissionReceipt
+
+if TYPE_CHECKING:
+    from ..knowledge import KnowledgeContext
 
 logger = logging.getLogger(__name__)
 
@@ -176,6 +179,17 @@ def fork_info_fields(
 
 
 @dataclass
+class RecordedInput:
+    """One fixed request input retained through uncertain inline delivery."""
+
+    seq: int | None
+    message: MessageContent
+    git_head: str | None = None
+    git_status_clean: bool | None = None
+    confirmed: bool = False
+
+
+@dataclass
 class QueuedPrompt:
     """A user turn waiting to run.
 
@@ -189,6 +203,7 @@ class QueuedPrompt:
     attachment_ids: list[str]
     wiki_mode: str | None = None
     trusted_request: str | None = None
+    knowledge_context: KnowledgeContext | None = None
     source: str = "human"
     priority: bool = False
     request_id: str = field(default_factory=lambda: uuid.uuid4().hex)
@@ -198,6 +213,7 @@ class QueuedPrompt:
     order: int = 0
     question_session_id: str | None = None
     question_id: str | None = None
+    recorded_input: RecordedInput | None = None
 
 
 @dataclass
@@ -342,6 +358,7 @@ class Session:
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _wiki_task_id: str | None = field(default=None, repr=False)
     _wiki_mode: str | None = field(default=None, repr=False)
+    _knowledge_context: KnowledgeContext | None = field(default=None, repr=False)
     _pending_queue: list[QueuedPrompt] = field(default_factory=list, repr=False)
     _dispatch_paused: bool = field(default=False, repr=False)
     _admission_closed: bool = field(default=False, repr=False)
@@ -353,6 +370,7 @@ class Session:
     _delivery_receipts: dict[str, SubmissionReceipt] = field(default_factory=dict, repr=False)
     _request_completions: dict[str, asyncio.Future[RequestCompletion]] = field(default_factory=dict, repr=False)
     _inline_requests: dict[str, list[QueuedPrompt]] = field(default_factory=dict, repr=False)
+    _delivery_notice_ids: set[str] = field(default_factory=set, repr=False)
     _backend_retirements: dict[int, tuple[HarnessRun, asyncio.Task[None]]] = field(default_factory=dict, repr=False)
     _recording_blocked: Any | None = field(default=None, repr=False)
     # Steers: messages typed while THIS turn is running, to be handed to the
