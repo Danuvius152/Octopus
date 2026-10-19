@@ -107,6 +107,9 @@ class TurnContext:
     subagents: list[dict[str, Any]] = field(default_factory=list)
     reasoning_effort: str | None = None
     service_tier: str | None = None
+    # Request-specific trusted instructions; excluded from stable controller
+    # comparison and delivered separately on a resumed Codex thread.
+    turn_instructions: str = ""
 
 
 @dataclass

@@ -1,27 +1,22 @@
-"""Injected-guide metadata describes the actual fresh instruction branch."""
+"""Stable Wiki discovery and authorized just-in-time guide loading."""
 
-import json
 from types import SimpleNamespace
 
 import pytest
 
 from server.wiki.tasks import tasks
-from server.wiki.workflow import guide, instructions, load_guide
+from server.wiki.workflow import BOOTSTRAP, guide, instructions, load_guide, view
 from tests import test_wiki_api as wiki_api
 
 client = wiki_api.client
 
 
-def card(prompt):
-    return json.loads(prompt.splitlines()[0].split("：", 1)[1])
+def card(token):
+    return view(tasks.active.get(token)).card
 
 
-@pytest.mark.parametrize("mode,injected,entry", [
-    ("auto", ["query", "entry"], "auto-entry"),
-    ("read", ["query"], None),
-    ("maintain", ["query", "entry"], "entry"),
-])
-async def test_regular_turn_marks_only_injected_content_and_keeps_fresh_scope(client, tmp_path, mode, injected, entry):
+@pytest.mark.parametrize("mode", ["auto", "read", "maintain"])
+async def test_regular_turn_only_advertises_stable_discovery_and_loads_current_guides_on_use(client, tmp_path, mode):
     vault = tmp_path / "vault"
     vault.mkdir()
     config = await wiki_api.configure(client, vault)
@@ -29,19 +24,17 @@ async def test_regular_turn_marks_only_injected_content_and_keeps_fresh_scope(cl
     token = tasks.open(session, mode)
     try:
         prompt = instructions(mode, token)
-        operation = card(prompt)
-        assert operation["injected_guides"] == injected
+        operation = card(token)
+        assert operation["injected_guides"] == []
         assert operation["mode"] == mode
         assert operation["vault_id"] == config["vault_id"]
         assert operation["curator_agent_id"] == config["curator_agent_id"]
         assert operation["writable_files"] == []
         assert "capabilities" not in operation and "guides" not in operation
-        assert guide("access") in prompt and guide("query-v2") in prompt
-        assert guide("worker-v2") not in prompt and guide("retrieval-v2") not in prompt
-        if entry:
-            assert guide(entry) in prompt
-        else:
-            assert guide("entry") not in prompt and guide("auto-entry") not in prompt
+        assert prompt == BOOTSTRAP
+        for name in ("access", "query-v2", "entry", "auto-entry", "worker-v2", "retrieval-v2"):
+            assert guide(name) not in prompt
+        assert config["vault_id"] not in prompt and config["registration_generation"] not in prompt
         # Marker reuse is advisory, never a cached denial of a fresh guide request.
         assert load_guide("query", token) == load_guide("query", token) == guide("query-v2")
         info = (await client.get("/api/wiki/info", headers=wiki_api.HEADERS)).json()
@@ -54,9 +47,10 @@ async def test_unbound_turn_does_not_advertise_a_vault_or_write_grants(client):
     token = tasks.open(SimpleNamespace(id="unbound", user_id=None, agent_id="reader"), "auto")
     try:
         prompt = instructions("auto", token)
-        operation = card(prompt)
+        operation = card(token)
         assert operation["state"] == "主库尚未绑定；用 info 确认状态"
-        assert operation["injected_guides"] == ["query", "entry"]
+        assert operation["injected_guides"] == []
+        assert prompt == BOOTSTRAP
         assert "vault_id" not in operation and "writable_files" not in operation
         assert "capabilities" not in operation and "guides" not in operation
     finally:
@@ -79,17 +73,19 @@ async def test_worker_and_cancelled_assignment_mark_the_actual_branch(client, tm
     token = tasks.open(session, "maintain")
     try:
         prompt = instructions("maintain", token)
-        operation = card(prompt)
-        assert operation["injected_guides"] == ["worker"]
+        operation = card(token)
+        assert operation["injected_guides"] == []
         assert operation["job_id"] == job["id"]
         assert operation["writable_files"] == ["Library/note.md"]
-        assert guide("worker-v2") in prompt and guide("query-v2") not in prompt
+        assert prompt == BOOTSTRAP and guide("worker-v2") not in prompt
+        assert guide("worker-v2") in load_guide("worker", token)
         assert load_guide("writing", token) == load_guide("writing", token) == guide("writing")
         jobs.update(job["id"], status="cancelled")
         ended = instructions("maintain", token)
-        assert card(ended)["injected_guides"] == ["query"]
-        assert guide("query-v2") in ended and guide("worker-v2") not in ended
-        assert guide("entry") not in ended and "只可查询，不发起或继续维护" in ended
+        assert card(token)["injected_guides"] == [] and card(token)["actor_role"] == "ended_worker"
+        assert ended == BOOTSTRAP
+        with pytest.raises(WikiError):
+            load_guide("worker", token)
         with pytest.raises(WikiError) as refused:
             load_guide("writing", token)
         assert refused.value.status == 403

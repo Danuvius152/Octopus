@@ -1,22 +1,93 @@
-"""Deliver trusted controller snapshots through Codex's native thread API.
+"""Deliver changed controller instructions through Codex's native thread API.
 
 exec resume restores the original developer instructions. Configuring a new
 developer_instructions string does not replace that history. Acknowledged
 thread/inject_items checkpoints a real developer message without invoking a
-model or editing the native transcript. Close and reap this writer before exec.
+model or editing the native transcript. Compare the latest local checkpoint in
+the active rollout returned by Codex, not a filename search or historical set.
+An inherited or compacted history without an explicit checkpoint is established
+once on its active branch. Close and reap this writer before exec.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
+import re
 import signal
+from pathlib import Path
 from typing import Any
 
 from ..aio import complete_cleanup, drain_cancelled
 from .profile import TurnContext
 
 _UPDATE_TIMEOUT = 20
+_START = '<octopus_controller sha256="'
+_END = "\n</octopus_controller>"
+_HEADER = re.compile(r'<octopus_controller sha256="([0-9a-f]{64})" characters="([0-9]+)">')
+
+
+def controller_message(instructions: str) -> str:
+    """A recognizable checkpoint also present in the first exec's instructions."""
+    payload = ("Current Octopus controller instructions. These supersede earlier Octopus controller "
+            "instructions, including obsolete Wiki lookup prohibitions.\n\n"
+            + instructions)
+    digest = hashlib.sha256(payload.encode()).hexdigest()
+    return f'{_START}{digest}" characters="{len(payload)}">\n{payload}{_END}'
+
+
+def turn_message(instructions: str) -> str:
+    return ("Current Octopus turn context; applies to this turn only and replaces earlier turn context. "
+            "The stable controller instructions remain in effect.\n\n" + instructions)
+
+
+def _checkpoint(item: dict[str, Any]) -> str | None:
+    if item.get("type") != "message" or item.get("role") != "developer":
+        return None
+    checkpoint = None
+    for part in item.get("content", []):
+        text = part.get("text", "")
+        if part.get("type") == "input_text" and text.startswith(_START):
+            header, _, body = text.partition("\n")
+            match = _HEADER.fullmatch(header)
+            checkpoint = "invalid"
+            if match:
+                length = int(match[2])
+                payload = body[:length]
+                if (body[length:].startswith(_END)
+                        and hashlib.sha256(payload.encode()).hexdigest() == match[1]):
+                    checkpoint = header + "\n" + payload + _END
+        elif text.startswith("Current Octopus controller snapshot for this turn."):
+            checkpoint = "legacy"
+    return checkpoint
+
+
+def _latest_checkpoint(path: str, thread_id: str) -> str | None:
+    """Read only this active segment; never mistake discarded branches for it.
+
+    The native API identifies the current path, including after a revert. A
+    reference to inherited history is intentionally not replayed here: a branch
+    without its own controller checkpoint receives one, then normal resumes
+    reuse it. This also avoids an application-owned delivery sidecar.
+    """
+    checkpoint = None
+    with Path(path).open("rb") as handle:
+        first = json.loads(handle.readline())
+        if first.get("type") != "session_meta" or first.get("payload", {}).get("id") != thread_id:
+            raise RuntimeError("Codex controller history identity mismatch")
+        for raw in handle:
+            record = json.loads(raw)
+            payload = record.get("payload", {})
+            if record.get("type") == "compacted":
+                checkpoint = None
+                for item in payload.get("replacement_history") or []:
+                    checkpoint = _checkpoint(item) or checkpoint
+            elif record.get("type") == "event_msg" and payload.get("type") == "thread_rolled_back":
+                checkpoint = None
+            elif record.get("type") == "response_item":
+                checkpoint = _checkpoint(payload) or checkpoint
+    return checkpoint
 
 
 async def refresh_instructions(ctx: TurnContext, argv: list[str], options: dict[str, Any]) -> None:
@@ -86,13 +157,21 @@ async def refresh_instructions(ctx: TurnContext, argv: list[str], options: dict[
                 "threadId": ctx.resume_id, "excludeTurns": True, "cwd": ctx.working_dir,
                 "model": ctx.model, "config": config,
             })
-            if restored["thread"]["id"] != ctx.resume_id:
+            thread = restored["thread"]
+            if thread["id"] != ctx.resume_id:
                 raise RuntimeError("Codex controller resumed a different thread")
-            await request(3, "thread/inject_items", {"threadId": ctx.resume_id, "items": [{
-                "type": "message", "role": "developer", "content": [{"type": "input_text", "text":
-                    "Current Octopus controller snapshot for this turn. It supersedes earlier Octopus controller "
-                    "instructions, including obsolete Wiki lookup prohibitions.\n\n" + ctx.system_prompt}],
-            }]})
+            if not thread.get("path"):
+                raise RuntimeError("Codex controller did not return an active history path")
+            current = await asyncio.to_thread(_latest_checkpoint, thread["path"], ctx.resume_id)
+            desired = controller_message(ctx.system_prompt)
+            messages = [desired] if current != desired else []
+            if ctx.turn_instructions:
+                messages.append(turn_message(ctx.turn_instructions))
+            if messages:
+                await request(3, "thread/inject_items", {"threadId": ctx.resume_id, "items": [
+                    {"type": "message", "role": "developer", "content": [{"type": "input_text", "text": text}]}
+                    for text in messages
+                ]})
             stdout = asyncio.create_task(drain(process.stdout), name="codex-controller-stdout")
             process.stdin.close()
             await process.wait()

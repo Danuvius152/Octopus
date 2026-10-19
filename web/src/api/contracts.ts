@@ -8143,7 +8143,7 @@ export interface operations {
     get_guide_api_wiki_guide_get: {
         parameters: {
             query: {
-                module: "query" | "retrieval" | "entry" | "maintenance" | "article" | "writing";
+                module: "query" | "retrieval" | "entry" | "worker" | "maintenance" | "article" | "writing";
                 token?: string | null;
             };
             header?: never;

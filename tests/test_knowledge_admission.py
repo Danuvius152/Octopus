@@ -26,7 +26,7 @@ async def test_explicit_wiki_source_contract_reaches_the_actual_backend_input(cl
                 observed.append((view(task).card, compose_system_prompt(
                     config.system_prompt, "", [], wiki_mode=config.wiki_mode,
                     wiki_task_id=config.wiki_task_id, wiki_capability=True,
-                )))
+                ), config.turn_instructions))
 
             def set_idle_handler(self, handler):
                 pass
@@ -47,9 +47,10 @@ async def test_explicit_wiki_source_contract_reaches_the_actual_backend_input(cl
     completed = await receipt.wait()
 
     assert completed.outcome.status == "success"
-    card, system = observed[0]
+    card, system, turn = observed[0]
     assert card["source_requirements"] == ["wiki", "web"]
-    assert "本地知识库" in system and "网页" in system
+    assert '"wiki", "web"' in turn
+    assert "本轮知识来源要求" not in system
 
 
 async def test_unconfirmed_request_input_never_opens_wiki_or_starts_the_backend(client, tmp_path, monkeypatch):

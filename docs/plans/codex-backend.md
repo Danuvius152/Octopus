@@ -246,6 +246,16 @@ Codex's analog of `--append-system-prompt` is
 `command.rs:build_codex_developer_instructions_config`). No AGENTS.md or
 instructions-file needed.
 
+For a new thread, the addendum carries one recognizable Octopus controller
+checkpoint. Resumed turns compare the latest checkpoint in the active rollout
+returned by Codex; unchanged rules do not append another full developer message.
+Real rule changes are acknowledged through `thread/inject_items` before exec.
+Request source requirements and the first fork note travel as separate trusted
+turn context. A process restart reuses the native checkpoint without a separate
+application delivery ledger. If compaction or an inherited active segment has no
+explicit checkpoint, the next turn establishes one local checkpoint; later
+unchanged turns reuse it. Existing history is never rewritten for this purpose.
+
 The text needs a **Codex variant**: the current `_OCTOPUS_SYSTEM_PROMPT`
 bg-vs-Bash section is Claude-specific ("the Claude Code harness will
 auto-background long Bash commands…") — false for Codex. Refactor

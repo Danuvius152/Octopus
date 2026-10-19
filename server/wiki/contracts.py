@@ -4,7 +4,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-GuideModule = Literal["query", "retrieval", "entry", "maintenance", "article", "writing"]
+GuideModule = Literal["query", "retrieval", "entry", "worker", "maintenance", "article", "writing"]
 ReadView = Literal["full", "compact"]
 
 

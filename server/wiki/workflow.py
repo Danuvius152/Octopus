@@ -18,12 +18,12 @@ from .store import WikiError
 from .tasks import WikiTask, tasks
 
 PROMPTS = Path(__file__).with_name("prompts")
-POLICY_VERSION = 3
+POLICY_VERSION = 4
 CARD_MAX_BYTES = 8192
 PATHS_MAX_BYTES = 4096
 PATHS_MAX_ITEMS = 16
 PUBLIC_GUIDES = ("query", "retrieval", "entry")
-WORKER_GUIDES = ("maintenance", "article", "writing")
+WORKER_GUIDES = ("worker", "maintenance", "article", "writing")
 GUIDE_FILES = (
     "access", "query-v2", "retrieval-v2", "entry", "auto-entry",
     "worker-v2", "maintenance-v2", "article-v2", "writing",
@@ -32,6 +32,10 @@ QUERY_TOOLS = frozenset({
     "info", "search", "read", "read_many", "list_documents", "graph", "inspect_image",
     "jobs", "load_guide", "maintenance_status", "maintenance_select", "maintenance_selection",
 })
+
+BOOTSTRAP = """共享 Wiki 可在普通任务中按需自主查询，无需 /wiki 或先询问其他 agent；查询不自动保存对话或维护文章。
+需要使用 Wiki 时再取得本轮操作卡与指南：没有对应指南先 load_guide；已有指南先用 info 核对当前操作卡的 guide_digests，仅复用仍在上下文且正文 digest 相同的内容。普通查询用 query，提交具体维护请求用 entry；执行维护先加载 worker，再按需加载 maintenance、article、writing，这些模块只向当前有效 curator assignment 开放。retrieval 按检索细节需要加载。load_guide 同时返回当前操作卡、公共规则和该模块正文。
+操作卡、任务、来源要求和权限以本轮实时回执为准；历史卡、指南版本及缓存均不授予权限，服务端逐次检查授权。使用当前提供的 Wiki 工具，禁止复用旧票据。指南被压缩或不再完整可见时重新加载；未使用 Wiki 的任务无需加载。"""
 
 
 def guide(name: str) -> str:
@@ -55,7 +59,7 @@ class PolicyView:
     card: dict[str, Any]
     tools: frozenset[str]
     guides: dict[str, str]
-    injected_text: tuple[str, ...]
+    access_text: str
 
     def load(self, module: GuideModule) -> str:
         if module not in self.guides:
@@ -102,11 +106,15 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
     # Keeping one snapshot also makes load_guide's digest match its actual text.
     bundle = {name: guide(name) for name in GUIDE_FILES}
     digest = hashlib.sha256(json.dumps([POLICY_VERSION, bundle], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-    injected = ["worker"] if worker else ["query", "entry"] if submitter else ["query"]
     available = {"query": bundle["query-v2"], "retrieval": bundle["retrieval-v2"],
                  "entry": bundle["auto-entry" if mode == "auto" else "entry"]} if live else {}
     if worker:
-        available |= {"maintenance": bundle["maintenance-v2"], "article": bundle["article-v2"], "writing": bundle["writing"]}
+        available |= {
+            "worker": "正文与新页按操作卡目标；已有导航 Markdown 可用 relations-only organize 补本批入口，不取得该页正文修改权。\n\n" + bundle["worker-v2"],
+            "maintenance": bundle["maintenance-v2"], "article": bundle["article-v2"], "writing": bundle["writing"],
+        }
+    guide_digests = {module: hashlib.sha256((bundle["access"] + "\n\n" + text).encode()).hexdigest()
+                     for module, text in available.items()}
     card: dict[str, Any] = {
         "policy_version": POLICY_VERSION, "guide_hash": digest, "schema_version": SCHEMA_VERSION,
         "actor_role": role, "mode": mode,
@@ -114,7 +122,8 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
         "source_requirements": list(task.knowledge.sources) if task and task.knowledge else [],
         "organization": "Library 分类；Key note；细粒度标签；必要关联",
         "excluded": "PDF 不处理；工具/tmp/配套静态资产按需读取",
-        "injected_guides": injected, "available_guides": sorted(available), "available_tools": sorted(names),
+        "injected_guides": [], "available_guides": sorted(available), "available_tools": sorted(names),
+        "guide_digests": guide_digests,
         "response_limits": {"text_bytes": TEXT_RESULT_MAX_BYTES, "card_bytes": CARD_MAX_BYTES,
                             "scope_paths": PATHS_MAX_ITEMS},
     }
@@ -138,27 +147,14 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
 
         if daily_command(task.request):
             card["selection"] = {"mode": "incremental", "directory": "Library"}
-    body = [bundle["access"]]
-    if worker:
-        body += ["正文与新页按操作卡目标；已有导航 Markdown 可用 relations-only organize 补本批入口，不取得该页正文修改权。", bundle["worker-v2"]]
-    else:
-        body.append(bundle["query-v2"])
-        if task and task.job_id:
-            body.append("当前维护 assignment 已结束或不可用；只可查询，不发起或继续维护。")
-        elif submitter:
-            body.append(bundle["auto-entry" if mode == "auto" else "entry"])
-        elif task is not None or mode == "read":
-            body.append("本轮只读：可查询，不可提交维护或写入。")
     if len(json.dumps(card, ensure_ascii=False).encode()) > CARD_MAX_BYTES:
         raise WikiError("Wiki operation card exceeds its response budget; use current job details", 503)
-    return PolicyView(card, frozenset(names), available, tuple(body))
+    return PolicyView(card, frozenset(names), available, bundle["access"])
 
 
 def instructions(mode: str, task_id: str | None = None) -> str:
-    current = view(tasks.active.get(task_id), mode=mode)
-    return ("本次知识操作卡：" + json.dumps(current.card, ensure_ascii=False) + "\n"
-            + "injected_guides 标记本轮常驻内容；已有内容时复用，缺失时再 load_guide；guide_hash 只标记文本版本，不授予权限。\n"
-            + "\n".join(current.injected_text))
+    """Stable discovery only; live authority and guide bodies are loaded on use."""
+    return BOOTSTRAP
 
 
 def load_guide(module: GuideModule, task_id: str | None) -> str:

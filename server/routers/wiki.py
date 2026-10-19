@@ -483,7 +483,9 @@ def get_guide(request: Request, module: GuideModule, user_id: ScopeUser = None, 
         raise WikiError("Wiki guides require an active authorized turn", 403)
     current = view(task)
     return {"module": module, "content": current.load(module),
-            "policy_version": current.card["policy_version"], "guide_hash": current.card["guide_hash"]}
+            "access": current.access_text, "operation": current.card,
+            "policy_version": current.card["policy_version"], "guide_hash": current.card["guide_hash"],
+            "guide_digest": current.card["guide_digests"][module]}
 
 
 class SearchSection(BaseModel):

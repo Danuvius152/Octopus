@@ -265,8 +265,8 @@ def compose_system_prompt(
     connectors blurb (if any), then the memory blurb (when the harness has no
     native memory and an agent memory dir exists), then the fork first-turn
     note (session-rewind.md §5.6.4 — framing the model needs to read the
-    forked world correctly). The runtime must deliver this snapshot every
-    turn; Codex exec resume retains its initial developer instructions."""
+    forked world correctly). The runtime delivers request-specific instructions
+    separately; unchanged Codex controller checkpoints are reused on resume."""
     from ..connectors.base import render_connectors_blurb
 
     out = tools_prompt

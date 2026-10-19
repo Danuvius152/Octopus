@@ -138,10 +138,12 @@ def info() -> dict:
 
 @mcp.tool()
 def load_guide(module: GuideModule) -> dict:
-    """Load a needed guide; injected_guides marks the content already injected this turn.
+    """Load a needed guide with common rules and the current operation card.
 
-    Reuse available content; reload when that content is missing from context.
-    query/retrieval/entry are readable in authorized turns. maintenance
+    Reuse complete content only when its guide_digest still matches the current
+    operation's guide_digests[module]; reload missing content. The whole-bundle
+    guide_hash alone does not identify mode-dependent entry text.
+    query/retrieval/entry are readable in authorized turns. worker/maintenance
     (patches, sources, recovery), article (metadata/layout) and writing
     (new prose) require a current curator worker assignment.
     """

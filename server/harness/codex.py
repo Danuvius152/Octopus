@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from .codex_activity import CodexActivityObserver, diagnostic_environment
-from .codex_control import refresh_instructions
+from .codex_control import controller_message, refresh_instructions, turn_message
 from .events import HarnessCredential, HarnessEvent, SubagentUpdate
 from .harness import Harness
 from .login import LoginMethod
@@ -297,7 +297,9 @@ def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
         "-C",
         ctx.working_dir,
         "-c",
-        f"developer_instructions={_toml_basic_string(ctx.system_prompt)}",
+        "developer_instructions=" + _toml_basic_string("\n\n".join(filter(None, (
+            controller_message(ctx.system_prompt), turn_message(ctx.turn_instructions) if ctx.turn_instructions else "",
+        )))),
         "-c",
         "features.retain_client_developer_messages=true",
     ]

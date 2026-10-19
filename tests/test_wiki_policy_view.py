@@ -17,7 +17,7 @@ client = wiki_api.client
 
 
 def operation(token, mode):
-    return json.loads(workflow.instructions(mode, token).splitlines()[0].split("：", 1)[1])
+    return workflow.view(tasks.active.get(token), mode=mode).card
 
 
 @pytest.mark.parametrize("mode", ["auto", "read", "maintain"])
@@ -43,6 +43,9 @@ async def test_operation_card_and_actual_tools_guides_share_one_current_policy(c
         assert loaded.json()["policy_version"] == card["policy_version"]
         assert loaded.json()["guide_hash"] == card["guide_hash"]
         assert loaded.json()["content"] == workflow.guide("retrieval-v2")
+        assert loaded.json()["operation"] == card
+        assert loaded.json()["access"] == workflow.guide("access")
+        assert loaded.json()["guide_digest"] == card["guide_digests"]["retrieval"]
         assert operation(token, mode)["guide_hash"] == card["guide_hash"]
     finally:
         reset_current_scope(scope)
@@ -68,7 +71,7 @@ async def test_cancelled_worker_card_and_tools_revoke_together_without_trusting_
         assert {"organize", "cancel_job", "retry_job"} <= set(old["available_tools"])
         jobs.mark_cancelled(job["id"])
         ended = operation(token, "maintain")
-        assert ended["actor_role"] == "ended_worker" and ended["injected_guides"] == ["query"]
+        assert ended["actor_role"] == "ended_worker" and ended["injected_guides"] == []
         assert ended["writable_files"] == []
         assert set(ended["available_tools"]) == {tool.name for tool in await mcp.list_tools()}
         assert not set(ended["available_tools"]) & {"maintain", "organize", "cancel_job", "retry_job", "publish"}
@@ -122,6 +125,30 @@ async def test_guide_hash_changes_with_the_actual_guide_bundle_but_never_enables
         assert after["writable_files"] == []
         tasks.close(token)
         closed = operation(token, "maintain")
-        assert "maintain" not in closed["available_tools"] and closed["injected_guides"] == ["query"]
+        assert "maintain" not in closed["available_tools"] and closed["injected_guides"] == []
     finally:
         tasks.close(token)
+
+
+async def test_mode_dependent_entry_has_its_own_body_digest_and_bootstrap_stays_stable(client, tmp_path):
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    await wiki_api.configure(client, vault)
+    session = SimpleNamespace(id="entry-variant", user_id=None, agent_id="ordinary")
+    auto = tasks.open(session, "auto")
+    maintain = tasks.open(session, "maintain")
+    try:
+        a, b = operation(auto, "auto"), operation(maintain, "maintain")
+        assert a["guide_hash"] == b["guide_hash"]
+        assert a["guide_digests"]["entry"] != b["guide_digests"]["entry"]
+        assert a["guide_digests"]["query"] == b["guide_digests"]["query"]
+        assert workflow.instructions("auto", auto) == workflow.instructions("maintain", maintain)
+        for token, expected in ((auto, "auto-entry"), (maintain, "entry")):
+            response = await client.get("/api/wiki/guide", params={"module": "entry"},
+                headers={"Authorization": "Bearer " + mint(session.id, wiki_task_id=token)})
+            assert response.status_code == 200, response.text
+            assert response.json()["content"] == workflow.guide(expected)
+            assert response.json()["guide_digest"] == operation(token, "auto")["guide_digests"]["entry"]
+    finally:
+        tasks.close(auto)
+        tasks.close(maintain)

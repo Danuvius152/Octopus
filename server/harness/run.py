@@ -171,6 +171,7 @@ class RunConfig:
     wiki_mode: str | None = None
     work_id: str | None = None
     system_prompt: str | None = None   # agent persona
+    turn_instructions: str = ""
     model: str | None = None
     reasoning_effort: str | None = None
     service_tier: str | None = None
@@ -182,7 +183,7 @@ class RunConfig:
     # owning agent (legacy/tests) → memory wiring is fully inert.
     memory_dir: str | None = None
     # Fork first-turn context note (session-rewind.md §5.6.4): framing
-    # appended to the system addendum on a fork's first turn only. None
+    # delivered as trusted context on a fork's first turn only. None
     # otherwise. NOT the replay transcript (that lives in the user channel).
     fork_note: str | None = None
     # Native-deep-research web leaf (native-deep-research.md §4): render a
@@ -275,11 +276,14 @@ class HarnessRun:
             self._config.connectors,
             memory_dir=self._config.memory_dir,
             inject_memory=self._profile.injects_memory_prompt,
-            fork_note=self._config.fork_note,
+            fork_note=None,
             wiki_mode=self._config.wiki_mode,
             wiki_capability=True,
             wiki_task_id=self._config.wiki_task_id,
         )
+        turn_instructions = "\n\n".join(filter(None, (self._config.turn_instructions, self._config.fork_note)))
+        if self._profile.backend != "codex":
+            system_prompt = "\n\n".join(filter(None, (system_prompt, turn_instructions)))
         return TurnContext(
             prompt=prompt,
             working_dir=abs_wd,
@@ -295,6 +299,7 @@ class HarnessRun:
             memory_dir=self._config.memory_dir,
             web_research=self._config.web_research,
             subagents=self._config.subagents,
+            turn_instructions=turn_instructions if self._profile.backend == "codex" else "",
         )
 
     def build_argv(

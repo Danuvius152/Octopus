@@ -1453,7 +1453,7 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
             wiki_task_id=run_config.wiki_task_id,
         )
         wiki = next((e for e in entries if e.key == "wiki"), None)
-        from server.wiki.workflow import guide
+        from server.wiki.workflow import BOOTSTRAP
 
         if backend == "codex":
             import tomllib
@@ -1462,7 +1462,7 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
             prompt = tomllib.loads(override)["developer_instructions"]
         else:
             prompt = argv[argv.index("--append-system-prompt") + 1]
-        seen.append((wiki is not None, guide("query-v2") in prompt))
+        seen.append((wiki is not None, BOOTSTRAP in prompt))
 
         class Runtime(FakeRunBase):
             def set_idle_handler(self, handler):

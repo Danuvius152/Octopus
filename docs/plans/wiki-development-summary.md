@@ -90,7 +90,11 @@ F12 当时的两环境完整 Wiki/MCP/accounts 离线组各 **2040 passed / 13 d
 
 worker 写前读当前任务所需范围；整体整理和复核读全文，局部修订读相关位置与必要上下文。终稿冷读覆盖该 job 的全部最终新增/修改区段、标题和必要邻接上下文，后续再改正文便重新覆盖，旧任务阅读不跨任务继承。未选字节由程序保全，含义与表达仍由模型检查。
 
-worker 按需加载 maintenance/article/writing 指南，只有有效当前 assignment 才开放维护模块；已有上下文直接复用，指南本身不授写权。worker 根据服务回执、输出版本和索引结束本轮，框架在模型返回后确认 job 终态，不能在任务内等待自己的 job 完成。
+普通会话启动时只常驻简短 Wiki 能力入口；使用 Wiki 时按需取得 query/entry/retrieval 指南及当前操作卡。load_guide 在同一次授权视图中返回公共规则、模块正文、操作卡和实际正文 digest；已有完整指南先按当前操作卡的 guide_digests 核验后复用。整包 guide_hash 不能区分 auto-entry 与显式 entry，不作为正文缓存键，也不授予权限。未使用 Wiki 的任务不预装查询或入库指南。
+
+worker 先按需加载 worker 基础合同，再按需加载 maintenance/article/writing 指南；只有有效当前 assignment 才开放这些维护模块。取消、结束或注册失效后，旧卡与旧 digest 不能恢复授权。worker 根据服务回执、输出版本和索引结束本轮，框架在模型返回后确认 job 终态，不能在任务内等待自己的 job 完成。
+
+Codex 控制指令的当前交付生命周期见[运行时计划](codex-backend.md#54-instruction-injection--solved--c-developer_instructions)：正常续聊和重启恢复复用最新稳定检查点，规则真正变化才更新；本轮来源要求与一次性分叉说明单独交付。历史 A02 的每轮 full snapshot 不再作为当前交付策略，原有过期 Wiki 禁令迁移能力继续保留。
 
 内部任务只捕获文档及创建预留身份，卡片中的路径从当前 grant 投影，不另存旧路径或新页布尔授权镜像。原位整理保留单一目标；App 的准备和跟随任务分别由 task→owner 字典登记，失败任务与真实 writer 退休语义保留。后继选定修复沿用这些简化，并补齐持久通知、原执行交接与 owner 恢复，不扩展其他条件项。
 

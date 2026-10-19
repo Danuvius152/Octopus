@@ -1,11 +1,9 @@
 """Current batches retain identities and supporting receipts stay auxiliary."""
 
-import json
-
 import pytest
 
 from server.wiki.tasks import tasks
-from server.wiki.workflow import instructions
+from server.wiki.workflow import view
 from tests import test_wiki_api as api
 from tests.test_wiki_grant_v2 import assigned
 from tests.test_wiki_supporting_navigation import addition, setup_notes
@@ -49,7 +47,7 @@ async def test_batch_keeps_its_original_identities_when_another_job_item_moves_i
         assert {row['doc_id'] for row in grant['selected_documents']} == {item['doc'] for item in job['items'] if item['path'] in {a, c, d}}
         with jobs.store.connect() as db:
             assert db.execute('SELECT count(*) FROM operation_receipts WHERE job_id=?', (job['id'],)).fetchone()[0] == 0
-        card = json.loads(instructions('maintain', next(token for token, root_task in tasks.active.items() if root_task is task)).splitlines()[0].split('：', 1)[1])
+        card = view(task).card
         assert moved_a in card['writable_files'] and a not in card['writable_files'] and b not in card['writable_files']
         allowed = await client.post('/api/wiki/organize', headers=headers, json={
             'path': moved_a, 'expected_revision': current_a['revision'], 'key_note': 'The selected original A remains writable after its move.', 'reason': 'Preserve the captured A identity'})

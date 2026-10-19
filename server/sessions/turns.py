@@ -2596,8 +2596,8 @@ class TurnsMixin(SessionManagerBase):
 
         # Fork first-turn note (session-rewind.md §5.6.4): present while
         # the fork's ephemeral fork_metadata is set (i.e. before its first
-        # result clears it), so it appears on turn 1 only — framing, not
-        # transcript. The replay block lives in the user channel, not here.
+        # result clears it). Delivered as trusted turn context rather than
+        # stable controller rules. The replay block lives in the user channel.
         fork_note: str | None = None
         if session.fork_metadata:
             try:
@@ -2612,8 +2612,6 @@ class TurnsMixin(SessionManagerBase):
         from ..knowledge import render
 
         knowledge_instructions = render(session._knowledge_context, original=False)
-        if knowledge_instructions:
-            system_prompt = "\n\n".join(filter(None, (system_prompt, knowledge_instructions)))
 
         return RunConfig(
             session_id=session.id,
@@ -2622,6 +2620,7 @@ class TurnsMixin(SessionManagerBase):
             wiki_mode=session._wiki_mode,
             work_id=session._work_id,
             system_prompt=system_prompt,
+            turn_instructions=knowledge_instructions,
             model=model,
             reasoning_effort=reasoning_effort,
             service_tier=service_tier,

@@ -37,7 +37,7 @@ async def test_all_turns_can_query_and_legacy_off_only_disables_maintenance(clie
 
     def create(run_config):
         from server.harness.assembly import compose_system_prompt
-        from server.wiki.workflow import guide
+        from server.wiki.workflow import BOOTSTRAP, guide, view
 
         entries = select_mcp_servers(run_config.mcp_servers, [], {}, session_id=session.id,
                                      user_id=session.user_id, wiki_task_id=run_config.wiki_task_id)
@@ -45,11 +45,10 @@ async def test_all_turns_can_query_and_legacy_off_only_disables_maintenance(clie
         captured.append((run_config, wiki))
         prompt = compose_system_prompt(run_config.system_prompt, "", [], wiki_mode=run_config.wiki_mode,
                                        wiki_capability=True, wiki_task_id=run_config.wiki_task_id)
-        assert guide("access") in prompt and guide("query-v2") in prompt
+        assert BOOTSTRAP in prompt and guide("query-v2") not in prompt
         assert guide("retrieval-v2") not in prompt and guide("maintenance-v2") not in prompt
-        assert "confidence" in prompt and "next_start" in prompt
         if expected == "read":
-            assert "本轮只读：可查询，不可提交维护或写入" in prompt
+            assert view(tasks.active[run_config.wiki_task_id]).card["may_submit"] is False
 
         class Run(FakeRunBase):
             def set_idle_handler(self, handler):
@@ -125,14 +124,13 @@ async def test_all_turns_can_query_and_legacy_off_only_disables_maintenance(clie
 
 def test_unregistered_wiki_does_not_claim_available_tools_and_legacy_off_is_read_only():
     from server.harness.assembly import compose_system_prompt
-    from server.wiki.workflow import guide
+    from server.wiki.workflow import BOOTSTRAP, guide
 
     missing = compose_system_prompt(None, "", [], wiki_capability=True)
     assert "unavailable" in missing
     assert guide("access") not in missing and guide("query-v2") not in missing
     legacy = compose_system_prompt(None, "", [], wiki_capability=True, wiki_mode="off")
-    assert guide("access") in legacy and guide("query-v2") in legacy
-    assert "本轮只读：可查询，不可提交维护或写入" in legacy
+    assert BOOTSTRAP in legacy and guide("query-v2") not in legacy
 
 
 async def test_native_job_navigation_avoids_embedding_large_payload_in_command(client, tmp_path):

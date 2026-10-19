@@ -10,7 +10,7 @@ from server.wiki.jobs import WikiJobs
 from server.wiki.registry import registry
 from server.wiki.sections import original_text
 from server.wiki.tasks import tasks
-from server.wiki.workflow import guide, instructions
+from server.wiki.workflow import BOOTSTRAP, guide, instructions, load_guide, view
 from tests import test_wiki_api as wiki_api
 
 client = wiki_api.client
@@ -170,9 +170,9 @@ async def test_guides_follow_verified_job_role_instead_of_agent_name(client, not
     entry_token = tasks.open(session, "maintain")
     try:
         entry = instructions("maintain", entry_token)
-        assert guide("entry") in entry
-        assert guide("access") in entry and guide("query-v2") in entry
-        assert guide("writing") not in entry and guide("maintenance-v2") not in entry and guide("retrieval-v2") not in entry
+        assert entry == BOOTSTRAP and guide("entry") not in entry
+        assert load_guide("entry", entry_token) == guide("entry")
+        assert "worker" not in view(tasks.active[entry_token]).guides
     finally:
         tasks.close(entry_token)
     jobs = WikiJobs(None)
@@ -182,17 +182,14 @@ async def test_guides_follow_verified_job_role_instead_of_agent_name(client, not
     token = tasks.open(session, "maintain")
     try:
         worker = instructions("maintain", token)
-        assert guide("access") in worker
-        assert guide("worker-v2") in worker and guide("writing") not in worker and guide("query-v2") not in worker
-        assert guide("maintenance-v2") not in worker and guide("retrieval-v2") not in worker
-        from server.wiki.workflow import load_guide
-
+        assert worker == BOOTSTRAP and guide("worker-v2") not in worker
+        assert guide("worker-v2") in load_guide("worker", token)
         assert load_guide("writing", token) == guide("writing")
         assert load_guide("maintenance", token) == guide("maintenance-v2")
         assert guide("entry") not in worker
-        modules = {"query", "retrieval", "entry", "maintenance", "article", "writing"}
-        card = json.loads(worker.splitlines()[0].split("：", 1)[1])
-        assert card["injected_guides"] == ["worker"]
+        modules = {"query", "retrieval", "entry", "worker", "maintenance", "article", "writing"}
+        card = view(tasks.active[token]).card
+        assert card["injected_guides"] == []
         assert "guides" not in card and "capabilities" not in card
         headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
         for module in modules:
@@ -219,10 +216,9 @@ async def test_guides_follow_verified_job_role_instead_of_agent_name(client, not
 
         jobs.update(job["id"], status="cancelled")
         ended = instructions("maintain", token)
-        assert guide("worker-v2") not in ended and guide("maintenance-v2") not in ended and guide("entry") not in ended
-        assert guide("query-v2") in ended and "只可查询，不发起或继续维护" in ended
-        assert json.loads(ended.splitlines()[0].split("：", 1)[1])["injected_guides"] == ["query"]
-        for module in ("maintenance", "article", "writing"):
+        assert ended == BOOTSTRAP
+        assert view(tasks.active[token]).card["actor_role"] == "ended_worker"
+        for module in ("worker", "maintenance", "article", "writing"):
             denied = await client.get("/api/wiki/guide", params={"module": module}, headers=headers)
             assert denied.status_code == 403, denied.text
         assert (await client.get("/api/wiki/guide", params={"module": "query"}, headers=headers)).status_code == 200

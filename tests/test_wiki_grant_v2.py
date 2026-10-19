@@ -203,7 +203,7 @@ async def test_default_target_and_explicit_target_replays_reuse_the_admitted_job
 async def test_existing_note_remains_writable_and_publish_is_hidden(client, tmp_path):
     from server.mcp_identity import reset_current_scope, set_current_scope, verify
     from server.mcp_servers.wiki import mcp
-    from server.wiki.workflow import instructions
+    from server.wiki.workflow import view
 
     root = tmp_path / "vault"
     (root / "Library").mkdir(parents=True)
@@ -218,7 +218,7 @@ async def test_existing_note_remains_writable_and_publish_is_hidden(client, tmp_
         finally:
             reset_current_scope(context)
         assert "organize" in names and "publish" not in names
-        card = json.loads(instructions("maintain", scope.wiki_task_id).splitlines()[0].split("：", 1)[1])
+        card = view(task).card
         assert card["writable_files"] == ["Library/note.md"] and card["allowed_new_paths"] == []
         current = await client.get("/api/wiki/read", headers=headers, params={"doc": "Library/note.md"})
         assert current.status_code == 200, current.text
