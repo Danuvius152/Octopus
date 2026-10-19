@@ -741,6 +741,9 @@ class HarnessRun:
         if (self._lease_closed or self._stream_closed or context is None
                 or generation != self._activity_generation or self._tool_identity_tracker is None):
             return
+        for event in events:
+            if event.type == "model_measurement":
+                self._emit(event)
         for event in self._tool_identity_tracker.normalize_observations(events, *context):
             self._emit(event)
 

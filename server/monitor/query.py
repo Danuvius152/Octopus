@@ -130,6 +130,71 @@ async def http(conn: aiosqlite.Connection, window: str = "24h") -> list[dict[str
     )
 
 
+# Shared validity rules keep the model and logical-turn views comparable.
+_CODEX_RESPONSES = """
+            SELECT ts, duration_ms, session_id,
+                   COALESCE(json_extract(detail, '$.request_id'),
+                            json_extract(detail, '$.native_turn_id'), 'unknown') request_id,
+                   json_extract(detail, '$.effort') effort,
+                   json_extract(detail, '$.service_tier') service_tier,
+                   json_extract(detail, '$.input_tokens') input_tokens,
+                   json_extract(detail, '$.cached_input_tokens') cached_input_tokens,
+                   COALESCE(json_extract(detail, '$.model'), 'unknown') model,
+                   json_extract(detail, '$.output_tokens') output,
+                   json_extract(detail, '$.reasoning_tokens') reasoning,
+                   duration_ms > 0 AND duration_ms < 1e12
+                       AND json_type(detail, '$.output_tokens') = 'integer'
+                       AND json_extract(detail, '$.output_tokens') >= 0
+                       AND (json_extract(detail, '$.reasoning_tokens') IS NULL
+                            OR json_extract(detail, '$.reasoning_tokens') BETWEEN 0
+                               AND json_extract(detail, '$.output_tokens')) valid
+            FROM events WHERE kind = 'codex_response' AND ts >= ?
+"""
+
+
+async def codex(conn: aiosqlite.Connection, window: str = "24h") -> list[dict[str, Any]]:
+    """Effective output TPS, weighted by observed response time, never turn time.
+
+    Coverage counts observed usage records, not unobserved provider requests.
+    Missing/invalid windows stay in that denominator, outside the TPS ratio.
+    """
+    return await _rows(conn, """
+        WITH responses AS (""" + _CODEX_RESPONSES + """
+        ), measured AS (
+            SELECT *, ROW_NUMBER() OVER (PARTITION BY model ORDER BY ts DESC) position
+            FROM responses WHERE valid
+        )
+        SELECT r.model,
+               ROUND(1000.0 * SUM(CASE WHEN r.valid THEN r.output END)
+                     / SUM(CASE WHEN r.valid THEN r.duration_ms END), 2) weighted_tps,
+               (SELECT ROUND(1000.0 * output / duration_ms, 2) FROM measured m
+                WHERE m.model = r.model AND position = 1) latest_tps,
+               (SELECT ts FROM measured m WHERE m.model = r.model AND position = 1) latest_at,
+               COUNT(*) responses, SUM(CASE WHEN r.valid THEN 1 ELSE 0 END) timed_responses,
+               ROUND(100.0 * SUM(CASE WHEN r.valid THEN 1 ELSE 0 END) / COUNT(*), 1) coverage_pct,
+               SUM(r.output) output_tokens, SUM(r.reasoning) reasoning_tokens,
+               (SELECT ROUND(AVG(e.duration_ms), 1) FROM events e
+                WHERE e.kind = 'codex_turn_latency' AND e.ts >= ?
+                  AND json_extract(e.detail, '$.model') = r.model) avg_turn_ttft_ms
+        FROM responses r GROUP BY r.model ORDER BY r.model
+    """, (_since(window), _since(window)))
+
+
+async def codex_turns(conn: aiosqlite.Connection, window: str = "24h") -> list[dict[str, Any]]:
+    """Recent logical requests, by session and actual observed model."""
+    return await _rows(conn, "WITH responses AS (" + _CODEX_RESPONSES + """
+        ) SELECT model, session_id, request_id, MAX(ts) last_seen,
+                 ROUND(1000.0 * SUM(CASE WHEN valid THEN output END)
+                       / SUM(CASE WHEN valid THEN duration_ms END), 2) weighted_tps,
+                 COUNT(*) responses, SUM(CASE WHEN valid THEN 1 ELSE 0 END) timed_responses,
+                 SUM(output) output_tokens, SUM(reasoning) reasoning_tokens,
+                 SUM(input_tokens) input_tokens, SUM(cached_input_tokens) cached_input_tokens,
+                 GROUP_CONCAT(DISTINCT effort) effort, GROUP_CONCAT(DISTINCT service_tier) service_tier
+          FROM responses GROUP BY session_id, request_id, model
+          ORDER BY last_seen DESC LIMIT 20
+    """, (_since(window),))
+
+
 async def overview(conn: aiosqlite.Connection, window: str = "24h") -> dict[str, Any]:
     """Everything at a glance — what the in-app page renders."""
     counts = await _rows(
@@ -144,10 +209,14 @@ async def overview(conn: aiosqlite.Connection, window: str = "24h") -> dict[str,
         "turns": await turns(conn, window),
         "errors": (await errors(conn, window))[:10],
         "resources": await resources(conn, window),
+        "codex": await codex(conn, window),
+        "codex_turns": await codex_turns(conn, window),
     }
 
 
 REPORTS = {
+    "codex": codex,
+    "codex_turns": codex_turns,
     "turns": turns,
     "errors": errors,
     "connectors": connectors,

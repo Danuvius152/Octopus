@@ -665,8 +665,9 @@ async def test_the_monitor_belongs_to_the_operator(two_accounts):
     whole install — are the operator's, and neither account here is an admin."""
     ctx = two_accounts
     for token in (ctx["vera"]["token"], ctx["archer"]["token"]):
-        res = await ctx["client"].get("/api/monitor/overview", headers=_as(token))
-        assert res.status_code == 403, res.status_code
+        for report in ("overview", "codex", "codex_turns"):
+            res = await ctx["client"].get(f"/api/monitor/{report}", headers=_as(token))
+            assert res.status_code == 403, res.status_code
 
 
 @pytest.mark.asyncio

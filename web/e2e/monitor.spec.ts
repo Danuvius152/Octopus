@@ -101,3 +101,30 @@ test.describe("Monitor", () => {
     }
   });
 });
+
+
+test("Codex effective TPS distinguishes measured and missing timing", async ({ page }) => {
+  await page.route("**/api/monitor/overview?*", async (route) => {
+    await route.fulfill({ json: {
+      window: "24h", counts: [], turns: [], errors: [], resources: [], codex_turns: [],
+      codex: [
+        { model: "gpt-measured", weighted_tps: 25, latest_tps: 20, latest_at: 1758800000,
+          responses: 3, timed_responses: 2, coverage_pct: 66.7, output_tokens: 350,
+          reasoning_tokens: 240, avg_turn_ttft_ms: 2000 },
+        { model: "gpt-missing", weighted_tps: null, latest_tps: null, latest_at: null,
+          responses: 1, timed_responses: 0, coverage_pct: 0, output_tokens: 25,
+          reasoning_tokens: null, avg_turn_ttft_ms: null },
+      ],
+    } });
+  });
+  await openMonitor(page);
+  const measured = page.getByRole("row", { name: /gpt-measured/ });
+  await expect(measured).toContainText("25.00 tok/s");
+  await expect(measured).toContainText("20.00 tok/s");
+  await expect(measured).toContainText("66.7%");
+  await expect(measured).toContainText("Partial timing");
+  await expect(page.getByRole("row", { name: /gpt-missing/ })).toContainText("Missing timing");
+  await expect(page.getByText(/Includes reasoning/)).toBeVisible();
+  await page.getByText("Recent Codex turns", { exact: true }).click();
+  await expect(page.getByText("Recent logical requests (up to 20, within window)", { exact: true })).toBeVisible();
+});

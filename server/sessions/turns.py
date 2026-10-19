@@ -1633,6 +1633,20 @@ class TurnsMixin(SessionManagerBase):
         normalized and enumerated in `harness/events.py`, so this branches on a
         contract rather than on whatever a CLI happened to print.
         """
+        if event.type == "model_measurement":
+            # The verified native adapter emits metadata only. Keep these
+            # observations out of transcripts, activity signals and WS frames.
+            if session.backend == "codex" and session._backend is attempt.backend:
+                detail = dict(event.raw)
+                kind = detail.pop("kind", None)
+                completed = detail.pop("completed_at", None)
+                if kind in {"codex_response", "codex_turn_latency"} and isinstance(completed, (int, float)):
+                    detail.update(attempt_id=attempt.attempt_id,
+                                  request_id=session._settlement.request_id if session._settlement else None)
+                    _monitor.record(_MonEvent(kind=kind, ts=completed, session_id=session.id,
+                                              agent_id=session.agent_id, backend="codex",
+                                              duration_ms=event.duration_ms, detail=detail))
+            return []
         if event.type == "subagent" and session._backend is not attempt.backend:
             return []
         from ..harness.tool_identity import ToolIdentityTracker

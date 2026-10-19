@@ -9,7 +9,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { MonitorPage } from "./MonitorPage";
 import { useSessionStore } from "../stores/sessionStore";
@@ -49,6 +49,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 describe("MonitorPage", () => {
@@ -88,7 +89,7 @@ describe("MonitorPage", () => {
     );
     render(<MonitorPage />);
     await waitFor(() =>
-      expect(screen.getAllByText(/Nothing recorded in this window/).length).toBe(4)
+      expect(screen.getAllByText(/Nothing recorded in this window/).length).toBe(6)
     );
   });
 
@@ -118,4 +119,43 @@ describe("MonitorPage", () => {
     await waitFor(() => expect(f).toHaveBeenCalled());
     expect(f.mock.calls[0][1].headers.Authorization).toBe("Bearer t");
   });
+});
+
+
+it("shows effective TPS, coverage and a missing-timing state", async () => {
+  vi.stubGlobal("fetch", mockFetch(overview({ codex: [
+    { model: "gpt-test", weighted_tps: 25, latest_tps: 20, latest_at: 1758800000,
+      responses: 3, timed_responses: 2, coverage_pct: 66.7, output_tokens: 350,
+      reasoning_tokens: 240, avg_turn_ttft_ms: 2000 },
+    { model: "missing-model", weighted_tps: null, latest_tps: null, latest_at: null,
+      responses: 1, timed_responses: 0, coverage_pct: 0, output_tokens: 25,
+      reasoning_tokens: null, avg_turn_ttft_ms: null },
+  ] })));
+  render(<MonitorPage />);
+  await screen.findByText("gpt-test");
+  const row = screen.getByText("gpt-test").closest("tr");
+  expect(row?.textContent).toContain("25.00 tok/s");
+  expect(row?.textContent).toContain("66.7%");
+  expect(screen.getByText("missing-model").closest("tr")?.textContent).toContain("Missing timing");
+  expect(screen.getByText(/Includes reasoning/)).toBeTruthy();
+});
+
+it("polls every five seconds only while visible and resumes on focus", async () => {
+  vi.useFakeTimers();
+  let visibility = "visible";
+  vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility as DocumentVisibilityState);
+  const fetcher = mockFetch(overview());
+  vi.stubGlobal("fetch", fetcher);
+  render(<MonitorPage />);
+  await act(async () => {});
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  await act(async () => { await vi.advanceTimersByTimeAsync(5000); });
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  visibility = "hidden";
+  fireEvent(document, new Event("visibilitychange"));
+  await act(async () => { await vi.advanceTimersByTimeAsync(15000); });
+  expect(fetcher).toHaveBeenCalledTimes(2);
+  visibility = "visible";
+  await act(async () => { fireEvent(document, new Event("visibilitychange")); });
+  expect(fetcher).toHaveBeenCalledTimes(3);
 });

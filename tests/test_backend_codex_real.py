@@ -165,6 +165,7 @@ async def test_real_resume_across_speed_changes(tmp_path):
 async def test_real_native_activity_identity_and_metadata_format(tmp_path):
     """Installed exec diagnostics and metadata prove the exact current native turn."""
     backend = _codex_run(session_id="native_activity_acceptance", mcp_servers=[])
+    backend.bind_tool_context("native-metrics-request", "native-metrics-attempt")
     ticks: list[float | None] = []
     backend.bind_activity(ticks.append)
     await backend.start(
@@ -178,6 +179,14 @@ async def test_real_native_activity_identity_and_metadata_format(tmp_path):
         assert observer.identity_confirmed, "Installed CLI native identity was not verified"
         assert observer.matched_records > 0, "Installed CLI emitted no accepted native activity metadata"
         assert ticks
+        responses = [event for event in events if event.type == "model_measurement"
+                     and event.raw.get("kind") == "codex_response"]
+        assert len(responses) >= 2, "Shell and final-answer responses need separate usage windows"
+        assert all(event.duration_ms and event.duration_ms > 0 for event in responses)
+        assert all(event.raw["model"] != "unknown" and event.raw["output_tokens"] > 0 for event in responses)
+        assert all(event.raw["reasoning_tokens"] <= event.raw["output_tokens"] for event in responses)
+        assert sum(event.duration_ms for event in responses) < next(
+            event.duration_ms for event in events if event.type == "result")
         assert any(event.type == "result" and not event.is_error for event in events)
         assert "Sent prompt with event ID:" not in backend.stderr_text
         assert "SessionConfiguredEvent" not in backend.stderr_text

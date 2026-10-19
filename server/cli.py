@@ -324,7 +324,7 @@ def build_parser() -> argparse.ArgumentParser:
         "report",
         nargs="?",
         default="overview",
-        help="overview (default), turns, errors, connectors, schedules, resources, http",
+        help="overview (default), turns, codex, codex_turns, errors, connectors, schedules, resources, http",
     )
     monitor_parser.add_argument(
         "--since",
@@ -364,6 +364,7 @@ def do_monitor(args) -> None:
                 print(f"Octopus — last {data['window']}\n")
                 _table("activity", data["counts"])
                 _table("turns", data["turns"])
+                _table("Codex effective output TPS (including reasoning)", data["codex"])
                 _table("top errors", data["errors"])
                 _table("resources", data["resources"])
                 return 0

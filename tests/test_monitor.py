@@ -216,3 +216,54 @@ class TestSampler:
 
     def test_a_missing_db_file_is_silent(self, tmp_path):
         assert collect_db(str(tmp_path / "nope.db")) == []
+
+
+async def test_codex_http_report_weights_response_time_and_exposes_missing_samples(store, monkeypatch):
+    """300 output / 12 response seconds = 25 TPS, not mean(50, 20)=35."""
+    from fastapi import FastAPI
+    from httpx import ASGITransport, AsyncClient
+
+    from server.config import settings
+    from server.deps import operator_user
+    from server.routers.monitor import router
+
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[operator_user] = lambda: None
+    monkeypatch.setattr(settings, "metrics_db_path", store._db_path)
+    now = time.time()
+    for index, (seconds, output, reasoning) in enumerate(((2, 100, 60), (10, 200, 150), (None, 50, 30))):
+        event = Event(kind="codex_response", ts=now - 10 + index, backend="codex",
+                      duration_ms=seconds * 1000 if seconds else None,
+                      detail={"model": "gpt-test", "output_tokens": output, "reasoning_tokens": reasoning,
+                              "native_thread_id": "thread", "native_turn_id": "turn", "response_id": str(index)})
+        store.record(event)
+        store.record(event)  # duplicate delivery must not change throughput or coverage
+    store.record(Event(kind="codex_response", ts=now - 7200, duration_ms=1000,
+                       detail={"model": "old", "output_tokens": 900}))
+    store.record(Event(kind="codex_response", ts=now - 1, duration_ms=0,
+                       detail={"model": "missing", "output_tokens": 25}))
+    store.record(Event(kind="codex_turn_latency", ts=now, duration_ms=2000,
+                       detail={"model": "gpt-test", "native_thread_id": "thread", "native_turn_id": "turn"}))
+    await store.drain()
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/api/monitor/codex?window=1h")
+        assert response.status_code == 200, response.text
+        rows = {row["model"]: row for row in response.json()["rows"]}
+        measured = rows["gpt-test"]
+        assert measured["weighted_tps"] == 25
+        assert measured["latest_tps"] == 20
+        assert measured["latest_at"] == now - 9
+        assert measured["responses"] == 3 and measured["timed_responses"] == 2
+        assert measured["coverage_pct"] == 66.7
+        assert measured["output_tokens"] == 350 and measured["reasoning_tokens"] == 240
+        assert rows["missing"]["weighted_tps"] is None
+        assert "old" not in rows
+        assert measured["avg_turn_ttft_ms"] == 2000
+        detail = await client.get("/api/monitor/codex_turns?window=1h")
+        assert detail.status_code == 200
+        turn = next(row for row in detail.json()["rows"] if row["model"] == "gpt-test")
+        assert turn["weighted_tps"] == 25
+        assert turn["responses"] == 3 and turn["output_tokens"] == 350
+        overview = (await client.get("/api/monitor/overview?window=1h")).json()
+        assert overview["codex"] == response.json()["rows"]

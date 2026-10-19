@@ -95,4 +95,19 @@ test("create a Codex session via the UI and get a real response @llm", async ({
     .textContent();
   expect((text || "").toUpperCase()).toContain("PONG-CODEX");
   await expect(page.locator(".result-badge")).toBeVisible({ timeout: 90_000 });
+
+  // The same ordinary turn supplies Monitor; no benchmark request is sent.
+  let model = "";
+  await expect.poll(async () => {
+    const report = await request.get(`${API}/monitor/codex_turns?window=1h`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    const rows = (await report.json()).rows as { session_id: string; model: string; weighted_tps: number | null }[];
+    const sample = rows.find((row) => row.session_id === sess.id);
+    model = sample?.model ?? "";
+    return sample?.weighted_tps ?? 0;
+  }, { timeout: 15_000 }).toBeGreaterThan(0);
+  await page.locator("button.btn-manage-monitor").click();
+  await expect(page.getByRole("row").filter({ has: page.getByRole("cell", { name: model, exact: true }) }).first())
+    .toContainText("tok/s");
 });

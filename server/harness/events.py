@@ -1,9 +1,10 @@
 """Backend-neutral DTOs + errors for the harness layer.
 
-`HarnessEvent` is the normalized event every harness run emits (the
-vocabulary `session_manager` broadcasts on WS). `HarnessCredential` is a
-resolved credential ready for a profile to apply at spawn — in one of two
-shapes selected by the profile's `credential_style`.
+`HarnessEvent` is the normalized event every harness run emits. The session
+manager consumes this vocabulary; model_measurement is internal metadata,
+never a transcript or WebSocket message. `HarnessCredential` is a resolved
+credential ready for a profile to apply at spawn, in one of two shapes selected
+by the profile's `credential_style`.
 """
 
 from __future__ import annotations

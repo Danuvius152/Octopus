@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { IconActivity, IconRefresh } from "@tabler/icons-react";
 import { useSessionStore } from "../stores/sessionStore";
 import { PageHeader } from "./PageHeader";
@@ -15,6 +15,8 @@ type Overview = {
   turns: Row[];
   errors: Row[];
   resources: Row[];
+  codex?: Row[];
+  codex_turns?: Row[];
 };
 
 /** Column labels the raw SQL aliases do not read well as. */
@@ -29,6 +31,13 @@ const HEADINGS: Record<string, string> = {
   last_seen: "last seen",
   error_code: "error",
   installation: "connector",
+  weighted_tps: "weighted TPS",
+  latest_tps: "last measured TPS",
+  latest_at: "last measured at",
+  coverage_pct: "timing coverage",
+  avg_turn_ttft_ms: "avg turn TTFT",
+  timed_responses: "timed responses",
+  status: "measurement status",
 };
 
 function heading(key: string): string {
@@ -37,7 +46,9 @@ function heading(key: string): string {
 
 function cell(key: string, value: string | number | null): string {
   if (value === null || value === undefined) return "—";
-  if (key === "last_seen" && typeof value === "number") {
+  if (key.endsWith("_tps") && typeof value === "number") return `${value.toFixed(2)} tok/s`;
+  if (key === "coverage_pct" && typeof value === "number") return `${value.toFixed(1)}%`;
+  if ((key === "last_seen" || key === "latest_at") && typeof value === "number") {
     return new Date(value * 1000).toLocaleString([], {
       month: "short",
       day: "numeric",
@@ -110,35 +121,55 @@ function Table({ title, rows }: { title: string; rows: Row[] }) {
 export function MonitorPage({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
   const token = useSessionStore((s) => s.token);
   const [window_, setWindow] = useState<Window>("24h");
-  const [data, setData] = useState<Overview | null>(null);
+  const [snapshot, setSnapshot] = useState<{ token: string; window: Window; data: Overview } | null>(null);
+  const data = snapshot?.token === token && snapshot.window === window_ ? snapshot.data : null;
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await fetch(`${API}/api/monitor/overview?window=${window_}`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (!res.ok) {
-        // 503 is the honest "no metrics file yet" case, not a failure.
-        const body = await res.json().catch(() => ({}));
-        setError(body.detail ?? `Request failed (${res.status})`);
-        setData(null);
-        return;
-      }
-      setData((await res.json()) as Overview);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setLoading(false);
-    }
-  }, [token, window_]);
+  const [refresh, setRefresh] = useState(0);
 
   useEffect(() => {
+    let disposed = false;
+    let inFlight = false;
+    const controller = new AbortController();
+    async function load() {
+      if (disposed || inFlight || document.visibilityState === "hidden") return;
+      inFlight = true;
+      setLoading(true);
+      try {
+        const res = await fetch(`${API}/api/monitor/overview?window=${window_}`, {
+          headers: { Authorization: `Bearer ${token}` }, signal: controller.signal,
+        });
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          if (!disposed) {
+            setError(body.detail ?? `Request failed (${res.status})`);
+            if (res.status === 401 || res.status === 403) setSnapshot(null);
+          }
+          return;
+        }
+        const next = await res.json() as Overview;
+        if (!disposed) {
+          setSnapshot({ token, window: window_, data: next });
+          setError(null);
+        }
+      } catch (e) {
+        if (!disposed) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        inFlight = false;
+        if (!disposed) setLoading(false);
+      }
+    }
+    const onVisibility = () => { if (document.visibilityState !== "hidden") void load(); };
     void load();
-  }, [load]);
+    const timer = globalThis.setInterval(() => { void load(); }, 5000);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      disposed = true;
+      controller.abort();
+      globalThis.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, [token, window_, refresh]);
 
   const turnCount = data?.counts.find((c) => c.kind === "turn")?.n ?? 0;
 
@@ -164,7 +195,7 @@ export function MonitorPage({ onToggleSidebar }: { onToggleSidebar?: () => void 
               </button>
             ))}
             <button
-              onClick={() => void load()}
+              onClick={() => setRefresh((value) => value + 1)}
               aria-label="Refresh"
               className="rounded p-1 text-gray-600 hover:bg-gray-100"
             >
@@ -184,6 +215,21 @@ export function MonitorPage({ onToggleSidebar }: { onToggleSidebar?: () => void 
         {loading && !data && <p className="text-sm text-gray-500">Loading…</p>}
         {data && (
           <>
+            <Table title="Codex effective output TPS" rows={(data.codex ?? []).map((row) => ({
+              ...row,
+              status: Number(row.timed_responses) === 0 ? "Missing timing"
+                : Number(row.timed_responses) < Number(row.responses) ? "Partial timing" : "Measured",
+            }))} />
+            <p className="mb-4 text-xs text-gray-500">
+              Includes reasoning. Output tokens ÷ client response time, including first-token wait;
+              excludes tool execution, background waits and user pauses. Last completed measurements,
+              held during tools and waits; refreshes every 5s while visible. Coverage is timed responses
+              ÷ observed usage records. TTFT is per turn. Different tasks and settings affect comparisons.
+            </p>
+            <details className="mb-6">
+              <summary className="cursor-pointer text-sm text-gray-600">Recent Codex turns</summary>
+              <Table title="Recent logical requests (up to 20, within window)" rows={data.codex_turns ?? []} />
+            </details>
             <Table title="activity" rows={data.counts} />
             <Table title="turns" rows={data.turns} />
             <Table title="top errors" rows={data.errors} />

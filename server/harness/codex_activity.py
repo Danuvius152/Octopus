@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
+from .codex_metrics import CodexResponseMetrics
 from .events import HarnessEvent, SubagentUpdate
 
 logger = logging.getLogger(__name__)
@@ -94,6 +95,7 @@ class CodexActivityObserver:
         self._observed: dict[tuple[str, str], str] = {}
         self._stderr_continuation = False
         self.matched_records = 0
+        self._metrics: CodexResponseMetrics | None = None
 
     def set_event_handler(self, handler: Callable[[list[HarnessEvent]], None]) -> None:
         """Attach the current run's metadata-only normalized observation sink."""
@@ -441,6 +443,8 @@ class CodexActivityObserver:
         return min(self._monotonic(), self._started_monotonic + completed / 1000 - self._started)
 
     def _discard_large_line(self, prefix: bytes) -> None:
+        if self._metrics is not None:
+            self._metrics.missing_boundary()
         envelope = _METADATA.match(prefix)
         if (envelope is not None and envelope["type"] == b"event_msg"
                 and _ITEM_COMPLETION.match(prefix[envelope.end():])):
@@ -477,9 +481,14 @@ class CodexActivityObserver:
                         self._discard_large_line(line[:512])
                         continue
                     obj = self._decode_metadata(line)
+                    if obj is not None:
+                        self._record_header(obj)
+                    if self.identity_confirmed and self._native_turn == self._turn:
+                        if self._metrics is None:
+                            self._metrics = CodexResponseMetrics(self._thread, self._turn, self._started)
+                        events.extend(self._metrics.feed_line(line, self._wall()))
                     if obj is None:
                         continue
-                    self._record_header(obj)
                     tick = self._completion(obj)
                     if tick is not None:
                         ticks.append(tick)

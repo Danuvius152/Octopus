@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +81,48 @@ async def test_real_native_metadata_observes_spawn_and_two_successful_rounds(tmp
         assert ticks == []
     finally:
         await observer.close()
+
+
+@pytest.mark.asyncio
+async def test_response_metrics_exclude_long_tool_execution_even_when_usage_arrives_late(native_source):
+    path, observer, events, ticks, clock, _records = native_source
+    started = clock["wall"] - 30
+
+    def row(seconds, kind, payload):
+        return {"timestamp": datetime.fromtimestamp(started + seconds, UTC).isoformat(),
+                "type": kind, "payload": payload}
+
+    def usage(seconds, output, reasoning):
+        return row(seconds, "event_msg", {"type": "token_count", "info": {
+            "last_token_usage": {"input_tokens": 10000, "output_tokens": output,
+                                 "reasoning_output_tokens": reasoning},
+            "total_token_usage": {"output_tokens": output},
+        }})
+
+    append_rows(path, [
+        row(0, "event_msg", {"type": "task_started", "turn_id": TURN}),
+        row(0, "turn_context", {"turn_id": TURN, "model": "gpt-test", "effort": "high"}),
+        row(1, "response_item", {"type": "message", "role": "user", "content": "PRIVATE_PROMPT"}),
+        row(3, "response_item", {"type": "reasoning", "text": "PRIVATE_REASONING"}),
+        row(5, "response_item", {"type": "function_call", "name": "shell", "arguments": "PRIVATE_ARGUMENTS"}),
+        row(185, "response_item", {"type": "function_call_output", "output": "PRIVATE_TOOL_OUTPUT"}),
+        usage(185.001, 100, 40),
+        row(189, "response_item", {"type": "message", "role": "assistant", "content": "PRIVATE_ANSWER"}),
+        usage(189.001, 80, 20),
+        row(190, "event_msg", {"type": "task_complete", "turn_id": TURN,
+                              "duration_ms": 190000, "time_to_first_token_ms": 2000}),
+    ])
+    clock.update(wall=started + 200, mono=210.0)
+    await observer.poll_once()
+    measurements = [event for event in events if event.type == "model_measurement"]
+    responses = [event for event in measurements if event.raw["kind"] == "codex_response"]
+    assert len(responses) == 2
+    assert [event.duration_ms for event in responses] == [4000, 4000]
+    assert [event.raw["output_tokens"] for event in responses] == [100, 80]
+    assert [event.raw["reasoning_tokens"] for event in responses] == [40, 20]
+    assert all(event.raw["model"] == "gpt-test" for event in measurements)
+    assert all("PRIVATE_" not in repr(event.raw) for event in measurements)
+    assert ticks == []
 
 
 @pytest.mark.asyncio
@@ -235,3 +277,110 @@ async def test_conflicting_native_spawn_identity_does_not_claim_another_child(tm
         assert CHILD not in caplog.text and str(path) not in caplog.text
     finally:
         await observer.close()
+
+
+@pytest.mark.asyncio
+async def test_modern_usage_before_items_and_legacy_duplicate_are_one_response(native_source):
+    path, observer, events, _ticks, clock, _records = native_source
+    started = clock["wall"] - 30
+
+    def row(seconds, kind, payload):
+        return {"timestamp": datetime.fromtimestamp(started + seconds, UTC).isoformat(),
+                "type": kind, "payload": payload}
+
+    counts = {"input_tokens": 3000, "output_tokens": 60, "reasoning_output_tokens": 40}
+    append_rows(path, [
+        row(0, "event_msg", {"type": "task_started", "turn_id": TURN}),
+        row(0, "turn_context", {"turn_id": TURN, "model": "gpt-modern"}),
+        row(1, "response_item", {"type": "message", "role": "user"}),
+        row(4, "token_usage_record", {"response_id": "response-1", "usage": counts}),
+        row(4.001, "response_item", {"type": "reasoning"}),
+        row(5, "response_item", {"type": "function_call"}),
+        row(6, "event_msg", {"type": "token_count", "info": {"last_token_usage": counts}}),
+        row(90, "response_item", {"type": "function_call_output"}),
+        row(92, "token_usage_record", {"response_id": "response-2", "usage": counts}),
+        row(94, "response_item", {"type": "message", "role": "assistant"}),
+        row(95, "token_usage_record", {"response_id": "response-2", "usage": counts}),
+        row(95, "event_msg", {"type": "task_complete", "turn_id": TURN}),
+    ])
+    clock.update(wall=started + 100, mono=110.0)
+    await observer.drain_observations()
+    responses = [event for event in events if event.raw.get("kind") == "codex_response"]
+    assert [event.raw["response_id"] for event in responses] == ["response-1", "response-2"]
+    assert [event.duration_ms for event in responses] == [4000, 4000]
+    assert [event.raw["output_tokens"] for event in responses] == [60, 60]
+
+
+@pytest.mark.asyncio
+async def test_legacy_snapshot_then_modern_carrier_do_not_create_phantom_response(native_source):
+    path, observer, events, _ticks, clock, _records = native_source
+    started = clock["wall"] - 30
+
+    def row(seconds, kind, payload):
+        return {"timestamp": datetime.fromtimestamp(started + seconds, UTC).isoformat(),
+                "type": kind, "payload": payload}
+
+    counts = {"output_tokens": 60, "reasoning_output_tokens": 40}
+    append_rows(path, [
+        row(0, "event_msg", {"type": "task_started", "turn_id": TURN}),
+        row(1, "response_item", {"type": "message", "role": "user"}),
+        row(5, "response_item", {"type": "message", "role": "assistant"}),
+        row(5.001, "event_msg", {"type": "token_count", "info": {"last_token_usage": counts}}),
+        row(5.002, "token_usage_record", {"response_id": "response-1", "usage": counts}),
+        row(6, "event_msg", {"type": "task_complete", "turn_id": TURN}),
+    ])
+    await observer.drain_observations()
+    responses = [event for event in events if event.raw.get("kind") == "codex_response"]
+    assert len(responses) == 1
+    assert responses[0].duration_ms == 4000
+
+
+@pytest.mark.asyncio
+async def test_usage_between_reasoning_and_answer_waits_for_last_generated_item(native_source):
+    path, observer, events, _ticks, clock, _records = native_source
+    started = clock["wall"] - 30
+
+    def row(seconds, kind, payload):
+        return {"timestamp": datetime.fromtimestamp(started + seconds, UTC).isoformat(),
+                "type": kind, "payload": payload}
+
+    append_rows(path, [
+        row(0, "event_msg", {"type": "task_started", "turn_id": TURN}),
+        row(1, "response_item", {"type": "message", "role": "user"}),
+        row(2, "response_item", {"type": "reasoning"}),
+        row(3, "token_usage_record", {"response_id": "response-middle", "usage": {"output_tokens": 60}}),
+        row(5, "response_item", {"type": "message", "role": "assistant"}),
+        row(6, "event_msg", {"type": "task_complete", "turn_id": TURN}),
+    ])
+    await observer.drain_observations()
+    responses = [event for event in events if event.raw.get("kind") == "codex_response"]
+    assert len(responses) == 1
+    assert responses[0].duration_ms == 4000
+    assert responses[0].raw["completed_at"] == started + 5
+
+
+@pytest.mark.asyncio
+async def test_legacy_snapshot_after_tool_result_cannot_invalidate_next_response(native_source):
+    path, observer, events, _ticks, clock, _records = native_source
+    started = clock["wall"] - 30
+
+    def row(seconds, kind, payload):
+        return {"timestamp": datetime.fromtimestamp(started + seconds, UTC).isoformat(),
+                "type": kind, "payload": payload}
+
+    def usage(seconds, output):
+        return row(seconds, "event_msg", {"type": "token_count", "info": {
+            "last_token_usage": {"output_tokens": output}}})
+
+    append_rows(path, [
+        row(0, "event_msg", {"type": "task_started", "turn_id": TURN}),
+        row(1, "response_item", {"type": "message", "role": "user"}),
+        row(5, "response_item", {"type": "function_call"}), usage(6, 60),
+        row(90, "response_item", {"type": "function_call_output"}), usage(90.001, 60),
+        row(94, "response_item", {"type": "message", "role": "assistant"}), usage(94.001, 80),
+        row(95, "event_msg", {"type": "task_complete", "turn_id": TURN}),
+    ])
+    clock.update(wall=started + 100, mono=110.0)
+    await observer.drain_observations()
+    responses = [event for event in events if event.raw.get("kind") == "codex_response"]
+    assert [(event.raw["output_tokens"], event.duration_ms) for event in responses] == [(60, 4000), (80, 4000)]

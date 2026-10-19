@@ -53,6 +53,13 @@ CREATE TABLE IF NOT EXISTS events (
 CREATE INDEX IF NOT EXISTS idx_events_kind_ts ON events(kind, ts);
 CREATE INDEX IF NOT EXISTS idx_events_ts ON events(ts);
 CREATE INDEX IF NOT EXISTS idx_events_session ON events(session_id, ts);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_response_identity ON events(
+    kind, json_extract(detail, '$.native_thread_id'),
+    json_extract(detail, '$.native_turn_id'), json_extract(detail, '$.response_id')
+) WHERE kind = 'codex_response';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_turn_latency_identity ON events(
+    kind, json_extract(detail, '$.native_thread_id'), json_extract(detail, '$.native_turn_id')
+) WHERE kind = 'codex_turn_latency';
 
 CREATE TABLE IF NOT EXISTS samples (
     ts     REAL NOT NULL,
@@ -174,7 +181,7 @@ class MetricsStore:
         try:
             if events:
                 await self._conn.executemany(
-                    "INSERT INTO events (ts, kind, session_id, agent_id, backend, "
+                    "INSERT OR IGNORE INTO events (ts, kind, session_id, agent_id, backend, "
                     "duration_ms, ok, error_code, detail) VALUES (?,?,?,?,?,?,?,?,?)",
                     [
                         (e.ts, e.kind, e.session_id, e.agent_id, e.backend,
