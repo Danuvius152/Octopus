@@ -3,7 +3,8 @@ import { useCallback, useEffect, useRef } from "react";
 import { newSubmissionId, type SubmissionReply } from "../lib/submission";
 import {
   addSessionInfo,
-  applySessionSnapshot,
+  loadSessionSnapshot,
+  loadBgTaskSnapshot,
   hydrateSession,
   sessionInfoFromDetail,
 } from "../lib/hydrateSession";
@@ -209,7 +210,6 @@ export function handleWsMessage(data: Record<string, unknown>) {
         tool_input: data.tool_input as Record<string, unknown>,
         tool_use_id: data.tool_use_id as string,
       });
-      updateSessionStatus(sessionId, "waiting_approval");
       break;
 
     case "question_request": {
@@ -612,7 +612,7 @@ export function useWebSocket() {
 
         // Re-fetch state after reconnect
         const snapshotStart = getState();
-        const { activeSessionId, token: t, dispatchGeneration } = snapshotStart;
+        const { activeSessionId, token: t } = snapshotStart;
         if (t) {
           fetch(`${window.location.origin}/api/sessions`, {
             headers: { Authorization: `Bearer ${t}` },
@@ -631,28 +631,11 @@ export function useWebSocket() {
             .catch(() => {});
 
           if (activeSessionId) {
-            fetch(
-              `${window.location.origin}/api/sessions/${activeSessionId}`,
-              { headers: { Authorization: `Bearer ${t}` } }
-            )
-              .then((r) => (r.ok ? r.json() : null))
-              .then((data) => {
-                if (!data) return;
-                applySessionSnapshot(activeSessionId, data, dispatchGeneration, snapshotStart.subagents[activeSessionId] || {});
-              })
-              .catch(() => {});
+            loadSessionSnapshot(activeSessionId, snapshotStart).catch(() => {});
             // Bg tasks: same reload, independent endpoint. Chat history
             // contains bg_run tool_use blocks whose chips need the bg
             // task records to render correctly after a reconnect.
-            fetch(
-              `${window.location.origin}/api/sessions/${activeSessionId}/bg-tasks`,
-              { headers: { Authorization: `Bearer ${t}` } }
-            )
-              .then((r) => (r.ok ? r.json() : null))
-              .then((tasks) => {
-                if (tasks) getState().setBgTasks(activeSessionId, tasks, snapshotStart.bgTasks[activeSessionId] || []);
-              })
-              .catch(() => {});
+            loadBgTaskSnapshot(activeSessionId, snapshotStart).catch(() => {});
             fetch(
               `${window.location.origin}/api/sessions/${activeSessionId}/delegations`,
               { headers: { Authorization: `Bearer ${t}` } }
@@ -847,35 +830,6 @@ export function useWebSocket() {
     [sendCommand]
   );
 
-  const approveTool = useCallback(
-    (sessionId: string, toolUseId: string) => {
-      const identity = [...(getState().messages[sessionId] || [])].reverse().find((m) => m.tool_use_id === toolUseId)?.runtime_metadata;
-      return sendCommand({
-        type: "approve_tool",
-        session_id: sessionId,
-        tool_use_id: toolUseId,
-        request_id: identity?.request_id ?? null, attempt_id: identity?.attempt_id ?? null,
-        tool_call_id: identity?.tool_call_id ?? null,
-      });
-    },
-    [sendCommand]
-  );
-
-  const denyTool = useCallback(
-    (sessionId: string, toolUseId: string, reason?: string) => {
-      const identity = [...(getState().messages[sessionId] || [])].reverse().find((m) => m.tool_use_id === toolUseId)?.runtime_metadata;
-      return sendCommand({
-        type: "deny_tool",
-        session_id: sessionId,
-        tool_use_id: toolUseId,
-        reason: reason || "",
-        request_id: identity?.request_id ?? null, attempt_id: identity?.attempt_id ?? null,
-        tool_call_id: identity?.tool_call_id ?? null,
-      });
-    },
-    [sendCommand]
-  );
-
   const answerQuestion = useCallback(
     (
       sessionId: string,
@@ -894,5 +848,5 @@ export function useWebSocket() {
     [sendCommand]
   );
 
-  return { send, sendMessage, interrupt, approveTool, denyTool, answerQuestion };
+  return { send, sendMessage, interrupt, answerQuestion };
 }

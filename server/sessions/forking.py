@@ -269,12 +269,6 @@ class ForkingMixin(SessionManagerBase):
                     reason="fork_blocked_parent_turn_active",
                     status_code=409,
                 )
-            if parent._pending_approvals:
-                raise ForkError(
-                    "Parent session has a pending tool approval",
-                    reason="fork_blocked_parent_turn_active",
-                    status_code=409,
-                )
             if delegation_manager.has_active_delegation_for_parent(parent.id):
                 raise ForkError(
                     "Parent session has an active delegation",
@@ -554,9 +548,6 @@ class ForkingMixin(SessionManagerBase):
                                 reason="fork_blocked_parent_turn_active", status_code=409)
             if parent._pending_queue:
                 raise ForkError("Parent session has a queued message",
-                                reason="fork_blocked_parent_turn_active", status_code=409)
-            if parent._pending_approvals:
-                raise ForkError("Parent session has a pending tool approval",
                                 reason="fork_blocked_parent_turn_active", status_code=409)
             if delegation_manager.has_active_delegation_for_parent(parent.id):
                 raise ForkError("Parent session has an active delegation",

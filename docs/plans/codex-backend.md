@@ -62,8 +62,8 @@ anything still marked unverified.
   `codex login --with-api-key` fallback; we don't need it.)
 - **A per-tool approval UI for Codex.** We run Codex headless with
   approvals/sandbox bypassed (§5.6), so no approval round-trip ever
-  reaches the frontend and `ToolApproval` simply never fires for Codex —
-  zero UI change.
+  reaches the frontend. Legacy approval requests are displayed only as static
+  history; human confirmation uses the separate `ask` tool.
 - **Codex's `features.memories` / cloud features.** VM0 enables
   `-c features.memories=true`; Octopus has its own memory story and
   won't opt in for v1.
@@ -323,8 +323,8 @@ host login). OAuth start currently hardcodes `backend: "claude-code"`
 
 `bun run generate:contracts` after the server schema lands (adds
 `SessionInfo.backend`, `CreateSessionRequest.backend`, the resume-field
-rename). `ToolApproval.tsx` / `ChatView.tsx` need no backend branch
-(§5.6).
+rename). `ChatView.tsx` needs no backend branch (§5.6); `MessageBubble.tsx`
+keeps historical approval requests readable without Allow/Deny actions.
 
 ---
 

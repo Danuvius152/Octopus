@@ -51,7 +51,7 @@ it("shows pause independently while a correction runs, including an empty pendin
     generation: "service-ui", revision: 1, paused: true, active_request_id: "correction", items: [],
   });
   const sendMessage = vi.fn();
-  render(<ChatView sendMessage={sendMessage} interrupt={vi.fn()} approveTool={vi.fn()} denyTool={vi.fn()}
+  render(<ChatView sendMessage={sendMessage} interrupt={vi.fn()}
     answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />);
   expect(screen.getByText("running")).toBeTruthy();
   expect(screen.getByText("Paused · 0 pending")).toBeTruthy();
@@ -76,7 +76,7 @@ it("keeps the queue paused and reports a failed resume", async () => {
 function setup(send?: Parameters<typeof ChatView>[0]["sendMessage"]) {
   const sendMessage = vi.fn(send);
   render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}><ChatView sendMessage={sendMessage} interrupt={vi.fn()}
-    approveTool={vi.fn()} denyTool={vi.fn()} answerQuestion={vi.fn()}
+    answerQuestion={vi.fn()}
     connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} /></VirtuosoMockContext.Provider>);
   return {
     sendMessage,
@@ -111,8 +111,8 @@ it.each(["without-randomUUID", "without-crypto"])("submits and restores rejected
   vi.stubGlobal("crypto", mode === "without-crypto" ? undefined : { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) });
   try {
     const sendMessage = vi.fn(async () => ({ accepted: false, message: "Session not found" }));
-    render(<ChatView sendMessage={sendMessage} interrupt={vi.fn()} approveTool={vi.fn()}
-      denyTool={vi.fn()} answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />);
+    render(<ChatView sendMessage={sendMessage} interrupt={vi.fn()}
+      answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />);
     fireEvent.change(screen.getByRole("textbox"), { target: { value: "retained draft" } });
     await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send message" })));
     expect(sendMessage).toHaveBeenCalledOnce();
@@ -126,8 +126,8 @@ it.each(["without-randomUUID", "without-crypto"])("submits and restores rejected
 it("keeps a rejected Wiki draft and protects subsequent editing during restoration", async () => {
   let finish!: (reply: { accepted: boolean; message: string }) => void;
   const sendMessage = vi.fn(() => new Promise<{ accepted: boolean; message: string }>((resolve) => { finish = resolve; }));
-  render(<ChatView sendMessage={sendMessage} interrupt={vi.fn()} approveTool={vi.fn()}
-    denyTool={vi.fn()} answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />);
+  render(<ChatView sendMessage={sendMessage} interrupt={vi.fn()}
+    answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />);
   const input = screen.getByRole("textbox");
   fireEvent.change(input, { target: { value: "  /wiki maintain Library/a.md  " } });
   fireEvent.click(screen.getByRole("button", { name: "Send message" }));

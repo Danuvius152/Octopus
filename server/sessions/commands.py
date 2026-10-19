@@ -56,13 +56,8 @@ async def process_command(manager: SessionManager, data: dict[str, Any], user_id
                     ok = await manager.answer_question(sid, pending.question_id, answers)
                     result = {**response, "accepted": True} if ok else stale
         elif operation in {"approve_tool", "deny_tool"}:
-            approval = session._pending_approvals.get(data.get("tool_use_id")) if isinstance(data.get("tool_use_id"), str) else None
-            if (approval is None or not approval.tool_call_id or data.get("tool_call_id") != approval.tool_call_id
-                    or data["request_id"] != approval.request_id or data["attempt_id"] != approval.attempt_id):
-                result = stale
-            else:
-                ok = await manager.approve_tool(sid, approval.tool_use_id) if operation == "approve_tool" else await manager.deny_tool(sid, approval.tool_use_id, str(data.get("reason") or ""))
-                result = {**response, "accepted": True} if ok else stale
+            # Retain receipts and replay/conflict semantics for old clients.
+            result = stale
         else:
             result = {**response, "code": "invalid_command", "message": "Unsupported command"}
         session._command_receipts[command_id] = (digest, result)

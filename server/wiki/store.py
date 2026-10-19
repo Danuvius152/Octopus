@@ -671,7 +671,7 @@ class WikiStore:
         assert row is not None
         managed = db.execute("SELECT metadata FROM managed_notes WHERE path=?", (relative,)).fetchone()
         catalog.index(db, row, metadata | (json.loads(managed[0]) if managed else {}))
-        search_index.index(db, row, metadata)
+        search_index.index(db, row, metadata, parsed=parsed)
         from . import materials
 
         materials.index(db, row, raw)

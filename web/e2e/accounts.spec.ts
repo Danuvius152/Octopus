@@ -229,30 +229,76 @@ test.describe("Accounts", () => {
     ).not.toContainText("disabled");
   });
 
-  test("signing out gives the bearer back", async ({ page, request }) => {
-    await signIn(page, OWNER);
-    const bearer = await page.evaluate(
-      () => localStorage.getItem("octopus_token") ?? ""
-    );
-    expect(bearer.length).toBeGreaterThan(0);
-    expect(
-      (await request.get(`${API}/auth/identity`, {
-        headers: { Authorization: `Bearer ${bearer}` },
-      })).status()
-    ).toBe(200);
-
-    await page.locator("button.btn-account").click();
-    await page.locator(".menu-sign-out").click();
-    await expect(page.locator("#username")).toBeVisible();
-
-    // The token the browser was holding is no longer one the server honours.
-    await expect
-      .poll(async () =>
+  for (const entry of ["sidebar", "settings"] as const) {
+    test(`signing out from ${entry} gives the bearer back after logout completes`, async ({ page, request }) => {
+      await signIn(page, OWNER);
+      const bearer = await page.evaluate(
+        () => localStorage.getItem("octopus_token") ?? ""
+      );
+      expect(bearer.length).toBeGreaterThan(0);
+      expect(
         (await request.get(`${API}/auth/identity`, {
           headers: { Authorization: `Bearer ${bearer}` },
         })).status()
-      )
-      .toBe(401);
+      ).toBe(200);
+
+      const otherBearer = (await (await request.post(`${API}/auth/login`, { data: OWNER })).json()).token as string;
+      let release!: () => void;
+      const logoutGate = new Promise<void>((resolve) => { release = resolve; });
+      let received = false;
+      await page.route("**/api/auth/logout", async (route) => {
+        expect(route.request().headers().authorization).toBe(`Bearer ${bearer}`);
+        received = true;
+        await logoutGate;
+        await route.continue();
+      });
+
+      await page.locator("button.btn-account").click();
+      if (entry === "settings") {
+        await page.locator(".menu-settings").click();
+        await page.getByRole("tab", { name: "Account", exact: true }).click();
+        await page.locator(".settings-dialog .btn-signout").click();
+        await expect(page.locator(".settings-dialog")).toHaveCount(0);
+      } else {
+        await page.locator(".menu-sign-out").click();
+      }
+      await expect.poll(() => received).toBe(true);
+      expect(await page.evaluate(() => localStorage.getItem("octopus_token"))).toBe(bearer);
+      await expect(page.locator(".agent-list-header")).toBeVisible();
+      release();
+      await expect(page.locator("#username")).toBeVisible();
+
+      // The token the browser was holding is no longer one the server honours.
+      await expect
+        .poll(async () =>
+          (await request.get(`${API}/auth/identity`, {
+            headers: { Authorization: `Bearer ${bearer}` },
+          })).status()
+        )
+        .toBe(401);
+      expect((await request.get(`${API}/auth/identity`, {
+        headers: { Authorization: `Bearer ${otherBearer}` },
+      })).status()).toBe(200);
+      await request.post(`${API}/auth/logout`, { headers: { Authorization: `Bearer ${otherBearer}` } });
+    });
+  }
+
+  test("settings still signs out locally when logout cannot reach the server", async ({ page, request }) => {
+    await signIn(page, OWNER);
+    const bearer = await page.evaluate(() => localStorage.getItem("octopus_token") ?? "");
+    await page.route("**/api/auth/logout", (route) => route.abort("failed"));
+    await page.locator("button.btn-account").click();
+    await page.locator(".menu-settings").click();
+    await page.getByRole("tab", { name: "Account", exact: true }).click();
+    await page.locator(".settings-dialog .btn-signout").click();
+    await expect(page.locator("#username")).toBeVisible();
+    expect(await page.evaluate(() => localStorage.getItem("octopus_token"))).toBe("");
+    // The synthetic network failure prevented revocation; clean up this
+    // test-owned bearer through the independent request client.
+    expect((await request.get(`${API}/auth/identity`, {
+      headers: { Authorization: `Bearer ${bearer}` },
+    })).status()).toBe(200);
+    await request.post(`${API}/auth/logout`, { headers: { Authorization: `Bearer ${bearer}` } });
   });
 
   test("same-page reauthentication clears the previous account's transcript and draft", async ({ page, request }) => {

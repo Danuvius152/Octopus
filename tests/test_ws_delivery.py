@@ -130,8 +130,8 @@ async def test_control_receipts_bind_stop_and_reject_a_new_attempt(runtime, monk
         assert interrupt.await_count == 1
 
 
-async def test_idle_stop_and_specific_question_tool_commands_reject_stale_scope(runtime, tmp_path):
-    from server.sessions.base import PendingApproval, PendingQuestion
+async def test_idle_stop_and_specific_question_commands_reject_stale_scope(runtime, tmp_path):
+    from server.sessions.base import PendingQuestion
 
     manager, db = runtime
     agent = await db.get_system_agent()
@@ -155,13 +155,49 @@ async def test_idle_stop_and_specific_question_tool_commands_reject_stale_scope(
         assert not (await send("answer_question", request_id="request", attempt_id="old-attempt", question_id="question", answers=answers))["accepted"]
         assert session._pending_questions["question"] is pending
         assert (await send("answer_question", request_id="request", attempt_id="new-attempt", question_id="question", answers=answers))["accepted"]
-        future = asyncio.get_running_loop().create_future()
-        session._pending_approvals["tool"] = PendingApproval("Write", {}, "tool", future,
-            request_id="request", attempt_id="new-attempt", tool_call_id="exact-call")
-        assert not (await send("approve_tool", request_id="request", attempt_id="new-attempt", tool_use_id="tool", tool_call_id="old-call"))["accepted"]
-        assert not future.done()
-        assert (await send("deny_tool", request_id="request", attempt_id="new-attempt", tool_use_id="tool", tool_call_id="exact-call", reason="declined"))["accepted"]
-        assert future.done()
+
+
+@pytest.mark.parametrize("operation", ["approve_tool", "deny_tool"])
+async def test_legacy_approval_commands_reject_and_replay_receipts(runtime, tmp_path, operation):
+    from server.sessions.base import QueuedPrompt
+
+    manager, db = runtime
+    agent = await db.get_system_agent()
+    session = await manager.create_session(agent["id"], "legacy approval", str(tmp_path), backend="codex")
+    async with connection(manager, settings.auth_token) as client:
+        async def send(payload, kind):
+            await client[0].put({"type": "websocket.receive", "text": json.dumps(payload)})
+            return await receipt_frame(client[1], kind)
+
+        legacy = {"type": operation, "session_id": session.id, "tool_use_id": "old-tool"}
+        rejection = await send(legacy, "error")
+        assert rejection["message"] == "No pending approval found"
+
+        payload = {**legacy, "client_command_id": "old-command", "request_id": None, "attempt_id": None}
+        first = await send(payload, "command_receipt")
+        assert first["accepted"] is False and first["code"] == "stale_command"
+        session._current_request = QueuedPrompt("later request", [], request_id="later-request")
+        session._question_attempt_id = "later-attempt"
+        assert await send(payload, "command_receipt") == first
+        conflict = await send({**payload, "tool_use_id": "different-tool"}, "command_receipt")
+        assert conflict["accepted"] is False and conflict["code"] == "command_conflict"
+
+
+@pytest.mark.parametrize("operation", ["approve_tool", "deny_tool"])
+async def test_legacy_approval_receipts_reject_foreign_and_missing_sessions(runtime, tmp_path, operation):
+    manager, db = runtime
+    agent = await db.get_system_agent()
+    session = await manager.create_session(agent["id"], "private approval", str(tmp_path), backend="codex")
+    session.user_id = "different-account"
+    async with connection(manager, settings.auth_token) as client:
+        for session_id in (session.id, "missing-session"):
+            await client[0].put({"type": "websocket.receive", "text": json.dumps({
+                "type": operation, "session_id": session_id, "tool_use_id": "old-tool",
+                "client_command_id": "foreign-command", "request_id": None, "attempt_id": None,
+            })})
+            rejection = await receipt_frame(client[1], "command_receipt")
+            assert rejection["accepted"] is False and rejection["code"] == "not_found"
+    assert session._command_receipts == {}
 
 
 @pytest.mark.parametrize("mode", [None, "read", "maintain"])

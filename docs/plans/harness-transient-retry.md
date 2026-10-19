@@ -61,8 +61,8 @@ swallowed the server throttle and stopped the turn instead of retrying.
 ## 4. Retry in the run loop (`session_manager._run_backend`)
 
 The retry slots into the existing post-turn dispatch, BEFORE the
-`saw_result` early-return (a transient failure arrives as an `is_error`
-`result`, so `saw_result` is true) and the Claude premature-exit recovery:
+result-presence early-return (a transient failure arrives as an `is_error`
+`result`, so `attempt.result is not None`) and the Claude premature-exit recovery:
 
 - A turn is *failed* when it produced an `is_error` result/error event, or
   no result at all.

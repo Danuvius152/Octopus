@@ -1,4 +1,4 @@
-"""Questions the model asks the human, and tool-approval decisions.
+"""Questions the model asks the human, with legacy approval compatibility.
 
 One slice of `SessionManager`, which was a single 4,017-line class with 84
 methods (docs/plans/polish-2026-09.md §3 A1). Split by responsibility; the
@@ -434,27 +434,11 @@ class QuestionsMixin(SessionManagerBase):
         return "\n\n".join(lines)
 
     async def approve_tool(self, session_id: str, tool_use_id: str) -> bool:
-        """Legacy SDK-era hook. The CLI-direct backend handles tool
-        permissions internally, so this is effectively a no-op."""
-        session = self.sessions.get(session_id)
-        if not session:
-            return False
-        pending = session._pending_approvals.get(tool_use_id)
-        if not pending or pending.future.done():
-            return False
-        pending.future.set_result(True)
-        return True
+        """Reject legacy approvals; confirmation uses AskUserQuestion."""
+        return False
 
     async def deny_tool(
         self, session_id: str, tool_use_id: str, reason: str = ""
     ) -> bool:
-        """Legacy SDK-era hook. The CLI-direct backend handles tool
-        permissions internally, so this is effectively a no-op."""
-        session = self.sessions.get(session_id)
-        if not session:
-            return False
-        pending = session._pending_approvals.get(tool_use_id)
-        if not pending or pending.future.done():
-            return False
-        pending.future.set_result(False)
-        return True
+        """Reject legacy approvals; confirmation uses AskUserQuestion."""
+        return False

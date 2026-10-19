@@ -11,6 +11,7 @@ from typing import Any
 
 import yaml
 from markdown_it import MarkdownIt
+from markdown_it.token import Token
 
 from .bounded_yaml import compose as compose_metadata
 from .bounded_yaml import load as load_metadata
@@ -38,6 +39,12 @@ class DocumentFormat:
     headings: list[dict] = field(default_factory=list)
     error: str | None = None
     footnotes: list[str] = field(default_factory=list)
+    # Owned by this parse of the current text, never cached or persisted.
+    # Rendering can mutate tokens (notably image.alt); projections must not
+    # treat token attributes as an immutable source representation.
+    tokens: list[Token] = field(default_factory=list, repr=False)
+    env: dict[str, Any] = field(default_factory=dict, repr=False)
+    line_offsets: list[int] = field(default_factory=list, repr=False)
 
     def metadata(self, legacy: dict) -> dict:
         result: dict[str, Any] = {"format_version": VERSION, "body_start": self.body_start, "body_sections": self.sections, "footnote_ids": self.footnotes}
@@ -107,10 +114,10 @@ def parse(text: str) -> DocumentFormat:
         except yaml.YAMLError as exc:
             result.error = f"Invalid or excessive YAML; original retained ({type(exc).__name__})"
     body = text[result.body_start:]
-    offsets = markdown_line_offsets(body, result.body_start)
+    offsets = result.line_offsets = markdown_line_offsets(body, result.body_start)
     boundaries = [(result.body_start, "body", "")]
     active_role, active_heading, active_level = "body", "", 0
-    tokens = _markdown.parse(body)
+    tokens = result.tokens = _markdown.parse(body, result.env)
     for index, token in enumerate(tokens):
         for child in token.children or []:
             if child.type == "text":

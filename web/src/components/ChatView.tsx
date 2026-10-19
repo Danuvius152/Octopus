@@ -38,7 +38,6 @@ import { OctopusLogo } from "./OctopusLogo";
 import { CredentialPicker } from "./CredentialPicker";
 import { PageHeader } from "./PageHeader";
 import { QuestionPrompt, type AnswerPayload } from "./QuestionPrompt";
-import { ToolApproval } from "./ToolApproval";
 import {
   SlashCommandMenu,
   buildRememberPrompt,
@@ -48,7 +47,7 @@ import {
 import { Button } from "./ui/button";
 import { isSessionBusy } from "../lib/deferredFork";
 import { loadOlderMessages } from "../lib/transcript";
-import { applySessionSnapshot } from "../lib/hydrateSession";
+import { loadSessionSnapshot } from "../lib/hydrateSession";
 import type { WikiMessageMode } from "../lib/wikiComposer";
 import { newSubmissionId, type SubmissionReply } from "../lib/submission";
 import { MAX_ATTACHMENTS_PER_MESSAGE, useDraftAttachments, type PendingAttachment } from "../hooks/useDraftAttachments";
@@ -77,8 +76,6 @@ interface Props {
     submissionId?: string
   ) => void | Promise<SubmissionReply>;
   interrupt: (sessionId: string) => void | Promise<SubmissionReply>;
-  approveTool: (sessionId: string, toolUseId: string) => void | Promise<SubmissionReply>;
-  denyTool: (sessionId: string, toolUseId: string) => void | Promise<SubmissionReply>;
   answerQuestion: (
     sessionId: string,
     questionId: string,
@@ -96,8 +93,6 @@ const EMPTY_QUESTIONS: PendingQuestion[] = [];
 export function ChatView({
   sendMessage,
   interrupt,
-  approveTool,
-  denyTool,
   answerQuestion,
   connected,
   onToggleSidebar,
@@ -339,17 +334,6 @@ export function ChatView({
   // gets it rather than each branch of MessageBubble growing its own.
   const renderMessageBody = useCallback(
     (_index: number, msg: Message) => {
-      if (msg.type === "tool_approval_request") {
-        return (
-          <ToolApproval
-            message={msg}
-            onApprove={(id) =>
-              activeSessionId && approveTool(activeSessionId, id)
-            }
-            onDeny={(id) => activeSessionId && denyTool(activeSessionId, id)}
-          />
-        );
-      }
       if (msg.type === "question_request") {
         const pending = pendingQuestions.find(
           (q) => q.question_id === msg.tool_use_id
@@ -400,8 +384,6 @@ export function ChatView({
     },
     [
       activeSessionId,
-      approveTool,
-      denyTool,
       answerQuestion,
       pendingQuestions,
       restoreRejectedInput,
@@ -1285,15 +1267,8 @@ export function ChatView({
     }
     if (fork.agent_id) store.setActiveAgentId(fork.agent_id);
     store.setActiveSessionId(fork.id);
-    const generation = store.dispatchGeneration;
     try {
-      const res = await fetch(`${window.location.origin}/api/sessions/${fork.id}`, {
-        headers: { Authorization: `Bearer ${store.token}` },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        applySessionSnapshot(fork.id, data, generation, store.subagents[fork.id] || {});
-      }
+      await loadSessionSnapshot(fork.id, store);
     } catch {
       /* ignore — the session is selected regardless */
     }
@@ -1325,15 +1300,8 @@ export function ChatView({
     }
     if (fork.agent_id) store.setActiveAgentId(fork.agent_id);
     store.setActiveSessionId(fork.id);
-    const generation = store.dispatchGeneration;
     try {
-      const res = await fetch(`${window.location.origin}/api/sessions/${fork.id}`, {
-        headers: { Authorization: `Bearer ${store.token}` },
-      });
-      if (res.ok) {
-        const data = await res.json();
-        applySessionSnapshot(fork.id, data, generation, store.subagents[fork.id] || {});
-      }
+      await loadSessionSnapshot(fork.id, store);
     } catch {
       /* ignore — the session is selected regardless */
     }

@@ -218,12 +218,10 @@ class QueuedPrompt:
 
 @dataclass
 class PendingApproval:
-    """Held for legacy WS approve_tool/deny_tool messages.
+    """Legacy public import retained for integrations.
 
-    The CLI-direct backend handles tool permissions itself via the control
-    protocol, so we don't populate this from the new code path — it's
-    retained only so existing WS clients don't get errors on the old
-    message types.
+    Sessions no longer create or hold tool approvals. Legacy WS approval
+    commands are rejected; human confirmation uses AskUserQuestion.
     """
 
     tool_name: str
@@ -338,7 +336,6 @@ class Session:
     # When the held CLI process last finished a turn — the reaper's clock
     # (inline-steering.md §7). None whenever no process is being held.
     _held_run_at: float | None = field(default=None, repr=False)
-    _pending_approvals: dict[str, PendingApproval] = field(default_factory=dict, repr=False)
     _command_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _command_receipts: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict, repr=False)
     _pending_questions: dict[str, PendingQuestion] = field(default_factory=dict, repr=False)

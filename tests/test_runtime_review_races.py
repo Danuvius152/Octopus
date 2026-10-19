@@ -12,6 +12,7 @@ import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -32,7 +33,6 @@ from server.routers.sessions import router as sessions_router
 from server.routers.ws import router as ws_router
 from server.sessions import SessionManager
 from server.sessions import turns as turn_module
-from server.sessions.base import PendingApproval
 from server.users import UserManager
 
 
@@ -597,8 +597,9 @@ async def test_websocket_cannot_resolve_another_accounts_question_or_approval(ru
     foreign = await users.create_user(username="second", password="password2")
     token = await users.issue_token(foreign["id"])
     question = await manager.create_pending_question(session.id, [{"question": "Private choice", "options": [{"label": "A"}]}])
-    future = asyncio.get_running_loop().create_future()
-    session._pending_approvals["private-approval"] = PendingApproval("Bash", {}, "private-approval", future)
+    approve, deny = AsyncMock(return_value=False), AsyncMock(return_value=False)
+    monkeypatch.setattr(manager, "approve_tool", approve)
+    monkeypatch.setattr(manager, "deny_tool", deny)
     incoming, outgoing, task = await connect_ws(manager, token)
     try:
         payload = {"type": operation, "session_id": session.id, "question_id": question, "tool_use_id": "private-approval", "answers": [{"question": "Private choice", "selected": ["A"]}]}
@@ -610,7 +611,8 @@ async def test_websocket_cannot_resolve_another_accounts_question_or_approval(ru
                 if response["type"] == "websocket.send" and json.loads(response["text"]).get("message") == "Invalid JSON":
                     break
         assert manager.has_pending_question(session.id, question)
-        assert not future.done()
+        approve.assert_not_awaited()
+        deny.assert_not_awaited()
     finally:
         await disconnect_ws(incoming, task)
 

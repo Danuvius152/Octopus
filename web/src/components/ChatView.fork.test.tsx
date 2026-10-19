@@ -43,7 +43,7 @@ function mockSessionFetch(handler: (url: string) => Promise<Response>) {
 
 function mount() {
   render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
-    <ChatView sendMessage={vi.fn()} interrupt={vi.fn()} approveTool={vi.fn()} denyTool={vi.fn()}
+    <ChatView sendMessage={vi.fn()} interrupt={vi.fn()}
       answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />
   </VirtuosoMockContext.Provider>);
 }

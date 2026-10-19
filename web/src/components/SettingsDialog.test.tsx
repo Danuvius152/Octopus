@@ -16,7 +16,7 @@ import { useSessionStore } from "../stores/sessionStore";
 let fetchMock: ReturnType<typeof vi.fn>;
 
 function openSettings() {
-  const view = render(<SettingsDialog open onOpenChange={() => {}} />);
+  const view = render(<SettingsDialog open onOpenChange={() => {}} onSignOut={() => {}} />);
   // Radix tabs switch on pointerdown, which jsdom doesn't synthesize.
   const tab = screen.getByRole("tab", { name: /account/i });
   fireEvent.pointerDown(tab);

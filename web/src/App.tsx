@@ -37,7 +37,7 @@ function App() {
 }
 
 function AuthenticatedApp() {
-  const { sendMessage, interrupt, approveTool, denyTool, answerQuestion } =
+  const { sendMessage, interrupt, answerQuestion } =
     useWebSocket();
   // Re-asked when the bearer changes, which includes claiming the install.
   const token = useSessionStore((s) => s.token);
@@ -152,8 +152,6 @@ function AuthenticatedApp() {
           <ChatView
             sendMessage={sendMessage}
             interrupt={interrupt}
-            approveTool={approveTool}
-            denyTool={denyTool}
             answerQuestion={answerQuestion}
             connected={connected}
             onToggleSidebar={toggleSidebar}
@@ -192,7 +190,7 @@ function AuthenticatedApp() {
         <div className="sidebar-overlay" onClick={() => setSidebarOpen(false)} />
       )}
 
-      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} />
+      <SettingsDialog open={settingsOpen} onOpenChange={setSettingsOpen} onSignOut={signOut} />
       <ArchivedSessionsDialog open={archivedOpen} onOpenChange={setArchivedOpen} />
       <FileViewerDialog />
     </div>

@@ -100,6 +100,9 @@ One install serves several people, each fully isolated (design:
   **install token** (`OCTOPUS_AUTH_TOKEN`), and creating the first account (`POST
   /api/auth/bootstrap`, install-token-authed) makes it admin and adopts whatever
   data is already on disk.
+  Both the sidebar and Settings sign-out actions await the same device-bearer
+  revocation before clearing local authentication; a network failure still
+  allows local sign-out.
 - **Row ownership.** Every owned table carries a `user_id` — `agents`,
   `sessions`, `applications`, `backend_credentials`, `connector_installations`,
   `notifiers` — and routers resolve the caller's id (the `ScopeUser` /
@@ -219,9 +222,9 @@ React 19 + TypeScript (strict) + Vite + zustand + Tailwind v4 + Radix.
 | Sidebar (two-level) | `SidebarAgents.tsx` (agents → their sessions), `SidebarApplications.tsx`, `SidebarManage.tsx` (Schedules / Connectors / Harness summary rows), `SidebarSectionHeader.tsx`, `SidebarEdgeToggle.tsx` (collapse), `SortablePins.tsx` (`@dnd-kit` pin reorder). Design: [`plans/console-redesign.md`](plans/console-redesign.md), [`plans/sidebar-pins.md`](plans/sidebar-pins.md) |
 | Main-area pages (store `mainView`) | `AgentFormPage.tsx` (create/edit agent — prompt/model/backend/credential/tools/connectors/avatar via `EmojiPicker.tsx`), `ApplicationFormPage.tsx`, `SchedulesPage.tsx`, `ConnectorsPage.tsx`, `HarnessPage.tsx`, `MonitorPage.tsx`, `ItemLibrary.tsx` (the **All** tab — every agent/app: pin / open / archive / restore), `PageHeader.tsx` (shared breadcrumb) |
 | Chat | `ChatView.tsx` (virtualized via `react-virtuoso`; Enter-to-send, Esc-interrupt, queued-message badge, per-message "Fork from here"), `MessageBubble.tsx`, `MessageTime.tsx` (hover-for-time), `SlashCommandMenu.tsx` (`/schedule`, `/remember`, `/research`, `/showme`, `/rewind`, `/fork`, `/archive`, `/model`, `/reset`), `ModelPickerDialog.tsx` (`/model`), `ForkDialog.tsx` (message picker + side-effect confirm + optional git-revert), `ArchivedSessionsDialog.tsx` |
-| In-turn cards & tools | `FileViewerDialog.tsx` (`/showme`), `BgTaskChip.tsx` (bg task status), `QuestionPrompt.tsx` (ask form), `ToolApproval.tsx` (approval prompt), `AgentDelegationRequestCard.tsx` + `AgentDelegationEventCard.tsx` (delegation status + injected reply/question/error turns), `SubagentCard.tsx` (native sub-agents), `ResearchCard.tsx` (deep-research phase progress) |
+| In-turn cards & tools | `FileViewerDialog.tsx` (`/showme`), `BgTaskChip.tsx` (bg task status), `QuestionPrompt.tsx` (ask form), `MessageBubble.tsx` (historical tool approval records), `AgentDelegationRequestCard.tsx` + `AgentDelegationEventCard.tsx` (delegation status + injected reply/question/error turns), `SubagentCard.tsx` (native sub-agents), `ResearchCard.tsx` (deep-research phase progress) |
 | Backends / creds / apps | `BackendPanel.tsx` (backend pick), `CredentialPicker.tsx`, `AppIcon.tsx`, `ApplicationView.tsx` (app iframe pane) |
-| State | `stores/sessionStore.ts`, `hooks/useWebSocket.ts`, `hooks/useViewportHeight.ts` |
+| State | `stores/sessionStore.ts`, `hooks/useWebSocket.ts`, `hooks/useViewportHeight.ts`; `lib/hydrateSession.ts` owns detail/bg request baselines and snapshot application, while callers retain navigation, list adoption and error policy |
 
 ## Data Flow
 
@@ -262,9 +265,12 @@ The `mcp__ask__user` MCP tool POSTs questions to
 (the Web UI renders `QuestionPrompt`) and long-polls for the
 answer, which is delivered back to the model. An unanswered question
 auto-answers after `ask_user_question_timeout_seconds` so headless
-scheduled sessions never wedge. (Native CLI tool-approval also exists via
-`PendingApproval` futures, but agents run with skip-permissions by default and
-gate sensitive actions through `ask`/connector confirms instead.)
+scheduled sessions never wedge. Normal CLI turns bypass native tool approvals;
+agents confirm sensitive actions through `ask`/connector confirms. Legacy WS
+approval commands are rejected, with command receipts retained for clients that
+send command identities. Historical tool approval requests remain readable as
+static records, without Allow/Deny actions. `PendingApproval` remains a public
+Python compatibility type, but sessions do not hold an approval lifecycle.
 
 ### Cross-turn background work
 

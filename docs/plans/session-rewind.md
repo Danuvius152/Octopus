@@ -828,8 +828,6 @@ with `409 fork_blocked_parent_turn_active`, with a specific
 - **Active task on the parent.** `S._active_task is not None`.
 - **Queued message on the parent.** `S._pending_queue` non-empty
   (Vera round-3 NIT: real field name on `Session`).
-- **Pending tool approval on the parent.** `S._pending_approvals`
-  non-empty.
 - **Active delegation on the parent.**
   `DelegationManager.has_active_delegation_for_parent(S.id)` —
   concrete public API on the existing `DelegationManager`
@@ -1379,8 +1377,7 @@ Five phases, each ends with the full verification suite green.
   saga in §5.1 step-by-step. Key load-bearing pieces:
   - **Refuse on live parent work** (round-1 F6 + round-2/3
     teeth): acquire `parent._lock`, check `_active_task`,
-    `_pending_queue` (the real field name — round-3 NIT),
-    `_pending_approvals`, AND
+    `_pending_queue` (the real field name — round-3 NIT), AND
     `DelegationManager.has_active_delegation_for_parent(S.id)`.
     Set `_forking=True` under the lock; release the lock for
     long-running steps; clear `_forking` in `finally`.

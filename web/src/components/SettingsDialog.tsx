@@ -25,6 +25,7 @@ import { useSessionStore } from "../stores/sessionStore";
 interface Props {
   open: boolean;
   onOpenChange: (next: boolean) => void;
+  onSignOut: () => void | Promise<void>;
 }
 
 const API = `${window.location.origin}/api`;
@@ -32,9 +33,8 @@ const API = `${window.location.origin}/api`;
 /** Additive settings dialog — sits *alongside* the three-section sidebar,
  * doesn't replace it. Holds the things that don't naturally fit as
  * sidebar sections: connection info, account, notifier targets. */
-export function SettingsDialog({ open, onOpenChange }: Props) {
+export function SettingsDialog({ open, onOpenChange, onSignOut }: Props) {
   const token = useSessionStore((s) => s.token);
-  const setToken = useSessionStore((s) => s.setToken);
   const [copied, setCopied] = useState(false);
 
   const serverUrl =
@@ -45,12 +45,6 @@ export function SettingsDialog({ open, onOpenChange }: Props) {
     navigator.clipboard?.writeText(token).catch(() => {});
     setCopied(true);
     setTimeout(() => setCopied(false), 1500);
-  };
-
-  const signOut = () => {
-    setToken("");
-    onOpenChange(false);
-    window.location.reload();
   };
 
   return (
@@ -131,7 +125,10 @@ export function SettingsDialog({ open, onOpenChange }: Props) {
               <Button
                 className="btn-signout"
                 variant="outline"
-                onClick={signOut}
+                onClick={() => {
+                  onOpenChange(false);
+                  void onSignOut();
+                }}
               >
                 <IconLogout size={16} />
                 Sign out

@@ -1,8 +1,5 @@
-import { accountFetch as fetch } from "./accountFetch";
-import { addSessionInfo, applySessionSnapshot, sessionInfoFromDetail } from "./hydrateSession";
+import { addSessionInfo, loadSessionAndBgSnapshots, sessionInfoFromDetail } from "./hydrateSession";
 import { useSessionStore } from "../stores/sessionStore";
-
-const API = window.location.origin;
 
 /** Make `sessionId` the active chat session and load its snapshot.
  *
@@ -17,28 +14,16 @@ export async function selectSession(
   agentId?: string | null
 ): Promise<void> {
   const store = useSessionStore.getState();
-  const { token } = store;
   if (agentId) store.setActiveAgentId(agentId);
   store.setActiveSessionId(sessionId);
 
-  const headers = { Authorization: `Bearer ${token}` };
   try {
-    const [detailRes, bgRes] = await Promise.all([
-      fetch(`${API}/api/sessions/${sessionId}`, { headers }),
-      fetch(`${API}/api/sessions/${sessionId}/bg-tasks`, { headers }),
-    ]);
-    if (detailRes.ok) {
-      const data = await detailRes.json();
+    await loadSessionAndBgSnapshots(sessionId, store, (data) => {
       // A session created server-side (an application's build session, a
       // delegation child) may not be in the sidebar list yet. We already have
       // its detail in hand — adopt it rather than spending another request.
-      if (applySessionSnapshot(sessionId, data, store.dispatchGeneration, store.subagents[sessionId] || {})) {
-        addSessionInfo(sessionInfoFromDetail(data));
-      }
-    }
-    if (bgRes.ok) {
-      useSessionStore.getState().setBgTasks(sessionId, await bgRes.json(), store.bgTasks[sessionId] || []);
-    }
+      addSessionInfo(sessionInfoFromDetail(data));
+    });
   } catch {
     // A failed snapshot load leaves the session selected but empty; the WS
     // reconnect path refetches it.

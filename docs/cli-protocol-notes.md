@@ -198,7 +198,7 @@ The post-mortem and the mitigation that shipped live in
   VM0-shape refactor reduced frequency but did not eliminate).
 - Worth filing upstream with Anthropic.
 - Octopus-side mitigation: `session_manager._run_backend` is a loop
-  that tracks `saw_result` / `saw_tool_use` across the event
+  that retains the attempt's `result` and tracks `saw_tool_use` across the event
   stream. If the stream ends without a `result` after a `tool_use`
   AND we have a resume id, it respawns the CLI once with prompt
   `"continue"`. Bounded by `_MAX_RECOVERY_ATTEMPTS = 1`; the

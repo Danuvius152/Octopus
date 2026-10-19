@@ -32,10 +32,29 @@ afterEach(() => {
 
 function renderChat() {
   return render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>
-    <ChatView sendMessage={vi.fn()} interrupt={vi.fn()} approveTool={vi.fn()} denyTool={vi.fn()}
+    <ChatView sendMessage={vi.fn()} interrupt={vi.fn()}
       answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />
   </VirtuosoMockContext.Provider>);
 }
+
+it("keeps legacy approval events readable after history reload without live actions or status", async () => {
+  handleWsMessage({
+    type: "tool_approval_request", session_id: sid, tool_name: "Write", tool_use_id: "legacy-tool",
+    tool_input: { file_path: "/tmp/history.txt", content: "Earlier approval input" },
+  });
+  expect(useSessionStore.getState().sessions[0].status).toBe("running");
+  renderChat();
+  expect(await screen.findByText(/Historical tool approval request/)).toBeTruthy();
+  expect(screen.getByText(/Earlier approval input/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Allow" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+  const history = useSessionStore.getState().messages[sid];
+  act(() => applyTranscript(sid, { messages: history, next_message_seq: 1 }));
+  expect(await screen.findByText(/Historical tool approval request/)).toBeTruthy();
+  expect(screen.getByText(/Earlier approval input/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Allow" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
+});
 
 it("closes the live form and renders the same closure after history reload and replay", async () => {
   handleWsMessage(requested);
@@ -123,7 +142,7 @@ it("keeps a newer WebSocket question answerable when the earlier HTTP refetch co
 
   function ConnectedChat() {
     useWebSocket();
-    return <ChatView sendMessage={vi.fn()} interrupt={vi.fn()} approveTool={vi.fn()} denyTool={vi.fn()}
+    return <ChatView sendMessage={vi.fn()} interrupt={vi.fn()}
       answerQuestion={vi.fn()} connected onToggleSidebar={vi.fn()} onOpenSchedules={vi.fn()} />;
   }
   render(<VirtuosoMockContext.Provider value={{ viewportHeight: 600, itemHeight: 80 }}>

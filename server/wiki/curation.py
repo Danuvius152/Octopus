@@ -52,7 +52,8 @@ class WikiCuration:
         from . import format
 
         text = candidate if candidate is not None else content
-        links = list(local_references(text))
+        parsed = format.parse(text)
+        links = list(local_references(text, parsed=parsed))
         if not links:
             return
         self.store.synchronize()
@@ -65,7 +66,7 @@ class WikiCuration:
                     native = portable_metadata.validate(json.loads(portable[1]))
                 except (ValueError, TypeError, RecursionError):
                     pass
-            native |= format.parse(text).metadata(native)
+            native |= parsed.metadata(native)
             if managed_metadata is None:
                 owned = db.execute("SELECT metadata FROM managed_notes WHERE path=?", (path,)).fetchone()
                 managed_metadata = json.loads(owned[0]) if owned else {}

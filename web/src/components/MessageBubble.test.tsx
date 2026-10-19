@@ -15,6 +15,17 @@ import { useSessionStore } from "../stores/sessionStore";
 
 afterEach(cleanup);
 
+it.each(["old-tool", undefined])("keeps historical tool approvals readable without actions (id: %s)", (toolUseId) => {
+  const { getByText, queryByRole } = render(<MessageBubble sessionId="approval-history" message={{
+    role: "tool", type: "tool_approval_request", tool_name: "Write", tool_use_id: toolUseId,
+    tool_input: { file_path: "/tmp/notes.txt", content: "Historical content" },
+  }} />);
+  expect(getByText("Write")).toBeTruthy();
+  expect(getByText(/Historical tool approval request/)).toBeTruthy();
+  expect(getByText(/Historical content/)).toHaveTextContent('"file_path": "/tmp/notes.txt"');
+  expect(queryByRole("button")).toBeNull();
+});
+
 it("renders a persisted material-only delivery notice after history reload", () => {
   const content = "Task result retained; no automatic reply was started.";
   const { getByText } = render(<MessageBubble sessionId="retained" message={{

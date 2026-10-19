@@ -13,7 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "./ui/dialog";
-import { applySessionSnapshot } from "../lib/hydrateSession";
+import { loadSessionAndBgSnapshots } from "../lib/hydrateSession";
 
 const API_URL = window.location.origin;
 
@@ -63,22 +63,11 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
   // read-only banner + history. Mirrors SessionList's old selectSession.
   const view = async (s: SessionInfo) => {
     const snapshotStart = useSessionStore.getState();
-    const generation = snapshotStart.dispatchGeneration;
     setActiveAgentId(s.agent_id ?? null);
     setActiveSessionId(s.id);
     onOpenChange(false);
     try {
-      const [detailRes, bgRes] = await Promise.all([
-        fetch(`${API_URL}/api/sessions/${s.id}`, { headers }),
-        fetch(`${API_URL}/api/sessions/${s.id}/bg-tasks`, { headers }),
-      ]);
-      if (detailRes.ok) {
-        const data = await detailRes.json();
-        applySessionSnapshot(s.id, data, generation, snapshotStart.subagents[s.id] || {});
-      }
-      if (bgRes.ok) {
-        useSessionStore.getState().setBgTasks(s.id, await bgRes.json(), snapshotStart.bgTasks[s.id] || []);
-      }
+      await loadSessionAndBgSnapshots(s.id, snapshotStart);
     } catch {
       // ignore
     }

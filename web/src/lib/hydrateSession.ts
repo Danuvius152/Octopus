@@ -39,17 +39,62 @@ export async function hydrateSession(sessionId: string): Promise<void> {
   if (!sessionId || !store.token) return;
   if (store.sessions.some((s) => s.id === sessionId)) return;
   try {
-    const res = await fetch(`${API}/api/sessions/${sessionId}`, {
-      headers: { Authorization: `Bearer ${store.token}` },
-    });
-    if (!res.ok) return;
-    const data = await res.json();
-    if (applySessionSnapshot(sessionId, data, store.dispatchGeneration, store.subagents[sessionId] || {})) {
-      addSessionInfo(sessionInfoFromDetail(data));
-    }
+    await loadSessionSnapshot(sessionId, store, (data) => addSessionInfo(sessionInfoFromDetail(data)));
   } catch {
     // The mount fetch / reconnect refetch will pick it up.
   }
+}
+
+type SnapshotStart = ReturnType<typeof useSessionStore.getState>;
+type OnDetail = (detail: Record<string, unknown>) => void;
+
+async function applyDetailResponse(sessionId: string, res: Response, start: SnapshotStart, onDetail?: OnDetail) {
+  if (!res.ok) return null;
+  const data: Record<string, unknown> = await res.json();
+  if (!applySessionSnapshot(sessionId, data, start.dispatchGeneration, start.subagents[sessionId] || {})) return null;
+  // Adopt detail in this same synchronous step, before an account change
+  // can clear the applied transcript and start a new sidebar list.
+  onDetail?.(data);
+  return data;
+}
+
+async function applyBgResponse(sessionId: string, res: Response, start: SnapshotStart): Promise<void> {
+  if (res.ok) {
+    useSessionStore.getState().setBgTasks(sessionId, await res.json(), start.bgTasks[sessionId] || []);
+  }
+}
+
+/** Capture the merge baseline before starting this detail request. Callers
+ * with an earlier operation identity can pass that original store snapshot. */
+export async function loadSessionSnapshot(sessionId: string, start = useSessionStore.getState(), onDetail?: OnDetail) {
+  const res = await fetch(`${API}/api/sessions/${sessionId}`, {
+    headers: { Authorization: `Bearer ${start.token}` },
+  });
+  return applyDetailResponse(sessionId, res, start, onDetail);
+}
+
+/** Background cards merge against the live records observed before fetch. */
+export async function loadBgTaskSnapshot(sessionId: string, start = useSessionStore.getState()): Promise<void> {
+  const res = await fetch(`${API}/api/sessions/${sessionId}/bg-tasks`, {
+    headers: { Authorization: `Bearer ${start.token}` },
+  });
+  await applyBgResponse(sessionId, res, start);
+}
+
+/** Selection and archived viewing wait for both responses before applying
+ * either one; reconnect deliberately loads the endpoints independently. */
+export async function loadSessionAndBgSnapshots(
+  sessionId: string, start = useSessionStore.getState(),
+  onDetail?: OnDetail,
+) {
+  const headers = { Authorization: `Bearer ${start.token}` };
+  const [detailRes, bgRes] = await Promise.all([
+    fetch(`${API}/api/sessions/${sessionId}`, { headers }),
+    fetch(`${API}/api/sessions/${sessionId}/bg-tasks`, { headers }),
+  ]);
+  const detail = await applyDetailResponse(sessionId, detailRes, start, onDetail);
+  await applyBgResponse(sessionId, bgRes, start);
+  return detail;
 }
 
 /** One queue-state path for selection, archived viewing and reconnect. */

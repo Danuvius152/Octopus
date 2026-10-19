@@ -9,15 +9,14 @@ import unicodedata
 from typing import cast
 
 import jieba
-from markdown_it import MarkdownIt
 from markdown_it.renderer import RendererHTML
 
+from . import format as document_format
 from .extract import HTML_BODY_VERSION, HTMLBodyAnalyzer
 from .formats import MARKDOWN_SQL
 
 VERSION = "sections-v8"
 _tokenizer = jieba.Tokenizer()
-_markdown = MarkdownIt("commonmark")
 jieba.setLogLevel(logging.WARNING)
 _letter = r"(?:(?![\u3400-\u9fff])[^\W_])"
 _pieces = re.compile(rf"[\u3400-\u9fff]+|{_letter}+(?:[-+]{_letter}+)*", re.UNICODE)
@@ -108,17 +107,14 @@ def query_groups(query: str) -> tuple[list[str], list[str]]:
     return terms, groups
 
 
-def sections(text: str, title: str) -> list[dict]:
-    """Character coordinates refer to extracted text, exactly as read() does."""
-    from .format import markdown_line_offsets, parse
-
-    parsed = parse(text)
+def sections(text: str, title: str, *, parsed: document_format.DocumentFormat | None = None) -> list[dict]:
+    """Original text coordinates; a supplied parse belongs to this exact text."""
+    if parsed is None:
+        parsed = document_format.parse(text)
     # Keep the rendered container/heading state across all Markdown tokens.
     # A fence creates a source partition, not a fresh HTML context.
-    body = text[parsed.body_start:]
-    line_offsets = markdown_line_offsets(body, parsed.body_start)
-    env: dict = {}
-    stream = _markdown.parse(body, env)
+    line_offsets, stream, env = parsed.line_offsets, parsed.tokens, parsed.env
+    _markdown = document_format._markdown
     renderer = cast(RendererHTML, _markdown.renderer)
     analyzer = HTMLBodyAnalyzer()
     evidence_ranges = []
@@ -215,7 +211,7 @@ def current(db, row) -> bool:
     )
 
 
-def index(db, row, metadata) -> None:
+def index(db, row, metadata, *, parsed: document_format.DocumentFormat | None = None) -> None:
     doc_id, text = row["id"], row["text"]
     aliases = metadata.get("aliases", [])
     tags = metadata.get("tags", [])
@@ -226,7 +222,7 @@ def index(db, row, metadata) -> None:
         supplied = json.loads(managed[0])
         aliases = [*aliases, *supplied.get("aliases", [])]
         tags = [*tags, *supplied.get("tags", [])]
-    chunks = sections(text, row["title"])
+    chunks = sections(text, row["title"], parsed=parsed)
     if row["path"].rsplit(".", 1)[-1].casefold() in {"html", "htm"} and metadata.get("html_body_version") == HTML_BODY_VERSION:
         # HTML extraction preserves its historical text coordinates. Its
         # original structure, including media-only body, was inspected once

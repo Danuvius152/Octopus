@@ -71,6 +71,7 @@ class _Settlement:
     protocol_issues: dict[str, int] = field(default_factory=dict)
     protocol_locations: list[dict[str, Any]] = field(default_factory=list)
     started_at: float | None = None
+    # Per-logical-turn retry budgets, also captured in the terminal outcome.
     recovery: dict[str, int] = field(default_factory=lambda: {
         "transient": 0, "idle": 0, "stale_session": 0, "premature_exit": 0,
     })
@@ -114,7 +115,6 @@ class _Attempt:
     # prompt goes in as the next message rather than a fresh invocation.
     reused: bool
     attempt_id: str = field(default_factory=lambda: uuid.uuid4().hex)
-    saw_result: bool = False
     result: HarnessEvent | None = None
     saw_tool_use: bool = False
     # Whether any assistant text streamed, including unfinished delta blocks.
@@ -191,12 +191,6 @@ class _Turn:
     # harness-transient-retry.md §4).
     resume_at_turn_start: str | None
     settlement: _Settlement = field(default_factory=_Settlement)
-    recovery_attempts: int = 0
-    transient_attempts: int = 0
-    # A dangling resume id is recoverable exactly once per turn: clear it,
-    # start fresh. A second failure is a different problem.
-    stale_session_retries: int = 0
-    idle_timeout_retries: int = 0
     started_at: float = field(default_factory=time.monotonic)
     produced_output: bool = False
 
@@ -1488,7 +1482,6 @@ class TurnsMixin(SessionManagerBase):
         if session._lock.locked():
             session._lock.release()
         session.status = SessionStatus.idle
-        session._pending_approvals.clear()
         await self._close_session_questions(session, reason="reset")
         await self._broadcast(
             {"type": "status", "session_id": session_id, "status": "idle"}
@@ -1631,7 +1624,7 @@ class TurnsMixin(SessionManagerBase):
         return (
             attempt.backend.reusable
             and attempt.backend.is_alive()
-            and attempt.saw_result
+            and attempt.result is not None
             and not attempt.failed
             and attempt.timeout is None
         )
@@ -1655,7 +1648,7 @@ class TurnsMixin(SessionManagerBase):
                 reason = "parent_timeout"
             elif attempt.saw_error_event or (attempt.result is not None and attempt.result.is_error):
                 reason = "parent_error"
-            elif attempt.saw_result:
+            elif attempt.result is not None:
                 reason = "parent_done"
             else:
                 reason = "process_ended"
@@ -1708,7 +1701,6 @@ class TurnsMixin(SessionManagerBase):
         self, session: Session, attempt: _Attempt, event: HarnessEvent
     ) -> None:
         """The turn said it was done: record it and settle the session."""
-        attempt.saw_result = True
         attempt.result = event
         _monitor.record(_MonEvent(
             kind="turn",
@@ -1897,13 +1889,13 @@ class TurnsMixin(SessionManagerBase):
         if overall > 0 and time.monotonic() - turn.started_at >= overall:
             reason, limit = "overall", overall
         maximum = max(0, settings.turn_idle_max_retries)
+        recovery = turn.settlement.recovery
         if (
             reason == "idle"
-            and turn.idle_timeout_retries < maximum
+            and recovery["idle"] < maximum
             and (not turn.produced_output or session.claude_session_id)
         ):
-            turn.idle_timeout_retries += 1
-            turn.settlement.recovery["idle"] = turn.idle_timeout_retries
+            recovery["idle"] += 1
             if turn.produced_output:
                 next_prompt = (
                     "The previous attempt stopped after a period without backend "
@@ -1925,14 +1917,14 @@ class TurnsMixin(SessionManagerBase):
             return _Decision.again(
                 next_prompt,
                 await self._surface_idle_retry(
-                    session, limit=limit, attempt=turn.idle_timeout_retries,
+                    session, limit=limit, attempt=recovery["idle"],
                     max_attempts=maximum,
                 ),
             )
         return _Decision.stop(
             await self._surface_turn_timeout(
                 session, reason=reason, limit=limit, backend=turn.harness.backend,
-                retries=turn.idle_timeout_retries,
+                retries=recovery["idle"],
             )
         )
 
@@ -1966,14 +1958,14 @@ class TurnsMixin(SessionManagerBase):
         fresh engine-side conversation, saying out loud that the engine lost
         its own history so the model starts this turn without it.
         """
+        recovery = turn.settlement.recovery
         if not (
             session.claude_session_id
-            and turn.stale_session_retries < 1
+            and recovery["stale_session"] < 1
             and turn.harness.is_stale_session_error(blob)
         ):
             return None
-        turn.stale_session_retries += 1
-        turn.settlement.recovery["stale_session"] = turn.stale_session_retries
+        recovery["stale_session"] += 1
         logger.warning(
             "Session %s: resume id %s is gone from the engine; "
             "clearing it and starting a fresh conversation",
@@ -2037,7 +2029,8 @@ class TurnsMixin(SessionManagerBase):
         """
         if not turn.harness.is_transient_error(blob, code=error_code):
             return None
-        can_retry = turn.transient_attempts < self._MAX_TRANSIENT_RETRIES and (
+        recovery = turn.settlement.recovery
+        can_retry = recovery["transient"] < self._MAX_TRANSIENT_RETRIES and (
             not turn.produced_output or bool(session.claude_session_id)
         )
         if not can_retry:
@@ -2048,19 +2041,18 @@ class TurnsMixin(SessionManagerBase):
                 await self._surface_transient_exhausted(
                     session,
                     backend=turn.harness.backend,
-                    attempts=turn.transient_attempts,
+                    attempts=recovery["transient"],
                 )
             )
 
-        turn.transient_attempts += 1
-        turn.settlement.recovery["transient"] = turn.transient_attempts
-        delay = self._TRANSIENT_RETRY_BASE_DELAY * (2 ** (turn.transient_attempts - 1))
+        recovery["transient"] += 1
+        delay = self._TRANSIENT_RETRY_BASE_DELAY * (2 ** (recovery["transient"] - 1))
         logger.warning(
             "Session %s: transient backend error; retrying in "
             "%.1fs (attempt %d/%d, resume=%s)",
             session.id,
             delay,
-            turn.transient_attempts,
+            recovery["transient"],
             self._MAX_TRANSIENT_RETRIES,
             turn.produced_output,
         )
@@ -2085,7 +2077,7 @@ class TurnsMixin(SessionManagerBase):
             next_prompt,
             await self._surface_transient_retry(
                 session,
-                attempt=turn.transient_attempts,
+                attempt=recovery["transient"],
                 max_attempts=self._MAX_TRANSIENT_RETRIES,
                 delay=delay,
             ),
@@ -2102,13 +2094,14 @@ class TurnsMixin(SessionManagerBase):
         with no tool use, a turn we've already retried once — is left alone.
         This is the last word on an attempt, so it always decides.
         """
-        if attempt.saw_result:
+        if attempt.result is not None:
             return _Decision.stop()
         if not turn.harness.premature_exit_recovery:
             # Harness opts out of the Claude-CLI premature-exit recovery (Codex
             # runs exactly once per turn) — codex-backend.md §5.6.
             return _Decision.stop()
-        if turn.recovery_attempts >= self._MAX_RECOVERY_ATTEMPTS:
+        recovery = turn.settlement.recovery
+        if recovery["premature_exit"] >= self._MAX_RECOVERY_ATTEMPTS:
             logger.warning(
                 "Session %s: CLI premature-exit retry budget exhausted; "
                 "giving up on this turn", session.id
@@ -2121,16 +2114,15 @@ class TurnsMixin(SessionManagerBase):
             # into the same conversation.
             return _Decision.stop()
 
-        turn.recovery_attempts += 1
-        turn.settlement.recovery["premature_exit"] = turn.recovery_attempts
+        recovery["premature_exit"] += 1
         logger.warning(
             "Session %s: detected CLI premature-exit after tool_use; "
             "auto-respawning with 'continue' (attempt %d/%d)",
-            session.id, turn.recovery_attempts, self._MAX_RECOVERY_ATTEMPTS,
+            session.id, recovery["premature_exit"], self._MAX_RECOVERY_ATTEMPTS,
         )
         marker_event = await self._recovery_frame(
             session, code="premature_exit", message="(auto-resumed after CLI exited mid-turn)",
-            attempt=turn.recovery_attempts, maximum=self._MAX_RECOVERY_ATTEMPTS,
+            attempt=recovery["premature_exit"], maximum=self._MAX_RECOVERY_ATTEMPTS,
         )
         return _Decision.again("continue", marker_event)
 

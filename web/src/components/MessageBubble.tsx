@@ -275,8 +275,20 @@ export function MessageBubble({
       return <ToolResultBlock message={message} />;
 
     case "tool_approval_request":
+      return (
+        <div className="msg msg-approval rounded-lg border border-yellow-200 bg-yellow-50 overflow-hidden">
+          <div className="px-3 py-2 text-sm">
+            <strong>{message.tool_name || "Tool"}</strong>
+            <span className="text-muted-foreground"> · Historical tool approval request</span>
+          </div>
+          <pre className="border-t border-yellow-200 bg-card/60 px-3 py-2 text-xs font-mono overflow-x-auto whitespace-pre-wrap break-words max-h-60 overflow-y-auto">
+            {JSON.stringify(message.tool_input, null, 2)}
+          </pre>
+        </div>
+      );
+
     case "question_request":
-      return null; // handled by ToolApproval / QuestionPrompt component
+      return null; // handled by QuestionPrompt
 
     case "question_closed":
       return (

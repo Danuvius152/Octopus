@@ -128,12 +128,15 @@ def source_reference(source, relation="derived_from"):
                            input_type="legacy", diagnostic="missing_source_selector")
 
 
-def local_references(text, *, body_start=None):
-    """Preserve original link tokens until the single URI parsing boundary."""
+def local_references(text, *, body_start=None, parsed=None):
+    """Preserve link targets; a supplied parse belongs to this exact text."""
     from .format import _markdown, parse
 
-    body = text[parse(text).body_start if body_start is None else body_start:]
-    for token in _markdown.parse(body):
+    if body_start is not None:
+        stream = _markdown.parse(text[body_start:])
+    else:
+        stream = (parsed if parsed is not None else parse(text)).tokens
+    for token in stream:
         for child in token.children or []:
             if child.type in {"link_open", "image"}:
                 resource = child.attrGet("href" if child.type == "link_open" else "src")
