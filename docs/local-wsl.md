@@ -90,7 +90,7 @@ mkdir -p "$HOME/.agents"
 ln -s "$HOME/.codex/skills" "$HOME/.agents/skills"
 ```
 
-Octopus 服务以 `jack` 运行，`HOME=/home/jack`，因此本地 CLI、已有和新建
+Octopus 服务以当前用户及其 `HOME` 运行，因此本地 CLI、已有和新建
 Codex agent、普通新会话都使用同一份用户技能。凭据仍使用
 `~/.octopus/codex/<credential_id>/` 作为独立 `CODEX_HOME`，不需要复制
 认证、配置或会话文件。下一轮启动 Codex 即可发现，无需重启 Octopus 或新建
