@@ -33,6 +33,12 @@ AI 后端使用已经登录 ChatGPT 的 Linux 版 Codex。`.env` 设置
 - 旧部署的代理环境文件：`~/.octopus/proxy.env`，权限 `0600`；首次受管安装时捕获其有效值。
 - 服务时区：`Asia/Shanghai`。
 
+账户的工作区、代理记忆、应用、附件、research 和 Wiki 状态位于
+`~/.octopus/users/<user_id>/`。根目录同名路径属于创建账户前的布局；账户模式
+仅保留仍有数据或工作目录引用的旧路径。数据库、安装配置、共享 CLI 凭据及发布
+工具仍由安装管理。`.octopus-installation` 和旁置的 `*.installation` 只记录资源
+所属的服务配置位置，用于阻止另一安装重复认领；有用资源的归属标记应保留。
+
 Windows 浏览器访问 <http://localhost:8000>。
 [WSL 官方文档](https://learn.microsoft.com/en-us/windows/wsl/networking)
 说明了 Windows 通过 localhost 访问 WSL 中服务的方式。
@@ -264,7 +270,12 @@ push、构建、重启或发布。用户明确要求文档提交时才提交，�
 4. 验证存活与就绪接口、登录页面、静态资源和真实浏览器，确认代码与构建产物属于
    本次提交；在服务快照运行
    `.venv/bin/python scripts/validate-release.py <服务快照> --base-url http://127.0.0.1:8000`
-   比对实际 HTML / JS / CSS 的 SHA-256。验收失败时，只有旧构建仍兼容实际
+   比对实际 HTML / JS / CSS 的 SHA-256。发布进程还须使用本次捕获的受管
+   Settings/provider 环境清理账户模式下未使用的旧目录空壳，并运行
+   `scripts/check-storage-layout.py` 确认不再出现；独立维护时用 `--prune`
+   显式清理。只删除指向本安装且没有数据、链接或已保存工作目录引用的空壳，
+   保留账户目录、旧附件和凭据；清理不使用递归强删，也不能继承模型测试环境。
+   验收失败时，只有旧构建仍兼容实际
    schema 和持久协议才可恢复旧指向并重启验证。更高 schema 迁移已提交时，
    不自动切回不兼容的旧构建，保留当前状态并采用兼容代码恢复或前向修复；
    不恢复旧 DB，不清理尚需诊断的代码快照。另以只读检查核对现有数据库、

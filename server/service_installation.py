@@ -5,10 +5,11 @@ from __future__ import annotations
 import fcntl
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
-from contextlib import contextmanager, nullcontext
+from contextlib import closing, contextmanager, nullcontext
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Literal
 
@@ -88,12 +89,131 @@ def _service_environment(config: Settings) -> str:
 
 def _markers(paths: dict[str, str]):
     for name in _DIRECTORIES:
-        yield Path(paths[name]) / ".octopus-installation"
+        if name in paths:
+            yield Path(paths[name]) / ".octopus-installation"
     for name in ("metrics_db_path", "master_key_file", *_PROVIDER_HOMES):
         if name not in paths:
             continue
         path = Path(paths[name])
         yield path.with_name(path.name + ".installation")
+
+
+def _account_work_roots(config: Settings) -> list[Path] | None:
+    database = Path(config.db_path).expanduser().resolve()
+    if config.db_path == ":memory:" or not database.exists():
+        return None
+    try:
+        with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
+            if connection.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='users'").fetchone() is None:
+                return None
+            if connection.execute("SELECT 1 FROM users LIMIT 1").fetchone() is None:
+                return None
+            roots = [Path(row[0]).expanduser().resolve() for row in connection.execute(
+                "SELECT DISTINCT working_dir FROM sessions WHERE working_dir IS NOT NULL AND working_dir != ''")]
+            for (raw,) in connection.execute("SELECT extra_roots FROM users"):
+                if raw is None:
+                    continue
+                granted = json.loads(raw)
+                if not isinstance(granted, list) or any(
+                    not isinstance(root, str) or not Path(root).is_absolute() for root in granted
+                ):
+                    raise InstallationError("Cannot verify the installation's granted work roots")
+                # Grants are canonical when saved. Following today's symlinks
+                # would change which approved path this cleanup preserves.
+                roots.extend(Path(root) for root in granted)
+            return roots
+    except (TypeError, ValueError) as error:
+        raise InstallationError("Cannot verify the installation's granted work roots") from error
+    except sqlite3.Error as error:
+        raise InstallationError("Cannot verify the installation's account storage layout") from error
+
+
+def _is_legacy_shell(root: Path, target: Path) -> bool:
+    if root.is_symlink():
+        return False
+    if not root.exists():
+        return True
+    if not root.is_dir():
+        return False
+    reference = root / ".octopus-installation"
+    if not reference.is_file() or reference.is_symlink():
+        return False
+
+    def unavailable(error):
+        raise error
+
+    for directory, folders, files in os.walk(root, followlinks=False, onerror=unavailable):
+        if any((Path(directory) / name).is_symlink() for name in folders):
+            return False
+        for name in files:
+            marker = Path(directory) / name
+            if name != ".octopus-installation" or marker.is_symlink():
+                return False
+            try:
+                if marker.read_text().strip() != str(target):
+                    return False
+            except (OSError, UnicodeError):
+                return False
+    return True
+
+
+def _claimed_paths(config: Settings, paths: dict[str, str]) -> dict[str, str]:
+    work_roots = _account_work_roots(config)
+    if work_roots is None:
+        return paths
+    protected = [Path(raw) for name, raw in paths.items() if name not in _DIRECTORIES or name == "users_root"]
+    target = profile_path(config)
+    return {
+        name: raw for name, raw in paths.items()
+        if name not in _DIRECTORIES or name == "users_root"
+        or Path(getattr(config, name)).expanduser().is_symlink()
+        or any(_overlaps(Path(raw), root) for root in protected)
+        or any(Path(raw) == directory or Path(raw) in directory.parents for directory in work_roots)
+        or not _is_legacy_shell(Path(raw), target)
+    }
+
+
+def legacy_shells(config: Settings) -> list[Path]:
+    """Unused single-user directories; account roots and real data stay owned."""
+    paths = _paths(config)
+    claimed = set(_claimed_paths(config, paths).values())
+    return sorted({Path(raw) for raw in paths.values() if raw not in claimed})
+
+
+def prune_legacy_shells(config: Settings) -> list[Path]:
+    """Remove only this managed installation's unused, empty legacy trees."""
+    if read_service_profile(config) is None:
+        raise InstallationError("Legacy cleanup requires the existing managed installation")
+    target = profile_path(config)
+    removed = []
+    for root in legacy_shells(config):
+        if not root.exists():
+            continue
+        with _claim_range(root):
+            if not _is_legacy_shell(root, target):
+                continue
+            directories = [Path(directory) for directory, _, _ in os.walk(root, followlinks=False)]
+            try:
+                for directory in reversed(directories):
+                    marker = directory / ".octopus-installation"
+                    if marker.exists():
+                        if marker.is_symlink() or marker.read_text().strip() != str(target):
+                            raise InstallationError("Legacy cleanup found another resource owner")
+                        marker.unlink()
+                    directory.rmdir()
+            except OSError:
+                # A concurrent new file is retained and restores the ordinary
+                # ownership check; recursive deletion is never permitted.
+                if root.is_dir() and not root.is_symlink():
+                    _claim(root / ".octopus-installation", target)
+                raise
+            descriptor = os.open(root.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            removed.append(root)
+    return removed
 
 
 def _resource_markers(path: Path):
@@ -186,10 +306,11 @@ def _references(markers) -> set[Path]:
 def read_service_profile(config: Settings) -> ServiceProfile | None:
     expected = profile_path(config)
     paths = _paths(config)
-    markers = set(_markers(paths))
+    claimed = _claimed_paths(config, paths)
+    markers = set(_markers(claimed))
     # Descendants remain part of the same installation. A different DB name
     # or a narrower Wiki/user root must not silently reuse managed resources.
-    for path in paths.values():
+    for path in claimed.values():
         markers.update(_resource_markers(Path(path)))
     references = {expected} if expected.exists() else set()
     try:
@@ -209,7 +330,7 @@ def read_service_profile(config: Settings) -> ServiceProfile | None:
         differences.append("workers (WEB_CONCURRENCY)")
     if differences:
         raise InstallationError(f"Configuration differs from managed installation {profile.unit}: {', '.join(differences)}; update its environment and rerun service setup")
-    if any(not marker.is_file() or marker.read_text().strip() != str(expected) for marker in _markers(paths)):
+    if any(not marker.is_file() or marker.read_text().strip() != str(expected) for marker in _markers(claimed)):
         raise InstallationError("Managed installation setup is incomplete; rerun service setup before startup")
     return profile
 
@@ -392,8 +513,9 @@ def configure_service(config: Settings, *, unit: str, manager: Literal["user", "
     owner = InstallationOwner(config)
     owner._acquire_lock()
     try:
-        markers = set(_markers(paths))
-        for path in paths.values():
+        claimed = _claimed_paths(config, paths)
+        markers = set(_markers(claimed))
+        for path in claimed.values():
             markers.update(_resource_markers(Path(path)))
         _check_registrations(config)
         vaults = {(root, state) for root, state in _registered_vaults(config) if root.is_dir()}
@@ -401,13 +523,13 @@ def configure_service(config: Settings, *, unit: str, manager: Literal["user", "
             markers.update(_resource_markers(root))
         if _references(markers) - {target}:
             raise InstallationError("Resource is already bound to another managed installation")
-        for marker in _markers(paths):
+        for marker in _markers(claimed):
             if marker.exists() and marker.read_text().strip() != str(target):
                 raise InstallationError("Resource is already bound to another managed installation")
         # References contain no copied settings. The central profile is the
         # authority; interrupted setup is closed to startup and repeatable.
         for name in (*_DIRECTORIES, "metrics_db_path", "master_key_file", *_PROVIDER_HOMES):
-            if name not in paths:
+            if name not in claimed:
                 continue
             resource = Path(paths[name])
             directory = name not in _FILES
@@ -530,7 +652,7 @@ class InstallationOwner:
             if self.profile is not None:
                 _verify_service(self.profile)
             else:
-                for name, raw in _paths(self.config).items():
+                for name, raw in _claimed_paths(self.config, _paths(self.config)).items():
                     path = Path(raw)
                     with _claim_range(path, directory=name not in _FILES):
                         _check_installation_range(path, None, directory=name not in _FILES)

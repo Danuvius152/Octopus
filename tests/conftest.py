@@ -104,7 +104,7 @@ def _surviving_cli_pids() -> list[int]:
 
 
 @pytest.fixture(autouse=True)
-def _account_state_stays_in_tmp(tmp_path_factory, monkeypatch):
+def _account_state_stays_in_tmp(request, tmp_path_factory, monkeypatch):
     """No test may write into a real install's state directory.
 
     Three settings default into `~/.octopus`: `master_key_file`, which
@@ -123,14 +123,46 @@ def _account_state_stays_in_tmp(tmp_path_factory, monkeypatch):
     from server.config import settings
 
     root = tmp_path_factory.mktemp("octopus-state")
-    monkeypatch.setattr(settings, "master_key_file", str(root / "master.key"))
-    monkeypatch.setattr(settings, "users_root", str(root / "users"))
-    monkeypatch.setattr(settings, "research_dir", str(root / "research"))
-    # Startup now sweeps Wiki text retention; never let a lifespan test reach
-    # the installation's legacy Wiki state either.
-    monkeypatch.setattr(settings, "wiki_dir", str(root / "wiki"))
-    for name in ("attachments_dir", "large_prompts_dir", "codex_home_dir", "applications_dir"):
-        monkeypatch.setattr(settings, name, str(root / name))
+    real = request.node.get_closest_marker("real") is not None
+    credential_root = Path(settings.codex_home_dir).expanduser()
+    # Installation discovery includes databases, cwd and default provider homes,
+    # not only account files. Child processes must inherit the same isolation.
+    for name, relative in {
+        "db_path": "octopus.db", "metrics_db_path": "metrics.db",
+        "master_key_file": "master.key", "users_root": "users",
+        "default_working_dir": "workspace", "agents_dir": "agents",
+        "attachments_dir": "attachments", "large_prompts_dir": "large-prompts",
+        "codex_home_dir": "codex", "applications_dir": "applications",
+        "research_dir": "research", "wiki_dir": "wiki",
+    }.items():
+        value = str(root / relative)
+        monkeypatch.setattr(settings, name, value)
+        monkeypatch.setenv("OCTOPUS_" + name.upper(), value)
+    Path(settings.default_working_dir).mkdir()
+    for variable, default, files in (
+        ("CODEX_HOME", ".codex", ("auth.json", "config.toml")),
+        ("CLAUDE_CONFIG_DIR", ".claude", (".credentials.json", "settings.json", ".claude.json")),
+    ):
+        source = Path(os.environ.get(variable) or Path.home() / default).expanduser()
+        destination = root / default
+        destination.mkdir()
+        if real:
+            # Keep live authentication at its existing owner; isolate all CLI
+            # output and exclude the managed installation's ownership marker.
+            for name in files:
+                if (source / name).is_file():
+                    (destination / name).symlink_to(source / name)
+        monkeypatch.setenv(variable, str(destination))
+    if real and credential_root.is_dir():
+        credentials = Path(settings.codex_home_dir)
+        credentials.mkdir()
+        for source in credential_root.iterdir():
+            if source.is_dir() and (source / "auth.json").is_file():
+                destination = credentials / source.name
+                destination.mkdir()
+                for name in ("auth.json", "config.toml"):
+                    if (source / name).is_file():
+                        (destination / name).symlink_to(source / name)
     # Each temporary installation starts in the legacy era with open writers.
     # Keep resource-owner collections intact so teardown leaks remain visible.
     from server.service_health import ServiceHealth
