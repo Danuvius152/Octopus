@@ -21,15 +21,17 @@ import json
 import logging
 import uuid
 from datetime import UTC, datetime
+from typing import TYPE_CHECKING
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
-from .. import deps
 from ..auth import verify_token
 from ..crypto import encrypt
+from ..database import Database
 from ..deps import ScopeUser, SessionMgr
 from ..harness import LoginDriver, LoginMethod, get_harness, has_backend
+from ..installation_keys import secret_key_scope
 from ..models import (
     AuthType,
     BackendKind,
@@ -40,6 +42,9 @@ from ..models import (
 )
 from ..oauth_login import LoginState
 from ..oauth_providers import OAuthTokenSet
+
+if TYPE_CHECKING:
+    from ..codex_login import CodexLoginSession
 
 logger = logging.getLogger(__name__)
 
@@ -91,20 +96,16 @@ async def create_credential(
     db = _require_db()
     cid = uuid.uuid4().hex[:12]
     created_at = datetime.now(UTC).isoformat()
-    # Encrypted under the owner's own key, not the install token (§4). It was
-    # the install token, which the upgrade re-keys away from — so a credential
-    # created after the first account would have been the one secret on the box
-    # that nothing could decrypt.
-    secret_encrypted = encrypt(req.secret, await deps.data_key_for(user_id))
-    await db.save_credential(
-        credential_id=cid,
-        backend=req.backend.value,
-        label=req.label,
-        auth_type=req.auth_type.value,
-        secret_encrypted=secret_encrypted,
-        created_at=created_at,
-        user_id=user_id,
-    )
+    async with secret_key_scope(db, user_id) as secret_key:
+        await db.save_credential(
+            credential_id=cid,
+            backend=req.backend.value,
+            label=req.label,
+            auth_type=req.auth_type.value,
+            secret_encrypted=encrypt(req.secret, secret_key),
+            created_at=created_at,
+            user_id=user_id,
+        )
     return CredentialInfo(
         id=cid,
         backend=req.backend,
@@ -122,6 +123,13 @@ async def update_credential(
     _: str = Depends(verify_token),
 ):
     db = _require_db()
+    async with secret_key_scope(db, user_id) as secret_key:
+        return await _update_credential(db, credential_id, req, user_id, secret_key)
+
+
+async def _update_credential(
+    db: Database, credential_id: str, req: UpdateCredentialRequest, user_id: str | None, secret_key: str,
+) -> CredentialInfo:
     existing = await db.get_credential(credential_id, user_id)
     if existing is None:
         raise HTTPException(status_code=404, detail="credential not found")
@@ -131,7 +139,7 @@ async def update_credential(
         update_kwargs["label"] = req.label
     if req.secret is not None:
         update_kwargs["secret_encrypted"] = encrypt(
-            req.secret, await deps.data_key_for(existing.get("user_id"))
+            req.secret, secret_key
         )
         # A fresh secret recovers a credential the CLI had rejected — clear
         # the reactive needs_reconnect flag (harness-credential-reauth.md §5).
@@ -297,6 +305,13 @@ async def oauth_complete(
         token_expires_at populated so the resolver knows when to refresh.
     """
     db = _require_db()
+    async with secret_key_scope(db, user_id) as secret_key:
+        return await _complete_oauth(db, req, user_id, secret_key)
+
+
+async def _complete_oauth(
+    db: Database, req: OAuthCompleteRequest, user_id: str | None, secret_key: str,
+) -> CredentialInfo:
     started = _login_driver(BackendKind.claude_code.value).get(req.login_id)
     if started is None or getattr(started, "user_id", None) != user_id:
         # Only the account that started the sign-in may finish it. An
@@ -328,7 +343,6 @@ async def oauth_complete(
         )
 
     created_at = datetime.now(UTC).isoformat()
-    secret_key = await deps.data_key_for(user_id)
 
     if session.token:
         # API-key path: long-lived sk-ant- key from create_api_key endpoint.
@@ -493,6 +507,22 @@ async def codex_login_status(
     credential: CredentialInfo | None = None
     if session.state == CodexLoginState.success and not session.persisted:
         db = _require_db()
+        async with secret_key_scope(db, user_id) as secret_key:
+            credential = await _persist_codex_login(db, session, user_id, secret_key)
+
+    return CodexLoginStatusResponse(
+        state=session.state.value,
+        verification_url=session.verification_url,
+        user_code=session.user_code,
+        message=session.message,
+        credential=credential,
+    )
+
+
+async def _persist_codex_login(
+    db: Database, session: CodexLoginSession, user_id: str | None, secret_key: str,
+) -> CredentialInfo:
+    if not session.persisted:
         # No real secret for Codex — the credential *is* the CODEX_HOME dir.
         # Store the dir path (encrypted, harmless) so the row is self-describing;
         # session_manager resolves the dir deterministically from credential_id.
@@ -520,7 +550,7 @@ async def codex_login_status(
                 label=session.label,
                 auth_type=AuthType.oauth.value,
                 secret_encrypted=encrypt(
-                    session.codex_home, await deps.data_key_for(user_id)
+                    session.codex_home, secret_key
                 ),
                 created_at=created_at,
                 user_id=user_id,
@@ -534,13 +564,8 @@ async def codex_login_status(
                 created_at=created_at,
             )
 
-    return CodexLoginStatusResponse(
-        state=session.state.value,
-        verification_url=session.verification_url,
-        user_code=session.user_code,
-        message=session.message,
-        credential=credential,
-    )
+        return credential
+    return _row_to_info(await db.get_credential(session.credential_id, user_id))
 
 
 @router.post("/codex/cancel", status_code=status.HTTP_204_NO_CONTENT)

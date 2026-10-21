@@ -11,6 +11,17 @@ stay top-level, *wrapped* by the harness login drivers — not relocated.
 Verified green at implementation time; current suite counts: ~764 backend
 tests + 64 frontend (vitest) + tsc + 62 e2e (Playwright).
 
+The ticket20 worktree keeps this Harness/Profile boundary. `SessionOwner`
+owns mutable session execution state; managed preparation, spawn, stdin,
+reader and retirement operations retain their original results and wake the
+Owner. Harness producer backpressure and stream closure reach the actual
+reader, and the original late handle remains owned through retirement.
+An input write, a committed business terminal, notification delivery and
+confirmed resource retirement are separate facts. See the
+[architecture execution plan](minimal-architecture-execution-20261020.md),
+section3.2, for the current contract and verification boundary; these edits
+do not establish later native-tail finality or cross-request lease changes.
+
 ## 0. Why this exists
 
 Octopus has a good *per-turn* backend abstraction (`BackendBase` in

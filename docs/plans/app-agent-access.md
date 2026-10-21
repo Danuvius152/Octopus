@@ -57,6 +57,18 @@ the operation. After a restart, an unavailable outcome is explicitly `unknown`.
 SSE events carry request/attempt identities; a `reset` event clears text from an
 abandoned attempt. A final reply retains all text blocks of the completed attempt.
 
+In the ticket20 worktree, ask/SSE consumes the original request's single
+completion. A successful `done` requires both an acknowledged business result
+and its delivered notification prefix. Failed or unavailable notification
+ends the app request with an explicit delivery error, preserving any already
+committed transcript/outcome for the original status lookup; it never replays
+the operation. Cancelling an app waiter does not cancel an admitted command.
+This is distinct from `ApplicationManager`'s build-status consumer, which also
+observes the original completion, including direct chat in the build session.
+See the [architecture execution plan](minimal-architecture-execution-20261020.md),
+section3.2, for the shared ownership and retirement contract. This worktree
+revision does not claim a deployed release.
+
 ## 3. A conversation is a session
 
 An app conversation is a real Octopus session (`origin='app'`, new nullable

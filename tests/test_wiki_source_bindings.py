@@ -3,7 +3,10 @@
 import contextlib
 import json
 import sqlite3
+import subprocess
+import sys
 import uuid
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,7 +21,7 @@ from server.wiki.store import WikiError, WikiStore
 def history(tmp_path):
     root = tmp_path / "vault"
     root.mkdir()
-    store = WikiStore(root, tmp_path / "state", uuid.uuid4().hex)
+    store = WikiStore(root, tmp_path / "state", uuid.uuid4().hex, create=True)
     try:
         yield WikiHistory(store)
     finally:
@@ -53,7 +56,7 @@ def dependency(store, doc="consumer.md"):
 
 def reopen(store):
     store.close()
-    return WikiStore(store.root, store.state, store.vault_id)
+    return WikiStore(store.root, store.state, store.vault_id, health=store.health)
 
 
 def test_bound_source_survives_complete_derived_graph_loss_and_reopen(history):
@@ -302,7 +305,7 @@ def test_v9_migration_retains_bound_target_and_missing_occurrence_becomes_unknow
     schema.initialize(store)
     with store.connect() as db:
         assert source_bindings.current(db, consumer["id"]) == first
-    current = WikiStore(history.store.root, history.store.state, history.store.vault_id)
+    current = WikiStore(history.store.root, history.store.state, history.store.vault_id, health=history.store.health)
     try:
         refs = current.read("consumer.md")["metadata"]["source_refs"]
         assert refs[0]["doc"] == a["id"]
@@ -404,7 +407,7 @@ def test_legacy_prepared_after_without_exact_source_plan_stays_unknown(history):
         receipt = history.record("consumer.md", raw, proposed, "human", "legacy preparation", "prepared")
         history.store.path("consumer.md").write_bytes(proposed)
     downgrade_to_v9(history.store)
-    current = WikiStore(history.store.root, history.store.state, history.store.vault_id)
+    current = WikiStore(history.store.root, history.store.state, history.store.vault_id, health=history.store.health)
     try:
         WikiHistory(current).recover()
         assert dependency(current)["doc"] is None
@@ -417,24 +420,67 @@ def test_legacy_prepared_after_without_exact_source_plan_stays_unknown(history):
 
 
 @pytest.mark.parametrize("failed_table", ["source_binding_observations", "source_binding_head", "wiki_schema"])
-def test_source_migration_failure_rolls_back_all_new_facts_and_schema_marker(history, failed_table):
-    setup_replacement(history)
-    downgrade_to_v9(history.store)
-    old = migration_store(history.store)
-    with old.connect() as db:
+def test_source_migration_failure_rolls_back_all_new_facts_and_schema_marker(history, failed_table, tmp_path):
+    original, _consumer, _raw, _receipt = setup_replacement(history)
+    store = history.store
+    downgrade_to_v9(store)
+    store.close()
+    with sqlite3.connect(store.db_path) as db:
         before = list(db.iterdump())
-
-    @contextlib.contextmanager
-    def interrupted():
-        with old.connect() as db:
-            db.set_authorizer(lambda action, table, *args: sqlite3.SQLITE_DENY
-                             if action == sqlite3.SQLITE_INSERT and table == failed_table else sqlite3.SQLITE_OK)
-            yield db
-
-    with pytest.raises(sqlite3.DatabaseError):
-        schema.initialize(SimpleNamespace(connect=interrupted))
-    with old.connect() as db:
+    bodies = {path.relative_to(store.root): path.read_bytes() for path in store.root.rglob("*.md")}
+    marker = tmp_path / "admitted-after-migration-failure"
+    program = """
+import sqlite3,sys
+from pathlib import Path
+from server.wiki.store import WikiStore
+root,state,vault_id,failed_table,marker=sys.argv[1:]
+marker=Path(marker)
+connect=sqlite3.connect
+def authorize(action,table,*args):
+    if action==sqlite3.SQLITE_INSERT and table==failed_table:
+        marker.with_suffix('.fault-started').touch()
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+def denied(*args,**kwargs):
+    db=connect(*args,**kwargs)
+    db.set_authorizer(authorize)
+    return db
+sqlite3.connect=denied
+try: WikiStore(Path(root),Path(state),vault_id)
+except Exception: pass
+marker.touch()
+"""
+    failed = subprocess.run(
+        [sys.executable, "-c", program, str(store.root), str(store.state), store.vault_id, failed_table, str(marker)],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=10,
+    )
+    assert marker.with_suffix(".fault-started").is_file(), failed.stderr
+    assert failed.returncode == 70, failed.stderr
+    assert not marker.exists()
+    with sqlite3.connect(store.db_path) as db:
         assert list(db.iterdump()) == before
+    restarted = subprocess.run(
+        [sys.executable, "-c", """
+import json,sys
+from pathlib import Path
+from server.wiki.store import WikiStore
+root,state,vault_id,original_id=sys.argv[1:]
+observations=[]
+for attempt in range(2):
+    store=WikiStore(Path(root),Path(state),vault_id)
+    store.refresh()
+    assert store.read('consumer.md')['metadata']['source_refs'][0]['doc']==original_id
+    assert store.read('a.md')['id']!=original_id
+    with store.connect() as db:
+        observations.append([tuple(row) for row in db.execute('SELECT source_doc,observation_id FROM source_binding_head ORDER BY source_doc')])
+    store.close()
+assert observations[0]==observations[1]
+print(json.dumps({'observations':observations}))
+""", str(store.root), str(store.state), store.vault_id, original["id"]],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=10,
+    )
+    assert restarted.returncode == 0, restarted.stderr
+    assert {path.relative_to(store.root): path.read_bytes() for path in store.root.rglob("*.md")} == bodies
 
 
 def test_schema9_framework_refuses_new_source_ledger_without_mutation(history, monkeypatch):

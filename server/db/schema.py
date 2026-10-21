@@ -19,6 +19,12 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     applied_at TEXT NOT NULL
 );
 
+-- Files can precede the rekey only while this encrypted intent remains.
+CREATE TABLE IF NOT EXISTS token_rotation_intent (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    encrypted_payload TEXT NOT NULL
+);
+
 -- Agents are the durable definition of an assistant (agent-refactor.md §4.1):
 -- identity + system prompt + model + credential + built-in MCP set + tool
 -- policy. They OWN sessions and schedules. Memory (the
@@ -151,6 +157,19 @@ CREATE TABLE IF NOT EXISTS client_submissions (
     payload_sha256 TEXT NOT NULL,
     request_id TEXT NOT NULL,
     receipt TEXT,
+    payload TEXT,
+    execution_state TEXT NOT NULL DEFAULT 'unknown',
+    execution_owner TEXT,
+    execution_generation TEXT,
+    execution_boot TEXT,
+    process_group INTEGER,
+    reason_code TEXT,
+    state_version INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT,
+    updated_at TEXT,
+    recovery_of TEXT,
+    recovered_by TEXT,
+    dismissed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (session_id, client_id)
 );
 
@@ -223,9 +242,8 @@ CREATE TABLE IF NOT EXISTS backend_credentials (
     backend TEXT NOT NULL,                 -- "claude-code" | "codex" | …
     label TEXT NOT NULL,
     auth_type TEXT NOT NULL,               -- "api_key" | "oauth"
-    secret_encrypted TEXT NOT NULL,        -- LEGACY: kept for back-compat reads
-                                           -- during the storage-split rollout.
-                                           -- New writes go into credential_secrets.
+    secret_encrypted TEXT NOT NULL,        -- Empty legacy placeholder; the only
+                                           -- ciphertext is in credential_secrets.
     created_at TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active', -- "active" | "needs_reconnect"
     token_expires_at TEXT,                 -- ISO8601, null for non-expiring keys

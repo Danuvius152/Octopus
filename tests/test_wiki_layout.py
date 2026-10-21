@@ -14,7 +14,7 @@ from server.wiki.store import WikiError, WikiStore
 def history(tmp_path):
     root = tmp_path / "vault"
     root.mkdir()
-    store = WikiStore(root, tmp_path / "state", "layout-contract")
+    store = WikiStore(root, tmp_path / "state", "layout-contract", create=True)
     try:
         yield WikiHistory(store)
     finally:

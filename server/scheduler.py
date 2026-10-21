@@ -34,6 +34,7 @@ class ScheduleRunner:
         self._session_mgr = session_mgr
         self._db = db
         self._closing = False
+        self._registration_lock = asyncio.Lock()
         self._shutdown_tasks: tuple[asyncio.Future, ...] | None = None
         self._session_mgr.set_schedule_runner(self)
 
@@ -49,7 +50,7 @@ class ScheduleRunner:
         run_time = getattr(job, "next_run_time", None) if job else None
         return run_time.isoformat() if run_time else None
 
-    async def initialize(self) -> None:
+    async def initialize(self, *, paused: bool = False) -> None:
         if self._closing:
             raise RuntimeError("ScheduleRunner is shutting down")
         now = datetime.now(UTC)
@@ -95,7 +96,13 @@ class ScheduleRunner:
         )
         if self._closing:
             raise RuntimeError("ScheduleRunner is shutting down")
-        self._scheduler.start()
+        self._scheduler.start(paused=paused)
+
+    def start(self) -> None:
+        """Release due fires only after the service has recovered all owners."""
+        if self._closing:
+            raise RuntimeError("ScheduleRunner is shutting down")
+        self._scheduler.resume()
 
     async def _prune_wiki(self):
         if self._closing:
@@ -219,14 +226,12 @@ class ScheduleRunner:
                     schedule_id, last_run_session_id=session.id
                 )
                 receipt = await self._session_mgr.start_message(session.id, body, source="schedule", **wiki_kwargs)
-                driver = session._active_task
                 if not receipt.accepted:
                     logger.info("Schedule %s suppressed: session admission is closed", schedule_id)
                     return
                 completion = await receipt.wait()
-                if driver is not None:
-                    await asyncio.wait({driver})
-                if completion.state == "recording_failed":
+                await self._session_mgr.await_session_execution(session.id)
+                if completion.state != "completed" or completion.recording_state != "committed":
                     logger.error("Schedule %s result recording is %s (session=%s request=%s)", schedule_id, completion.recording_state, session.id, completion.request_id)
                     return
                 await self._db.update_schedule(schedule_id, last_run_at=now)
@@ -263,8 +268,7 @@ class ScheduleRunner:
         """The schedule's current row, or None if it was deleted between the
         job firing and this lookup."""
         try:
-            async with self._db.schedule_definition(schedule_id) as row:
-                return dict(row) if row is not None else None
+            return await self._db.get_schedule_definition(schedule_id)
         except Exception:
             logger.exception("Schedule %s: could not read its row", schedule_id)
             return None
@@ -316,22 +320,30 @@ class ScheduleRunner:
         return (
             session.status != SessionStatus.idle
             or bool(session._pending_queue)
-            or session._current_request is not None
-            or bool(session._active_task and not session._active_task.done())
-            or session._recording_blocked is not None
+            or session._run.request is not None
+            or self._session_mgr.session_is_executing(session)
         )
 
     async def add(self, row: dict) -> None:
+        # A prepared HTTP edit can be overtaken before registration. Fetch
+        # the committed definition while this runner owns registration order.
+        # No SQL transaction remains open while validating the target.
+        async with self._registration_lock:
+            await self._register(row["id"])
+
+    async def _register(self, schedule_id: str) -> None:
         if self._closing:
             raise RuntimeError("ScheduleRunner is shutting down")
-        # A prepared HTTP edit can be overtaken before registration. Fetch
-        # the committed definition under the writer fence, never register its
-        # old snapshot after a newer update has completed.
-        async with self._db.schedule_definition(row["id"]) as current:
-            if current is not None and current["enabled"] and await self._target_is_active(current):
-                self._add_job(current)
+        current = await self._db.get_schedule_definition(schedule_id)
+        self._remove_job(schedule_id)
+        if current is not None and current["enabled"] and await self._target_is_active(current):
+            self._add_job(current)
 
     async def remove(self, schedule_id: str) -> None:
+        async with self._registration_lock:
+            self._remove_job(schedule_id)
+
+    def _remove_job(self, schedule_id: str) -> None:
         try:
             self._scheduler.remove_job(schedule_id)
         except JobLookupError:
@@ -340,8 +352,8 @@ class ScheduleRunner:
             pass
 
     async def reschedule(self, row: dict) -> None:
-        await self.remove(row["id"])
-        await self.add(row)
+        async with self._registration_lock:
+            await self._register(row["id"])
 
     async def _target_is_active(self, row: dict) -> bool:
         try:
@@ -360,7 +372,7 @@ class ScheduleRunner:
                 await self._db.update_schedule(
                     row["id"], enabled=False, invalid_reason=exc.reason,
                 )
-            await self.remove(row["id"])
+            self._remove_job(row["id"])
             logger.warning("Schedule %s suppressed: %s", row["id"], exc.reason)
             return False
         return row["agent_id"] not in self._session_mgr._closed_agents

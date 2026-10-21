@@ -16,6 +16,7 @@ from .sessions import (
     _MAX_PENDING_STEERS,
     _MAX_SUBAGENTS_PER_SESSION,
     _REAPER_INTERVAL_SECONDS,
+    ActiveRun,
     ForkError,
     PendingApproval,
     PendingQuestion,
@@ -39,6 +40,7 @@ __all__ = [
     "_MAX_SUBAGENTS_PER_SESSION",
     "_REAPER_INTERVAL_SECONDS",
 
+    "ActiveRun",
     "ForkError",
     "PendingApproval",
     "PendingQuestion",

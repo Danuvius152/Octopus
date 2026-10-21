@@ -1,92 +1,79 @@
-"""Rotating `OCTOPUS_AUTH_TOKEN` in one operation (docs/plans/token-rotation.md).
+"""Token files precede a database rekey with one encrypted prepared intent.
 
-The token is both the credential clients present and the key
-`server/crypto.py` derives to encrypt every secret in the database, so
-changing it by hand — edit the env file, restart — performs half the job and
-silently breaks the rest: stored credentials stop decrypting, and open clients
-reconnect forever against a token that is no longer accepted.
-
-This module does all of it, in an order chosen so that a failure anywhere
-leaves the system consistent.
+Rekey and intent removal share a short transaction. Startup restores old file
+values while the intent remains; uncertain commits exit instead of guessing.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
+import subprocess
+import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
+from io import StringIO
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import Any, Literal
 
-import aiosqlite
+from dotenv import dotenv_values
+from dotenv.parser import parse_stream
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .config import settings
-from .crypto import decrypt, encrypt
-from .db.base import serialized_write
-
-if TYPE_CHECKING:
-    from .database import Database
+from .aio import complete_cleanup
+from .config import settings, startup_env_file
+from .crypto import decrypt, encrypt, master_key
+from .database import Database
+from .db.transaction import Transaction
+from .service_installation import ServiceProfile
 
 logger = logging.getLogger(__name__)
-
 ENV_KEY = "OCTOPUS_AUTH_TOKEN"
-
-# Short enough not to be annoying, long enough that "changeme" and a
-# four-letter word don't pass. The point of a rotation is usually that the old
-# one was too easy.
 MIN_TOKEN_LENGTH = 12
-
-# A token rides in a URL query (`/ws?token=…`) and in a cookie value
-# (`octopus_app_token`), so these characters would either need escaping or
-# silently truncate it.
 _FORBIDDEN = re.compile(r"[\s;,\"'\\]")
-
-# Every ciphertext the token protects: (table, key column, secret column).
-_SECRET_COLUMNS = (
-    ("credential_secrets", "credential_id", "secret_encrypted"),
-    ("connector_installation_secrets", "installation_id", "secret_encrypted"),
-    ("connector_oauth_clients", "kind", "client_secret_encrypted"),
+_TOKEN_LINE = re.compile(r"^([ \t]*(?:export[ \t]+)?OCTOPUS_AUTH_TOKEN[ \t]*=[ \t]*).*$", re.M | re.I)
+_ACCOUNT_SECRETS = (
+    ("credential_secrets", "backend_credentials", "credential_id"),
+    ("connector_installation_secrets", "connector_installations", "installation_id"),
 )
 
 
 class TokenRotationError(Exception):
-    """Something that stops a rotation, with the status code to answer with."""
-
     def __init__(self, message: str, *, status_code: int = 400) -> None:
         super().__init__(message)
         self.message = message
         self.status_code = status_code
 
 
-class RekeyCommitUnconfirmed(Exception):
-    """Storage cannot prove which key committed; no caller may claim rollback."""
+class _Intent(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    version: Literal[1] = 1
+    database: str
+    old_token: str = Field(min_length=1, repr=False)
+    new_token: str = Field(min_length=MIN_TOKEN_LENGTH, repr=False)
+    files: tuple[str, ...] = Field(min_length=1)
 
 
 @dataclass
 class RotationResult:
-    """What a rotation actually did, so the UI can say it plainly."""
-
     env_files: list[str] = field(default_factory=list)
     reencrypted: dict[str, int] = field(default_factory=dict)
 
 
 def validate_new_token(new_token: str) -> str:
-    """The new token, or a refusal explaining what's wrong with it."""
     token = (new_token or "").strip()
     if not token:
         raise TokenRotationError("The new token can't be empty")
     if len(token) < MIN_TOKEN_LENGTH:
-        raise TokenRotationError(
-            f"The new token must be at least {MIN_TOKEN_LENGTH} characters"
-        )
+        raise TokenRotationError(f"The new token must be at least {MIN_TOKEN_LENGTH} characters")
     if _FORBIDDEN.search(token):
-        raise TokenRotationError(
-            "The new token can't contain spaces, quotes, backslashes, "
-            "semicolons or commas — it travels in a URL query and a cookie"
-        )
+        raise TokenRotationError("The new token can't contain spaces, quotes, backslashes, semicolons or commas — it travels in a URL query and a cookie")
+    if "${" in token:
+        raise TokenRotationError("The new token cannot contain dotenv interpolation (${...}); choose a literal value")
     if token == "changeme":
         raise TokenRotationError("Pick something other than the default token")
     if token == settings.auth_token:
@@ -95,270 +82,256 @@ def validate_new_token(new_token: str) -> str:
 
 
 def env_files_defining_token() -> list[Path]:
-    """The env files that actually set `OCTOPUS_AUTH_TOKEN`.
-
-    Both are updated when both exist: one is handed to the service by systemd,
-    the other is what pydantic reads from the working directory. Updating only
-    one resurrects the old token on the next restart — a server that can't
-    decrypt its own database.
-    """
     override = os.environ.get("OCTOPUS_ENV_FILE")
-    if override:
-        # An explicit pointer is the whole list, never a first guess: the
-        # fallbacks below are real files on a real machine, and a test (or a
-        # script) that names its own must not be able to reach them. This
-        # module rewrites secrets; the blast radius of a wrong guess is
-        # someone's live config.
-        candidates = [Path(override)]
-    else:
-        candidates = [
-            # What pydantic reads (relative to the working directory)…
-            Path.cwd() / ".env",
-            # …and what systemd hands the service, which is the repo's own.
-            Path(__file__).resolve().parent.parent / ".env",
-        ]
+    primary = Path(startup_env_file()).expanduser()
+    candidates = [primary] if override else [primary, Path(__file__).resolve().parent.parent / ".env"]
     found: list[Path] = []
-    for path in candidates:
-        if path is None or not path.is_file():
-            continue
-        resolved = path.resolve()
-        if resolved in found:
-            continue
-        try:
-            text = resolved.read_text()
-        except OSError:
-            continue
-        if re.search(rf"^{ENV_KEY}=", text, re.M):
-            found.append(resolved)
+    for candidate in candidates:
+        if candidate.is_file():
+            path = candidate.resolve()
+            if path not in found and _TOKEN_LINE.search(path.read_text()):
+                found.append(path)
     return found
 
 
-def _rewrite_env_file(path: Path, token: str) -> None:
-    """Replace the token line in `path`, atomically, leaving everything else
-    exactly as it was."""
-    original = path.read_text()
-    updated = re.sub(
-        rf"^{ENV_KEY}=.*$", f"{ENV_KEY}={token}", original, flags=re.M
-    )
-    fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".env-rotate-")
+def _env_token(text: str, *, interpolate: bool) -> str:
+    # Count bindings before dotenv's dictionary folds repeated or quoted keys.
+    definitions = [binding for binding in parse_stream(StringIO(text))
+                   if binding.key is not None and binding.key.lower() == ENV_KEY.lower()]
+    if len(definitions) != 1:
+        raise TokenRotationError("The token must have one unambiguous, single-line environment definition", status_code=409)
+    # The sole binding must also match the existing single-line rewrite format.
+    lines = list(_TOKEN_LINE.finditer(text))
+    # Settings normalizes names to lowercase, including aliases in dotenv.
+    values = {name.lower(): value for name, value in dotenv_values(stream=StringIO(text), interpolate=interpolate).items()}
+    token = values.get(ENV_KEY.lower())
+    single = {name.lower(): value for name, value in dotenv_values(stream=StringIO(lines[0].group()), interpolate=interpolate).items()} if len(lines) == 1 else {}
+    if (len(lines) != 1 or token is None
+            or single.get(ENV_KEY.lower()) != token):
+        raise TokenRotationError("The token must have one unambiguous, single-line environment definition", status_code=409)
+    return token
+
+
+def _render_environment(text: str, token: str, *, interpolate: bool) -> str:
+    value = json.dumps(token, ensure_ascii=False) if _FORBIDDEN.search(token) else token
+    updated = _TOKEN_LINE.sub(lambda match: match[1] + value, text)
+    if _env_token(updated, interpolate=interpolate) != token:
+        raise TokenRotationError("The token cannot round-trip through the startup configuration", status_code=409)
+    return updated
+
+
+def _startup_source(db_path: str, paths: list[Path]) -> bool:
+    """Prove the effective next-start source, including loaded unit overrides."""
+    database = Path(db_path).expanduser().resolve()
+    profile_file = database.with_name(database.name + ".service.json")
+    aliases = [name for name in os.environ if name.lower() == ENV_KEY.lower()]
+    if not profile_file.exists():
+        if aliases:
+            raise TokenRotationError("An external OCTOPUS_AUTH_TOKEN would override the rotated file on restart; start from the env file before rotating", status_code=409)
+        if Path(startup_env_file()).expanduser().resolve() not in paths:
+            raise TokenRotationError("Settings' selected env file does not define the token; configure OCTOPUS_ENV_FILE or its working-directory .env before rotating", status_code=409)
+        if paths != env_files_defining_token():
+            raise TokenRotationError("Startup now uses different token files; preserve the retained rotation and restore its original startup source", status_code=409)
+        return True  # Standalone Settings uses python-dotenv interpolation.
+    if any(name != ENV_KEY for name in aliases):
+        raise TokenRotationError("A case alias of OCTOPUS_AUTH_TOKEN can override the generated service source; remove it before rotating", status_code=409)
     try:
-        with os.fdopen(fd, "w") as fh:
-            fh.write(updated)
-        os.chmod(tmp_name, 0o600)
-        os.replace(tmp_name, path)
-    except Exception:
-        # A half-written temp file is litter, not a config.
-        try:
-            os.unlink(tmp_name)
-        except OSError:
-            pass
-        raise
+        profile = ServiceProfile.model_validate_json(profile_file.read_text())
+    except (OSError, ValidationError) as error:
+        raise TokenRotationError("The managed startup profile cannot be verified", status_code=409) from error
+    active = database.with_name(database.name + ".service.env")
+    if profile.paths.get("db_path") != str(database) or paths != [active]:
+        raise TokenRotationError("Rotation must use the installation's active environment file", status_code=409)
+    try:
+        command = ["systemctl", "--user" if profile.manager == "user" else "--system", "show", profile.unit,
+                   "-p", "EnvironmentFiles", "-p", "UnsetEnvironment", "-p", "ExecStart"]
+        result = subprocess.run(command, capture_output=True, text=True, timeout=3, check=True)
+    except (OSError, subprocess.SubprocessError) as error:
+        raise TokenRotationError("The loaded service configuration cannot be verified; rotation was not started", status_code=409) from error
+    properties = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+    expected_command = f"argv[]={sys.executable} -m server.cli serve --service-process ;"
+    unset = properties.get("UnsetEnvironment", "")
+    if (properties.get("EnvironmentFiles") != f"{active} (ignore_errors=no)"
+            or expected_command not in properties.get("ExecStart", "")
+            or re.search(r"(?:^|[\s\"'])OCTOPUS_AUTH_TOKEN(?:[=\s\"']|$)", unset)):
+        raise TokenRotationError("Loaded service overrides do not preserve the generated token source; rerun service setup before rotating", status_code=409)
+    return False  # systemd passes the EnvironmentFile's literal token to Settings.
 
 
-async def rotate_auth_token(
-    db: Database,
-    new_token: str,
-    *,
-    session_mgr: Any | None = None,
-) -> RotationResult:
-    """Change the access token everywhere it lives, or change nothing.
-
-    Order is the whole design (docs/plans/token-rotation.md §2): persist the
-    new token to disk first (a filesystem failure aborts with nothing
-    changed), re-encrypt the database second (a failure there restores the
-    files), swap the live setting third, and only then drop the processes
-    carrying the old token in their environment.
-    """
-    old_token = settings.auth_token
-    token = validate_new_token(new_token)
-
+def _preflight(db_path: str, old_token: str, new_token: str) -> tuple[list[Path], bool]:
     paths = env_files_defining_token()
     if not paths:
-        raise TokenRotationError(
-            f"No env file defines {ENV_KEY}, so a new token couldn't survive a "
-            f"restart. Add it to a .env file first.",
-            status_code=409,
-        )
+        raise TokenRotationError(f"No env file defines {ENV_KEY}, so a new token couldn't survive a restart. Add it to a .env file first.", status_code=409)
+    interpolate = _startup_source(db_path, paths)
+    for path in paths:
+        text = path.read_text()
+        if _env_token(text, interpolate=interpolate) != old_token:
+            raise TokenRotationError("An environment file differs from the live token; verify its configuration before rotating", status_code=409)
+        _render_environment(text, old_token, interpolate=interpolate)
+        _render_environment(text, new_token, interpolate=interpolate)
+    return paths, interpolate
 
-    # 1. Disk, remembering enough to put it back.
-    previous: dict[Path, str] = {}
+
+def _rewrite_env_file(path: Path, token: str, allowed: set[str], *, interpolate: bool) -> None:
+    if path.resolve() != path:
+        raise TokenRotationError("A retained token file no longer has its original canonical path", status_code=409)
+    original = path.read_text()
+    if _env_token(original, interpolate=interpolate) not in allowed:
+        raise TokenRotationError("A token file contains an unknown third value; retained rotation evidence needs operator attention", status_code=409)
+    updated = _render_environment(original, token, interpolate=interpolate)
+    descriptor, temporary = tempfile.mkstemp(dir=path.parent, prefix=".env-rotate-")
     try:
-        for path in paths:
-            previous[path] = path.read_text()
-            _rewrite_env_file(path, token)
-    except OSError as exc:
-        _restore(previous)
-        raise TokenRotationError(
-            f"Could not write {exc.filename or 'the env file'}: {exc.strerror}",
-            status_code=500,
-        )
-
-    # 2. Every secret, in one transaction.
-    try:
-        result = RotationResult(env_files=[str(p) for p in paths])
-        result.reencrypted = await _reencrypt_secrets(db, old_token, token)
-    except RekeyCommitUnconfirmed as exc:
-        raise TokenRotationError(
-            "The secret rekey commit is unconfirmed. Prepared environment files were retained; "
-            "verify the stored secret keys before restarting or retrying rotation.",
-            status_code=503,
-        ) from exc
-    except BaseException as exc:
-        _restore(previous)
-        if not isinstance(exc, Exception) or isinstance(exc, TokenRotationError):
-            raise
-        raise TokenRotationError(
-            f"Re-encrypting the stored secrets failed, so nothing was changed: {exc}",
-            status_code=500,
-        )
-
-    # 3. The live setting. Everything after this point is best-effort cleanup.
-    settings.auth_token = token
-    logger.info(
-        "auth token rotated; rewrote %s, re-encrypted %s",
-        ", ".join(result.env_files),
-        result.reencrypted,
-    )
-
-    # 4. Processes that were handed the old token at spawn.
-    await _drop_stale_processes(session_mgr)
-    return result
-
-
-def _restore(previous: dict[Path, str]) -> None:
-    for path, text in previous.items():
-        try:
-            path.write_text(text)
-        except OSError:
-            logger.exception("could not restore %s after a failed rotation", path)
-
-
-async def _committed_rekey_state(
-    db: Database, updates: list[tuple[str, str, str, str, str]],
-    originals: list[tuple[str, str, str, str, str]],
-) -> Literal["committed", "unchanged", "unconfirmed"]:
-    async def read(reader: aiosqlite.Connection) -> Literal["committed", "unchanged", "unconfirmed"]:
-        changed, unchanged = True, True
-        for update, original in zip(updates, originals, strict=True):
-            table, key_column, secret_column, row_key, intended = update
-            cursor = await reader.execute(
-                f"SELECT {secret_column} FROM {table} WHERE {key_column} = ?",
-                (row_key,),
-            )
-            row = await cursor.fetchone()
-            changed = changed and row is not None and row[0] == intended
-            unchanged = unchanged and row is not None and row[0] == original[4]
-        return "committed" if changed else "unchanged" if unchanged else "unconfirmed"
-
-    if db._db_path == ":memory:":
-        # Hermetic in-memory stores have no independent connection. The
-        # commit owner has already finished, and this view has no transaction.
-        return await read(db.conn) if not db.conn.in_transaction else "unconfirmed"
-    async with aiosqlite.connect(Path(db._db_path).resolve().as_uri() + "?mode=ro", uri=True) as reader:
-        await reader.execute("BEGIN")
-        return await read(reader)
-
-
-async def _commit_rekey(
-    db: Database, savepoint: str, updates: list[tuple[str, str, str, str, str]],
-    originals: list[tuple[str, str, str, str, str]],
-) -> None:
-    """Finish the captured commit before interpreting a lost acknowledgement."""
-    commit = asyncio.create_task(db.conn.commit(), name="secret-rekey-commit")
-    try:
-        await asyncio.shield(commit)
-    except BaseException as failure:
-        # Cancellation cannot release the shared connection while its worker
-        # still decides the transaction. Once committed, finish the key handoff.
-        while not commit.done():
+        with os.fdopen(descriptor, "w") as stream:
+            stream.write(updated)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        for directory in path.parents:
+            parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
             try:
-                await asyncio.shield(commit)
-            except asyncio.CancelledError:
-                continue
-            except Exception:
-                break  # The finished commit error is classified by storage.
-        try:
-            if db.conn.in_transaction:
-                await db.conn.execute(f"ROLLBACK TO {savepoint}")
-                await db.conn.execute(f"RELEASE {savepoint}")
-            state = await _committed_rekey_state(db, updates, originals)
-        except BaseException as exc:
-            raise RekeyCommitUnconfirmed("Rekey commit could not be verified") from exc
-        if state == "committed":
-            logger.warning("Secret rekey commit confirmed despite missing acknowledgement")
-            return
-        if state == "unchanged":
-            raise failure
-        raise RekeyCommitUnconfirmed("Rekey committed contents did not match either known state") from failure
+                os.fsync(parent)
+            finally:
+                os.close(parent)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
-@serialized_write
-async def _reencrypt_secrets(
-    db: Database, old_token: str, new_token: str
-) -> dict[str, int]:
-    """Re-key every stored secret. All of them, or none.
+def _write_files(intent: _Intent, token: str, interpolate: bool) -> None:
+    allowed = {intent.old_token, intent.new_token}
+    # Reject an unknown later file before changing any earlier file.
+    for name in intent.files:
+        path = Path(name)
+        if path.resolve() != path or _env_token(path.read_text(), interpolate=interpolate) not in allowed:
+            raise TokenRotationError("A retained token file cannot be reconciled; preserve the intent for operator attention", status_code=409)
+    for name in intent.files:
+        _rewrite_env_file(Path(name), token, allowed, interpolate=interpolate)
 
-    A row that won't decrypt with the old token aborts the rotation instead of
-    being skipped: a half-rotated database is one where some secrets are keyed
-    to a token nobody has any more.
-    """
-    await db._ensure_connected()
-    await db._flush_locked()
-    counts: dict[str, int] = {}
 
-    # Read and re-key everything BEFORE writing anything: a row that won't
-    # decrypt then costs nothing, instead of leaving the rows before it keyed
-    # to the new token and the rows after it keyed to the old one. (The
-    # connection's implicit transaction is not enough on its own — this ran
-    # halfway once, and the test that caught it is
-    # `test_a_secret_that_cannot_be_decrypted_changes_nothing`.)
-    updates: list[tuple[str, str, str, str, str]] = []
-    originals: list[tuple[str, str, str, str, str]] = []
-    for table, key_col, secret_col in _SECRET_COLUMNS:
-        cursor = await db.conn.execute(f"SELECT {key_col}, {secret_col} FROM {table}")
-        rows = await cursor.fetchall()
-        counts[table] = len(rows)
-        for key, ciphertext in rows:
-            try:
-                plaintext = decrypt(ciphertext, old_token)
-            except ValueError as exc:
-                raise TokenRotationError(
-                    f"{table}.{key_col}={key!r} could not be decrypted with the "
-                    f"current token, so nothing was changed ({exc}). Delete that "
-                    f"row and re-add the credential, then rotate again.",
-                    status_code=409,
-                )
-            updates.append(
-                (table, key_col, secret_col, key, encrypt(plaintext, new_token))
-            )
-            originals.append((table, key_col, secret_col, key, ciphertext))
-
-    await db.conn.execute("SAVEPOINT token_rekey")
+async def _file_step[T](db: Database, action: Callable[..., T], *args: Any) -> T:
+    task = asyncio.create_task(asyncio.to_thread(action, *args))
     try:
-        for table, key_col, secret_col, key, ciphertext in updates:
-            await db.conn.execute(
-                f"UPDATE {table} SET {secret_col} = ? WHERE {key_col} = ?",
-                (ciphertext, key),
-            )
-        await _commit_rekey(db, "token_rekey", updates, originals)
-    except BaseException:
-        # This transaction owns only its savepoint. Buffered transcripts were
-        # acknowledged before it, and concurrent writers hold the same lock.
-        if db.conn.in_transaction:
-            await db.conn.execute("ROLLBACK TO token_rekey")
-            await db.conn.execute("RELEASE token_rekey")
+        async with asyncio.timeout(5):
+            return await asyncio.shield(task)
+    except TokenRotationError:
         raise
+    except BaseException as error:
+        db.health.fail(error)
+
+
+async def _rekey(tx: Transaction, old: str, new: str, wrapping_key: str, *, write: bool) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for table, parents, identity in _ACCOUNT_SECRETS:
+        rows = await tx.fetch_all(
+            f"SELECT s.{identity},s.secret_encrypted FROM {table} s JOIN {parents} p ON p.id=s.{identity} WHERE p.user_id IS NULL",  # noqa: S608
+        )
+        counts[table] = 0
+        for key, ciphertext in rows:
+            if not ciphertext:
+                continue
+            try:
+                plaintext = decrypt(ciphertext, old)
+            except ValueError as error:
+                raise TokenRotationError(f"{table} record {key!r} cannot be decrypted with the current token; verify the retained secret before rotating", status_code=409) from error
+            if write:
+                await tx.execute(f"UPDATE {table} SET secret_encrypted=? WHERE {identity}=?", (encrypt(plaintext, new), key))  # noqa: S608
+            counts[table] += 1
+    counts["connector_oauth_clients"] = 0
+    for kind, ciphertext in await tx.fetch_all("SELECT kind,client_secret_encrypted FROM connector_oauth_clients"):
+        if not ciphertext:
+            continue
+        try:
+            decrypt(ciphertext, wrapping_key)
+            continue
+        except ValueError:
+            pass
+        try:
+            plaintext = decrypt(ciphertext, old)
+        except ValueError as error:
+            raise TokenRotationError("An OAuth client secret has an unknown encryption key; verify it before rotating", status_code=409) from error
+        if write:
+            await tx.execute("UPDATE connector_oauth_clients SET client_secret_encrypted=? WHERE kind=?", (encrypt(plaintext, wrapping_key), kind))
+        counts["connector_oauth_clients"] += 1
     return counts
 
 
-async def _drop_stale_processes(session_mgr: Any | None) -> None:
-    """Retire held CLI processes that may carry the old callback environment.
+async def _recover_locked(db: Database) -> None:
+    async with db.transaction(write=False) as tx:
+        row = await tx.fetch_one("SELECT encrypted_payload FROM token_rotation_intent WHERE id=1")
+    if row is None:
+        return
+    try:
+        intent = _Intent.model_validate_json(decrypt(row[0], master_key()))
+        if (intent.database != str(Path(db._db_path).expanduser().resolve())
+                or len(set(intent.files)) != len(intent.files)
+                or any(not Path(name).is_absolute() for name in intent.files)
+                or settings.auth_token not in {intent.old_token, intent.new_token}):
+            raise TokenRotationError("Retained token rotation does not match this startup; preserve its evidence for operator attention", status_code=409)
+        interpolate = await _file_step(db, _startup_source, db._db_path, [Path(name) for name in intent.files])
+        await _file_step(db, _write_files, intent, intent.old_token, interpolate)
+    except (TokenRotationError, ValueError, ValidationError) as error:
+        db.health.fail(error)
+    async with db.transaction() as tx:
+        await tx.execute("DELETE FROM token_rotation_intent WHERE id=1")
+    settings.auth_token = intent.old_token
+    if ENV_KEY in os.environ:
+        os.environ[ENV_KEY] = intent.old_token
 
-    Application backends receive a master-key app token, not the install
-    token, so their processes and in-flight requests remain valid.
-    """
-    if session_mgr is not None:
-        try:
-            await session_mgr.stop_all_held_processes()
-        except Exception:
-            logger.exception("could not stop held CLI processes after rotation")
+
+async def recover_auth_token(db: Database) -> None:
+    """Startup owner: reconcile files before any secret consumer is admitted."""
+    async with db.installation_key_lock:
+        await _recover_locked(db)
+
+
+async def rotate_auth_token(db: Database, new_token: str, *, session_mgr: Any | None = None) -> RotationResult:
+    captured_token = settings.auth_token
+
+    async def command() -> RotationResult:
+        async with db.installation_key_lock:
+            if settings.auth_token != captured_token:
+                raise TokenRotationError("Another rotation has already changed this token; sign in again", status_code=409)
+            token = validate_new_token(new_token)
+            paths, interpolate = await _file_step(db, _preflight, db._db_path, captured_token, token)
+            wrapping_key = await _file_step(db, master_key)
+            intent = _Intent(database=str(Path(db._db_path).expanduser().resolve()), old_token=captured_token,
+                             new_token=token, files=tuple(str(path) for path in paths))
+            sealed = encrypt(intent.model_dump_json(), wrapping_key)
+            try:
+                # C0: validate without effects, then retain the sole cross-resource intent.
+                async with db.transaction() as tx:
+                    if await db._count(tx, "SELECT COUNT(*) FROM users"):
+                        raise TokenRotationError("The installation token has retired; use the owning account", status_code=409)
+                    if await tx.fetch_one("SELECT id FROM token_rotation_intent WHERE id=1"):
+                        db.health.fail(RuntimeError("An unresolved token intent reached an admitted rotation"))
+                    await _rekey(tx, captured_token, token, wrapping_key, write=False)
+                    await tx.execute("INSERT INTO token_rotation_intent(id,encrypted_payload) VALUES(1,?)", (sealed,))
+                try:
+                    # F1: every file and its directory precedes the database commit.
+                    await _file_step(db, _write_files, intent, token, interpolate)
+                    # C1: re-read actual secrets, rekey, and remove the intent atomically.
+                    async with db.transaction() as tx:
+                        counts = await _rekey(tx, captured_token, token, wrapping_key, write=True)
+                        await tx.execute("DELETE FROM token_rotation_intent WHERE id=1")
+                except TokenRotationError:
+                    await _recover_locked(db)
+                    raise
+            except TokenRotationError:
+                raise
+            except BaseException as error:
+                # A cancelled owner can have a confirmed C0/C1 commit. Never
+                # release its key scope without handoff or startup recovery.
+                db.health.fail(error)
+            settings.auth_token = token
+            if ENV_KEY in os.environ:
+                os.environ[ENV_KEY] = token
+            try:
+                if session_mgr is not None:
+                    async with asyncio.timeout(5):
+                        await session_mgr.stop_all_held_processes()
+            except BaseException as error:
+                db.health.fail(error)
+            result = RotationResult([str(path) for path in paths], counts)
+            logger.info("auth token rotated; rewrote %s, re-encrypted %s", result.env_files, counts)
+            return result
+
+    return await complete_cleanup(command())

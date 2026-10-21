@@ -13,7 +13,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from .base import DatabaseBase, serialized_write
+from .base import DatabaseBase
+from .transaction import Transaction
 
 
 def _row_to_user(row: Any) -> dict[str, Any]:
@@ -35,10 +36,17 @@ _USER_COLUMNS = (
 )
 
 
+async def owner_is_available(tx: Transaction, user_id: str | None) -> bool:
+    """Read the current owner/legacy-era fact within the caller's transaction."""
+    if user_id is None:
+        return await tx.fetch_one("SELECT 1 FROM users LIMIT 1") is None
+    row = await tx.fetch_one("SELECT disabled_at FROM users WHERE id=?", (user_id,))
+    return row is not None and not row[0]
+
+
 class UsersMixin(DatabaseBase):
     # -- users --------------------------------------------------------------
 
-    @serialized_write
     async def create_user(
         self,
         *,
@@ -49,20 +57,27 @@ class UsersMixin(DatabaseBase):
         is_admin: bool = False,
         dek_wrapped: str | None = None,
     ) -> dict[str, Any]:
-        await self._ensure_connected()
-        await self.conn.execute(
+        async with self.transaction(write=True) as tx:
+            return await self._create_user(tx, user_id=user_id, username=username, password_hash=password_hash,
+                                           created_at=created_at, is_admin=is_admin, dek_wrapped=dek_wrapped)
+
+    async def _create_user(self, tx: Transaction, *, user_id: str, username: str, password_hash: str,
+                           created_at: str, is_admin: bool = False, dek_wrapped: str | None = None) -> dict[str, Any]:
+        await tx.execute(
             "INSERT INTO users (id, username, password_hash, dek_wrapped, "
             " is_admin, created_at) VALUES (?, ?, ?, ?, ?, ?)",
             (user_id, username, password_hash, dek_wrapped, int(is_admin), created_at),
         )
-        await self.conn.commit()
-        created = await self.get_user(user_id)
-        assert created is not None  # just inserted
+        created = await self._get_user(tx, user_id)
+        assert created is not None
         return created
 
     async def get_user(self, user_id: str) -> dict[str, Any] | None:
-        await self._ensure_connected()
-        cursor = await self.conn.execute(
+        async with self.transaction(write=False) as tx:
+            return await self._get_user(tx, user_id)
+
+    async def _get_user(self, tx: Transaction, user_id: str) -> dict[str, Any] | None:
+        cursor = await tx.execute(
             f"SELECT {_USER_COLUMNS} FROM users WHERE id = ?", (user_id,)
         )
         row = await cursor.fetchone()
@@ -71,41 +86,39 @@ class UsersMixin(DatabaseBase):
     async def get_user_by_username(self, username: str) -> dict[str, Any] | None:
         """Case-insensitively, because the column is NOCASE and a login that
         only matched the exact casing would reject the right person."""
-        await self._ensure_connected()
-        cursor = await self.conn.execute(
-            f"SELECT {_USER_COLUMNS} FROM users WHERE username = ? COLLATE NOCASE",
-            (username,),
-        )
-        row = await cursor.fetchone()
-        return _row_to_user(row) if row else None
+        async with self.transaction(write=False) as tx:
+            cursor = await tx.execute(
+                f"SELECT {_USER_COLUMNS} FROM users WHERE username = ? COLLATE NOCASE",
+                (username,),
+            )
+            row = await cursor.fetchone()
+            return _row_to_user(row) if row else None
 
     async def list_users(self) -> list[dict[str, Any]]:
-        await self._ensure_connected()
-        cursor = await self.conn.execute(
-            f"SELECT {_USER_COLUMNS} FROM users ORDER BY created_at"
-        )
-        return [_row_to_user(r) for r in await cursor.fetchall()]
+        async with self.transaction(write=False) as tx:
+            cursor = await tx.execute(
+                f"SELECT {_USER_COLUMNS} FROM users ORDER BY created_at"
+            )
+            return [_row_to_user(r) for r in await cursor.fetchall()]
 
     async def count_users(self) -> int:
-        return await self._count("SELECT COUNT(*) FROM users")
+        async with self.transaction(write=False) as tx:
+            return await self._count(tx, "SELECT COUNT(*) FROM users")
 
-    @serialized_write
     async def update_user_field(self, user_id: str, **fields: Any) -> None:
         """Set named columns. Same shape as `update_session_field` — the
         caller names what it means and the SQL is assembled once."""
-        if not fields:
-            return
-        await self._ensure_connected()
-        assignments = ", ".join(f"{name} = ?" for name in fields)
-        await self.conn.execute(
-            f"UPDATE users SET {assignments} WHERE id = ?",
-            (*fields.values(), user_id),
-        )
-        await self.conn.commit()
+        async with self.transaction(write=True) as tx:
+            if not fields:
+                return
+            assignments = ", ".join(f"{name} = ?" for name in fields)
+            await tx.execute(
+                f"UPDATE users SET {assignments} WHERE id = ?",
+                (*fields.values(), user_id),
+            )
 
     # -- ownership ----------------------------------------------------------
 
-    @serialized_write
     async def adopt_orphan_rows(self, user_id: str) -> dict[str, int]:
         """Give every unowned row to `user_id`. Returns what moved, per table.
 
@@ -116,33 +129,34 @@ class UsersMixin(DatabaseBase):
         because "adopt anything orphaned" stays correct if a later import or a
         restored backup ever produces one.
         """
-        await self._ensure_connected()
+        async with self.transaction(write=True) as tx:
+            return await self._adopt_orphan_rows(tx, user_id)
+
+    async def _adopt_orphan_rows(self, tx: Transaction, user_id: str) -> dict[str, int]:
         moved: dict[str, int] = {}
         for table in self.OWNED_TABLES:
-            cursor = await self.conn.execute(
+            cursor = await tx.execute(
                 f"UPDATE {table} SET user_id = ? WHERE user_id IS NULL",  # noqa: S608
                 (user_id,),
             )
             if cursor.rowcount:
                 moved[table] = cursor.rowcount
-        await self.conn.commit()
         return moved
 
     async def count_orphan_rows(self) -> dict[str, int]:
         """Unowned rows per table — what `adopt_orphan_rows` would move."""
-        await self._ensure_connected()
-        out: dict[str, int] = {}
-        for table in self.OWNED_TABLES:
-            n = await self._count(
-                f"SELECT COUNT(*) FROM {table} WHERE user_id IS NULL"  # noqa: S608
-            )
-            if n:
-                out[table] = n
-        return out
+        async with self.transaction(write=False) as tx:
+            out: dict[str, int] = {}
+            for table in self.OWNED_TABLES:
+                n = await self._count(tx,
+                    f"SELECT COUNT(*) FROM {table} WHERE user_id IS NULL"  # noqa: S608
+                )
+                if n:
+                    out[table] = n
+            return out
 
     # -- invites ------------------------------------------------------------
 
-    @serialized_write
     async def create_invite(
         self,
         *,
@@ -152,20 +166,22 @@ class UsersMixin(DatabaseBase):
         expires_at: str | None = None,
         max_uses: int = 1,
     ) -> dict[str, Any]:
-        await self._ensure_connected()
-        await self.conn.execute(
-            "INSERT INTO invites (code, created_by, created_at, expires_at, "
-            " max_uses) VALUES (?, ?, ?, ?, ?)",
-            (code, created_by, created_at, expires_at, max_uses),
-        )
-        await self.conn.commit()
-        found = await self.get_invite(code)
-        assert found is not None
-        return found
+        async with self.transaction(write=True) as tx:
+            await tx.execute(
+                "INSERT INTO invites (code, created_by, created_at, expires_at, "
+                " max_uses) VALUES (?, ?, ?, ?, ?)",
+                (code, created_by, created_at, expires_at, max_uses),
+            )
+            found = await self._get_invite(tx, code)
+            assert found is not None
+            return found
 
     async def get_invite(self, code: str) -> dict[str, Any] | None:
-        await self._ensure_connected()
-        cursor = await self.conn.execute(
+        async with self.transaction(write=False) as tx:
+            return await self._get_invite(tx, code)
+
+    async def _get_invite(self, tx: Transaction, code: str) -> dict[str, Any] | None:
+        cursor = await tx.execute(
             "SELECT code, created_by, created_at, expires_at, max_uses, "
             " used_count, revoked_at FROM invites WHERE code = ?",
             (code,),
@@ -184,17 +200,16 @@ class UsersMixin(DatabaseBase):
         }
 
     async def list_invites(self) -> list[dict[str, Any]]:
-        await self._ensure_connected()
-        cursor = await self.conn.execute("SELECT code FROM invites ORDER BY created_at")
-        codes = [r[0] for r in await cursor.fetchall()]
-        out = []
-        for code in codes:
-            invite = await self.get_invite(code)
-            if invite:
-                out.append(invite)
-        return out
+        async with self.transaction(write=False) as tx:
+            cursor = await tx.execute("SELECT code FROM invites ORDER BY created_at")
+            codes = [r[0] for r in await cursor.fetchall()]
+            out = []
+            for code in codes:
+                invite = await self._get_invite(tx, code)
+                if invite:
+                    out.append(invite)
+            return out
 
-    @serialized_write
     async def claim_invite(self, code: str) -> bool:
         """Consume one use, atomically.
 
@@ -202,27 +217,23 @@ class UsersMixin(DatabaseBase):
         read-then-write, so two registrations racing for the last use of a code
         cannot both win — SQLite settles it and the loser sees 0 rows changed.
         """
-        await self._ensure_connected()
-        cursor = await self.conn.execute(
-            "UPDATE invites SET used_count = used_count + 1 "
-            " WHERE code = ? AND revoked_at IS NULL AND used_count < max_uses",
-            (code,),
-        )
-        await self.conn.commit()
-        return (cursor.rowcount or 0) > 0
+        async with self.transaction(write=True) as tx:
+            cursor = await tx.execute(
+                "UPDATE invites SET used_count = used_count + 1 "
+                " WHERE code = ? AND revoked_at IS NULL AND used_count < max_uses",
+                (code,),
+            )
+            return (cursor.rowcount or 0) > 0
 
-    @serialized_write
     async def revoke_invite(self, code: str, *, at: str) -> None:
-        await self._ensure_connected()
-        await self.conn.execute(
-            "UPDATE invites SET revoked_at = ? WHERE code = ? AND revoked_at IS NULL",
-            (at, code),
-        )
-        await self.conn.commit()
+        async with self.transaction(write=True) as tx:
+            await tx.execute(
+                "UPDATE invites SET revoked_at = ? WHERE code = ? AND revoked_at IS NULL",
+                (at, code),
+            )
 
     # -- tokens -------------------------------------------------------------
 
-    @serialized_write
     async def store_token(
         self,
         *,
@@ -233,17 +244,19 @@ class UsersMixin(DatabaseBase):
         expires_at: str | None = None,
         label: str | None = None,
     ) -> None:
-        await self._ensure_connected()
-        await self.conn.execute(
-            "INSERT INTO auth_tokens (token_hash, user_id, kind, label, "
-            " created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
-            (token_hash, user_id, kind, label, created_at, expires_at),
-        )
-        await self.conn.commit()
+        async with self.transaction(write=True) as tx:
+            await tx.execute(
+                "INSERT INTO auth_tokens (token_hash, user_id, kind, label, "
+                " created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
+                (token_hash, user_id, kind, label, created_at, expires_at),
+            )
 
     async def get_token(self, token_hash: str) -> dict[str, Any] | None:
-        await self._ensure_connected()
-        cursor = await self.conn.execute(
+        async with self.transaction(write=False) as tx:
+            return await self._get_token(tx, token_hash)
+
+    async def _get_token(self, tx: Transaction, token_hash: str) -> dict[str, Any] | None:
+        cursor = await tx.execute(
             "SELECT token_hash, user_id, kind, label, created_at, expires_at, "
             " last_seen_at, revoked_at FROM auth_tokens WHERE token_hash = ?",
             (token_hash,),
@@ -264,74 +277,66 @@ class UsersMixin(DatabaseBase):
 
     async def get_token_user(self, token_hash: str) -> dict[str, Any] | None:
         """Read the bearer and its current account together, without a write."""
-        await self._ensure_connected()
-        columns = ", ".join(f"u.{column.strip()}" for column in _USER_COLUMNS.split(","))
-        cursor = await self.conn.execute(
-            f"SELECT {columns}, t.revoked_at, t.expires_at "
-            "FROM auth_tokens AS t JOIN users AS u ON u.id = t.user_id "
-            "WHERE t.token_hash = ?",
-            (token_hash,),
-        )
-        row = await cursor.fetchone()
-        if row is None:
-            return None
-        return {"user": _row_to_user(row), "revoked_at": row[8], "expires_at": row[9]}
+        async with self.transaction(write=False) as tx:
+            columns = ", ".join(f"u.{column.strip()}" for column in _USER_COLUMNS.split(","))
+            cursor = await tx.execute(
+                f"SELECT {columns}, t.revoked_at, t.expires_at "
+                "FROM auth_tokens AS t JOIN users AS u ON u.id = t.user_id "
+                "WHERE t.token_hash = ?",
+                (token_hash,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                return None
+            return {"user": _row_to_user(row), "revoked_at": row[8], "expires_at": row[9]}
 
     async def list_tokens(self, user_id: str) -> list[dict[str, Any]]:
-        await self._ensure_connected()
-        cursor = await self.conn.execute(
-            "SELECT token_hash FROM auth_tokens WHERE user_id = ? "
-            " AND revoked_at IS NULL ORDER BY created_at",
-            (user_id,),
-        )
-        hashes = [r[0] for r in await cursor.fetchall()]
-        out = []
-        for h in hashes:
-            token = await self.get_token(h)
-            if token:
-                out.append(token)
-        return out
+        async with self.transaction(write=False) as tx:
+            cursor = await tx.execute(
+                "SELECT token_hash FROM auth_tokens WHERE user_id = ? "
+                " AND revoked_at IS NULL ORDER BY created_at",
+                (user_id,),
+            )
+            hashes = [r[0] for r in await cursor.fetchall()]
+            out = []
+            for h in hashes:
+                token = await self._get_token(tx, h)
+                if token:
+                    out.append(token)
+            return out
 
-    @serialized_write
     async def touch_token(self, token_hash: str, *, at: str) -> None:
         """Record that a bearer was just used.
 
-        Deliberately not committed on its own — this fires on *every*
-        authenticated request, and a commit per request would put a disk write
-        in front of every call. It shares the bounded batch used by messages;
-        the first deferred write schedules a commit even if traffic stops.
+        This short operation commits independently of transcript writes, so
+        authentication cannot accidentally commit another operation's input.
         """
-        await self._ensure_connected()
-        await self.conn.execute(
-            "UPDATE auth_tokens SET last_seen_at = ? WHERE token_hash = ?",
-            (at, token_hash),
-        )
-        self._defer_commit()
+        async with self.transaction(write=True) as tx:
+            await tx.execute(
+                "UPDATE auth_tokens SET last_seen_at = ? WHERE token_hash = ?",
+                (at, token_hash),
+            )
 
-    @serialized_write
     async def revoke_token(self, token_hash: str, *, at: str) -> None:
-        await self._ensure_connected()
-        await self.conn.execute(
-            "UPDATE auth_tokens SET revoked_at = ? WHERE token_hash = ? "
-            " AND revoked_at IS NULL",
-            (at, token_hash),
-        )
-        await self.conn.commit()
+        async with self.transaction(write=True) as tx:
+            await tx.execute(
+                "UPDATE auth_tokens SET revoked_at = ? WHERE token_hash = ? "
+                " AND revoked_at IS NULL",
+                (at, token_hash),
+            )
 
-    @serialized_write
     async def revoke_all_tokens(self, user_id: str, *, at: str, keep: str | None = None) -> int:
         """Sign a user out everywhere. `keep` spares the caller's own bearer,
         which is what "change my password" wants: other devices out, this one
         still in."""
-        await self._ensure_connected()
-        sql = (
-            "UPDATE auth_tokens SET revoked_at = ? WHERE user_id = ? "
-            " AND revoked_at IS NULL"
-        )
-        params: list[Any] = [at, user_id]
-        if keep is not None:
-            sql += " AND token_hash != ?"
-            params.append(keep)
-        cursor = await self.conn.execute(sql, params)
-        await self.conn.commit()
-        return cursor.rowcount or 0
+        async with self.transaction(write=True) as tx:
+            sql = (
+                "UPDATE auth_tokens SET revoked_at = ? WHERE user_id = ? "
+                " AND revoked_at IS NULL"
+            )
+            params: list[Any] = [at, user_id]
+            if keep is not None:
+                sql += " AND token_hash != ?"
+                params.append(keep)
+            cursor = await tx.execute(sql, params)
+            return cursor.rowcount or 0

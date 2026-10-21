@@ -99,7 +99,7 @@ async def scope_is_authorized(scope: McpScope) -> bool:
 
 async def scope_rejection_reason(scope: McpScope) -> str | None:
     """Only call with a verified signature; never diagnose untrusted claims."""
-    from .deps import accounts_exist
+    from .deps import accounts_exist, owner_is_available
 
     if not work_is_open(scope.work_id):
         return "closed_work"
@@ -112,8 +112,10 @@ async def scope_rejection_reason(scope: McpScope) -> str | None:
             return "retired_run_lease"
         if lease != (scope.session_id, scope.user_id, scope.work_id):
             return "mismatched_run_lease"
-    if scope.user_id is None and await accounts_exist():
-        return "legacy_era"
+    if scope.user_id is None:
+        return "legacy_era" if await accounts_exist() else None
+    if not await owner_is_available(scope.user_id):
+        return "owner_unavailable"
     return None
 
 

@@ -36,7 +36,6 @@ async def _seed_session(db, sid="parent"):
 
 async def _append(db, sid, seq, role, type, **kw):
     await db.append_message(session_id=sid, seq=seq, role=role, type=type, **kw)
-    await db.flush()
 
 
 # ------------------------------------------------------------------ classifier

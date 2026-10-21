@@ -8,17 +8,19 @@ connection, so rollback cannot lose receipt or commit replay a deletion twice.
 import contextlib
 import hashlib
 import json
-import sqlite3
 import uuid
 from datetime import UTC, datetime
 
+from ..service_health import ServiceHealth
+from . import storage
 from .store import WikiError
 
 PROTOCOL = 1
 
 
 class EventInbox:
-    def __init__(self, db_path, root, vault_id, *, recovery=None):
+    def __init__(self, db_path, root, vault_id, *, recovery=None, health=None):
+        self.health = health if health is not None else ServiceHealth()
         self.db_path = db_path
         self.root = str(root)
         self.vault_id = vault_id
@@ -27,24 +29,11 @@ class EventInbox:
             db.execute("INSERT OR IGNORE INTO filesystem_state(singleton,protocol,root,vault_id) VALUES(1,?,?,?)", (PROTOCOL, self.root, self.vault_id))
             self.check(db, allow_armed=recovery is not None)
 
-    @staticmethod
-    def commit(db):
-        db.commit()
-
     @contextlib.contextmanager
     def connect(self):
-        db = sqlite3.connect(self.db_path, timeout=30)
-        db.row_factory = sqlite3.Row
-        try:
-            db.execute("PRAGMA recursive_triggers=ON")
+        with storage.connect(self.db_path, self.health) as db:
             db.execute("BEGIN IMMEDIATE")
             yield db
-            self.commit(db)
-        except BaseException:
-            db.rollback()
-            raise
-        finally:
-            db.close()
 
     def state(self, db):
         """Validate receipt continuity without discarding uncertain evidence."""
@@ -63,7 +52,7 @@ class EventInbox:
         from . import recovery_state
 
         state = self.state(db)
-        recovery_state.access(db, self.root, self.vault_id, self.recovery)
+        recovery_state.access(db, self.root, self.vault_id, self.recovery, health=self.health)
         if state["uncertain"] and not (self.recovery is not None and self.recovery.intake):
             raise WikiError("Filesystem history is uncertain; inspect the durable inbox before reopening writes: " + state["uncertain"], 503)
         if state["armed_epoch"] and not allow_armed:
@@ -71,59 +60,32 @@ class EventInbox:
         return state
 
     def arm(self, epoch):
-        attempted = False
-        try:
-            with self.connect() as db:
-                self.check(db)
-                db.execute("UPDATE filesystem_state SET armed_epoch=? WHERE singleton=1", (epoch,))
-                attempted = True
-        except Exception:
-            # A commit can report failure after the durable result is visible.
-            if not attempted:
-                raise
-            with sqlite3.connect(self.db_path) as db:
-                db.row_factory = sqlite3.Row
-                state = self.check(db, allow_armed=True)
-            if state["armed_epoch"] != epoch:
-                raise
+        with self.connect() as db:
+            self.check(db)
+            db.execute("UPDATE filesystem_state SET armed_epoch=? WHERE singleton=1", (epoch,))
 
     def receive(self, records, epoch, root_generation, *, armed=True, batch_id=None):
         payload = json.dumps({"protocol": PROTOCOL, "root": self.root, "vault_id": self.vault_id, "root_generation": root_generation, "records": records}, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(payload.encode()).hexdigest()
         batch_id = batch_id or uuid.uuid4().hex
-        attempted = False
-        try:
-            with self.connect() as db:
-                state = self.check(db, allow_armed=armed)
-                if armed and state["armed_epoch"] != epoch:
-                    raise WikiError("Filesystem receipt has no matching armed read", 503)
-                previous = db.execute("SELECT seq,payload_hash FROM filesystem_inbox WHERE batch_id=?", (batch_id,)).fetchone()
-                if previous is not None:
-                    if previous["payload_hash"] != digest:
-                        raise WikiError("Filesystem batch ID reused with different payload; evidence retained", 503)
-                    seq = previous["seq"]
-                elif records:
-                    seq = state["received_seq"] + 1
-                    db.execute("INSERT INTO filesystem_inbox VALUES(?,?,?,?,?,?,?,?)", (seq, batch_id, epoch, root_generation, payload, digest, "pending", datetime.now(UTC).isoformat()))
-                    db.execute("UPDATE filesystem_state SET received_seq=? WHERE singleton=1", (seq,))
-                else:
-                    seq = None
-                if armed:
-                    db.execute("UPDATE filesystem_state SET armed_epoch=NULL WHERE singleton=1")
-                attempted = True
-            return seq
-        except Exception:
-            if not attempted:
-                raise
-            with sqlite3.connect(self.db_path) as db:
-                db.row_factory = sqlite3.Row
-                state = self.check(db, allow_armed=True)
-                row = db.execute("SELECT seq,payload_hash FROM filesystem_inbox WHERE batch_id=?", (batch_id,)).fetchone()
-            if row is not None and row[1] == digest and state["armed_epoch"] is None:
-                return row[0]
-            if not records and state["armed_epoch"] is None:
-                return None
-            raise
+        with self.connect() as db:
+            state = self.check(db, allow_armed=armed)
+            if armed and state["armed_epoch"] != epoch:
+                raise WikiError("Filesystem receipt has no matching armed read", 503)
+            previous = db.execute("SELECT seq,payload_hash FROM filesystem_inbox WHERE batch_id=?", (batch_id,)).fetchone()
+            if previous is not None:
+                if previous["payload_hash"] != digest:
+                    raise WikiError("Filesystem batch ID reused with different payload; evidence retained", 503)
+                seq = previous["seq"]
+            elif records:
+                seq = state["received_seq"] + 1
+                db.execute("INSERT INTO filesystem_inbox VALUES(?,?,?,?,?,?,?,?)", (seq, batch_id, epoch, root_generation, payload, digest, "pending", datetime.now(UTC).isoformat()))
+                db.execute("UPDATE filesystem_state SET received_seq=? WHERE singleton=1", (seq,))
+            else:
+                seq = None
+            if armed:
+                db.execute("UPDATE filesystem_state SET armed_epoch=NULL WHERE singleton=1")
+        return seq
 
     def pending(self):
         with self.connect() as db:

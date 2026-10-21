@@ -5,6 +5,7 @@ Drives `SessionManager.duplicate_session` against a real in-memory DB. Unlike
 an independent full copy of the working directory and leaves the parent intact.
 """
 
+import asyncio
 import json
 from pathlib import Path
 
@@ -13,10 +14,12 @@ from httpx import ASGITransport, AsyncClient
 
 from server import session_manager as sm
 from server.database import Database
+from server.harness import HarnessEvent
 from server.main import app
-from server.session_manager import ForkError, QueuedPrompt, SessionManager
+from server.session_manager import ForkError, SessionManager
 from server.session_manager import session_manager as global_sm
 from server.sessions import forking as sm_forking
+from tests.fake_run import FakeRunBase
 
 
 @pytest.fixture
@@ -47,7 +50,6 @@ async def _seed_parent(mgr, working_dir, *, backend="claude-code", n_user=3):
             content=f"a{i}",
         )
         seq += 1
-    await mgr.db.flush()
     parent._message_count = seq
     return parent
 
@@ -218,18 +220,33 @@ async def test_duplicate_refused_active_task(manager, tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     parent = await _seed_parent(manager, repo)
 
-    import asyncio
+    await manager.initialize(manager.db)
+    started, release = asyncio.Event(), asyncio.Event()
 
-    async def _never():
-        await asyncio.sleep(60)
+    class HeldParent(FakeRunBase):
+        async def start(self, *_args, **_kwargs):
+            started.set()
 
-    parent._active_task = asyncio.create_task(_never())
+        async def stream(self):
+            await release.wait()
+            yield HarnessEvent(type="result")
+
+        async def interrupt(self):
+            release.set()
+
+        async def stop(self):
+            release.set()
+
+    monkeypatch.setattr(manager, "_make_run", lambda *_args, **_kwargs: HeldParent())
+    receipt = await manager.start_message(parent.id, "Keep this parent active")
     try:
+        await asyncio.wait_for(started.wait(), 1)
         with pytest.raises(ForkError) as ei:
             await manager.duplicate_session(parent.id)
         assert ei.value.reason == "fork_blocked_parent_turn_active"
     finally:
-        parent._active_task.cancel()
+        await manager.interrupt(parent.id)
+        await asyncio.wait_for(receipt.wait(), 1)
 
 
 @pytest.mark.asyncio
@@ -237,7 +254,9 @@ async def test_duplicate_refused_queued_message(manager, tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     repo = _repo(tmp_path)
     parent = await _seed_parent(manager, repo)
-    parent._pending_queue.append(QueuedPrompt(prompt="later", attachment_ids=[]))
+    await manager.interrupt(parent.id)
+    queued = await manager.start_message(parent.id, "later", source="bg")
+    assert manager.dispatch_snapshot(parent.id)["items"][0]["request_id"] == queued.request_id
     with pytest.raises(ForkError) as ei:
         await manager.duplicate_session(parent.id)
     assert ei.value.reason == "fork_blocked_parent_turn_active"

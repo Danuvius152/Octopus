@@ -17,8 +17,9 @@ Covers:
 
 We use real DelegationManager instances bound to per-test in-memory
 SessionManagers. The parent session's `start_message` is patched in
-the broadcast-injection tests so we never spawn a real harness — the
-captured prompts are what matters.
+the consumer tests so no model process runs. Their admitted receipts remain
+pending until the test model records the original request's text and terminal;
+the completion then drives the captured parent prompt.
 """
 
 from __future__ import annotations
@@ -46,7 +47,8 @@ from server.routers import agents as agents_mod
 from server.routers import schedules as schedules_mod
 from server.scheduler import ScheduleRunner
 from server.session_manager import session_manager
-from tests.submission import accepted_receipt
+from server.sessions.turns import _Settlement
+from tests.completion_models import CompletionModels
 
 TOKEN = "changeme"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
@@ -55,6 +57,11 @@ HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def models():
+    return CompletionModels()
 
 
 @pytest.fixture
@@ -125,17 +132,17 @@ async def _model_scope(dm, rec):
         tool_input={"request_context": {"request_id": request_id, "work_id": rec.work_id,
                                         "source": "delegation", "knowledge": json.loads(encode(context))}},
     )
-    previous = session._knowledge_context, session._settlement, session._backend
-    session._knowledge_context = context
-    session._settlement = SimpleNamespace(request_id=request_id, work_id=rec.work_id)
-    session._backend = SimpleNamespace(run_lease_id=lease)
+    previous = session._run.knowledge_context, session._run.settlement, session._run.backend
+    session._run.knowledge_context = context
+    session._run.settlement = _Settlement(request_id=request_id, work_id=rec.work_id)
+    session._run.backend = SimpleNamespace(run_lease_id=lease)
     register_run(lease, session.id, session.user_id, rec.work_id)
     try:
-        yield verify(mint(session.id, user_id=session.user_id, wiki_task_id=session._wiki_task_id,
+        yield verify(mint(session.id, user_id=session.user_id, wiki_task_id=session._run.wiki_task_id,
                           run_lease_id=lease, work_id=rec.work_id))
     finally:
         revoke_run(lease)
-        session._knowledge_context, session._settlement, session._backend = previous
+        session._run.knowledge_context, session._run.settlement, session._run.backend = previous
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +228,7 @@ async def test_resolve_target_agent_missing_returns_none(dm, db):
 
 @pytest.mark.asyncio
 async def test_files_resolved_against_working_dir(
-    dm, mgr, db, monkeypatch, tmp_path
+    models, dm, mgr, db, monkeypatch, tmp_path
 ):
     """Plan §5.7: file paths are resolved against the parent's
     working_dir and missing entries are flagged. Verifies the prompt
@@ -230,10 +237,8 @@ async def test_files_resolved_against_working_dir(
     started: list[tuple[str, str]] = []
 
     async def fake_start_message(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         started.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", fake_start_message)
     # Build a real working dir with one file that exists and one
@@ -269,7 +274,7 @@ async def test_files_resolved_against_working_dir(
 
 @pytest.mark.asyncio
 async def test_delegation_session_archived_after_terminal_inject(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
     """Plan §5.2 with Vera's round-2 nuance: a delegation child is
     archived when its OWN terminal turn has been injected into its
@@ -278,7 +283,7 @@ async def test_delegation_session_archived_after_terminal_inject(
     Verifies _inject_terminal drives auto_archive_scheduled_session
     itself, so the chain work is genuinely complete by the time the
     archive runs."""
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent = await _make_session(mgr, octo["id"])
@@ -287,10 +292,10 @@ async def test_delegation_session_archived_after_terminal_inject(
     )
     child = mgr.get_session(rec.delegation_id)
     assert child is not None
-    child._active_task = None
+    assert not mgr.session_is_executing(child)
     # Drive the terminal event. _inject_terminal should both inject
     # into the parent AND archive the child.
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "result", "session_id": rec.delegation_id, "is_error": False,
     })
     assert rec.state == "completed"
@@ -299,7 +304,7 @@ async def test_delegation_session_archived_after_terminal_inject(
 
 @pytest.mark.asyncio
 async def test_idle_handler_does_not_archive_delegation_child(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
     """Vera's round-2 BLOCKING finding: the generic idle hook used to
     archive delegation children, breaking nested chains. The
@@ -312,7 +317,7 @@ async def test_idle_handler_does_not_archive_delegation_child(
     still ACCEPTS delegation origin (it's how DelegationManager
     archives after terminal inject), but the idle path no longer
     calls it for delegation children."""
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent = await _make_session(mgr, octo["id"])
@@ -328,7 +333,7 @@ async def test_idle_handler_does_not_archive_delegation_child(
     # Confirm: even with the child quiesced, the auto-archive helper
     # archives it when called directly (the DelegationManager path),
     # but it's never called from the idle hook for a delegation child.
-    child._active_task = None
+    assert not mgr.session_is_executing(child)
     ok = await mgr.auto_archive_scheduled_session(rec.delegation_id)
     assert ok is True  # helper still accepts delegation origin
     assert mgr.get_session(rec.delegation_id) is None
@@ -341,7 +346,7 @@ async def test_auto_archive_skips_user_origin_sessions(mgr, db, monkeypatch):
     helper is called directly."""
     octo = await db.get_system_agent()
     sess = await _make_session(mgr, octo["id"], origin="user")
-    sess._active_task = None
+    assert not mgr.session_is_executing(sess)
     ok = await mgr.auto_archive_scheduled_session(sess.id)
     assert ok is False
     assert mgr.get_session(sess.id) is not None
@@ -386,7 +391,7 @@ async def test_orphaned_delegation_archived_on_restart(db):
 
 @pytest.mark.asyncio
 async def test_nested_chain_intermediate_stays_alive_while_grandchild_runs(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
     """The full Vera scenario: Octo asks Vera, Vera asks Pete and
     ends her turn. Vera is now idle waiting for Pete. With the
@@ -415,8 +420,6 @@ async def test_nested_chain_intermediate_stays_alive_while_grandchild_runs(
     inject_errors: list[str] = []
 
     async def faithful_start_message(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         # Mirror SessionManager.start_message: ValueError when the
         # target session id is no longer in the in-memory map. Any
         # archival-too-early bug surfaces here as an exception that
@@ -426,7 +429,7 @@ async def test_nested_chain_intermediate_stays_alive_while_grandchild_runs(
         if sid not in mgr.sessions:
             raise ValueError(f"Session {sid} not found")
         delivered.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     def capture_logger_exception(msg, *args, **kwargs):
         # When DelegationManager._inject_terminal catches a missing-
@@ -456,10 +459,10 @@ async def test_nested_chain_intermediate_stays_alive_while_grandchild_runs(
             parent_session_id=vera_sess.id, agent_name="pete", request="r2", scope=scope,
         )
     # Vera is now waiting for Pete; she has no active work of her own.
-    vera_sess._active_task = None
+    assert not mgr.session_is_executing(vera_sess)
 
     # Drive session_manager's actual idle hook for Vera (mirror of
-    # _consume_message's post-queue-drain block). With the round-2
+    # the original owner reporting the session idle). With the round-2
     # fix in place, "delegation" is NOT in _AUTO_ARCHIVE_ORIGINS so
     # this is a no-op; if a future change re-adds it (the original
     # bug), Vera gets archived here and Pete's reply below fails.
@@ -472,7 +475,7 @@ async def test_nested_chain_intermediate_stays_alive_while_grandchild_runs(
     # Drive Pete to terminal. If Vera was archived too early,
     # faithful_start_message raises and capture_logger_exception
     # records it — the assertions below fail.
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "result",
         "session_id": pete_rec.delegation_id,
         "is_error": False,
@@ -495,7 +498,7 @@ async def test_nested_chain_intermediate_stays_alive_while_grandchild_runs(
     # already done (he answered above, before she wrapped up), that turn isn't
     # her answer, so it must not finalise or archive her: Pete's reply is
     # queued into her session and she still owes Octo the relay.
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "result",
         "session_id": vera_rec.delegation_id,
         "is_error": False,
@@ -505,7 +508,7 @@ async def test_nested_chain_intermediate_stays_alive_while_grandchild_runs(
     )
 
     # Turn 2 — the relay Pete's reply woke her for — fires her own terminal.
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "result",
         "session_id": vera_rec.delegation_id,
         "is_error": False,
@@ -520,15 +523,13 @@ async def test_nested_chain_intermediate_stays_alive_while_grandchild_runs(
 
 
 @pytest.mark.asyncio
-async def test_start_delegation_happy_path(dm, mgr, db, monkeypatch):
+async def test_start_delegation_happy_path(models, dm, mgr, db, monkeypatch):
     # Disable real harness spawn — we only want to verify the wiring.
     started: list[tuple[str, str]] = []
 
     async def fake_start_message(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         started.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", fake_start_message)
 
@@ -566,8 +567,8 @@ async def test_start_delegation_happy_path(dm, mgr, db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_start_delegation_rejects_empty_request(dm, mgr, db, monkeypatch):
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+async def test_start_delegation_rejects_empty_request(models, dm, mgr, db, monkeypatch):
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     await _make_agent(db, "Vera")
     parent_agent = await db.get_system_agent()
     parent = await _make_session(mgr, parent_agent["id"])
@@ -592,8 +593,8 @@ async def test_start_delegation_unknown_parent(dm):
 
 
 @pytest.mark.asyncio
-async def test_start_delegation_unknown_target(dm, mgr, db, monkeypatch):
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+async def test_start_delegation_unknown_target(models, dm, mgr, db, monkeypatch):
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     parent_agent = await db.get_system_agent()
     parent = await _make_session(mgr, parent_agent["id"])
     with pytest.raises(DelegationError) as excinfo:
@@ -606,8 +607,8 @@ async def test_start_delegation_unknown_target(dm, mgr, db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_start_delegation_rejects_self(dm, mgr, db, monkeypatch):
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+async def test_start_delegation_rejects_self(models, dm, mgr, db, monkeypatch):
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     parent_agent = await db.get_system_agent()
     parent = await _make_session(mgr, parent_agent["id"])
     with pytest.raises(DelegationError) as excinfo:
@@ -621,9 +622,9 @@ async def test_start_delegation_rejects_self(dm, mgr, db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cycle_rejected(dm, mgr, db, monkeypatch):
+async def test_cycle_rejected(models, dm, mgr, db, monkeypatch):
     """Octo → Vera → Octo is rejected at the cycle check."""
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     vera = await _make_agent(db, "Vera")
 
@@ -650,14 +651,14 @@ async def test_cycle_rejected(dm, mgr, db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_chain_walk_rejects_session_id_cycle(dm, mgr, db, monkeypatch):
+async def test_chain_walk_rejects_session_id_cycle(models, dm, mgr, db, monkeypatch):
     """If the parent_session_id pointers form a session-id cycle
     (corrupted, not a real agent cycle), fail closed rather than
     silently treating the chain as terminated. The cycle is forced
     in memory after a valid creation, so the SQLite FK on
     parent_session_id (which would catch the obvious construction
     error) doesn't apply."""
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     a = await _make_agent(db, "A")
@@ -682,7 +683,7 @@ async def test_chain_walk_rejects_session_id_cycle(dm, mgr, db, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_chain_walk_falls_back_to_db_for_archived_ancestor(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
     """Vera's round-3 finding: after the auto-archive-after-terminal
     fix, a delegation child can legitimately have its parent archived
@@ -691,7 +692,7 @@ async def test_chain_walk_falls_back_to_db_for_archived_ancestor(
     ancestor missing from the in-memory map. Without this fallback,
     every fresh delegation from an unarchived child would 409 with
     "no longer exists"."""
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     vera = await _make_agent(db, "Vera")
     await _make_agent(db, "Pete")
@@ -717,13 +718,13 @@ async def test_chain_walk_falls_back_to_db_for_archived_ancestor(
 
 @pytest.mark.asyncio
 async def test_chain_walk_rejects_truly_missing_ancestor(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
     """Only fail-closed when the ancestor is gone from BOTH memory
     AND the DB. A stale parent_session_id pointing at a hard-deleted
     row still produces a 409 — that's actual corruption, not a
     legitimate archived state."""
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     ancestor = await _make_session(mgr, octo["id"], name="ancestor")
@@ -744,9 +745,9 @@ async def test_chain_walk_rejects_truly_missing_ancestor(
 
 
 @pytest.mark.asyncio
-async def test_depth_cap_rejected(dm, mgr, db, monkeypatch):
+async def test_depth_cap_rejected(models, dm, mgr, db, monkeypatch):
     """A 4th delegation hop is rejected (DEPTH_CAP=3)."""
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     a = await _make_agent(db, "A")
     b = await _make_agent(db, "B")
@@ -776,24 +777,18 @@ async def test_depth_cap_rejected(dm, mgr, db, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Broadcast → injection
+# Request completion → injection
 # ---------------------------------------------------------------------------
 
 
-async def _noop_start_message(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-    return accepted_receipt()
-
-
 @pytest.mark.asyncio
-async def test_reply_injection_on_result(dm, mgr, db, monkeypatch):
-    """assistant_text + result(is_error=False) → [agent-reply:...] turn."""
+async def test_reply_injection_on_result(models, dm, mgr, db, monkeypatch):
+    """The original committed success receipt produces one parent reply."""
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -807,9 +802,9 @@ async def test_reply_injection_on_result(dm, mgr, db, monkeypatch):
     injected.clear()
 
     cid = rec.delegation_id
-    await dm._on_broadcast({"type": "assistant_text", "session_id": cid, "content": "Reviewed. "})
-    await dm._on_broadcast({"type": "assistant_text", "session_id": cid, "content": "Looks good."})
-    await dm._on_broadcast({"type": "result", "session_id": cid, "is_error": False})
+    await models.emit(dm, {"type": "assistant_text", "session_id": cid, "content": "Reviewed. "})
+    await models.emit(dm, {"type": "assistant_text", "session_id": cid, "content": "Looks good."})
+    await models.emit(dm, {"type": "result", "session_id": cid, "is_error": False})
 
     assert rec.state == "completed"
     assert rec.finished_at is not None
@@ -822,7 +817,7 @@ async def test_reply_injection_on_result(dm, mgr, db, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_parent_delegation_waits_for_its_own_sub_delegation(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
     """Octo → Vera → Pete: Vera's turn-1 result must NOT finalise her.
 
@@ -836,10 +831,8 @@ async def test_parent_delegation_waits_for_its_own_sub_delegation(
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -859,28 +852,28 @@ async def test_parent_delegation_waits_for_its_own_sub_delegation(
     injected.clear()
 
     # Turn 1: Vera says she's asked Pete, then her turn ends.
-    await dm._on_broadcast(
+    await models.emit(dm,
         {"type": "assistant_text", "session_id": vera_sid, "content": "Awaiting Pete."}
     )
-    await dm._on_broadcast({"type": "result", "session_id": vera_sid, "is_error": False})
+    await models.emit(dm, {"type": "result", "session_id": vera_sid, "is_error": False})
     assert vera_rec.state == "running", "Vera finalised before Pete answered"
     assert injected == [], f"Octo was told {injected!r} before Pete replied"
 
     # Pete answers → his terminal injection wakes Vera (into HER session).
-    await dm._on_broadcast(
+    await models.emit(dm,
         {"type": "assistant_text", "session_id": pete_sid, "content": "HOP-7"}
     )
-    await dm._on_broadcast({"type": "result", "session_id": pete_sid, "is_error": False})
+    await models.emit(dm, {"type": "result", "session_id": pete_sid, "is_error": False})
     assert pete_rec.state == "completed"
     assert [sid for sid, _ in injected] == [vera_sid]
     injected.clear()
 
     # Turn 2: Vera relays. No sub-delegation in flight now, so she finalises
     # and Octo finally hears the token.
-    await dm._on_broadcast(
+    await models.emit(dm,
         {"type": "assistant_text", "session_id": vera_sid, "content": "Pete says HOP-7"}
     )
-    await dm._on_broadcast({"type": "result", "session_id": vera_sid, "is_error": False})
+    await models.emit(dm, {"type": "result", "session_id": vera_sid, "is_error": False})
     assert vera_rec.state == "completed"
     assert len(injected) == 1
     target_sid, prompt = injected[0]
@@ -891,7 +884,7 @@ async def test_parent_delegation_waits_for_its_own_sub_delegation(
 
 @pytest.mark.asyncio
 async def test_parent_delegation_waits_when_its_sub_delegation_finished_first(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
     """Same chain, inverted timing: Pete answers BEFORE Vera's turn-1 result.
 
@@ -910,10 +903,8 @@ async def test_parent_delegation_waits_when_its_sub_delegation_finished_first(
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -934,32 +925,32 @@ async def test_parent_delegation_waits_when_its_sub_delegation_finished_first(
 
     # Pete is quick: he answers while Vera is still wrapping up turn 1. His
     # terminal injection lands in Vera's session, queued behind that turn.
-    await dm._on_broadcast(
+    await models.emit(dm,
         {"type": "assistant_text", "session_id": pete_sid, "content": "HOP-7"}
     )
-    await dm._on_broadcast({"type": "result", "session_id": pete_sid, "is_error": False})
+    await models.emit(dm, {"type": "result", "session_id": pete_sid, "is_error": False})
     assert pete_rec.state == "completed"
     assert [sid for sid, _ in injected] == [vera_sid]
     injected.clear()
 
     # Only now does Vera's turn 1 end. Nothing is running under her — but she
     # still owes Octo the relay, so she must not finalise here.
-    await dm._on_broadcast(
+    await models.emit(dm,
         {
             "type": "assistant_text",
             "session_id": vera_sid,
             "content": "Delegation started to Pete. Waiting for their reply.",
         }
     )
-    await dm._on_broadcast({"type": "result", "session_id": vera_sid, "is_error": False})
+    await models.emit(dm, {"type": "result", "session_id": vera_sid, "is_error": False})
     assert vera_rec.state == "running", "Vera finalised on the turn that only asked Pete"
     assert injected == [], f"Octo was told {injected!r} instead of Pete's answer"
 
     # Turn 2 — woken by Pete's reply — is the relay, and it finalises her.
-    await dm._on_broadcast(
+    await models.emit(dm,
         {"type": "assistant_text", "session_id": vera_sid, "content": "Pete says HOP-7"}
     )
-    await dm._on_broadcast({"type": "result", "session_id": vera_sid, "is_error": False})
+    await models.emit(dm, {"type": "result", "session_id": vera_sid, "is_error": False})
     assert vera_rec.state == "completed"
     assert len(injected) == 1
     target_sid, prompt = injected[0]
@@ -970,7 +961,7 @@ async def test_parent_delegation_waits_when_its_sub_delegation_finished_first(
 
 @pytest.mark.asyncio
 async def test_plain_delegation_finalises_on_its_first_result(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
     """The deferral must not leak onto ordinary one-hop delegations.
 
@@ -980,10 +971,8 @@ async def test_plain_delegation_finalises_on_its_first_result(
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -995,10 +984,10 @@ async def test_plain_delegation_finalises_on_its_first_result(
     )
     injected.clear()
 
-    await dm._on_broadcast(
+    await models.emit(dm,
         {"type": "assistant_text", "session_id": rec.delegation_id, "content": "done"}
     )
-    await dm._on_broadcast(
+    await models.emit(dm,
         {"type": "result", "session_id": rec.delegation_id, "is_error": False}
     )
     assert rec.state == "completed"
@@ -1007,17 +996,15 @@ async def test_plain_delegation_finalises_on_its_first_result(
 
 
 @pytest.mark.asyncio
-async def test_parent_delegation_still_fails_fast_on_error(dm, mgr, db, monkeypatch):
+async def test_parent_delegation_still_fails_fast_on_error(models, dm, mgr, db, monkeypatch):
     """The wait-for-children rule must not swallow failures: an error result
     finalises immediately even with a sub-delegation in flight, otherwise a
     crashed middle agent would hang its caller forever."""
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1033,7 +1020,7 @@ async def test_parent_delegation_still_fails_fast_on_error(dm, mgr, db, monkeypa
     )
     injected.clear()
 
-    await dm._on_broadcast(
+    await models.emit(dm,
         {"type": "result", "session_id": vera_rec.delegation_id, "is_error": True}
     )
     assert vera_rec.state == "failed"
@@ -1041,15 +1028,13 @@ async def test_parent_delegation_still_fails_fast_on_error(dm, mgr, db, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_error_injection_on_result_error(dm, mgr, db, monkeypatch):
+async def test_error_injection_on_result_error(models, dm, mgr, db, monkeypatch):
     """result(is_error=True) → [agent-error:...] turn, state=failed."""
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1061,7 +1046,7 @@ async def test_error_injection_on_result_error(dm, mgr, db, monkeypatch):
     injected.clear()
 
     cid = rec.delegation_id
-    await dm._on_broadcast({"type": "result", "session_id": cid, "is_error": True})
+    await models.emit(dm, {"type": "result", "session_id": cid, "is_error": True})
 
     assert rec.state == "failed"
     assert len(injected) == 1
@@ -1070,15 +1055,13 @@ async def test_error_injection_on_result_error(dm, mgr, db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_error_injection_on_error_event(dm, mgr, db, monkeypatch):
-    """An explicit error event from the child also terminates."""
+async def test_error_injection_on_error_event(models, dm, mgr, db, monkeypatch):
+    """A committed child error completes its captured request and terminates."""
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1090,7 +1073,7 @@ async def test_error_injection_on_error_event(dm, mgr, db, monkeypatch):
     injected.clear()
 
     cid = rec.delegation_id
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "error", "session_id": cid, "message": "harness died",
     })
 
@@ -1105,14 +1088,12 @@ async def test_error_injection_on_error_event(dm, mgr, db, monkeypatch):
     {"type": "error", "code": "stale_session", "retrying": True},
     {"type": "result", "is_error": True, "retrying": True},
 ])
-async def test_recovery_events_do_not_terminate_a_delegation(dm, mgr, db, monkeypatch, event):
+async def test_recovery_events_do_not_terminate_a_delegation(models, dm, mgr, db, monkeypatch, event):
     injected = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1121,21 +1102,21 @@ async def test_recovery_events_do_not_terminate_a_delegation(dm, mgr, db, monkey
     rec = await dm.start_delegation(parent_session_id=parent.id, agent_name="Vera", request="r")
     injected.clear()
 
-    await dm._on_broadcast({**event, "session_id": rec.delegation_id})
+    await models.emit(dm, {**event, "session_id": rec.delegation_id})
     assert rec.state == "running"
     assert rec.delegation_id in mgr.sessions
     assert injected == []
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "assistant_text", "session_id": rec.delegation_id, "content": "recovered reply"
     })
-    await dm._on_broadcast({"type": "result", "session_id": rec.delegation_id, "is_error": False})
+    await models.emit(dm, {"type": "result", "session_id": rec.delegation_id, "is_error": False})
     assert rec.state == "completed"
     assert len(injected) == 1
     assert "recovered reply" in injected[0][1]
 
 
 @pytest.mark.parametrize("failure", ["idle", "transient"])
-async def test_delegation_waits_for_real_turn_recovery(dm, mgr, db, monkeypatch, failure):
+async def test_delegation_waits_for_real_turn_recovery(models, dm, mgr, db, monkeypatch, failure):
     import asyncio
 
     from server.config import settings as cfg
@@ -1143,12 +1124,18 @@ async def test_delegation_waits_for_real_turn_recovery(dm, mgr, db, monkeypatch,
     from tests.fake_run import FakeRunBase
 
     injected = []
+    submit = mgr.start_message
+    original_receipts = []
+    admitted = asyncio.Event()
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
-        injected.append((sid, prompt))
-        return accepted_receipt()
+        if sid == parent.id:
+            injected.append((sid, prompt))
+            return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
+        receipt = await submit(sid, prompt, attachment_ids, source=source, work_id=work_id,
+                               delivery_id=delivery_id, **kwargs)
+        original_receipts.append(receipt)
+        return receipt
 
     monkeypatch.setattr(mgr, "start_message", capture)
     monkeypatch.setattr(cfg, "turn_idle_timeout_seconds", 0.1)
@@ -1157,9 +1144,6 @@ async def test_delegation_waits_for_real_turn_recovery(dm, mgr, db, monkeypatch,
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent = await _make_session(mgr, octo["id"])
-    rec = await dm.start_delegation(parent_session_id=parent.id, agent_name="Vera", request="review")
-    child = mgr.sessions[rec.delegation_id]
-    injected.clear()
 
     class RecoveryRun(FakeRunBase):
         def __init__(self, recovering=False):
@@ -1167,6 +1151,7 @@ async def test_delegation_waits_for_real_turn_recovery(dm, mgr, db, monkeypatch,
             self.unblocked = asyncio.Event()
 
         async def start(self, *args, **kwargs):
+            await admitted.wait()
             assert rec.state == "running"
             assert child.id in mgr.sessions
 
@@ -1174,6 +1159,7 @@ async def test_delegation_waits_for_real_turn_recovery(dm, mgr, db, monkeypatch,
             self.unblocked.set()
 
         async def stream(self):
+            await admitted.wait()
             yield HarnessEvent(type="session_started", session_id="saved-thread")
             if self.recovering:
                 yield HarnessEvent(type="text", content="final review")
@@ -1189,7 +1175,21 @@ async def test_delegation_waits_for_real_turn_recovery(dm, mgr, db, monkeypatch,
 
     runs = iter([RecoveryRun(), RecoveryRun(recovering=True)])
     monkeypatch.setattr(mgr, "_make_run", lambda *args, **kwargs: next(runs))
-    events = [e async for e in mgr._execute_claimed_request(child.id, "review", source="delegation", work_id=rec.work_id)]
+    events = []
+
+    async def observe(event):
+        if event.get("session_id") == child.id:
+            events.append(event)
+
+    mgr.on_broadcast("original-recovery-prefix", observe)
+    rec = await dm.start_delegation(parent_session_id=parent.id, agent_name="Vera", request="review")
+    child = mgr.sessions[rec.delegation_id]
+    admitted.set()
+    receipt, = original_receipts
+    completion = await asyncio.wait_for(receipt.wait(), 5)
+    assert completion.recording_state == "committed" and completion.outcome.status == "success"
+    await mgr.await_session_execution(child.id, timeout=5)
+    await dm.confirm_recording()
     assert any(e.get("retrying") for e in events)
     assert rec.state == "completed"
     assert len(injected) == 1
@@ -1202,9 +1202,9 @@ async def test_delegation_waits_for_real_turn_recovery(dm, mgr, db, monkeypatch,
 
 
 @pytest.mark.asyncio
-async def test_post_terminal_events_ignored(dm, mgr, db, monkeypatch):
+async def test_post_terminal_events_ignored(models, dm, mgr, db, monkeypatch):
     """Once a delegation is terminal, late events don't reopen it."""
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent = await _make_session(mgr, octo["id"])
@@ -1212,24 +1212,22 @@ async def test_post_terminal_events_ignored(dm, mgr, db, monkeypatch):
         parent_session_id=parent.id, agent_name="vera", request="r",
     )
     cid = rec.delegation_id
-    await dm._on_broadcast({"type": "result", "session_id": cid, "is_error": False})
+    await models.emit(dm, {"type": "result", "session_id": cid, "is_error": False})
     state_before = rec.state
-    await dm._on_broadcast({"type": "assistant_text", "session_id": cid, "content": "late"})
-    await dm._on_broadcast({"type": "result", "session_id": cid, "is_error": True})
+    await models.emit(dm, {"type": "assistant_text", "session_id": cid, "content": "late"})
+    await models.emit(dm, {"type": "result", "session_id": cid, "is_error": True})
     assert rec.state == state_before
 
 
 @pytest.mark.asyncio
-async def test_empty_reply_gets_placeholder(dm, mgr, db, monkeypatch):
+async def test_empty_reply_gets_placeholder(models, dm, mgr, db, monkeypatch):
     """A child that ends successfully without any assistant_text still
     gets a reply injection, with a placeholder body."""
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1240,7 +1238,7 @@ async def test_empty_reply_gets_placeholder(dm, mgr, db, monkeypatch):
     )
     injected.clear()
     cid = rec.delegation_id
-    await dm._on_broadcast({"type": "result", "session_id": cid, "is_error": False})
+    await models.emit(dm, {"type": "result", "session_id": cid, "is_error": False})
     _, prompt = injected[0]
     assert "without producing any text" in prompt
 
@@ -1251,14 +1249,12 @@ async def test_empty_reply_gets_placeholder(dm, mgr, db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cancel_delegation(dm, mgr, db, monkeypatch):
+async def test_cancel_delegation(models, dm, mgr, db, monkeypatch):
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     async def fake_interrupt(sid):
         return True
@@ -1289,7 +1285,7 @@ async def test_cancel_delegation(dm, mgr, db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_follow_up_happy_path(dm, mgr, db, monkeypatch):
+async def test_follow_up_happy_path(models, dm, mgr, db, monkeypatch):
     """Octo asks Vera, Vera replies + her session auto-archives. Octo
     follows up with a new round in the same session. The child is
     unarchived, the record is reset to running, and the new request
@@ -1298,10 +1294,8 @@ async def test_follow_up_happy_path(dm, mgr, db, monkeypatch):
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1310,8 +1304,12 @@ async def test_follow_up_happy_path(dm, mgr, db, monkeypatch):
     rec = await dm.start_delegation(
         parent_session_id=parent.id, agent_name="vera", request="round 1",
     )
+    # This original body must never be mixed into the follow-up's reply.
+    await models.emit(dm, {
+        "type": "assistant_text", "session_id": rec.delegation_id, "content": "First round original reply.",
+    })
     # Drive Vera to terminal so she auto-archives.
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "result", "session_id": rec.delegation_id, "is_error": False,
     })
     assert rec.state == "completed"
@@ -1328,10 +1326,8 @@ async def test_follow_up_happy_path(dm, mgr, db, monkeypatch):
     assert updated.delegation_id == rec.delegation_id
     assert updated.state == "running"
     assert updated.request == "round 2 — please re-check finding 3"
-    assert updated.captured_text == []
     assert updated.error is None
     assert updated.finished_at is None
-    assert updated._terminal_injected is False
     # Child is back in the live map.
     assert mgr.get_session(rec.delegation_id) is not None
     # The new request was delivered to the child's session.
@@ -1342,23 +1338,24 @@ async def test_follow_up_happy_path(dm, mgr, db, monkeypatch):
     assert "round 2 — please re-check finding 3" in prompt
     # The full chain still works: Vera's NEW reply lands on Octo.
     injected.clear()
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "assistant_text",
         "session_id": rec.delegation_id,
         "content": "Re-checked. Looks fixed.",
     })
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "result", "session_id": rec.delegation_id, "is_error": False,
     })
     assert updated.state == "completed"
     octo_injects = [p for s, p in injected if s == parent.id]
     assert len(octo_injects) == 1
     assert "Re-checked. Looks fixed." in octo_injects[0]
+    assert "First round original reply." not in octo_injects[0]
 
 
 @pytest.mark.asyncio
-async def test_follow_up_rejects_while_running(dm, mgr, db, monkeypatch):
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+async def test_follow_up_rejects_while_running(models, dm, mgr, db, monkeypatch):
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent = await _make_session(mgr, octo["id"])
@@ -1377,8 +1374,8 @@ async def test_follow_up_rejects_while_running(dm, mgr, db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_follow_up_rejects_unknown_delegation(dm, mgr, db, monkeypatch):
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+async def test_follow_up_rejects_unknown_delegation(models, dm, mgr, db, monkeypatch):
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     parent = await _make_session(mgr, octo["id"])
     with pytest.raises(DelegationError) as ex:
@@ -1391,10 +1388,10 @@ async def test_follow_up_rejects_unknown_delegation(dm, mgr, db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_follow_up_rejects_wrong_parent(dm, mgr, db, monkeypatch):
+async def test_follow_up_rejects_wrong_parent(models, dm, mgr, db, monkeypatch):
     """A delegation can only be followed up by its OWN parent — a
     different session can't continue someone else's conversation."""
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent_a = await _make_session(mgr, octo["id"], name="A")
@@ -1402,7 +1399,7 @@ async def test_follow_up_rejects_wrong_parent(dm, mgr, db, monkeypatch):
     rec = await dm.start_delegation(
         parent_session_id=parent_a.id, agent_name="vera", request="r",
     )
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "result", "session_id": rec.delegation_id, "is_error": False,
     })
     with pytest.raises(DelegationError) as ex:
@@ -1415,15 +1412,15 @@ async def test_follow_up_rejects_wrong_parent(dm, mgr, db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_follow_up_rejects_empty_request(dm, mgr, db, monkeypatch):
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+async def test_follow_up_rejects_empty_request(models, dm, mgr, db, monkeypatch):
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent = await _make_session(mgr, octo["id"])
     rec = await dm.start_delegation(
         parent_session_id=parent.id, agent_name="vera", request="r",
     )
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "result", "session_id": rec.delegation_id, "is_error": False,
     })
     with pytest.raises(DelegationError) as ex:
@@ -1436,14 +1433,14 @@ async def test_follow_up_rejects_empty_request(dm, mgr, db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_route_follow_up_requires_live_parent(client, monkeypatch):
+async def test_route_follow_up_requires_live_parent(models, client, monkeypatch):
     """Vera-round-5 finding: a follow-up from a parent session that's
     no longer in the live sessions map (archived / deleted between
     rounds) must 404 — otherwise the manager would round-reset the
     record and start the child, then silently drop the terminal
     turn because there's no live parent to inject into."""
     async def noop(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        return accepted_receipt()
+        return await models.start_message(session_manager, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(session_manager, "start_message", noop)
 
@@ -1457,7 +1454,7 @@ async def test_route_follow_up_requires_live_parent(client, monkeypatch):
         headers=HEADERS,
     )
     did = create.json()["delegation_id"]
-    await singleton_delegation_manager._on_broadcast({
+    await models.emit(singleton_delegation_manager, {
         "type": "result", "session_id": did, "is_error": False,
     })
     # Evict the parent session from the live map (simulating archive
@@ -1479,11 +1476,11 @@ async def test_route_follow_up_requires_live_parent(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_route_follow_up(client, monkeypatch):
+async def test_route_follow_up(models, client, monkeypatch):
     """HTTP path mirrors the manager: 200/201 happy path; 404 for
     unknown delegation; 409 while running."""
     async def noop(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        return accepted_receipt()
+        return await models.start_message(session_manager, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(session_manager, "start_message", noop)
 
@@ -1500,7 +1497,7 @@ async def test_route_follow_up(client, monkeypatch):
 
     # Drive the delegation to terminal via the broadcast bus so the
     # record can be followed-up.
-    await singleton_delegation_manager._on_broadcast({
+    await models.emit(singleton_delegation_manager, {
         "type": "result", "session_id": did, "is_error": False,
     })
 
@@ -1517,7 +1514,7 @@ async def test_route_follow_up(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cancel_cascades_to_descendants(dm, mgr, db, monkeypatch):
+async def test_cancel_cascades_to_descendants(models, dm, mgr, db, monkeypatch):
     """Vera's round-3 finding: cancelling a delegation must cascade
     to its descendants, otherwise a grandchild keeps burning tokens
     and its eventual reply lands on a cancelled parent.
@@ -1527,10 +1524,8 @@ async def test_cancel_cascades_to_descendants(dm, mgr, db, monkeypatch):
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     async def fake_interrupt(sid):
         return True
@@ -1575,7 +1570,7 @@ async def test_cancel_cascades_to_descendants(dm, mgr, db, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_cancel_delegation_single_inject_under_interrupt_broadcast(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
     """The bug Vera caught: cancel_delegation() calls interrupt()
     which broadcasts an `error` event before returning; without the
@@ -1590,21 +1585,19 @@ async def test_cancel_delegation_single_inject_under_interrupt_broadcast(
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
 
     async def fake_interrupt(sid):
         # Mirror the real session_manager.interrupt: broadcast an
         # `error` event on the child session before returning.
-        await dm._on_broadcast({
+        await models.emit(dm, {
             "type": "error",
             "session_id": sid,
             "message": "(interrupted by user)",
-        })
+        }, wait=False)
         return True
 
     monkeypatch.setattr(mgr, "interrupt", fake_interrupt)
@@ -1632,7 +1625,7 @@ async def test_cancel_delegation_single_inject_under_interrupt_broadcast(
 
 
 @pytest.mark.asyncio
-async def test_terminal_injection_is_idempotent(dm, mgr, db, monkeypatch):
+async def test_terminal_injection_is_idempotent(models, dm, mgr, db, monkeypatch):
     """Belt-and-suspenders: even if two terminal-producing events
     race past the state guard (e.g. a `result` and an `error` from a
     crashing child arrive in quick succession), exactly one
@@ -1640,10 +1633,8 @@ async def test_terminal_injection_is_idempotent(dm, mgr, db, monkeypatch):
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1653,16 +1644,17 @@ async def test_terminal_injection_is_idempotent(dm, mgr, db, monkeypatch):
         parent_session_id=parent.id, agent_name="vera", request="r",
     )
     injected.clear()
-    # Force the bypass: call `_inject_terminal` twice directly.
-    rec.state = "completed"
+    # Complete the real recorded request, then try to inject its terminal
+    # twice again. The one-shot relay guard must preserve the first return.
+    await models.emit(dm, {"type": "result", "session_id": rec.delegation_id, "is_error": False})
     await dm._inject_terminal(rec)
     await dm._inject_terminal(rec)
     assert len(injected) == 1
 
 
 @pytest.mark.asyncio
-async def test_list_delegations_newest_first(dm, mgr, db, monkeypatch):
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+async def test_list_delegations_newest_first(models, dm, mgr, db, monkeypatch):
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     await _make_agent(db, "Pete")
@@ -1678,16 +1670,14 @@ async def test_list_delegations_newest_first(dm, mgr, db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_concurrent_delegations_to_same_target(dm, mgr, db, monkeypatch):
+async def test_concurrent_delegations_to_same_target(models, dm, mgr, db, monkeypatch):
     """Two delegations to Vera in flight at once: both run, both reply
     independently, parent sees both terminal turns."""
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1704,10 +1694,10 @@ async def test_concurrent_delegations_to_same_target(dm, mgr, db, monkeypatch):
     injected.clear()
 
     # Send each child its own result.
-    await dm._on_broadcast({"type": "assistant_text", "session_id": rec1.delegation_id, "content": "one"})
-    await dm._on_broadcast({"type": "result", "session_id": rec1.delegation_id, "is_error": False})
-    await dm._on_broadcast({"type": "assistant_text", "session_id": rec2.delegation_id, "content": "two"})
-    await dm._on_broadcast({"type": "result", "session_id": rec2.delegation_id, "is_error": False})
+    await models.emit(dm, {"type": "assistant_text", "session_id": rec1.delegation_id, "content": "one"})
+    await models.emit(dm, {"type": "result", "session_id": rec1.delegation_id, "is_error": False})
+    await models.emit(dm, {"type": "assistant_text", "session_id": rec2.delegation_id, "content": "two"})
+    await models.emit(dm, {"type": "result", "session_id": rec2.delegation_id, "is_error": False})
 
     assert rec1.state == "completed"
     assert rec2.state == "completed"
@@ -1770,10 +1760,10 @@ async def _post_session(client, agent_id, name="parent"):
 
 
 @pytest.mark.asyncio
-async def test_route_start_delegation(client, monkeypatch):
+async def test_route_start_delegation(models, client, monkeypatch):
     """POST /sessions/{sid}/delegations succeeds; child session shows
     up via GET /sessions/{child_sid}."""
-    monkeypatch.setattr(session_manager, "start_message", _noop_start_message)
+    monkeypatch.setattr(session_manager, "start_message", models.start_for(session_manager))
 
     agents = (await client.get("/api/agents", headers=HEADERS)).json()
     octo = next(a for a in agents if a["is_system"])
@@ -1801,8 +1791,8 @@ async def test_route_start_delegation(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_route_list_and_cancel(client, monkeypatch):
-    monkeypatch.setattr(session_manager, "start_message", _noop_start_message)
+async def test_route_list_and_cancel(models, client, monkeypatch):
+    monkeypatch.setattr(session_manager, "start_message", models.start_for(session_manager))
 
     async def fake_interrupt(sid):
         return True
@@ -1838,8 +1828,8 @@ async def test_route_list_and_cancel(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_route_404s(client, monkeypatch):
-    monkeypatch.setattr(session_manager, "start_message", _noop_start_message)
+async def test_route_404s(models, client, monkeypatch):
+    monkeypatch.setattr(session_manager, "start_message", models.start_for(session_manager))
     # Unknown parent session.
     r = await client.post(
         "/api/sessions/ghost/delegations",
@@ -1869,8 +1859,8 @@ async def test_route_404s(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_route_self_delegation_409(client, monkeypatch):
-    monkeypatch.setattr(session_manager, "start_message", _noop_start_message)
+async def test_route_self_delegation_409(models, client, monkeypatch):
+    monkeypatch.setattr(session_manager, "start_message", models.start_for(session_manager))
     agents = (await client.get("/api/agents", headers=HEADERS)).json()
     octo = next(a for a in agents if a["is_system"])
     parent = await _post_session(client, octo["id"])
@@ -1888,7 +1878,7 @@ async def test_route_self_delegation_409(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_question_request_routed_to_parent(dm, mgr, db, monkeypatch):
+async def test_question_request_routed_to_parent(models, dm, mgr, db, monkeypatch):
     """A child raises a question; the manager injects
     `[agent-question:…]` into the parent. The pending question itself
     stays on the child's queue, intact — the parent's `answer` route
@@ -1896,10 +1886,8 @@ async def test_question_request_routed_to_parent(dm, mgr, db, monkeypatch):
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         injected.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1910,7 +1898,7 @@ async def test_question_request_routed_to_parent(dm, mgr, db, monkeypatch):
     )
     injected.clear()
 
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "question_request",
         "session_id": rec.delegation_id,
         "question_id": "q-abc",
@@ -1952,7 +1940,7 @@ async def test_question_request_routed_to_parent(dm, mgr, db, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_question_with_empty_questions_does_not_crash(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
     """An edge case: the child emits a malformed question_request with
     no questions. We still inject a sensible placeholder so the parent
@@ -1960,10 +1948,8 @@ async def test_question_with_empty_questions_does_not_crash(
     captured: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         captured.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
     octo = await db.get_system_agent()
@@ -1973,7 +1959,7 @@ async def test_question_with_empty_questions_does_not_crash(
         parent_session_id=parent.id, agent_name="vera", request="r",
     )
     captured.clear()
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "question_request",
         "session_id": rec.delegation_id,
         "question_id": "q-x",
@@ -1985,11 +1971,11 @@ async def test_question_with_empty_questions_does_not_crash(
 
 @pytest.mark.asyncio
 async def test_terminated_delegations_ignore_questions(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
     """A late question event after a child finished is dropped — the
     parent's reply has already been injected."""
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent = await _make_session(mgr, octo["id"])
@@ -1997,20 +1983,18 @@ async def test_terminated_delegations_ignore_questions(
         parent_session_id=parent.id, agent_name="vera", request="r",
     )
     # Drive to terminal.
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "result", "session_id": rec.delegation_id, "is_error": False,
     })
     # Now a stray question_request should be a no-op.
     captured = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
-        if source == "delegation" and (session := mgr.get_session(sid)) is not None:
-            session._work_id = work_id
         captured.append((sid, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, sid, prompt, source=source, work_id=work_id)
 
     monkeypatch.setattr(mgr, "start_message", capture)
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "question_request",
         "session_id": rec.delegation_id,
         "question_id": "q-stray",
@@ -2030,19 +2014,16 @@ def _seed_pending_question(
     """Wire a fake pending question onto a child session without going
     through the full create_pending_question flow (which would need a
     persistence path)."""
-    import asyncio as _asyncio
-
     from server.session_manager import PendingQuestion
 
-    child_session._pending_questions[question_id] = PendingQuestion(
+    child_session._questions[question_id] = PendingQuestion(
         question_id=question_id, questions=questions
     )
-    child_session._pending_question_events[question_id] = _asyncio.Event()
 
 
 @pytest.mark.asyncio
-async def test_answer_pending_question_happy(dm, mgr, db, monkeypatch):
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+async def test_answer_pending_question_happy(models, dm, mgr, db, monkeypatch):
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent = await _make_session(mgr, octo["id"])
@@ -2075,9 +2056,9 @@ async def test_answer_pending_question_happy(dm, mgr, db, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_answer_pending_question_requires_complete_multi_question_batch(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent = await _make_session(mgr, octo["id"])
@@ -2106,7 +2087,7 @@ async def test_answer_pending_question_requires_complete_multi_question_batch(
     with pytest.raises(DelegationError) as exc:
         await dm.answer_pending_question(rec.delegation_id, "A")
     assert exc.value.status_code == 400
-    assert not seen and "q-1" in child._pending_questions
+    assert not seen and any(item.question_id == "q-1" for item in mgr.get_pending_questions(child.id))
     answers = [{"selected": ["A"]}, {"text": "custom second"}, {"selected": ["C"]}]
     await dm.answer_pending_question(rec.delegation_id, answers=answers, question_id="q-1")
     assert seen["answers"] == [{"selected": ["A"], "text": None},
@@ -2114,8 +2095,8 @@ async def test_answer_pending_question_requires_complete_multi_question_batch(
                                 {"selected": ["C"], "text": None}]
 
 
-async def test_delegated_answers_preserve_multiple_choices_and_stable_question_identity(dm, mgr, db, monkeypatch):
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+async def test_delegated_answers_preserve_multiple_choices_and_stable_question_identity(models, dm, mgr, db, monkeypatch):
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent = await _make_session(mgr, octo["id"])
@@ -2140,9 +2121,9 @@ async def test_delegated_answers_preserve_multiple_choices_and_stable_question_i
 
 @pytest.mark.asyncio
 async def test_answer_pending_question_rejects_empty_choice(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent = await _make_session(mgr, octo["id"])
@@ -2158,9 +2139,9 @@ async def test_answer_pending_question_rejects_empty_choice(
 
 @pytest.mark.asyncio
 async def test_answer_pending_question_when_no_pending(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent = await _make_session(mgr, octo["id"])
@@ -2174,16 +2155,16 @@ async def test_answer_pending_question_when_no_pending(
 
 @pytest.mark.asyncio
 async def test_answer_pending_question_after_terminal(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent = await _make_session(mgr, octo["id"])
     rec = await dm.start_delegation(
         parent_session_id=parent.id, agent_name="vera", request="r",
     )
-    await dm._on_broadcast({
+    await models.emit(dm, {
         "type": "result", "session_id": rec.delegation_id, "is_error": False,
     })
     with pytest.raises(DelegationError) as ex:
@@ -2193,11 +2174,11 @@ async def test_answer_pending_question_after_terminal(
 
 @pytest.mark.asyncio
 async def test_answer_pending_question_human_race_409(
-    dm, mgr, db, monkeypatch
+    models, dm, mgr, db, monkeypatch
 ):
     """If session_manager.answer_question returns False (the human UI
     drained the queue first) we surface 409."""
-    monkeypatch.setattr(mgr, "start_message", _noop_start_message)
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
     parent = await _make_session(mgr, octo["id"])
@@ -2222,8 +2203,8 @@ async def test_answer_pending_question_human_race_409(
 
 
 @pytest.mark.asyncio
-async def test_route_answer_happy(client, monkeypatch):
-    monkeypatch.setattr(session_manager, "start_message", _noop_start_message)
+async def test_route_answer_happy(models, client, monkeypatch):
+    monkeypatch.setattr(session_manager, "start_message", models.start_for(session_manager))
 
     agents = (await client.get("/api/agents", headers=HEADERS)).json()
     octo = next(a for a in agents if a["is_system"])
@@ -2263,8 +2244,8 @@ async def test_route_answer_happy(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_route_answer_404_for_unknown_delegation(client, monkeypatch):
-    monkeypatch.setattr(session_manager, "start_message", _noop_start_message)
+async def test_route_answer_404_for_unknown_delegation(models, client, monkeypatch):
+    monkeypatch.setattr(session_manager, "start_message", models.start_for(session_manager))
     agents = (await client.get("/api/agents", headers=HEADERS)).json()
     octo = next(a for a in agents if a["is_system"])
     parent = await _post_session(client, octo["id"])
@@ -2277,8 +2258,8 @@ async def test_route_answer_404_for_unknown_delegation(client, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_route_answer_409_when_no_pending(client, monkeypatch):
-    monkeypatch.setattr(session_manager, "start_message", _noop_start_message)
+async def test_route_answer_409_when_no_pending(models, client, monkeypatch):
+    monkeypatch.setattr(session_manager, "start_message", models.start_for(session_manager))
     agents = (await client.get("/api/agents", headers=HEADERS)).json()
     octo = next(a for a in agents if a["is_system"])
     await _post_agent(client, "Vera")
@@ -2297,45 +2278,54 @@ async def test_route_answer_409_when_no_pending(client, monkeypatch):
     assert r.status_code == 409
 
 
-@pytest.mark.parametrize("state,expected", [("completed", True), ("failed", False), ("cancelled", False)])
-async def test_terminal_metric_is_independent_of_closed_parent(dm, mgr, db, monkeypatch, state, expected):
-    from server.delegations import DelegationRunState
+async def _terminal_under_closed_parent(models, dm, mgr, db, monkeypatch, state):
     from server.mcp_identity import close_work
 
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
+    parent = await _make_session(mgr, (await db.get_system_agent())["id"], name="metric parent")
+    outer_name, leaf_name = f"Metric outer {state}", f"Metric leaf {state}"
+    await _make_agent(db, outer_name)
+    await _make_agent(db, leaf_name)
+    outer = await dm.start_delegation(
+        parent_session_id=parent.id, agent_name=outer_name, request="coordinate review",
+    )
+    async with _model_scope(dm, outer) as scope:
+        rec = await dm.start_delegation(
+            parent_session_id=outer.delegation_id, agent_name=leaf_name, request="metric review", scope=scope,
+        )
+    close_work(outer.work_id)
+    if state == "cancelled":
+        await dm.cancel_delegation(rec.delegation_id)
+    else:
+        await models.emit(dm, {
+            "session_id": rec.delegation_id, "type": "result", "is_error": state == "failed",
+        })
+    return rec
+
+
+@pytest.mark.parametrize("state,expected", [("completed", True), ("failed", False), ("cancelled", False)])
+async def test_terminal_metric_is_independent_of_closed_parent(models, dm, mgr, db, monkeypatch, state, expected):
     records = []
     monkeypatch.setattr("server.delegations._mon_record", records.append)
-    parent = await _make_session(mgr, (await db.get_system_agent())["id"], name="metric parent")
-    work = f"closed-metric-{state}"
-    close_work(work)
-    rec = DelegationRunState(delegation_id="metric-child", parent_session_id=parent.id,
-                             target_agent_id="agent", target_agent_name="worker", request="work",
-                             parent_work_id=work, state=state)
-    await dm._inject_terminal(rec)
-    await dm._inject_terminal(rec)
+    rec = await _terminal_under_closed_parent(models, dm, mgr, db, monkeypatch, state)
+    # Repeating the public cancellation must preserve the existing outcome
+    # and avoid a second metric or terminal relay.
+    await dm.cancel_delegation(rec.delegation_id)
     assert len(records) == 1 and records[0].ok is expected
     assert records[0].error_code == (None if expected else state)
     assert records[0].detail["state"] == state
     assert rec._terminal_disposition == "closed"
-    assert rec._terminal_injected is False
 
 
-async def test_success_and_failure_delegation_metrics_query_real_storage(dm, mgr, db, monkeypatch, tmp_path):
-    from server.delegations import DelegationRunState
-    from server.mcp_identity import close_work
+async def test_success_and_failure_delegation_metrics_query_real_storage(models, dm, mgr, db, monkeypatch, tmp_path):
     from server.monitor import MetricsStore, query
 
     store = MetricsStore(str(tmp_path / "delegation-metrics.db"))
     await store.initialize()
     monkeypatch.setattr("server.delegations._mon_record", store.record)
-    parent = await _make_session(mgr, (await db.get_system_agent())["id"], name="metric storage parent")
-    work = "closed-storage-metrics"
-    close_work(work)
     try:
         for state in ("completed", "failed"):
-            rec = DelegationRunState(delegation_id=f"metric-{state}", parent_session_id=parent.id,
-                                     target_agent_id="agent", target_agent_name="worker", request="work",
-                                     parent_work_id=work, state=state)
-            await dm._inject_terminal(rec)
+            await _terminal_under_closed_parent(models, dm, mgr, db, monkeypatch, state)
         await store.drain()
         rows = await query.errors(store.conn, "24h")
         assert [(row["kind"], row["error_code"], row["n"]) for row in rows] == [("delegation", "failed", 1)]

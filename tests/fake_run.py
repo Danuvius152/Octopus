@@ -12,6 +12,8 @@ test explicitly opts in.
 
 from __future__ import annotations
 
+from server.diagnostics import exception_diagnostic
+
 
 class FakeRunBase:
     """The parts of `HarnessRun` every stand-in must answer."""
@@ -20,6 +22,9 @@ class FakeRunBase:
 
     def is_alive(self) -> bool:
         return True
+
+    def format_exception(self, error: BaseException) -> str:
+        return exception_diagnostic(error)
 
     def spawn_signature(self, working_dir, credential) -> str:
         return "fake-signature"

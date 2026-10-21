@@ -16,6 +16,7 @@ from typing import Any
 
 from ..crypto import decrypt, encrypt
 from ..harness import HarnessCredential
+from ..installation_keys import secret_key_scope
 from ..models import CredentialStatus
 from ..oauth_errors import RefreshErrorCode
 from ..oauth_providers import OAuthTokenSet, get_provider
@@ -43,7 +44,7 @@ class CredentialsMixin(SessionManagerBase):
             agent.get("credential_id") if agent else None
         )
         return await self.resolve_credential_by_id(
-            cred_id, style=harness.profile.credential_style, context=f"session {session.id}"
+            cred_id, style=harness.profile.credential_style, context=f"session {session.id}", user_id=session.user_id,
         )
 
     async def resolve_credential_by_id(
@@ -53,11 +54,14 @@ class CredentialsMixin(SessionManagerBase):
         style: str = "env_secret",
         context: str = "",
         require_auth: bool = True,
+        user_id: str | None = None,
     ) -> HarnessCredential | None:
         """Resolve a credential id into a `HarnessCredential` of the shape the
         harness needs (`style`). Returns None when there's no id, the row is
         missing/needs_reconnect, or it can't be resolved — the caller then runs
         with whatever auth the CLI finds on its own. `context` labels log lines.
+        `user_id` is the captured caller owner; None names the legacy install,
+        never an unscoped lookup of a later account's encryption key.
 
         - ``home_dir`` (Codex): the credential is directory-backed; its dir is
           deterministic (`<codex_home_dir>/<credential_id>/`), so we resolve it
@@ -89,14 +93,20 @@ class CredentialsMixin(SessionManagerBase):
 
         if self.db is None:
             return None
-        row = await self.db.get_credential(cred_id)
-        if row is None:
-            logger.warning(
-                "%s references missing credential %s; running without auth override",
-                context or "caller",
-                cred_id,
-            )
-            return None
+        async with secret_key_scope(self.db, user_id) as secret_key:
+            row = await self.db.get_credential(cred_id, user_id)
+            if row is None or row.get("user_id") != user_id:
+                logger.warning(
+                    "%s references unavailable credential %s; running without auth override",
+                    context or "caller", cred_id,
+                )
+                return None
+            return await self._resolve_secret_credential(cred_id, row, secret_key)
+
+    async def _resolve_secret_credential(
+        self, cred_id: str, row: dict[str, Any], secret_key: str,
+    ) -> HarnessCredential | None:
+        """Read and refresh while the caller owns the applicable key scope."""
         if row.get("needs_reconnect"):
             logger.warning(
                 "Credential %s is in needs_reconnect state (%s); running without auth override",
@@ -104,13 +114,6 @@ class CredentialsMixin(SessionManagerBase):
                 row.get("last_refresh_error_code"),
             )
             return None
-        # Keyed to the credential's *owner* (§4). The row knows who it belongs
-        # to, so the key comes from the row rather than from whoever happens to
-        # be asking — which is what makes a background path (the scheduler
-        # firing somebody's job) decrypt the same secret a request does.
-        from .. import deps
-
-        secret_key = await deps.data_key_for(row.get("user_id"))
         try:
             plaintext = decrypt(row["secret_encrypted"], secret_key)
         except ValueError:

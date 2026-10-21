@@ -42,10 +42,10 @@ async def test_startup_repairs_only_unambiguous_fork_owners(tmp_path):
             "VALUES (?, ?, ?, '2026-10-11', ?, ?, ?, ?, ?, 'codex', 'ready')",
             (sid, sid, str(tmp_path), origin, parent, agent_id or system_agent["id"], owner, archived),
         )
+    await db.conn.commit()
     await db.append_message(
         session_id="child", seq=0, role="user", type="text", content="keep this history"
     )
-    await db.flush()
     before = {r["id"]: r for r in await db.load_sessions(include_archived=True)}
     messages = await db.load_messages("child")
     await db.close()
@@ -59,7 +59,9 @@ async def test_startup_repairs_only_unambiguous_fork_owners(tmp_path):
             expected = {**row, "user_id": "owner-a"} if sid in repaired else row
             assert after[sid] == expected
         assert await db.load_messages("child") == messages
-        await db._apply_migrations()
+        await db.close()
+        db = Database(path)
+        await db.initialize()
         assert {r["id"]: r for r in await db.load_sessions(include_archived=True)} == after
         ledger = await db.conn.execute(
             "SELECT COUNT(*) FROM schema_migrations WHERE version='backfill:fork_session_owners'"

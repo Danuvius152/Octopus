@@ -16,7 +16,7 @@ from server.wiki.store import WikiStore
 def store(tmp_path):
     root = tmp_path / "vault"
     root.mkdir()
-    instance = WikiStore(root, tmp_path / "state", uuid.uuid4().hex)
+    instance = WikiStore(root, tmp_path / "state", uuid.uuid4().hex, create=True)
     try:
         yield instance
     finally:

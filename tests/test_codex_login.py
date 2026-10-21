@@ -260,7 +260,7 @@ async def test_codex_home_credential_resolution():
 
     mgr = SessionManager()
     codex = get_harness("codex")  # credential_style == "home_dir"
-    sess = SimpleNamespace(credential_id="credX", id="s1")
+    sess = SimpleNamespace(credential_id="credX", id="s1", user_id=None)
 
     # No dir yet → fall back to host login (None).
     assert await mgr._resolve_credential(sess, None, codex) is None
@@ -275,7 +275,7 @@ async def test_codex_home_credential_resolution():
     assert cred is not None and cred.home_dir == home and cred.backend == "codex"
 
     # Falls back to the agent's default credential when the session has none.
-    no_cred = SimpleNamespace(credential_id=None, id="s2")
+    no_cred = SimpleNamespace(credential_id=None, id="s2", user_id=None)
     cred2 = await mgr._resolve_credential(no_cred, {"credential_id": "credX"}, codex)
     assert cred2 is not None and cred2.home_dir == home
     # No credential anywhere → None.

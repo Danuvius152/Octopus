@@ -52,9 +52,24 @@ class QueryProbe:
         self.last_session_id = session.id
         self.last_request_id = uuid.uuid4().hex
         self.last_events = []
-        async with asyncio.timeout(240):
-            async for event in self.manager._execute_claimed_request(session.id, question, wiki_mode="read", request_id=self.last_request_id):
-                self.last_events.append(event)
+
+        async def observe(event):
+            if event.get("session_id") == session.id:
+                self.last_events.append(deepcopy(event))
+
+        subscription = f"wiki-query-{self.last_request_id}"
+        self.manager.on_broadcast(subscription, observe)
+        try:
+            async with asyncio.timeout(240):
+                receipt = await self.manager.start_message(
+                    session.id, question, wiki_mode="read", request_id=self.last_request_id,
+                )
+                assert receipt.accepted and receipt.request_id == self.last_request_id
+                completion = await receipt.wait()
+                assert completion.recording_state == "committed"
+                assert completion.outcome is not None and completion.outcome.status == "success"
+        finally:
+            self.manager.remove_broadcast(subscription)
         events = self.last_events
         assert not any(event.get("type") == "error" for event in events), events
         outcomes = [event for event in events if event.get("type") == "result"]

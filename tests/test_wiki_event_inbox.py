@@ -4,7 +4,6 @@ These faults use temporary vaults and their real SQLite/inotify boundary. No
 model, user corpus, or running service participates in the recovery checks.
 """
 
-import contextlib
 import hashlib
 import json
 import sqlite3
@@ -15,9 +14,11 @@ from pathlib import Path
 
 import pytest
 
+from server.service_health import ServiceHealth
 from server.wiki.curation import WikiCuration
-from server.wiki.event_inbox import EventInbox
 from server.wiki.store import WikiError, WikiStore
+from tests.test_service_runtime import installation_settings
+from tests.test_wiki_storage import registration_process
 
 
 @pytest.fixture
@@ -27,14 +28,15 @@ def vault(tmp_path):
     state = tmp_path / "state"
     vault_id = str(uuid.uuid4())
     stores = []
+    health = ServiceHealth()
 
-    def open_store():
-        store = WikiStore(root, state, vault_id)
+    def open_store(*, create=False):
+        store = WikiStore(root, state, vault_id, health=health, create=create)
         assert store.events.mode == "inotify"
         stores.append(store)
         return store
 
-    yield open_store(), open_store
+    yield open_store(create=True), open_store
     for store in stores:
         store.close()
 
@@ -150,168 +152,131 @@ def test_delete_receipt_is_committed_before_the_index_application(vault, monkeyp
     assert path.read_bytes() == replacement_raw
 
 
-@pytest.mark.parametrize("entry", ["synchronize", "refresh"])
+@pytest.mark.parametrize("action", ["arm", "receive", "application", "ack"])
 @pytest.mark.parametrize("committed", [False, True])
-@pytest.mark.parametrize("recovery", ["same_store", "reopen"])
-def test_application_commit_result_is_resolved_from_durable_state(vault, monkeypatch, entry, committed, recovery):
-    store, open_store = vault
-    path, original = original_note(store)
-    replacement_raw = b"# Replacement\nOne identity across every recovery attempt.\n"
-    with sqlite3.connect(store.db_path) as db:
-        watermark = db.execute("SELECT applied_seq FROM filesystem_state").fetchone()[0]
-    connect = store.connect
-    faults = []
-
-    @contextlib.contextmanager
-    def ambiguous_commit():
-        with connect() as db:
-            yield db
-            new_watermark = db.execute("SELECT applied_seq FROM filesystem_state").fetchone()[0]
-            if db.in_transaction and new_watermark > watermark and not faults:
-                faults.append(True)
-                if committed:
-                    db.commit()
-                raise sqlite3.OperationalError("synthetic application COMMIT result unavailable")
-
-    with path.open("rb"):
-        path.unlink()
-        path.write_bytes(replacement_raw)
-        with monkeypatch.context() as patch:
-            patch.setattr(store, "connect", ambiguous_commit)
-            with pytest.raises(WikiError) as failure:
-                getattr(store, entry)()
-            assert failure.value.status == 503
-        assert faults == [True]
-        with sqlite3.connect(store.db_path) as db:
-            first_id = db.execute("SELECT id FROM documents WHERE path=?", (original["path"],)).fetchone()[0]
-            pending = db.execute("SELECT count(*) FROM filesystem_inbox WHERE status='pending'").fetchone()[0]
-        assert (first_id != original["id"]) is committed
-        assert bool(pending) is not committed
-        if recovery == "reopen":
-            store.close()
-            store = open_store()
-        store.refresh()
-        replacement_id = store.read(original["path"])["id"]
-        assert replacement_id != original["id"]
-        if committed:
-            assert replacement_id == first_id
-        for _attempt in range(2):
-            store.synchronize()
-            store.refresh()
-            assert store.read(original["path"])["id"] == replacement_id
-        assert_retired(store, original)
-    assert path.read_bytes() == replacement_raw
-
-
-@pytest.mark.parametrize("committed", [False, True])
-@pytest.mark.parametrize("recovery", ["same_store", "reopen"])
-def test_ack_commit_failure_never_replays_the_applied_delete(vault, monkeypatch, committed, recovery):
-    store, open_store = vault
-    path, original = original_note(store)
-    replacement_raw = b"# Replacement\nAcknowledgement cannot end this new binding.\n"
-    with sqlite3.connect(store.db_path) as db:
-        watermark = db.execute("SELECT applied_seq FROM filesystem_state").fetchone()[0]
-    commit = EventInbox.commit
-    faults = []
-
-    def ambiguous_ack_commit(db):
-        acknowledgement = db.execute(
-            "SELECT 1 FROM filesystem_inbox WHERE seq>? AND status='applied' AND payload='' LIMIT 1",
-            (watermark,),
-        ).fetchone()
-        if acknowledgement and not faults:
-            faults.append(True)
-            if committed:
-                commit(db)
-            raise sqlite3.OperationalError("synthetic acknowledgement COMMIT result unavailable")
-        commit(db)
-
-    with path.open("rb"):
-        path.unlink()
-        path.write_bytes(replacement_raw)
-        with monkeypatch.context() as patch:
-            patch.setattr(EventInbox, "commit", staticmethod(ambiguous_ack_commit))
-            with pytest.raises(WikiError) as failure:
+def test_uncertain_commit_exits_and_only_a_restart_reconciles_receipts(tmp_path, action, committed):
+    config, config_file = installation_settings(tmp_path / "installation")
+    marker = tmp_path / "admitted-after-failure"
+    operation = """
+target=root/'Library/note.md'
+target.parent.mkdir()
+target.write_bytes(b'# Original\\nThe original judgment.\\n')
+registry.configure(None,root,'curator')
+store=registry.store(None)
+original=store.read('Library/note.md')
+with store.connect() as db:
+    watermark=db.execute('SELECT applied_seq FROM filesystem_state').fetchone()[0]
+proof={'id':original['id'],'uid':original['metadata']['uid'],'vault_id':store.vault_id,'watermark':watermark}
+marker.with_suffix('.before').write_text(json.dumps(proof))
+action=ACTION
+committed=COMMITTED
+connect=sqlite3.connect
+class FaultyConnection(sqlite3.Connection):
+    def commit(self):
+        if self.in_transaction:
+            state=self.execute('SELECT armed_epoch,applied_seq FROM filesystem_state').fetchone()
+            selected=(action=='arm' and state[0]=='fault-epoch'
+                or action=='receive' and self.execute("SELECT 1 FROM filesystem_inbox WHERE batch_id='retained-batch'").fetchone()
+                or action=='application' and state[1]>watermark
+                or action=='ack' and self.execute("SELECT 1 FROM filesystem_inbox WHERE seq>? AND payload=''",(watermark,)).fetchone())
+            if selected:
+                marker.with_suffix('.commit-started').touch()
+                if committed: super().commit()
+                raise OSError('synthetic lost authoritative commit response')
+        return super().commit()
+def faulty_connect(*args,**kwargs):
+    kwargs['factory']=FaultyConnection
+    return connect(*args,**kwargs)
+sqlite3.connect=faulty_connect
+try:
+    if action=='arm':
+        store.events.journal.arm('fault-epoch')
+    else:
+        with target.open('rb'):
+            target.unlink()
+            target.write_bytes(b'# Replacement\\nA different judgment.\\n')
+            if action=='receive':
+                journal=store.events.journal
+                journal.arm('fault-epoch')
+                journal.receive([{'type':'kernel','path':'Library/note.md','mask':0x200,'cookie':0}],
+                    'fault-epoch',store.events.root_generation,batch_id='retained-batch')
+            else:
                 store.synchronize()
-            assert failure.value.status == 503
-        assert faults == [True]
-        with sqlite3.connect(store.db_path) as db:
-            committed_id = db.execute("SELECT id FROM documents WHERE path=?", (original["path"],)).fetchone()[0]
-            assert committed_id != original["id"]
-            assert not db.execute("SELECT 1 FROM filesystem_inbox WHERE status='pending'").fetchone()
-            payload = db.execute("SELECT payload FROM filesystem_inbox WHERE seq>?", (watermark,)).fetchone()[0]
-            assert bool(payload) is not committed
-        if recovery == "reopen":
-            store.close()
-            store = open_store()
-        for _attempt in range(2):
-            store.refresh()
-            assert store.read(original["path"])["id"] == committed_id
-        assert_retired(store, original)
-    assert path.read_bytes() == replacement_raw
-
-
-def test_receive_resolves_commit_that_succeeded_before_raising(inbox, monkeypatch):
-    epoch = "armed-synthetic-observer"
-    inbox.arm(epoch)
-    commit = EventInbox.commit
-    failures = []
-
-    def uncertain_commit(db):
-        row = db.execute("SELECT 1 FROM filesystem_inbox WHERE batch_id='receipt-after-commit'").fetchone()
-        commit(db)
-        if row and not failures:
-            failures.append(True)
-            raise sqlite3.OperationalError("synthetic lost receive COMMIT response")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(EventInbox, "commit", staticmethod(uncertain_commit))
-        sequence = inbox.receive([new_record()], epoch, "generation", batch_id="receipt-after-commit")
-    assert failures == [True]
-    assert sql_rows(inbox, "SELECT armed_epoch FROM filesystem_state") == [(None,)]
-    assert [row[0]["seq"] for row in inbox.pending()] == [sequence]
-    assert inbox.receive([new_record()], epoch, "generation", armed=False, batch_id="receipt-after-commit") == sequence
-
-
-def test_failed_receive_commit_retains_armed_protection(inbox, monkeypatch):
-    epoch = "armed-synthetic-observer"
-    inbox.arm(epoch)
-    commit = EventInbox.commit
-
-    def fail_receive_commit(db):
-        if db.execute("SELECT 1 FROM filesystem_inbox WHERE batch_id='receipt-before-commit'").fetchone():
-            raise sqlite3.OperationalError("synthetic failed receive COMMIT")
-        commit(db)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(EventInbox, "commit", staticmethod(fail_receive_commit))
-        with pytest.raises(sqlite3.OperationalError, match="failed receive COMMIT"):
-            inbox.receive([new_record()], epoch, "generation", batch_id="receipt-before-commit")
-    assert sql_rows(inbox, "SELECT armed_epoch FROM filesystem_state") == [(epoch,)]
-    assert not sql_rows(inbox, "SELECT seq FROM filesystem_inbox WHERE batch_id='receipt-before-commit'")
-    with pytest.raises(WikiError) as failure:
-        EventInbox(inbox.db_path, inbox.root, inbox.vault_id)
-    assert failure.value.status == 503
-
-
-def test_arm_resolves_commit_that_succeeded_before_raising(inbox, monkeypatch):
-    epoch = "arm-after-commit"
-    commit = EventInbox.commit
-    failures = []
-
-    def uncertain_commit(db):
+except Exception:
+    pass
+marker.touch()
+""".replace("ACTION", repr(action)).replace("COMMITTED", repr(committed))
+    failed = registration_process(config_file, marker, operation)
+    assert marker.with_suffix(".commit-started").is_file(), failed.stderr
+    assert failed.returncode == 70, failed.stderr
+    assert not marker.exists()
+    proof = json.loads(marker.with_suffix(".before").read_text())
+    database = Path(config.wiki_dir) / "index.sqlite3"
+    with sqlite3.connect(database) as db:
+        current_id = db.execute("SELECT id FROM documents WHERE path='Library/note.md'").fetchone()[0]
         armed = db.execute("SELECT armed_epoch FROM filesystem_state").fetchone()[0]
-        commit(db)
-        if armed == epoch and not failures:
-            failures.append(True)
-            raise sqlite3.OperationalError("synthetic lost arm COMMIT response")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(EventInbox, "commit", staticmethod(uncertain_commit))
-        inbox.arm(epoch)
-    assert failures == [True]
-    sequence = inbox.receive([new_record()], epoch, "generation")
-    assert [row[0]["seq"] for row in inbox.pending()] == [sequence]
+        receipts = db.execute("SELECT seq,batch_id,payload_hash,status,payload FROM filesystem_inbox WHERE seq>?", (proof["watermark"],)).fetchall()
+    if action == "arm":
+        assert armed == ("fault-epoch" if committed else None)
+        assert not receipts and current_id == proof["id"]
+    elif action == "receive":
+        assert armed == (None if committed else "fault-epoch")
+        assert bool(receipts) is committed
+        assert current_id == proof["id"]
+    else:
+        assert armed is None and receipts
+        assert (current_id != proof["id"]) is (committed or action == "ack")
+        assert all(row[3] == ("applied" if committed or action == "ack" else "pending") for row in receipts)
+        if action == "ack":
+            assert all(bool(row[4]) is not committed for row in receipts)
+    blocked = action == "arm" and committed or action == "receive" and not committed
+    restarted = registration_process(config_file, marker, """
+from server.wiki.store import WikiError
+from server.wiki.recovery import Metadata
+result={'ids':[],'retired':[]}
+proof=json.loads(marker.with_suffix('.before').read_text())
+for attempt in range(2):
+    try:
+        store=registry.store(None)
+        store.refresh()
+        result['ids'].append(store.read('Library/note.md')['id'])
+        for identifier in (proof['id'],proof['uid']):
+            try: store.read(identifier)
+            except WikiError as error: result['retired'].append(error.status)
+            else: result['retired'].append(200)
+    except WikiError as error:
+        result['blocked']=error.status
+        result['filesystem']=Metadata(registry,None).snapshot()['filesystem']
+    registry.close()
+result['vault_id']=registry.config(None)['vault_id']
+marker.write_text(json.dumps(result))
+""")
+    assert restarted.returncode == 0, restarted.stderr
+    result = json.loads(marker.read_text())
+    assert result["vault_id"] == proof["vault_id"]
+    if blocked:
+        assert result["blocked"] == 503 and result["ids"] == []
+        assert result["filesystem"]["armed_epoch"] == "fault-epoch"
+    else:
+        assert len(set(result["ids"])) == 1
+        if action == "arm":
+            assert result["ids"] == [proof["id"]] * 2
+        else:
+            assert result["ids"][0] != proof["id"]
+            assert result["retired"] == [404] * 4
+            if committed and action == "application" or action == "ack":
+                assert result["ids"][0] == current_id
+    with sqlite3.connect(database) as db:
+        retained = db.execute("SELECT seq,batch_id,payload_hash,status,payload FROM filesystem_inbox WHERE seq>?", (proof["watermark"],)).fetchall()
+    assert [row[:3] for row in retained] == [row[:3] for row in receipts]
+    if not blocked:
+        assert all(row[3] == "applied" for row in retained)
+        # An applied receipt need not be acknowledged by the next observer.
+        # Its retained payload must never be replayed against the new identity.
+        if action == "ack" and not committed:
+            assert [row[4] for row in retained] == [row[4] for row in receipts]
+    expected = b"# Original\nThe original judgment.\n" if action == "arm" else b"# Replacement\nA different judgment.\n"
+    assert (Path(config_file).parent / "vault/Library/note.md").read_bytes() == expected
 
 
 @pytest.mark.parametrize("acknowledged", [False, True])
@@ -444,7 +409,10 @@ def test_replacement_recovers_in_independent_process_without_transferring_source
         script = """
 import json, sys
 from pathlib import Path
+from server.service_health import ServiceHealth
 from server.wiki.store import WikiError, WikiStore
+from tests.test_service_runtime import installation_settings
+from tests.test_wiki_storage import registration_process
 root, state, vault_id, old_id, old_uid, consumer_id = sys.argv[1:]
 result = {"retired": [], "replacement_ids": []}
 for attempt in range(2):

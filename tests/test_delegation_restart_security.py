@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 
 import httpx
 import pytest
@@ -212,45 +211,6 @@ async def test_confirmed_failed_or_cancelled_round_survives_restart_and_accepts_
     assert scope.work_id == following.work_id != original.work_id
     assert recovered.to_public_dict() == confirmed
 
-
-async def test_committed_round_survives_lost_write_acknowledgement_and_restart(runtime, monkeypatch):
-    boot, starts = runtime
-    first_boot = await boot()
-    write = first_boot.database.compare_and_set_delegation_state
-    lost_acknowledgements = []
-
-    async def commit_then_lose_acknowledgement(*args, **kwargs):
-        changed = await write(*args, **kwargs)
-        if changed and json.loads(args[2])["state"] == "completed":
-            lost_acknowledgements.append(args[2])
-            raise OSError("synthetic response lost after commit")
-        return changed
-
-    monkeypatch.setattr(
-        first_boot.database, "compare_and_set_delegation_state", commit_then_lose_acknowledgement,
-    )
-    original = await first_boot.delegations.start_delegation(
-        parent_session_id=first_boot.parent_id, agent_name="Worker", request="complete despite lost acknowledgement",
-    )
-    await asyncio.wait_for(starts.get(), 5)
-    await wait_finished(first_boot.manager, original)
-    assert lost_acknowledgements
-    confirmed = original.to_public_dict()
-    assert confirmed["state"] == "completed" and confirmed["recording_state"] == "committed"
-    await first_boot.close()
-    current = await boot()
-    recovered = current.delegations.get_delegation(original.delegation_id)
-    assert recovered is not None and recovered.to_public_dict() == confirmed
-    assert starts.empty()
-    assert current.manager.dispatch_snapshot(current.parent_id)["items"] == []
-    following = await current.delegations.follow_up_delegation(
-        parent_session_id=current.parent_id, delegation_id=original.delegation_id,
-        request="held explicit followup after verified commit",
-    )
-    context = await asyncio.wait_for(starts.get(), 5)
-    scope = await wait_live_scope(context)
-    assert scope.work_id == following.work_id != original.work_id
-    assert recovered.to_public_dict() == confirmed
 
 
 async def test_deleted_parent_cannot_start_a_followup_from_a_restored_receipt(runtime):

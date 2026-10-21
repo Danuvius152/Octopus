@@ -1,11 +1,10 @@
 """Resolve local note links for navigation; a link is never proof of reading."""
 
 import re
-import unicodedata
-from html.parser import HTMLParser
 from pathlib import PurePosixPath
 
-from .extract import blocks
+from . import format
+from .format import heading_slug as heading_slug
 
 
 def note_name(path):
@@ -16,116 +15,27 @@ def note_name(path):
     return name
 
 
-def headings(text):
-    """Actual Markdown headings with literal current-file coordinates."""
-    offset, fence, front = 0, None, text.lstrip("\ufeff").startswith(("---\n", "---\r\n"))
-    result = []
-    for number, line in enumerate(text.splitlines(keepends=True)):
-        stripped = line.strip()
-        if front:
-            if number > 0 and stripped == "---":
-                front = False
-        else:
-            marker = re.match(r"^\s*(`{3,}|~{3,})", line)
-            if marker:
-                if fence is None:
-                    fence = marker[1]
-                elif marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
-                    fence = None
-            elif fence is None:
-                match = re.match(r"^ {0,3}(#{1,6})\s+(.+?)\s*#*\s*$", line)
-                if match:
-                    result.append({"title": match[2], "level": len(match[1]), "start": offset})
-        offset += len(line)
-    for index, heading in enumerate(result):
-        heading["end"] = next((later["start"] for later in result[index + 1:] if later["level"] <= heading["level"]), len(text))
-    return result
+def headings(text: str, *, parsed: format.DocumentFormat | None = None) -> list[dict]:
+    """Literal heading sections; a supplied parse belongs to this exact text."""
+    return [heading | {"end": heading["section_end"]} for heading in (parsed if parsed is not None else format.parse(text)).headings]
 
 
-def heading_slug(title):
-    title = re.sub(r"\[([^]]+)\]\([^)]*\)", r"\1", title)
-    return "-".join("".join(char for char in title.casefold() if char.isspace() or char in "_-" or unicodedata.category(char)[0] in {"L", "N"}).split())
-
-
-def block_span(text, identifier):
+def block_span(text: str, identifier: str, *, parsed: format.DocumentFormat | None = None) -> tuple[int, int] | None:
     """Cover the whole prose/list block, including a standalone trailing ID."""
-    if not re.fullmatch(r"\^[A-Za-z0-9-]+", identifier):
-        return None
-    # Mask non-prose without moving any current-file coordinates.
-    masked = re.sub(
-        r"(?ms)\A\ufeff?---\r?\n.*?^---[ \t]*(?:\r?\n|$)|^\s*(`{3,}|~{3,})[^\n]*\n.*?^\s*\1\s*$",
-        lambda match: re.sub(r"[^\n]", " ", match[0]), text,
-    )
-    ranges, offset = [], 0
-    for part in blocks(text):
-        ranges.append((offset, offset + len(part), masked[offset:offset + len(part)]))
-        offset += len(part)
-    hits = [index for index, (_, _, part) in enumerate(ranges) if re.search(r"(?m)\^" + re.escape(identifier[1:]) + r"[ \t]*\r?$", part)]
-    if len(hits) != 1:
-        return None
-    index = hits[0]
-    end = ranges[index][1]
-    if ranges[index][2].strip() == identifier:
-        index -= 1
-        while index >= 0 and not text[ranges[index][0]:ranges[index][1]].strip():
-            index -= 1
-        if index < 0:
-            return None
-    list_marker = r"(?m)^\s*(?:[-+*]|\d+[.)])\s+"
-    def list_part(part):
-        lines = [line for line in part.splitlines() if line.strip()]
-        return bool(lines) and (
-            re.match(list_marker, lines[0]) is not None
-            # Markdown permits lazy unindented lines after an indented
-            # continuation paragraph; its first line determines this chunk.
-            or lines[0].startswith((" ", "\t"))
-        )
-
-    # A loose list can end in an indented paragraph, with no marker in that
-    # final chunk. Include its preceding conditions, including nested items.
-    first = index
-    saw_marker = re.search(list_marker, ranges[index][2]) is not None
-    if list_part(ranges[index][2]):
-        while first > 0:
-            previous = first - 1
-            while previous >= 0 and not ranges[previous][2].strip():
-                previous -= 1
-            if previous < 0 or not list_part(ranges[previous][2]):
-                break
-            saw_marker = saw_marker or re.search(list_marker, ranges[previous][2]) is not None
-            first = previous
-        if saw_marker:
-            index = first
-    return ranges[index][0], end
+    return (parsed if parsed is not None else format.parse(text)).block_spans.get(identifier)
 
 
-def anchor_exists(text, anchor):
+def anchor_exists(text: str, anchor: str, *, parsed: format.DocumentFormat | None = None) -> bool:
+    parsed = parsed if parsed is not None else format.parse(text)
     if anchor.startswith("^"):
-        return block_span(text, anchor) is not None
-    seen = {}
-    for heading in headings(text):
-        title = heading["title"]
-        slug = heading_slug(title)
-        suffix = seen.get(slug, 0)
-        seen[slug] = suffix + 1
-        unique = slug + (f"-{suffix}" if suffix else "")
-        if anchor.casefold() in {title.casefold(), unique}:
+        return block_span(text, anchor, parsed=parsed) is not None
+    for heading in parsed.headings:
+        if anchor.casefold() in {heading["title"].casefold(), heading["slug"]}:
             return True
-    class HTMLAnchors(HTMLParser):
-        def __init__(self):
-            super().__init__()
-            self.found = False
-
-        def handle_starttag(self, tag, attrs):
-            if any(key in {"id", "name"} and value == anchor for key, value in attrs):
-                self.found = True
-
-    parser = HTMLAnchors()
-    parser.feed(re.sub(r"(?ms)^\s*(`{3,}|~{3,})[^\n]*\n.*?^\s*\1\s*$|`[^`]*`", "", text))
-    return parser.found
+    return anchor in parsed.html_anchors
 
 
-def source_span(text, location):
+def source_span(text: str, location: str, *, parsed: format.DocumentFormat | None = None) -> tuple[int, int] | None:
     """Verify an evidence locator, without claiming its semantic relevance."""
     location = location.strip()
     if location in {"全文", "原文全文"} and text.strip():
@@ -139,10 +49,17 @@ def source_span(text, location):
             if start < end:
                 return start, end
         return None
-    title = location.lstrip("#").strip()
-    matches = [heading for heading in headings(text) if title.casefold() in {heading["title"].casefold(), heading_slug(heading["title"])}]
-    if len(matches) == 1:
-        return matches[0]["start"], matches[0]["end"]
     if location.startswith("^"):
-        return block_span(text, location)
+        return block_span(text, location, parsed=parsed)
+    title = location.lstrip("#").strip().casefold()
+    current = (parsed if parsed is not None else format.parse(text)).headings
+    # An explicit fragment selects its slug projection; a plain repeated title
+    # remains ambiguous rather than silently citing the first occurrence.
+    if location.startswith("#"):
+        matches = [heading for heading in current if title == heading["slug"]]
+        if len(matches) == 1:
+            return matches[0]["start"], matches[0]["section_end"]
+    matches = [heading for heading in current if title in {heading["title"].casefold(), heading["slug"]}]
+    if len(matches) == 1:
+        return matches[0]["start"], matches[0]["section_end"]
     return None

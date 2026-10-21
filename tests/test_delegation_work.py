@@ -10,6 +10,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
+from server import deps
 from server.agent_manager import AgentManager
 from server.bg_tasks import BgTaskManager
 from server.database import Database
@@ -18,12 +19,16 @@ from server.deps import get_session_manager
 from server.harness import get_harness
 from server.mcp_identity import verify
 from server.sessions import SessionManager
+from server.users import UserManager
+from tests.test_delegation_restart_security import wait_live_scope
 
 
 @pytest.fixture
 async def work_runtime(monkeypatch, tmp_path):
     database = Database(":memory:")
     await database.initialize()
+    monkeypatch.setattr(deps, "_user_manager", UserManager(database))
+    monkeypatch.setattr(deps, "_accounts_exist", None)
     manager = SessionManager()
     await manager.initialize(database)
     agents = AgentManager(database)
@@ -63,7 +68,7 @@ async def work_runtime(monkeypatch, tmp_path):
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None))
     try:
         yield manager, delegations, parent, starts
     finally:
@@ -72,8 +77,7 @@ async def work_runtime(monkeypatch, tmp_path):
         delegations.shutdown()
         for session in list(manager.sessions.values()):
             await manager.interrupt(session.id)
-            if session._active_task:
-                await asyncio.wait_for(session._active_task, 5)
+            await manager.await_session_execution(session.id, timeout=5)
         await manager.stop_all_held_processes()
         await database.close()
 
@@ -82,6 +86,14 @@ async def wait_state(manager, delegation_id, state):
     async with asyncio.timeout(5):
         while manager.get_delegation(delegation_id).state != state:
             await asyncio.sleep(0.01)
+
+
+async def assert_no_queued_messages(manager, session_id):
+    if manager.get_session(session_id) is not None:
+        assert manager.dispatch_snapshot(session_id)["items"] == []
+    else:
+        assert next(row for row in await manager.db.load_sessions(include_archived=True)
+                    if row["id"] == session_id)["archived"]
 
 
 async def test_follow_up_has_new_work_and_stale_cancel_cannot_stop_it(work_runtime):
@@ -112,18 +124,20 @@ async def test_cancel_queued_round_preserves_independent_human_request(work_runt
     )
     await starts.get()
     await wait_state(delegations, first.delegation_id, "completed")
-    child = manager.get_session(first.delegation_id)
-    if child._active_task:
-        await asyncio.wait_for(child._active_task, 5)
-    await manager.start_message(child.id, "held independent human")
+    await asyncio.wait_for(delegations.confirm_recording(), 5)
+    child = manager.get_session(first.delegation_id) or await manager.unarchive_session(first.delegation_id)
+    await manager.await_session_execution(child.id, timeout=5)
+    human = await manager.start_message(child.id, "held independent human")
+    assert human.accepted
     assert "held independent human" in (await starts.get()).prompt
     second = await delegations.follow_up_delegation(
         parent_session_id=parent.id, delegation_id=child.id, request="held queued delegation",
     )
     await delegations.cancel_delegation(child.id, work_id=second.work_id)
-    await asyncio.sleep(0.05)
+    await asyncio.wait_for(delegations.confirm_recording(), 5)
     assert manager.get_session(child.id).status.value == "running"
-    assert manager.dispatch_snapshot(child.id)["items"] == []
+    snapshot = manager.dispatch_snapshot(child.id)
+    assert snapshot["active_request_id"] == human.request_id and snapshot["items"] == []
 
 
 async def test_real_run_bearer_identifies_work_and_stop_revokes_it(work_runtime):
@@ -134,6 +148,7 @@ async def test_real_run_bearer_identifies_work_and_stop_revokes_it(work_runtime)
         parent_session_id=parent.id, agent_name="Worker", request="held work",
     )
     context = await starts.get()
+    await wait_live_scope(context)
     token = next(entry.credential for entry in context.mcp_servers if entry.key == "bg")
     scope = verify(token)
     assert scope.work_id == rec.work_id
@@ -149,6 +164,7 @@ async def test_explicit_cancel_stops_owned_bg_and_late_tool_call_is_rejected(wor
         parent_session_id=parent.id, agent_name="Worker", request="held work",
     )
     context = await starts.get()
+    await wait_live_scope(context)
     token = next(entry.credential for entry in context.mcp_servers if entry.key == "bg")
     headers = {"Authorization": f"Bearer {token}"}
     path = f"/api/sessions/{rec.delegation_id}/bg-tasks"
@@ -176,6 +192,7 @@ async def test_cancel_cleans_bg_whose_spawn_returns_after_work_closed(work_runti
         parent_session_id=parent.id, agent_name="Worker", request="held work",
     )
     context = await starts.get()
+    await wait_live_scope(context)
     token = next(entry.credential for entry in context.mcp_servers if entry.key == "bg")
     spawned, release = asyncio.Event(), asyncio.Event()
     original = asyncio.create_subprocess_exec
@@ -203,7 +220,9 @@ async def test_cancel_cleans_bg_whose_spawn_returns_after_work_closed(work_runti
             await asyncio.sleep(0.01)
     task = await manager.work_test_bg.get_task(response.json()["id"])
     assert task.status == "cancelled" and task.stop_reason == "work_cancelled"
-    assert manager.dispatch_snapshot(rec.delegation_id)["items"] == []
+    await assert_no_queued_messages(manager, rec.delegation_id)
+    messages = await manager.db.load_messages(rec.delegation_id)
+    assert not [row for row in messages if (row.get("tool_input") or {}).get("request_context", {}).get("source") == "bg"]
 
 
 async def test_ordinary_stop_keeps_bg_running_and_pauses_its_return(work_runtime):
@@ -212,20 +231,37 @@ async def test_ordinary_stop_keeps_bg_running_and_pauses_its_return(work_runtime
         parent_session_id=parent.id, agent_name="Worker", request="held work",
     )
     context = await starts.get()
+    await wait_live_scope(context)
     token = next(entry.credential for entry in context.mcp_servers if entry.key == "bg")
+    completed, release, returned = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def hold_completed_publication(event):
+        if event.get("session_id") == rec.delegation_id and event["type"] == "bg_completed":
+            completed.set()
+            await release.wait()
+        if (event.get("session_id") == rec.delegation_id and event["type"] == "dispatch_state"
+                and any(item["source"] == "bg" for item in event["dispatch_state"]["items"])):
+            returned.set()
+
+    manager.on_broadcast("hold-stopped-bg-return", hold_completed_publication)
     response = await manager.work_test_client.post(
         f"/api/sessions/{rec.delegation_id}/bg-tasks",
         headers={"Authorization": f"Bearer {token}"},
         json={"command": "sleep .2; echo finished", "idle_timeout_seconds": 0},
     )
-    await manager.interrupt(rec.delegation_id)
-    async with asyncio.timeout(5):
-        while (await manager.work_test_bg.get_task(response.json()["id"])).status == "running":
-            await asyncio.sleep(0.01)
-    task = await manager.work_test_bg.get_task(response.json()["id"])
-    assert task.status == "completed" and task.stdout.strip() == "finished"
-    queued = manager.dispatch_snapshot(rec.delegation_id)
-    assert queued["paused"] and [item["source"] for item in queued["items"]] == ["bg"]
+    try:
+        await manager.interrupt(rec.delegation_id)
+        await asyncio.wait_for(completed.wait(), 5)
+        task = await manager.work_test_bg.get_task(response.json()["id"])
+        assert task.status == "completed" and task.stdout.strip() == "finished"
+        assert manager.dispatch_snapshot(rec.delegation_id)["items"] == []
+        release.set()
+        await asyncio.wait_for(returned.wait(), 5)
+        queued = manager.dispatch_snapshot(rec.delegation_id)
+        assert queued["paused"] and [item["source"] for item in queued["items"]] == ["bg"]
+    finally:
+        release.set()
+        manager.remove_broadcast("hold-stopped-bg-return")
 
 
 async def test_completed_old_round_can_cancel_residual_bg_without_touching_new_round(work_runtime, tmp_path):
@@ -234,6 +270,7 @@ async def test_completed_old_round_can_cancel_residual_bg_without_touching_new_r
         parent_session_id=parent.id, agent_name="Worker", request="controlled round",
     )
     context = await starts.get()
+    await wait_live_scope(context)
     token = next(entry.credential for entry in context.mcp_servers if entry.key == "bg")
     response = await manager.work_test_client.post(
         f"/api/sessions/{first.delegation_id}/bg-tasks",
@@ -262,12 +299,14 @@ async def test_nested_cancellation_closes_descendants_without_waking_closed_bran
         parent_session_id=parent.id, agent_name="Worker", request="held child",
     )
     child_context = await starts.get()
+    await wait_live_scope(child_context)
     child_token = next(entry.credential for entry in child_context.mcp_servers if entry.key == "bg")
     grandchild = await delegations.start_delegation(
         parent_session_id=child.delegation_id, agent_name="Grandchild", request="held grandchild",
         scope=verify(child_token),
     )
     context = await starts.get()
+    await wait_live_scope(context)
     token = next(entry.credential for entry in context.mcp_servers if entry.key == "bg")
     response = await manager.work_test_client.post(
         f"/api/sessions/{grandchild.delegation_id}/bg-tasks",
@@ -280,7 +319,7 @@ async def test_nested_cancellation_closes_descendants_without_waking_closed_bran
         while (await manager.work_test_bg.get_task(response.json()["id"])).status == "running":
             await asyncio.sleep(0.01)
     assert grandchild.state == "cancelled"
-    assert manager.dispatch_snapshot(child.delegation_id)["items"] == []
+    await assert_no_queued_messages(manager, child.delegation_id)
     assert len(manager.dispatch_snapshot(parent.id)["items"]) == 1
 
 
@@ -299,7 +338,7 @@ async def test_held_claude_reuses_actual_lease_until_work_changes(work_runtime, 
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("claude-code")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None))
     finished = asyncio.Queue()
 
     async def capture(event):
@@ -311,11 +350,13 @@ async def test_held_claude_reuses_actual_lease_until_work_changes(work_runtime, 
         await manager.start_message(session.id, prompt)
         assert not (await asyncio.wait_for(finished.get(), 5))["is_error"]
     assert len(contexts) == 1
+    await wait_live_scope(contexts[0])
     first_token = next(entry.credential for entry in contexts[0].mcp_servers if entry.key == "bg")
     first_lease = verify(first_token).run_lease_id
     await manager.start_message(session.id, "new owner", source="delegation", work_id="separate-owner")
     await asyncio.wait_for(finished.get(), 5)
     assert len(contexts) == 2
+    await wait_live_scope(contexts[1])
     second_token = next(entry.credential for entry in contexts[1].mcp_servers if entry.key == "bg")
     assert verify(second_token).work_id == "separate-owner"
     assert verify(second_token).run_lease_id != first_lease
@@ -353,6 +394,7 @@ async def test_signed_work_survives_mcp_thread_and_late_loopback_is_refused(work
             parent_session_id=parent.id, agent_name="Worker", request="held work",
         )
         context = await starts.get()
+        await wait_live_scope(context)
         token = next(entry.credential for entry in context.mcp_servers if entry.key == "bg")
         async with httpx.AsyncClient(headers={"Authorization": f"Bearer {token}"}, timeout=10) as client:
             async with streamable_http_client(f"http://127.0.0.1:{api.port}/mcp/bg/mcp", http_client=client) as (read, write, _):
@@ -471,6 +513,7 @@ async def test_archived_completed_round_still_owns_background_process(work_runti
         parent_session_id=parent.id, agent_name="Worker", request="controlled round",
     )
     context = await starts.get()
+    await wait_live_scope(context)
     token = next(entry.credential for entry in context.mcp_servers if entry.key == "bg")
     response = await manager.work_test_client.post(
         f"/api/sessions/{rec.delegation_id}/bg-tasks", headers={"Authorization": f"Bearer {token}"},
@@ -478,10 +521,12 @@ async def test_archived_completed_round_still_owns_background_process(work_runti
     )
     (tmp_path / "release").touch()
     await wait_state(delegations, rec.delegation_id, "completed")
-    child = manager.get_session(rec.delegation_id)
-    if child._active_task:
-        await asyncio.wait_for(child._active_task, 5)
-    assert await manager.auto_archive_scheduled_session(rec.delegation_id)
+    await asyncio.wait_for(delegations.confirm_recording(), 5)
+    await manager.await_session_execution(rec.delegation_id, timeout=5)
+    assert manager.get_session(rec.delegation_id) is None
+    stored = next(row for row in await manager.db.load_sessions(include_archived=True)
+                  if row["id"] == rec.delegation_id)
+    assert stored["archived"]
     await delegations.cancel_delegation(rec.delegation_id, work_id=rec.work_id)
     async with asyncio.timeout(5):
         while (await manager.work_test_bg.get_task(response.json()["id"])).status == "running":
@@ -509,13 +554,18 @@ async def test_cancel_reaps_model_process_when_spawn_handle_returns_late(work_ru
         parent_session_id=parent.id, agent_name="Worker", request="held work",
     )
     await asyncio.wait_for(spawned.wait(), 3)
-    await delegations.cancel_delegation(rec.delegation_id, work_id=rec.work_id)
-    release.set()
+    cancellation = asyncio.create_task(delegations.cancel_delegation(rec.delegation_id, work_id=rec.work_id))
     try:
+        await wait_state(delegations, rec.delegation_id, "cancelled")
+        assert not cancellation.done(), "Cancellation still owns the outstanding OS spawn handle"
+        release.set()
+        assert await asyncio.wait_for(cancellation, 3) is rec
         async with asyncio.timeout(3):
             while processes[0].returncode is None:
                 await asyncio.sleep(0.01)
     finally:
+        release.set()
+        await asyncio.gather(cancellation, return_exceptions=True)
         # This is the scripted process captured at the OS boundary, never a
         # real CLI. Retire it if a regression failed the behavioral assertion.
         if processes[0].returncode is None:
@@ -541,7 +591,7 @@ async def test_cancel_during_claim_prevents_owned_turn_from_starting(work_runtim
     await asyncio.wait_for(cancelled.wait(), 3)
     await asyncio.sleep(0.05)
     assert starts.empty() and rec.state == "cancelled"
-    assert manager.dispatch_snapshot(rec.delegation_id)["items"] == []
+    await assert_no_queued_messages(manager, rec.delegation_id)
 
 
 async def test_concurrent_follow_ups_accept_one_new_round(work_runtime):
@@ -551,6 +601,9 @@ async def test_concurrent_follow_ups_accept_one_new_round(work_runtime):
     )
     await starts.get()
     await wait_state(delegations, first.delegation_id, "completed")
+    # A committed round can still own its original relay/archive command.
+    # Exercise competing continuations after that original command retires.
+    await asyncio.wait_for(delegations.confirm_recording(), 5)
     results = await asyncio.gather(*[
         delegations.follow_up_delegation(
             parent_session_id=parent.id, delegation_id=first.delegation_id, request="held next",
@@ -558,6 +611,10 @@ async def test_concurrent_follow_ups_accept_one_new_round(work_runtime):
     ], return_exceptions=True)
     assert len([item for item in results if isinstance(item, DelegationError)]) == 1
     assert len([item for item in results if not isinstance(item, Exception)]) == 1
+    accepted = next(item for item in results if not isinstance(item, Exception))
+    assert accepted.state == "running" and accepted.work_id != first.work_id
+    await asyncio.wait_for(starts.get(), 5)
+    assert starts.empty()
 
 
 async def test_signed_diagnostic_identity_cannot_create_unowned_model_work(work_runtime, tmp_path):

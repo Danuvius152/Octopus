@@ -366,13 +366,13 @@ class ClaudeEventParser(EventParser):
         if kind == "system":
             subtype = obj.get("subtype")
             if subtype == "init":
-                self._log_mcp_status(obj)
+                diagnostic = self._mcp_status(obj)
                 sid = obj.get("session_id")
                 self._captured_session_id = sid
-                if sid:
-                    return ParseOutput(
-                        events=[HarnessEvent(type="session_started", session_id=sid)]
-                    )
+                return ParseOutput(
+                    events=[HarnessEvent(type="session_started", session_id=sid)] if sid else [],
+                    diagnostics=[(logging.WARNING, diagnostic)] if diagnostic else [],
+                )
             if subtype == "api_retry":
                 return self._api_retry(obj)
             if subtype in _TASK_SUBTYPES:
@@ -395,8 +395,7 @@ class ClaudeEventParser(EventParser):
         if kind == "result":
             return ParseOutput(events=[self._result(obj)], end_of_stream=True)
 
-        logger.debug("Unhandled CLI event type: %s", kind)
-        return ParseOutput()
+        return ParseOutput(diagnostics=[(logging.DEBUG, f"Unhandled CLI event type: {kind}")])
 
     def _stream_delta(self, obj: dict[str, Any]) -> ParseOutput:
         """`--include-partial-messages` token deltas (inline-steering.md §4 S1).
@@ -428,8 +427,8 @@ class ClaudeEventParser(EventParser):
         return ParseOutput(events=[HarnessEvent(type="text_delta", content=text)])
 
     @staticmethod
-    def _log_mcp_status(obj: dict[str, Any]) -> None:
-        """Say so when the CLI could not reach one of our tool namespaces.
+    def _mcp_status(obj: dict[str, Any]) -> str | None:
+        """Report when the CLI could not reach one of our tool namespaces.
 
         The init event lists every MCP server with its status, and we ignored
         it — so a namespace that failed to connect left no trace on our side at
@@ -441,16 +440,15 @@ class ClaudeEventParser(EventParser):
         """
         servers = obj.get("mcp_servers")
         if not isinstance(servers, list):
-            return
+            return None
         broken = [
             f"{s.get('name')}={s.get('status')}"
             for s in servers
             if isinstance(s, dict) and s.get("status") not in (None, "connected")
         ]
         if broken:
-            logger.warning(
-                "CLI reports MCP namespace(s) not connected: %s", ", ".join(broken)
-            )
+            return f"MCP namespaces not connected count={len(broken)}: {', '.join(broken)}"
+        return None
 
     def _task_event(self, subtype: str, obj: dict[str, Any]) -> ParseOutput:
         """`system/task_*` → one normalized `subagent` event.

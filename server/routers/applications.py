@@ -18,7 +18,7 @@ import json
 import mimetypes
 import os
 from collections.abc import AsyncIterator
-from urllib.parse import unquote
+from urllib.parse import unquote, urlencode
 
 import httpx
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -53,6 +53,7 @@ from ..models import (
     ApplicationUpdate,
     PinOrderRequest,
 )
+from ..users import owner_is_available
 
 router = APIRouter(prefix="/api/applications", tags=["applications"])
 static_router = APIRouter(tags=["applications"])
@@ -249,12 +250,6 @@ async def delete_application(
 # ------------------------------------------------------------ static serving
 
 
-# Sentinel: this credential opens exactly this application and nothing else, so
-# the row is fetched by id with no owner filter. Distinct from `None`, which
-# here would mean "the pre-accounts install, where nobody owns anything".
-_APP_ITSELF = "app-scope-token"
-
-
 def _presented_token(request: Request) -> str:
     """The bearer this request carries, from any of the three places one can
     travel on `/apps/*`: the header, `?token=` (an iframe can't set headers)
@@ -277,8 +272,8 @@ def _presented_token(request: Request) -> str:
     )
 
 
-async def _viewer(request: Request, app_id: str) -> str | None:
-    """Whose application this request may reach, or 401.
+async def _application_for_request(request: Request, app_id: str) -> dict:
+    """The authorized application, after checking its owner's current state.
 
     Three credentials open `/apps/*`, and the answer is which account's rows to
     look in:
@@ -294,22 +289,23 @@ async def _viewer(request: Request, app_id: str) -> str | None:
       is `None`: nobody owns anything yet (multi-tenancy.md §9).
     """
     scoped = request.headers.get("x-octopus-app-token") or _presented_token(request)
-    if is_app_scope_token(app_id, scoped):
-        return _APP_ITSELF
-    allowed, user_id = await deps.scope_user_id_for(_presented_token(request))
-    if not allowed:
+    user_id = None
+    if not is_app_scope_token(app_id, scoped):
+        allowed, user_id = await deps.scope_user_id_for(_presented_token(request))
+        if not allowed:
+            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
+    manager = _get_manager()
+    try:
+        row = await manager.get_application(app_id, user_id)
+    except ApplicationError as error:
+        raise _http_error(error)
+    if not await owner_is_available(manager._require_db(), row.get("user_id")):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
-    return user_id
+    return row
 
 
 async def _serve(request: Request, app_id: str, path: str) -> FileResponse:
-    viewer = await _viewer(request, app_id)
-    try:
-        row = await _get_manager().get_application(
-            app_id, None if viewer == _APP_ITSELF else viewer
-        )
-    except ApplicationError as e:
-        raise _http_error(e)
+    row = await _application_for_request(request, app_id)
 
     target = resolve_within(row["app_dir"], path or "")
     # A traversal attempt is a 404, not a 403: refusing differently would
@@ -378,13 +374,7 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
     whether a file happens to share its path, so renaming a file silently
     changes routing.
     """
-    viewer = await _viewer(request, app_id)
-    try:
-        row = await _get_manager().get_application(
-            app_id, None if viewer == _APP_ITSELF else viewer
-        )
-    except ApplicationError as e:
-        raise _http_error(e)
+    row = await _application_for_request(request, app_id)
 
     state = await backend_supervisor.ensure_running(app_id, row["app_dir"])
     if state.state == ABSENT:
@@ -425,9 +415,12 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
             if state.state != RUNNING or not state.port:
                 raise HTTPException(503, state.error or "Application backend stopped")
             url = f"http://127.0.0.1:{state.port}/api/{path}"
+        # Preserve the full pair order: httpx's params helper groups repeated
+        # keys. The query token authenticates to Octopus, never to app code.
+        query = urlencode([(key, value) for key, value in request.query_params.multi_items() if key != "token"]).encode("ascii")
         upstream = client.build_request(
-            request.method, url, headers=headers,
-            params=dict(request.query_params), content=request_body,
+            request.method, httpx.URL(url).copy_with(query=query or None), headers=headers,
+            content=request_body,
         )
         dispatched = True
         resp = await client.send(upstream, stream=True)
@@ -498,23 +491,13 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
 # them. `agent/` and `api/` are therefore reserved prefixes inside an app.
 
 
-async def _app_for_agent_api(request: Request, app_id: str) -> dict:
-    viewer = await _viewer(request, app_id)
-    try:
-        return await _get_manager().get_application(
-            app_id, None if viewer == _APP_ITSELF else viewer
-        )
-    except ApplicationError as e:
-        raise _http_error(e)
-
-
 def _agent_error(e: AppAgentError) -> HTTPException:
     return HTTPException(e.status_code, {"message": e.message, **e.recovery} if e.recovery else e.message)
 
 
 @static_router.get("/apps/{app_id}/agent/conversations/{conversation_id}/requests/{request_id}")
 async def get_app_request_status(request: Request, app_id: str, conversation_id: str, request_id: str):
-    await _app_for_agent_api(request, app_id)
+    await _application_for_request(request, app_id)
     try:
         return await app_agent_manager.get_request_status(app_id, conversation_id, request_id)
     except AppAgentError as e:
@@ -526,7 +509,7 @@ async def get_app_request_status(request: Request, app_id: str, conversation_id:
 )
 async def list_app_agents(request: Request, app_id: str):
     """Who this app can address. Name is the address."""
-    row = await _app_for_agent_api(request, app_id)
+    row = await _application_for_request(request, app_id)
     try:
         return await app_agent_manager.list_agents(row.get("user_id"))
     except AppAgentError as e:
@@ -537,7 +520,7 @@ async def list_app_agents(request: Request, app_id: str):
     "/apps/{app_id}/agent/conversations", response_model=list[AppConversation]
 )
 async def list_app_conversations(request: Request, app_id: str):
-    await _app_for_agent_api(request, app_id)
+    await _application_for_request(request, app_id)
     try:
         return app_agent_manager.list_conversations(app_id)
     except AppAgentError as e:
@@ -552,7 +535,7 @@ async def get_app_conversation(
     request: Request, app_id: str, conversation_id: str
 ):
     """One thread with its messages — what an app renders after a reload."""
-    await _app_for_agent_api(request, app_id)
+    await _application_for_request(request, app_id)
     try:
         return await app_agent_manager.get_conversation(app_id, conversation_id)
     except AppAgentError as e:
@@ -566,7 +549,7 @@ async def get_app_conversation(
 async def delete_app_conversation(
     request: Request, app_id: str, conversation_id: str
 ):
-    await _app_for_agent_api(request, app_id)
+    await _application_for_request(request, app_id)
     try:
         await app_agent_manager.delete_conversation(app_id, conversation_id)
     except AppAgentError as e:
@@ -578,7 +561,7 @@ async def app_agent_ask(
     request: Request, app_id: str, body: AppAgentTurnRequest
 ):
     """One question, one answer. The shape a backend script wants."""
-    row = await _app_for_agent_api(request, app_id)
+    row = await _application_for_request(request, app_id)
     try:
         return await app_agent_manager.ask(row, **body.model_dump())
     except AppAgentError as e:
@@ -613,7 +596,7 @@ async def app_agent_chat(
     The event vocabulary is documented in app-agent-access.md §2 and in the
     build prompt every application's agent reads.
     """
-    row = await _app_for_agent_api(request, app_id)
+    row = await _application_for_request(request, app_id)
     try:
         turn = await app_agent_manager.begin_turn(row, **body.model_dump())
     except AppAgentError as e:

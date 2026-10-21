@@ -50,8 +50,11 @@ async def test_app_conversation_roundtrips_all_persisted_fields(tmp_path, empty_
         for field in ("id", "name", "working_dir", "created_at", "credential_id", "app_id", "user_id", "backend"):
             assert getattr(restored, field) == getattr(session, field)
         assert restored._next_message_seq == expected_next and restored._message_count == expected_count
-        assert restored._active_task is None and restored._backend is None
-        assert not restored._pending_queue and not restored._backend_retirements
+        await manager.await_session_execution(restored.id, timeout=1)
+        snapshot = manager.dispatch_snapshot(restored.id)
+        assert snapshot["active_request_id"] is None and snapshot["items"] == []
+        assert manager.running_turns_for(restored.user_id) == 0
+        assert not manager.session_is_executing(restored)
         await manager.drain_turns()
         # A fresh manager exercises the actual startup entry point too.
         restarted = SessionManager()

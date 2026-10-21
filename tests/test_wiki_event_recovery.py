@@ -8,6 +8,7 @@ import weakref
 
 import pytest
 
+from server.service_health import ServiceHealth
 from server.wiki.curation import WikiCuration
 from server.wiki.store import WikiError, WikiStore
 
@@ -19,9 +20,10 @@ def vault(tmp_path):
     state = tmp_path / "state"
     vault_id = str(uuid.uuid4())
     stores = []
+    health = ServiceHealth()
 
-    def open_store():
-        store = WikiStore(root, state, vault_id)
+    def open_store(*, create=False):
+        store = WikiStore(root, state, vault_id, create=create, health=health)
         assert store.events.mode == "inotify"
         stores.append(weakref.ref(store))
         return store
@@ -64,7 +66,7 @@ def assert_retired(store, original):
 @pytest.mark.parametrize("release", ["close", "gc"])
 def test_rolled_back_deletion_survives_last_store_release(vault, monkeypatch, synchronize, release):
     root, open_store = vault
-    store = open_store()
+    store = open_store(create=True)
     path, original = original_note(store)
     consumer = source_consumer(store, original)
     consumer_raw = (root / consumer["path"]).read_bytes()
@@ -111,7 +113,7 @@ def test_rolled_back_deletion_survives_last_store_release(vault, monkeypatch, sy
 @pytest.mark.parametrize("recovery", ["synchronize", "reopen"])
 def test_committed_replacement_is_not_retired_again_after_ack_failure(vault, monkeypatch, recovery):
     _root, open_store = vault
-    store = open_store()
+    store = open_store(create=True)
     path, original = original_note(store)
     replacement_raw = b"# Replacement\nAlready committed bytes.\n"
     with path.open("rb"):
@@ -143,7 +145,7 @@ def test_committed_replacement_is_not_retired_again_after_ack_failure(vault, mon
 
 def test_observed_delete_survives_last_close_while_another_move_is_pending(vault, tmp_path, monkeypatch):
     root, open_store = vault
-    store = open_store()
+    store = open_store(create=True)
     path, original = original_note(store)
     moved = root / "Library/moving.md"
     moved.write_bytes(b"# Moving\n")
@@ -179,7 +181,7 @@ def test_observed_delete_survives_last_close_while_another_move_is_pending(vault
 
 def test_unfinished_reception_is_never_reported_ready(vault):
     _root, open_store = vault
-    store = open_store()
+    store = open_store(create=True)
     path, original = original_note(store)
     raw = path.read_bytes()
     store.events.journal.arm(store.events.epoch)

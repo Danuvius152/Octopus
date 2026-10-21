@@ -14,8 +14,9 @@ import os
 import re
 import stat
 import time
-from collections.abc import Callable, Generator, Mapping
+from collections.abc import Awaitable, Callable, Generator, Mapping
 from datetime import UTC, datetime, timedelta
+from inspect import isawaitable
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -89,9 +90,9 @@ class CodexActivityObserver:
         self._disabled = False
         self._warning: str | None = None
         self._task: asyncio.Task[None] | None = None
-        self._read_task: asyncio.Task[tuple[list[float], list[HarnessEvent]]] | None = None
+        self._read_task: asyncio.Task[tuple[list[float], list[HarnessEvent], int | None]] | None = None
         self._cursor_lock = asyncio.Lock()
-        self._event_handler: Callable[[list[HarnessEvent]], None] | None = None
+        self._event_handler: Callable[[list[HarnessEvent]], Awaitable[None] | None] | None = None
         self._native_turn: str | None = None
         self._function_headers: dict[str, str] = {}
         self._observed: dict[tuple[str, str], str] = {}
@@ -99,7 +100,7 @@ class CodexActivityObserver:
         self.matched_records = 0
         self._metrics: CodexResponseMetrics | None = None
 
-    def set_event_handler(self, handler: Callable[[list[HarnessEvent]], None]) -> None:
+    def set_event_handler(self, handler: Callable[[list[HarnessEvent]], Awaitable[None] | None]) -> None:
         """Attach the current run's metadata-only normalized observation sink."""
         self._event_handler = handler
 
@@ -468,24 +469,31 @@ class CodexActivityObserver:
                 and _ITEM_COMPLETION.match(prefix[envelope.end():])):
             self._disable("activity_line_limit")
 
-    def _read(self, *, baseline: bool = False, drain: bool = False) -> tuple[list[float], list[HarnessEvent]]:
+    def _read(
+        self, *, baseline: bool = False, drain: bool = False, boundary: int | None = None,
+    ) -> tuple[list[float], list[HarnessEvent], int | None]:
         if self._closed or self._disabled:
-            return [], []
+            return [], [], boundary
         fd = None
         try:
             fd = self._open(final=drain)
             if fd is None:
-                return [], []
+                return [], [], boundary
             if baseline:
                 self._offset = os.lseek(fd, 0, os.SEEK_END)
-                return [], []
-            # Final convergence consumes only the already-written prefix;
-            # appenders cannot prolong it. Ordinary polls retain their budget.
-            boundary = os.fstat(fd).st_size if drain else self._offset + _MAX_READ
+                return [], [], None
+            # Capture final EOF once, then deliver each bounded read before
+            # advancing again. Neither a large prefix nor later appenders may
+            # turn downstream backpressure into an unbounded projection list.
+            if drain and boundary is None:
+                boundary = os.fstat(fd).st_size
+            batch_end = self._offset + _MAX_READ
+            if boundary is not None:
+                batch_end = min(batch_end, boundary)
             ticks: list[float] = []
             events: list[HarnessEvent] = []
-            while self._offset < boundary and not self._closed and not self._disabled:
-                data = os.read(fd, min(_MAX_READ, boundary - self._offset))
+            while self._offset < batch_end and not self._closed and not self._disabled:
+                data = os.read(fd, min(_MAX_READ, batch_end - self._offset))
                 if not data:
                     break
                 self._offset += len(data)
@@ -515,32 +523,37 @@ class CodexActivityObserver:
                     self._discard_large_line(self._partial[:512])
                     self._partial = b""
                     self._skipping_line = True
-            return ticks, events
+            return ticks, events, boundary
         except (OSError, ValueError):
             self._disable("rollout_read")
-            return [], []
+            return [], [], boundary
         finally:
             if fd is not None:
                 os.close(fd)
 
-    async def _read_owned(self, *, baseline: bool = False, drain: bool = False) -> tuple[list[float], list[HarnessEvent]]:
-        async with self._cursor_lock:
-            # A cancelled waiter never permits a second worker to advance the
-            # same cursor while its shielded predecessor is still reading.
-            if self._read_task is not None:
-                await asyncio.shield(self._read_task)
-            task = asyncio.create_task(asyncio.to_thread(self._read, baseline=baseline, drain=drain))
-            self._read_task = task
-            try:
-                return await asyncio.shield(task)
-            finally:
-                if task.done() and self._read_task is task:
-                    self._read_task = None
+    async def _read_owned(
+        self, *, baseline: bool = False, drain: bool = False, boundary: int | None = None,
+    ) -> tuple[list[float], list[HarnessEvent], int | None]:
+        # The caller owns the cursor lock through both read and delivery. A
+        # cancelled waiter must still join its captured worker before the
+        # next poll advances that cursor.
+        if self._read_task is not None:
+            await asyncio.shield(self._read_task)
+        task = asyncio.create_task(asyncio.to_thread(
+            self._read, baseline=baseline, drain=drain, boundary=boundary,
+        ))
+        self._read_task = task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done() and self._read_task is task:
+                self._read_task = None
 
     async def start(self) -> None:
         # Existing threads start at a captured EOF before the child is spawned.
         if self._thread is not None:
-            await self._read_owned(baseline=True)
+            async with self._cursor_lock:
+                await self._read_owned(baseline=True)
         if not self._closed and not self._disabled:
             self._task = asyncio.create_task(self._watch(), name="codex-native-activity")
 
@@ -552,23 +565,34 @@ class CodexActivityObserver:
         await self._poll(drain=True)
 
     async def _poll(self, *, drain: bool = False) -> None:
-        try:
-            ticks, events = await self._read_owned(drain=drain)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            self._disable("observer_failed")
-            return
-        for tick in ticks:
-            if self._closed or self._disabled:
-                return
-            self.matched_records += 1
-            self._notify(tick)
-        if events and not self._closed and not self._disabled and self._event_handler is not None:
-            try:
-                self._event_handler(events)
-            except Exception:
-                self._disable("native_projection_failed")
+        # In particular, terminal drain cannot overtake a watch poll whose
+        # records have been read but are waiting for the Harness consumer.
+        async with self._cursor_lock:
+            boundary = None
+            while not self._closed and not self._disabled:
+                previous_offset = self._offset
+                try:
+                    ticks, events, boundary = await self._read_owned(drain=drain, boundary=boundary)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    self._disable("observer_failed")
+                    return
+                for tick in ticks:
+                    if self._closed or self._disabled:
+                        return
+                    self.matched_records += 1
+                    self._notify(tick)
+                if events and not self._closed and not self._disabled and self._event_handler is not None:
+                    try:
+                        delivery = self._event_handler(events)
+                        if isawaitable(delivery):
+                            await delivery
+                    except Exception:
+                        self._disable("native_projection_failed")
+                if (not drain or boundary is None or self._offset >= boundary
+                        or self._offset <= previous_offset):
+                    return
 
     async def _watch(self) -> None:
         while not self._closed and not self._disabled:

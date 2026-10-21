@@ -12,6 +12,7 @@ from pathlib import Path
 from ..aio import complete_cleanup
 from ..config import settings
 from ..mcp_identity import McpScope, close_work
+from ..sessions.runtime_types import SessionOwnerUnavailable
 from . import grants, job_events, job_execution, maintenance_inputs, materials
 from .curation import WikiCuration
 from .formats import MARKDOWN_SQL, is_markdown_maintenance, require_markdown_maintenance
@@ -522,7 +523,7 @@ class WikiJobs:
             session = manager.get_session(job["session_id"])
             if session is not None:
                 refs.update(request.request_id for request in
-                            [*session._pending_queue, *([session._current_request] if session._current_request else [])]
+                            [*session._pending_queue, *([session._run.request] if session._run.request else [])]
                             if request.source == "wiki")
             for request_id in refs:
                 await manager.cancel_request(job["session_id"], request_id)
@@ -534,13 +535,6 @@ class WikiJobs:
         job = await _io(self.get, job_id)
         if job["status"] != "cancelled" or job["settlement_phase"] == "confirmed":
             return
-        if manager is not None:
-            refs = {(ref.get("session_id"), ref.get("request_id")) for item in job["items"]
-                    if (ref := item.get("worker_request")) or (ref := item.get("recording_failure"))}
-            for session_id, request_id in refs:
-                session = manager.get_session(session_id) if session_id else None
-                if session is not None and session._recording_blocked is not None and session._recording_blocked.request_id == request_id:
-                    await manager._reconcile_recording(session)
         try:
             await _io(self.require_retired, job, manager=manager)
         except WikiError as error:
@@ -715,12 +709,10 @@ class WikiJobs:
         references = {ref["request_id"] for item in job.get("items", [])
                       if (ref := item.get("worker_request") or item.get("recording_failure"))
                       and ref.get("session_id") == job["session_id"] and ref.get("request_id")}
-        active = ([*session._pending_queue, *([session._current_request] if session._current_request else [])]
+        active = ([*session._pending_queue, *([session._run.request] if session._run.request else [])]
                   if session is not None else [])
         if session is not None and (any(not references or request.request_id in references for request in active)
-                                    or session._backend_retirements
-                                    or session._recording_blocked is not None and
-                                    (not references or session._recording_blocked.request_id in references)):
+                                    or session._run.retirements):
             raise WikiError("The previous maintenance execution has not retired", 409)
 
     def readmit(self, job_id, paths, creation=None):
@@ -838,6 +830,7 @@ class WikiJobs:
                 grants.reacquire(db, reacquire)
                 db.execute("INSERT INTO wiki_grant_readmissions VALUES(?,?,?,?,?,?)", (
                     job_id, self.registration["registration_generation"], request_hash, encoded, job["error"], datetime.now(UTC).isoformat()))
+                WikiHistory(self.store).preserve_candidate_owners(db, job)
                 completed = [item for item in job["items"] if item.get("status") == "done"]
                 done_ids = {item.get("doc") for item in completed}
                 selected = [item for item in selected if item["doc"] not in done_ids]
@@ -950,23 +943,24 @@ class WikiJobs:
         worker.wake(self.user_id)
         return self.get(job_id)
 
-    def resolve_conflicts(self, job_id, path):
+    def conflicts(self, job_id, document_id):
         history = WikiHistory(self.store)
-        with history.locked():
-            with self.store.connect() as db:
-                ids = [row[0] for row in db.execute(
-                    "SELECT change_id FROM change_proposals WHERE json_extract(operation,'$.job_id')=? AND json_extract(operation,'$.source_path')=?",
-                    (job_id, path),
-                )]
-            history.resolve_proposals(ids)
-
-    def has_conflict(self, job_id, path):
         with self.store.connect() as db:
-            return bool(db.execute("""SELECT 1 FROM change_proposals p
+            rows = db.execute("""SELECT p.change_id AS id,p.operation,r.document_id FROM change_proposals p
               JOIN change_retention r ON r.change_id=p.change_id
               WHERE json_extract(p.operation,'$.job_id')=?
-                AND json_extract(p.operation,'$.source_path')=?
-                AND r.resolved_at IS NULL LIMIT 1""", (job_id, path)).fetchone())
+                AND (json_extract(p.operation,'$.source_doc')=?
+                  OR (json_extract(p.operation,'$.source_doc') IS NULL AND r.document_id=?))
+                AND r.resolved_at IS NULL""", (job_id, document_id, document_id)).fetchall()
+            return [row["id"] for row in rows if history.candidate_recovery_error(db, row, json.loads(row["operation"])) is None]
+
+    def resolve_conflicts(self, job_id, document_id):
+        history = WikiHistory(self.store)
+        with history.locked():
+            history.resolve_proposals(self.conflicts(job_id, document_id))
+
+    def has_conflict(self, job_id, document_id):
+        return bool(self.conflicts(job_id, document_id))
 
     def publication(self, job_id, document_id):
         with self.store.connect() as db:
@@ -1003,25 +997,28 @@ class WikiJobs:
                 item.update(status="attention", error="Publication interrupted before its applied marker; review the retained change and current text without regenerating the note")
                 return True
             try:
-                output = self.store.read(published["output_path"], length=1, expected_revision=published["output_revision"])
-                if published["output_path"] != item["path"]:
+                output = self.store.read(published["output_doc"], length=1)
+                item["output"] = output["path"]
+                if output["revision"] != published["output_revision"]:
+                    raise WikiError("Published output changed; review the existing publication", 409)
+                if published["output_doc"] != item["doc"]:
                     self.store.read(item["doc"], length=1, expected_revision=published["input_revision"])
                 if output["id"] != published["output_doc"]:
                     raise WikiError("Published output identity was replaced", 409)
                 if operation in {"save", "organize"} and output["stale"]:
                     raise WikiError("Published output or its cited sources changed; review the existing publication", 409)
                 with self.store.connect() as db:
-                    self.store.require_indexed(db, published["output_path"])
+                    self.store.require_indexed(db, output["path"])
                     db.execute("UPDATE job_publications SET indexed=1 WHERE change_id=?", (published["change_id"],))
             except WikiError as exc:
                 item.update(status="attention", index_complete=False, index_recovery=True,
-                            output=published["output_path"], output_revision=published["output_revision"],
+                            output_revision=published["output_revision"],
                             output_change_id=published["change_id"], error=str(exc))
                 return True
-            item.update(status="done", input_revision=published["input_revision"], output=published["output_path"], output_revision=published["output_revision"], output_change_id=published["change_id"], index_complete=True)
+            item.update(status="done", input_revision=published["input_revision"], output=output["path"], output_revision=published["output_revision"], output_change_id=published["change_id"], index_complete=True)
             item.pop("error", None)
             item.pop("index_recovery", None)
-            self.resolve_conflicts(job_id, item["path"])
+            self.resolve_conflicts(job_id, item["doc"])
             return True
 
     def recover_creation(self, job_id, item):
@@ -1091,14 +1088,15 @@ class WikiJobs:
                 item["retry_count"] += 1
                 persisted.update(item)
                 self.update(job_id, expected_status="running", items=fresh["items"])
-            current = self.store.read(item["doc"], length=1)
-            raw = self.store.path(current["path"]).read_bytes()
-            candidate = history.record(item["path"], raw, raw, "curator-worker", error, "conflict", proposal={
-                "job_id": job_id, "source_path": item["path"], "expected_revision": item["revision"],
+            current, raw = self.store.read_snapshot(item["doc"], length=1)
+            candidate = history.record(current["path"], raw, raw, "curator-worker", error, "conflict", document_id=current["id"], proposal={
+                "job_id": job_id, "source_doc": current["id"], "source_path": current["path"], "expected_revision": item["revision"],
+                "source_revision": current["revision"],
                 "operation": "reread-and-organize", "reason": error,
             })
             item.setdefault("candidate_changes", []).append(candidate["id"])
             item.setdefault("input_revision", item["revision"])
+            item["path"] = current["path"]
             if not retrying:
                 item.update(status="attention", error=error + "; retained candidate for review")
             else:
@@ -1122,22 +1120,52 @@ class WikiWorker:
         self.pending: set[str | None] = set()
         self._stopping = False
         self.notice_task: asyncio.Task | None = None
+        self._recovered: set[tuple[str, str]] = set()
 
-    async def start(self, manager):
+    async def recover(self):
+        """Recover configured vaults before any curator or notice receiver runs."""
+        for user_id, state in registry.states():
+            if (state / "config.json").is_file():
+                try:
+                    jobs = await _io(WikiJobs, user_id)
+                    await self._recover_vault(jobs)
+                except WikiError:
+                    # Invalid registration or document evidence blocks this
+                    # vault, while its authenticated diagnostic remains usable.
+                    # Storage failures enter ServiceHealth before being wrapped.
+                    logger.exception("Wiki recovery blocked for account=%s; inspect its registration and recovery diagnostics", user_id)
+
+    async def _recover_vault(self, jobs):
+        key = (str(jobs.store.state.resolve()), jobs.registration["vault_id"])
+        if key not in self._recovered:
+            await _io(jobs.recover_jobs)
+            self._recovered.add(key)
+
+    async def start(self, manager, *, paused=False):
         if self._stopping and (self.tasks or self.notice_task is not None):
             raise RuntimeError("Wiki curator teardown remains unconfirmed")
         if self.notice_task is not None:
             raise RuntimeError("Wiki notification receiver is already running")
         self._stopping = False
+        await self.recover()
         self.manager = manager
         self.loop = asyncio.get_running_loop()
+        if not paused:
+            self.start_producing()
+
+    def start_producing(self):
+        if self._stopping or self.manager is None or self.notice_task is not None:
+            raise RuntimeError("Wiki worker is not prepared for startup")
         from .job_notifications import run as receive_notices
 
-        self.notice_task = self.loop.create_task(receive_notices(manager), name="wiki-job-notifications")
+        self.notice_task = self.loop.create_task(receive_notices(self.manager), name="wiki-job-notifications")
+        waiting = set(self.pending)
         states = registry.states()
         for user_id, state in states:
             if (state / "config.json").is_file():
-                self.wake(user_id)
+                waiting.add(user_id)
+        for user_id in waiting:
+            self.wake(user_id)
 
     def wake(self, user_id):
         if self._stopping:
@@ -1152,7 +1180,7 @@ class WikiWorker:
                 return
         if self.manager is not None:
             self.pending.add(user_id)
-        if self.manager is not None and (
+        if self.notice_task is not None and self.manager is not None and (
             user_id not in self.tasks or self.tasks[user_id].done()
         ):
             self.tasks[user_id] = asyncio.get_running_loop().create_task(
@@ -1189,9 +1217,9 @@ class WikiWorker:
         self.pending.clear()
         self.manager = None
         self.loop = None
+        self._recovered.clear()
 
     async def run(self, user_id):
-        recover = True
         retry_delay = self.RETRY_INITIAL_SECONDS
         unfinished = None
         while not self._stopping:
@@ -1203,12 +1231,12 @@ class WikiWorker:
                 if unfinished is not None:
                     await self._finish_failed_job(user_id, *unfinished)
                     unfinished = None
-                if recover:
-                    await _io(jobs.recover_jobs)
-                    recover = False
+                await self._recover_vault(jobs)
                 job_id = await self._claim_job(jobs)
+            except WikiError:
+                logger.exception("Wiki worker blocked for account=%s; inspect its registration and recovery diagnostics", user_id)
+                return
             except Exception:
-                recover = True
                 logger.exception("Wiki worker unavailable for account=%s; retrying in %.1fs", user_id, retry_delay)
                 await asyncio.sleep(retry_delay)
                 retry_delay = min(retry_delay * 2, self.RETRY_MAX_SECONDS)
@@ -1259,14 +1287,13 @@ class WikiWorker:
             session = self.manager.get_session(job["session_id"])
             if session is not None:
                 await complete_cleanup(self.manager._await_backend_retirement(session))
-                if getattr(session, "_recording_blocked", None) is None:
-                    original = {ref["request_id"] for item in job["items"]
-                                if (ref := item.get("worker_request"))
-                                and ref.get("session_id") == session.id}
-                    # A legacy job without an exact original request cannot
-                    # safely retire a session now used by a human correction.
-                    if len(original) == 1:
-                        await self.manager.archive_session(session.id, replace=False, only_request_id=original.pop())
+                original = {ref["request_id"] for item in job["items"]
+                            if (ref := item.get("worker_request"))
+                            and ref.get("session_id") == session.id}
+                # A legacy job without an exact original request cannot
+                # safely retire a session now used by a human correction.
+                if len(original) == 1:
+                    await self.manager.archive_session(session.id, replace=False, only_request_id=original.pop())
         await _io(jobs.release_unused, job_id)
 
     async def process(self, jobs, job_id):
@@ -1469,15 +1496,20 @@ class WikiWorker:
                     cancellation = {"cause": "shutdown"} if (
                         isinstance(error, asyncio.CancelledError) and error.args == ("shutdown",)
                     ) else {}
-                    await complete_cleanup(self.manager.cancel_request(
-                        session.id, reference["request_id"], **cancellation,
-                    ))
+                    try:
+                        await complete_cleanup(self.manager.cancel_request(
+                            session.id, reference["request_id"], **cancellation,
+                        ))
+                    except SessionOwnerUnavailable:
+                        # The original writer has ended. Its receipt below
+                        # still owns the result; finally joins its resources.
+                        pass
                     if receipt.request_id != reference["request_id"]:
                         await _io(job_execution.transition, jobs, job_id, reference, "unknown")
                         raise
                     completion = await receipt.wait()
                     job_execution.require_completion(reference, completion)
-                    if completion.state == "recording_failed":
+                    if completion.state in {"recording_failed", "unavailable"}:
                         await self._mark_recording_failure(jobs, job_id, reference, completion)
                     else:
                         if completion.recording_state == "committed" and completion.outcome is not None:
@@ -1541,7 +1573,7 @@ class WikiWorker:
                     except WikiError:
                         item.update(status="attention", error="; ".join(errors) or str(exc))
                     else:
-                        conflict = await _io(jobs.has_conflict, job_id, item["path"])
+                        conflict = await _io(jobs.has_conflict, job_id, item["doc"])
                         await _io(jobs.reread, job_id, item, "; ".join(errors) or str(exc), retryable=current["revision"] != item["revision"] or conflict)
             await _io(
                 jobs.update,
@@ -1567,11 +1599,6 @@ class WikiWorker:
         session = self.manager.get_session(session_id)
         if session is not None:
             await complete_cleanup(self.manager._await_backend_retirement(session))
-        if session is not None and session._recording_blocked is not None and session._recording_blocked.request_id == request_id:
-            blocked = session._recording_blocked
-            if blocked.request_id != request_id or not await self.manager._reconcile_recording(session):
-                item.update(status="attention", error="Original execution result recording remains unconfirmed")
-                return
         try:
             outcome = await self.manager.db.get_committed_terminal(session_id, request_id)
         except Exception:

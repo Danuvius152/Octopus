@@ -222,6 +222,29 @@ def do_pull(args: argparse.Namespace) -> None:
 
 def do_serve(args: argparse.Namespace) -> None:
     """Execute the serve subcommand (default)."""
+    import os
+    import subprocess
+
+    # Resolve CLI overrides before checking the managed installation contract.
+    if getattr(args, "tunnel", None) is not None:
+        os.environ["OCTOPUS_ENABLE_TUNNEL"] = str(args.tunnel).lower()
+
+    from .config import settings
+    from .service_installation import InstallationError, read_service_profile
+
+    try:
+        profile = read_service_profile(settings)
+        if getattr(args, "service_process", False) and profile is None:
+            raise InstallationError("--service-process requires a configured managed installation")
+        if profile is not None and not getattr(args, "service_process", False):
+            command = ["systemctl", *(["--user"] if profile.manager == "user" else []), "start", "--", profile.unit]
+            subprocess.run(command, check=True)
+            print(f"Using {profile.unit}; readiness: http://127.0.0.1:{profile.port}/ready")
+            return
+    except (InstallationError, OSError, subprocess.SubprocessError) as error:
+        print(str(error), file=sys.stderr)
+        raise SystemExit(78) from error
+
     dist_index = Path(__file__).resolve().parent.parent / "web" / "dist" / "index.html"
     if not dist_index.exists():
         print(
@@ -229,13 +252,6 @@ def do_serve(args: argparse.Namespace) -> None:
             "  The API will work, but no UI will be served.\n"
             "  Run `cd web && bun run build` to build the frontend.\n"
         )
-
-    # CLI --tunnel flag overrides config if explicitly set.
-    # We set the env var (not the Settings object) so the value survives
-    # uvicorn's reload, which re-imports the module and creates a fresh Settings().
-    if getattr(args, "tunnel", None) is not None:
-        import os
-        os.environ["OCTOPUS_ENABLE_TUNNEL"] = str(args.tunnel).lower()
 
     from .main import run
     run()
@@ -256,6 +272,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=None,
         help="Enable Cloudflare Tunnel for public HTTPS access",
+    )
+    serve_parser.add_argument(
+        "--service-process", action="store_true",
+        help="Run the managed server inside its configured systemd unit",
     )
 
     # handoff

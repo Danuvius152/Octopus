@@ -44,9 +44,9 @@ async def app_wiki(request: Request, app_id: str, operation: str):
     import anyio
     from pydantic import ValidationError
 
-    from .applications import _app_for_agent_api
+    from .applications import _application_for_request
 
-    row = await _app_for_agent_api(request, app_id)
+    row = await _application_for_request(request, app_id)
     user_id = row.get("user_id")
     if registry.config(user_id).get("app_id") != app_id:
         raise WikiError("This application is not bound to this wiki", 403)

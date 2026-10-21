@@ -36,8 +36,12 @@ afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 function mockSessionFetch(handler: (url: string) => Promise<Response>) {
   const fetcher = vi.fn(handler);
   // The integrated Wiki cards load independently of the fork transcript.
-  vi.stubGlobal("fetch", (url: string) => new URL(url, window.location.origin).pathname.endsWith("/wiki-jobs")
-    ? Promise.resolve(new Response("[]")) : fetcher(url));
+  vi.stubGlobal("fetch", (url: string) => {
+    const path = new URL(url, window.location.origin).pathname;
+    if (path.endsWith("/wiki-jobs")) return Promise.resolve(Response.json([]));
+    if (path.endsWith("/submissions")) return Promise.resolve(Response.json({ items: [] }));
+    return fetcher(url);
+  });
   return fetcher;
 }
 

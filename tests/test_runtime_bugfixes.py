@@ -3,8 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 import threading
-from itertools import pairwise
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,14 +16,13 @@ import pytest
 from fastapi import FastAPI
 from mcp.server.fastmcp import FastMCP
 
-from server import main, mcp_http, mcp_identity
+from server import deps, main, mcp_http, mcp_identity
 from server.agent_manager import AgentManager
 from server.config import settings
 from server.database import Database
 from server.harness.codex import CODEX, CodexEventParser
 from server.harness.run import HarnessRun
 from server.monitor import MetricsStore, query, set_store
-from server.sessions import outcomes
 from server.users import UserManager
 from server.wiki import jobs as jobs_module
 from server.wiki.history import WikiHistory
@@ -51,7 +53,7 @@ def trusted_readmit(jobs, job_id):
     return jobs.readmit(job_id, paths)
 
 
-async def test_startup_isolates_unavailable_vault_and_rejoins_without_restart(service, tmp_path, monkeypatch, caplog):
+async def test_startup_isolates_unavailable_vault_and_rejoins_after_explicit_wake(service, tmp_path, caplog):
     db = Database(settings.db_path)
     await db.initialize()
     users = UserManager(db)
@@ -69,41 +71,66 @@ async def test_startup_isolates_unavailable_vault_and_rejoins_without_restart(se
         assert task["status"] == "queued"
         prepared.append((owner, root, task["id"]))
     await db.close()
+    registry.close()
     broken_owner, broken_root, broken_job = prepared[0]
     broken_root.rename(tmp_path / "disconnected")
-    monkeypatch.setattr(WikiWorker, "RETRY_INITIAL_SECONDS", 0.1, raising=False)
-    monkeypatch.setattr(WikiWorker, "RETRY_MAX_SECONDS", 0.2, raising=False)
     async with main.app.router.lifespan_context(main.app):
         healthy_owner, _, healthy_job = prepared[1]
         await eventually(lambda: WikiJobs(healthy_owner).get(healthy_job)["status"] == "completed")
-        # No tight retry loop while one mounted root is absent.
-        await asyncio.sleep(0.25)
-        failures = [r for r in caplog.records if "Wiki worker unavailable" in r.message and r.args[0] == broken_owner]
-        assert failures and failures[0].args[1] == 0.1
-        assert all(record.args[1] == 0.2 for record in failures[1:])
-        assert all(later.created - earlier.created >= earlier.args[1] * 0.9
-                   for earlier, later in pairwise(failures))
+        # Invalid registration blocks this owner until an explicit wake.
+        await asyncio.wait_for(asyncio.shield(jobs_module.worker.tasks[broken_owner]), 1)
+        failures = [r for r in caplog.records if "Wiki worker blocked" in r.message and r.args[0] == broken_owner]
+        assert len(failures) == 1
         assert "vault root is unavailable" in caplog.text
         (tmp_path / "disconnected").rename(broken_root)
+        assert WikiJobs(broken_owner).get(broken_job)["status"] == "queued"
+        jobs_module.worker.wake(broken_owner)
         await eventually(lambda: WikiJobs(broken_owner).get(broken_job)["status"] == "completed")
         assert not service._admission_closed
     assert not jobs_module.worker.tasks
 
 
-async def test_unavailable_worker_cancellation_stops_retry(jobs, monkeypatch):
+async def test_stopped_blocked_worker_does_not_reopen_when_root_returns(jobs, monkeypatch):
     root = jobs.store.root
     moved = root.with_name("offline")
     root.rename(moved)
     worker = WikiWorker()
-    monkeypatch.setattr(worker, "RETRY_INITIAL_SECONDS", 60.0, raising=False)
+    reading, release, finished = threading.Event(), threading.Event(), threading.Event()
     try:
         await worker.start(test_wiki_jobs.wiki_api.session_manager)
-        await asyncio.sleep(0.05)
         task = worker.tasks[None]
-        await asyncio.wait_for(worker.stop(), 1)
-        assert task.cancelled()
+        await asyncio.wait_for(asyncio.shield(task), 1)
+        is_dir = Path.is_dir
+
+        def hold_missing_root(path, *args, **kwargs):
+            if path == root:
+                reading.set()
+                try:
+                    assert release.wait(2)
+                    return is_dir(path, *args, **kwargs)
+                finally:
+                    finished.set()
+            return is_dir(path, *args, **kwargs)
+
+        # Hold the receiver's real filesystem check after its curator has
+        # ended. Stop must join that I/O before propagating its cancellation,
+        # even when the completed read returns the missing-root domain error.
+        monkeypatch.setattr(Path, "is_dir", hold_missing_root)
+        assert await asyncio.to_thread(reading.wait, 2)
+        receiver = worker.notice_task
+        stopping = asyncio.create_task(worker.stop(timeout=1))
+        await asyncio.sleep(0)
+        assert not finished.is_set() and not stopping.done()
+        release.set()
+        await asyncio.wait_for(stopping, 2)
+        assert finished.is_set() and receiver.cancelled()
+        assert task.done()
     finally:
+        release.set()
         moved.rename(root)
+        await worker.stop()
+    worker.wake(None)
+    assert not worker.tasks
 
 
 async def test_shutdown_during_job_claim_records_interruption(jobs, monkeypatch):
@@ -147,7 +174,7 @@ async def test_live_registration_change_settles_old_worker_and_allows_retry(jobs
 
         async def stream(self):
             session = next(s for s in manager.sessions.values() if s.origin == "wiki")
-            tokens.append(grants.open(session, "maintain", request_id=session._current_request.request_id))
+            tokens.append(grants.open(session, "maintain", request_id=session._run.request.request_id))
             entered.set()
             await release.wait()
             from server.harness import HarnessEvent
@@ -304,27 +331,111 @@ async def test_unconfirmed_recording_survives_rebinding_without_regeneration(job
         await worker.stop()
 
 
-async def test_rebinding_keeps_blocked_recording_session_until_original_is_verified(jobs, client, monkeypatch):
+@pytest.mark.parametrize("committed", [False, True])
+async def test_rebinding_terminal_commit_failure_preserves_original_without_regeneration(tmp_path, monkeypatch, committed):
+    from server.sessions import SessionManager
+
+    proof_path = tmp_path / "wiki-terminal-proof.json"
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", str(Path(__file__).resolve()),
+         "-o", "python_functions=_wiki_terminal_commit_child"],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=15,
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
+             "OCTOPUS_TEST_WIKI_TERMINAL_PROOF": str(proof_path),
+             "OCTOPUS_TEST_WIKI_TERMINAL_COMMITTED": str(int(committed))},
+    )
+    assert result.returncode == 70, result.stdout + result.stderr
+    proof = json.loads(proof_path.read_text())
+    assert proof["selected"]["status"] == "success"
+    assert proof["calls"] == ["model"]
+    assert not proof_path.with_suffix(".published").exists()
+    monkeypatch.setattr(settings, "wiki_dir", proof["wiki_state"])
+    current = WikiJobs(None)
+    assert current.registration["app_id"] == "replacement-app"
+    assert current.store.path("Library/blocked.md").read_bytes() == bytes.fromhex(proof["published_hex"])
+    assert b"Keep this source." in current.store.path("Library/blocked.md").read_bytes()
+    database = Database(proof["database"])
+    await database.initialize()
+    manager = SessionManager()
+    await manager.initialize(database)
+    calls = []
+
+    def forbid_regeneration(*args, **kwargs):
+        calls.append("new model")
+        raise AssertionError("Verification must not regenerate the original published work")
+
+    monkeypatch.setattr(manager, "_make_run", forbid_regeneration)
+    try:
+        session = manager.get_session(proof["session_id"])
+        assert session is not None
+        terminal = await database.get_committed_terminal(proof["session_id"], proof["request_id"])
+        assert terminal == (proof["selected"] if committed else None)
+        assert manager.dispatch_snapshot(session.id)["items"] == []
+        rows = await database.load_messages(session.id)
+        assert [row["content"] for row in rows if row["role"] == "user"] == [proof["input"]]
+        assert [row["tool_input"]["request_context"]["request_id"] for row in rows
+                if row["role"] == "user"] == [proof["request_id"]]
+        original = current.get(proof["job_id"])
+        original_reference = original["items"][0]["worker_request"]
+        assert original_reference["request_id"] == proof["request_id"]
+        assert original_reference["session_id"] == proof["session_id"]
+        assert original_reference["attempt"] == proof["original_attempt"]
+        assert original["receipts"]
+        if not committed:
+            assert [row for row in rows if row["type"] == "result"] == []
+            assert original_reference["phase"] != "settled"
+            assert calls == []
+            # The original file receipt survives independently of the absent
+            # execution terminal. P5 owns cold item classification/readmission.
+            return
+        current.recover_jobs()
+        readmitted = trusted_readmit(current, proof["job_id"])
+        finished = await asyncio.wait_for(test_wiki_jobs.process(current, readmitted, manager), 5)
+        assert finished["attempt"] == readmitted["attempt"] + 1
+        assert finished["status"] == ("completed" if committed else "completed_with_attention")
+        reference = finished["items"][0]["worker_request"]
+        assert reference["request_id"] == proof["request_id"]
+        assert reference["session_id"] == proof["session_id"]
+        assert reference["attempt"] == proof["original_attempt"]
+        assert current.store.path("Library/blocked.md").read_bytes() == bytes.fromhex(proof["published_hex"])
+        assert calls == []
+    finally:
+        await database.close()
+
+
+async def _wiki_terminal_commit_child(jobs, monkeypatch, tmp_path):
     from server.harness import HarnessEvent
+    from server.sessions import SessionManager
     from server.wiki.curation import WikiCuration
 
-    manager = test_wiki_jobs.wiki_api.session_manager
-    record_terminal = manager.db.record_terminal
+    proof_path = Path(os.environ["OCTOPUS_TEST_WIKI_TERMINAL_PROOF"])
+    committed = os.environ["OCTOPUS_TEST_WIKI_TERMINAL_COMMITTED"] == "1"
+    path = str(proof_path.with_suffix(".db"))
+    database = Database(path)
+    await database.initialize()
+    agent_id = jobs.registration["curator_agent_id"]
+    await database.save_agent(agent_id=agent_id, name="Original curator", created_at="time", updated_at="time", backend="codex")
+    manager = SessionManager()
+    await manager.initialize(database)
     calls = []
-    rebound = False
 
     class PublishingRun(FakeRunBase):
+        def __init__(self):
+            self.started = asyncio.Event()
+
         async def start(self, *args, **kwargs):
             calls.append("model")
+            self.started.set()
 
         async def stream(self):
+            await self.started.wait()
             from server.mcp_identity import mint, verify
             from server.wiki.tasks import tasks
 
             session_id = jobs.get(job["id"])["session_id"]
             doc = jobs.store.read("Library/blocked.md")
             session = manager.get_session(session_id)
-            token = tasks.open(session, "maintain", request_id=session._current_request.request_id)
+            token = tasks.open(session, "maintain", request_id=session._run.request.request_id)
             try:
                 task = tasks.call(tasks.active[token], verify(mint(session_id, wiki_task_id=token)))
                 tasks.record_read(task, doc)
@@ -337,65 +448,51 @@ async def test_rebinding_keeps_blocked_recording_session_until_original_is_verif
         async def stop(self):
             pass
 
-    async def fail_recording(**kwargs):
-        nonlocal rebound
-        if not rebound:
-            rebound = True
-            config = registry.config(None)
-            registry.configure(None, Path(config["root"]), config["curator_agent_id"], "replacement-app")
-        raise OSError("injected terminal persistence failure")
-
     monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: PublishingRun())
-    monkeypatch.setattr(manager.db, "record_terminal", fail_recording)
     job = jobs.maintain("blocked-recording-rebind", "# Original\nKeep this source.\n", "organize", [], "Library/blocked.md", [], "human")
-    worker = jobs_module.worker
-    assert not worker.tasks
+    selected = None
+    input_content = None
+    execute, commit = database.conn.execute, database.conn.commit
+
+    async def observe_sql(sql, parameters=()):
+        nonlocal selected, input_content
+        cursor = await execute(sql, parameters)
+        if sql.startswith("INSERT INTO messages "):
+            if parameters[2] == "user":
+                input_content = json.loads(parameters[4])
+            if parameters[3] == "result":
+                selected = json.loads(parameters[4])
+        return cursor
+
+    async def uncertain_commit():
+        if selected is None:
+            return await commit()
+        if committed:
+            await commit()
+        original = jobs.get(job["id"])
+        config = registry.config(None)
+        registry.configure(None, Path(config["root"]), config["curator_agent_id"], "replacement-app")
+        proof_path.write_text(json.dumps({
+            "database": path, "wiki_state": str(settings.wiki_dir), "job_id": job["id"],
+            "session_id": original["session_id"], "request_id": selected["request_id"],
+            "original_attempt": original["attempt"],
+            "input": input_content,
+            "selected": selected, "calls": calls,
+            "published_hex": jobs.store.path("Library/blocked.md").read_bytes().hex(),
+        }))
+        raise OSError("actual Wiki worker terminal commit acknowledgment lost")
+
+    async def observe(event):
+        if event.get("type") == "result":
+            proof_path.with_suffix(".published").touch()
+
+    manager.on_broadcast("wiki-terminal-proof", observe)
+    monkeypatch.setattr(database.conn, "execute", observe_sql)
+    monkeypatch.setattr(database.conn, "commit", uncertain_commit)
+    worker = WikiWorker()
     await worker.start(manager)
-    try:
-        await eventually(lambda: rebound and WikiJobs(None).get(job["id"])["status"] == "failed")
-        current = WikiJobs(None)
-        first = current.get(job["id"])
-        assert first["items"][0].get("recording_failure")
-        published = current.store.path("Library/blocked.md").read_bytes()
-        await asyncio.wait_for(asyncio.shield(worker.tasks[None]), 3)
-        session = manager.get_session(first["session_id"])
-        assert session is not None and session._recording_blocked is not None
-        reference = first["items"][0]["recording_failure"]
-        with pytest.raises(WikiError, match="execution has not retired") as blocked:
-            current.readmit(job["id"], [])
-        assert blocked.value.status == 409
-        assert session._current_request is None and not session._pending_queue
-        assert not session._backend_retirements
-        paused = session._dispatch_paused
-        endpoint = f"/api/sessions/{session.id}/dispatch/resume?resume_queue=false"
-        failed = await client.post(endpoint, headers=test_wiki_jobs.wiki_api.HEADERS)
-        assert failed.status_code == 503
-        assert session._recording_blocked.request_id == reference["request_id"]
-        assert session._dispatch_paused == paused and calls == ["model"]
-        monkeypatch.setattr(manager.db, "record_terminal", record_terminal)
-        reconciled = await client.post(endpoint, headers=test_wiki_jobs.wiki_api.HEADERS)
-        assert reconciled.status_code == 200, reconciled.text
-        assert session._recording_blocked is None and session._dispatch_paused == paused
-        assert not session._pending_queue and calls == ["model"]
-        terminal = await manager.db.get_committed_terminal(session.id, reference["request_id"])
-        assert terminal["status"] == "success"
-        refused = await client.post(f"/api/wiki/jobs/{job['id']}/retry", headers=test_wiki_jobs.wiki_api.HEADERS)
-        assert refused.status_code == 409
-        accepted = await client.post(f"/api/wiki/jobs/{job['id']}/readmit", headers=test_wiki_jobs.wiki_api.HEADERS,
-                                     json={"paths": []})
-        assert accepted.status_code == 200, accepted.text
-        await eventually(lambda: current.get(job["id"])["status"] == "completed")
-        await asyncio.wait_for(asyncio.shield(worker.tasks[None]), 3)
-        assert current.get(job["id"])["status"] == "completed"
-        assert calls == ["model"]
-        assert current.store.path("Library/blocked.md").read_bytes() == published
-        assert manager.get_session(session.id) is None
-    finally:
-        monkeypatch.setattr(manager.db, "record_terminal", record_terminal)
-        await worker.stop()
-        for session in list(manager.sessions.values()):
-            if session._recording_blocked is not None:
-                await manager._reconcile_recording(session)
+    await asyncio.wait_for(asyncio.shield(worker.tasks[None]), 10)
+    raise AssertionError("An uncertain terminal commit returned to the Wiki worker")
 
 
 @pytest.mark.parametrize("binding", ["curator_agent_id", "app_id"])
@@ -434,15 +531,13 @@ async def test_recording_reference_survives_a_cancellation_between_control_read_
     assert result["items"][0]["recording_failure"]["request_id"] == "original-request"
 
 
-async def test_captured_web_lifecycle_prevents_idle_but_replays_and_silence_do_not(monkeypatch):
+async def test_captured_web_lifecycle_prevents_idle_but_replays_and_silence_do_not(manager, monkeypatch, tmp_path):
     rows = [json.loads(line) for line in (Path(__file__).parent / "fixtures/codex-web-search-0.162.1.jsonl").read_text().splitlines()]
     clock = SimpleNamespace(now=299.0)
-    state = {"last": 0.0, "tripped": None}
     run = HarnessRun(CODEX)
     ticks = []
 
     def touch(_):
-        state["last"] = clock.now
         ticks.append(clock.now)
 
     run.bind_activity(touch)
@@ -454,38 +549,79 @@ async def test_captured_web_lifecycle_prevents_idle_but_replays_and_silence_do_n
         await run._handle_line(json.dumps(row))
     assert ticks == [299.0, 299.0]
 
-    class Backend:
-        stopped = False
-
-        async def stop(self):
-            self.stopped = True
-
-    backend = Backend()
-    checked_301 = asyncio.Event()
-    continue_clock = asyncio.Event()
-
-    async def advance(_):
-        if not checked_301.is_set():
-            checked_301.set()
-        else:
-            await continue_clock.wait()
-            clock.now = 600.0
-
-    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 300)
-    monkeypatch.setattr(settings, "turn_max_seconds", 0)
-    monkeypatch.setattr(outcomes, "time", SimpleNamespace(monotonic=lambda: clock.now))
-    monkeypatch.setattr(outcomes, "asyncio", SimpleNamespace(sleep=advance, create_task=asyncio.create_task))
-    watcher = test_session_manager.SessionManager()._start_turn_watchdog(backend, state, started_at=0.0)
-    await checked_301.wait()
-    await asyncio.sleep(0)
-    assert state["tripped"] is None and not backend.stopped
     run._begin_retirement()
     await run.stop()
     await run._handle_line(json.dumps({"type": "item.completed", "item": {"type": "web_search", "id": "exec-11111111-1111-4111-8111-111111111111"}}))
     assert ticks == [299.0, 299.0]
-    continue_clock.set()
-    await watcher
-    assert backend.stopped and state["tripped"] == ("idle", 300)
+
+    observed = HarnessRun(CODEX)
+    validated = []
+    active, replay, replayed, stopped = (asyncio.Event() for _ in range(4))
+
+    class WebRun(FakeRunBase):
+        def __init__(self):
+            self.started = asyncio.Event()
+
+        def bind_activity(self, callback):
+            def observe(timestamp):
+                validated.append(timestamp)
+                callback(timestamp)
+
+            return observed.bind_activity(observe)
+
+        def unbind_activity(self, token):
+            observed.unbind_activity(token)
+
+        async def start(self, *args, **kwargs):
+            self.started.set()
+
+        async def stream(self):
+            await self.started.wait()
+            for row in rows:
+                await observed._handle_line(json.dumps(row))
+            active.set()
+            await replay.wait()
+            for row in (rows[0], rows[1], rows[1]):
+                await observed._handle_line(json.dumps(row))
+            replayed.set()
+            await stopped.wait()
+            if False:
+                yield
+
+        async def stop(self):
+            observed._begin_retirement()
+            await observed.stop()
+            stopped.set()
+
+        async def interrupt(self):
+            await self.stop()
+
+    monkeypatch.setattr(settings, "turn_idle_timeout_seconds", .2)
+    monkeypatch.setattr(settings, "turn_idle_max_retries", 0)
+    monkeypatch.setattr(settings, "turn_max_seconds", 0)
+    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: WebRun())
+    agent = await manager.db.get_system_agent()
+    session = await manager.create_session(agent["id"], "Captured web activity", str(tmp_path), backend="codex")
+    receipt = await manager.start_message(session.id, "Wait for real web activity")
+    waiting = asyncio.create_task(receipt.wait())
+    try:
+        await asyncio.wait_for(active.wait(), 2)
+        assert len(validated) == 2
+        await asyncio.sleep(.1)
+        assert not waiting.done() and manager.session_is_executing(session)
+        replay.set()
+        await asyncio.wait_for(replayed.wait(), 2)
+        assert len(validated) == 2
+        completion = await asyncio.wait_for(waiting, 2)
+        assert completion.outcome.status == "failed"
+        assert completion.outcome.code == "turn_timeout"
+        assert "without validated activity" in completion.outcome.message
+        assert completion.outcome.recovery["idle"] == 0
+        assert stopped.is_set()
+    finally:
+        replay.set()
+        stopped.set()
+        await asyncio.gather(waiting, return_exceptions=True)
 
 
 @pytest.mark.parametrize("failed", [False, True])
@@ -504,27 +640,34 @@ def test_codex_results_measure_monotonic_attempt_duration(monkeypatch, failed):
 
 async def test_codex_attempt_durations_reach_persisted_metrics_across_retry(manager, monkeypatch, tmp_path):
     import server.harness.codex as codex
+    import server.sessions.owner_runtime as owner_runtime
     import server.sessions.turns as turns
 
     store = MetricsStore(str(tmp_path / "metrics.db"))
     await store.initialize()
     set_store(store)
-    clock = SimpleNamespace(now=10.0)
+    clock = SimpleNamespace(now=time.monotonic())
     monkeypatch.setattr(codex, "time", SimpleNamespace(monotonic=lambda: clock.now))
     monkeypatch.setattr(turns, "time", SimpleNamespace(monotonic=lambda: clock.now))
+    monkeypatch.setattr(owner_runtime, "time", SimpleNamespace(monotonic=lambda: clock.now))
     monkeypatch.setattr(type(manager), "_TRANSIENT_RETRY_BASE_DELAY", 0)
     agent = await manager.db.get_system_agent()
     session = await manager.create_session(agent["id"], "duration", str(tmp_path), backend="codex")
     starts = []
 
     class ParsedRun(FakeRunBase):
+        def __init__(self):
+            self.started = asyncio.Event()
+
         async def start(self, *a, **k):
             self.parser = CodexEventParser()
             self.parser.parse({"type": "turn.started"})
             self.ordinal = len(starts)
             starts.append(clock.now)
+            self.started.set()
 
         async def stream(self):
+            await self.started.wait()
             clock.now += (self.ordinal + 1) / 4
             raw = {"type": "turn.failed", "error": {"message": "API Error: 529 Overloaded"}} if self.ordinal == 0 else {"type": "turn.completed"}
             for event in self.parser.parse(raw).events:
@@ -538,9 +681,17 @@ async def test_codex_attempt_durations_reach_persisted_metrics_across_retry(mana
 
     monkeypatch.setattr(manager, "_make_run", lambda *a, **k: ParsedRun())
     try:
-        events = [event async for event in manager._run_backend(session, "request")]
-        assert events[-1]["type"] == "result" and not events[-1]["is_error"]
-        assert events[-1]["duration_ms"] == 750
+        events = []
+
+        async def observe(event):
+            events.append(event)
+
+        manager.on_broadcast("attempt-duration", observe)
+        receipt = await manager.start_message(session.id, "request")
+        assert (await asyncio.wait_for(receipt.wait(), 5)).outcome.status == "success"
+        terminal = [event for event in events if event["type"] == "result"]
+        assert len(terminal) == 1 and not terminal[0]["is_error"]
+        assert terminal[0]["duration_ms"] == 750
         await store.drain()
         rows = await store.conn.execute_fetchall("SELECT duration_ms,ok,detail FROM events WHERE kind='turn' ORDER BY rowid")
         assert [(row[0], row[1]) for row in rows] == [(250, 0), (500, 1)]
@@ -556,7 +707,11 @@ async def test_codex_attempt_durations_reach_persisted_metrics_across_retry(mana
 
 
 @pytest.mark.parametrize("retirement", ["revoke", "close-work", "cancel-delete"])
-async def test_retired_mcp_cleanup_is_owned_and_does_not_restore_tools(retirement):
+async def test_retired_mcp_cleanup_is_owned_and_does_not_restore_tools(retirement, manager, monkeypatch):
+    users = UserManager(manager.db)
+    owner_id = (await users.create_user(username="cleanup-owner", password="password1"))["id"]
+    other_id = (await users.create_user(username="cleanup-other", password="password2"))["id"]
+    monkeypatch.setattr(deps, "_user_manager", users)
     server = FastMCP("cleanup-test", json_response=True)
     app = FastAPI()
     transport_app = server.streamable_http_app()
@@ -575,8 +730,8 @@ async def test_retired_mcp_cleanup_is_owned_and_does_not_restore_tools(retiremen
 
     app.mount("/mcp/test", serving)
     lease, work = f"cleanup-{retirement}", f"work-{retirement}"
-    mcp_identity.register_run(lease, "owner-session", "owner", work)
-    owner = mcp_identity.mint("owner-session", user_id="owner", run_lease_id=lease, work_id=work)
+    mcp_identity.register_run(lease, "owner-session", owner_id, work)
+    owner = mcp_identity.mint("owner-session", user_id=owner_id, run_lease_id=lease, work_id=work)
     headers = {"Authorization": f"Bearer {owner}", "Accept": "application/json, text/event-stream"}
     try:
         async with server.session_manager.run():
@@ -589,7 +744,7 @@ async def test_retired_mcp_cleanup_is_owned_and_does_not_restore_tools(retiremen
                 assert response.status_code == 200
                 sid = response.headers["mcp-session-id"]
                 assert len(server.session_manager._server_instances) == 1
-                identities = [("other-session", "owner", "other-run"), ("owner-session", "other", "other-tenant"), ("owner-session", "owner", "replacement-run")] if retirement == "cancel-delete" else []
+                identities = [("other-session", owner_id, "other-run"), ("owner-session", other_id, "other-tenant"), ("owner-session", owner_id, "replacement-run")] if retirement == "cancel-delete" else []
                 for session, user, other_lease in identities:
                     mcp_identity.register_run(other_lease, session, user, None)
                     try:

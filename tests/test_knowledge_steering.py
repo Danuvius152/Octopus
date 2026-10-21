@@ -3,20 +3,25 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
+import subprocess
+import sys
 import uuid
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from server.database import Database
 from server.harness import HarnessEvent, get_harness
-from server.knowledge import capture, derive
+from server.knowledge import capture, derive, encode
 from server.mcp_identity import McpScope, register_run, revoke_run
 from server.session_manager import SessionManager
 from server.wiki.limits import MaintenanceLimit
 from server.wiki.registry import registry
-from server.wiki.tasks import tasks
+from server.wiki.tasks import RUN_WIKI_SCOPE, tasks
 from tests.fake_run import FakeRunBase
 
 
@@ -37,28 +42,44 @@ async def steering(tmp_path, monkeypatch):
     started = asyncio.Queue()
     frames = asyncio.Queue()
     first_done = asyncio.Event()
-    control = SimpleNamespace(frame_error=False, derived=None, active_knowledge=None)
+    control = SimpleNamespace(frame_error=False, derived=None, active_knowledge=None, frame_marker=None, scope=None)
 
     def create(config):
         class Run(FakeRunBase):
             reusable = True
-            run_lease_id = uuid.uuid4().hex
+
+            def __init__(self):
+                self.run_lease_id = uuid.uuid4().hex
+                self.session_id, self.user_id = config.session_id, config.user_id
+                self.work_id = config.work_id
+                self.ready = asyncio.Event()
+
+            def bind_wiki_task(self, task_id):
+                tasks.bind_run(self.run_lease_id, task_id, self.session_id, self.user_id)
 
             async def start(self, prompt, *args, **kwargs):
                 self.prompt = prompt
-                register_run(self.run_lease_id, session.id, session.user_id, config.work_id)
+                register_run(self.run_lease_id, self.session_id, self.user_id, self.work_id)
+                self.ready.set()
+
+            def prepare_turn_stream(self):
+                self.ready.clear()
 
             async def send_turn(self, prompt):
                 self.prompt = prompt
+                self.ready.set()
 
             async def send_user_frame(self, prompt):
+                if control.frame_marker is not None:
+                    control.frame_marker.touch()
                 # The independent connection cannot see the writer's pending
                 # batch. Observe only the public Database transcript seam.
                 committed = await reader.load_messages(session.id)
                 scope = McpScope(
-                    session.id, user_id=session.user_id, wiki_task_id=config.wiki_task_id,
-                    run_lease_id=self.run_lease_id, work_id=config.work_id,
+                    self.session_id, user_id=self.user_id, wiki_task_id=RUN_WIKI_SCOPE,
+                    run_lease_id=self.run_lease_id, work_id=self.work_id,
                 )
+                control.scope = scope
                 control.derived = derive(capture(session, scope, prompt="Continue verification"), "Verify a claim")
                 control.active_knowledge = tasks.require(scope).knowledge
                 await frames.put((prompt, committed))
@@ -69,6 +90,7 @@ async def steering(tmp_path, monkeypatch):
                 pass
 
             async def stream(self):
+                await self.ready.wait()
                 await started.put(self.prompt)
                 if self.prompt == "Initial comparison":
                     await first_done.wait()
@@ -76,16 +98,18 @@ async def steering(tmp_path, monkeypatch):
 
             async def stop(self):
                 revoke_run(self.run_lease_id)
+                tasks.unbind_run(self.run_lease_id)
 
             async def interrupt(self):
                 revoke_run(self.run_lease_id)
+                tasks.unbind_run(self.run_lease_id)
 
         return Run()
 
     monkeypatch.setattr(get_harness("codex"), "create_run", create)
     try:
         yield SimpleNamespace(
-            manager=manager, session=session, db=db, reader=reader,
+            manager=manager, session=session, db=db, reader=reader, database_path=path,
             started=started, frames=frames, first_done=first_done, control=control,
         )
     finally:
@@ -113,41 +137,66 @@ async def test_steered_input_and_knowledge_are_independently_committed_before_fr
     assert "Initial comparison" in inherited.trusted_request
     assert correction in inherited.trusted_request
     assert env.control.active_knowledge == inherited
+    assert matches[0]["tool_input"]["request_context"]["knowledge"] == json.loads(encode(inherited))
+    assert inherited.origin.request_id == original.request_id
+    assert env.control.scope.session_id == env.session.id
+    assert env.control.scope.user_id == env.session.user_id
+    assert env.control.scope.wiki_task_id == RUN_WIKI_SCOPE
+    assert tasks.require(env.control.scope).knowledge == inherited
     env.first_done.set()
     assert (await original.wait()).outcome.status == "success"
 
 
 @pytest.mark.parametrize("committed_before_error", [False, True])
-async def test_unconfirmed_inline_input_never_reaches_the_backend_and_retries_once(
-    steering, monkeypatch, committed_before_error,
-):
+async def test_unconfirmed_inline_input_stops_the_process_before_a_frame(tmp_path, committed_before_error):
+    proof = tmp_path / "commit-proof.json"
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", str(Path(__file__).resolve()),
+         "-o", "python_functions=_unconfirmed_inline_commit_child"],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=15,
+        env={**os.environ, "OCTOPUS_TEST_INLINE_COMMIT_PROOF": str(proof),
+             "OCTOPUS_TEST_INLINE_COMMIT_MODE": str(int(committed_before_error)), "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+    assert result.returncode == 70, result.stdout + result.stderr
+    evidence = json.loads(proof.read_text())
+    assert not proof.with_suffix(".frame").exists()
+    reader = Database(evidence["database"])
+    await reader.initialize()
+    try:
+        rows = await reader.load_messages(evidence["session_id"])
+        assert any(row["content"] == "Initial comparison" for row in rows)
+        corrections = [row for row in rows if row["content"] == "Use the added evidence before answering."]
+        assert len(corrections) == int(committed_before_error)
+        if corrections:
+            assert corrections[0]["tool_input"]["request_context"]["request_id"] == "original-inline-input"
+    finally:
+        await reader.close()
+
+
+async def _unconfirmed_inline_commit_child(steering, monkeypatch):
+    """Selected only by the parent subprocess to observe real fail-stop."""
     env = steering
-    original = await env.manager.start_message(env.session.id, "Initial comparison")
+    await env.manager.start_message(env.session.id, "Initial comparison")
     await asyncio.wait_for(env.started.get(), 2)
-    failed = asyncio.Event()
+    proof = Path(os.environ["OCTOPUS_TEST_INLINE_COMMIT_PROOF"])
+    committed_before_error = os.environ["OCTOPUS_TEST_INLINE_COMMIT_MODE"] == "1"
+    env.control.frame_marker = proof.with_suffix(".frame")
     commit = env.db.conn.commit
+    before = env.db.conn.total_changes
 
     async def failed_commit():
+        if env.db.conn.total_changes == before:
+            return await commit()
         if committed_before_error:
             await commit()
-        failed.set()
+        proof.write_text(json.dumps({"database": env.database_path, "session_id": env.session.id}))
         raise OSError("steered input commit is unconfirmed")
 
     correction = "Use the added evidence before answering."
-    with monkeypatch.context() as patch:
-        patch.setattr(env.db.conn, "commit", failed_commit)
-        receipt = await env.manager.start_message(env.session.id, correction, steerable=True)
-        await asyncio.wait_for(failed.wait(), 2)
-        await asyncio.sleep(0)
-        assert env.frames.empty()
-        committed = await env.reader.load_messages(env.session.id)
-        assert sum(row["content"] == correction for row in committed) == int(committed_before_error)
-    env.first_done.set()
-    assert (await original.wait()).outcome.status == "success"
-    assert (await asyncio.wait_for(receipt.wait(), 3)).outcome.status == "success"
-    rows = [row for row in await env.reader.load_messages(env.session.id) if row["content"] == correction]
-    assert len(rows) == 1
-    assert rows[0]["tool_input"]["request_context"]["request_id"] == receipt.request_id
+    monkeypatch.setattr(env.db.conn, "commit", failed_commit)
+    receipt = await env.manager.start_message(env.session.id, correction, steerable=True, request_id="original-inline-input")
+    await asyncio.wait_for(receipt.wait(), 5)
+    raise AssertionError("An unconfirmed input commit returned to the caller")
 
 
 async def test_failed_frame_reuses_committed_input_and_its_original_identity(steering):
@@ -157,13 +206,21 @@ async def test_failed_frame_reuses_committed_input_and_its_original_identity(ste
     correction = "Keep the source limits when this is retried."
     env.control.frame_error = True
     receipt = await env.manager.start_message(env.session.id, correction, steerable=True)
+    assert receipt.disposition == "steered"
     _, committed = await asyncio.wait_for(env.frames.get(), 2)
     first = next(row for row in committed if row["content"] == correction)
+    assert first["tool_input"]["request_context"]["request_id"] == receipt.request_id
+    completed = await asyncio.wait_for(receipt.wait(), 3)
+    assert completed.input_request_id == receipt.request_id
+    assert completed.request_id == original.request_id
+    assert completed.reason == "steer_delivery_unknown" and completed.outcome is None
+    assert completed.state == "unavailable" and completed.notification_state == "unavailable"
+    assert completed.recording_state == "none"
+    assert env.manager.dispatch_snapshot(env.session.id)["items"] == []
+    assert env.started.empty() and env.frames.empty()
     env.first_done.set()
     assert (await original.wait()).outcome.status == "success"
-    completed = await asyncio.wait_for(receipt.wait(), 3)
-    assert completed.request_id == receipt.request_id
-    assert completed.outcome.status == "success"
+    assert env.started.empty() and env.frames.empty()
     rows = [row for row in await env.reader.load_messages(env.session.id) if row["content"] == correction]
     assert rows == [first]
 

@@ -336,7 +336,7 @@ async def test_delayed_registration_cannot_restore_an_already_disabled_plan(plan
 
 @pytest.mark.parametrize("in_session", [False, True])
 @pytest.mark.parametrize("abort", ["close", "cancel"])
-async def test_fire_does_not_capture_an_uncommitted_definition_that_is_rolled_back(plan_runtime, monkeypatch, tmp_path, in_session, abort):
+async def test_fire_reads_the_confirmed_definition_after_update_interruption(plan_runtime, monkeypatch, tmp_path, in_session, abort):
     import uuid
 
     from server.mcp_identity import close_work
@@ -368,15 +368,14 @@ async def test_fire_does_not_capture_an_uncommitted_definition_that_is_rolled_ba
     monkeypatch.setattr(manager.db.conn, "_execute", pause_after_sql)
     monkeypatch.setattr(runner, "_schedule_row", observe_snapshot)
     patch = asyncio.create_task(api.patch(f"/api/schedules/{schedule_id}", headers=headers,
-                                          json={"prompt": "Rejected definition"}))
+                                          json={"prompt": "Updated definition"}))
     fire = None
     try:
         await asyncio.wait_for(written.wait(), 5)
         fire = asyncio.create_task(runner._fire(schedule_id))
-        try:
+        with pytest.raises(TimeoutError):
             await asyncio.wait_for(snapshot.wait(), .1)
-        except TimeoutError:
-            pass  # A committed read must wait behind the writer.
+        assert not snapshot.is_set(), "A definition reader crossed the unconfirmed write"
         if abort == "close":
             close_work(work_id)
         else:
@@ -392,11 +391,16 @@ async def test_fire_does_not_capture_an_uncommitted_definition_that_is_rolled_ba
         await asyncio.wait_for(fire, 5)
         await manager.drain_turns()
         row = (await manager.db.load_schedules())[0]
+        # Closing the original work refuses and rolls back the definition.
+        # Cancelling only its waiter preserves the acknowledged transaction.
+        expected = "Original scheduled task" if abort == "close" else "Updated definition"
+        assert row["prompt"] == expected
         inputs = [message for message in await manager.db.load_messages(row["last_run_session_id"])
                   if message["role"] == "user" and message["tool_input"]["request_context"]["source"] == "schedule"]
         assert len(inputs) == 1
-        assert "Original scheduled task" in inputs[0]["content"]
-        assert "Rejected definition" not in inputs[0]["content"]
+        assert inputs[0]["content"].endswith("\n\n" + expected)
+        if abort == "close":
+            assert "Updated definition" not in inputs[0]["content"]
     finally:
         release.set()
         (tmp_path / "release").touch()

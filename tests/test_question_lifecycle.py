@@ -8,6 +8,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
+from server import deps
 from server.agent_manager import AgentManager
 from server.config import settings
 from server.database import Database
@@ -15,7 +16,9 @@ from server.deps import get_session_manager
 from server.harness import HarnessEvent
 from server.routers import questions, sessions
 from server.session_manager import SessionManager
+from server.sessions import owner_questions
 from server.sessions import questions as question_module
+from server.users import UserManager
 from server.workspace import paths_for
 from tests.fake_run import FakeRunBase
 
@@ -49,6 +52,18 @@ async def question_host():
         await db.close()
 
 
+@pytest.fixture
+async def owned_question_host(question_host, monkeypatch):
+    manager, _, client, events = question_host
+    users = UserManager(manager.db)
+    owner = await users.create_user(username="question-owner", password="test-password")
+    monkeypatch.setattr(deps, "_user_manager", users)
+    agent = await AgentManager(manager.db).create_agent(name="Owned questions", user_id=owner["id"])
+    session = await manager.create_session(agent["id"], "Owned question", None)
+    client.headers["Authorization"] = "Bearer " + await users.issue_token(owner["id"])
+    return manager, session, client, events
+
+
 async def test_competing_human_answers_resolve_once(question_host):
     manager, session, client, events = question_host
     qid = await manager.create_pending_question(session.id, QUESTIONS)
@@ -73,6 +88,30 @@ async def test_unknown_question_poll_is_closed_instead_of_waiting(question_host)
     assert response.json() == {"detail": "Question not found or closed"}
 
 
+async def test_cancelling_one_long_poll_keeps_the_question_answerable(question_host):
+    manager, session, client, _ = question_host
+    qid = await manager.create_pending_question(session.id, QUESTIONS)
+    polling = asyncio.create_task(client.get(
+        f"/api/sessions/{session.id}/questions/{qid}/answer?timeout=60", headers=HEADERS
+    ))
+    await asyncio.sleep(0)
+    polling.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await polling
+    assert [q.question_id for q in manager.get_pending_questions(session.id)] == [qid]
+    answered = await client.post(
+        f"/api/sessions/{session.id}/questions/{qid}/answer",
+        headers=HEADERS, json={"answers": [{"selected": ["A"]}]},
+    )
+    assert answered.status_code == 200
+    late = await client.get(
+        f"/api/sessions/{session.id}/questions/{qid}/answer", headers=HEADERS
+    )
+    assert late.status_code == 200
+    assert late.json() == {"answer": "Q: Choose\nA: A"}
+    assert manager.get_pending_questions(session.id) == ()
+
+
 async def test_stop_while_idle_closes_an_outstanding_form(question_host):
     manager, session, client, events = question_host
     qid = await manager.create_pending_question(session.id, QUESTIONS)
@@ -81,6 +120,117 @@ async def test_stop_while_idle_closes_an_outstanding_form(question_host):
     response = await client.get(f"/api/sessions/{session.id}/questions/{qid}/answer", headers=HEADERS)
     assert response.status_code == 404
     assert len([event for event in events if event["type"] == "question_closed"]) == 1
+
+
+@pytest.mark.parametrize("operation", ["interrupt", "reset"])
+async def test_idle_control_preserves_a_question_created_while_old_closure_publishes(
+    owned_question_host, operation,
+):
+    manager, session, client, events = owned_question_host
+    created = await client.post(f"/api/sessions/{session.id}/questions", json={"questions": QUESTIONS})
+    assert created.status_code == 201
+    old_id = created.json()["question_id"]
+    closing, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_old_closure(event):
+        if event["type"] == "question_closed" and event["question_id"] == old_id:
+            closing.set()
+            await release.wait()
+
+    manager.on_broadcast("hold-old-question-closure", hold_old_closure)
+    controlling = asyncio.create_task(
+        manager.interrupt(session.id) if operation == "interrupt"
+        else client.post(f"/api/sessions/{session.id}/reset")
+    )
+    polling = None
+    try:
+        await asyncio.wait_for(closing.wait(), 1)
+        created = await client.post(f"/api/sessions/{session.id}/questions", json={"questions": QUESTIONS})
+        assert created.status_code == 201
+        new_id = created.json()["question_id"]
+        polling = asyncio.create_task(client.get(
+            f"/api/sessions/{session.id}/questions/{new_id}/answer?timeout=60"
+        ))
+        await asyncio.sleep(0)
+        release.set()
+        result = await asyncio.wait_for(controlling, 1)
+        if operation == "interrupt":
+            assert result is False
+        else:
+            assert result.status_code == 200
+        snapshot = await client.get(f"/api/sessions/{session.id}")
+        assert [question["question_id"] for question in snapshot.json()["pending_questions"]] == [new_id]
+        answered = await client.post(
+            f"/api/sessions/{session.id}/questions/{new_id}/answer",
+            json={"answers": [{"selected": ["B"]}]},
+        )
+        assert answered.status_code == 200
+        polled = await asyncio.wait_for(polling, 1)
+        assert polled.status_code == 200
+        assert polled.json() == {"answer": "Q: Choose\nA: B"}
+        assert [event["question_id"] for event in events if event["type"] == "question_closed"] == [old_id]
+    finally:
+        release.set()
+        await asyncio.gather(controlling, return_exceptions=True)
+        if polling is not None:
+            polling.cancel()
+            await asyncio.gather(polling, return_exceptions=True)
+
+
+@pytest.mark.parametrize("operation", ["archive", "delete", "shutdown"])
+async def test_closed_admission_rejects_questions_while_old_closure_publishes(
+    owned_question_host, monkeypatch, operation,
+):
+    manager, session, client, events = owned_question_host
+    created = await client.post(f"/api/sessions/{session.id}/questions", json={"questions": QUESTIONS})
+    assert created.status_code == 201
+    old_id = created.json()["question_id"]
+    closing, release = asyncio.Event(), asyncio.Event()
+    late_answers = []
+
+    async def observe(event):
+        if event["type"] == "question_closed" and event["question_id"] == old_id:
+            closing.set()
+            await release.wait()
+        elif event["type"] == "question_answer" and manager.get_session(session.id) is None:
+            late_answers.append({"question_id": event["question_id"], "auto": event.get("auto", False)})
+
+    manager.on_broadcast("closed-question-admission", observe)
+    if operation == "archive":
+        control = client.post(f"/api/sessions/{session.id}/archive?replace=false")
+    elif operation == "delete":
+        control = client.delete(f"/api/sessions/{session.id}")
+    else:
+        control = manager.drain_turns(timeout=1)
+    retiring = asyncio.create_task(control)
+    try:
+        await asyncio.wait_for(closing.wait(), 1)
+        # Visibility/resource retirement is independent of this subscriber.
+        # The original closure remains ordered and finishes after release.
+        result = await asyncio.wait_for(retiring, 1)
+        monkeypatch.setattr(settings, "ask_user_question_timeout_seconds", 0.05)
+        rejected = await client.post(f"/api/sessions/{session.id}/questions", json={"questions": QUESTIONS})
+        release.set()
+        if operation == "shutdown":
+            assert result == 0
+        else:
+            assert result.status_code == 204
+            assert manager.get_session(session.id) is None
+        # A refused question must never create a timer that publishes after
+        # the owning Session has been retired.
+        await asyncio.sleep(0.1)
+        if operation == "shutdown":
+            assert rejected.status_code == 400
+            assert rejected.json() == {"detail": "Session admission is closed"}
+        else:
+            assert rejected.status_code == 404
+            assert rejected.json() == {"detail": "Session not found"}
+        assert [event["question_id"] for event in events if event["type"] == "question_request"] == [old_id]
+        assert not [event for event in events if event["type"] == "question_answer"]
+        assert late_answers == []
+    finally:
+        release.set()
+        await asyncio.gather(retiring, return_exceptions=True)
 
 
 async def test_closing_question_wakes_poll_and_removes_live_form(question_host):
@@ -203,6 +353,22 @@ async def test_waiting_questions_suspend_idle_and_last_answer_resets_it(question
     assert result["content"]["status"] == "success"
 
 
+async def test_attempt_finalization_retires_its_answered_question(question_host, monkeypatch):
+    manager, session, client, events = question_host
+    run = WaitingRun(manager, session)
+    final = await start_waiting_turn(manager, session, run, monkeypatch)
+    qid = run.question_ids[0]
+    assert await manager.answer_question(session.id, qid, [{"selected": ["A"]}])
+    outcome = (await asyncio.wait_for(final, timeout=1))["content"]
+    assert outcome["status"] == "success"
+    response = await client.get(
+        f"/api/sessions/{session.id}/questions/{qid}/answer", headers=HEADERS
+    )
+    assert response.status_code == 404
+    assert manager.get_pending_questions(session.id) == ()
+    assert not [event for event in events if event["type"] == "question_closed"]
+
+
 @pytest.mark.parametrize("operation", ["interrupt", "reset", "archive", "delete"])
 async def test_ending_request_closes_questions_and_wakes_poll(question_host, monkeypatch, operation):
     manager, session, client, events = question_host
@@ -234,7 +400,9 @@ async def test_authoritative_deadline_wins_over_delayed_timer_and_late_human_ans
 ):
     manager, session, client, events = question_host
     now = [10.0]
-    monkeypatch.setattr(question_module, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    clock = SimpleNamespace(monotonic=lambda: now[0])
+    monkeypatch.setattr(question_module, "time", clock)
+    monkeypatch.setattr(owner_questions, "time", clock)
     monkeypatch.setattr(settings, "ask_user_question_timeout_seconds", 60)
     qid = await manager.create_pending_question(session.id, QUESTIONS)
     now[0] = 71.0
@@ -298,12 +466,20 @@ async def test_old_question_cannot_exempt_new_attempt_from_idle_timeout(question
     assert response.status_code == 404
 
 
-async def test_cancelled_answer_request_still_publishes_its_claimed_resolution(question_host):
-    manager, session, _, _ = question_host
+async def test_cancelled_answer_request_still_publishes_its_claimed_resolution(question_host, monkeypatch):
+    manager, session, client, _ = question_host
     qid = await manager.create_pending_question(session.id, QUESTIONS)
     broadcasting = asyncio.Event()
     release = asyncio.Event()
     received = asyncio.Event()
+    inserting, allow_insert = asyncio.Event(), asyncio.Event()
+    execute = manager.db.conn.execute
+
+    async def hold_actual_answer_insert(sql, parameters=()):
+        if sql.lstrip().startswith("INSERT INTO messages") and "question_answer" in parameters:
+            inserting.set()
+            await allow_insert.wait()
+        return await execute(sql, parameters)
 
     async def slow_subscriber(event):
         if event["type"] == "question_answer":
@@ -316,36 +492,65 @@ async def test_cancelled_answer_request_still_publishes_its_claimed_resolution(q
 
     manager.on_broadcast("slow-subscriber", slow_subscriber)
     manager.on_broadcast("final-subscriber", final_subscriber)
+    monkeypatch.setattr(manager.db.conn, "execute", hold_actual_answer_insert)
     answering = asyncio.create_task(manager.answer_question(session.id, qid, [{"selected": ["A"]}]))
-    await asyncio.wait_for(broadcasting.wait(), timeout=1)
-    answering.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await answering
-    release.set()
-    await asyncio.wait_for(received.wait(), timeout=0.2)
-    assert not manager.has_pending_question(session.id, qid)
+    try:
+        await asyncio.wait_for(inserting.wait(), 1)
+        answering.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(answering, .2)
+        allow_insert.set()
+        await asyncio.wait_for(broadcasting.wait(), timeout=1)
+        snapshot = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+        assert snapshot.json()["pending_questions"] == []
+        assert manager.get_pending_questions(session.id) == ()
+        late = await client.get(
+            f"/api/sessions/{session.id}/questions/{qid}/answer", headers=HEADERS
+        )
+        assert late.status_code == 200
+        assert late.json() == {"answer": "Q: Choose\nA: A"}
+        release.set()
+        await asyncio.wait_for(received.wait(), timeout=0.2)
+        assert not manager.has_pending_question(session.id, qid)
+    finally:
+        allow_insert.set()
+        release.set()
+        await asyncio.gather(answering, return_exceptions=True)
 
 
-async def test_cancelled_question_creation_closes_the_registered_wait(question_host):
+async def test_creation_reply_and_answer_do_not_wait_for_the_creation_subscriber(question_host):
     manager, session, client, events = question_host
     broadcasting = asyncio.Event()
+    release, answered = asyncio.Event(), asyncio.Event()
 
     async def slow_subscriber(event):
         if event["type"] == "question_request":
             broadcasting.set()
-            await asyncio.Event().wait()
+            await release.wait()
+        if event["type"] == "question_answer":
+            answered.set()
 
     manager.on_broadcast("slow-create-subscriber", slow_subscriber)
     creating = asyncio.create_task(manager.create_pending_question(session.id, QUESTIONS))
-    await asyncio.wait_for(broadcasting.wait(), timeout=1)
-    qid = next(event["question_id"] for event in events if event["type"] == "question_request")
-    creating.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await creating
-    assert not manager.has_pending_question(session.id, qid)
-    response = await client.get(f"/api/sessions/{session.id}/questions/{qid}/answer", headers=HEADERS)
-    assert response.status_code == 404
-    assert len([event for event in events if event["type"] == "question_closed"]) == 1
+    try:
+        await asyncio.wait_for(broadcasting.wait(), timeout=1)
+        qid = await asyncio.wait_for(creating, .2)
+        assert manager.has_pending_question(session.id, qid)
+        response = await client.post(
+            f"/api/sessions/{session.id}/questions/{qid}/answer", headers=HEADERS,
+            json={"answers": [{"selected": ["B"]}]},
+        )
+        assert response.status_code == 200
+        poll = await client.get(f"/api/sessions/{session.id}/questions/{qid}/answer", headers=HEADERS)
+        assert poll.json() == {"answer": "Q: Choose\nA: B"}
+        assert not answered.is_set(), "The resolution overtook its held creation prefix"
+        assert await manager.interrupt(session.id) is False
+        assert not [event for event in events if event["type"] == "question_closed"]
+        release.set()
+        await asyncio.wait_for(answered.wait(), 1)
+    finally:
+        release.set()
+        await asyncio.gather(creating, return_exceptions=True)
 
 
 async def test_host_auto_answer_resolves_form_and_poll_once(question_host, monkeypatch):

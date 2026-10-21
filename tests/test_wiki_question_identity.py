@@ -53,7 +53,7 @@ def make_store(tmp_path):
         file.write_text(source)
         (root / "Summaries").mkdir(exist_ok=True)
         (root / "Summaries/summary.md").write_text(summary(source_path, title, represented))
-        store = WikiStore(root, base / "state", str(uuid.uuid4()))
+        store = WikiStore(root, base / "state", str(uuid.uuid4()), create=True)
         stores.append(store)
         return store
 

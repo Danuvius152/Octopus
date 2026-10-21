@@ -32,9 +32,13 @@ import re
 import secrets
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .crypto import new_dek, unwrap_dek, wrap_dek
+from .db.users import owner_is_available as _owner_is_available
+
+if TYPE_CHECKING:
+    from .database import Database
 
 # scrypt cost. ~17 MB and tens of milliseconds per attempt — enough to make
 # offline guessing expensive, little enough that a login feels instant.
@@ -181,6 +185,12 @@ def validate_password(password: str, *, username: str = "") -> None:
 # ---------------------------------------------------------------------------
 
 
+async def owner_is_available(db: Database, user_id: str | None) -> bool:
+    """Current account authority, including the installation's legacy era."""
+    async with db.transaction(write=False) as tx:
+        return await _owner_is_available(tx, user_id)
+
+
 class UserManager:
     """Accounts against a `Database`. Constructed per app, like AgentManager."""
 
@@ -189,27 +199,24 @@ class UserManager:
 
     # -- accounts -----------------------------------------------------------
 
-    async def _insert(
+    def prepare_user(
         self, *, username: str, password: str, is_admin: bool
     ) -> dict[str, Any]:
-        """The row, with its data key minted at the same moment.
+        """Validate and prepare the hash and durable wrapped key before SQL."""
+        name = validate_username(username)
+        validate_password(password, username=name)
+        return {
+            "user_id": uuid.uuid4().hex[:12], "username": name,
+            "password_hash": hash_password(password), "created_at": _now(),
+            "is_admin": is_admin, "dek_wrapped": wrap_dek(new_dek()),
+        }
 
-        A user without a DEK would be a user whose first stored credential has
-        to decide what to do about it, and "create it lazily" is how two halves
-        of a system end up disagreeing about whether one exists.
-        """
+    async def _insert(self, prepared: dict[str, Any]) -> dict[str, Any]:
         from . import deps
         from .workspace import paths_for
 
+        user = await self.db.create_user(**prepared)
         deps.forget_accounts_exist()
-        user = await self.db.create_user(
-            user_id=uuid.uuid4().hex[:12],
-            username=username,
-            password_hash=hash_password(password),
-            created_at=_now(),
-            is_admin=is_admin,
-            dek_wrapped=wrap_dek(new_dek()),
-        )
         # Provision the account's directories at creation, so the first session
         # has a working directory to run in. Bootstrap did this for the first
         # account; invite-registration did not, so a registered account's first
@@ -221,25 +228,25 @@ class UserManager:
     async def create_user(
         self, *, username: str, password: str, is_admin: bool = False
     ) -> dict[str, Any]:
-        name = validate_username(username)
-        validate_password(password, username=name)
-        if await self.db.get_user_by_username(name) is not None:
+        prepared = self.prepare_user(username=username, password=password, is_admin=is_admin)
+        if await self.db.get_user_by_username(prepared["username"]) is not None:
             raise UserError("That username is taken", status_code=409)
-        return await self._insert(username=name, password=password, is_admin=is_admin)
+        return await self._insert(prepared)
 
-    def data_key(self, user: dict[str, Any]) -> str:
+    def data_key(self, user: dict[str, Any], *, key: str | None = None) -> str:
         """The key this user's secrets are encrypted with.
 
         Unwrapped on demand rather than held: the master key is already in
         memory, so caching the plaintext DEK would only widen what a heap dump
         gives away in exchange for a PBKDF2 that is already cached.
+        A caller holding a SQL transaction supplies its captured master key.
         """
         wrapped = user.get("dek_wrapped")
         if not wrapped:
             raise UserError(
                 f"user {user.get('username')!r} has no data key", status_code=500
             )
-        return unwrap_dek(wrapped)
+        return unwrap_dek(wrapped, key=key)
 
     async def data_key_for(self, user_id: str | None) -> str:
         """The key `user_id`'s secrets are encrypted with, by id.
@@ -394,12 +401,11 @@ class UserManager:
         if invite["used_count"] >= invite["max_uses"]:
             raise UserError("That invite code has been used", status_code=403)
 
-        name = validate_username(username)
-        validate_password(password, username=name)
-        if await self.db.get_user_by_username(name) is not None:
+        prepared = self.prepare_user(username=username, password=password, is_admin=False)
+        if await self.db.get_user_by_username(prepared["username"]) is not None:
             raise UserError("That username is taken", status_code=409)
 
         if not await self.db.claim_invite(invite["code"]):
             # Lost a race for the last use.
             raise UserError("That invite code has been used", status_code=403)
-        return await self._insert(username=name, password=password, is_admin=False)
+        return await self._insert(prepared)

@@ -40,7 +40,7 @@ def organize(curation, path, expected_revision, key_note, tags, aliases, relatio
             raise WikiError("Choose new Key note or reuse", 422)
         if article and not existing and not key_note:
             raise WikiError("Read and supply the missing Key note; do not claim an absent summary was reused", 422)
-        offset = top_offset(text)
+        offset = top_offset(text, parsed=parsed)
         inserts = ""
         if article and offset == parsed.body_start:
             inserts += "# " + (fields.get("title") or source["title"]) + newline * 2

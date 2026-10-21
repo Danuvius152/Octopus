@@ -36,6 +36,7 @@ import hashlib
 import logging
 import os
 import secrets
+import tempfile
 from pathlib import Path
 
 from cryptography.fernet import Fernet, InvalidToken
@@ -98,29 +99,45 @@ def master_key() -> str:
     if settings.master_key:
         return settings.master_key
 
-    path = Path(settings.master_key_file).expanduser()
+    path = Path(settings.master_key_file).expanduser().resolve()
     cached = _MASTER_CACHE.get(str(path))
     if cached:
         return cached
 
-    if path.exists():
-        key = path.read_text().strip()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    created = False
+    if not path.exists():
+        # Publish complete, durable bytes without replacing a competing key.
+        # Readers can never observe the partially written candidate.
+        with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".master-key-", mode="w", encoding="utf-8") as candidate:
+            candidate.write(secrets.token_urlsafe(32))
+            candidate.flush()
+            os.fsync(candidate.fileno())
+            try:
+                os.link(candidate.name, path)
+                created = True
+            except FileExistsError:
+                pass
+
+    with path.open("rb") as stored:
+        key = stored.read().decode("utf-8").strip()
         if not key:
             raise ValueError(
                 f"{path} is empty — refusing to invent a new master key, because "
                 "doing so would silently orphan every stored secret. Restore the "
                 "file or set OCTOPUS_MASTER_KEY."
             )
-    else:
-        key = secrets.token_urlsafe(32)
-        path.parent.mkdir(parents=True, exist_ok=True)
-        # Written 0600 from the start rather than chmod'ed after: between the
-        # two there is a window where the key is world-readable.
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        if not created:
+            os.fsync(stored.fileno())
+    # Existence after a failed startup is not evidence of directory durability.
+    # Every uncached load confirms the whole chain to the filesystem root.
+    for directory in path.parents:
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
         try:
-            os.write(fd, key.encode("utf-8"))
+            os.fsync(fd)
         finally:
             os.close(fd)
+    if created:
         logger.info("created a new master key at %s", path)
 
     _MASTER_CACHE[str(path)] = key

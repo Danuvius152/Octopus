@@ -50,8 +50,10 @@ async def test_harness_reader_freezes_provenance_before_consumer_context_changes
         "result": {"content": [{"type": "text", "text": "Started bg task `old` (tests)."}]},
     }}))
     run.bind_tool_context("new-request", "new-attempt")
-    call = run._event_queue.get_nowait()
-    result = run._event_queue.get_nowait()
+    stream = run.stream()
+    call = await anext(stream)
+    result = await anext(stream)
+    await stream.aclose()
     assert call.runtime_metadata["request_id"] == "old-request"
     assert result.runtime_metadata["request_id"] == "old-request"
     assert call.runtime_metadata["tool_call_id"] == result.runtime_metadata["tool_call_id"]
@@ -157,7 +159,9 @@ async def test_terminal_retires_call_context_but_keeps_captured_native_child_pro
     await run._handle_line(json.dumps({"type": "assistant", "message": {"content": [{
         "type": "tool_use", "id": "spawn", "name": "Agent", "input": {},
     }]}}))
-    spawn = run._event_queue.get_nowait()
+    stream = run.stream()
+    spawn = await anext(stream)
+    await stream.aclose()
     await run._handle_line(json.dumps({"type": "result", "subtype": "success", "is_error": False}))
     idle = []
 

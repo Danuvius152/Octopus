@@ -8,6 +8,8 @@ rationale.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from server.large_prompts import (
@@ -228,8 +230,9 @@ async def test_send_message_hands_backend_pointer_for_huge_prompt(
         mgr._make_run = lambda s, agent=None, connectors=None: RecordingBackend()  # type: ignore[method-assign,assignment]
 
         huge = "Q" * (LARGE_PROMPT_THRESHOLD_BYTES + 50_000)
-        async for _ in mgr._execute_claimed_request(session.id, huge):
-            pass
+        receipt = await mgr.start_message(session.id, huge)
+        assert receipt.accepted
+        assert (await asyncio.wait_for(receipt.wait(), 5)).outcome.status == "success"
 
         # Backend got the pointer, NOT the 150 KB original. This is the
         # property that makes the whole feature load-bearing for E2BIG.

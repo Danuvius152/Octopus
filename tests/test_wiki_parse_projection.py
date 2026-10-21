@@ -33,14 +33,14 @@ def test_indexing_shares_current_parse_but_catalog_reads_current_body(tmp_path, 
     store = None
     try:
         if entry != "construct":
-            store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+            store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
         (root / "note.md").write_text(TEXT)
         if entry == "prepared":
             extracted = extract(TEXT.encode(), ".md")
             prepared = {"extracted": extracted, "parsed": format.parse(extracted["text"])}
         calls = count_parses(monkeypatch)
         if entry == "construct":
-            store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+            store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
         elif entry == "refresh":
             store.refresh()
         elif entry == "search":
@@ -115,7 +115,7 @@ def test_link_validation_reuses_candidate_parse_for_metadata(tmp_path, monkeypat
     root = tmp_path / "vault"
     root.mkdir()
     (root / "note.md").write_text(TEXT)
-    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
     try:
         candidate = TEXT + "\nAdded [self](#fixture).\n"
         calls = count_parses(monkeypatch)

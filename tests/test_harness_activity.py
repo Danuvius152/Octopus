@@ -1,6 +1,7 @@
 """Execution activity at the Harness boundary is independent of display output."""
 from __future__ import annotations
 
+import asyncio
 import json
 
 import pytest
@@ -19,7 +20,8 @@ async def test_empty_reasoning_updates_activity_without_display():
         "item": {"id": "item_0", "type": "reasoning", "text": ""},
     }))
     assert len(ticks) == 1
-    assert run._event_queue.empty()
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(anext(run.stream()), 0.01)
     run.unbind_activity(token)
 
 

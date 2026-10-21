@@ -627,6 +627,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/submissions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get Recoverable Inputs */
+        get: operations["get_recoverable_inputs_api_sessions__session_id__submissions_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/submissions/{client_id}": {
         parameters: {
             query?: never;
@@ -636,6 +653,40 @@ export interface paths {
         };
         /** Get Submission Status */
         get: operations["get_submission_status_api_sessions__session_id__submissions__client_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/submissions/{client_id}/recovery": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Dismiss Recoverable Input */
+        delete: operations["dismiss_recoverable_input_api_sessions__session_id__submissions__client_id__recovery_delete"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/sessions/{session_id}/submissions/{client_id}/attachments/{attachment_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Recover Submission Attachment */
+        get: operations["recover_submission_attachment_api_sessions__session_id__submissions__client_id__attachments__attachment_id__get"];
         put?: never;
         post?: never;
         delete?: never;
@@ -2849,6 +2900,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/ready": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Readiness */
+        get: operations["readiness_ready_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -3385,6 +3453,44 @@ export interface components {
             reason?: string | null;
             /** Work Id */
             work_id?: string | null;
+        };
+        /** ClientSubmissionStatus */
+        ClientSubmissionStatus: {
+            /** Session Id */
+            session_id: string;
+            /** Client Request Id */
+            client_request_id: string;
+            /** Request Id */
+            request_id: string;
+            /** Accepted */
+            accepted: boolean;
+            /** Disposition */
+            disposition?: string | null;
+            execution: components["schemas"]["SubmissionExecution"];
+            input?: components["schemas"]["SubmissionInput"] | null;
+            outcome?: components["schemas"]["TurnOutcome"] | null;
+            /** Message */
+            message?: string | null;
+            /** Code */
+            code?: string | null;
+            /** State */
+            state?: "unknown" | null;
+            /** Recovery Of Client Id */
+            recovery_of_client_id?: string | null;
+            /** Recovered By Client Id */
+            recovered_by_client_id?: string | null;
+        };
+        /** ClientSubmissionSummary */
+        ClientSubmissionSummary: {
+            /** Client Request Id */
+            client_request_id: string;
+            /** Request Id */
+            request_id: string;
+            execution: components["schemas"]["SubmissionExecution"];
+            /** Preview */
+            preview: string;
+            /** Attachment Count */
+            attachment_count: number;
         };
         /** CodexLoginCancelRequest */
         CodexLoginCancelRequest: {
@@ -4583,6 +4689,19 @@ export interface components {
             tool_call_id: string;
             receipt?: components["schemas"]["ToolReceipt"] | null;
         };
+        /** SavedAttachment */
+        SavedAttachment: {
+            /** Id */
+            id: string;
+            /** Filename */
+            filename: string;
+            /** Size */
+            size: number;
+            /** Mime Type */
+            mime_type: string;
+            /** Sha256 */
+            sha256: string;
+        };
         /**
          * ScheduleFromTextRequest
          * @description Natural-language schedule: `text` is parsed (rigid fast-path, else AI)
@@ -5130,6 +5249,42 @@ export interface components {
              */
             sources: components["schemas"]["Source"][];
         };
+        /** SubmissionExecution */
+        SubmissionExecution: {
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "reserved" | "queued" | "claimed" | "completed" | "succeeded" | "failed" | "interrupted" | "withdrawn" | "unknown" | "rejected";
+            /** Reason Code */
+            reason_code?: string | null;
+            /** State Version */
+            state_version: number;
+            /** Updated At */
+            updated_at?: string | null;
+            /** Execution Owner Request Id */
+            execution_owner_request_id: string;
+            /** Recoverable Input */
+            recoverable_input: boolean;
+        };
+        /** SubmissionInput */
+        SubmissionInput: {
+            /** Content */
+            content: string;
+            /** Attachment Ids */
+            attachment_ids: string[];
+            /** Attachments */
+            attachments: components["schemas"]["SavedAttachment"][];
+            /** Wiki Mode */
+            wiki_mode?: string | null;
+        };
+        /** SubmissionRecoveryPage */
+        SubmissionRecoveryPage: {
+            /** Items */
+            items: components["schemas"]["ClientSubmissionSummary"][];
+            /** Next Cursor */
+            next_cursor?: number | null;
+        };
         /** SubmitAnswerRequest */
         SubmitAnswerRequest: {
             /** Answers */
@@ -5181,6 +5336,46 @@ export interface components {
             delegation_id?: string | null;
             /** Work Id */
             work_id?: string | null;
+        };
+        /** TurnOutcome */
+        TurnOutcome: {
+            /**
+             * Kind
+             * @default outcome
+             * @constant
+             */
+            kind: "outcome";
+            /** Request Id */
+            request_id: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "success" | "failed" | "interrupted";
+            /** Message */
+            message?: string | null;
+            /** Code */
+            code?: string | null;
+            /** Provider Code */
+            provider_code?: string | null;
+            /** Recovery */
+            recovery?: {
+                [key: string]: number;
+            };
+            /**
+             * Recording Integrity
+             * @default complete
+             * @enum {string}
+             */
+            recording_integrity: "complete" | "incomplete";
+            /** Recording Issues */
+            recording_issues?: {
+                [key: string]: number;
+            };
+            /** Recording Locations */
+            recording_locations?: {
+                [key: string]: unknown;
+            }[];
         };
         /** UpdateConnectorRequest */
         UpdateConnectorRequest: {
@@ -6787,6 +6982,41 @@ export interface operations {
             };
         };
     };
+    get_recoverable_inputs_api_sessions__session_id__submissions_get: {
+        parameters: {
+            query?: {
+                before?: number | null;
+                limit?: number;
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SubmissionRecoveryPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_submission_status_api_sessions__session_id__submissions__client_id__get: {
         parameters: {
             query?: {
@@ -6796,6 +7026,73 @@ export interface operations {
             path: {
                 session_id: string;
                 client_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientSubmissionStatus"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    dismiss_recoverable_input_api_sessions__session_id__submissions__client_id__recovery_delete: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+                client_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    recover_submission_attachment_api_sessions__session_id__submissions__client_id__attachments__attachment_id__get: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+                client_id: string;
+                attachment_id: string;
             };
             cookie?: never;
         };
@@ -11241,6 +11538,26 @@ export interface operations {
         };
     };
     health_health_get: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+        };
+    };
+    readiness_ready_get: {
         parameters: {
             query?: never;
             header?: never;

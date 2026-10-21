@@ -6,7 +6,7 @@ from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
 from .. import deps
 from ..deps import SessionMgr
-from ..sessions.turns import QuotaExceeded
+from ..sessions.runtime_types import QuotaExceeded
 from ..ws_delivery import SocketDelivery
 
 logger = logging.getLogger(__name__)
@@ -91,6 +91,11 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                     }, session_scoped=False)
                 from ..attachments import AttachmentUnavailable
 
+                recovery_of = data.get("recovery_of_client_id")
+                if recovery_of is not None and (not isinstance(recovery_of, str) or not recovery_of or len(recovery_of) > 128 or not client_request_id):
+                    reject("Invalid recovery identity", code="invalid_recovery_identity")
+                    continue
+
                 attachment_ids = data.get("attachment_ids", [])
                 if not isinstance(attachment_ids, list) or any(not isinstance(a, str) for a in attachment_ids):
                     reject(str(AttachmentUnavailable()), code=AttachmentUnavailable.code)
@@ -109,7 +114,8 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                     if client_request_id:
                         from ..sessions.client_submissions import submit_client_message
                         response = await submit_client_message(session_manager, session_id, content, attachment_ids, client_request_id,
-                                                               wiki_mode=explicit_mode(content, data.get("wiki_mode")))
+                                                               wiki_mode=explicit_mode(content, data.get("wiki_mode")),
+                                                               recovery_of_client_id=recovery_of)
                         delivery.offer({"type": "submission", **response}, session_scoped=False)
                         continue
                     # The only steerable caller: this is a person typing.

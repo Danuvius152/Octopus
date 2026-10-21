@@ -86,7 +86,11 @@ async def test_raw_question_real_websocket_identity_and_terminal_control(tmp_pat
         assert len(submitted) == 1 and submitted[0]["question"] == question
         kwargs = submitted[0]["kwargs"]
         assert isinstance(kwargs["request_id"], str) and len(kwargs["request_id"]) == 32
-        assert {key: value for key, value in kwargs.items() if key != "request_id"} == {"attachment_ids": [], "steerable": True}
+        assert {key: value for key, value in kwargs.items() if key != "request_id"} == {
+            "attachment_ids": [], "steerable": True, "durable_client_input": True,
+        }
+        cursor = await db.conn.execute("SELECT payload FROM client_submissions WHERE request_id=?", (kwargs["request_id"],))
+        assert json.loads((await cursor.fetchone())[0])["content"] == question
         session = manager.get_session(probe.last_session_id)
         assert session.origin == "user" and session.parent_session_id is None
         if outcome == "success":

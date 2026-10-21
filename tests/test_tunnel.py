@@ -239,22 +239,27 @@ class TestCliTunnelFlag:
         args = parser.parse_args(["serve"])
         assert args.tunnel is None
 
-    def test_tunnel_flag_sets_env_var(self, monkeypatch):
+    def test_tunnel_flag_sets_env_var(self, monkeypatch, tmp_path):
         """--tunnel sets OCTOPUS_ENABLE_TUNNEL env var so it survives uvicorn reload."""
         import os
         from unittest.mock import patch as _patch
 
         from server.cli import build_parser, do_serve
+        from tests.test_service_runtime import installation_settings
 
         monkeypatch.delenv("OCTOPUS_ENABLE_TUNNEL", raising=False)
+        config, _ = installation_settings(tmp_path / "installation")
+        monkeypatch.setattr("server.config.settings", config)
+        monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex"))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude"))
 
         parser = build_parser()
         args = parser.parse_args(["serve", "--tunnel"])
 
-        # Prevent actually starting the server
-        with _patch("server.cli.Path.exists", return_value=True):
-            with _patch("server.main.run"):
-                do_serve(args)
+        # Keep real profile detection while preventing the isolated server start.
+        with _patch("server.main.run") as run:
+            do_serve(args)
+        run.assert_called_once_with()
 
         assert os.environ.get("OCTOPUS_ENABLE_TUNNEL") == "true"
 

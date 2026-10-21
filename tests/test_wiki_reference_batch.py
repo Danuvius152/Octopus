@@ -1,6 +1,5 @@
 """Batch identity decisions, invalidation and immutable source proof."""
 
-import sqlite3
 import uuid
 
 import pytest
@@ -18,7 +17,7 @@ CLAIM = "urn:uuid:7c1fd8f1-6ff3-4c28-99bb-a0d14567663f"
 def store(tmp_path):
     root = tmp_path / "vault"
     root.mkdir()
-    current = WikiStore(root, tmp_path / "state", uuid.uuid4().hex)
+    current = WikiStore(root, tmp_path / "state", uuid.uuid4().hex, create=True)
     try:
         yield current
     finally:
@@ -56,7 +55,7 @@ def test_duplicate_fresh_uid_claims_have_no_first_file_winner(store, reverse, mi
     with store.connect() as db:
         db.execute("DROP TABLE " + missing)
     store.close()
-    reopened = WikiStore(store.root, store.state, store.vault_id)
+    reopened = WikiStore(store.root, store.state, store.vault_id, health=store.health)
     try:
         with reopened.connect() as db:
             assert db.execute("SELECT 1 FROM uid_aliases WHERE uid=?", (CLAIM,)).fetchone() is None
@@ -99,7 +98,7 @@ def test_absent_exact_doc_reference_resolves_when_identity_appears_in_later_batc
     assert store.read("consumer.md")["revision"] == document["revision"]
     assert store.read("future.md")["id"] == target
     store.close()
-    reopened = WikiStore(store.root, store.state, store.vault_id)
+    reopened = WikiStore(store.root, store.state, store.vault_id, health=store.health)
     try:
         edge = reopened.graph("consumer.md")["edges"][0]
         assert (edge["to"], edge["status"]) == (target, "resolved")
@@ -238,7 +237,7 @@ def test_persistent_graph_pending_resumes_and_missing_reverse_cache_rebuilds(sto
     with store.connect() as db:
         db.execute("DROP TABLE wiki_edge_lookups")
     store.close()
-    reopened = WikiStore(store.root, store.state, store.vault_id)
+    reopened = WikiStore(store.root, store.state, store.vault_id, health=store.health)
     try:
         assert reopened.graph(consumer)["edges"][0]["to"] == target
         assert reopened.index_state()["index_status"] == "ready"
@@ -257,7 +256,9 @@ def test_graph_failure_rolls_back_before_acknowledging_filesystem_receipts(store
 
     def fail(db, row, metadata):
         if row["path"] == "consumer.md":
-            raise sqlite3.OperationalError("controlled graph publication failure")
+            # Exercise a classified logical query error. Unknown/physical
+            # storage failures use the subprocess exit contract instead.
+            db.execute('SELECT * FROM "controlled graph publication failure"')
         return resolve(db, row, metadata)
 
     write(store, "a.md", "# A\nNew evidence.\n")

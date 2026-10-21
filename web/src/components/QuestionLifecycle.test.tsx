@@ -135,7 +135,7 @@ it("keeps a newer WebSocket question answerable when the earlier HTTP refetch co
   vi.stubGlobal("WebSocket", Socket);
   vi.stubGlobal("fetch", vi.fn(async (url: string) => url.endsWith(`/api/sessions/${sid}`)
     ? detail : new Response(JSON.stringify(url.endsWith("/api/sessions")
-      ? useSessionStore.getState().sessions : []))));
+      ? useSessionStore.getState().sessions : url.endsWith("/submissions") ? { items: [] } : []))));
   useSessionStore.setState({ token: "question-test-token" });
   const dispatch = { generation: "service-a", revision: 1, paused: false, items: [], active_request_id: "r1" };
   handleWsMessage({ type: "dispatch_state", session_id: sid, dispatch_state: dispatch });

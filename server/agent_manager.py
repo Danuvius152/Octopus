@@ -10,12 +10,15 @@ not go through this manager.
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import uuid
 from datetime import UTC, datetime
+from functools import wraps
 from typing import Any
 
 from . import agent_memory
+from .aio import complete_cleanup
 from .config import settings
 from .credential_bindings import (
     CredentialBindingError,
@@ -29,9 +32,49 @@ class AgentError(Exception):
     """Agent business-rule violation. Routes map this to a 400/409."""
 
 
+def _memory_mutation(operation):
+    """Join the installation command's ownership, without waiting inside a run.
+
+    Bootstrap drains old runs while holding this same lock. A mutation must
+    therefore refuse contention before any effect, rather than make that run
+    wait for the command draining it. This also makes concurrent memory CRUD
+    explicitly retryable; an already-entered mutation finishes before bootstrap.
+    """
+    @wraps(operation)
+    async def mutate(self, *args, **kwargs):
+        async def command():
+            self.db.health.require_healthy()
+            try:
+                # locked() alone misses a released lock with an earlier
+                # bootstrap waiter. A zero deadline also respects its queue.
+                async with asyncio.timeout(0):
+                    await self.db._bootstrap_lock.acquire()
+            except TimeoutError as error:
+                raise AgentError("Agent memory is busy with another installation or memory operation; retry") from error
+            try:
+                return await operation(self, *args, **kwargs)
+            finally:
+                self.db._bootstrap_lock.release()
+
+        return await complete_cleanup(command())
+
+    return mutate
+
+
 class AgentManager:
     def __init__(self, db: Database) -> None:
         self.db = db
+
+    def _require_memory_handoff(self, agent: dict[str, Any]) -> None:
+        from .memory_handoff import MemoryHandoffConflict, memory_handoff_pending
+
+        try:
+            if memory_handoff_pending(agent["id"], agent.get("user_id")):
+                raise AgentError("Agent memory handoff is incomplete; finish account recovery before changing this agent")
+        except MemoryHandoffConflict as error:
+            raise AgentError(str(error)) from error
+        except OSError as error:
+            self.db.health.fail(error)
 
     async def list_agents(
         self, *, include_archived: bool = False, user_id: str | None = None
@@ -54,6 +97,7 @@ class AgentManager:
         """This account's protected Default Agent (is_system=1)."""
         return await self.db.get_system_agent(user_id)
 
+    @_memory_mutation
     async def create_agent(
         self,
         *,
@@ -173,6 +217,7 @@ class AgentManager:
             raise AgentError("The Default Agent cannot be archived")
         await self.db.archive_agent(agent_id)
 
+    @_memory_mutation
     async def unarchive_agent(
         self, agent_id: str, user_id: str | None = None
     ) -> dict[str, Any]:
@@ -182,6 +227,7 @@ class AgentManager:
         agent = await self.db.get_agent(agent_id, user_id=user_id)
         if agent is None:
             raise AgentError("Agent not found")
+        self._require_memory_handoff(agent)
         if not agent["archived"]:
             return agent
         clash = await self.db.get_agent_by_name(
@@ -243,12 +289,14 @@ class AgentManager:
         await self.db.reorder_agent_pins(ordered_ids)
         return await self.db.load_agents(user_id=user_id)
 
+    @_memory_mutation
     async def delete_agent(self, agent_id: str) -> None:
         agent = await self.db.get_agent(agent_id)
         if agent is None:
             raise AgentError("Agent not found")
         if agent["is_system"]:
             raise AgentError("The Default Agent cannot be deleted")
+        self._require_memory_handoff(agent)
         if await self.db.count_sessions_for_agent(agent_id) > 0:
             raise AgentError(
                 "Agent still has sessions; archive it instead of deleting"

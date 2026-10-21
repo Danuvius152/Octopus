@@ -99,7 +99,9 @@ async def create_question(
         # delete. Surface as 404 so the MCP server can report cleanly.
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     session = session_manager.get_session(session_id, user_id)
-    pending = session._pending_questions.get(qid) if session else None
+    pending = session._questions.get(qid) if session else None
+    if pending is not None and pending.state != "pending":
+        pending = None
     return {"question_id": qid, "deadline": pending.deadline if pending else None}
 
 

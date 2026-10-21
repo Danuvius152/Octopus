@@ -18,6 +18,8 @@ import {
 } from "../stores/sessionStore";
 import { ForkDialog } from "./ForkDialog";
 import { ResearchCard } from "./ResearchCard";
+import { RecoverableInputs } from "./RecoverableInputs";
+import type { ClientSubmissionStatus } from "../api";
 import { WikiJobCards } from "./WikiJobCards";
 import { TranscriptIntegrityNotice } from "./TranscriptIntegrityNotice";
 import { MessageBubble } from "./MessageBubble";
@@ -73,7 +75,8 @@ interface Props {
     content: string,
     attachmentIds?: string[],
     wikiMode?: WikiMessageMode,
-    submissionId?: string
+    submissionId?: string,
+    recoveryOfClientId?: string
   ) => void | Promise<SubmissionReply>;
   interrupt: (sessionId: string) => void | Promise<SubmissionReply>;
   answerQuestion: (
@@ -99,12 +102,14 @@ export function ChatView({
   onOpenSchedules,
 }: Props) {
   const [input, setInput] = useState("");
+  const [restoredInput, setRestoredInput] = useState<{ sessionId: string; clientId: string } | null>(null);
   const [requiredAttachmentCount, setRequiredAttachmentCount] = useState(0);
   const submittedDrafts = useRef(new Map<string, { sessionId: string; text: string; attachments: PendingAttachment[] }>());
   const [rejectedDrafts, setRejectedDrafts] = useState<{
     id: string; sessionId: string; text: string; attachments: PendingAttachment[];
     reason: string;
-    uncertain?: { id: string; content: string; attachmentIds?: string[] };
+    recoveryOfClientId?: string;
+    uncertain?: { id: string; content: string; attachmentIds?: string[]; recoveryOfClientId?: string };
     confirming?: boolean;
   }[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -150,6 +155,15 @@ export function ChatView({
   const agentLabel = activeAgent?.name || "Assistant";
   const isArchived = !!activeSession?.archived;
   const transcriptDamaged = activeSession?.transcript_integrity === "duplicate_seq";
+  const restoreSavedInput = useCallback((saved: ClientSubmissionStatus, files: File[]) => {
+    if (!activeSessionId || saved.session_id !== activeSessionId || input.length || pendingAttachments.length || isArchived || transcriptDamaged || !saved.input) return;
+    setInput(saved.input.content);
+    addFiles(files);
+    setRequiredAttachmentCount(saved.input.attachment_ids.length);
+    setHistory(HISTORY_IDLE);
+    setRestoredInput({ sessionId: activeSessionId, clientId: saved.client_request_id });
+    textareaRef.current?.focus();
+  }, [activeSessionId, input, pendingAttachments, isArchived, transcriptDamaged, addFiles]);
   const pendingQueueMap = useSessionStore((s) => s.pendingQueue);
   const dispatchStates = useSessionStore((s) => s.dispatchStates);
   const dispatchPaused = activeSessionId ? dispatchStates[activeSessionId]?.paused ?? false : false;
@@ -554,23 +568,30 @@ export function ChatView({
     const draft = {
       id: newSubmissionId(), sessionId: activeSessionId, text: input,
       attachments: pendingAttachments.filter((attachment) => attachment.status === "ready"),
+      ...(restoredInput?.sessionId === activeSessionId ? { recoveryOfClientId: restoredInput.clientId } : {}),
     };
-    const submission = sendMessage(
+    const submission = draft.recoveryOfClientId ? sendMessage(
+      activeSessionId, content, readyAttachmentIds.length > 0 ? readyAttachmentIds : undefined,
+      undefined, undefined, draft.recoveryOfClientId,
+    ) : sendMessage(
       activeSessionId,
       content,
       readyAttachmentIds.length > 0 ? readyAttachmentIds : undefined,
       undefined
     );
     setInput("");
+    setRestoredInput(null);
     setHistory(HISTORY_IDLE);
     clearAttachments();
     setRequiredAttachmentCount(0);
     if (submission) {
       void submission.then((reply) => {
-        if (!reply.accepted) setRejectedDrafts((drafts) => [...drafts, {
+        if (!reply.accepted || reply.execution?.state === "withdrawn" || reply.state === "unknown") setRejectedDrafts((drafts) => [...drafts, {
           ...draft, reason: reply.message || "Your message was not accepted.",
+          ...(reply.execution?.state === "withdrawn" && reply.clientRequestId ? { recoveryOfClientId: reply.clientRequestId } : {}),
           ...(reply.state === "unknown" && reply.clientRequestId ? { uncertain: {
             id: reply.clientRequestId, content, attachmentIds: readyAttachmentIds.length ? readyAttachmentIds : undefined,
+            recoveryOfClientId: draft.recoveryOfClientId,
           } } : {}),
         }]);
         else if (reply.requestId && draft.attachments.length) {
@@ -588,10 +609,11 @@ export function ChatView({
     setRejectedDrafts((drafts) => drafts.map((item) => item.id === draft.id ? { ...item, confirming: true } : item));
     const original = draft.uncertain;
     try {
-      const reply = await sendMessage(draft.sessionId, original.content, original.attachmentIds, undefined, original.id);
+      const reply = await sendMessage(draft.sessionId, original.content, original.attachmentIds, undefined, original.id, original.recoveryOfClientId);
       if (!reply) return;
-      setRejectedDrafts((drafts) => reply.accepted ? drafts.filter((item) => item.id !== draft.id) : drafts.map((item) => item.id === draft.id
+      setRejectedDrafts((drafts) => reply.accepted && reply.state !== "unknown" && reply.execution?.state !== "withdrawn" ? drafts.filter((item) => item.id !== draft.id) : drafts.map((item) => item.id === draft.id
         ? { ...item, confirming: false, reason: reply.message || "Admission confirmation failed.",
+          ...(reply.execution?.state === "withdrawn" ? { recoveryOfClientId: original.id } : {}),
           uncertain: reply.state === "unknown" || reply.code === "not_sent" ? original : undefined } : item));
     } catch {
       setRejectedDrafts((drafts) => drafts.map((item) => item.id === draft.id ? { ...item, confirming: false } : item));
@@ -1538,6 +1560,8 @@ export function ChatView({
                 onClick={() => {
                   if (draft.uncertain || !activeSessionId || isArchived || input.length > 0 || pendingAttachments.length > 0) return;
                   setInput(draft.text);
+                  setRestoredInput(draft.recoveryOfClientId && draft.sessionId === activeSessionId
+                    ? { sessionId: activeSessionId, clientId: draft.recoveryOfClientId } : null);
                   restoreAttachments(draft.attachments);
                   setRequiredAttachmentCount(0);
                   setHistory(HISTORY_IDLE);
@@ -1675,6 +1699,10 @@ export function ChatView({
       {activeSessionId && <DispatchQueue key={activeSessionId} sessionId={activeSessionId} readOnly={isArchived || transcriptDamaged} />}
       {activeSessionId && <CommandNotices sessionId={activeSessionId} />}
 
+      {activeSessionId && <RecoverableInputs key={`recovery-${activeSessionId}`} sessionId={activeSessionId} connected={connected}
+        disabled={isArchived || transcriptDamaged || input.length > 0 || pendingAttachments.length > 0}
+        onRestore={restoreSavedInput} />}
+
       {savedDrafts}
       {isArchived || transcriptDamaged ? (
         <div className="chat-archived-banner px-4 py-3 border-t border-border bg-muted/40 text-sm text-muted-foreground flex items-center justify-between gap-3 shrink-0">
@@ -1730,7 +1758,7 @@ export function ChatView({
             {pendingAttachments.length < requiredAttachmentCount && <div role="alert" className="px-3 pt-2 text-sm text-destructive">
               Re-attach {requiredAttachmentCount} {requiredAttachmentCount === 1 ? "file" : "files"} to send the complete message.
               <button type="button" className="ml-2 underline" onClick={() => {
-                setInput(""); clearAttachments(); setRequiredAttachmentCount(0);
+                setInput(""); clearAttachments(); setRequiredAttachmentCount(0); setRestoredInput(null);
               }}>Discard draft</button>
             </div>}
             {pendingAttachments.length > 0 && (

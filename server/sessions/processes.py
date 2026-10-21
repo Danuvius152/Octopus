@@ -24,43 +24,45 @@ from .base import (
     SessionManagerBase,
     logger,
 )
+from .owner_runtime import RetireHeldProcess
 
 
 class ProcessesMixin(SessionManagerBase):
 
     async def retire_ownerless_runs(self) -> None:
-        """Stop old execution before account adoption, keeping queued work."""
+        """Join old lifecycle work and stop execution before account adoption."""
         from ..mcp_identity import revoke_ownerless_runs
 
+        async def join_lifecycle_commands() -> None:
+            while True:
+                async with self._agent_lifecycle_lock:
+                    self._legacy_transition = True
+                    pending = tuple(
+                        operation
+                        for operations in self._agent_operations.values()
+                        for operation in operations
+                    )
+                if not pending:
+                    return
+                await asyncio.gather(*(asyncio.shield(operation) for operation in pending))
+
+        # A reserved command still owns its file work and final installation
+        # or compensation. It must finish before the account transaction can
+        # adopt its rows and live sessions; no coordination lock spans the join.
+        await join_lifecycle_commands()
         revoke_ownerless_runs()
         retiring = [
-            (session, session._backend, session._active_task)
+            session
             for session in list(self.sessions.values())
-            if session.user_id is None and (session._backend or session._active_task)
+            if session.user_id is None and (session._run.backend or self.session_is_executing(session))
         ]
-        for session, backend, driver in retiring:
+        for session in retiring:
             await self.interrupt(session.id)
-            if backend is not None:
-                self._retire_backend(session, backend)
-            if driver is not None:
-                done, pending = await asyncio.wait({driver}, timeout=5.0)
-                if pending:
-                    raise RuntimeError("Pre-account execution retirement remains unconfirmed")
-                if not driver.cancelled() and driver.exception() is not None:
-                    raise driver.exception()
-            await self._await_backend_retirement(session)
+            await self.await_session_execution(session.id, timeout=5.0)
+        # Request retirement may finish an exact Wiki cleanup archive. Join
+        # those registrations too, without closing their original cleanup path.
+        await join_lifecycle_commands()
 
-    async def _safe_backend_interrupt(self, backend: HarnessRun) -> None:
-        """Best-effort background teardown of a wedged backend subprocess.
-
-        Used from interrupt() so the WS caller isn't held by SIGTERM/SIGKILL
-        escalation. Any failure is logged — the lock has already been
-        released by then via the cancelled inner task.
-        """
-        try:
-            await backend.interrupt()
-        except Exception:
-            logger.exception("Background backend.interrupt() failed")
 
     async def _enforce_held_cap(self, *, keep_session_id: str | None = None) -> int:
         """Drop least-recently-used held processes until at most
@@ -74,29 +76,33 @@ class ProcessesMixin(SessionManagerBase):
         held = [
             s
             for s in self.sessions.values()
-            if s._backend is not None
-            and s._held_run_at is not None
+            if s._run.backend is not None
+            and s._run.held_since is not None
             and s.id != keep_session_id
-            and (s._active_task is None or s._active_task.done())
+            and not self.session_is_executing(s)
         ]
         if len(held) < _MAX_HELD_PROCESSES:
             return 0
-        held.sort(key=lambda s: s._held_run_at or 0.0)
+        held.sort(key=lambda s: s._run.held_since or 0.0)
         # `keep_session_id` occupies one slot of the budget.
         excess = len(held) - (_MAX_HELD_PROCESSES - (1 if keep_session_id else 0))
         stopped = 0
         for session in held[: max(0, excess)]:
-            backend = session._backend
-            if backend is None:
+            backend = session._run.backend
+            held_since = session._run.held_since
+            if backend is None or held_since is None:
                 continue
-            self._retire_backend(session, backend)
             try:
-                await self._await_backend_retirement(session)
-                stopped += 1
-            except Exception:
-                logger.exception(
-                    "failed stopping held process for session %s", session.id
-                )
+                retirement = await self._session_owner(session).call_runtime(RetireHeldProcess(backend, held_since))
+                if retirement is not None:
+                    _, pending = await asyncio.wait({retirement}, timeout=_HELD_STOP_TIMEOUT)
+                    if pending:
+                        raise RuntimeError("Held process retirement remains unconfirmed")
+                    await asyncio.shield(retirement)
+                    stopped += 1
+            except Exception as error:
+                logger.error("failed stopping held process session=%s error=%s\n%s",
+                             session.id, type(error).__name__, backend.format_exception(error))
         if stopped:
             logger.info("released %d held CLI process(es) to stay under the cap", stopped)
         return stopped
@@ -114,29 +120,33 @@ class ProcessesMixin(SessionManagerBase):
         held = [
             s
             for s in self.sessions.values()
-            if s._backend is not None
-            and s._held_run_at is not None
-            and (s._active_task is None or s._active_task.done())
+            if s._run.backend is not None
+            and s._run.held_since is not None
+            and not self.session_is_executing(s)
         ]
-        doomed = [s for s in held if now - (s._held_run_at or now) >= _HELD_PROCESS_IDLE_SECONDS]
+        doomed = [s for s in held if now - (s._run.held_since or now) >= _HELD_PROCESS_IDLE_SECONDS]
         survivors = [s for s in held if s not in doomed]
         if len(survivors) > _MAX_HELD_PROCESSES:
-            survivors.sort(key=lambda s: s._held_run_at or 0.0)
+            survivors.sort(key=lambda s: s._run.held_since or 0.0)
             doomed.extend(survivors[: len(survivors) - _MAX_HELD_PROCESSES])
 
         stopped = 0
         for session in doomed:
-            backend = session._backend
-            if backend is None:
+            backend = session._run.backend
+            held_since = session._run.held_since
+            if backend is None or held_since is None:
                 continue
-            self._retire_backend(session, backend)
             try:
-                await self._await_backend_retirement(session)
-                stopped += 1
-            except Exception:
-                logger.exception(
-                    "failed stopping held process for session %s", session.id
-                )
+                retirement = await self._session_owner(session).call_runtime(RetireHeldProcess(backend, held_since))
+                if retirement is not None:
+                    _, pending = await asyncio.wait({retirement}, timeout=_HELD_STOP_TIMEOUT)
+                    if pending:
+                        raise RuntimeError("Held process retirement remains unconfirmed")
+                    await asyncio.shield(retirement)
+                    stopped += 1
+            except Exception as error:
+                logger.error("failed stopping held process session=%s error=%s\n%s",
+                             session.id, type(error).__name__, backend.format_exception(error))
         if stopped:
             logger.info("reaped %d idle CLI process(es)", stopped)
         return stopped
@@ -167,14 +177,20 @@ class ProcessesMixin(SessionManagerBase):
         """
         stopped = 0
         for session in list(self.sessions.values()):
-            backend = session._backend
-            if backend is not None:
-                self._retire_backend(session, backend, reason="service_shutdown")
-            if not session._backend_retirements:
-                continue
-            # Observe captured retirement under the existing sweep budget.
-            # An unconfirmed exit keeps its owner and is a shutdown failure.
-            await self._await_backend_retirement(session, timeout=_HELD_STOP_TIMEOUT)
+            backend = session._run.backend
+            # The same sweep budget covers the original writer handoff and
+            # resource confirmation. A blocked writer still owns its command
+            # after this waiter times out; shutdown must retain the database.
+            deadline = asyncio.timeout(_HELD_STOP_TIMEOUT)
+            try:
+                async with deadline:
+                    if backend is not None:
+                        await self._retire_backend(session, backend, reason="service_shutdown")
+                    await self._await_backend_retirement(session, timeout=_HELD_STOP_TIMEOUT)
+            except TimeoutError as error:
+                if not deadline.expired():
+                    raise
+                raise RuntimeError("Held process retirement remains unconfirmed") from error
             if backend is not None:
                 stopped += 1
         return stopped
@@ -184,45 +200,6 @@ class ProcessesMixin(SessionManagerBase):
         self._reaper_task = None
         await drain_cancelled(task, "held-process reaper")
 
-    def _reusable_run(
-        self,
-        session: Session,
-        working_dir: str,
-        credential: Any,
-        agent: dict[str, Any] | None,
-        connectors: list[tuple[Any, Any]] | None,
-    ) -> HarnessRun | None:
-        """The session's held process, if it can serve this turn.
-
-        Spawning the CLI costs ~1.5s that a live process doesn't pay, and its
-        prompt cache stays warm (inline-steering.md §3). Reuse is refused —
-        and the caller spawns fresh — whenever anything baked in at spawn has
-        changed, so a persona edit or a credential swap can never be served by
-        a process still running the old one.
-        """
-        held = session._backend
-        if held is None or not held.reusable or not held.is_alive():
-            return None
-        # Never hand a process that's mid-turn to a second turn. `start_message`
-        # normally prevents concurrent turns, but reuse makes a live process
-        # reachable from more paths than before, and two turns sharing one
-        # stdin would interleave their prompts into one conversation.
-        if session._steer_open:
-            logger.warning(
-                "session %s: refusing to reuse a process with a turn in flight",
-                session.id,
-            )
-            return None
-        want = self._make_run(session, agent, connectors).spawn_signature(
-            working_dir, credential
-        )
-        if held.spawn_signature(working_dir, credential) != want:
-            logger.info(
-                "session %s config changed; respawning instead of reusing",
-                session.id,
-            )
-            return None
-        return held
 
     def _forget_backend(self, session: Session, expected: HarnessRun | None = None, *, reason: str = "process_ended") -> list[dict[str, Any]]:
         """Detach a session from its CLI process and close out what that
@@ -233,12 +210,12 @@ class ProcessesMixin(SessionManagerBase):
         rest of the session (native-subagents.md §7).
         """
         from ..mcp_identity import revoke_run
-        if expected is not None and session._backend is not expected:
+        if expected is not None and session._run.backend is not expected:
             revoke_run(getattr(expected, "run_lease_id", None))
             return []
-        revoke_run(getattr(session._backend, "run_lease_id", None))
-        session._backend = None
-        session._held_run_at = None
+        revoke_run(getattr(session._run.backend, "run_lease_id", None))
+        session._run.backend = None
+        session._run.held_since = None
         frames = []
         for key, run in list(session._subagents.items()):
             if run.status in {"running", "unknown"}:

@@ -17,7 +17,7 @@ from server.wiki.store import WikiError, WikiStore
 def store(tmp_path):
     root = tmp_path / "vault"
     root.mkdir()
-    instance = WikiStore(root, tmp_path / "state", uuid.uuid4().hex)
+    instance = WikiStore(root, tmp_path / "state", uuid.uuid4().hex, create=True)
     try:
         yield instance
     finally:
@@ -91,7 +91,7 @@ def test_self_fragment_survives_first_index_reindex_and_reopen(store, link):
                              current["revision"], "human", "append")
     check(store)
     store.close()
-    reopened = WikiStore(store.root, store.state, store.vault_id)
+    reopened = WikiStore(store.root, store.state, store.vault_id, health=store.health)
     try:
         check(reopened)
     finally:

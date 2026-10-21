@@ -6,7 +6,9 @@ extracted text. Parsing never modifies the file or certifies its content.
 
 import json
 import re
+import unicodedata
 from dataclasses import dataclass, field
+from html.parser import HTMLParser
 from typing import Any
 
 import yaml
@@ -16,8 +18,9 @@ from markdown_it.token import Token
 from .bounded_yaml import compose as compose_metadata
 from .bounded_yaml import load as load_metadata
 
-VERSION = "okf-parser-v6"
+VERSION = "okf-parser-v7"
 _FRONT = re.compile(r"\A\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|$)", re.S)
+_BLOCK_ID = re.compile(r"\^([A-Za-z0-9-]+)[ \t]*(?=\r\n|\r|\n|$)")
 _markdown = MarkdownIt("commonmark")
 _ROLES = {
     "reference": "reference", "source": "source", "synthesis": "synthesis",
@@ -37,6 +40,8 @@ class DocumentFormat:
     body_start: int = 0
     sections: list[dict] = field(default_factory=list)
     headings: list[dict] = field(default_factory=list)
+    html_anchors: set[str] = field(default_factory=set)
+    block_spans: dict[str, tuple[int, int] | None] = field(default_factory=dict)
     error: str | None = None
     footnotes: list[str] = field(default_factory=list)
     # Owned by this parse of the current text, never cached or persisted.
@@ -45,6 +50,10 @@ class DocumentFormat:
     tokens: list[Token] = field(default_factory=list, repr=False)
     env: dict[str, Any] = field(default_factory=dict, repr=False)
     line_offsets: list[int] = field(default_factory=list, repr=False)
+
+    def title(self, fallback: str) -> str:
+        """Project the first actual top-level H1 without rescanning source."""
+        return next((heading["title"] for heading in self.headings if heading["level"] == 1 and heading["depth"] == 0), fallback)
 
     def metadata(self, legacy: dict) -> dict:
         result: dict[str, Any] = {"format_version": VERSION, "body_start": self.body_start, "body_sections": self.sections, "footnote_ids": self.footnotes}
@@ -100,11 +109,80 @@ def markdown_line_offsets(text: str, start: int = 0) -> list[int]:
     return offsets
 
 
+def heading_slug(title: str) -> str:
+    """Keep the existing Unicode/link spelling used by Wiki heading anchors."""
+    title = re.sub(r"\[([^]]+)\]\([^)]*\)", r"\1", title)
+    return "-".join("".join(char for char in title.casefold() if char.isspace() or char in "_-" or unicodedata.category(char)[0] in {"L", "N"}).split())
+
+
+class _HTMLAnchors(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self.anchors: set[str] = set()
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.anchors.update(value for key, value in attrs if key in {"id", "name"} and value is not None)
+
+
+def _explicit_locations(result: DocumentFormat, text: str) -> None:
+    """Project explicit anchors only from actual HTML and prose tokens."""
+    html = _HTMLAnchors()
+    roots = [token for token in result.tokens if token.level == 0 and token.map is not None]
+    spans = []
+    for index, root in enumerate(roots):
+        assert root.map is not None
+        start = result.line_offsets[root.map[0]]
+        following = roots[index + 1].map if index + 1 < len(roots) else None
+        limit = result.line_offsets[following[0]] if following is not None else len(text)
+        end = result.line_offsets[root.map[1]]
+        # Reference definitions have no block tokens. Retain separator
+        # whitespace without swallowing such unrelated source between blocks.
+        while end < limit and text[end] in " \t\r\n":
+            end += 1
+        spans.append((start, end))
+    root_index = -1
+    for token in result.tokens:
+        if token.level == 0 and token.map is not None:
+            root_index += 1
+        if token.type == "html_block":
+            html.feed(token.content)
+        literal_ids = set()
+        if token.children and token.map is not None:
+            source = text[result.line_offsets[token.map[0]]:result.line_offsets[token.map[1]]]
+            literal_ids = {marker[1] for marker in _BLOCK_ID.finditer(source)}
+        for index, child in enumerate(token.children or []):
+            if child.type == "html_inline":
+                html.feed(child.content)
+            if child.type != "text" or root_index < 0:
+                continue
+            # The marker must end an actual prose line, rather than code,
+            # a link label or text followed by more inline markup.
+            following_child = token.children[index + 1] if token.children and index + 1 < len(token.children) else None
+            if following_child is not None and following_child.type not in {"softbreak", "hardbreak"}:
+                continue
+            marker = re.search(r"\^([A-Za-z0-9-]+)[ \t]*$", child.content)
+            if marker is None or marker[1] not in literal_ids:
+                continue
+            identifier = "^" + marker[1]
+            first = root_index
+            if roots[first].type == "paragraph_open" and token.content.strip() == identifier:
+                # A standalone ID belongs to the preceding complete prose or
+                # list block. It cannot turn a code example into a citation.
+                first -= 1
+                if first < 0 or roots[first].type not in {"paragraph_open", "heading_open", "bullet_list_open", "ordered_list_open", "blockquote_open"}:
+                    continue
+                if spans[first][1] != spans[root_index][0]:
+                    continue
+            span = (spans[first][0], spans[root_index][1])
+            result.block_spans[identifier] = None if identifier in result.block_spans else span
+    html.close()
+    result.html_anchors = html.anchors
+
+
 def parse(text: str) -> DocumentFormat:
-    result = DocumentFormat()
     match = _FRONT.match(text)
+    result = DocumentFormat(body_start=match.end() if match else int(text.startswith("\ufeff")))
     if match:
-        result.body_start = match.end()
         try:
             fields = load_metadata(match[1])
             if isinstance(fields, dict) and all(isinstance(key, str) for key in fields):
@@ -118,23 +196,42 @@ def parse(text: str) -> DocumentFormat:
     boundaries = [(result.body_start, "body", "")]
     active_role, active_heading, active_level = "body", "", 0
     tokens = result.tokens = _markdown.parse(body, result.env)
+    slugs: dict[str, int] = {}
+    containers: list[tuple[int, int]] = []
+    outlines: dict[int, list[dict]] = {}
     for index, token in enumerate(tokens):
         for child in token.children or []:
             if child.type == "text":
                 result.footnotes.extend(label for label in re.findall(r"\[\^([^\]\s]+)\]", child.content) if label not in result.footnotes)
+        if token.nesting == -1 and token.type != "heading_close":
+            containers.pop()
         if token.map is None:
             continue
         start, end = (offsets[number] for number in token.map)
         if token.type == "heading_open":
-            result.headings.append({"start": start, "end": end, "title": tokens[index + 1].content, "level": int(token.tag[1:])})
+            title, level = tokens[index + 1].content, int(token.tag[1:])
+            slug = heading_slug(title)
+            suffix = slugs.get(slug, 0)
+            slugs[slug] = suffix + 1
+            scope, section_end = containers[-1] if containers else (-1, len(text))
+            peers = outlines.setdefault(scope, [])
+            while peers and peers[-1]["level"] >= level:
+                peers.pop()["section_end"] = start
+            entry = {"start": start, "end": end, "title": title, "level": level, "depth": token.level,
+                     "slug": slug + (f"-{suffix}" if suffix else ""), "section_end": section_end}
+            result.headings.append(entry)
+            peers.append(entry)
+        elif token.nesting == 1:
+            containers.append((index, end))
         if token.type == "heading_open" and token.level == 0:
             heading = tokens[index + 1].content
+            active_heading = heading
             level = int(token.tag[1:])
             selected = _HEADINGS.get(heading.casefold())
             if selected is not None:
-                active_role, active_heading, active_level = selected, heading, level
+                active_role, active_level = selected, level
             elif not active_level or level <= active_level:
-                active_role, active_heading, active_level = "body", heading, level
+                active_role, active_level = "body", level
             boundaries.append((start, active_role, active_heading))
         elif token.type in {"fence", "code_block"}:
             boundaries.extend(((start, "example", active_heading), (end, active_role, active_heading)))
@@ -143,6 +240,7 @@ def parse(text: str) -> DocumentFormat:
         end = ordered[index + 1][0] if index + 1 < len(ordered) else len(text)
         if text[start:end].strip():
             result.sections.append({"start": start, "end": end, "role": role, "title": heading})
+    _explicit_locations(result, text)
     return result
 
 

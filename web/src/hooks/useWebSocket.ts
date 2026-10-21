@@ -702,6 +702,7 @@ export function useWebSocket() {
                 ...(data.state === "unknown" ? { state: "unknown" as const } : {}),
                 ...(typeof data.code === "string" ? { code: data.code } : {}),
                 ...(typeof data.request_id === "string" ? { requestId: data.request_id } : {}),
+                ...(data.execution ? { execution: data.execution } : {}),
               });
             }
           } else if (data.type === "command_receipt") {
@@ -746,7 +747,7 @@ export function useWebSocket() {
   }, []);
 
   const sendMessage = useCallback(
-    (sessionId: string, content: string, attachmentIds?: string[], wikiMode?: WikiMessageMode, submissionId?: string) => {
+    (sessionId: string, content: string, attachmentIds?: string[], wikiMode?: WikiMessageMode, submissionId?: string, recoveryOfClientId?: string): Promise<SubmissionReply> => {
       // Don't optimistically add to chat — the backend broadcasts a
       // user_message event whether the prompt fires immediately or after
       // dequeue, so a single broadcast handler keeps state consistent.
@@ -759,6 +760,7 @@ export function useWebSocket() {
         payload.attachment_ids = attachmentIds;
       }
       if (wikiMode) payload.wiki_mode = wikiMode;
+      if (recoveryOfClientId) payload.recovery_of_client_id = recoveryOfClientId;
       const clientRequestId = submissionId || newSubmissionId();
       payload.client_request_id = clientRequestId;
       if (wsRef.current?.readyState !== WebSocket.OPEN) {
@@ -791,7 +793,12 @@ export function useWebSocket() {
     const operation = String(data.type);
     const generation = getState().accountGeneration;
     const update = (state: "pending" | "accepted" | "failed" | "unknown", message?: string) => {
-      if (getState().accountGeneration === generation) getState().setControlCommand({ id, sessionId, operation, state, message });
+      if (getState().accountGeneration !== generation) return;
+      if (operation === "interrupt" && state === "accepted") {
+        getState().dismissControlCommand(id);
+      } else {
+        getState().setControlCommand({ id, sessionId, operation, state, message });
+      }
     };
     update("pending");
     return new Promise<SubmissionReply>((resolve) => {

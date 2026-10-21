@@ -102,9 +102,7 @@ class OrdinaryChatProbe:
         except BaseException as error:
             try:
                 await self.manager.interrupt(session.id)
-                active = getattr(session, "_active_task", None)
-                if active and not active.done():
-                    await asyncio.wait_for(asyncio.shield(active), timeout=15)
+                await self.manager.await_session_execution(session.id, timeout=15)
             except BaseException as cleanup_error:
                 self.cleanup_failures.append({"type": type(cleanup_error).__name__,
                                               "message": str(cleanup_error).replace(self.token, "<redacted>")})
@@ -200,7 +198,7 @@ async def ordinary_chat_probe(tmp_path, monkeypatch, request):
         original_result = manager._handle_result_event
 
         async def record_usage(session, attempt, event):
-            current = getattr(session, "_current_request", None)
+            current = session._run.request
             probe.usage_observations.append({
                 "session_id": session.id, "request_id": getattr(current, "request_id", probe.last_request_id),
                 "attempt_id": attempt.attempt_id, "native_thread_id": event.session_id,

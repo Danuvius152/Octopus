@@ -27,7 +27,7 @@ ARGUMENT = "The original argument retains its exception and limit."
 def history(tmp_path):
     root = tmp_path / "vault"
     root.mkdir()
-    store = WikiStore(root, tmp_path / "state", "isolated-material-map")
+    store = WikiStore(root, tmp_path / "state", "isolated-material-map", create=True)
     try:
         yield WikiHistory(store)
     finally:
@@ -351,7 +351,7 @@ def test_raw_cache_rebuild_and_store_restart_keep_the_durable_map(history):
     with store.connect() as db:
         db.execute("DROP TABLE raw_materials")
     store.close()
-    restarted = WikiStore(store.root, store.state, store.vault_id)
+    restarted = WikiStore(store.root, store.state, store.vault_id, health=store.health)
     try:
         with WikiHistory(restarted).locked():
             assert materials.find(restarted, raw)["id"] == doc["id"]

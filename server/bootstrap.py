@@ -4,15 +4,9 @@ One operation, because the pieces have to happen together or not at all: an
 install with a user whose secrets are still keyed to the retired token, or with
 rows nobody owns, is worse than either the before or the after.
 
-    create the account  ->  re-key its secrets  ->  adopt its rows
-                        ->  remember where it already works
-
-It is a one-way door on a live box, so the order is chosen for what a failure
-leaves behind. The account is created first because everything else needs an
-owner; the secrets are re-keyed before the rows are adopted because a failure
-there must not leave rows pointing at a user whose credentials do not open;
-and `extra_roots` is set last because it is the only part that is merely
-convenient rather than correct.
+The account, its secrets, adopted rows and existing working roots share one
+short database transaction. Hashing, key-file preparation, process retirement
+and filesystem migration happen outside that transaction.
 
 Available exactly once: the route that calls this is refused the moment an
 account exists, which is also when the legacy token it authenticates with stops
@@ -24,14 +18,12 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import shutil
 from pathlib import Path
 from typing import Any
 
 from .config import settings
-from .crypto import decrypt, encrypt
-from .db.base import serialized_write
-from .token_rotation import RekeyCommitUnconfirmed, _commit_rekey
+from .crypto import decrypt, encrypt, master_key
+from .db.transaction import Transaction
 from .users import UserError, UserManager
 from .workspace import paths_for
 
@@ -60,133 +52,61 @@ class BootstrapError(Exception):
         self.status_code = status_code
 
 
-@serialized_write
-async def _rekey_secrets(db: Any, old_key: str, new_key: str, user_id: str | None = None) -> dict[str, int]:
-    """Move every stored secret off the old key. All, or none.
-
-    A user's secrets go to `new_key`, their own DEK; the install's own go to the
-    master key, because they belong to the box rather than to the first person
-    who claimed it.
-
-    Read and re-key everything before writing anything, which is the lesson
-    `token_rotation` already paid for: a row that will not decrypt must cost
-    nothing rather than leave the rows before it on the new key and the rows
-    after it on the old.
-    """
-    from .crypto import master_key
-
-    await db._ensure_connected()
-    await db._flush_locked()
+async def _rekey_secrets(tx: Transaction, old_key: str, new_key: str, user_id: str,
+                         installation_key: str, *, adopt: bool) -> dict[str, int]:
+    """Rekey within the account transaction, respecting each secret's owner."""
     counts: dict[str, int] = {}
-    updates: list[tuple[str, str, str, str, str]] = []
-    originals: list[tuple[str, str, str, str, str]] = []
-
-    for tables, destination in (
-        (_SECRET_COLUMNS, new_key),
-        (_INSTALL_SECRET_COLUMNS, master_key()),
-    ):
-        for table, key_col, secret_col in tables:
-            if table in {entry[0] for entry in _SECRET_COLUMNS}:
-                owner_table = "backend_credentials" if table == "credential_secrets" else "connector_installations"
-                cursor = await db.conn.execute(
-                    f"SELECT s.{key_col}, s.{secret_col} FROM {table} s JOIN {owner_table} o ON o.id=s.{key_col} "
-                    "WHERE o.user_id IS NULL OR o.user_id=?", (user_id,),  # noqa: S608
-                )
-            else:
-                cursor = await db.conn.execute(f"SELECT {key_col}, {secret_col} FROM {table}")  # noqa: S608
-            counts[table] = 0
-            for row_key, ciphertext in await cursor.fetchall():
-                if not ciphertext:
-                    continue
-                try:
-                    plaintext = decrypt(ciphertext, old_key)
-                except ValueError as exc:
-                    try:
-                        decrypt(ciphertext, destination)
-                        continue  # A recovered upgrade already committed this row.
-                    except ValueError:
-                        pass
-                    raise BootstrapError(
-                        f"{table}.{key_col}={row_key!r} could not be decrypted "
-                        f"with the current token, so nothing was changed "
-                        f"({exc}). Fix or delete that row and try again."
-                    ) from exc
-                updates.append(
-                    (
-                        table,
-                        key_col,
-                        secret_col,
-                        row_key,
-                        encrypt(plaintext, destination),
-                    )
-                )
-                originals.append((table, key_col, secret_col, row_key, ciphertext))
-                counts[table] += 1
-
-    await db.conn.execute("SAVEPOINT account_rekey")
-    try:
-        for table, key_col, secret_col, row_key, ciphertext in updates:
-            await db.conn.execute(
-                f"UPDATE {table} SET {secret_col} = ? WHERE {key_col} = ?",  # noqa: S608
-                (ciphertext, row_key),
+    for table, key_col, secret_col in (*_SECRET_COLUMNS, *_INSTALL_SECRET_COLUMNS):
+        account_secret = table in {entry[0] for entry in _SECRET_COLUMNS}
+        destination = new_key if account_secret else installation_key
+        if account_secret:
+            owner_table = "backend_credentials" if table == "credential_secrets" else "connector_installations"
+            rows = await tx.fetch_all(
+                f"SELECT s.{key_col},s.{secret_col},o.user_id FROM {table} s JOIN {owner_table} o ON o.id=s.{key_col} "
+                "WHERE o.user_id IS NULL OR o.user_id=?", (user_id,),  # noqa: S608
             )
-        await _commit_rekey(db, "account_rekey", updates, originals)
-    except RekeyCommitUnconfirmed as exc:
-        raise BootstrapError(
-            "The account secret rekey commit is unconfirmed. The existing account was retained; "
-            "verify its stored secret keys before continuing the upgrade.",
-            status_code=503,
-        ) from exc
-    except BaseException:
-        if db.conn.in_transaction:
-            await db.conn.execute("ROLLBACK TO account_rekey")
-            await db.conn.execute("RELEASE account_rekey")
-        raise
+        else:
+            rows = await tx.fetch_all(f"SELECT {key_col},{secret_col},NULL FROM {table}")  # noqa: S608
+        counts[table] = 0
+        for row_key, ciphertext, owner in rows:
+            if not ciphertext or (account_secret and owner is None and not adopt):
+                continue
+            # Old upgrades could commit rekey before adopting NULL-owner
+            # rows. The bound migration owner's exact DEK remains proof even
+            # when adoption has not committed yet; other accounts are excluded
+            # by the query above. Preserve already-correct ciphertext bytes.
+            try:
+                decrypt(ciphertext, destination)
+                continue
+            except ValueError:
+                pass
+            try:
+                plaintext = decrypt(ciphertext, old_key)
+            except ValueError as error:
+                raise BootstrapError(f"{table}.{key_col}={row_key!r} could not be decrypted; verify the retained secret before upgrading") from error
+            await tx.execute(f"UPDATE {table} SET {secret_col}=? WHERE {key_col}=?",  # noqa: S608
+                             (encrypt(plaintext, destination), row_key))
+            counts[table] += 1
     return counts
 
 
-async def _existing_working_dirs(db: Any, user_id: str | None = None) -> list[str]:
-    """Every distinct directory this install's sessions already work in.
+async def _unowned_working_dirs(tx: Transaction) -> set[str]:
+    """Directories whose sessions are about to be adopted.
 
     They become the first account's `extra_roots`, because confining them to a
     workspace that did not exist when they were created would break live
     sessions on the first turn after the upgrade — including, on the machine
     this was written on, the ones working on Octopus itself.
     """
-    rows = await db.load_sessions(include_archived=True)
-    roots: list[str] = []
-    for row in rows:
-        if row.get("user_id") not in {None, user_id}:
-            continue
-        raw = (row.get("working_dir") or "").strip()
-        if not raw:
-            continue
-        path = str(Path(raw).expanduser())
-        if path not in roots:
-            roots.append(path)
-    return roots
+    # Owned sessions already received their grants in the account commit.
+    # A resume must not reapprove them after links or account grants change.
+    rows = await tx.fetch_all("SELECT DISTINCT working_dir FROM sessions WHERE user_id IS NULL")
+    return {raw for row in rows if (raw := (row[0] or "").strip())}
 
 
-def _move_agent_memory(user_id: str) -> int:
-    """Move the install's agent memory under the new account.
-
-    A move rather than a copy: two copies of an agent's memory diverging is
-    worse than either, and the destination is on the same filesystem. Skipped
-    silently when there is nothing there, which is the fresh-install case.
-    """
-    legacy = Path(settings.agents_dir).expanduser()
-    if not legacy.is_dir():
-        return 0
-    destination = paths_for(user_id).agents
-    destination.mkdir(parents=True, exist_ok=True)
-    moved = 0
-    for entry in legacy.iterdir():
-        target = destination / entry.name
-        if target.exists():
-            continue
-        shutil.move(str(entry), str(target))
-        moved += 1
-    return moved
+def _resolve_roots(roots: list[str]) -> list[str]:
+    """Capture authorization targets before entering the account transaction."""
+    return [str(Path(root).expanduser().resolve()) for root in roots]
 
 
 async def _bootstrap_account(
@@ -210,24 +130,14 @@ async def _bootstrap_account(
     and a server that is not restarted would go on serving them as unowned.
     """
     users = UserManager(db)
-    if existing_user is None and await db.count_users() > 0:
-        raise BootstrapError(
-            "This install already has an account", status_code=409
-        )
-
     try:
-        user = existing_user or await users.create_user(
-            username=username, password=password, is_admin=True
-        )
+        prepared = users.prepare_user(username=username, password=password, is_admin=True) if existing_user is None else None
     except UserError as exc:
         raise BootstrapError(exc.message, status_code=exc.status_code) from exc
-    if on_created is not None:
-        await on_created(user)
-
-    summary: dict[str, Any] = {"user_id": user["id"], "username": user["username"]}
+    installation_key = master_key()
 
     # Ownership changes invalidate the authority baked into a running CLI.
-    # Stop old requests before the re-key/adoption awaits; new turns resume
+    # Stop old requests before the account commit; new turns resume
     # their transcripts with the account's freshly scoped runtime.
     if session_manager is not None:
         await session_manager.retire_ownerless_runs()
@@ -235,27 +145,68 @@ async def _bootstrap_account(
         from .mcp_identity import revoke_ownerless_runs
         revoke_ownerless_runs()
 
-    # Secrets before rows: a failure here must not leave rows pointing at an
-    # account whose credentials do not open.
-    summary["reencrypted"] = await _rekey_secrets(
-        db, settings.auth_token, users.data_key(user), user["id"]
-    )
+    async with db.installation_key_lock:
+        expected_extra_roots = "[]"
+        expected_working_dirs: set[str] = set()
+        roots: list[str] = []
+        if adopt:
+            # Filesystem resolution runs without SQLite ownership. Session
+            # roots and account grants can change meanwhile, so the final
+            # transaction checks both SQL sources before applying this result.
+            async with db.transaction(write=False) as tx:
+                if existing_user is not None:
+                    current = await db._get_user(tx, existing_user["id"])
+                    if current is None:
+                        raise BootstrapError("The migration owner no longer exists", status_code=409)
+                    expected_extra_roots = current.get("extra_roots") or "[]"
+                expected_working_dirs = await _unowned_working_dirs(tx)
+            newly_granted_roots = await asyncio.to_thread(_resolve_roots, sorted(expected_working_dirs))
+            # Existing grants and the registered Wiki root are captured
+            # canonical paths. Only newly adopted sessions acquire grants;
+            # retrying publication cannot authorize new symlink targets.
+            roots = list(dict.fromkeys([
+                *json.loads(expected_extra_roots), *newly_granted_roots, *([wiki_root] if wiki_root else []),
+            ]))
 
-    if adopt:
-        summary["adopted"] = await db.adopt_orphan_rows(user["id"])
-        roots = list(dict.fromkeys(
-            str(Path(root).expanduser().resolve()) for root in (
-                *json.loads(user.get("extra_roots") or "[]"),
-                *await _existing_working_dirs(db, user["id"]), *([wiki_root] if wiki_root else []),
+        async with db.transaction() as tx:
+            if prepared is not None:
+                if await db._count(tx, "SELECT COUNT(*) FROM users"):
+                    raise BootstrapError("This install already has an account", status_code=409)
+                user = await db._create_user(tx, **prepared)
+            else:
+                assert existing_user is not None
+                user = await db._get_user(tx, existing_user["id"])
+                if user is None:
+                    raise BootstrapError("The migration owner no longer exists", status_code=409)
+            if adopt and (
+                (user.get("extra_roots") or "[]") != expected_extra_roots
+                or await _unowned_working_dirs(tx) != expected_working_dirs
+            ):
+                raise BootstrapError("Existing working roots changed during account preparation; retry the upgrade", status_code=409)
+            summary: dict[str, Any] = {"user_id": user["id"], "username": user["username"]}
+            summary["reencrypted"] = await _rekey_secrets(
+                tx, settings.auth_token, users.data_key(user, key=installation_key), user["id"], installation_key, adopt=adopt,
             )
-        ))
-        if roots:
-            await db.update_user_field(user["id"], extra_roots=json.dumps(roots))
-        summary["extra_roots"] = roots
-        summary["agent_memory_moved"] = _move_agent_memory(user["id"])
-        paths_for(user["id"]).ensure()
+            if adopt:
+                summary["adopted"] = await db._adopt_orphan_rows(tx, user["id"])
+                user["extra_roots"] = json.dumps(roots)
+                await tx.execute("UPDATE users SET extra_roots=? WHERE id=?", (user["extra_roots"], user["id"]))
+                summary["extra_roots"] = roots
+
+    from . import deps
+
+    deps.forget_accounts_exist()
+    if on_created is not None:
+        await on_created(user)
+    paths_for(user["id"]).ensure()
+    if adopt:
+        from .memory_handoff import MemoryHandoffConflict, handoff_agent_memory
+        try:
+            summary["agent_memory_moved"] = await handoff_agent_memory(db, user_id=user["id"])
+        except MemoryHandoffConflict as error:
+            raise BootstrapError(str(error), status_code=409) from error
         if session_manager is not None:
-            summary["live_sessions_adopted"] = session_manager.adopt_orphan_sessions(
+            summary["live_sessions_adopted"] = await session_manager.adopt_orphan_sessions(
                 user["id"]
             )
 
@@ -269,15 +220,28 @@ async def bootstrap_first_account(db: Any, *, username: str, password: str, adop
     from .wiki.account_upgrade import upgrade_with_wiki
     from .wiki.registry import registry
 
-    if not hasattr(db, "_bootstrap_lock"):
-        db._bootstrap_lock = asyncio.Lock()
-    async with db._bootstrap_lock:
-        if await db.count_users():
-            raise BootstrapError("This install already has an account", status_code=409)
-        if (registry.state(None) / "config.json").is_file():
-            return await complete_cleanup(upgrade_with_wiki(
-                db, username=username, password=password, adopt=adopt, manager=session_manager,
-            ))
-        return await complete_cleanup(_bootstrap_account(
-            db, username=username, password=password, adopt=adopt, session_manager=session_manager,
-        ))
+    async def command():
+        # The command owns serialization through journal preparation, drain
+        # and publication, including when its HTTP waiter has gone away.
+        async with db._bootstrap_lock:
+            if await db.count_users():
+                raise BootstrapError("This install already has an account", status_code=409)
+            if (registry.state(None) / "config.json").is_file():
+                return await upgrade_with_wiki(
+                    db, username=username, password=password, adopt=adopt, manager=session_manager,
+                )
+            if session_manager is not None:
+                session_manager._legacy_transition = True
+            try:
+                summary = await _bootstrap_account(
+                    db, username=username, password=password, adopt=adopt, session_manager=session_manager,
+                )
+            except BootstrapError:
+                if session_manager is not None and not await db.count_users():
+                    session_manager._legacy_transition = False
+                raise
+            if session_manager is not None:
+                session_manager._legacy_transition = False
+            return summary
+
+    return await complete_cleanup(command())

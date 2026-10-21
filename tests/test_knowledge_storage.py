@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import copy
 import sqlite3
+import subprocess
+import sys
+from pathlib import Path
 
-import aiosqlite
 import pytest
 
 from server.database import Database
@@ -107,57 +110,102 @@ async def test_request_retry_never_reuses_a_different_input(database, change):
 
 @pytest.mark.parametrize("failure", ["before_commit", "no_commit", "lost_acknowledgement"])
 async def test_request_commit_failure_is_not_success_and_retry_keeps_one_input(
-    database, tmp_path, monkeypatch, failure,
+    tmp_path, failure,
 ):
-    reader = Database(str(tmp_path / "knowledge.db"))
-    await reader.initialize()
+    program = """
+import asyncio
+import sys
+import time
+from pathlib import Path
+from server.database import Database
+from tests.test_knowledge_storage import CREATED_AT, REQUEST_CONTEXT
+
+async def main():
+    database = Database(sys.argv[1])
+    await database.initialize()
+    await database.save_session("parent", "Parent", "/tmp", CREATED_AT)
+    driver_commit = database.conn._conn.commit
+    def unconfirmed_driver_commit():
+        if sys.argv[2] == "lost_acknowledgement":
+            driver_commit()
+        if sys.argv[2] == "no_commit":
+            time.sleep(60)
+            driver_commit()
+        raise OSError("original commit acknowledgement unavailable")
+    async def failed_commit():
+        await database.conn._execute(unconfirmed_driver_commit)
+    database.conn.commit = failed_commit
+    await database.record_request(
+        request_id="request-one", session_id="parent", seq=0,
+        role="user", type="text", content="/wiki Why?",
+        tool_input={"request_context": REQUEST_CONTEXT},
+    )
+    Path(sys.argv[3]).touch()
+
+asyncio.run(main())
+"""
+    path, success = tmp_path / "knowledge.db", tmp_path / "returned-success"
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(path), failure, str(success)],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=8,
+    )
+    assert result.returncode == 70, result.stderr
+    assert not success.exists(), "An unconfirmed commit returned successful acknowledgement"
     message = {
         "request_id": "request-one", "session_id": "parent", "seq": 0,
         "role": "user", "type": "text", "content": "/wiki Why?",
         "tool_input": {"request_context": REQUEST_CONTEXT},
     }
+    for reopening in range(2):
+        reader = Database(str(path))
+        await reader.initialize()
+        try:
+            committed = await reader.load_messages("parent")
+            expected = 1 if reopening or failure == "lost_acknowledgement" else 0
+            assert len(committed) == expected
+            # This is an explicit same-identity retry after cold reopening,
+            # never a continuation on the connection that lost trust.
+            await reader.record_request(**message)
+            messages = await reader.load_messages("parent")
+            assert len(messages) == 1
+            assert messages[0]["content"] == "/wiki Why?"
+            assert messages[0]["tool_input"]["request_context"] == REQUEST_CONTEXT
+            assert await reader.get_committed_terminal("parent", "request-one") is None
+        finally:
+            await reader.close()
+
+
+async def test_request_waits_for_its_original_commit_acknowledgement(database, monkeypatch, tmp_path):
+    reader = Database(str(tmp_path / "knowledge.db"))
+    await reader.initialize()
+    committing, release = asyncio.Event(), asyncio.Event()
     commit = database.conn.commit
 
-    async def failed_commit():
-        if failure == "lost_acknowledgement":
-            await commit()
-        if failure != "no_commit":
-            raise OSError("commit acknowledgement lost")
+    async def paused_commit():
+        committing.set()
+        await release.wait()
+        await commit()
 
+    monkeypatch.setattr(database.conn, "commit", paused_commit)
+    message = {
+        "request_id": "request-one", "session_id": "parent", "seq": 0,
+        "role": "user", "type": "text", "content": "/wiki Why?",
+        "tool_input": {"request_context": REQUEST_CONTEXT},
+    }
+    pending = asyncio.create_task(database.record_request(**message))
     try:
-        with monkeypatch.context() as patch:
-            patch.setattr(database.conn, "commit", failed_commit)
-            with pytest.raises(OSError, match="commit"):
-                await database.record_request(**message)
-        committed = await reader.load_messages("parent")
-        assert len(committed) == (1 if failure == "lost_acknowledgement" else 0)
-        await database.record_request(**message)
+        await asyncio.wait_for(committing.wait(), 2)
+        assert not pending.done()
+        assert await reader.load_messages("parent") == []
+        release.set()
+        await pending
         messages = await reader.load_messages("parent")
         assert len(messages) == 1
         assert messages[0]["tool_input"]["request_context"] == REQUEST_CONTEXT
     finally:
+        release.set()
+        await asyncio.gather(pending, return_exceptions=True)
         await reader.close()
-
-
-async def test_request_requires_independent_commit_verification(database, monkeypatch):
-    connect = aiosqlite.connect
-
-    def unavailable_reader(*args, **kwargs):
-        if kwargs.get("uri"):
-            raise OSError("independent reader unavailable")
-        return connect(*args, **kwargs)
-
-    message = {
-        "request_id": "request-one", "session_id": "parent", "seq": 0,
-        "role": "user", "type": "text", "content": "/wiki Why?",
-        "tool_input": {"request_context": REQUEST_CONTEXT},
-    }
-    with monkeypatch.context() as patch:
-        patch.setattr(aiosqlite, "connect", unavailable_reader)
-        with pytest.raises(OSError, match="independent reader"):
-            await database.record_request(**message)
-    await database.record_request(**message)
-    assert await database.count_messages("parent") == 1
 
 
 async def test_additive_migration_preserves_legacy_rows_and_does_not_replay(tmp_path):

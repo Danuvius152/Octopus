@@ -4,53 +4,20 @@ import asyncio
 import json
 import logging
 import sqlite3
-import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from functools import wraps
-from typing import Any, ParamSpec, TypeVar
+from typing import Any
 
 import aiosqlite
 
 from ..config import settings
-from ..monitor import Event as _MonEvent
-from ..monitor import record as _mon_record
+from ..service_health import ServiceHealth
 from .schema import _DEFAULT_MCP_SERVERS_JSON, _SCHEMA
-
-P = ParamSpec("P")
-T = TypeVar("T")
-
-
-def serialized_write[**P, T](method: Callable[P, Awaitable[T]]) -> Callable[P, Awaitable[T]]:
-    """Keep one connection's write/commit bookkeeping in the same operation."""
-    @wraps(method)
-    async def guarded(*args: P.args, **kwargs: P.kwargs) -> T:
-        database: Any = args[0]
-        async with database._writing():
-            return await method(*args, **kwargs)
-    return guarded
-
+from .transaction import Transaction
 
 logger = logging.getLogger(__name__)
-
-# Bounds on the deferred commit (B4). Whichever trips first flushes, so the
-# worst case is ~half a second or ~32 messages of transcript at risk from a
-# hard kill, instead of an entire turn.
-_FLUSH_AFTER_SECONDS = 0.5
-_FLUSH_EVERY_APPENDS = 32
-
-# Built-in MCP servers attached to the Default Agent (and the default for
-# any newly-created agent). Kept here so the migration backfill and the
-# CREATE TABLE default stay in lock-step.
-
-
-
-
-
-
-
 def _load_json_list(raw: Any) -> list[Any]:
     """A JSON-list column as a list, whatever shape the column is in.
 
@@ -71,7 +38,7 @@ class DatabaseBase:
     mixins stand on.
 
     Separate from them so the lifecycle has one home: opening the file, the
-    pragmas, the deferred-commit bound, the migration ledger. A mixin inherits
+    pragmas, the short transaction boundary, the migration ledger. A mixin inherits
     this rather than declaring the attributes it borrows, which keeps the type
     checker honest about what it may touch.
     """
@@ -174,7 +141,7 @@ class DatabaseBase:
         "c.backend",
         "c.label",
         "c.auth_type",
-        "COALESCE(s.secret_encrypted, c.secret_encrypted) AS secret_encrypted",
+        "s.secret_encrypted",
         "c.created_at",
         "c.status",
         "c.token_expires_at",
@@ -384,52 +351,102 @@ class DatabaseBase:
     # `connector_installations` (multi-tenancy.md §5).
 
 
-    def __init__(self, db_path: str) -> None:
+    def __init__(self, db_path: str, *, health: ServiceHealth | None = None) -> None:
         self._db_path = db_path
+        self.health = health if health is not None else ServiceHealth()
         self._conn: aiosqlite.Connection | None = None
-        self._dirty: bool = False
         self._closed: bool = False
-        self._pending_appends: int = 0
-        self._last_flush: float = time.monotonic()
-        self._flush_task: asyncio.Task[None] | None = None
         self._close_task: asyncio.Task[None] | None = None
-        self._dirty_since: float | None = None
         self._write_lock = asyncio.Lock()
-        self._close_lock = asyncio.Lock()
+        self._bootstrap_lock = asyncio.Lock()
+        self.installation_key_lock = asyncio.Lock()
         self._write_owner: asyncio.Task[Any] | None = None
         # Work that has to unwind before the connection goes away; see
         # `add_close_hook`.
         self._close_hooks: list[Callable[[], Awaitable[None]]] = []
 
     @asynccontextmanager
-    async def _writing(self) -> AsyncIterator[None]:
-        task = asyncio.current_task()
-        if self._write_owner is task:
-            yield
-            return
-        async with self._write_lock:
-            self._write_owner = task
+    async def transaction(self, *, write: bool = True, timeout: float = 5.0) -> AsyncIterator[Transaction]:
+        """Own BEGIN, SQL, cursors and commit/rollback under one total deadline.
+
+        Helpers receive this transaction explicitly. A public operation cannot
+        recursively enter another public operation on the same connection.
+        """
+        self.health.require_healthy()
+        if self._write_owner is asyncio.current_task():
+            raise RuntimeError("Nested database operation; pass the current transaction to its SQL helper")
+        deadline = asyncio.get_running_loop().time() + timeout
+        async with asyncio.timeout_at(deadline):
+            await self._write_lock.acquire()
             try:
-                yield
+                self.health.require_healthy()
+                await self._ensure_connected()
+                self._write_owner = asyncio.current_task()
+                tx = Transaction(self.conn, self.health, deadline)
+                try:
+                    await tx.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+                except sqlite3.OperationalError as error:
+                    if (getattr(error, "sqlite_errorcode", 0) & 255) in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED} and not self.conn.in_transaction:
+                        raise
+                    self.health.fail(error)
+                except BaseException as error:
+                    self.health.fail(error)
+                try:
+                    yield tx
+                except BaseException as error:
+                    storage_failure = isinstance(error, (OSError, sqlite3.DatabaseError)) and not isinstance(error, sqlite3.IntegrityError)
+                    if storage_failure:
+                        self.health.fail(error)
+                    try:
+                        await tx.finish()
+                        await tx._wait(self.conn.rollback())
+                    except BaseException as failure:
+                        self.health.fail(failure)
+                    raise
+                else:
+                    try:
+                        await tx.finish()
+                        await tx._wait(self.conn.commit())
+                    except BaseException as failure:
+                        self.health.fail(failure)
+                    if tx.cancelled is not None:
+                        raise tx.cancelled
             finally:
                 self._write_owner = None
+                self._write_lock.release()
 
-    async def initialize(self) -> None:
-        self._conn = await aiosqlite.connect(self._db_path)
-        await self.conn.execute("PRAGMA journal_mode=WAL")
-        await self.conn.execute("PRAGMA foreign_keys=ON")
-        # Wait rather than fail if another connection holds the write lock —
-        # the CLI's own tooling and the test suite both open this file, and the
-        # default is to raise "database is locked" immediately (B5).
-        await self.conn.execute("PRAGMA busy_timeout=5000")
-        # NORMAL is the standard pairing with WAL: a commit does not fsync, so
-        # a crash can lose the last commits but cannot corrupt the database.
-        # Stated explicitly because the durability story below (the timed
-        # flush) depends on knowing which it is.
-        await self.conn.execute("PRAGMA synchronous=NORMAL")
-        await self.conn.executescript(_SCHEMA)
-        await self._apply_migrations()
-        await self.conn.commit()
+    async def initialize(self, *, timeout: float = 15.0) -> None:
+        """Own startup SQL under one deadline, before any public operation."""
+        self.health.require_healthy()
+        if self._conn is not None or self._closed:
+            raise RuntimeError("A Database can only be initialized once")
+        async with asyncio.timeout(timeout):
+            async with self._write_lock:
+                self._write_owner = asyncio.current_task()
+                try:
+                    self._conn = await aiosqlite.connect(self._db_path)
+                    mode = await self.conn.execute("PRAGMA journal_mode=WAL")
+                    mode_value = await mode.fetchone()
+                    if mode_value is None or mode_value[0].lower() != ("memory" if self._db_path == ":memory:" else "wal"):
+                        raise RuntimeError("Runtime database requires WAL journaling")
+                    await mode.close()
+                    await self.conn.execute("PRAGMA foreign_keys=ON")
+                    await self.conn.execute("PRAGMA busy_timeout=5000")
+                    await self.conn.execute("PRAGMA synchronous=FULL")
+                    durability = await self.conn.execute("PRAGMA synchronous")
+                    durability_value = await durability.fetchone()
+                    if durability_value is None or durability_value[0] != 2:
+                        raise RuntimeError("Runtime database requires synchronous=FULL")
+                    await durability.close()
+                    await self.conn.executescript(_SCHEMA)
+                    await self._apply_migrations()
+                    await self.conn.commit()
+                except BaseException as error:
+                    # No producer can use a partially migrated or still-busy
+                    # connection. Startup never tries online storage repair.
+                    self.health.fail(error)
+                finally:
+                    self._write_owner = None
 
     async def _stamp(self, version: str) -> None:
         """Record a migration as applied. The ledger exists so "what has run"
@@ -521,21 +538,35 @@ class DatabaseBase:
         for table, column, ddl in self._COLUMN_MIGRATIONS:
             await self._add_column(table, column, ddl)
 
-        # Storage split (B-4): copy pre-split secrets into their own table.
-        # New writes go there directly; this is a one-off catch-up, and
-        # INSERT OR IGNORE makes re-running a no-op. Kept in a try because it
-        # reads a legacy column that fresh databases do not have at all — the
-        # one place where "the statement may be invalid here" is the expected
-        # case rather than a bug, so it logs instead of passing silently.
-        try:
+        for column, definition in (
+            ("payload", "TEXT"), ("execution_state", "TEXT NOT NULL DEFAULT 'unknown'"),
+            ("execution_owner", "TEXT"), ("execution_generation", "TEXT"),
+            ("execution_boot", "TEXT"), ("process_group", "INTEGER"),
+            ("reason_code", "TEXT"), ("state_version", "INTEGER NOT NULL DEFAULT 0"),
+            ("created_at", "TEXT"), ("updated_at", "TEXT"), ("recovery_of", "TEXT"),
+            ("recovered_by", "TEXT"), ("dismissed", "INTEGER NOT NULL DEFAULT 0"),
+        ):
+            await self._add_column("client_submissions", column,
+                                   f"ALTER TABLE client_submissions ADD COLUMN {column} {definition}")
+        await self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS client_submission_request ON client_submissions(session_id,request_id)")
+
+        # The split row is authoritative after rotation or account adoption.
+        # Preserve a legacy-only secret before retiring the obsolete copy;
+        # never replace a newer split value with the old encryption key.
+        if await self._has_column("backend_credentials", "secret_encrypted"):
             await self.conn.execute(
                 "INSERT OR IGNORE INTO credential_secrets "
                 "(credential_id, secret_encrypted) "
-                "SELECT id, secret_encrypted FROM backend_credentials"
+                "SELECT id, secret_encrypted FROM backend_credentials "
+                "WHERE secret_encrypted != ''"
+            )
+            await self.conn.execute(
+                "UPDATE backend_credentials SET secret_encrypted = '' "
+                "WHERE secret_encrypted != '' AND EXISTS ("
+                "SELECT 1 FROM credential_secrets s "
+                "WHERE s.credential_id = backend_credentials.id)"
             )
             await self._stamp("backfill:credential_secrets")
-        except Exception:
-            logger.exception("credential storage-split backfill failed")
 
         # The applications name index was originally unconditional, which
         # reserved a name forever: archiving an app then blocked reusing it.
@@ -681,47 +712,43 @@ class DatabaseBase:
             logger.info("Restored account ownership for %d fork sessions", repaired)
         await self._stamp("backfill:fork_session_owners")
 
-    async def _set_pinned(self, table: str, row_id: str, pinned: bool) -> None:
+    async def _set_pinned(self, tx: Transaction, table: str, row_id: str, pinned: bool) -> None:
         """Pin a row to the sidebar (at the bottom) or unpin it.
 
         Unpinning leaves `pin_order` alone — it only means something while
         pinned, and pinning again always appends, because an item coming back
         to the sidebar is news and belongs where the eye lands last.
         """
-        await self._ensure_connected()
         if pinned:
-            await self.conn.execute(
+            await tx.execute(
                 f"UPDATE {table} SET pinned = 1, "
                 f"pin_order = {self._NEXT_PIN_ORDER.format(table=table)} "
                 "WHERE id = ? AND pinned = 0",
                 (row_id,),
             )
         else:
-            await self.conn.execute(
+            await tx.execute(
                 f"UPDATE {table} SET pinned = 0 WHERE id = ?", (row_id,)
             )
-        await self.conn.commit()
 
-    async def _reorder_pins(self, table: str, ordered_ids: list[str]) -> None:
+    async def _reorder_pins(self, tx: Transaction, table: str, ordered_ids: list[str]) -> None:
         """Lay the pinned rows out in `ordered_ids` order.
 
         Any pinned, live row the list doesn't name — pinned from another tab
         after this one last looked — keeps its relative order and follows
         the named ones, so a reorder never drops someone else's pin.
         """
-        await self._ensure_connected()
-        cursor = await self.conn.execute(
+        cursor = await tx.execute(
             f"SELECT id FROM {table} WHERE pinned = 1 AND archived = 0 "
             "ORDER BY pin_order, created_at, id"
         )
         named = set(ordered_ids)
         rest = [r[0] for r in await cursor.fetchall() if r[0] not in named]
         for position, row_id in enumerate([*ordered_ids, *rest], start=1):
-            await self.conn.execute(
+            await tx.execute(
                 f"UPDATE {table} SET pin_order = ? WHERE id = ?",
                 (position, row_id),
             )
-        await self.conn.commit()
 
     async def _backfill_pin_order(self) -> None:
         """Give every agent and application without a sidebar position one.
@@ -980,16 +1007,8 @@ class DatabaseBase:
             )
 
     async def _ensure_connected(self) -> None:
-        # A closed Database is dead — never silently re-open. The
-        # previous "reconnect" path was load-bearing for nothing in
-        # production and was the root cause of a pytest atexit hang:
-        # tests that closed the DB still had pending consumer tasks
-        # that would call flush() during loop teardown, the reconnect
-        # spawned a brand-new aiosqlite worker thread right before
-        # the loop died, and that orphaned non-daemon thread pinned
-        # the process. We raise CancelledError so in-flight callers
-        # (e.g. session_manager._consume_message) exit cleanly via
-        # their existing CancelledError handling.
+        # A retired connection never reopens. A late consumer exits through
+        # cancellation instead of creating an unowned SQLite worker thread.
         if self._closed:
             raise asyncio.CancelledError("Database is closed")
         assert self._conn is not None, "Database not initialized"
@@ -1000,7 +1019,7 @@ class DatabaseBase:
         The database is the resource; whoever holds long-running work against
         it has to be given the chance to finish that work while the connection
         still answers. A turn in flight is the case this exists for: cancelled
-        after the connection is gone, its own `finally` — which flushes and
+        after the connection is gone, its own `finally` — which records and
         broadcasts — has nothing to await and nothing to cancel it, so the event
         loop stops making progress instead of failing. Cancelled *before*, it
         unwinds normally.
@@ -1011,135 +1030,60 @@ class DatabaseBase:
         """
         self._close_hooks.append(hook)
 
-    async def close(self) -> None:
-        # Closing owns the timer and connection. Caller cancellation must not
-        # abandon either resource halfway through their teardown.
+    async def close(self, *, timeout: float = 5.0) -> None:
+        """Drain registered owners, then retire the connection once."""
+        if self._write_owner is asyncio.current_task():
+            raise RuntimeError("Cannot close a database from its active transaction")
         if self._close_task is None or self._close_task.done():
-            self._close_task = asyncio.create_task(self._close(), name="database-close")
+            self._close_task = asyncio.create_task(self._close(timeout), name="database-close")
             self._close_task.add_done_callback(self._observe_close)
         await asyncio.shield(self._close_task)
 
     @staticmethod
     def _observe_close(task: asyncio.Task[None]) -> None:
         if not task.cancelled() and (error := task.exception()) is not None:
-            logger.error("Database close failed; connection retained for retry",
+            logger.error("Database owners did not drain; connection retained for retry",
                          exc_info=(type(error), error, error.__traceback__))
 
-    async def _close(self) -> None:
-        """Unwind the hooks, commit, then close. The flag goes up *before* the
-        connection is torn down, deliberately.
-
-        `await self.conn.close()` yields, and in that window a task that was
-        waiting elsewhere can reach `_ensure_connected`, find `_closed` still
-        False, and submit work to an aiosqlite worker thread that is stopping.
-        That future is never resolved by anyone: the task cannot be cancelled
-        out of it either, so the *loop* cannot finish tearing down, and what you
-        see is a test run — or a shutdown — that stops making progress instead
-        of failing. Setting the flag first turns that window into the
-        `CancelledError` the callers already handle.
-
-        The commit below goes through `self.conn` rather than
-        `_ensure_connected`, so closing can still flush what it has to.
-        """
-        async with self._close_lock:
-            failures: list[Exception] = []
-            for hook in reversed(tuple(self._close_hooks)):
-                try:
-                    await hook()
-                except Exception as error:
-                    logger.exception("Database teardown remains unconfirmed")
-                    failures.append(error)
-                else:
-                    self._close_hooks.remove(hook)
-            if failures:
-                raise RuntimeError("Database teardown remains unconfirmed; connection kept open") from failures[0]
-            async with self._writing():
-                if not self._conn:
-                    return
-                timer = self._flush_task
-                if timer is not None:
-                    timer.cancel()
-                    await asyncio.gather(timer, return_exceptions=True)
-                    self._flush_task = None
-                try:
-                    await self._flush_locked()
-                except Exception:
-                    self._schedule_flush()
-                    raise
-                self._closed = True
-                await self.conn.close()
-                self._conn = None
-
-    async def flush(self) -> None:
-        """Commit pending writes."""
-        await self._ensure_connected()
-        async with self._writing():
-            await self._ensure_connected()
-            await self._flush_locked()
-
-    async def _flush_locked(self) -> None:
-        """Acknowledge the batch while append/touch/close cannot alter it."""
-        if self._dirty:
-            await self.conn.commit()
-            self._dirty = False
-            self._dirty_since = None
-            pending, waited = self._pending_appends, time.monotonic() - self._last_flush
-            self._pending_appends = 0
-            self._last_flush = time.monotonic()
-            _mon_record(_MonEvent(
-                kind="db_flush",
-                duration_ms=waited * 1000,
-                ok=True,
-                detail={"rows": pending},
-            ))
-
-    async def _maybe_flush(self) -> None:
-        """Size pressure may flush early; the first write's timer bounds idle batches."""
-        if not self._dirty:
-            return
-        if (
-            self._pending_appends >= _FLUSH_EVERY_APPENDS
-            or (time.monotonic() - (self._dirty_since or self._last_flush)) >= _FLUSH_AFTER_SECONDS
-        ):
-            await self._flush_locked()
-
-    def _defer_commit(self) -> None:
-        self._dirty = True
-        if self._dirty_since is None:
-            self._dirty_since = time.monotonic()
-        self._schedule_flush()
-
-    def _schedule_flush(self) -> None:
-        if self._flush_task is None or self._flush_task.done():
-            self._flush_task = asyncio.create_task(self._flush_deferred(), name="database-batch-flush")
-
-    async def _flush_deferred(self) -> None:
-        while self._dirty and not self._closed:
-            deadline = (self._dirty_since or time.monotonic()) + _FLUSH_AFTER_SECONDS
-            await asyncio.sleep(max(0, deadline - time.monotonic()))
+    async def _close(self, timeout: float) -> None:
+        """A hook failure retains the resource; an uncertain driver exit is fatal."""
+        failures: list[Exception] = []
+        for hook in reversed(tuple(self._close_hooks)):
             try:
-                async with self._writing():
-                    await self._flush_locked()
+                await hook()
             except Exception as error:
-                logger.exception("Deferred database commit failed; batch retained for retry")
-                _mon_record(_MonEvent(kind="db_flush", ok=False, error_code=type(error).__name__))
-                # Failed storage cannot honor the normal deadline. Preserve
-                # dirty state and retry at a bounded rate, without a busy loop.
-                await asyncio.sleep(_FLUSH_AFTER_SECONDS)
+                logger.exception("Database teardown remains unconfirmed")
+                failures.append(error)
+            else:
+                self._close_hooks.remove(hook)
+        if failures:
+            raise RuntimeError("Database teardown remains unconfirmed; connection kept open") from failures[0]
+        # All public writes are already committed. The same lock joins an
+        # in-flight transaction and prevents new work during driver close.
+        async with asyncio.timeout(timeout):
+            async with self._write_lock:
+                if self._conn is None:
+                    return
+                self.health.require_healthy()
+                self._closed = True
+                try:
+                    await self._conn.close()
+                except BaseException as error:
+                    self.health.fail(error)
+                self._conn = None
 
     @property
     def conn(self) -> aiosqlite.Connection:
         assert self._conn is not None, "Database not initialized"
         return self._conn
 
-    async def _count(self, sql: str, params: tuple[Any, ...] = ()) -> int:
+    async def _count(self, tx: Transaction, sql: str, params: tuple[Any, ...] = ()) -> int:
         """One `SELECT COUNT(*)`, as an int.
 
         An aggregate returns exactly one row, which is what the callers that
         used to `execute` / `fetchone` / `row[0]` were each relying on without
         saying so. Said here once, and phrased as the one thing they all want.
         """
-        await self._ensure_connected()
-        cursor = await self.conn.execute(sql, params)
+        cursor = await tx.execute(sql, params)
         row = await cursor.fetchone()
         return int(row[0]) if row else 0

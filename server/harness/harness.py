@@ -15,7 +15,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import signal
+import time
 
+from ..config import settings
+from ..diagnostics import diagnostic_text, exception_diagnostic
 from .events import HarnessCredential, HarnessOneshotError
 from .login import LoginDriver
 from .model_settings import ModelOption, ModelSettings
@@ -211,6 +214,8 @@ class Harness:
 
         The profile builds the argv (applying the credential its own way)
         and extracts the result text from stdout."""
+        started_at = time.monotonic()
+        diagnostic_secrets = (settings.auth_token, ctx.credential.secret if ctx.credential else "")
         argv, kwargs = self.profile.build_oneshot_argv(ctx)
         try:
             argv, kwargs = prepare_spawn(argv, kwargs)
@@ -242,7 +247,9 @@ class Harness:
             if not done.cancelled() and (error := done.exception()) is not None:
                 # Retirement can finish after the bounded caller has already
                 # reported uncertainty; still observe its actual failure.
-                logger.error("One-shot process retirement failed", exc_info=error)
+                logger.error("Harness one-shot retirement failed provider=%s error_type=%s\n%s",
+                             self.profile.backend, type(error).__name__,
+                             exception_diagnostic(error, secrets=diagnostic_secrets))
 
         async def confirm_retirement() -> None:
             nonlocal retirement
@@ -282,10 +289,11 @@ class Harness:
             raise
         if proc.returncode != 0:
             logger.warning(
-                "%s one-shot exited %s: %s",
+                "Harness one-shot failed provider=%s exit_code=%s elapsed_ms=%s stderr=%s",
                 self.profile.backend,
                 proc.returncode,
-                err.decode(errors="replace")[:300],
+                int((time.monotonic() - started_at) * 1000),
+                diagnostic_text(err.decode(errors="replace"), secrets=diagnostic_secrets),
             )
             raise HarnessOneshotError("failed", "one-shot call failed")
         text = self.profile.parse_oneshot_stdout(out.decode(errors="replace"))

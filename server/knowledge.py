@@ -127,12 +127,12 @@ def capture(session, scope: McpScope | None, *, prompt: str, selected: str | Non
         context = for_entry(session, prompt, request_id=uuid.uuid4().hex, selected=selected)
         return AdmittedRequest(context.origin, context)
     require_live_scope(scope, session.id)
-    context = session._knowledge_context
-    settlement = session._settlement
+    context = session._run.knowledge_context
+    settlement = session._run.settlement
     from .wiki.tasks import tasks
     if (scope.user_id != session.user_id or context is None or settlement is None
-            or getattr(session._backend, "run_lease_id", None) != scope.run_lease_id
-            or tasks.token_for_scope(scope) != session._wiki_task_id or session._work_id != scope.work_id):
+            or getattr(session._run.backend, "run_lease_id", None) != scope.run_lease_id
+            or tasks.token_for_scope(scope) != session._run.wiki_task_id or session._run.work_id != scope.work_id):
         raise ValueError("The original requesting run is no longer active")
     return AdmittedRequest(RequestRef(session.id, settlement.request_id, session.user_id), context, scope.work_id)
 

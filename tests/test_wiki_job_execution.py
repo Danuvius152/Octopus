@@ -7,7 +7,6 @@ import pytest
 from server.database import Database
 from server.mcp_identity import work_is_open
 from server.models import TurnOutcome
-from server.sessions.base import QueuedPrompt
 from server.wiki import job_execution
 from server.wiki.jobs import WikiWorker
 from server.wiki.store import WikiError
@@ -47,6 +46,27 @@ def prepare(jobs, job):
     running = jobs.update(job["id"], status="running")
     reference = job_execution.prepare(jobs, running, running["items"], "original-worker", "original-request")
     return jobs.get(job["id"]), reference
+
+
+async def pause_human_before_claim(manager, session_id, prompt, request_id):
+    """Keep a real accepted correction unstarted through the public Stop path."""
+    paused = asyncio.Event()
+
+    async def stop_original_claim(event):
+        if (event.get("session_id") == session_id and event.get("request_id") == request_id
+                and event.get("type") == "dequeued" and not paused.is_set()):
+            await manager.interrupt(session_id)
+            paused.set()
+
+    manager.on_broadcast(request_id, stop_original_claim)
+    try:
+        receipt = await manager.start_message(session_id, prompt, request_id=request_id)
+        assert receipt.accepted
+        await asyncio.wait_for(paused.wait(), 5)
+        await manager.await_session_execution(session_id, timeout=5)
+        return receipt
+    finally:
+        manager.remove_broadcast(request_id)
 
 
 async def record_terminal(database, request_id="original-request", *, content_id=None):
@@ -213,19 +233,16 @@ async def test_human_correction_does_not_inherit_assignment_and_blocks_automatic
     try:
         assert tasks.active[token].job_id is None
         assert tasks.mode_for(session, None, request_id="human-correction") == "auto"
-        async with session._dispatch_lock:
-            archive = asyncio.create_task(manager.archive_session(session.id, replace=False, only_request_id="wiki-original"))
-            await asyncio.sleep(0)
-            correction = QueuedPrompt(prompt="Keep this new condition", attachment_ids=[], request_id="human-correction")
-            session._pending_queue.append(correction)
+        correction = await pause_human_before_claim(manager, session.id, "Keep this new condition", "human-correction")
+        archive = asyncio.create_task(manager.archive_session(session.id, replace=False, only_request_id="wiki-original"))
         await archive
         assert manager.get_session(session.id) is session
-        assert session._pending_queue == [correction]
+        assert [item["request_id"] for item in manager.dispatch_snapshot(session.id)["items"]] == [correction.request_id]
         assert not session._admission_closed
     finally:
         tasks.close(token)
         tasks.unassign(session.id)
-        session._pending_queue.clear()
+        await manager.cancel_request(session.id, "human-correction")
         if archive is not None:
             await asyncio.gather(archive, return_exceptions=True)
 
@@ -235,8 +252,7 @@ async def test_failed_worker_cleanup_keeps_a_later_human_correction(jobs, tmp_pa
     session = await manager.create_session(jobs.registration["curator_agent_id"], "Worker failure", str(tmp_path))
     running = jobs.update(enqueue(jobs)["id"], status="running")
     reference = job_execution.prepare(jobs, running, running["items"], session.id, "failed-original")
-    correction = QueuedPrompt(prompt="Preserve this new instruction", attachment_ids=[], request_id="later-human")
-    session._pending_queue.append(correction)
+    correction = await pause_human_before_claim(manager, session.id, "Preserve this new instruction", "later-human")
     archive = manager.archive_session
 
     async def guarded_archive(session_id, **kwargs):
@@ -249,10 +265,10 @@ async def test_failed_worker_cleanup_keeps_a_later_human_correction(jobs, tmp_pa
     try:
         await worker._finish_failed_job(jobs.user_id, running["id"], "failed", "Worker stopped")
         assert manager.get_session(session.id) is session
-        assert session._pending_queue == [correction]
+        assert [item["request_id"] for item in manager.dispatch_snapshot(session.id)["items"]] == [correction.request_id]
         assert not session._admission_closed
     finally:
-        session._pending_queue.clear()
+        await manager.cancel_request(session.id, correction.request_id)
 
 
 async def test_cancel_during_session_creation_is_confirmed_only_after_live_worker_retires(jobs):

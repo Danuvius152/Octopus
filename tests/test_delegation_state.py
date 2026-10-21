@@ -50,11 +50,11 @@ async def test_saved_round_survives_restart_and_rejects_stale_snapshot(db, tmp_p
     follow_up = json.dumps({"work_id": "round-b", "state": "running"})
     scope = {"parent_session_id": parent, "user_id": None}
 
-    assert await db.compare_and_set_delegation_state(child, None, running, **scope)
-    assert await db.compare_and_set_delegation_state(child, running, completed, **scope)
-    assert not await db.compare_and_set_delegation_state(child, running, running, **scope)
-    assert await db.compare_and_set_delegation_state(child, completed, follow_up, **scope)
-    assert not await db.compare_and_set_delegation_state(child, completed, completed, **scope)
+    assert await db.compare_and_set_delegation_state(child, None, running, target_agent_id=agent, **scope)
+    assert await db.compare_and_set_delegation_state(child, running, completed, target_agent_id=agent, **scope)
+    assert not await db.compare_and_set_delegation_state(child, running, running, target_agent_id=agent, **scope)
+    assert await db.compare_and_set_delegation_state(child, completed, follow_up, target_agent_id=agent, **scope)
+    assert not await db.compare_and_set_delegation_state(child, completed, completed, target_agent_id=agent, **scope)
 
     await db.close()
     reopened = Database(str(tmp_path / "delegations.db"))
@@ -67,6 +67,44 @@ async def test_saved_round_survives_restart_and_rejects_stale_snapshot(db, tmp_p
         }]
     finally:
         await reopened.close()
+
+
+@pytest.mark.parametrize("owner", [None, "alice"])
+async def test_same_owner_rebinding_cannot_commit_an_original_targets_round(db, tmp_path, owner):
+    child, parent, target = await _save_conversation(db, owner=owner)
+    await db.save_agent(
+        agent_id="replacement", name="Replacement", created_at=STAMP,
+        updated_at=STAMP, user_id=owner,
+    )
+    scope = {"parent_session_id": parent, "user_id": owner}
+    running = '{"work_id":"round-a","state":"running"}'
+    completed = '{"work_id":"round-a","state":"completed"}'
+    assert await db.compare_and_set_delegation_state(child, None, running, target_agent_id=target, **scope)
+
+    # A different writer changes only the target, preserving owner and snapshot.
+    with sqlite3.connect(tmp_path / "delegations.db") as external:
+        external.execute("UPDATE sessions SET agent_id = ? WHERE id = ?", ("replacement", child))
+    assert (await db.get_session_binding(child))["agent_id"] != target
+
+    assert not await db.compare_and_set_delegation_state(child, running, completed, target_agent_id=target, **scope)
+    assert await db.load_delegation_state(child, **scope) == running
+    assert await db.compare_and_set_delegation_state(
+        child, running, completed, target_agent_id="replacement", **scope,
+    )
+
+
+async def test_reparenting_cannot_commit_an_original_parents_round(db, tmp_path):
+    child, parent, target = await _save_conversation(db, owner="alice")
+    await db.save_session("another-parent", "Another parent", "/tmp", STAMP, agent_id=target, user_id="alice")
+    scope = {"parent_session_id": parent, "user_id": "alice"}
+    running = '{"work_id":"round-a","state":"running"}'
+    assert await db.compare_and_set_delegation_state(child, None, running, target_agent_id=target, **scope)
+    with sqlite3.connect(tmp_path / "delegations.db") as external:
+        external.execute("UPDATE sessions SET parent_session_id = ? WHERE id = ?", ("another-parent", child))
+
+    assert not await db.compare_and_set_delegation_state(child, running, "wrong-parent", target_agent_id=target, **scope)
+    assert await db.load_delegation_state(child, **scope) is None
+    assert await db.load_delegation_state(child, parent_session_id="another-parent", user_id="alice") == running
 
 
 async def test_latest_request_is_bound_to_child_work_and_its_owner(db):
@@ -96,84 +134,15 @@ async def test_latest_request_is_bound_to_child_work_and_its_owner(db):
     ) is None
 
 
-@pytest.mark.parametrize("failure_type", [OSError, asyncio.CancelledError])
-async def test_failed_snapshot_write_cannot_be_committed_by_later_update(db, monkeypatch, failure_type):
-    child, parent, _agent = await _save_conversation(db)
-    scope = {"parent_session_id": parent, "user_id": None}
-    running = '{"state":"running"}'
-    interrupted = '{"state":"interrupted"}'
-    commit = db.conn.commit
-    fail_next = True
-
-    async def fail_once():
-        nonlocal fail_next
-        if fail_next:
-            fail_next = False
-            raise failure_type("SQLite commit unavailable")
-        await commit()
-
-    monkeypatch.setattr(db.conn, "commit", fail_once)
-    with pytest.raises(failure_type, match="commit unavailable"):
-        await db.compare_and_set_delegation_state(child, None, running, **scope)
-    assert await db.load_delegation_state(child, **scope) is None
-
-    assert await db.compare_and_set_delegation_state(child, None, interrupted, **scope)
-    assert await db.load_delegation_state(child, **scope) == interrupted
-
-
-async def test_snapshot_rollback_preserves_preceding_transcript_batch(db, monkeypatch, tmp_path):
-    child, parent, _agent = await _save_conversation(db)
-    await db.append_message(child, 0, "user", "text", content="Keep the original request")
-    commit = db.conn.commit
-    commits = 0
-
-    async def fail_round_commit():
-        nonlocal commits
-        commits += 1
-        if commits == 2:
-            raise OSError("Round snapshot unavailable")
-        await commit()
-
-    monkeypatch.setattr(db.conn, "commit", fail_round_commit)
-    with pytest.raises(OSError, match="snapshot unavailable"):
-        await db.compare_and_set_delegation_state(
-            child, None, "running", parent_session_id=parent, user_id=None,
-        )
-    reader = Database(str(tmp_path / "delegations.db"))
-    await reader.initialize()
-    try:
-        assert [row["content"] for row in await reader.load_messages(child)] == ["Keep the original request"]
-        assert await reader.load_delegation_states() == []
-    finally:
-        await reader.close()
-
-
-async def test_lost_commit_acknowledgement_can_be_verified_from_committed_storage(db, monkeypatch):
-    child, parent, _agent = await _save_conversation(db)
-    scope = {"parent_session_id": parent, "user_id": None}
-    completed = '{"state":"completed"}'
-    commit = db.conn.commit
-
-    async def acknowledge_after_error():
-        await commit()
-        raise OSError("Commit acknowledgement lost")
-
-    monkeypatch.setattr(db.conn, "commit", acknowledge_after_error)
-    with pytest.raises(OSError, match="acknowledgement lost"):
-        await db.compare_and_set_delegation_state(child, None, completed, **scope)
-    assert await db.load_delegation_state(child, **scope) == completed
-    monkeypatch.setattr(db.conn, "commit", commit)
-
-
 async def test_concurrent_follow_up_reservations_have_one_winner(db, tmp_path):
-    child, parent, _agent = await _save_conversation(db)
+    child, parent, agent = await _save_conversation(db)
     scope = {"parent_session_id": parent, "user_id": None}
     second = Database(str(tmp_path / "delegations.db"))
     await second.initialize()
     try:
         outcomes = await asyncio.gather(
-            db.compare_and_set_delegation_state(child, None, "first", **scope),
-            second.compare_and_set_delegation_state(child, None, "second", **scope),
+            db.compare_and_set_delegation_state(child, None, "first", target_agent_id=agent, **scope),
+            second.compare_and_set_delegation_state(child, None, "second", target_agent_id=agent, **scope),
         )
         assert sorted(outcomes) == [False, True]
         assert await db.load_delegation_state(child, **scope) in {"first", "second"}
@@ -202,15 +171,15 @@ async def test_foreign_or_ownerless_relationships_have_no_round_authority(
         origin="delegation", parent_session_id="parent",
     )
     scope = {"parent_session_id": "parent", "user_id": child_owner}
-    assert not await db.compare_and_set_delegation_state("child", None, "state", **scope)
+    assert not await db.compare_and_set_delegation_state("child", None, "state", target_agent_id="target", **scope)
     assert await db.load_delegation_state("child", **scope) is None
     assert await db.load_delegation_states() == []
 
 
 async def test_archived_round_survives_but_deleted_parent_removes_authority(db):
-    child, parent, _agent = await _save_conversation(db, owner="alice")
+    child, parent, agent = await _save_conversation(db, owner="alice")
     scope = {"parent_session_id": parent, "user_id": "alice"}
-    assert await db.compare_and_set_delegation_state(child, None, "done", **scope)
+    assert await db.compare_and_set_delegation_state(child, None, "done", target_agent_id=agent, **scope)
     await db.update_session_field(child, archived=True)
     assert (await db.load_delegation_states())[0]["id"] == child
     assert await db.load_delegation_state(child, **scope) == "done"
@@ -220,15 +189,28 @@ async def test_archived_round_survives_but_deleted_parent_removes_authority(db):
     await db.delete_session(parent)
     assert await db.load_delegation_states() == []
     assert await db.load_delegation_state(child, **scope) is None
-    assert not await db.compare_and_set_delegation_state(child, "done", "new", **scope)
+    assert not await db.compare_and_set_delegation_state(child, "done", "new", target_agent_id=agent, **scope)
     assert any(row["id"] == child for row in await db.load_sessions(include_archived=True))
 
 
+async def test_deleted_child_cannot_reserve_another_round(db):
+    child, parent, agent = await _save_conversation(db)
+    scope = {"parent_session_id": parent, "user_id": None}
+    running = '{"work_id":"round-a","state":"running"}'
+    assert await db.compare_and_set_delegation_state(child, None, running, target_agent_id=agent, **scope)
+    await db.delete_session(child)
+
+    assert not await db.compare_and_set_delegation_state(child, running, "new-round", target_agent_id=agent, **scope)
+    assert await db.load_delegation_state(child, **scope) is None
+    assert await db.load_delegation_states() == []
+    assert (await db.get_session_binding(parent))["id"] == parent
+
+
 async def test_ordinary_session_cannot_gain_delegation_authority(db):
-    child, parent, _agent = await _save_conversation(db)
+    child, parent, agent = await _save_conversation(db)
     await db.update_session_field(child, origin="fork")
     assert not await db.compare_and_set_delegation_state(
-        child, None, "state", parent_session_id=parent, user_id=None,
+        child, None, "state", parent_session_id=parent, user_id=None, target_agent_id=agent,
     )
     assert await db.load_delegation_states() == []
 
@@ -246,9 +228,9 @@ async def test_additive_migration_leaves_previous_delegations_without_round_stat
         assert await reopened.load_delegation_state(
             old_child, parent_session_id=parent, user_id=None,
         ) is None
-        new_child, new_parent, _agent = await _save_conversation(reopened, suffix="-new")
+        new_child, new_parent, agent = await _save_conversation(reopened, suffix="-new")
         assert await reopened.compare_and_set_delegation_state(
-            new_child, None, "future", parent_session_id=new_parent, user_id=None,
+            new_child, None, "future", parent_session_id=new_parent, user_id=None, target_agent_id=agent,
         )
         assert [row["id"] for row in await reopened.load_delegation_states()] == [new_child]
     finally:

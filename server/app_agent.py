@@ -146,7 +146,9 @@ class AppAgentManager:
         completion = await receipt.wait()
         if turn.done.is_set():
             return
-        if completion.state != "completed" or completion.recording_state != "committed":
+        if completion.notification_state != "delivered":
+            self._fail_turn(turn, completion.reason or "The original request notification could not be delivered")
+        elif completion.state != "completed" or completion.recording_state != "committed":
             self._fail_turn(turn, f"The request ended without a recorded reply ({completion.state})")
         elif completion.outcome is not None and completion.outcome.status != "success":
             self._fail_turn(turn, completion.outcome.message or "The agent did not complete this request")
@@ -279,10 +281,7 @@ class AppAgentManager:
                     and (not attempt_id or (row.get("tool_input") or {}).get("attempt_context", {}).get("attempt_id") == attempt_id)]
             return {**result, "state": "completed" if terminal["content"]["status"] == "success" else "failed",
                     "outcome": terminal["content"], "reply": "\n\n".join(text), "cost": terminal.get("cost")}
-        blocked = session._recording_blocked
-        if blocked is not None and blocked.request_id == request_id:
-            return {**result, "state": "recording_unconfirmed"}
-        current = session._current_request
+        current = session._run.request
         if current is not None and current.request_id == request_id:
             return {**result, "state": "running"}
         if any(item.request_id == request_id for item in session._pending_queue):
@@ -429,7 +428,7 @@ class AppAgentManager:
         """Wait out a turn that is still unwinding. True once the session is
         free, False if it's genuinely busy with someone else's turn."""
         deadline = time.monotonic() + IDLE_WAIT_SECONDS
-        while session._active_task and not session._active_task.done():
+        while self._require_session_mgr().session_is_executing(session):
             if time.monotonic() >= deadline:
                 return False
             await asyncio.sleep(_IDLE_POLL_SECONDS)
@@ -643,16 +642,11 @@ class AppAgentManager:
             if msg.get("is_error"):
                 turn.error = str(msg.get("message") or "the agent's turn ended with an error")
                 turn.emit({"type": "error", "message": turn.error})
+                turn.done.set()
             else:
                 turn.cost = msg.get("cost")
-                turn.emit(
-                    {
-                        "type": "done",
-                        "reply": turn.reply(),
-                        "cost": turn.cost,
-                    }
-                )
-            turn.done.set()
+                # The original completion confirms both storage and delivery
+                # of its notification prefix. A result frame alone cannot.
             return
         if kind == "error":
             turn.error = str(msg.get("message") or "session error")

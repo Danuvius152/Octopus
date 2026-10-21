@@ -46,7 +46,7 @@ async def test_namespace_readiness_failure_closes_listener_and_owner(
     failure = RuntimeError("controlled namespace readiness failure")
     port = None
 
-    async def fail_readiness(listening_port, namespaces):
+    async def fail_readiness(listening_port, namespaces, readiness_token):
         nonlocal port
         port = listening_port
         assert namespaces and owners and not owners[0].done()

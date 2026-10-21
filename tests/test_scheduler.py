@@ -6,9 +6,9 @@ import pytest
 
 from server.database import Database
 from server.knowledge import encode, for_account
-from server.models import SessionStatus
 from server.scheduler import ScheduleRunner
 from server.session_manager import SessionManager
+from tests.fake_run import FakeRunBase
 from tests.submission import accepted_receipt
 
 
@@ -19,6 +19,37 @@ async def save_schedule(db, **fields):
                           request_id=fields["schedule_id"], user_id=agent["user_id"],
                           prompt=fields["prompt"], selected=fields.get("wiki_mode"))
     await db.save_schedule(**fields, knowledge_context=encode(context))
+
+
+def capture_model_runs(manager, monkeypatch, *, hold=False):
+    """Keep scheduling, admission and settlement real at the Harness seam."""
+    from server.harness import HarnessEvent
+
+    started = []
+
+    class Run(FakeRunBase):
+        def __init__(self, session_id):
+            self.session_id = session_id
+            self.release = asyncio.Event()
+
+        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+            self.prompt = prompt
+            self.request_id = manager.dispatch_snapshot(self.session_id)["active_request_id"]
+            started.append(self)
+
+        async def stream(self):
+            if hold:
+                await self.release.wait()
+            yield HarnessEvent(type="result", is_error=False)
+
+        async def interrupt(self):
+            self.release.set()
+
+        async def stop(self):
+            self.release.set()
+
+    monkeypatch.setattr(manager, "_make_run", lambda session, *args, **kwargs: Run(session.id))
+    return started
 
 
 @pytest.fixture
@@ -199,16 +230,7 @@ async def test_fire_materializes_scheduled_session_and_auto_archives(
     mgr, db, runner = setup
     agent = await db.get_system_agent()
 
-    # Stub the turn — no real backend; just record what ran.
-    ran: dict = {}
-
-    async def fake_send(session_id, prompt, attachment_ids=None, **kwargs):
-        ran["session_id"] = session_id
-        ran["prompt"] = prompt
-        if False:  # make this an async generator without yielding events
-            yield
-
-    monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
+    runs = capture_model_runs(mgr, monkeypatch)
 
     await save_schedule(db,
         schedule_id="sch1",
@@ -222,9 +244,13 @@ async def test_fire_materializes_scheduled_session_and_auto_archives(
     await runner._fire("sch1")
 
     # A fresh session ran the prompt under the agent...
-    assert ran["prompt"].endswith("do it")
-    assert ran["prompt"].startswith("[scheduled:daily — Every 1m]")
-    fired_sid = ran["session_id"]
+    assert len(runs) == 1
+    assert runs[0].prompt.endswith("do it")
+    fired_sid = runs[0].session_id
+    original = [row for row in await db.load_messages(fired_sid) if row["role"] == "user"]
+    assert len(original) == 1
+    assert original[0]["content"].startswith("[scheduled:daily — Every 1m]")
+    assert runs[0].prompt.endswith(original[0]["content"])
     rows = await db.load_sessions(include_archived=True)
     fired = next(r for r in rows if r["id"] == fired_sid)
     assert fired["agent_id"] == agent["id"]
@@ -253,12 +279,8 @@ async def test_fire_creates_a_fresh_session_for_each_durable_schedule_run(setup,
         created_sessions.append(sess.id)
         return sess
 
-    async def fake_send(session_id, prompt, attachment_ids=None, **kwargs):
-        if False:
-            yield
-
+    runs = capture_model_runs(mgr, monkeypatch)
     monkeypatch.setattr(mgr, "create_session", tracking_create)
-    monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
 
     await save_schedule(db,
         schedule_id="schX", agent_id=agent["id"], name="repeat", prompt="first",
@@ -271,6 +293,8 @@ async def test_fire_creates_a_fresh_session_for_each_durable_schedule_run(setup,
     # Two fires → two distinct fresh sessions.
     assert len(created_sessions) == 2
     assert created_sessions[0] != created_sessions[1]
+    assert [run.session_id for run in runs] == created_sessions
+    assert runs[0].prompt.endswith("first") and runs[1].prompt.endswith("second")
 
 
 @pytest.mark.asyncio
@@ -338,14 +362,7 @@ async def test_fire_falls_back_to_fresh_session_when_origin_gone(setup, monkeypa
     mgr, db, runner = setup
     agent = await db.get_system_agent()
 
-    ran: dict = {}
-
-    async def fake_send(session_id, prompt, attachment_ids=None, **kwargs):
-        ran["session_id"] = session_id
-        if False:
-            yield
-
-    monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
+    runs = capture_model_runs(mgr, monkeypatch)
 
     await save_schedule(db,
         schedule_id="sch2",
@@ -360,7 +377,8 @@ async def test_fire_falls_back_to_fresh_session_when_origin_gone(setup, monkeypa
     await runner._fire("sch2")
 
     # A fresh schedule-origin session ran the prompt and was auto-archived.
-    fired_sid = ran["session_id"]
+    assert len(runs) == 1
+    fired_sid = runs[0].session_id
     assert fired_sid != "ghost-session-that-was-deleted"
     rows = await db.load_sessions(include_archived=True)
     fired = next(r for r in rows if r["id"] == fired_sid)
@@ -487,11 +505,7 @@ async def test_run_at_schedule_deleted_after_fire(setup, monkeypatch):
     mgr, db, runner = setup
     agent = await db.get_system_agent()
 
-    async def fake_send(session_id, prompt, attachment_ids=None, **kwargs):
-        if False:
-            yield
-
-    monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
+    runs = capture_model_runs(mgr, monkeypatch)
 
     await save_schedule(db,
         schedule_id="once2",
@@ -509,6 +523,7 @@ async def test_run_at_schedule_deleted_after_fire(setup, monkeypatch):
 
     # Row gone from DB.
     assert await db.load_schedules() == []
+    assert len(runs) == 1 and runs[0].prompt.endswith("do it once")
 
 
 @pytest.mark.asyncio
@@ -766,14 +781,7 @@ async def test_a_fire_is_skipped_while_the_previous_one_is_still_running(
     mgr, db, runner = setup
     agent = await db.get_system_agent()
 
-    sends: list[str] = []
-
-    async def fake_send(session_id, prompt, attachment_ids=None, **kwargs):
-        sends.append(session_id)
-        if False:
-            yield
-
-    monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
+    runs = capture_model_runs(mgr, monkeypatch, hold=True)
     await save_schedule(db,
         schedule_id="busy1",
         agent_id=agent["id"],
@@ -783,24 +791,31 @@ async def test_a_fire_is_skipped_while_the_previous_one_is_still_running(
         created_at="2026-01-01T00:00:00+00:00",
     )
 
-    # Fire once — it records the session it ran in…
-    await runner._fire("busy1")
-    assert len(sends) == 1
-    first_sid = (await db.load_schedules())[0]["last_run_session_id"]
-    assert first_sid == sends[0]
+    firing = asyncio.create_task(runner._fire("busy1"))
+    resumed = None
+    try:
+        async with asyncio.timeout(2):
+            while not runs:
+                await asyncio.sleep(0)
+        first_sid = (await db.load_schedules())[0]["last_run_session_id"]
+        assert first_sid == runs[0].session_id
+        assert mgr.session_is_executing(mgr.get_session(first_sid))
+        await runner._fire("busy1")
+        assert len(runs) == 1, "a second run started while the first was going"
 
-    # …and pretend that run is still going when the next tick arrives.
-    stuck = await mgr.create_session(agent["id"], name="stuck")
-    await db.update_schedule("busy1", last_run_session_id=stuck.id)
-    stuck.status = SessionStatus.running
-
-    await runner._fire("busy1")
-    assert len(sends) == 1, "a second run started while the first was going"
-
-    # Once it finishes, the schedule resumes on the next tick.
-    stuck.status = SessionStatus.idle
-    await runner._fire("busy1")
-    assert len(sends) == 2
+        runs[0].release.set()
+        await asyncio.wait_for(firing, 2)
+        resumed = asyncio.create_task(runner._fire("busy1"))
+        async with asyncio.timeout(2):
+            while len(runs) != 2:
+                await asyncio.sleep(0)
+        runs[1].release.set()
+        await asyncio.wait_for(resumed, 2)
+        assert runs[1].session_id != first_sid
+    finally:
+        for run in runs:
+            run.release.set()
+        await asyncio.gather(*([firing, resumed] if resumed is not None else [firing]))
 
 
 @pytest.mark.asyncio
@@ -810,14 +825,7 @@ async def test_a_gone_or_idle_previous_session_never_blocks(setup, monkeypatch):
     mgr, db, runner = setup
     agent = await db.get_system_agent()
 
-    sends: list[str] = []
-
-    async def fake_send(session_id, prompt, attachment_ids=None, **kwargs):
-        sends.append(session_id)
-        if False:
-            yield
-
-    monkeypatch.setattr(mgr, "_execute_claimed_request", fake_send)
+    runs = capture_model_runs(mgr, monkeypatch)
     await save_schedule(db,
         schedule_id="gone1",
         agent_id=agent["id"],
@@ -829,7 +837,7 @@ async def test_a_gone_or_idle_previous_session_never_blocks(setup, monkeypatch):
     await db.update_schedule("gone1", last_run_session_id="deleted-long-ago")
 
     await runner._fire("gone1")
-    assert len(sends) == 1
+    assert len(runs) == 1
 
 
 @pytest.mark.asyncio
@@ -842,14 +850,7 @@ async def test_a_fire_does_not_pile_up_behind_another_fire_in_a_chat(
     agent = await db.get_system_agent()
     origin = await mgr.create_session(agent["id"], name="chat")
 
-    started: list[str] = []
-
-    async def fake_start(session_id, prompt, *, source, knowledge_context):
-        assert source == "schedule"
-        started.append(prompt)
-        return accepted_receipt()
-
-    monkeypatch.setattr(mgr, "start_message", fake_start)
+    runs = capture_model_runs(mgr, monkeypatch, hold=True)
     await save_schedule(db,
         schedule_id="chat1",
         agent_id=agent["id"],
@@ -860,49 +861,68 @@ async def test_a_fire_does_not_pile_up_behind_another_fire_in_a_chat(
         origin_session_id=origin.id,
     )
 
-    await runner._fire("chat1")
-    assert len(started) == 1
+    human = await mgr.start_message(origin.id, "The user's original task")
+    try:
+        async with asyncio.timeout(2):
+            while not runs:
+                await asyncio.sleep(0)
+        await runner._fire("chat1")
+        first = mgr.dispatch_snapshot(origin.id)["items"]
+        assert len(first) == 1 and first[0]["source"] == "schedule"
+        assert first[0]["summary"].endswith("summarize")
+        await runner._fire("chat1")
+        assert mgr.dispatch_snapshot(origin.id)["items"] == first, "a second fire queued behind the first"
+        assert len(runs) == 1
 
-    # Something is now waiting in that session's queue.
-    origin._pending_queue.append(object())
-    await runner._fire("chat1")
-    assert len(started) == 1, "a second fire queued behind the first"
-
-    origin._pending_queue.clear()
-    await runner._fire("chat1")
-    assert len(started) == 2
+        assert await asyncio.wait_for(mgr.cancel_request(origin.id, first[0]["request_id"]), 1)
+        await runner._fire("chat1")
+        second = mgr.dispatch_snapshot(origin.id)["items"]
+        assert len(second) == 1 and second[0]["source"] == "schedule"
+        assert second[0]["request_id"] != first[0]["request_id"]
+        assert await asyncio.wait_for(mgr.cancel_request(origin.id, second[0]["request_id"]), 1)
+    finally:
+        await mgr.interrupt(origin.id)
+        await asyncio.wait_for(human.wait(), 2)
+        await mgr.await_session_execution(origin.id, timeout=2)
 
 
 async def test_fresh_fire_is_admitted_and_owned_by_dispatch(setup, monkeypatch):
-    import asyncio
-
-    from server.harness import HarnessEvent
-
     mgr, db, runner = setup
     agent = await db.get_system_agent()
     entered = asyncio.Event()
     captured = {}
 
-    async def backend(session, prompt):
-        captured.update(session_id=session.id, source=session._current_request.source,
-                        driver=session._active_task, inner=session._inner_task,
-                        request_id=session._current_request.request_id)
+    async def observe(event):
+        if event.get("type") != "attempt_started":
+            return
+        captured.update(session_id=event["session_id"], request_id=event["request_id"], attempt_id=event["attempt_id"])
         entered.set()
-        await asyncio.Event().wait()
-        if False:
-            yield HarnessEvent(type="result")
 
-    monkeypatch.setattr(mgr, "_run_backend", backend)
+    runs = capture_model_runs(mgr, monkeypatch, hold=True)
+    mgr.on_broadcast("owned-schedule", observe)
     await save_schedule(db,
         schedule_id="owned-schedule", agent_id=agent["id"], name="owned",
         prompt="scheduled work", interval_seconds=3600,
         created_at="2026-10-17T00:00:00+00:00",
     )
     firing = asyncio.create_task(runner._fire("owned-schedule"))
-    await asyncio.wait_for(entered.wait(), 2)
-    assert captured["source"] == "schedule"
-    assert captured["driver"] is not None and captured["inner"] is not None
-    assert mgr.running_turns_for(None) == 1
-    await mgr.drain_turns()
-    await asyncio.wait_for(firing, 2)
-    assert mgr.running_turns_for(None) == 0
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        original = [row for row in await db.load_messages(captured["session_id"]) if row["role"] == "user"]
+        assert len(original) == 1
+        context = original[0]["tool_input"]["request_context"]
+        assert context["source"] == "schedule" and context["request_id"] == captured["request_id"]
+        assert captured["attempt_id"]
+        assert mgr.running_turns_for(None) == 1
+        await mgr.drain_turns()
+        await asyncio.wait_for(firing, 2)
+        assert mgr.running_turns_for(None) == 0
+        assert len(runs) == 1
+        outcomes = [row["content"] for row in await db.load_messages(captured["session_id"]) if row["type"] == "result"]
+        assert len(outcomes) == 1 and outcomes[0]["request_id"] == captured["request_id"]
+        assert outcomes[0]["status"] == "interrupted" and outcomes[0]["code"] == "service_shutdown"
+    finally:
+        for run in runs:
+            run.release.set()
+        await asyncio.wait_for(firing, 2)
+        mgr.remove_broadcast("owned-schedule")

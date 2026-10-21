@@ -416,6 +416,7 @@ async def create_agent_schedule_from_text(
         agent.get("credential_id"),
         style=harness.profile.credential_style,
         context=f"schedule-parse agent {agent_id}",
+        user_id=user_id,
     )
     try:
         parsed = await parse_schedule_text(

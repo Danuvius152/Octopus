@@ -6,20 +6,34 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.submission import accepted_receipt
 from tests.test_wiki_query_real import QueryProbe
 
 
 class ReplayManager:
     def __init__(self, scenario):
         self.scenario = scenario
+        self.callbacks = {}
 
     async def create_session(self, *args, **kwargs):
         return SimpleNamespace(id="synthetic-session")
 
-    async def _execute_claimed_request(self, session_id, question, *, wiki_mode, request_id):
+    def on_broadcast(self, key, callback):
+        self.callbacks[key] = callback
+
+    def remove_broadcast(self, key):
+        del self.callbacks[key]
+
+    async def start_message(self, session_id, question, *, wiki_mode, request_id):
         assert wiki_mode == "read"
-        yield {"type": "assistant_text", "content": "Replay segment A."}
-        yield {"type": "assistant_text", "content": "Replay segment B."}
+        async for event in self.events(session_id, request_id):
+            for callback in tuple(self.callbacks.values()):
+                await callback(deepcopy(event))
+        return accepted_receipt(request_id)
+
+    async def events(self, session_id, request_id):
+        yield {"type": "assistant_text", "session_id": session_id, "content": "Replay segment A."}
+        yield {"type": "assistant_text", "session_id": session_id, "content": "Replay segment B."}
         final = {"type": "result", "session_id": session_id, "request_id": request_id,
                  "terminal": True, "is_error": False,
                  "content": {"status": "success", "request_id": request_id}}
@@ -41,9 +55,9 @@ class ReplayManager:
         elif self.scenario == "other-content-request":
             final["content"]["request_id"] = "another-request"
         elif self.scenario == "error-event":
-            yield {"type": "error", "content": "error before settlement"}
+            yield {"type": "error", "session_id": session_id, "content": "error before settlement"}
         elif self.scenario == "recovery":
-            yield {"type": "recovery", "content": {"provider_code": "server_overloaded"}}
+            yield {"type": "recovery", "session_id": session_id, "content": {"provider_code": "server_overloaded"}}
         yield final
         if self.scenario == "duplicate":
             yield deepcopy(final)

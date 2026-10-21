@@ -127,6 +127,7 @@ async def start_callback_api(
     websocket: bool = False,
     overrides: dict[Any, Any] | None = None,
     exception_handlers: dict[Any, Any] | None = None,
+    readiness_token: str | None = None,
 ) -> CallbackApi:
     """Serve `routers` plus (by default) every MCP namespace on a free port.
 
@@ -204,7 +205,7 @@ async def start_callback_api(
             raise RuntimeError("callback API server never started")
         port = server.servers[0].sockets[0].getsockname()[1]
         if mcp:
-            await _await_namespaces(port, servers)
+            await _await_namespaces(port, servers, readiness_token)
         return CallbackApi(
             port=port,
             app=app,
@@ -238,7 +239,7 @@ async def start_callback_api(
         raise
 
 
-async def _await_namespaces(port: int, servers: dict[str, Any]) -> None:
+async def _await_namespaces(port: int, servers: dict[str, Any], token: str | None = None) -> None:
     """Don't hand out the port until every namespace has answered in full.
 
     Cheap — eight in-process requests, a few milliseconds — and worth it: a
@@ -264,7 +265,7 @@ async def _await_namespaces(port: int, servers: dict[str, Any]) -> None:
         },
     }
     headers = {
-        "Authorization": f"Bearer {mint('callback-api-readiness')}",
+        "Authorization": f"Bearer {token or mint('callback-api-readiness')}",
         "Accept": "application/json, text/event-stream",
         "Content-Type": "application/json",
     }

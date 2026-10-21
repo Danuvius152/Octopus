@@ -48,7 +48,8 @@ async def test_whole_input_is_rejected_before_queue_or_model(runtime, attachment
     with pytest.raises(ValueError) as raised:
         await manager.start_message(session.id, "Use all of these files", attachment_ids=identifiers, steerable=True)
     assert getattr(raised.value, "code", None) == "attachment_unavailable"
-    assert session._pending_queue == [] and not session._active_task
+    assert manager.dispatch_snapshot(session.id)["items"] == []
+    assert not manager.session_is_executing(session)
     assert starts.empty() and events == []
     assert await database.load_messages(session.id) == before
 
@@ -64,9 +65,7 @@ async def test_missing_queued_file_fails_without_a_second_model_and_retains_inpu
     await manager.interrupt(session.id)
     # Stop pauses the accepted queue. Resume it explicitly once the captured
     # blocker and its process have retired; no timing sleeps hide the loss.
-    async with asyncio.timeout(5):
-        while session._active_task is not None:
-            await asyncio.sleep(.01)
+    await manager.await_session_execution(session.id, timeout=5)
     await manager.resume_dispatch(session.id)
     completion = await asyncio.wait_for(second.wait(), 5)
     await wait_dispatch_idle(manager, session.id)

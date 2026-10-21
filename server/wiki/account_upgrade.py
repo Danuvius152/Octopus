@@ -9,12 +9,15 @@ import os
 import shutil
 import sqlite3
 import uuid
+from collections.abc import Iterable
 from pathlib import Path
 
 from ..aio import complete_cleanup
 from ..config import settings
+from ..service_installation import transfer_vault
 from .history import atomic
 from .registry import registry
+from .storage import connect, file_effect
 from .store import WikiError
 
 
@@ -59,11 +62,24 @@ def pending_upgrade(*, include_complete=False) -> dict | None:
         raise WikiError("Account migration journal needs operator verification", 503) from exc
 
 
+def _sync_directories(directories: Iterable[Path]) -> None:
+    with file_effect(registry.health):
+        for directory in directories:
+            descriptor = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+
+
 def save(journal: dict) -> None:
     path = journal_path()
-    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    atomic(path, json.dumps(journal, ensure_ascii=False, sort_keys=True).encode())
-    path.chmod(0o600)
+    with file_effect(registry.health):
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        atomic(path, json.dumps(journal, ensure_ascii=False, sort_keys=True).encode())
+        path.chmod(0o600)
+    parent = path.parent.resolve()
+    _sync_directories((parent, *parent.parents))
 
 
 def subscriber_digest(subscriber):
@@ -99,16 +115,16 @@ def _durable_digest(path: Path) -> dict:
     from .maintenance_inputs import TABLES as maintenance_derived
 
     derived = {"documents", "search_documents", "search_sections", "search_fts", "raw_materials", "index_state", "watch_directories"} | maintenance_derived.keys()
-    with sqlite3.connect(path.as_uri() + "?mode=ro", uri=True) as db:
+    with connect(path, registry.health, write=False) as db:
         if db.execute("PRAGMA integrity_check").fetchone()[0] != "ok":
-            raise WikiError("Wiki state integrity verification failed", 503)
+            registry.health.fail(RuntimeError("Wiki state integrity verification failed"))
         tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name")]
         result = {}
         for table in tables:
             if table in derived or table.startswith(("search_fts_", "sqlite_")):
                 continue
             quoted = '"' + table.replace('"', '""') + '"'
-            rows = sorted(repr(row) for row in db.execute(f"SELECT * FROM {quoted}"))  # noqa: S608
+            rows = sorted(repr(tuple(row)) for row in db.execute(f"SELECT * FROM {quoted}"))  # noqa: S608
             result[table] = {"rows": len(rows), "sha256": hashlib.sha256("\n".join(rows).encode()).hexdigest()}
         return result
 
@@ -127,7 +143,8 @@ def prepare(journal: dict) -> None:
         marker = stage / ".upgrade-owner.json"
         if not marker.is_file() or json.loads(marker.read_text()).get("upgrade_id") != journal["upgrade_id"]:
             raise WikiError("Migration staging directory is not owned by this upgrade; retained", 409)
-        shutil.rmtree(stage)
+        with file_effect(registry.health):
+            shutil.rmtree(stage)
     total = 0
     for path in source.rglob("*"):
         if path.is_symlink():
@@ -136,14 +153,15 @@ def prepare(journal: dict) -> None:
             total += path.stat().st_size
     if shutil.disk_usage(stage.parent).free < total * 2 + 1024 * 1024:
         raise WikiError("Insufficient space to prepare a verified Wiki migration", 507)
-    stage.mkdir(mode=0o700)
-    atomic(stage / ".upgrade-owner.json", json.dumps({"upgrade_id": journal["upgrade_id"]}).encode())
-    shutil.copytree(source, stage, dirs_exist_ok=True,
-                    ignore=shutil.ignore_patterns("index.sqlite3", "index.sqlite3-wal", "index.sqlite3-shm", "index.sqlite3-journal"))
+    with file_effect(registry.health):
+        stage.mkdir(mode=0o700)
+        atomic(stage / ".upgrade-owner.json", json.dumps({"upgrade_id": journal["upgrade_id"]}).encode())
+        shutil.copytree(source, stage, dirs_exist_ok=True,
+                        ignore=shutil.ignore_patterns("index.sqlite3", "index.sqlite3-wal", "index.sqlite3-shm", "index.sqlite3-journal"))
     original = source / "index.sqlite3"
     if original.is_file():
-        with sqlite3.connect(original.as_uri() + "?mode=ro", uri=True) as before:
-            with sqlite3.connect(stage / "index.sqlite3") as after:
+        with connect(original, registry.health, write=False) as before:
+            with connect(stage / "index.sqlite3", registry.health, create=True) as after:
                 before.backup(after)
     journal["durable"] = _durable_digest(stage / "index.sqlite3")
     if _durable_digest(original) != journal["durable"]:
@@ -152,7 +170,7 @@ def prepare(journal: dict) -> None:
     if _manifest(stage) != journal["files"]:
         raise WikiError("Wiki history and snapshot file verification failed", 503)
     journal["notice_subscribers"] = {}
-    with sqlite3.connect((stage / "index.sqlite3").as_uri() + "?mode=ro", uri=True) as db:
+    with connect(stage / "index.sqlite3", registry.health, write=False) as db:
         db.row_factory = sqlite3.Row
         if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='wiki_job_subscribers'").fetchone():
             from . import job_events
@@ -160,11 +178,15 @@ def prepare(journal: dict) -> None:
             job_events.require(db)
             journal["notice_subscribers"] = {row["id"]: subscriber_digest(row) for row in
                                               db.execute("SELECT * FROM wiki_job_subscribers WHERE owner='legacy'")}
-    for path in [stage, *stage.rglob("*")]:
-        path.chmod(0o700 if path.is_dir() else 0o600)
-        if path.is_file():
-            with path.open("rb") as handle:
-                os.fsync(handle.fileno())
+    staged_paths = [stage, *stage.rglob("*")]
+    with file_effect(registry.health):
+        for path in staged_paths:
+            path.chmod(0o700 if path.is_dir() else 0o600)
+            if path.is_file():
+                with path.open("rb") as handle:
+                    os.fsync(handle.fileno())
+    directories = sorted((path for path in staged_paths if path.is_dir()), key=lambda path: len(path.parts), reverse=True)
+    _sync_directories(directories)
     journal["phase"] = "prepared"
     save(journal)
 
@@ -184,18 +206,20 @@ def publish(journal: dict) -> None:
     else:
         journal["phase"] = "publishing"
         save(journal)
-        os.replace(stage, destination)
-        descriptor = os.open(destination.parent, os.O_RDONLY | os.O_DIRECTORY)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
+        with file_effect(registry.health):
+            os.replace(stage, destination)
+    # A previous rename can be visible without its directory-sync receipt.
+    # Re-entry must confirm the same namespace before publishing ownership.
+    _sync_directories((destination.parent, *destination.parent.parents))
     journal["phase"] = "published"
     save(journal)
     source = Path(journal["source"])
+    transfer_vault(settings, Path(journal["config"]["root"]), source, destination, health=registry.health)
     old_config = source / "config.json"
     if old_config.exists():
-        os.replace(old_config, source / "config.legacy-adopted.json")
+        with file_effect(registry.health):
+            os.replace(old_config, source / "config.legacy-adopted.json")
+    _sync_directories((source,))
 
 
 async def _io(function, *args):
@@ -325,6 +349,13 @@ async def upgrade_with_wiki(db, *, username, password, adopt, manager, user=None
         if not drained:
             raise BootstrapError("Account transition cleanup is unconfirmed; state retained. Retry the upgrade after its writers finish.",
                                  status_code=503) from exc
+        if journal["phase"] != "preparing":
+            # prepared may already be visible even when save's final fsync
+            # failed. Reopening writers would invalidate the retained staging
+            # that the same command will reuse on retry.
+            raise BootstrapError("Account preparation is retained; Wiki writes remain stopped. "
+                                 "Retry the original bootstrap request to confirm preparation and continue.",
+                                 status_code=503) from exc
         registry.unblock(None)
         registry.resume_access()
         if manager is not None:
@@ -341,8 +372,6 @@ async def upgrade_with_wiki(db, *, username, password, adopt, manager, user=None
 
 async def resume_upgrade(db, user, manager):
     from ..bootstrap import BootstrapError
-    if not hasattr(db, "_bootstrap_lock"):
-        db._bootstrap_lock = asyncio.Lock()
     async with db._bootstrap_lock:
         if pending_upgrade() is None:
             raise BootstrapError("No pending account upgrade", status_code=404)

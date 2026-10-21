@@ -7,7 +7,7 @@ import sqlite3
 import uuid
 from datetime import UTC, datetime
 
-from . import protocols
+from . import protocols, storage
 
 TABLES = {
     "filesystem_recoveries": """CREATE TABLE filesystem_recoveries(
@@ -103,7 +103,7 @@ def active(db):
     return db.execute("SELECT * FROM filesystem_recoveries WHERE phase<>'complete'").fetchone()
 
 
-def access(db, root, vault_id, permit=None):
+def access(db, root, vault_id, permit=None, *, health):
     """The persistent phase is the admission authority, including cold opens."""
     from .store import WikiError
 
@@ -117,6 +117,7 @@ def access(db, root, vault_id, permit=None):
         if row is not None and (row["root"], row["vault_id"]) != (str(root), vault_id):
             raise WikiError("Filesystem recovery binding changed; evidence retained", 503)
     except sqlite3.DatabaseError as exc:
+        storage.check_error(exc, db, health)
         raise unavailable() from exc
 
 

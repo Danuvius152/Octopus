@@ -807,11 +807,10 @@ async def test_worker_keeps_completed_session_until_owned_cleanup_and_archives_o
         await asyncio.wait_for(started.wait(), 2)
         session_id = jobs.get(job["id"])["session_id"]
         session = manager.get_session(session_id)
-        driver = session._active_task
-        assert session._current_request.source == "wiki"
+        assert session._run.request.source == "wiki"
         finish_run.set()
         await asyncio.wait_for(cleaning.wait(), 2)
-        await asyncio.wait_for(asyncio.shield(driver), 2)
+        assert (await asyncio.wait_for(receipts[0].wait(), 2)).outcome.status == "success"
         assert automatic == []
         assert manager.get_session(session_id) is session
         assert session_id in grants.assignments
@@ -870,7 +869,7 @@ async def test_worker_cancel_waits_for_owned_execution_before_removing_grant(job
         await asyncio.wait_for(started.wait(), 2)
         session_id = jobs.get(job["id"])["session_id"]
         session = manager.get_session(session_id)
-        assert session._current_request.source == "wiki"
+        assert session._run.request.source == "wiki"
         assert session_id in grants.assignments
         processing.cancel()
         await asyncio.wait_for(stopping.wait(), 2)
@@ -921,15 +920,16 @@ async def test_job_cancel_targets_captured_wiki_request_and_preserves_human_corr
     correction = await manager.start_message(session.id, "human correction")
     try:
         await asyncio.wait_for(entered.wait(), 2)
-        result = await jobs.cancel(job["id"], manager)
+        result = await asyncio.wait_for(jobs.cancel(job["id"], manager), 2)
         assert result["status"] == "cancelled"
         assert (await original.wait()).state == "withdrawn"
-        assert session._current_request.request_id == correction.request_id
-        assert not session._inner_task.done()
+        assert session._run.request.request_id == correction.request_id
+        assert manager.session_is_executing(session)
         finish.set()
         assert (await asyncio.wait_for(correction.wait(), 2)).outcome.status == "success"
     finally:
         finish.set()
+        await asyncio.wait_for(manager.interrupt(session.id), 2)
 
 
 @pytest.fixture

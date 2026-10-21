@@ -13,6 +13,10 @@
 
 import type { components } from "./contracts";
 
+export type ClientSubmissionStatus = components["schemas"]["ClientSubmissionStatus"];
+export type ClientSubmissionSummary = components["schemas"]["ClientSubmissionSummary"];
+export type SubmissionRecoveryPage = components["schemas"]["SubmissionRecoveryPage"];
+
 export type AgentRead = components["schemas"]["AgentRead"];
 export type ApplicationRead = components["schemas"]["ApplicationRead"];
 export type ApplicationCreate = components["schemas"]["ApplicationCreate"];

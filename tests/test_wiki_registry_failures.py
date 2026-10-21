@@ -3,12 +3,11 @@
 import asyncio
 import importlib
 import json
-import os
 import sqlite3
-import stat
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -21,6 +20,8 @@ from server.routers import wiki as wiki_router
 from server.users import UserManager
 from server.wiki.registry import WikiRegistry
 from server.wiki.store import WikiError
+from tests.test_service_runtime import installation_settings
+from tests.test_wiki_storage import registration_process
 
 registry_module = importlib.import_module("server.wiki.registry")
 
@@ -111,32 +112,55 @@ def test_last_user_cleanup_failure_wakes_drain_and_retains_resource(
                     store._lifecycle.notify_all()
 
 
-def test_same_value_retry_confirms_file_and_directory_durability(registered, monkeypatch):
-    registry, root, first = registered
-    fsync = os.fsync
-    attempts = []
-
-    def synchronize(descriptor):
-        kind = "directory" if stat.S_ISDIR(os.fstat(descriptor).st_mode) else "file"
-        attempts[-1].append(kind)
-        if kind == "directory" and len(attempts) <= 2:
-            raise OSError("synthetic directory durability failure")
-        return fsync(descriptor)
-
-    monkeypatch.setattr(os, "fsync", synchronize)
+def test_same_value_retry_confirms_file_and_directory_durability(tmp_path):
+    config, config_file = installation_settings(tmp_path / "installation")
+    marker = tmp_path / "sync-attempt"
     generations = []
-    for _ in range(2):
-        attempts.append([])
-        with pytest.raises(WikiError, match="durability is unconfirmed") as failure:
-            registry.configure(None, root, "curator-b")
-        assert failure.value.status == 503
-        generations.append(registry.config(None)["registration_generation"])
-    attempts.append([])
-    confirmed = registry.configure(None, root, "curator-b")
-    generations.append(confirmed["registration_generation"])
+    for _attempt in range(2):
+        result = registration_process(config_file, marker, """
+import stat
+if not (state/'config.json').exists():
+    first=registry.configure(None,root,'curator-a')
+    marker.with_suffix('.first').write_text(json.dumps(first))
+fsync=os.fsync
+def synchronize(descriptor):
+    path=Path(os.readlink(f'/proc/self/fd/{descriptor}'))
+    if path==state or path.parent==state:
+        kind='directory' if stat.S_ISDIR(os.fstat(descriptor).st_mode) else 'file'
+        with marker.with_suffix('.syncs').open('a') as output: output.write(kind+'\\n')
+        if path==state: raise OSError('synthetic directory durability failure')
+    return fsync(descriptor)
+os.fsync=synchronize
+try:
+    registry.configure(None,root,'curator-b')
+except Exception:
+    pass
+marker.touch()
+""")
+        assert result.returncode == 70, result.stderr
+        assert not marker.exists()
+        generations.append(json.loads((Path(config.wiki_dir) / "config.json").read_text())["registration_generation"])
+    confirmed = registration_process(config_file, marker, """
+import stat
+fsync=os.fsync
+def synchronize(descriptor):
+    path=Path(os.readlink(f'/proc/self/fd/{descriptor}'))
+    if path==state or path.parent==state:
+        kind='directory' if stat.S_ISDIR(os.fstat(descriptor).st_mode) else 'file'
+        with marker.with_suffix('.syncs').open('a') as output: output.write(kind+'\\n')
+    return fsync(descriptor)
+os.fsync=synchronize
+result=registry.configure(None,root,'curator-b')
+marker.write_text(json.dumps(result))
+registry.close()
+""")
+    assert confirmed.returncode == 0, confirmed.stderr
+    generations.append(json.loads(marker.read_text())["registration_generation"])
+    first = json.loads(marker.with_suffix(".first").read_text())
     assert len(set(generations)) == 1
     assert generations[0] != first["registration_generation"]
-    assert all("file" in attempt and "directory" in attempt for attempt in attempts)
+    assert marker.with_suffix(".syncs").read_text().splitlines().count("directory") == 3
+    assert marker.with_suffix(".syncs").read_text().splitlines().count("file") >= 3
 
 
 @pytest.fixture
@@ -424,16 +448,22 @@ def test_controlled_reopen_cannot_publish_after_lifecycle_or_journal_changes(
 ):
     from server.wiki import account_upgrade as upgrade
 
-    registry, root, _ = registered
+    registry, root, config = registered
     owner = "migration-owner"
-    config = registry.configure(owner, root, "curator")
-    registry.block(owner)
     monkeypatch.setattr(upgrade, "registry", registry)
     identifier = uuid.uuid4().hex
-    journal = {"version": 1, "upgrade_id": identifier, "phase": "reopening", "user_id": owner,
+    journal = {"version": 1, "upgrade_id": identifier, "phase": "preparing", "user_id": owner,
                "username": "owner", "adopt": True, "source": str(registry.state(None)),
                "stage": str(upgrade.journal_path().parent / (".wiki-adoption-" + identifier)),
                "config": config}
+    registry.block(None)
+    registry.state(owner).parent.mkdir(parents=True, exist_ok=True)
+    upgrade.prepare(journal)
+    journal["phase"] = "account_created"
+    upgrade.save(journal)
+    upgrade.publish(journal)
+    registry.block(owner)
+    journal["phase"] = "reopening"
     upgrade.save(journal)
     entered, release = threading.Event(), threading.Event()
     real_store = registry_module.WikiStore

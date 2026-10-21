@@ -90,6 +90,10 @@ async def run(manager):
                     await jobs.settle_cancelled(job_id, manager)
                 after[user_id] = unsettled[-1] if unsettled else ""
                 await dispatch(jobs, manager)
-            except Exception:
+            except Exception as error:
                 logger.exception("Wiki notification delivery remains pending for account=%s", user_id)
+                # The joined I/O can fail after cleanup deferred cancellation.
+                # Its domain error must not restart a cancelled receiver.
+                if (receiver := asyncio.current_task()) is not None and receiver.cancelling():
+                    raise asyncio.CancelledError from error
         await asyncio.sleep(1)

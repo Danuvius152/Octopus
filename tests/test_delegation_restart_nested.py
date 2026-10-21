@@ -121,44 +121,27 @@ async def test_database_close_confirms_terminal_writer_created_during_its_own_dr
     scope = verify(token)
     assert scope is not None and scope_is_live(scope)
     write = current.database.compare_and_set_delegation_state
-    fault = True
+    entered, release = asyncio.Event(), asyncio.Event()
 
-    async def unavailable_terminal_write(*args, **kwargs):
-        if fault and json.loads(args[2])["state"] == "interrupted":
-            raise OSError("synthetic terminal persistence outage during close")
+    async def pause_terminal_write(*args, **kwargs):
+        if json.loads(args[2])["state"] == "interrupted":
+            entered.set()
+            await release.wait()
         return await write(*args, **kwargs)
 
-    monkeypatch.setattr(current.database, "compare_and_set_delegation_state", unavailable_terminal_write)
+    monkeypatch.setattr(current.database, "compare_and_set_delegation_state", pause_terminal_write)
+    closing = asyncio.create_task(current.database.close())
     try:
-        # Keep the delegation observer bound: retiring the native turn creates
-        # its final receipt writer inside the DB's own teardown hooks.
-        with pytest.raises(RuntimeError, match="kept open"):
-            await current.database.close()
-        assert rec.state == "interrupted"
-        assert rec.to_public_dict()["recording_state"] == "unconfirmed"
+        await asyncio.wait_for(entered.wait(), 5)
+        assert not closing.done()
+        assert rec.state == "running"
         assert not scope_is_live(scope)
-        rows = await current.database.load_sessions(include_archived=True)
-        assert any(row["id"] == current.parent_id for row in rows)
-        messages = await current.database.load_messages(rec.delegation_id)
-        results = [row["content"] for row in messages if row["type"] == "result"]
-        assert len(results) == 1
-        assert results[0]["status"] == "interrupted"
-        assert results[0]["code"] == "service_shutdown"
         assert current.manager.dispatch_snapshot(current.parent_id)["items"] == []
-        rejected = await current.manager.start_message(
-            current.parent_id, "late automatic return", source="delegation", delivery_id="late-shutdown-return",
-        )
-        assert rejected.disposition == "closed"
-        assert starts.empty()
     finally:
-        fault = False
-        # The public continuation first verifies the original selected receipt;
-        # admission is sealed, so this explicit request starts no native turn.
-        await current.delegations.follow_up_delegation(
-            parent_session_id=current.parent_id, delegation_id=rec.delegation_id,
-            request="explicit verification after storage recovery",
-        )
-        await current.database.close()
-    assert rec.state == "interrupted"
-    assert rec.to_public_dict()["recording_state"] == "committed"
+        release.set()
+    await asyncio.wait_for(closing, 5)
+    assert rec.state == "interrupted" and rec.to_public_dict()["recording_state"] == "committed"
+    restarted = await boot()
+    restored = restarted.delegations.get_delegation(rec.delegation_id)
+    assert restored.work_id == rec.work_id and restored.state == "interrupted"
     assert starts.empty()

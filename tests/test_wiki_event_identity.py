@@ -26,7 +26,7 @@ from server.wiki.tasks import tasks
 def store(tmp_path):
     root = tmp_path / "vault"
     (root / "Library").mkdir(parents=True)
-    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
     assert store.events.mode == "inotify"
     yield store
     store.close()
@@ -256,7 +256,7 @@ def test_observed_root_move_ends_old_generation_and_watches_the_new_root(store, 
 def test_overlapping_store_leases_share_events_and_do_not_retire_successor_twice(store):
     original = note(store)
     with store.borrow() as lease:
-        replacement_store = WikiStore(store.root, store.state, store.vault_id)
+        replacement_store = WikiStore(store.root, store.state, store.vault_id, health=store.health)
         try:
             assert replacement_store.events is store.events
             store.retire()
@@ -274,7 +274,7 @@ def test_overlapping_store_leases_share_events_and_do_not_retire_successor_twice
 
 def test_uncommitted_events_are_shared_with_replacement_store(store, monkeypatch):
     original = note(store)
-    replacement_store = WikiStore(store.root, store.state, store.vault_id)
+    replacement_store = WikiStore(store.root, store.state, store.vault_id, health=store.health)
     try:
         path = store.path(original["path"])
         with path.open("rb"):

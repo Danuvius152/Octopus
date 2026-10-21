@@ -1,15 +1,16 @@
-"""Failed startup restores clean resources or retains an unconfirmed owner."""
+"""Startup restores receipts while owning its complete recovery command."""
 from __future__ import annotations
 
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 
 from server import main
 from server.config import settings
-from server.delegations import DelegationError
 from tests.test_delegation_restart import runtime as runtime
+from tests.test_delegation_restart_recording import seed_unfinished_round
 from tests.test_service_shutdown import service as service
 
 
@@ -31,7 +32,7 @@ async def test_invalid_future_receipt_fails_startup_without_leaking_its_database
     broken["state"] = False
     assert await seed.database.compare_and_set_delegation_state(
         rec.delegation_id, before, json.dumps(broken),
-        parent_session_id=seed.parent_id, user_id=None,
+        target_agent_id=rec.target_agent_id, parent_session_id=seed.parent_id, user_id=None,
     )
     await seed.close()
     removed = []
@@ -52,92 +53,20 @@ async def test_invalid_future_receipt_fails_startup_without_leaking_its_database
     assert request_marker not in caplog.text
 
 
-async def test_unconfirmed_startup_restore_keeps_its_owner_and_database_and_original_error(
-    runtime, service, monkeypatch, caplog,
-):
-    boot, starts = runtime
-    seed = await boot(settings.db_path)
-    rec = await seed.delegations.start_delegation(
-        parent_session_id=seed.parent_id, agent_name="Worker", request="held receipt before storage outage",
-    )
-    await asyncio.wait_for(starts.get(), 5)
-    await seed.close()
-    database_factory = main.Database
-    fault = True
-
-    def database_with_restore_fault(path):
-        database = database_factory(path)
-        write = database.compare_and_set_delegation_state
-
-        async def unavailable_write(*args, **kwargs):
-            if fault and json.loads(args[2])["state"] == "interrupted":
-                raise OSError("synthetic startup restoration storage outage")
-            return await write(*args, **kwargs)
-
-        monkeypatch.setattr(database, "compare_and_set_delegation_state", unavailable_write)
-        return database
-
-    monkeypatch.setattr(main, "Database", database_with_restore_fault)
-    removed = []
-    remove = service.remove_broadcast
-
-    def record_removal(key):
-        removed.append(key)
-        remove(key)
-
-    monkeypatch.setattr(service, "remove_broadcast", record_removal)
-    try:
-        with pytest.raises(DelegationError) as failure:
-            async with main.app.router.lifespan_context(main.app):
-                pytest.fail("unconfirmed receipt cannot finish startup")
-        assert failure.value.status_code == 503
-        assert str(failure.value) == "Delegation state saving failed or is unconfirmed"
-        owner = main.delegation_manager
-        selected = owner.get_delegation(rec.delegation_id)
-        assert selected is not None and selected.state == "interrupted"
-        assert selected.work_id == rec.work_id
-        assert selected.to_public_dict()["recording_state"] == "unconfirmed"
-        assert owner.db is service.db and owner.session_mgr is service
-        assert owner.BROADCAST_KEY not in removed
-        rows = await service.db.load_sessions(include_archived=True)
-        assert any(row["id"] == rec.delegation_id for row in rows)
-        rejected = await service.start_message(
-            seed.parent_id, "late return after failed startup", source="delegation", delivery_id="late-startup-return",
-        )
-        assert rejected.disposition == "closed"
-        assert starts.empty()
-        assert "Service startup cleanup unconfirmed; database retained" in caplog.text
-    finally:
-        fault = False
-        # Confirm the selected old receipt through the existing public API.
-        # Admission stays sealed, so this request creates no native process.
-        await main.delegation_manager.follow_up_delegation(
-            parent_session_id=seed.parent_id, delegation_id=rec.delegation_id,
-            request="explicit verification after startup storage recovery",
-        )
-        await service.db.close()
-        main.delegation_manager.shutdown()
-    assert selected.state == "interrupted"
-    assert selected.to_public_dict()["recording_state"] == "committed"
-    assert starts.empty()
-
-
 async def test_cancelled_startup_joins_its_existing_writer_and_preserves_cancellation_reason(
     runtime, service, monkeypatch,
 ):
-    boot, starts = runtime
-    seed = await boot(settings.db_path)
-    rec = await seed.delegations.start_delegation(
-        parent_session_id=seed.parent_id, agent_name="Worker", request="held receipt before cancelled startup",
+    _, starts = runtime
+    seed = seed_unfinished_round(
+        Path(settings.db_path), request="held receipt before cancelled startup",
+        agents_dir=Path(settings.agents_dir),
     )
-    await asyncio.wait_for(starts.get(), 5)
-    await seed.close()
     database_factory = main.Database
     entered, release, closing = asyncio.Event(), asyncio.Event(), asyncio.Event()
     writers = []
 
-    def database_with_blocked_writer(path):
-        database = database_factory(path)
+    def database_with_blocked_writer(path, **options):
+        database = database_factory(path, **options)
         write = database.compare_and_set_delegation_state
         close = database.close
 
@@ -165,6 +94,12 @@ async def test_cancelled_startup_joins_its_existing_writer_and_preserves_cancell
     starting = asyncio.create_task(start())
     try:
         await asyncio.wait_for(entered.wait(), 5)
+        messages = await service.db.load_messages(seed["child_id"])
+        original = next(row for row in messages if row["role"] == "user")
+        assert original["content"] == seed["input"] and original["seq"] == seed["input_seq"]
+        assert original["tool_input"]["request_context"]["request_id"] == seed["request_id"]
+        assert any(row["content"] == seed["body"] for row in messages)
+        assert await service.db.get_committed_terminal(seed["child_id"], seed["request_id"]) is None
         starting.cancel("startup stopped")
         await asyncio.wait_for(closing.wait(), 5)
         assert len(writers) == 1 and writers[0] is not None
@@ -174,8 +109,9 @@ async def test_cancelled_startup_joins_its_existing_writer_and_preserves_cancell
             await asyncio.wait_for(starting, 5)
         assert cancellation.value.args == ("startup stopped",)
         assert writers[0].done() and not writers[0].cancelled()
-        selected = main.delegation_manager.get_delegation(rec.delegation_id)
+        selected = main.delegation_manager.get_delegation(seed["child_id"])
         assert selected is not None and selected.state == "interrupted"
+        assert selected.work_id == seed["work_id"] and selected.request == seed["request"]
         assert selected.to_public_dict()["recording_state"] == "committed"
         with pytest.raises(asyncio.CancelledError, match="Database is closed"):
             await service.db.load_sessions()

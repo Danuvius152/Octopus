@@ -1,6 +1,8 @@
 """Signed-in Codex proves the task-scoped HTTP tools, including native helpers."""
 
 import asyncio
+import uuid
+from copy import deepcopy
 
 import pytest
 
@@ -14,6 +16,25 @@ from server.wiki import WikiError, registry
 from tests.callback_api import start_callback_api
 
 pytestmark = [pytest.mark.real, pytest.mark.real_codex]
+
+
+async def _request_events(manager, session_id, prompt, **kwargs):
+    request_id = uuid.uuid4().hex
+    events = []
+
+    async def observe(event):
+        if event.get("session_id") == session_id and event.get("request_id") == request_id:
+            events.append(deepcopy(event))
+
+    manager.on_broadcast(request_id, observe)
+    try:
+        receipt = await manager.start_message(session_id, prompt, request_id=request_id, **kwargs)
+        assert receipt.accepted
+        completion = await receipt.wait()
+        assert completion.outcome.status == "success" and completion.recording_state == "committed"
+        return events
+    finally:
+        manager.remove_broadcast(request_id)
 
 
 @pytest.mark.parametrize("next_mode", [None, "read"])
@@ -143,26 +164,22 @@ async def test_codex_explicit_wiki_and_native_helper_then_ordinary_task(
     )
     try:
         async with asyncio.timeout(240):
-            events = [
-                event
-                async for event in manager._execute_claimed_request(
-                    session.id,
-                    "这是显式本地知识查询。请用 spawn_agent 创建一个原生助手，让它用 mcp__wiki__search 搜索工程决定，再用 mcp__wiki__read 查证，返回核验码、revision 与行号。主 agent 等待助手完成后回答。禁止 shell 读库。",
-                    wiki_mode="read",
-                )
-            ]
+            events = await _request_events(
+                manager,
+                session.id,
+                "这是显式本地知识查询。请用 spawn_agent 创建一个原生助手，让它用 mcp__wiki__search 搜索工程决定，再用 mcp__wiki__read 查证，返回核验码、revision 与行号。主 agent 等待助手完成后回答。禁止 shell 读库。",
+                wiki_mode="read",
+            )
         assert any(event.get("type") == "subagent" for event in events), events
         text = "\n".join(str(event.get("content", "")) for event in events)
         assert "WIKI-COBALT-9472" in text, text
         assert not any(event.get("type") == "error" for event in events), events
         async with asyncio.timeout(120):
-            ordinary = [
-                event
-                async for event in manager._execute_claimed_request(
-                    session.id,
-                    "这是普通讨论，不查知识库，也不操作文件。只回复 ORDINARY-OK。",
-                )
-            ]
+            ordinary = await _request_events(
+                manager,
+                session.id,
+                "这是普通讨论，不查知识库，也不操作文件。只回复 ORDINARY-OK。",
+            )
         assert not any(
             "wiki" in str(event.get("tool", ""))
             for event in ordinary

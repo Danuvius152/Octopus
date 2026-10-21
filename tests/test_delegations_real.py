@@ -266,8 +266,8 @@ async def test_real_question_loop_claude_to_claude(tmp_path, monkeypatch):
             child_sid = rec.delegation_id
             child = mgr.get_session(child_sid)
             assert child is not None
-            assert child._pending_questions, "no pending question in queue"
-            qid, _ = next(iter(child._pending_questions.items()))
+            assert mgr.get_pending_questions(child.id), "no pending question in queue"
+            qid = mgr.get_pending_questions(child.id)[0].question_id
             await mgr._deliver_question_answer(
                 child, qid, "red", auto=False
             )
@@ -397,7 +397,10 @@ async def test_real_three_hop_chain(tmp_path, monkeypatch):
                     "target": rec.target_agent_name,
                     "state": rec.state,
                     "error": rec.error,
-                    "text": " ".join(rec.captured_text)[:200],
+                    "text": " ".join(
+                        row["content"] for row in await db.load_messages(rec.delegation_id)
+                        if row["role"] == "assistant" and row["type"] == "text" and isinstance(row["content"], str)
+                    )[:200],
                 }
                 for rid, rec in dm._records.items()
             ]

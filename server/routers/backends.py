@@ -28,6 +28,7 @@ async def model_settings_for(
         credential = await session_manager.resolve_credential_by_id(
             credential_id, style=harness.profile.credential_style,
             context="model settings",
+            user_id=user_id,
         )
     return harness.model_settings(credential)
 

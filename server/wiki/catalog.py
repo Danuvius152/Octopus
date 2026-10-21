@@ -2,7 +2,7 @@
 
 from pathlib import PurePosixPath
 
-from . import resolver, source_bindings, uids
+from . import format, resolver, source_bindings, uids
 from .links import note_name
 from .references import ParsedReference, local_references
 
@@ -90,10 +90,11 @@ def resolve_edges(db, row, metadata):
     db.execute("DELETE FROM wiki_edges WHERE source_doc=?", (row["id"],))
     db.execute("DELETE FROM wiki_edge_lookups WHERE source_doc=?", (row["id"],))
     parent = PurePosixPath(row["path"]).parent.as_posix()
+    parsed = format.parse(row["text"])
     refs = [(ParsedReference.restore(entry["reference"]), entry.get("recorded_revision"), entry.get("label"), resolved)
             for entry, resolved in source_bindings.index(db, row, metadata)]
-    refs.extend((reference, None, None, resolver.resolve(db, reference, parent, source_doc=row["id"]))
-                for reference in local_references(row["text"], body_start=metadata.get("body_start", 0)))
+    refs.extend((reference, None, None, resolver.resolve(db, reference, parent, source_doc=row["id"], source_parse=parsed))
+                for reference in local_references(row["text"], parsed=parsed))
     for ordinal, (reference, recorded, label, resolved) in enumerate(refs):
         resource, relation, location = reference.raw_resource, reference.relation, reference.fragment
         db.execute("INSERT INTO wiki_edges VALUES(?,?,?,?,?,?,?,?,?,?)", (row["id"], ordinal, resolved.target, resource, relation, location, recorded if isinstance(recorded, str) else None, label if isinstance(label, str) else None, note_name(reference.value).casefold(), resolved.status))

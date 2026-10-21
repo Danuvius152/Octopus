@@ -324,3 +324,23 @@ describe("session-owned attachment drafts", () => {
     expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Queued complete input", ["reselected-file"], undefined);
   });
 });
+
+it("restores a server-saved input without sending, then explicitly sends a new recovery request", async () => {
+  useSessionStore.setState({ token: "recoverable-input-test" });
+  const execution = { state: "withdrawn", state_version: 2, execution_owner_request_id: "old-request", recoverable_input: true };
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    if (url.endsWith("/submissions")) return Response.json({ items: [{ client_request_id: "old-client", request_id: "old-request", execution,
+      preview: "Recover this input", attachment_count: 0 }], next_cursor: null });
+    if (url.endsWith("/submissions/old-client")) return Response.json({ session_id: session.id, client_request_id: "old-client", request_id: "old-request",
+      accepted: true, execution, input: { content: "Recover this input", attachment_ids: [], attachments: [] } });
+    return Response.json([]);
+  }));
+  const { input, send, sendMessage } = setup(async () => ({ accepted: true }));
+  fireEvent.click(await screen.findByRole("button", { name: "Restore to input" }));
+  await waitFor(() => expect(input).toHaveValue("Recover this input"));
+  expect(sendMessage).not.toHaveBeenCalled();
+  fireEvent.change(input, { target: { value: "Reviewed and edited input" } });
+  fireEvent.click(send);
+  expect(sendMessage).toHaveBeenCalledExactlyOnceWith(session.id, "Reviewed and edited input", undefined, undefined, undefined, "old-client");
+  vi.unstubAllGlobals();
+});

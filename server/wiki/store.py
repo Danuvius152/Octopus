@@ -1,4 +1,4 @@
-"""Existing files are authoritative; the SQLite index can be rebuilt."""
+"""Files own content; SQLite retains identity, history and protocol ledgers."""
 
 from __future__ import annotations
 
@@ -17,7 +17,8 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from . import catalog, portable_metadata, search_index, source_bindings, uids
+from ..service_health import ServiceHealth
+from . import catalog, portable_metadata, search_index, source_bindings, storage, uids
 from . import format as document_format
 from .extract import HTML_BODY_VERSION, SUPPORTED, extract
 from .formats import MARKDOWN_QUERY_CONTRACT, MARKDOWN_SQL
@@ -116,7 +117,8 @@ def vault_read(function):
 class WikiStore:
     registration_generation: str | None = None
 
-    def __init__(self, root: Path, state: Path, vault_id: str, *, on_construct=None, recovery=None) -> None:
+    def _prepare(self, root, state, vault_id, health, recovery):
+        self.health = health if health is not None else ServiceHealth()
         self._lifecycle = threading.Condition()
         self._local = threading.local()
         self._users = 0
@@ -127,20 +129,49 @@ class WikiStore:
         self.root = root.resolve()
         self.state = state
         self.vault_id = vault_id
+        self.db_path = state / "index.sqlite3"
+        self._create_database = False
+
+    @classmethod
+    def create_database(cls, root: Path, state: Path, vault_id: str, path: Path, *, health: ServiceHealth) -> None:
+        """Build an unpublished initial ledger, using the existing schema."""
+        from .schema import initialize
+
+        candidate = cls.__new__(cls)
+        candidate._prepare(root, state, vault_id, health, None)
+        candidate.db_path = path
+        candidate._create_database = True
+        initialize(candidate)
+        with candidate.connect() as db:
+            db.execute("INSERT INTO filesystem_state(singleton,protocol,root,vault_id) VALUES(1,1,?,?)", (str(candidate.root), vault_id))
+            db.execute("INSERT INTO wiki_protocols VALUES('registration_config',1)")
+        candidate._create_database = False
+
+    def __init__(self, root: Path, state: Path, vault_id: str, *, on_construct=None, recovery=None,
+                 health: ServiceHealth | None = None, create: bool = False) -> None:
+        self._prepare(root, state, vault_id, health, recovery)
         if on_construct is not None:
             on_construct(self)
+        if not create and (not self.db_path.is_file() or self.db_path.is_symlink()):
+            raise WikiError("Wiki ledger database is missing; retained registration cannot create a replacement", 503)
+        if not create:
+            from . import protocols
+
+            binding = protocols.registration_preflight(state.resolve(), health=self.health)
+            if binding is not None and binding != {"root": str(self.root), "vault_id": vault_id}:
+                raise WikiError("Wiki ledger root or vault binding changed; durable state retained", 503)
         state.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.db_path = state / "index.sqlite3"
         from .events import VaultEvents
         from .schema import initialize
 
         try:
-            self.events = VaultEvents.acquire(self.root, state)
+            self.events = VaultEvents.acquire(self.root, state, health=self.health)
         except OSError as exc:
             raise WikiError(f"Wiki observer unavailable; another process may own this index: {exc}", 503) from exc
         self._events_released = False
         self._events_finalizer = weakref.finalize(self, self.events.release)
         try:
+            self._create_database = create
             initialize(self)
         except sqlite3.DatabaseError as exc:
             self.release_events()
@@ -148,6 +179,8 @@ class WikiStore:
         except BaseException:
             self.release_events()
             raise
+        finally:
+            self._create_database = False
         self._synchronizing = threading.local()
         try:
             self._schema_ready = True
@@ -337,18 +370,12 @@ class WikiStore:
     @contextlib.contextmanager
     def connect(self):
         with self.operation():
-            db = sqlite3.connect(self.db_path, timeout=30)
-            db.row_factory = sqlite3.Row
-            try:
-                db.execute("PRAGMA recursive_triggers=ON")
+            with storage.connect(self.db_path, self.health, create=self._create_database) as db:
                 if self._schema_ready:
                     from . import recovery_state
 
-                    recovery_state.access(db, self.root, self.vault_id, self._recovery)
-                with db:
-                    yield db
-            finally:
-                db.close()
+                    recovery_state.access(db, self.root, self.vault_id, self._recovery, health=self.health)
+                yield db
 
     def path(self, relative: str) -> Path:
         logical = PurePosixPath(relative)
@@ -644,11 +671,7 @@ class WikiStore:
         if kind == "original":
             kind = {"source": "source", "reference": "source", "concept": "concept", "navigation": "topic", "synthesis": "topic"}.get(metadata.get("doc_role"), kind)
         uids.observe(db, doc_id, metadata)
-        title = next(
-            (line[2:].strip() for line in text.splitlines() if line.startswith("# ")),
-            path.stem,
-        )
-        title = metadata.get("title") or title
+        title = metadata.get("title") or parsed.title(path.stem)
         db.execute(
             """INSERT INTO documents VALUES(?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(id) DO UPDATE SET path=excluded.path,revision=excluded.revision,
@@ -941,7 +964,6 @@ class WikiStore:
         center = self.read(doc, length=1)
         return catalog.graph(self, center["id"], offset, limit, cursor, model_response=model_response)
 
-    @vault_read
     def read(
         self,
         doc: str,
@@ -951,6 +973,22 @@ class WikiStore:
         expected_revision: str | None = None,
         page: int | None = None,
     ) -> dict[str, Any]:
+        document, _ = self.read_snapshot(
+            doc, start=start, length=length, expected_revision=expected_revision, page=page
+        )
+        return document
+
+    @vault_read
+    def read_snapshot(
+        self,
+        doc: str,
+        *,
+        start: int = 0,
+        length: int = 16000,
+        expected_revision: str | None = None,
+        page: int | None = None,
+    ) -> tuple[dict[str, Any], bytes]:
+        """Return the public read and the exact bytes from which it was indexed."""
         if start < 0 or not 1 <= length <= 24000 or (page is not None and page < 1):
             raise WikiError("Invalid read range", 422)
         identity = self.resolve_identity(doc)
@@ -965,6 +1003,8 @@ class WikiStore:
                 raise WikiError("Document not found", 404)
             raw = b"" if file.suffix.lower() == ".pdf" else file.read_bytes()
             row = self._index(db, relative, raw=raw)
+            if identity is not None and row["id"] != identity["id"]:
+                raise WikiError("Document identity changed during read", 409)
             if expected_revision and expected_revision != row["revision"]:
                 raise WikiError("Document changed; read the current revision", 409)
             text = row["text"]
@@ -989,7 +1029,7 @@ class WikiStore:
                 "line_start": text[:start].count("\n") + 1,
                 "line_end": text[:end].count("\n") + 1,
                 "freshness": "live", **self.index_state(),
-            }
+            }, raw
 
     def resolve_identity(self, doc):
         with self.connect() as db:

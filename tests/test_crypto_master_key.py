@@ -70,3 +70,23 @@ def test_wrapping_round_trips_and_is_bound_to_the_master_key():
 
     with pytest.raises(ValueError):
         crypto.unwrap_dek(wrapped, key="a-different-master-key")
+
+
+@pytest.mark.parametrize("failed_sync", ["file", "directory"])
+def test_key_wrapping_cannot_succeed_or_cache_a_key_before_durable_storage(monkeypatch, failed_sync):
+    fsync = os.fsync
+
+    def interrupted_sync(fd):
+        directory = stat.S_ISDIR(os.fstat(fd).st_mode)
+        if directory == (failed_sync == "directory"):
+            raise OSError("key durability unconfirmed")
+        return fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", interrupted_sync)
+    for _ in range(2):
+        with pytest.raises(OSError, match="durability unconfirmed"):
+            crypto.wrap_dek("account data key")
+    monkeypatch.setattr(os, "fsync", fsync)
+    wrapped = crypto.wrap_dek("account data key")
+    crypto._MASTER_CACHE.clear()
+    assert crypto.unwrap_dek(wrapped) == "account data key"

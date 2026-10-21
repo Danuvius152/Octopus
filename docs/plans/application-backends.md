@@ -194,6 +194,11 @@ and response bodies rather than buffering them, and forwards the method, path,
 query and a conservative header set. `no-store` stays on app content; the
 backend's own cache headers pass through for its responses.
 
+The reserved `token` query parameter authenticates to Octopus and is removed
+in every occurrence before forwarding. All other pairs retain their original
+order, including interleaved repeated keys, empty values and Unicode text.
+Authentication headers and cookies are excluded from the forwarded header set.
+
 A backend is reachable **only** through this proxy. It binds `127.0.0.1`, so it
 is not exposed on the network, and the tunnel exposes Octopus, not the app.
 

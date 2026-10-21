@@ -211,6 +211,10 @@ async def test_job_evidence_stays_confined_and_outside_canonical_vault(client, t
 
     vault = tmp_path / "vault"
     vault.mkdir()
+    if layout == "all-roots-in-vault":
+        # Configure a complete installation here; moving config.json alone
+        # would discard the authoritative ledger and test missing state instead.
+        monkeypatch.setattr(settings, "wiki_dir", str(vault / "state"))
     config = await wiki_api.configure(client, vault)
     workspace = tmp_path / "workspace" if layout == "escaped-directory" else vault
     workspace.mkdir(exist_ok=True)
@@ -219,13 +223,6 @@ async def test_job_evidence_stays_confined_and_outside_canonical_vault(client, t
     if layout == "escaped-directory":
         outside.mkdir()
         (workspace / "wiki-evidence").symlink_to(outside, target_is_directory=True)
-    elif layout == "all-roots-in-vault":
-        # Even the fallback state directory may be configured inside the vault.
-        state = vault / "state"
-        state.mkdir()
-        (state / "config.json").write_bytes((tmp_path / "state/config.json").read_bytes())
-        monkeypatch.setattr(settings, "wiki_dir", str(state))
-
     session = await wiki_api.session_manager.create_session(config["curator_agent_id"], "Confined evidence", str(tmp_path), backend="codex")
     task_id = tasks.open(session, "auto")
     scope = verify(mint(session.id, wiki_task_id=task_id))

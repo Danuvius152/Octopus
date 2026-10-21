@@ -350,15 +350,23 @@ async def test_agent_reasoning_update_validates_inherited_session_model(client):
 async def test_invocation_rejects_unavailable_inherited_speed_before_spawning(client, monkeypatch):
     response = await client.post("/api/sessions", headers=HEADERS, json={"backend": "codex"})
     session = session_manager.get_session(response.json()["id"])
-    session.model = "model-b"
+    assert (await client.patch(
+        f"/api/sessions/{session.id}", headers=HEADERS, json={"model": "model-b"},
+    )).status_code == 200
     await session_manager.db.update_agent(session.agent_id, service_tier="fast")
 
     def unexpected_run(*args, **kwargs):
         pytest.fail("an invalid effective model/speed combination must not spawn a runtime")
 
     monkeypatch.setattr(session_manager, "_make_run", unexpected_run)
-    with pytest.raises(ValueError, match="Fast speed is unavailable"):
-        _ = [event async for event in session_manager._run_backend(session, "hello")]
+    receipt = await session_manager.start_message(session.id, "hello")
+    assert receipt.accepted
+    completion = await asyncio.wait_for(receipt.wait(), 5)
+    assert completion.outcome.status == "failed"
+    assert "Fast speed is unavailable" in completion.outcome.message
+    messages = await session_manager.db.load_messages(session.id)
+    assert [row["content"] for row in messages if row["role"] == "user"] == ["hello"]
+    assert len([row for row in messages if row["type"] == "result"]) == 1
 
 
 @pytest.mark.asyncio

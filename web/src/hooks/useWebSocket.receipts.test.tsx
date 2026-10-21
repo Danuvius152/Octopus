@@ -41,7 +41,7 @@ it("reports disconnected controls and correlates Stop with its attempt", async (
   act(() => socket.onmessage?.({ data: JSON.stringify({ type: "command_receipt", operation: "interrupt", session_id: "s",
     client_command_id: payload.client_command_id, accepted: true }) }));
   expect((await pending).accepted).toBe(true);
-  expect(useSessionStore.getState().controlCommands[payload.client_command_id].state).toBe("accepted");
+  expect(useSessionStore.getState().controlCommands[payload.client_command_id]).toBeUndefined();
 });
 
 it("marks an unconfirmed Stop unknown and never replays it on reconnect", async () => {
@@ -99,4 +99,20 @@ it("keeps live card completions across delayed reconnect responses and accepts a
   expect(useSessionStore.getState().subagents.s.call.status).toBe("running");
   expect(useSessionStore.getState().bgTasks.s[0].status).toBe("running");
   expect(useSessionStore.getState().research.s[0].status).toBe("running");
+});
+
+it("keeps recovery provenance on a new identity and on lost-ACK confirmation", async () => {
+  const { result } = renderHook(useWebSocket);
+  const original = Socket.instances[0];
+  const pending = result.current.sendMessage("s", "restored", undefined, undefined, "new-request", "withdrawn-request");
+  expect(JSON.parse(original.send.mock.calls[0][0])).toMatchObject({ client_request_id: "new-request", recovery_of_client_id: "withdrawn-request" });
+  act(() => { original.readyState = 3; original.onclose?.({ code: 1006 }); vi.advanceTimersByTime(3000); });
+  expect((await pending).state).toBe("unknown");
+  const next = Socket.instances[1];
+  expect(next.send).not.toHaveBeenCalled();
+  const confirmation = result.current.sendMessage("s", "restored", undefined, undefined, "new-request", "withdrawn-request");
+  expect(JSON.parse(next.send.mock.calls[0][0])).toEqual(JSON.parse(original.send.mock.calls[0][0]));
+  act(() => next.onmessage?.({ data: JSON.stringify({ type: "submission", session_id: "s", client_request_id: "new-request", accepted: true,
+    request_id: "durable-new-request", execution: { state: "withdrawn", recoverable_input: true } }) }));
+  expect(await confirmation).toMatchObject({ accepted: true, execution: { state: "withdrawn" } });
 });

@@ -20,7 +20,7 @@ def store(tmp_path):
         (root / f"tmp/resources/resource-{index}.html").write_text(
             f"<p>Supporting fixture {index}</p>", encoding="utf-8"
         )
-    current = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+    current = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
     try:
         current.synchronize()
         yield current

@@ -499,8 +499,7 @@ class CodexEventParser(EventParser):
                 events=self._item_events(kind, obj), activity=self._item_activity(kind, item),
             )
 
-        logger.debug("Unhandled codex event type: %s", kind)
-        return ParseOutput()
+        return ParseOutput(diagnostics=[(logging.DEBUG, f"Unhandled codex event type: {kind}")])
 
     def _item_activity(self, kind: str, item: Any) -> bool | None:
         if self._activity_terminal:

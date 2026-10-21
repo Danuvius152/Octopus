@@ -1,7 +1,13 @@
+import os
 from typing import Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
+
+
+def startup_env_file() -> str:
+    """The dotenv source selected when Settings loads in a new process."""
+    return os.environ.get("OCTOPUS_ENV_FILE") or ".env"
 
 
 class Settings(BaseSettings):
@@ -135,7 +141,13 @@ class Settings(BaseSettings):
     github_oauth_client_id: str | None = None
     github_oauth_client_secret: str | None = None
 
-    model_config = {"env_prefix": "OCTOPUS_", "env_file": ".env"}
+    @field_validator("public_base_url", "gmail_oauth_client_id", "gmail_oauth_client_secret",
+                     "github_oauth_client_id", "github_oauth_client_secret", mode="before")
+    @classmethod
+    def empty_optional_configuration(cls, value: object) -> object:
+        return None if value == "" else value
+
+    model_config = {"env_prefix": "OCTOPUS_", "env_file": startup_env_file()}
 
     @property
     def resolved_public_base_url(self) -> str:

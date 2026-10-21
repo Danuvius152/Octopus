@@ -1,6 +1,11 @@
 """Tests for the /api/agents routes (agent-refactor.md §5.4 / §8)."""
 
 import asyncio
+import json
+import os
+import sys
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -12,6 +17,8 @@ from server.routers import agents as agents_mod
 from server.routers import schedules as schedules_mod
 from server.scheduler import ScheduleRunner
 from server.session_manager import session_manager
+from tests.fake_run import FakeRunBase
+from tests.test_session_retirement import _retire_original_test_process
 
 TOKEN = "changeme"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
@@ -281,61 +288,271 @@ async def test_archive_agent_cascades_sessions(client):
 
 
 @pytest.mark.asyncio
-async def test_archive_agent_storage_refusal_keeps_agent_and_session_live(client, monkeypatch):
-    from server.sessions.turns import _Settlement
-
-    agent = await _create_agent(client, name="Unconfirmed storage")
-    session = await session_manager.create_session(agent["id"], "Needs verification", "/tmp")
-
-    async def fail_recording(**kwargs):
-        raise OSError("Result storage unavailable")
-
-    recording = session_manager.db.record_terminal
-    monkeypatch.setattr(session_manager.db, "record_terminal", fail_recording)
-    try:
-        await session_manager._settle_turn(session, _Settlement(), status="success")
-        response = await client.post(f"/api/agents/{agent['id']}/archive", headers=HEADERS)
-        assert response.status_code == 409
-        assert "recording" in response.json()["detail"].lower()
-        assert not (await session_manager.db.get_agent(agent["id"]))["archived"]
-        assert session_manager.get_session(session.id) is session
-        assert not next(row for row in await session_manager.db.load_sessions(include_archived=True) if row["id"] == session.id)["archived"]
-    finally:
-        # Recover the selected result before exercising truthful DB teardown.
-        monkeypatch.setattr(session_manager.db, "record_terminal", recording)
-        await session_manager.resume_dispatch(session.id)
+@pytest.mark.parametrize("committed", [False, True])
+async def test_archive_agent_storage_refusal_keeps_agent_and_session_live(tmp_path, committed):
+    proof, status, messages, artifacts = await _cold_archive_fault(
+        tmp_path, "storage-after" if committed else "storage-before",
+    )
+    assert proof["selected_outcome"]["status"] == "interrupted"
+    assert proof["selected_outcome"]["request_id"] == proof["request_id"]
+    assert proof["model"]["pid"] == proof["process_group"] == proof["model"]["process_group"]
+    assert (artifacts / "actual-commit-applied").exists() is committed
+    if committed:
+        assert status["execution"]["state"] == "interrupted"
+        assert status["outcome"] == proof["selected_outcome"]
+        assert [message["content"] for message in messages if message["type"] == "result"] == [proof["selected_outcome"]]
+    else:
+        assert status["execution"]["state"] == "unknown"
+        assert status["execution"]["recoverable_input"] is False
+        assert "outcome" not in status
+        assert not [message for message in messages if message["type"] == "result"]
+    assert not (artifacts / "result-published").exists()
 
 
 @pytest.mark.asyncio
-async def test_archive_agent_retirement_refusal_keeps_agent_and_session_live(client):
-    agent = await _create_agent(client, name="Unconfirmed retirement")
-    session = await session_manager.create_session(agent["id"], "Needs retirement", "/tmp")
+async def test_archive_agent_retirement_refusal_keeps_agent_and_session_live(tmp_path):
+    proof, status, messages, artifacts = await _cold_archive_fault(tmp_path, "retirement")
+    assert proof["model"] is None, "This isolated case owns a stand-in Harness resource, not a model PID"
+    assert status["execution"]["state"] == "interrupted"
+    assert status["outcome"]["request_id"] == proof["request_id"]
+    assert [message["content"] for message in messages if message["type"] == "result"] == [status["outcome"]]
+    assert (artifacts / "stop-attempts.jsonl").read_text().splitlines() == ["Backend retirement remains unconfirmed"]
+    diagnostic = (artifacts / "service.log").read_text()
+    assert "Backend retirement remains unconfirmed" in diagnostic and "Session owner failed" in diagnostic
 
-    class UnreapedRun:
-        confirmed = False
 
-        async def interrupt(self):
-            raise RuntimeError("Backend retirement remains unconfirmed")
+async def _cold_archive_fault(tmp_path, mode):
+    from fastapi import FastAPI
 
-        async def stop(self):
-            if not self.confirmed:
-                raise RuntimeError("Backend retirement remains unconfirmed")
+    from server.deps import get_session_manager, scope_user_id
+    from server.routers import sessions as sessions_mod
+    from server.sessions import SessionManager
+    from server.sessions.client_submissions import (
+        submission_status,
+        submit_client_message,
+    )
 
-    session._backend = UnreapedRun()
+    artifacts = tmp_path / "agent-archive-fault"
+    artifacts.mkdir()
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", "-s",
+        str(Path(__file__).resolve()), "-o", "python_functions=_agent_archive_fault_child",
+        "--basetemp", str(artifacts / "child-tests"),
+        cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "OCTOPUS_TEST_AGENT_ARCHIVE_FAULT": mode},
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    output = asyncio.create_task(process.communicate())
     try:
-        response = await client.post(f"/api/agents/{agent['id']}/archive", headers=HEADERS)
-        assert response.status_code == 409
-        assert "retirement" in response.json()["detail"].lower()
-        assert not (await session_manager.db.get_agent(agent["id"]))["archived"]
-        assert session_manager.get_session(session.id) is session
-        assert not next(row for row in await session_manager.db.load_sessions(include_archived=True) if row["id"] == session.id)["archived"]
+        stdout, stderr = await asyncio.wait_for(asyncio.shield(output), 15)
+        (artifacts / "child.log").write_bytes(stdout + stderr)
+        assert process.returncode == 70, (stdout + stderr).decode(errors="replace")
+        proof = json.loads((artifacts / "proof.json").read_text())
+        assert proof["mode"] == mode and (artifacts / "archive-entered").exists()
+        assert not (artifacts / "agent-archived").exists()
+        assert not (artifacts / "session-archived").exists()
+        if (artifacts / "archive-response.json").exists():
+            refusal = json.loads((artifacts / "archive-response.json").read_text())
+            assert refusal["status_code"] == 409
+        else:
+            assert not (artifacts / "archive-returned").exists()
+        starts = (artifacts / "starts.jsonl").read_text().splitlines()
+        assert len(starts) == 1
+        db = Database(proof["database"])
+        manager = SessionManager()
+        try:
+            await db.initialize()
+            await manager.initialize(db)
+            application = FastAPI()
+            application.include_router(agents_mod.router)
+            application.include_router(sessions_mod.router)
+            application.dependency_overrides[get_session_manager] = lambda: manager
+            application.dependency_overrides[scope_user_id] = lambda: None
+            with pytest.MonkeyPatch.context() as routes:
+                routes.setattr(agents_mod, "_manager", AgentManager(db))
+                async with AsyncClient(transport=ASGITransport(application), base_url="http://test") as http:
+                    agent = await http.get(f"/api/agents/{proof['agent_id']}", headers=HEADERS)
+                    assert agent.status_code == 200 and agent.json()["archived"] is False
+                    detail = await http.get(f"/api/sessions/{proof['session_id']}", headers=HEADERS)
+                    assert detail.status_code == 200 and detail.json()["id"] == proof["session_id"]
+            assert await db.get_agent(proof["agent_id"]) == proof["agent_row_before"]
+            row = next(row for row in await db.load_sessions(include_archived=True) if row["id"] == proof["session_id"])
+            assert row == proof["session_row_before"] and not row["archived"]
+            assert manager.get_session(proof["session_id"]) is not None
+            status = await submission_status(manager, proof["session_id"], "agent-original-input")
+            assert status["accepted"] is True and status["request_id"] == proof["request_id"]
+            assert status["input"]["content"] == "Archive this original work once"
+            assert status["execution"]["execution_owner_request_id"] == proof["request_id"]
+            duplicate = await submit_client_message(
+                manager, proof["session_id"], "Archive this original work once", [],
+                "agent-original-input", wiki_mode=None,
+            )
+            assert duplicate == status
+            messages = await db.load_messages(proof["session_id"])
+            assert [message["content"] for message in messages if message["role"] == "user"] == ["Archive this original work once"]
+            assert [message["content"] for message in messages if message["role"] == "assistant"] == ["Original agent work is running."]
+            assert manager.dispatch_snapshot(proof["session_id"])["items"] == []
+            assert not manager.session_is_executing(manager.get_session(proof["session_id"]))
+            if mode == "storage-before":
+                with pytest.raises(ValueError, match="process exit is unconfirmed"):
+                    await manager.start_message(proof["session_id"], "Do not replace the unknown original writer")
+            assert (artifacts / "starts.jsonl").read_text().splitlines() == starts
+            return proof, status, messages, artifacts
+        finally:
+            await db.close()
     finally:
-        # Confirm this fake writer's exit before releasing its retained fault.
-        backend, task = next(iter(session._backend_retirements.values()))
-        assert task.done() and task.exception() is not None
-        backend.confirmed = True
-        await backend.stop()
-        session._backend_retirements.pop(id(backend))
+        if process.returncode is None:
+            process.kill()
+        await asyncio.wait_for(output, 5)
+        if (artifacts / "model.json").exists():
+            await _retire_original_test_process(json.loads((artifacts / "model.json").read_text()))
+
+
+async def _agent_archive_fault_child(tmp_path, tmp_path_factory, monkeypatch):
+    import logging
+
+    from fastapi import FastAPI
+
+    from server.deps import get_session_manager, scope_user_id
+    from server.harness import HarnessEvent, get_harness
+    from server.routers import sessions as sessions_mod
+    from server.sessions import SessionManager
+    from server.sessions.client_submissions import submit_client_message
+
+    artifacts = tmp_path_factory.getbasetemp().parent
+    mode = os.environ["OCTOPUS_TEST_AGENT_ARCHIVE_FAULT"]
+    database_path = tmp_path / "agent-archive.db"
+    db = Database(str(database_path))
+    await db.initialize()
+    manager = SessionManager()
+    await manager.initialize(db)
+    application = FastAPI()
+    application.include_router(agents_mod.router)
+    application.include_router(sessions_mod.router)
+    application.dependency_overrides[get_session_manager] = lambda: manager
+    application.dependency_overrides[scope_user_id] = lambda: None
+    agents_mod.set_manager(AgentManager(db))
+    handler = logging.FileHandler(artifacts / "service.log")
+    handler.setFormatter(logging.Formatter("%(name)s %(levelname)s %(message)s"))
+    logging.getLogger("server").addHandler(handler)
+    ready = asyncio.Event()
+    proof = {"database": str(database_path), "mode": mode, "model": None}
+
+    def save_proof():
+        (artifacts / "proof.json").write_text(json.dumps(proof))
+
+    def record_start(prompt):
+        with (artifacts / "starts.jsonl").open("a") as stream:
+            stream.write(json.dumps(prompt) + "\n")
+
+    async def observe(event):
+        kind = event.get("type")
+        if kind == "assistant_text" and event.get("content") == "Original agent work is running.":
+            ready.set()
+        if kind in {"result", "agent_archived", "session_archived"}:
+            (artifacts / {"result": "result-published", "agent_archived": "agent-archived", "session_archived": "session-archived"}[kind]).touch()
+
+    manager.on_broadcast("agent-archive-fault-proof", observe)
+    if mode == "retirement":
+        failure = RuntimeError("Backend retirement remains unconfirmed")
+
+        class UnreapedRun(FakeRunBase):
+            async def start(self, prompt, working_dir, resume_id=None, credential=None):
+                record_start(prompt)
+
+            async def stream(self):
+                yield HarnessEvent(type="text", content="Original agent work is running.")
+                await asyncio.Event().wait()
+
+            async def interrupt(self):
+                pass
+
+            async def stop(self):
+                with (artifacts / "stop-attempts.jsonl").open("a") as stream:
+                    stream.write(str(failure) + "\n")
+                proof["selected_outcome"] = await db.get_committed_terminal(proof["session_id"], proof["request_id"])
+                assert manager.get_session(proof["session_id"]) is not None
+                assert not (await db.get_agent(proof["agent_id"]))["archived"]
+                save_proof()
+                raise failure
+
+        monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: UnreapedRun())
+    else:
+        code = (
+            "import json,os,sys,time\n"
+            "from pathlib import Path\n"
+            "fields=Path(f'/proc/{os.getpid()}/stat').read_text().rsplit(')',1)[1].split()\n"
+            "Path(sys.argv[1]).write_text(json.dumps({'pid':os.getpid(),'process_group':os.getpgrp(),'start_time':fields[19]}))\n"
+            "print(json.dumps({'type':'thread.started','thread_id':'agent-archive-thread'}),flush=True)\n"
+            "print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'Original agent work is running.'}}),flush=True)\n"
+            "time.sleep(60)\n"
+        )
+
+        def argv(context):
+            record_start(context.prompt)
+            return [sys.executable, "-u", "-c", code, str(artifacts / "model.json")], {"cwd": context.working_dir}
+
+        harness = get_harness("codex")
+        monkeypatch.setattr(harness, "profile", replace(
+            harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None,
+        ))
+
+    async with AsyncClient(transport=ASGITransport(application), base_url="http://test") as http:
+        agent = await _create_agent(
+            http, name="Original archive owner", backend="codex",
+            mcp_servers=["ask", "bg", "ask_agent", "research", "schedule"],
+        )
+        created = await http.post(
+            f"/api/agents/{agent['id']}/sessions", headers=HEADERS,
+            json={"name": "Original archive session", "working_dir": str(tmp_path), "backend": "codex"},
+        )
+        assert created.status_code == 201, created.text
+        session_id = created.json()["id"]
+        admitted = await submit_client_message(
+            manager, session_id, "Archive this original work once", [], "agent-original-input", wiki_mode=None,
+        )
+        assert admitted["accepted"] is True
+        await asyncio.wait_for(ready.wait(), 5)
+        original = await db.get_client_submission(session_id, "agent-original-input")
+        proof.update(agent_id=agent["id"], session_id=session_id, request_id=admitted["request_id"],
+                     agent_row_before=await db.get_agent(agent["id"]),
+                     session_row_before=next(row for row in await db.load_sessions(include_archived=True) if row["id"] == session_id),
+                     process_group=original["process_group"])
+        if mode != "retirement":
+            proof["model"] = json.loads((artifacts / "model.json").read_text())
+        save_proof()
+        if mode.startswith("storage-"):
+            terminal = None
+            execute, commit = db.conn.execute, db.conn.commit
+
+            async def terminal_sql(sql, parameters=()):
+                nonlocal terminal
+                cursor = await execute(sql, parameters)
+                if sql.startswith("INSERT INTO messages ") and parameters[3] == "result":
+                    assert parameters[-1] == admitted["request_id"]
+                    terminal = json.loads(parameters[4])
+                return cursor
+
+            async def lost_terminal_commit_acknowledgment():
+                if terminal is None:
+                    return await commit()
+                proof["selected_outcome"] = terminal
+                save_proof()
+                if mode == "storage-after":
+                    await commit()
+                    (artifacts / "actual-commit-applied").touch()
+                raise OSError("actual agent archive terminal commit acknowledgment lost")
+
+            monkeypatch.setattr(db.conn, "execute", terminal_sql)
+            monkeypatch.setattr(db.conn, "commit", lost_terminal_commit_acknowledgment)
+        (artifacts / "archive-entered").touch()
+        response = await http.post(f"/api/agents/{agent['id']}/archive", headers=HEADERS)
+        (artifacts / "archive-response.json").write_text(json.dumps({"status_code": response.status_code, "body": response.json()}))
+        (artifacts / "archive-returned").touch()
+        assert response.status_code != 200
+        # The original failed resource remains owned; no later failure or map
+        # clearing is used to turn a retirement refusal into a successful close.
+        await asyncio.wait_for(asyncio.Event().wait(), 8)
 
 
 @pytest.mark.asyncio

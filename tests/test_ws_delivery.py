@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from contextlib import asynccontextmanager
 
 import pytest
@@ -15,6 +16,56 @@ from server.database import Database
 from server.deps import get_session_manager
 from server.routers.ws import router
 from server.sessions import SessionManager
+from tests.fake_run import FakeRunBase
+
+
+def hold_model_runs(manager, monkeypatch):
+    """Only the model transport is held; request/attempt/control remain real."""
+    from server.harness import HarnessEvent
+
+    starts = asyncio.Queue()
+
+    class Run(FakeRunBase):
+        def __init__(self):
+            self.stopped = asyncio.Event()
+
+        def is_alive(self):
+            return not self.stopped.is_set()
+
+        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+            self.prompt = prompt
+            starts.put_nowait(self)
+
+        async def stream(self):
+            yield HarnessEvent(type="text", content="Holding the original request.")
+            await self.stopped.wait()
+
+        async def stop(self):
+            self.stopped.set()
+
+        async def interrupt(self):
+            await self.stop()
+
+    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: Run())
+    return starts
+
+
+async def start_held_request(manager, session_id, prompt, **kwargs):
+    request_id = uuid.uuid4().hex
+    key = f"ws-attempt-{request_id}"
+    scope = asyncio.get_running_loop().create_future()
+
+    async def observe(event):
+        if (event.get("type") == "attempt_started" and event.get("session_id") == session_id
+                and event.get("request_id") == request_id and not scope.done()):
+            scope.set_result(event)
+
+    manager.on_broadcast(key, observe)
+    try:
+        receipt = await manager.start_message(session_id, prompt, request_id=request_id, **kwargs)
+        return receipt, await asyncio.wait_for(scope, 2)
+    finally:
+        manager.remove_broadcast(key)
 
 
 @asynccontextmanager
@@ -83,7 +134,10 @@ async def test_submission_identity_survives_ack_loss_reconnect_and_manager_resta
     manager, db = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "deduplicated", str(tmp_path), backend="codex")
-    monkeypatch.setattr(manager, "_schedule_dispatch", lambda session: False)
+    starts = hold_model_runs(manager, monkeypatch)
+    # A separate read-scoped request cannot take this browser input as a steer.
+    blocker, _scope = await start_held_request(manager, session.id, "The original running task", wiki_mode="read")
+    original_run = await asyncio.wait_for(starts.get(), 2)
     payload = {"type": "send_message", "session_id": session.id, "content": "execute once", "client_request_id": "same-input"}
     async def submit(owner, data):
         async with connection(owner, settings.auth_token) as client:
@@ -93,77 +147,104 @@ async def test_submission_identity_survives_ack_loss_reconnect_and_manager_resta
     second = await submit(manager, payload)
     assert first["accepted"] and second["accepted"]
     assert first["request_id"] == second["request_id"]
-    assert len(session._pending_queue) == 1
+    queued = manager.dispatch_snapshot(session.id)["items"]
+    assert len(queued) == 1 and queued[0]["request_id"] == first["request_id"]
+    assert queued[0]["summary"] == "execute once"
     conflict = await submit(manager, {**payload, "content": "different operation"})
     assert conflict["accepted"] is False and conflict["code"] == "submission_conflict"
+    await manager.interrupt(session.id)
+    assert (await asyncio.wait_for(blocker.wait(), 2)).outcome.status == "interrupted"
+    await manager.drain_turns()
+    assert original_run.stopped.is_set() and starts.empty()
     restarted = SessionManager()
     await restarted.initialize(db)
     third = await submit(restarted, payload)
     assert third["request_id"] == first["request_id"] and third["accepted"]
-    assert restarted.get_session(session.id)._pending_queue == []
+    assert restarted.dispatch_snapshot(session.id)["items"] == []
+    assert starts.empty()
 
 
 async def test_control_receipts_bind_stop_and_reject_a_new_attempt(runtime, monkeypatch, tmp_path):
-    from unittest.mock import AsyncMock
-
-    from server.sessions.base import QueuedPrompt
     manager, db = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "scoped Stop", str(tmp_path), backend="codex")
-    session._current_request = QueuedPrompt("first", [], request_id="r1")
-    session._question_attempt_id = "a1"
-    interrupt = AsyncMock(return_value=True)
-    monkeypatch.setattr(manager, "interrupt", interrupt)
+    starts = hold_model_runs(manager, monkeypatch)
+    original, scope = await start_held_request(manager, session.id, "first")
+    first_run = await asyncio.wait_for(starts.get(), 2)
+    successor = None
     async with connection(manager, settings.auth_token) as client:
         async def send(data):
             await client[0].put({"type": "websocket.receive", "text": json.dumps(data)})
             return await receipt_frame(client[1], "command_receipt")
-        payload = {"type": "interrupt", "session_id": session.id, "client_command_id": "stop-1", "request_id": "r1", "attempt_id": "a1",
-                   "generation": manager.dispatch_snapshot(session.id)["generation"]}
-        first = await send(payload)
-        assert first["accepted"]
-        session._current_request = QueuedPrompt("next", [], request_id="r2")
-        session._question_attempt_id = "a2"
-        assert (await send(payload))["accepted"]  # returns the old receipt only
-        stale = await send({**payload, "client_command_id": "late-stop"})
-        assert stale["accepted"] is False and stale["code"] == "stale_command"
-        assert interrupt.await_count == 1
+        try:
+            payload = {"type": "interrupt", "session_id": session.id, "client_command_id": "stop-1",
+                       "request_id": original.request_id, "attempt_id": scope["attempt_id"],
+                       "generation": manager.dispatch_snapshot(session.id)["generation"]}
+            first = await send(payload)
+            assert first["accepted"]
+            assert (await asyncio.wait_for(original.wait(), 2)).outcome.status == "interrupted"
+            successor, next_scope = await start_held_request(manager, session.id, "next")
+            next_run = await asyncio.wait_for(starts.get(), 2)
+            assert next_scope["attempt_id"] != scope["attempt_id"]
+            assert await send(payload) == first  # replays only the original Stop receipt
+            stale = await send({**payload, "client_command_id": "late-stop"})
+            assert stale["accepted"] is False and stale["code"] == "stale_command"
+            assert first_run.stopped.is_set() and not next_run.stopped.is_set()
+            assert manager.dispatch_snapshot(session.id)["active_request_id"] == successor.request_id
+            assert starts.empty()
+        finally:
+            await manager.interrupt(session.id)
+            if successor is not None:
+                assert (await asyncio.wait_for(successor.wait(), 2)).outcome.status == "interrupted"
+            await manager.await_session_execution(session.id, timeout=2)
 
 
-async def test_idle_stop_and_specific_question_commands_reject_stale_scope(runtime, tmp_path):
-    from server.sessions.base import PendingQuestion
-
+async def test_idle_stop_and_specific_question_commands_reject_stale_scope(runtime, tmp_path, monkeypatch):
     manager, db = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "scoped controls", str(tmp_path), backend="codex")
+    starts = hold_model_runs(manager, monkeypatch)
+    active = None
+    command_number = 0
     async with connection(manager, settings.auth_token) as client:
         async def send(operation, **fields):
-            payload = {"type": operation, "session_id": session.id, "client_command_id": str(len(session._command_receipts)),
+            nonlocal command_number
+            command_number += 1
+            payload = {"type": operation, "session_id": session.id, "client_command_id": str(command_number),
                        "request_id": None, "attempt_id": None, **fields}
             await client[0].put({"type": "websocket.receive", "text": json.dumps(payload)})
             return await receipt_frame(client[1], "command_receipt")
         snapshot = manager.dispatch_snapshot(session.id)
         assert not (await send("interrupt", generation="retired", revision=snapshot["revision"]))["accepted"]
-        assert not session._dispatch_paused
+        assert not manager.dispatch_snapshot(session.id)["paused"]
         assert (await send("interrupt", generation=snapshot["generation"], revision=snapshot["revision"]))["accepted"]
         assert not (await send("interrupt", generation=snapshot["generation"], revision=snapshot["revision"]))["accepted"]
-        session._question_attempt_id = "new-attempt"
-        pending = PendingQuestion("question", [{"question": "Which?", "options": [{"label": "A"}]}],
-                                  request_id="request", attempt_id="new-attempt")
-        session._pending_questions[pending.question_id] = pending
-        answers = [{"selected": ["A"]}]
-        assert not (await send("answer_question", request_id="request", attempt_id="old-attempt", question_id="question", answers=answers))["accepted"]
-        assert session._pending_questions["question"] is pending
-        assert (await send("answer_question", request_id="request", attempt_id="new-attempt", question_id="question", answers=answers))["accepted"]
+        try:
+            active, scope = await start_held_request(manager, session.id, "The new question attempt")
+            await asyncio.wait_for(starts.get(), 2)
+            qid = await manager.create_pending_question(
+                session.id, [{"question": "Which?", "options": [{"label": "A"}]}],
+            )
+            answers = [{"selected": ["A"]}]
+            fields = {"request_id": active.request_id, "question_id": qid, "answers": answers}
+            assert not (await send("answer_question", attempt_id="old-attempt", **fields))["accepted"]
+            assert manager.has_pending_question(session.id, qid)
+            assert (await send("answer_question", attempt_id=scope["attempt_id"], **fields))["accepted"]
+            assert "A" in await manager.wait_for_question_answer(session.id, qid, timeout=.1)
+        finally:
+            await manager.interrupt(session.id)
+            if active is not None:
+                await asyncio.wait_for(active.wait(), 2)
+            await manager.await_session_execution(session.id, timeout=2)
 
 
 @pytest.mark.parametrize("operation", ["approve_tool", "deny_tool"])
-async def test_legacy_approval_commands_reject_and_replay_receipts(runtime, tmp_path, operation):
-    from server.sessions.base import QueuedPrompt
-
+async def test_legacy_approval_commands_reject_and_replay_receipts(runtime, tmp_path, operation, monkeypatch):
     manager, db = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "legacy approval", str(tmp_path), backend="codex")
+    starts = hold_model_runs(manager, monkeypatch)
+    active = None
     async with connection(manager, settings.auth_token) as client:
         async def send(payload, kind):
             await client[0].put({"type": "websocket.receive", "text": json.dumps(payload)})
@@ -176,11 +257,18 @@ async def test_legacy_approval_commands_reject_and_replay_receipts(runtime, tmp_
         payload = {**legacy, "client_command_id": "old-command", "request_id": None, "attempt_id": None}
         first = await send(payload, "command_receipt")
         assert first["accepted"] is False and first["code"] == "stale_command"
-        session._current_request = QueuedPrompt("later request", [], request_id="later-request")
-        session._question_attempt_id = "later-attempt"
-        assert await send(payload, "command_receipt") == first
-        conflict = await send({**payload, "tool_use_id": "different-tool"}, "command_receipt")
-        assert conflict["accepted"] is False and conflict["code"] == "command_conflict"
+        try:
+            active, _scope = await start_held_request(manager, session.id, "later request")
+            running = await asyncio.wait_for(starts.get(), 2)
+            assert await send(payload, "command_receipt") == first
+            conflict = await send({**payload, "tool_use_id": "different-tool"}, "command_receipt")
+            assert conflict["accepted"] is False and conflict["code"] == "command_conflict"
+            assert not running.stopped.is_set()
+        finally:
+            await manager.interrupt(session.id)
+            if active is not None:
+                await asyncio.wait_for(active.wait(), 2)
+            await manager.await_session_execution(session.id, timeout=2)
 
 
 @pytest.mark.parametrize("operation", ["approve_tool", "deny_tool"])
@@ -217,7 +305,7 @@ async def test_agent_bearer_cannot_enter_human_websocket(runtime, monkeypatch, t
         async with connection(manager, token) as client:
             closed = await asyncio.wait_for(client[1].get(), 1)
             assert closed["type"] == "websocket.close" and closed["code"] == 4001
-            assert not session._pending_queue
+            assert manager.dispatch_snapshot(session.id)["items"] == []
     finally:
         revoke_run(lease)
         if grant:
@@ -228,19 +316,19 @@ async def test_closed_submission_is_rejected_with_client_identity(runtime, tmp_p
     manager, db = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "closed ws", str(tmp_path), backend="codex")
-    session._admission_closed = True
+    manager.close_admission()
     async with connection(manager, settings.auth_token) as client:
         await client[0].put({"type": "websocket.receive", "text": json.dumps({
             "type": "send_message", "session_id": session.id, "content": "keep my draft",
             "client_request_id": "draft-1",
         })})
-        rejected = await frame(client[1])
+        rejected = await receipt_frame(client[1], "submission")
         assert rejected["type"] == "submission"
         assert rejected["accepted"] is False
         assert rejected["client_request_id"] == "draft-1"
         assert rejected["session_id"] == session.id
         assert "closed" in rejected["message"].lower()
-        assert not session._pending_queue
+        assert manager.dispatch_snapshot(session.id)["items"] == []
         assert not await db.load_messages(session.id)
 
 
@@ -443,15 +531,14 @@ async def test_slow_browser_does_not_delay_stop_or_the_committed_result(runtime,
     release = asyncio.Event()
     async with connection(manager, settings.auth_token, release=release) as slow:
         async with connection(manager, settings.auth_token) as healthy:
-            await asyncio.wait_for(manager.start_message(session.id, "hold this turn"), 1)
-            driver = session._active_task
+            original = await asyncio.wait_for(manager.start_message(session.id, "hold this turn"), 1)
             await asyncio.wait_for(slow[3].wait(), 1)
-            async with asyncio.timeout(2):
-                while session._backend is None or not session._backend.is_alive():
-                    await asyncio.sleep(0.01)
+            ready = await receipt_frame(healthy[1], "assistant_text")
+            assert ready["content"] == "Working."
             assert await asyncio.wait_for(manager.interrupt(session.id), 1)
-            if driver is not None:
-                await asyncio.wait_for(driver, 5)
+            completion = await asyncio.wait_for(original.wait(), 5)
+            assert completion.outcome.status == "interrupted"
+            await manager.await_session_execution(session.id, timeout=5)
             rows = await db.load_messages(session.id)
             results = [row for row in rows if row["type"] == "result"]
             assert len(results) == 1

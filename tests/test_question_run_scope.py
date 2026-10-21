@@ -58,8 +58,7 @@ async def question_runtime(monkeypatch, tmp_path):
             yield manager, session, client, events, starts
         finally:
             await manager.interrupt(session.id)
-            if session._active_task:
-                await asyncio.wait_for(session._active_task, 5)
+            await manager.await_session_execution(session.id, timeout=5)
             await manager.stop_all_held_processes()
             await database.close()
 
@@ -162,7 +161,7 @@ async def test_manager_and_rest_recheck_invalid_run_owner(question_runtime, inva
 async def test_live_lease_for_previous_account_owner_cannot_create_question(question_runtime):
     manager, session, client, events, _ = question_runtime
     token, scope = await begin_run(question_runtime)
-    assert manager.adopt_orphan_sessions("new-account-owner") == 1
+    assert await manager.adopt_orphan_sessions("new-account-owner") == 1
     assert not scope_is_live(scope)  # Adoption retires the previous owner's authority.
     response = await client.post(
         f"/api/sessions/{session.id}/questions",

@@ -15,6 +15,7 @@ call the tool.
 
 from __future__ import annotations
 
+import asyncio
 import glob
 import os
 from datetime import datetime
@@ -84,8 +85,9 @@ async def _bootstrap(tmp_path, monkeypatch):
 
 
 async def _turn(session_id: str, prompt: str) -> None:
-    async for _event in session_manager._execute_claimed_request(session_id, prompt):
-        pass
+    receipt = await session_manager.start_message(session_id, prompt)
+    assert receipt.accepted
+    assert (await asyncio.wait_for(receipt.wait(), 240)).outcome.status == "success"
 
 
 @pytest.mark.real_claude

@@ -20,21 +20,21 @@ import os
 import re
 import shutil
 import signal
+import time
 import uuid as uuid_module
+from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..aio import drain_cancelled
+from ..config import settings
+from ..diagnostics import diagnostic_text, exception_diagnostic
 from . import assembly
 from .events import HarnessCredential, HarnessEvent
 from .profile import ActivityObserver, RuntimeProfile, StdinMode, TurnContext
 
 logger = logging.getLogger(__name__)
-
-# Sentinel pushed onto the event queue to signal EOF on the stdout reader.
-_STREAM_END = object()
 
 # Per-line buffer cap for the asyncio StreamReader wrapping the CLI's
 # stdout. asyncio's 64 KiB default is easily exceeded by a single
@@ -43,6 +43,13 @@ _STREAM_END = object()
 # anything short of pathological emit cleanly; pipe backpressure keeps
 # memory bounded.
 _STDOUT_LINE_LIMIT_BYTES = 4 * 1024 * 1024
+
+# Match the existing browser transport's transient 256-frame / 1 MiB scale.
+# Count bounds Python object overhead; serialized event bytes bound payloads.
+# A legal stdout record may exceed this payload budget, so one large event
+# occupies the buffer alone instead of lowering the 4 MiB input-line contract.
+_EVENT_BUFFER_COUNT = 256
+_EVENT_BUFFER_BYTES = 1024 * 1024
 
 
 def _fallback_path_dirs() -> list[str]:
@@ -144,15 +151,24 @@ def _terminate_process_group(proc: asyncio.subprocess.Process, sig: int) -> bool
     return False
 
 
+async def _await_owned_task[T](task: asyncio.Task[T]) -> T:
+    """Leave a captured task running when its waiter is cancelled.
+
+    Its owner retrieves failures with the run's diagnostic context; a shield
+    can send a late exception to the event-loop logger without that context.
+    """
+    if not task.done():
+        await asyncio.wait({task})
+    return task.result()
+
+
 def parse_json_line(line: str) -> dict[str, Any] | None:
-    """Parse a JSONL line, returning None on parse error (logs a warning)."""
+    """Parse a JSONL object; the run owns diagnostics and credential masking."""
     try:
         obj = json.loads(line)
-    except json.JSONDecodeError as e:
-        logger.warning("Skipping unparseable harness line: %s — %s", line[:200], e)
+    except json.JSONDecodeError:
         return None
     if not isinstance(obj, dict):
-        logger.warning("Unexpected non-object harness line: %s", line[:200])
         return None
     return obj
 
@@ -195,6 +211,8 @@ class RunConfig:
     # so an agent that defines some still works on a harness that can't take
     # them (the CLI's built-in sub-agents remain available either way).
     subagents: list[dict[str, Any]] = field(default_factory=list)
+    # Resolved by the request owner, after asynchronous resume/observer work.
+    authorize_spawn: Callable[[], Awaitable[None]] | None = None
 
 
 class HarnessRun:
@@ -209,17 +227,21 @@ class HarnessRun:
         self.run_lease_id = uuid_module.uuid4().hex
         self.work_id = self._config.work_id
         self._lease_closed = False
-        self._spawn_task: asyncio.Task[asyncio.subprocess.Process] | None = None
+        self._spawn_task: asyncio.Task[asyncio.subprocess.Process | None] | None = None
         self._spawn_cleanup: asyncio.Task[None] | None = None
         self._preparation_task: asyncio.Task[None] | None = None
         self._stop_task: asyncio.Task[None] | None = None
         self._activity_observer: ActivityObserver | None = None
         self._parser = profile.new_event_parser()
         self._process: asyncio.subprocess.Process | None = None
-        self._event_queue: asyncio.Queue[HarnessEvent | object] = asyncio.Queue()
+        self._started_at: float | None = None
+        self._event_queue: deque[tuple[HarnessEvent, int]] = deque()
+        self._event_bytes = 0
+        self._event_changed = asyncio.Event()
         self._stdout_task: asyncio.Task[None] | None = None
         self._stderr_task: asyncio.Task[None] | None = None
         self._stderr_lines: list[str] = []
+        self._diagnostic_secrets: tuple[str, ...] = ()
         self.protocol_issues: dict[str, int] = {}
         self.protocol_locations: list[dict[str, Any]] = []
         self._stdout_line_number = 0
@@ -247,6 +269,15 @@ class HarnessRun:
     @property
     def profile(self) -> RuntimeProfile:
         return self._profile
+
+    @property
+    def process_group_id(self) -> int | None:
+        """prepare_spawn creates a group led by the CLI's PID."""
+        return self._process.pid if self._process is not None else None
+
+    def format_exception(self, error: BaseException) -> str:
+        """Format full local details using this run's captured credentials."""
+        return exception_diagnostic(error, secrets=self._diagnostic_secrets)
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -336,6 +367,8 @@ class HarnessRun:
         if self._lease_closed:
             raise RuntimeError("HarnessRun has been retired")
 
+        self._diagnostic_secrets = (settings.auth_token, credential.secret if credential else "")
+        self._started_at = time.monotonic()
         self._parser.begin_turn()
 
         from ..mcp_identity import work_is_open
@@ -381,22 +414,37 @@ class HarnessRun:
         if self._lease_closed:
             raise asyncio.CancelledError
 
-        from ..mcp_identity import register_run
-        if self._config.session_id:
-            register_run(self.run_lease_id, self._config.session_id, self._config.user_id, self.work_id)
+        request_id, attempt_id = self._tool_context or (None, None)
 
-        logger.info("Spawning harness %s: %s (cwd=%s)", self._profile.backend, argv, kwargs.get("cwd"))
-        spawn = asyncio.create_task(asyncio.create_subprocess_exec(
-            *argv,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            limit=_STDOUT_LINE_LIMIT_BYTES,
-            **kwargs,
-        ))
+        async def spawn_process() -> asyncio.subprocess.Process | None:
+            if self._config.authorize_spawn is not None:
+                try:
+                    await self._config.authorize_spawn()
+                except asyncio.CancelledError:
+                    return None  # No OS spawn has been submitted.
+            if self._lease_closed or not work_is_open(self.work_id):
+                return None
+            from ..mcp_identity import register_run
+            if self._config.session_id:
+                register_run(self.run_lease_id, self._config.session_id, self._config.user_id, self.work_id)
+            logger.info("Harness spawn provider=%s run=%s request=%s attempt=%s argv=%s cwd=%s",
+                        self._profile.backend, self.run_lease_id, request_id, attempt_id,
+                        diagnostic_text(str(argv), secrets=self._diagnostic_secrets),
+                        diagnostic_text(str(kwargs.get("cwd")), secrets=self._diagnostic_secrets))
+            # No await separates current authority from submitting the spawn.
+            return await asyncio.create_subprocess_exec(
+                *argv,
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                limit=_STDOUT_LINE_LIMIT_BYTES,
+                **kwargs,
+            )
+
+        spawn = asyncio.create_task(spawn_process())
         self._spawn_task = spawn
         try:
-            process = await asyncio.shield(spawn)
+            process = await _await_owned_task(spawn)
         except asyncio.CancelledError:
             # A transport can have spawned the process before returning its
             # handle. Keep that reservation alive until the captured group is
@@ -408,22 +456,33 @@ class HarnessRun:
             async def reap_aborted_spawn() -> None:
                 try:
                     abandoned = await spawn
-                    _terminate_process_group(abandoned, signal.SIGKILL)
-                    await asyncio.wait_for(abandoned.wait(), timeout=4.0)
-                except Exception:
-                    logger.exception("Failed to reap aborted harness startup")
+                    if abandoned is not None:
+                        _terminate_process_group(abandoned, signal.SIGKILL)
+                        await asyncio.wait_for(abandoned.wait(), timeout=4.0)
+                except Exception as error:
+                    logger.error("Harness startup retirement failed provider=%s run=%s error_type=%s\n%s",
+                                 self._profile.backend, self.run_lease_id, type(error).__name__,
+                                 exception_diagnostic(error, secrets=self._diagnostic_secrets))
                     raise
                 finally:
                     self._spawn_task = None
             self._spawn_cleanup = asyncio.create_task(reap_aborted_spawn(), name="harness-startup-cleanup")
             self._begin_retirement()
             raise
-        except Exception:
+        except Exception as error:
+            logger.error("Harness spawn failed provider=%s run=%s request=%s attempt=%s error_type=%s errno=%s elapsed_ms=%s\n%s",
+                         self._profile.backend, self.run_lease_id, request_id, attempt_id,
+                         type(error).__name__, error.errno if isinstance(error, OSError) else None,
+                         int((time.monotonic() - self._started_at) * 1000),
+                         exception_diagnostic(error, secrets=self._diagnostic_secrets))
             self._begin_retirement()
             raise
         finally:
             if spawn.done():
                 self._spawn_task = None
+        if process is None:
+            self._begin_retirement()
+            raise asyncio.CancelledError
         if self._lease_closed or not work_is_open(self.work_id):
             self._process = process
             _terminate_process_group(process, signal.SIGKILL)
@@ -447,8 +506,10 @@ class HarnessRun:
         ):
             try:
                 self._process.stdin.close()
-            except Exception:
-                logger.debug("closing stdin failed", exc_info=True)
+            except Exception as error:
+                logger.debug("Harness stdin close failed provider=%s run=%s error_type=%s\n%s",
+                             self._profile.backend, self.run_lease_id, type(error).__name__,
+                             exception_diagnostic(error, secrets=self._diagnostic_secrets))
         elif self._profile.stdin_mode is StdinMode.STREAM_JSON:
             # Write the prompt immediately. The pipe must never sit open and
             # idle: that is what made the CLI stall ~3s per turn waiting for
@@ -570,6 +631,11 @@ class HarnessRun:
         `stream()` can be iterated again; the process, its parser (which holds
         the engine's session id) and its MCP children all carry over.
         """
+        self.prepare_turn_stream()
+        await self.write_turn_input(prompt)
+
+    def prepare_turn_stream(self) -> None:
+        """Open this turn's reader before its initial stdin operation waits."""
         if not self.reusable:
             raise RuntimeError(f"{self._profile.backend} cannot reuse a process")
         if not self.is_alive():
@@ -577,11 +643,16 @@ class HarnessRun:
         # A fresh queue rather than draining the old one: anything still in it
         # belongs to the turn that just ended, and replaying that into the new
         # turn would duplicate messages.
-        self._event_queue = asyncio.Queue()
+        self._event_queue = deque()
+        self._event_bytes = 0
         self._stream_closed = False
+        self._event_changed.set()
         self.protocol_issues.clear()
         self.protocol_locations.clear()
         self._parser.begin_turn()
+
+    async def write_turn_input(self, prompt: str) -> None:
+        """Write the initial input after the owner has opened its reader."""
         self._initial_uuid = await self.send_user_frame(prompt)
 
     def bind_wiki_task(self, task_id: str | None) -> None:
@@ -593,11 +664,16 @@ class HarnessRun:
 
     async def stream(self) -> AsyncIterator[HarnessEvent]:
         while True:
-            item = await self._event_queue.get()
-            if item is _STREAM_END:
+            if self._event_queue:
+                event, size = self._event_queue.popleft()
+                self._event_bytes -= size
+                self._event_changed.set()
+                yield event
+            elif self._stream_closed:
                 return
-            assert isinstance(item, HarnessEvent)
-            yield item
+            else:
+                self._event_changed.clear()
+                await self._event_changed.wait()
 
     def _begin_retirement(self) -> asyncio.Task[None]:
         self._lease_closed = True
@@ -613,7 +689,13 @@ class HarnessRun:
 
     async def stop(self) -> None:
         """Owned retirement includes a late spawn; caller cancellation cannot orphan it."""
-        await asyncio.shield(self._begin_retirement())
+        try:
+            await _await_owned_task(self._begin_retirement())
+        except Exception as error:
+            logger.error("Harness retirement failed provider=%s run=%s error_type=%s\n%s",
+                         self._profile.backend, self.run_lease_id, type(error).__name__,
+                         self.format_exception(error))
+            raise
 
     async def _stop(self) -> None:
         if self._preparation_task is not None:
@@ -621,18 +703,20 @@ class HarnessRun:
             if not preparation.done():
                 preparation.cancel()
             try:
-                await asyncio.shield(preparation)
+                await _await_owned_task(preparation)
             except asyncio.CancelledError:
                 pass  # the preparation owns and confirms its subprocess cleanup
-            except Exception:
-                logger.debug("Controller preparation failed while stopping", exc_info=True)
+            except Exception as error:
+                logger.debug("Harness controller preparation failed during retirement provider=%s run=%s error_type=%s\n%s",
+                             self._profile.backend, self.run_lease_id, type(error).__name__,
+                             exception_diagnostic(error, secrets=self._diagnostic_secrets))
             self._preparation_task = None
         if self._spawn_cleanup is not None:
             await self._spawn_cleanup
             self._spawn_cleanup = None
         elif self._spawn_task is not None:
             try:
-                pending = await asyncio.shield(self._spawn_task)
+                pending = await _await_owned_task(self._spawn_task)
             except Exception:
                 pending = None
             if pending is not None and self._process is None:
@@ -649,11 +733,13 @@ class HarnessRun:
         if proc.stdin and not proc.stdin.is_closing():
             try:
                 proc.stdin.close()
-            except (OSError, RuntimeError, ValueError) as e:
+            except (OSError, RuntimeError, ValueError) as error:
                 # A transport that is already gone, or an event loop that has
                 # closed under us during interpreter shutdown. Neither is worth
                 # failing a teardown over, but neither is worth hiding either.
-                logger.debug("closing stdin failed: %s", e)
+                logger.debug("Harness stdin close failed provider=%s run=%s error_type=%s\n%s",
+                             self._profile.backend, self.run_lease_id, type(error).__name__,
+                             exception_diagnostic(error, secrets=self._diagnostic_secrets))
 
         if proc.returncode is None:
             try:
@@ -662,27 +748,52 @@ class HarnessRun:
                 # Escalate to the whole process GROUP so nested CLI children
                 # (MCP servers, subagents) die too, not just the direct child
                 # (turn-safety.md §2).
-                logger.warning("CLI didn't exit on stdin close, terminating group")
+                logger.warning("Harness retirement escalation provider=%s run=%s signal=SIGTERM",
+                               self._profile.backend, self.run_lease_id)
                 _terminate_process_group(proc, signal.SIGTERM)
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=2.0)
                 except TimeoutError:
-                    logger.warning("CLI didn't exit on SIGTERM, killing group")
+                    logger.warning("Harness retirement escalation provider=%s run=%s signal=SIGKILL",
+                                   self._profile.backend, self.run_lease_id)
                     _terminate_process_group(proc, signal.SIGKILL)
-                    await proc.wait()
-
+                    # asyncio's pending wait also needs pipe EOF. A paused
+                    # output transport must be drained before joining it.
         for task, name in (
             (self._stdout_task, "stdout reader"),
             (self._stderr_task, "stderr reader"),
         ):
-            await drain_cancelled(task, name)
-
-        if not self._stream_closed:
-            self._stream_closed = True
+            if task is None:
+                continue
+            if not task.done():
+                task.cancel()
             try:
-                self._event_queue.put_nowait(_STREAM_END)
-            except asyncio.QueueFull:
+                await task
+            except asyncio.CancelledError:
                 pass
+            except Exception as error:
+                logger.error("Harness reader retirement failed provider=%s run=%s reader=%s error_type=%s\n%s",
+                             self._profile.backend, self.run_lease_id, name, type(error).__name__,
+                             exception_diagnostic(error, secrets=self._diagnostic_secrets))
+
+        # A reader blocked on delivery, or one that exited on an oversized
+        # line, can leave its transport paused at asyncio's buffer cap. The
+        # Drain both captured pipes in bounded chunks: a pending process wait
+        # can need pipe EOF even after the child has exited. Confirm both the
+        # descriptors and the actual process exit before retirement returns.
+        async with asyncio.timeout(2.0):
+            for pipe in (proc.stdout, proc.stderr):
+                if pipe is not None:
+                    while await pipe.read(64 * 1024):
+                        pass
+            await proc.wait()
+
+        logger.info("Harness exit provider=%s run=%s elapsed_ms=%s exit_code=%s",
+                    self._profile.backend, self.run_lease_id,
+                    int((time.monotonic() - self._started_at) * 1000) if self._started_at is not None else None,
+                    proc.returncode)
+
+        self._close_stream()
 
         self._process = None
         self._stdout_task = None
@@ -698,10 +809,23 @@ class HarnessRun:
 
     # ------------------------------------------------------------------ helpers
 
-    def _emit(self, event: HarnessEvent) -> None:
+    async def _emit(self, event: HarnessEvent) -> None:
         if self._stream_closed:
             return
-        self._event_queue.put_nowait(event)
+        # Include raw protocol data and normalized fields. This is a payload
+        # budget, not an RSS claim; the count cap bounds small-event overhead.
+        size = sum(len(part) for part in json.JSONEncoder(
+            ensure_ascii=True, default=vars,
+        ).iterencode(event))
+        while not self._stream_closed:
+            if (len(self._event_queue) < _EVENT_BUFFER_COUNT
+                    and (not self._event_queue or self._event_bytes + size <= _EVENT_BUFFER_BYTES)):
+                self._event_queue.append((event, size))
+                self._event_bytes += size
+                self._event_changed.set()
+                return
+            self._event_changed.clear()
+            await self._event_changed.wait()
 
     def _close_stream(self) -> None:
         """Signal end-of-stream to `stream()` consumers at a logical boundary
@@ -711,10 +835,7 @@ class HarnessRun:
         self._stream_closed = True
         from ..wiki.tasks import tasks
         tasks.unbind_run(self.run_lease_id)
-        try:
-            self._event_queue.put_nowait(_STREAM_END)
-        except asyncio.QueueFull:
-            pass
+        self._event_changed.set()
 
     @property
     def stderr_text(self) -> str:
@@ -765,7 +886,7 @@ class HarnessRun:
         if callback is not None:
             callback(timestamp)
 
-    def _publish_observations(self, events: list[HarnessEvent], *, generation: int) -> None:
+    async def _publish_observations(self, events: list[HarnessEvent], *, generation: int) -> None:
         """Adapter observations share the current run's captured tool context."""
         context = self._tool_context
         if (self._lease_closed or self._stream_closed or context is None
@@ -773,9 +894,9 @@ class HarnessRun:
             return
         for event in events:
             if event.type == "model_measurement":
-                self._emit(event)
+                await self._emit(event)
         for event in self._tool_identity_tracker.normalize_observations(events, *context):
-            self._emit(event)
+            await self._emit(event)
 
     async def _drain_observations(self) -> None:
         drain = getattr(self._activity_observer, "drain_observations", None)
@@ -788,12 +909,21 @@ class HarnessRun:
         if obj is None:
             # Known diagnostic prefixes carry no protocol record. Unknown
             # JSON objects remain legal extensions; malformed records do not.
-            if not re.match(r"^(?:DEBUG|INFO|WARN(?:ING)?|ERROR)(?::|\s)", line):
+            if re.match(r"^(?:DEBUG|INFO|WARN(?:ING)?|ERROR)(?::|\s)", line):
+                logger.debug("Harness CLI stdout diagnostic provider=%s run=%s line=%s: %s",
+                             self._profile.backend, self.run_lease_id, self._stdout_line_number,
+                             diagnostic_text(line, secrets=self._diagnostic_secrets))
+            else:
                 self._note_protocol_issue("invalid_json", line)
             return
         if self._activity_observer is not None:
             self._activity_observer.observe_stdout(obj)
         out = self._parser.parse(obj)
+        request_id, attempt_id = self._tool_context or (None, None)
+        for level, message in out.diagnostics:
+            logger.log(level, "Harness parser diagnostic provider=%s run=%s request=%s attempt=%s: %s",
+                       self._profile.backend, self.run_lease_id, request_id, attempt_id,
+                       diagnostic_text(message, secrets=self._diagnostic_secrets))
         if out.activity is True or (out.activity is None and out.events):
             self._activity()
         if out.end_of_stream:
@@ -817,19 +947,27 @@ class HarnessRun:
                 # Out of turn: hand it to the session rather than dropping it.
                 try:
                     await self._idle_handler(event)
-                except Exception:
-                    logger.exception("idle event handler failed")
+                except Exception as error:
+                    logger.error("Harness idle event handler failed provider=%s run=%s error_type=%s\n%s",
+                                 self._profile.backend, self.run_lease_id, type(error).__name__,
+                                 exception_diagnostic(error, secrets=self._diagnostic_secrets))
             else:
-                self._emit(event)
+                await self._emit(event)
         if out.end_of_stream:
             self._close_stream()
 
-    def _note_protocol_issue(self, kind: str, line: str = "") -> None:
+    def _note_protocol_issue(self, kind: str, line: str = "", *, error: Exception | None = None) -> None:
         self.protocol_issues[kind] = self.protocol_issues.get(kind, 0) + 1
         if len(self.protocol_locations) < 8:
             self.protocol_locations.append({"kind": kind, "line": self._stdout_line_number,
                                             "characters": len(line),
                                             "sha256": hashlib.sha256(line.encode()).hexdigest()})
+        request_id, attempt_id = self._tool_context or (None, None)
+        logger.warning("Harness protocol issue provider=%s run=%s request=%s attempt=%s kind=%s line=%s characters=%s error_type=%s content=%s%s",
+                       self._profile.backend, self.run_lease_id, request_id, attempt_id,
+                       kind, self._stdout_line_number, len(line), type(error).__name__ if error else None,
+                       diagnostic_text(line, secrets=self._diagnostic_secrets),
+                       "\n" + exception_diagnostic(error, secrets=self._diagnostic_secrets) if error else "")
 
     async def _read_stdout(self) -> None:
         assert self._process and self._process.stdout
@@ -840,16 +978,12 @@ class HarnessRun:
                     continue
                 try:
                     await self._handle_line(line)
-                except Exception:
-                    self._note_protocol_issue("parser_exception", line)
-                    logger.exception(
-                        "%s event parse crashed on: %s", self._profile.backend, line[:200]
-                    )
+                except Exception as error:
+                    self._note_protocol_issue("parser_exception", line, error=error)
         except asyncio.CancelledError:
             raise
-        except Exception:
-            self._note_protocol_issue("stdout_interrupted")
-            logger.exception("stdout reader crashed")
+        except Exception as error:
+            self._note_protocol_issue("stdout_interrupted", error=error)
         finally:
             if not self._stream_closed:
                 try:
@@ -868,8 +1002,12 @@ class HarnessRun:
                     if self._activity_observer is not None and self._activity_observer.consume_stderr(line):
                         continue
                     self._stderr_lines.append(line)
-                    logger.debug("CLI stderr: %s", line)
+                    logger.debug("Harness CLI stderr provider=%s run=%s: %s",
+                                 self._profile.backend, self.run_lease_id,
+                                 diagnostic_text(line, secrets=self._diagnostic_secrets))
         except asyncio.CancelledError:
             raise
-        except Exception:
-            logger.exception("stderr reader crashed")
+        except Exception as error:
+            logger.error("Harness stderr reader failed provider=%s run=%s error_type=%s\n%s",
+                         self._profile.backend, self.run_lease_id, type(error).__name__,
+                         exception_diagnostic(error, secrets=self._diagnostic_secrets))

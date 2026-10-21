@@ -8,11 +8,10 @@ from typing import Any
 
 from ..wiki.contracts import JobCard, JobSnapshot
 from ..wiki.store import WikiError
-from .base import DatabaseBase, serialized_write
+from .base import DatabaseBase
 
 
 class WikiJobsMixin(DatabaseBase):
-    @serialized_write
     async def receive_wiki_job_notice(
         self, vault_id: str, user_id: str | None, delivery: dict[str, Any],
     ) -> str:
@@ -32,11 +31,8 @@ class WikiJobsMixin(DatabaseBase):
         key = (vault_id, delivery["event_id"], delivery["subscriber_id"])
         values = (user_id, snapshot.job_id, snapshot.state_version, delivery["kind"],
                   delivery["target"], delivery["request_id"], delivery["client_id"], body)
-        await self._ensure_connected()
-        await self._flush_locked()
-        try:
-            await self.conn.execute("BEGIN IMMEDIATE")
-            cursor = await self.conn.execute(
+        async with self.transaction(write=True) as tx:
+            cursor = await tx.execute(
                 "SELECT user_id,job_id,state_version,kind,target,request_id,client_id,body,outcome "
                 "FROM wiki_job_notifications WHERE vault_id=? AND event_id=? AND subscriber_id=?", key,
             )
@@ -48,7 +44,7 @@ class WikiJobsMixin(DatabaseBase):
             else:
                 outcome = "unavailable"
                 if delivery["kind"] in {"chat", "schedule"}:
-                    cursor = await self.conn.execute(
+                    cursor = await tx.execute(
                         "SELECT 1 FROM sessions WHERE id=? AND user_id IS ? "
                         "AND (?='' OR app_id=?)",
                         (delivery["target"], user_id, delivery["client_id"], delivery["client_id"]),
@@ -56,38 +52,34 @@ class WikiJobsMixin(DatabaseBase):
                     if await cursor.fetchone():
                         outcome = "delivered"
                 elif delivery["kind"] == "app":
-                    cursor = await self.conn.execute(
+                    cursor = await tx.execute(
                         "SELECT 1 FROM applications WHERE id=? AND user_id IS ?", (delivery["client_id"], user_id),
                     )
                     if await cursor.fetchone():
                         outcome = "delivered"
                 elif delivery["kind"] == "human" and not delivery["target"] and not delivery["client_id"]:
                     outcome = "delivered"
-                await self.conn.execute(
+                await tx.execute(
                     "INSERT INTO wiki_job_notifications VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (*key, *values, outcome, datetime.now(UTC).isoformat()),
                 )
-            await self.conn.commit()
-        except BaseException:
-            await self.conn.rollback()
-            raise
-        return outcome
+            return outcome
 
     async def wiki_job_cards(
         self, session_id: str, user_id: str | None, *, offset: int = 0, limit: int = 30,
     ) -> list[dict[str, Any]]:
         """Select the newest committed version, including for archived chats."""
-        if offset < 0 or not 1 <= limit <= 100:
-            raise ValueError("Invalid Wiki card pagination")
-        await self._ensure_connected()
-        cursor = await self.conn.execute(
-            "SELECT vault_id,subscriber_id,request_id,body,received_at FROM ("
-            "SELECT n.*,row_number() OVER (PARTITION BY vault_id,job_id "
-            "ORDER BY state_version DESC,event_id) AS position "
-            "FROM wiki_job_notifications n JOIN sessions s ON s.id=n.target AND s.user_id IS n.user_id "
-            "WHERE n.user_id IS ? AND n.target=? AND n.kind IN ('chat','schedule') AND n.outcome='delivered'"
-            ") WHERE position=1 ORDER BY received_at DESC LIMIT ? OFFSET ?",
-            (user_id, session_id, limit, offset),
-        )
-        return [JobCard(**json.loads(row[3]), vault_id=row[0], subscriber_id=row[1],
-                        origin_request_id=row[2], received_at=row[4]).model_dump() for row in await cursor.fetchall()]
+        async with self.transaction(write=False) as tx:
+            if offset < 0 or not 1 <= limit <= 100:
+                raise ValueError("Invalid Wiki card pagination")
+            cursor = await tx.execute(
+                "SELECT vault_id,subscriber_id,request_id,body,received_at FROM ("
+                "SELECT n.*,row_number() OVER (PARTITION BY vault_id,job_id "
+                "ORDER BY state_version DESC,event_id) AS position "
+                "FROM wiki_job_notifications n JOIN sessions s ON s.id=n.target AND s.user_id IS n.user_id "
+                "WHERE n.user_id IS ? AND n.target=? AND n.kind IN ('chat','schedule') AND n.outcome='delivered'"
+                ") WHERE position=1 ORDER BY received_at DESC LIMIT ? OFFSET ?",
+                (user_id, session_id, limit, offset),
+            )
+            return [JobCard(**json.loads(row[3]), vault_id=row[0], subscriber_id=row[1],
+                            origin_request_id=row[2], received_at=row[4]).model_dump() for row in await cursor.fetchall()]

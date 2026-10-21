@@ -5,7 +5,7 @@ import asyncio
 import pytest
 
 from server.session_manager import SessionManager
-from server.sessions.base import QueuedPrompt, Session
+from server.sessions.base import BackendRetirement, QueuedPrompt, Session
 from server.wiki.jobs import WikiJobs, worker
 from server.wiki.registry import registry
 from server.wiki.store import WikiError
@@ -41,7 +41,14 @@ async def test_terminal_job_requires_confirmed_writer_exit(client, tmp_path, mon
                 raise RuntimeError("writer exit unconfirmed")
 
     backend = Writer()
-    retirement = manager._retire_backend(session, backend)
+    if outcome in {"failed", "cancelled"}:
+        # Exercise the HTTP guard's retained-failure projection in isolation.
+        # A live Owner observing this failed task instead enters real fatal
+        # cleanup, covered by the subprocess owner-failure tests.
+        retirement = asyncio.create_task(backend.stop())
+        session._run.retirements[id(backend)] = BackendRetirement(backend, retirement)
+    else:
+        retirement = await manager._retire_backend(session, backend)
     await entered.wait()
     if outcome == "cancelled":
         retirement.cancel()
@@ -52,7 +59,7 @@ async def test_terminal_job_requires_confirmed_writer_exit(client, tmp_path, mon
         await asyncio.sleep(0)  # Observe the actual retirement callback.
     monkeypatch.setattr(worker, "manager", manager)
     monkeypatch.setattr(worker, "wake", lambda *args: None)
-    assert session._current_request is None and not session._pending_queue
+    assert session._run.request is None and not session._pending_queue
     if operation == "readmit":
         registry.configure(None, root, "new-curator")
     response = await client.post(f"/api/wiki/jobs/{job['id']}/{operation}", headers=wiki_api.HEADERS,
@@ -60,14 +67,15 @@ async def test_terminal_job_requires_confirmed_writer_exit(client, tmp_path, mon
     try:
         if outcome == "success":
             assert response.status_code == 200, response.text
-            assert not session._backend_retirements
+            assert not session._run.retirements
         else:
             assert response.status_code == 409, response.text
             assert "previous maintenance execution has not retired" in response.json()["detail"].lower()
-            assert id(backend) in session._backend_retirements
+            assert id(backend) in session._run.retirements
     finally:
         release.set()
         await asyncio.gather(retirement, return_exceptions=True)
+        await manager.close_session_owners()
 
 
 @pytest.mark.parametrize("location", ["current", "queued"])
@@ -84,7 +92,7 @@ async def test_retirement_check_preserves_exact_request_scope(client, tmp_path, 
     job = jobs.update(job["id"], session_id=session.id, items=job["items"])
     request = QueuedPrompt(prompt="Retain this instruction", attachment_ids=[], request_id=request_id)
     if location == "current":
-        session._current_request = request
+        session._run.request = request
     else:
         session._pending_queue.append(request)
     if request_id == "original-worker":
@@ -93,6 +101,6 @@ async def test_retirement_check_preserves_exact_request_scope(client, tmp_path, 
     else:
         jobs.require_retired(job, manager=manager)
     if location == "current":
-        assert session._current_request is request
+        assert session._run.request is request
     else:
         assert session._pending_queue == [request]

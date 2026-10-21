@@ -15,7 +15,7 @@ from server.wiki.store import WikiError, WikiStore
 def history(tmp_path):
     root = tmp_path / "vault"
     root.mkdir()
-    return WikiHistory(WikiStore(root, tmp_path / "state", str(uuid.uuid4())))
+    return WikiHistory(WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True))
 
 
 def owned_note(history):

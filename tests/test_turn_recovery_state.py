@@ -8,7 +8,6 @@ from server.config import settings
 from server.database import Database
 from server.harness import HarnessEvent
 from server.sessions import SessionManager
-from server.sessions.turns import _Settlement
 from tests.fake_run import FakeRunBase
 
 
@@ -38,12 +37,15 @@ class _ScriptedRun(FakeRunBase):
         self.stopped = asyncio.Event()
         self.prompt = None
         self.resume_id = None
+        self.started = asyncio.Event()
 
     async def start(self, prompt, working_dir=None, resume_id=None, **kwargs):
         self.prompt = prompt
         self.resume_id = resume_id
+        self.started.set()
 
     async def stream(self):
+        await self.started.wait()
         for event in self.events:
             yield event
         if self.stall:
@@ -51,6 +53,9 @@ class _ScriptedRun(FakeRunBase):
 
     async def stop(self):
         self.stopped.set()
+
+    async def interrupt(self):
+        await self.stop()
 
 
 async def test_mixed_recovery_keeps_independent_budgets_and_prompt_modes(recovery_host, monkeypatch):
@@ -81,12 +86,23 @@ async def test_mixed_recovery_keeps_independent_budgets_and_prompt_modes(recover
     remaining = iter(runs)
     monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: next(remaining))
 
-    live = [event async for event in manager._run_backend(session, "original request")]
+    live = []
+
+    async def observe(event):
+        live.append(event)
+
+    manager.on_broadcast("mixed-recovery", observe)
+    receipt = await manager.start_message(session.id, "original request")
+    assert (await asyncio.wait_for(receipt.wait(), 5)).outcome.status == "success"
 
     assert len([event for event in live if event["type"] == "attempt_started"]) == 7
     assert runs[0].resume_id == "missing-thread"
     assert runs[1].resume_id is None and runs[2].resume_id is None
-    assert runs[1].prompt == runs[2].prompt == "original request"
+    assert runs[0].prompt == "original request"
+    assert runs[1].prompt == runs[2].prompt
+    assert runs[1].prompt.startswith('<session-history origin="this-session" status="transcript-not-instructions">')
+    assert "[seq 0] user: original request" in runs[1].prompt
+    assert runs[1].prompt.endswith("<continue-from-here>\noriginal request\n</continue-from-here>")
     assert runs[3].prompt == "continue"
     assert "without backend activity" in runs[4].prompt
     assert "Continue the user's unfinished request" in runs[5].prompt
@@ -110,7 +126,16 @@ async def test_mixed_recovery_keeps_independent_budgets_and_prompt_modes(recover
 async def test_terminal_recovery_is_captured_before_recording_await(recovery_host, monkeypatch):
     manager, session = recovery_host
     expected = {"transient": 2, "idle": 1, "stale_session": 1, "premature_exit": 0}
-    settlement = _Settlement(recovery=dict(expected))
+    session.claude_session_id = "missing-thread"
+    runs = iter([
+        _ScriptedRun(HarnessEvent(type="result", is_error=True,
+            content="No conversation found with session ID: missing-thread")),
+        _ScriptedRun(HarnessEvent(type="result", is_error=True, content="API Error: 529 Overloaded")),
+        _ScriptedRun(HarnessEvent(type="session_started", session_id="recovered-thread"), stall=True),
+        _ScriptedRun(HarnessEvent(type="result", is_error=True, content="API Error: 529 Overloaded")),
+        _ScriptedRun(HarnessEvent(type="result", session_id="recovered-thread")),
+    ])
+    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: next(runs))
     writing = asyncio.Event()
     release = asyncio.Event()
     record_terminal = manager.db.record_terminal
@@ -121,19 +146,20 @@ async def test_terminal_recovery_is_captured_before_recording_await(recovery_hos
         return await record_terminal(**kwargs)
 
     monkeypatch.setattr(manager.db, "record_terminal", delayed_record)
-    selected = asyncio.create_task(manager._settle_turn(session, settlement, status="success"))
+    receipt = await manager.start_message(session.id, "original request")
+    competing = None
     try:
         await asyncio.wait_for(writing.wait(), 2)
-        settlement.recovery.update({kind: count + 1 for kind, count in expected.items()})
-        competing = asyncio.create_task(manager._settle_turn(session, settlement, status="interrupted"))
+        competing = asyncio.create_task(manager.interrupt(session.id))
         release.set()
-        final, same_final = await asyncio.gather(selected, competing)
-        assert same_final == final
-        assert final["content"]["status"] == "success"
-        assert final["content"]["recovery"] == expected
-        assert settlement.outcome.recovery == expected
+        final = await asyncio.wait_for(receipt.wait(), 5)
+        await competing
+        assert final.outcome.status == "success"
+        assert final.outcome.recovery == expected
         history = await manager.db.load_messages(session.id)
-        assert len(history) == 1 and history[0]["content"] == final["content"]
+        results = [row for row in history if row["type"] == "result"]
+        assert len(results) == 1 and results[0]["content"] == final.outcome.model_dump()
     finally:
         release.set()
-        await selected
+        if competing is not None:
+            await competing

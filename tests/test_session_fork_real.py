@@ -66,10 +66,11 @@ async def _bootstrap(tmp_path, monkeypatch):
 
 async def _run_turn(mgr, sid, prompt, timeout=180.0):
     """Fire a turn and wait for the session to go idle."""
-    await mgr.start_message(sid, prompt)
-    sess = mgr.get_session(sid)
-    if sess and sess._active_task:
-        await asyncio.wait_for(sess._active_task, timeout)
+    receipt = await mgr.start_message(sid, prompt)
+    assert receipt.accepted
+    completion = await asyncio.wait_for(receipt.wait(), timeout)
+    assert completion.outcome.status == "success"
+    await mgr.await_session_execution(sid, timeout=timeout)
 
 
 async def _turn_get_reply(mgr, db, sid, prompt, tries=6):

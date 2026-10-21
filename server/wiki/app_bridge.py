@@ -8,9 +8,12 @@ import re
 import uuid
 from pathlib import Path
 
+from starlette.datastructures import QueryParams
+
 from ..aio import complete_cleanup
-from .history import WikiHistory, atomic, history_text
+from .history import WikiHistory, atomic, history_text, sync_directory
 from .registry import registry
+from .storage import file_effect
 from .store import WikiError
 
 _pending: dict[asyncio.Task, str | None] = {}
@@ -134,7 +137,9 @@ class AppMutation:
 
     def _journal_changes(self):
         self.history.finish_external(self.before)
-        self.journal.unlink(missing_ok=True)
+        with file_effect(self.history.store.health):
+            self.journal.unlink(missing_ok=True)
+            sync_directory(self.journal.parent)
 
     async def receipt(self, payload):
         async with self._finish_lock:
@@ -150,7 +155,8 @@ class AppMutation:
             trash_id = payload.get("id")
             if isinstance(trash_id, str) and re.fullmatch(r"[a-f0-9]{32}", trash_id):
                 self.before["trash_id"] = trash_id
-                atomic(self.journal, json.dumps(self.before).encode())
+                with file_effect(self.history.store.health):
+                    atomic(self.journal, json.dumps(self.before).encode())
 
         await complete_cleanup(asyncio.to_thread(remember))
 
@@ -245,14 +251,13 @@ async def _begin(app_row, method, endpoint, query, body=b""):
         return None
     if _stopping or user_id in _blocked_owners:
         raise WikiError("Wiki application writes are stopped during service transition", 503)
+    # Sapphire's parse_qs drops blanks and selects the first remaining vault.
+    # Missing/all-blank vaults are rejected downstream, without a default vault.
+    vault = next((value for value in QueryParams(query).getlist("vault") if value), None)
+    if vault is None:
+        return None
     # Sapphire can contain other vaults; this bridge covers only the registered root.
-    vault = query.get("vault")
-    if not vault:
-        file = Path(app_row["app_dir"] + ".data") / "registry.json"
-        if file.is_file():
-            vaults = json.loads(file.read_text()).get("vaults", [])
-            vault = vaults[0].get("id") if vaults else None
-    expected = Path(app_row["app_dir"] + ".data") / "vaults" / (vault or "") / "repo"
+    expected = Path(app_row["app_dir"] + ".data") / "vaults" / vault / "repo"
     if expected.resolve() != Path(config["root"]).resolve():
         return None
     history = await complete_cleanup(asyncio.to_thread(lambda: WikiHistory(registry.store(user_id))))
@@ -320,7 +325,8 @@ async def _begin(app_row, method, endpoint, query, body=b""):
                     "trash_id": trash_id,
                     "trash_root": str(trash_root),
                 }
-                atomic(journal, json.dumps(entry).encode())
+                with file_effect(history.store.health):
+                    atomic(journal, json.dumps(entry).encode())
                 return entry, payload
 
         # Cancelling an await does not stop a worker thread. Join preparation

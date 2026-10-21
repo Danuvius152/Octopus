@@ -152,8 +152,7 @@ async def runtime(monkeypatch, tmp_path):
     finally:
         for session in list(manager.sessions.values()):
             await manager.interrupt(session.id)
-            if session._active_task:
-                await asyncio.wait_for(session._active_task, 5)
+            await manager.await_session_execution(session.id, timeout=5)
         delegations.shutdown()
         await manager.stop_all_held_processes()
         await database.close()
@@ -361,6 +360,68 @@ async def test_bootstrap_retires_actual_ownerless_run_and_next_request_uses_new_
     assert len(outcomes) == 1 and outcomes[0]["status"] == "success"
 
 
+async def test_closing_old_work_retires_its_held_backend_while_new_input_is_claiming(runtime, monkeypatch, tmp_path):
+    from server.sessions.client_submissions import (
+        submission_status,
+        submit_client_message,
+    )
+
+    manager, database, parent, _, starts, _ = runtime
+    pid_file = tmp_path / "held-old-work.pid"
+
+    def argv(context):
+        starts.put_nowait(context)
+        code = f"import json,os,sys; open({str(pid_file)!r},'w').write(str(os.getpid()))\n"
+        code += "for line in sys.stdin:\n"
+        code += " print(json.dumps({'type':'system','subtype':'init','session_id':'held-work-thread'}),flush=True)\n"
+        code += " print(json.dumps({'type':'result','subtype':'success','session_id':'held-work-thread','is_error':False}),flush=True)\n"
+        return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
+
+    harness = get_harness("claude-code")
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
+    session = await manager.create_session(parent.agent_id, "Held old work", str(tmp_path), backend="claude-code")
+    old_work = f"held-work:{session.id}"
+    await manager.start_message(session.id, "Finish the original work", work_id=old_work)
+    await asyncio.wait_for(starts.get(), 5)
+    await wait_dispatch_idle(manager, session.id)
+    old_pid = int(pid_file.read_text())
+    backend = session._run.backend
+    assert backend is not None and backend.work_id == old_work and process_alive(old_pid)
+    stopped = asyncio.Event()
+    stop = backend.stop
+
+    async def observed_stop():
+        await stop()
+        stopped.set()
+
+    monkeypatch.setattr(backend, "stop", observed_stop)
+    entered, release = gate_sql(
+        monkeypatch, database, lambda sql: sql.startswith("UPDATE client_submissions SET execution_state='claimed'"),
+    )
+    submitting = asyncio.create_task(submit_client_message(
+        manager, session.id, "Continue with independent human input", [], "next-held-work", wiki_mode=None,
+    ))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        assert starts.empty(), "the next input has not reached model creation"
+        affected = [await manager.close_work(old_work)]
+        await manager.finish_work_cancellation(affected)
+        await asyncio.wait_for(stopped.wait(), 2)
+        assert not process_alive(old_pid)
+        assert starts.empty(), "retiring the old backend must not dispatch the blocked input"
+    finally:
+        release.set()
+        result = await asyncio.wait_for(submitting, 5)
+    assert result["accepted"]
+    context = await asyncio.wait_for(starts.get(), 5)
+    scope = verify(next(entry.credential for entry in context.mcp_servers if entry.key == "ask"))
+    assert scope.work_id is None and context.resume_id == "held-work-thread"
+    await wait_dispatch_idle(manager, session.id)
+    assert int(pid_file.read_text()) != old_pid
+    status = await submission_status(manager, session.id, "next-held-work")
+    assert status is not None and status["execution"]["state"] == "succeeded"
+
+
 async def test_bootstrap_retires_held_process_and_resumes_transcript_under_new_owner(runtime, monkeypatch, tmp_path):
     manager, database, parent, _, starts, _ = runtime
     monkeypatch.setattr(deps, "_user_manager", UserManager(database))
@@ -439,7 +500,6 @@ async def test_account_transition_does_not_fan_out_unadopted_question_answer(run
     manager, database, session, _, _, _ = runtime
     users = UserManager(database)
     monkeypatch.setattr(deps, "_user_manager", users)
-    question = await manager.create_pending_question(session.id, [{"question": "Private choice", "options": [{"label": "A"}]}])
     # The answer has already been recorded when account adoption crosses its
     # publication. Do not submit a new synchronous write while a connection
     # operation is deliberately gated: writes are now serialized.
@@ -450,28 +510,39 @@ async def test_account_transition_does_not_fan_out_unadopted_question_answer(run
             publication_entered.set()
             await publication_release.wait()
 
-    manager.on_broadcast("hold-answer-publication", hold_publication)
-    answer = asyncio.create_task(manager.answer_question(session.id, question, [{"question": "Private choice", "answer": "synthetic private answer"}]))
-    await asyncio.wait_for(publication_entered.wait(), 5)
-    entered, release = gate_sql(monkeypatch, database, lambda sql: sql.startswith("UPDATE sessions SET user_id"))
-    adoption = asyncio.create_task(bootstrap_first_account(database, username="first", password="password1", session_manager=manager))
-    await asyncio.wait_for(entered.wait(), 5)
-    assert session.user_id is None and await deps.accounts_exist()
-    foreign = asyncio.create_task(users.create_user(username="second", password="password2"))
     foreign_events = []
+    creation_delivered, answer_delivered = asyncio.Event(), asyncio.Event()
 
     async def receive(event):
         foreign_events.append(event)
+        if event["type"] == "question_request":
+            creation_delivered.set()
 
+    async def observe_answer_prefix(event):
+        if event["type"] == "question_answer":
+            answer_delivered.set()
+
+    manager.on_broadcast("hold-answer-publication", hold_publication)
     manager.on_broadcast("foreign-during-adoption", receive, "unrelated-account")
+    manager.on_broadcast("after-adoption-answer-publication", observe_answer_prefix)
+    question = await manager.create_pending_question(session.id, [{"question": "Private choice", "options": [{"label": "A"}]}])
+    await asyncio.wait_for(creation_delivered.wait(), 2)
+    assert [event["type"] for event in foreign_events] == ["question_request"]
+    foreign_events.clear()
+    answer = asyncio.create_task(manager.answer_question(session.id, question, [{"question": "Private choice", "answer": "synthetic private answer"}]))
+    await asyncio.wait_for(publication_entered.wait(), 5)
+    # Commit account/row adoption without handing this manager's live objects
+    # over. Publication must consult the committed owner during that window.
+    await bootstrap_first_account(database, username="first", password="password1")
+    assert session.user_id is None and await deps.accounts_exist()
+    foreign = asyncio.create_task(users.create_user(username="second", password="password2"))
     try:
         publication_release.set()
         assert await asyncio.wait_for(answer, 5)
+        await asyncio.wait_for(answer_delivered.wait(), 2)
         assert foreign_events == []
     finally:
         publication_release.set()
-        release.set()
-        await adoption
         await foreign
 
 
@@ -499,7 +570,7 @@ async def test_archived_background_result_keeps_adopted_owner(background, runtim
     gate.touch()
     await wait_until(lambda: bool(delivered))
     assert foreign_events == []
-    assert [event["type"] for event in owner_events] == ["session_archived", "bg_completed"]
+    assert [event["type"] for event in owner_events if event["type"] != "dispatch_state"] == ["session_archived", "bg_completed"]
     assert owner_events[-1]["task_id"] == record.id
 
 
@@ -528,6 +599,11 @@ async def test_connected_ownerless_websocket_retires_on_account_transition(runti
 async def test_connected_legacy_websocket_receives_actual_token_rotation_handoff(runtime, monkeypatch, tmp_path, revoke):
     manager, database, _, _, _, _ = runtime
     monkeypatch.setattr(settings, "auth_token", settings.auth_token)
+    # This standalone fixture restarts from its selected env file, without a
+    # parent token overriding that file on the next Settings load.
+    for name in tuple(os.environ):
+        if name.lower() == "octopus_auth_token":
+            monkeypatch.delenv(name)
     monkeypatch.setattr(deps, "_user_manager", UserManager(database))
     monkeypatch.setattr(auth_router, "_db", database)
     env = tmp_path / "rotation.env"
@@ -541,7 +617,7 @@ async def test_connected_legacy_websocket_receives_actual_token_rotation_handoff
     try:
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post("/api/auth/rotate", headers={"Authorization": f"Bearer {old}"}, json={"new_token": replacement, "revoke_other_clients": revoke})
-        assert response.status_code == 200
+        assert response.status_code == 200, response.text
         frame = await asyncio.wait_for(outgoing.get(), 5)
         assert frame["type"] == "websocket.send"
         assert json.loads(frame["text"]) == {"type": "auth_token_rotated", "token": None if revoke else replacement}
@@ -617,7 +693,7 @@ async def test_websocket_cannot_resolve_another_accounts_question_or_approval(ru
         await disconnect_ws(incoming, task)
 
 
-async def test_resume_response_is_404_if_session_deleted_during_publication(runtime):
+async def test_resume_reply_does_not_wait_for_publication_and_later_delete_is_visible(runtime):
     manager, _, session, _, _, _ = runtime
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -629,11 +705,17 @@ async def test_resume_response_is_404_if_session_deleted_during_publication(runt
     manager.on_broadcast("slow-resume", slow_resume)
     async with session_client(manager, session) as client:
         request = asyncio.create_task(client.post(f"/api/sessions/{session.id}/dispatch/resume"))
-        await asyncio.wait_for(entered.wait(), 5)
-        await manager.delete_session(session.id)
-        release.set()
-        response = await asyncio.wait_for(request, 5)
-    assert response.status_code == 404
+        try:
+            await asyncio.wait_for(entered.wait(), 5)
+            response = await asyncio.wait_for(request, 2)
+            assert response.status_code == 200
+            assert not release.is_set()
+            await manager.delete_session(session.id)
+            assert (await client.get(f"/api/sessions/{session.id}")).status_code == 404
+        finally:
+            release.set()
+            await asyncio.gather(request, return_exceptions=True)
+    await asyncio.wait_for(manager.close_session_owners(), 2)
 
 
 async def test_detail_response_is_404_if_session_deleted_during_history_read(runtime, monkeypatch):
@@ -662,9 +744,20 @@ async def test_auto_archive_preserves_stop_and_new_return_during_database_write(
     archive = asyncio.create_task(manager.auto_archive_scheduled_session(session.id))
     await asyncio.wait_for(entered.wait(), 5)
     await manager.interrupt(session.id)
-    await manager.start_message(session.id, "late background result", source="bg", delivery_id="bg:late")
-    release.set()
-    assert await asyncio.wait_for(archive, 5) is False
+    submission = asyncio.create_task(manager.start_message(
+        session.id, "late background result", source="bg", delivery_id="bg:late",
+    ))
+    try:
+        # Admission uses the same serialized DB as archive. Both operations
+        # must be allowed to finish before checking the queued-return result.
+        await asyncio.sleep(0)
+        assert not submission.done()
+        release.set()
+        assert await asyncio.wait_for(archive, 5) is False
+        assert (await asyncio.wait_for(submission, 5)).accepted
+    finally:
+        release.set()
+        await asyncio.gather(archive, submission, return_exceptions=True)
     assert manager.get_session(session.id) is session
     snapshot = manager.dispatch_snapshot(session.id)
     assert snapshot["paused"] is True
@@ -744,10 +837,10 @@ async def test_background_total_limit_runs_while_started_publication_waits(backg
             pass
 
 
-async def test_cancelled_background_registration_does_not_start_a_process_or_terminal_receipt(background, runtime, monkeypatch, tmp_path):
+async def test_cancelled_background_registration_retains_confirmed_row_without_starting_a_process(background, runtime, monkeypatch, tmp_path):
     manager, session, delivered, broadcasts = background
     _, database, _, _, _, _ = runtime
-    entered, _ = gate_sql(monkeypatch, database, lambda sql: sql.startswith("INSERT INTO bg_tasks"))
+    entered, release = gate_sql(monkeypatch, database, lambda sql: sql.startswith("INSERT INTO bg_tasks"))
     pid_file = tmp_path / "aborted-registration.pid"
     code = f"import os,time; open({str(pid_file)!r},'w').write(str(os.getpid())); time.sleep(30)"
     creation = asyncio.create_task(manager.start_task(
@@ -757,16 +850,40 @@ async def test_cancelled_background_registration_does_not_start_a_process_or_ter
     await asyncio.wait_for(entered.wait(), 5)
     assert not pid_file.exists(), "uncommitted launch started an OS process"
     creation.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await asyncio.wait_for(creation, 8)
+    try:
+        # Cancelling its waiter does not cancel the captured SQL operation.
+        # Let the real driver finish before expecting its caller to unwind.
+        await asyncio.sleep(0)
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(creation, 8)
+    finally:
+        release.set()
+        await asyncio.gather(creation, return_exceptions=True)
     assert not pid_file.exists()
-    assert await manager.list_tasks(session.id) == []
+    registered = await manager.list_tasks(session.id)
+    assert len(registered) == 1
+    assert registered[0].session_id == session.id
+    assert registered[0].command == shlex.join([sys.executable, "-c", code])
+    assert registered[0].status == "interrupted" and registered[0].stop_reason == "startup_failed"
+    assert registered[0].exit_code is None
+    assert registered[0].stdout == registered[0].stderr == ""
     assert delivered == broadcasts == []
 
 
-async def test_stop_during_running_publication_releases_status_as_well_as_dispatch(runtime):
-    manager, _, session, _, starts, events = runtime
+async def test_stop_during_running_publication_retires_resources_before_delivering_its_prefix(runtime, monkeypatch):
+    from server.harness.run import HarnessRun
+
+    manager, database, session, _, starts, events = runtime
     entered, release = asyncio.Event(), asyncio.Event()
+    resources = []
+    spawn = HarnessRun.start
+
+    async def capture_original_start(run, *args, **kwargs):
+        resources.append(run)
+        return await spawn(run, *args, **kwargs)
+
+    monkeypatch.setattr(HarnessRun, "start", capture_original_start)
 
     async def slow_client(event):
         if event["type"] == "status" and event.get("status") == "running":
@@ -774,20 +891,33 @@ async def test_stop_during_running_publication_releases_status_as_well_as_dispat
             await release.wait()
 
     manager.on_broadcast("slow-running-client", slow_client)
-    await manager.start_message(session.id, "request")
-    await asyncio.wait_for(entered.wait(), 5)
-    await manager.interrupt(session.id)
+    receipt = await manager.start_message(session.id, "held request")
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        await asyncio.wait_for(manager.interrupt(session.id), 2)
+        await manager.await_session_execution(session.id, timeout=5)
+        assert manager.get_session(session.id).status.value == "idle"
+        assert manager.dispatch_snapshot(session.id)["paused"] is True
+        assert all(not run.is_alive() for run in resources)
+        assert starts.qsize() <= 1
+        history = await database.load_messages(session.id)
+        assert [row["content"] for row in history if row["role"] == "user"] == ["held request"]
+        terminals = [row for row in history if row["type"] == "result"]
+        assert len(terminals) == 1 and terminals[0]["content"]["status"] == "interrupted"
+        assert not [event for event in events if event["type"] == "result"]
+    finally:
+        release.set()
+    completion = await asyncio.wait_for(receipt.wait(), 5)
+    assert completion.recording_state == "committed" and completion.outcome.status == "interrupted"
     await wait_dispatch_idle(manager, session.id)
-    assert manager.get_session(session.id).status.value == "idle"
-    assert manager.dispatch_snapshot(session.id)["paused"] is True
-    assert starts.empty()
+    assert starts.qsize() <= 1 and all(not run.is_alive() for run in resources)
     outcomes = [event for event in events if event["type"] == "result"]
     assert len(outcomes) == 1
     assert outcomes[0]["content"]["status"] == "interrupted"
 
 
-async def test_stop_of_unstarted_delegation_preserves_round_until_resume(runtime):
-    manager, _, parent, delegations, starts, events = runtime
+async def test_stop_of_unstarted_delegation_preserves_round_until_resume(runtime, monkeypatch):
+    manager, database, parent, delegations, starts, events = runtime
     stopped = asyncio.Event()
 
     async def stop_on_claim(event):
@@ -806,16 +936,40 @@ async def test_stop_of_unstarted_delegation_preserves_round_until_resume(runtime
     assert len(manager.dispatch_snapshot(round_.delegation_id)["items"]) == 1
     assert starts.empty()
     assert not [event for event in events if event["session_id"] == round_.delegation_id and event["type"] in {"error", "result"}]
-    await manager.resume_dispatch(round_.delegation_id)
-    await asyncio.wait_for(starts.get(), 5)
-    async with asyncio.timeout(5):
-        while round_.state == "running":
-            await asyncio.sleep(0.01)
-    assert round_.state == "completed"
-    assert starts.empty()
+    entered, release = asyncio.Event(), asyncio.Event()
+    execute = database.conn._execute
+
+    async def pause_parent_admission(function, *args, **kwargs):
+        if (len(args) > 1 and isinstance(args[0], str)
+                and "FROM agents a WHERE a.id = ?" in args[0]
+                and args[1][0] == parent.agent_id and not entered.is_set()):
+            entered.set()
+            await release.wait()
+        return await execute(function, *args, **kwargs)
+
+    monkeypatch.setattr(database.conn, "_execute", pause_parent_admission)
+    confirming = None
+    try:
+        await manager.resume_dispatch(round_.delegation_id)
+        await asyncio.wait_for(starts.get(), 5)
+        await asyncio.wait_for(entered.wait(), 5)
+        assert round_.state == "completed"
+        assert starts.empty()
+        assert manager.dispatch_snapshot(parent.id)["items"] == []
+        confirming = asyncio.create_task(delegations.confirm_recording())
+        await asyncio.sleep(0)
+        assert not confirming.done(), "the original relay command still owns admission"
+    finally:
+        release.set()
+        if confirming is not None:
+            await asyncio.wait_for(confirming, 5)
+        else:
+            await delegations.confirm_recording()
     replies = manager.dispatch_snapshot(parent.id)["items"]
     assert len(replies) == 1
+    assert replies[0]["source"] == "delegation"
     assert replies[0]["summary"].startswith("[agent-reply:")
+    assert starts.empty()
 
 
 async def test_queued_return_keeps_its_owner_when_deleted_during_dispatch_publication(runtime):
@@ -920,13 +1074,15 @@ async def completed_delegation(runtime):
     async with asyncio.timeout(5):
         while original.state == "running":
             await asyncio.sleep(0.01)
+    # The committed outcome precedes the original relay and archive command.
+    await asyncio.wait_for(delegations.confirm_recording(), 5)
     if manager.get_session(original.delegation_id) is not None:
         await wait_dispatch_idle(manager, original.delegation_id)
         await manager.archive_session(original.delegation_id, replace=False)
     return original
 
 
-async def test_cancelled_follow_up_setup_restores_original_finished_round(runtime):
+async def test_cancelled_follow_up_waiter_keeps_the_owned_round_and_its_reply(runtime):
     manager, _, parent, delegations, starts, _ = runtime
     original = await completed_delegation(runtime)
     entered, release = asyncio.Event(), asyncio.Event()
@@ -938,16 +1094,34 @@ async def test_cancelled_follow_up_setup_restores_original_finished_round(runtim
 
     manager.on_broadcast("slow-reopen", slow_client)
     following = asyncio.create_task(delegations.follow_up_delegation(
-        parent_session_id=parent.id, delegation_id=original.delegation_id, request="Cancelled setup",
+        parent_session_id=parent.id, delegation_id=original.delegation_id, request="Accepted setup after waiter disconnect",
     ))
-    await asyncio.wait_for(entered.wait(), 5)
-    following.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await following
-    assert delegations.get_delegation(original.delegation_id) is original
-    assert not delegations.has_active_delegation_for_parent(parent.id)
-    assert starts.empty()
-    assert len(manager.dispatch_snapshot(parent.id)["items"]) == 1
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        following.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await following
+        accepted = delegations.get_delegation(original.delegation_id)
+        assert accepted is not original and accepted.work_id != original.work_id
+        assert accepted.request == "Accepted setup after waiter disconnect"
+        assert accepted.state == "running" and original.state == "completed"
+        assert starts.empty(), "the held reopen has not admitted the child yet"
+        release.set()
+        await asyncio.wait_for(delegations.confirm_recording(), 5)
+        await wait_until(lambda: len(manager.dispatch_snapshot(parent.id)["items"]) == 2)
+        await manager.await_session_execution(accepted.delegation_id, timeout=5)
+        await asyncio.wait_for(delegations.confirm_recording(), 5)
+        assert delegations.get_delegation(original.delegation_id) is accepted
+        assert accepted.state == "completed" and original.state == "completed"
+        assert not manager.has_pending_or_active_work(accepted.delegation_id, accepted.work_id)
+        saved = next(row for row in await manager.db.load_sessions(include_archived=True)
+                     if row["id"] == accepted.delegation_id)
+        assert saved["archived"]
+        assert not delegations.has_active_delegation_for_parent(parent.id)
+        assert starts.qsize() == 1, "exactly one child round survives the cancelled waiter"
+    finally:
+        release.set()
+        await asyncio.gather(following, return_exceptions=True)
 
 
 async def test_cancelled_reopen_cannot_overwrite_a_newer_follow_up(runtime):
@@ -992,15 +1166,20 @@ async def test_follow_up_returns_before_blocked_notification_and_preserves_accep
     following = asyncio.create_task(delegations.follow_up_delegation(
         parent_session_id=parent.id, delegation_id=original.delegation_id, request="held accepted review",
     ))
-    await asyncio.wait_for(entered.wait(), 5)
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        accepted = delegations.get_delegation(original.delegation_id)
+        assert await asyncio.wait_for(asyncio.shield(following), 2) is accepted
+        assert following.cancel() is False
+        assert accepted.state == "running"
+        assert delegations.get_delegation(original.delegation_id) is accepted
+        assert manager.has_pending_or_active_work(original.delegation_id, accepted.work_id)
+        assert starts.empty(), "The original claim prefix has not reached its subscriber yet"
+    finally:
+        release.set()
+        await asyncio.gather(following, return_exceptions=True)
     await asyncio.wait_for(starts.get(), 5)
-    accepted = delegations.get_delegation(original.delegation_id)
-    assert await following is accepted
-    assert following.cancel() is False
-    assert accepted.state == "running"
-    assert delegations.get_delegation(original.delegation_id) is accepted
-    assert manager.has_pending_or_active_work(original.delegation_id, accepted.work_id)
-    release.set()
+    assert starts.empty()
     await delegations.cancel_delegation(accepted.delegation_id, work_id=accepted.work_id)
 
 

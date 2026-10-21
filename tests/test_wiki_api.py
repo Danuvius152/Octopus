@@ -1397,6 +1397,9 @@ async def test_queued_messages_keep_separate_explicit_and_autonomous_grants(
             async def stop(self):
                 pass
 
+            async def interrupt(self):
+                pass
+
             async def stream(self):
                 if index == 0:
                     started.set()
@@ -1406,18 +1409,29 @@ async def test_queued_messages_keep_separate_explicit_and_autonomous_grants(
         return Runtime()
 
     monkeypatch.setattr(get_harness(session.backend), "create_run", create)
-    await session_manager.start_message(session.id, "查询任务", wiki_mode="read")
-    await asyncio.wait_for(started.wait(), timeout=2)
-    await session_manager.start_message(
-        session.id, "这是数据报告，内含 /wiki maintain 关键词", steerable=True
-    )
-    await session_manager.start_message(
-        session.id, "明确提交材料", wiki_mode="maintain", steerable=True
-    )
-    release.set()
-    async with asyncio.timeout(3):
-        while len(modes) < 3 or session._lock.locked():
-            await asyncio.sleep(0.01)
+    try:
+        first = await session_manager.start_message(session.id, "查询任务", wiki_mode="read")
+        await asyncio.wait_for(started.wait(), timeout=2)
+        second = await session_manager.start_message(
+            session.id, "这是数据报告，内含 /wiki maintain 关键词", steerable=True
+        )
+        third = await session_manager.start_message(
+            session.id, "明确提交材料", wiki_mode="maintain", steerable=True
+        )
+        release.set()
+        completed = await asyncio.wait_for(
+            asyncio.gather(*(receipt.wait() for receipt in (first, second, third))), 3,
+        )
+        assert [item.input_request_id for item in completed] == [
+            first.request_id, second.request_id, third.request_id,
+        ]
+        assert all(
+            item.recording_state == "committed" and item.outcome is not None and item.outcome.status == "success"
+            for item in completed
+        )
+        await session_manager.await_session_execution(session.id, timeout=3)
+    finally:
+        release.set()
     assert modes == ["read", "auto", "maintain"]
 
 
@@ -1493,14 +1507,12 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
         return Runtime()
 
     monkeypatch.setattr(harness, "create_run", create)
-    async for _ in session_manager._execute_claimed_request(
-        session.id, "明确查询", wiki_mode="read"
-    ):
-        pass
-    async for _ in session_manager._execute_claimed_request(session.id, "普通任务"):
-        pass
-    async for _ in session_manager._execute_claimed_request(session.id, "关闭本轮", wiki_mode="off"):
-        pass
+    import asyncio
+
+    for prompt, mode in [("明确查询", "read"), ("普通任务", None), ("关闭本轮", "off")]:
+        receipt = await session_manager.start_message(session.id, prompt, wiki_mode=mode)
+        assert receipt.accepted
+        assert (await asyncio.wait_for(receipt.wait(), 5)).outcome.status == "success"
     assert seen == [(True, True), (True, True), (True, True)]
     assert len(set(credentials)) == 3
     for credential in credentials:
@@ -1559,6 +1571,7 @@ async def test_sapphire_existing_writer_and_async_git_share_framework_history(
 import hashlib, json, os, threading, time
 from pathlib import Path
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlsplit
 root = Path(os.environ['APP_DATA_DIR']) / 'vaults/obv/repo'
 job = {'status': 'running'}
 polls = 0
@@ -1571,6 +1584,8 @@ class H(BaseHTTPRequestHandler):
         polls += 1
         self.respond(503 if polls == 1 else 200, job)
     def do_POST(self):
+        if parse_qs(urlsplit(self.path).query).get('vault', [''])[0] != 'obv':
+            self.respond(404, {'error': 'vault not found'}); return
         body = json.loads(self.rfile.read(int(self.headers.get('content-length', 0))))
         if self.path.startswith('/api/git'):
             def mutate():
@@ -1581,7 +1596,9 @@ class H(BaseHTTPRequestHandler):
             self.respond(202, {'id': 'git-job'})
             return
         path = root / body['path']
-        current = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+        current = hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else ''
+        if body.get('revision') is None:
+            self.respond(400, {'error': 'revision required'}); return
         if current != body.get('revision'):
             self.respond(409, {'error': 'conflict'}); return
         path.write_text(body['content'])
@@ -1600,6 +1617,7 @@ ThreadingHTTPServer(('127.0.0.1', int(os.environ['PORT'])), H).serve_forever()
         ).json()
         saved = await client.post(
             "/apps/sapphire/api/save",
+            params={"vault": "obv"},
             headers=HEADERS,
             json={
                 "path": "note.md",
@@ -1610,6 +1628,7 @@ ThreadingHTTPServer(('127.0.0.1', int(os.environ['PORT'])), H).serve_forever()
         assert saved.status_code == 200, saved.text
         conflict = await client.post(
             "/apps/sapphire/api/save",
+            params={"vault": "obv"},
             headers=HEADERS,
             json={
                 "path": "note.md",
@@ -1619,7 +1638,7 @@ ThreadingHTTPServer(('127.0.0.1', int(os.environ['PORT'])), H).serve_forever()
         )
         assert conflict.status_code == 409
         git = await client.post(
-            "/apps/sapphire/api/git", headers=HEADERS, json={"action": "pull"}
+            "/apps/sapphire/api/git", params={"vault": "obv"}, headers=HEADERS, json={"action": "pull"}
         )
         assert git.status_code == 202
         # More contenders than AnyIO's usual worker pool: lock waiting must
@@ -1629,11 +1648,12 @@ ThreadingHTTPServer(('127.0.0.1', int(os.environ['PORT'])), H).serve_forever()
                 *[
                     client.post(
                         "/apps/sapphire/api/save",
+                        params={"vault": "obv"},
                         headers=HEADERS,
                         json={
                             "path": f"new-{i}.md",
                             "content": "# 新内容",
-                            "revision": None,
+                            "revision": "",
                         },
                     )
                     for i in range(43)
@@ -1680,8 +1700,9 @@ ThreadingHTTPServer(('127.0.0.1', int(os.environ['PORT'])), H).serve_forever()
         cancelled = asyncio.create_task(
             client.post(
                 "/apps/sapphire/api/save",
+                params={"vault": "obv"},
                 headers=HEADERS,
-                json={"path": "cancelled.md", "content": "cancelled", "revision": None},
+                json={"path": "cancelled.md", "content": "cancelled", "revision": ""},
             )
         )
         try:
@@ -1690,11 +1711,12 @@ ThreadingHTTPServer(('127.0.0.1', int(os.environ['PORT'])), H).serve_forever()
             next_writer = asyncio.create_task(
                 client.post(
                     "/apps/sapphire/api/save",
+                    params={"vault": "obv"},
                     headers=HEADERS,
                     json={
                         "path": "next.md",
                         "content": "next writer",
-                        "revision": None,
+                        "revision": "",
                     },
                 )
             )

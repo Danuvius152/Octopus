@@ -132,6 +132,8 @@ class ParseOutput:
     end_of_stream: bool = False
     # A recognized runtime event can carry no displayable text.
     activity: bool | None = None
+    # The run logs parser notes with its captured credential context.
+    diagnostics: list[tuple[int, str]] = field(default_factory=list)
 
 
 class ActivityObserver(Protocol):

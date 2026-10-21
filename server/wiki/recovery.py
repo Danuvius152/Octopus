@@ -17,7 +17,9 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import catalog, source_bindings
+from ..config import settings
+from ..service_installation import InstallationError, guard_vault
+from . import catalog, source_bindings, storage
 from . import format as document_format
 from . import recovery_state as ledger
 from .event_inbox import EventInbox
@@ -49,8 +51,9 @@ def basis(db):
 class Metadata:
     """Read a registered owner's durable state without constructing a Store."""
 
-    def __init__(self, registry, user_id):
+    def __init__(self, registry, user_id, *, health=None):
         self.registry, self.user_id = registry, user_id
+        self.health = health if health is not None else registry.health
         self.state = registry.state(user_id).resolve()
         self.config = registry.config(user_id, require_root=False)
         self.root = Path(self.config["root"])
@@ -60,32 +63,24 @@ class Metadata:
         self.inbox = EventInbox.__new__(EventInbox)
         self.inbox.db_path, self.inbox.root = self.db_path, str(self.root)
         self.inbox.vault_id, self.inbox.recovery = self.config["vault_id"], None
+        self.inbox.health = self.health
 
     @contextlib.contextmanager
     def connect(self, *, write=False):
         from .schema import VERSION, validate_filesystem_ledger
 
-        db = sqlite3.connect(self.db_path.as_uri() + ("?mode=rw" if write else "?mode=ro"), uri=True, timeout=30)
-        db.row_factory = sqlite3.Row
         try:
-            db.execute("PRAGMA recursive_triggers=ON")
-            db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
-            if db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] != VERSION:
-                raise WikiError("Filesystem recovery requires the current durable protocol", 503)
-            validate_filesystem_ledger(db)
-            ledger.require(db)
-            source_bindings.validate(db)
-            self.inbox.pending_rows(db)
-            yield db
-            db.commit()
+            with storage.connect(self.db_path, self.health, write=write) as db:
+                db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
+                if db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] != VERSION:
+                    raise WikiError("Filesystem recovery requires the current durable protocol", 503)
+                validate_filesystem_ledger(db)
+                ledger.require(db)
+                source_bindings.validate(db)
+                self.inbox.pending_rows(db)
+                yield db
         except sqlite3.DatabaseError as exc:
-            db.rollback()
             raise WikiError("Filesystem recovery metadata is unavailable; database retained: " + str(exc), 503) from exc
-        except BaseException:
-            db.rollback()
-            raise
-        finally:
-            db.close()
 
     def check_binding(self):
         if self.registry.state(self.user_id).resolve() != self.state or self.registry.config(self.user_id) != self.config:
@@ -191,7 +186,7 @@ class Permit:
 class Handle:
     def __init__(self, manager, metadata):
         self.manager, self.metadata = manager, metadata
-        self.observer = VaultEvents.acquire(metadata.root, metadata.state)
+        self.observer = VaultEvents.acquire(metadata.root, metadata.state, health=metadata.health)
         self.recovery_id = ""
         self.permit: Permit | None = None
         self.handoff_permit: Permit | None = None
@@ -250,10 +245,12 @@ class Handle:
 class RecoveryManager:
     def __init__(self, registry):
         self.registry = registry
+        self.health = registry.health
         self._lock = threading.RLock()
         self._handles = {}
         self._gates = {}
         self._closing = False
+        self._drained = False
         self._close_gate = threading.Lock()
 
     def key(self, user_id):
@@ -261,30 +258,48 @@ class RecoveryManager:
 
     @contextlib.contextmanager
     def gate(self, user_id):
-        with self._lock:
-            if self._closing:
-                raise WikiError("Filesystem recovery cleanup is in progress", 503)
+        with self.registry._lock, self._lock:
+            self._require_open()
+            incarnation = self.registry._incarnation
             gate = self._gates.setdefault(self.key(user_id), threading.RLock())
         with gate:
-            with self._lock:
-                if self._closing:
-                    raise WikiError("Filesystem recovery cleanup is in progress", 503)
+            with self.registry._lock, self._lock:
+                self._require_open()
+                if incarnation != self.registry._incarnation:
+                    raise WikiError("Filesystem recovery lifecycle changed before admission", 503)
             yield
+
+    def _require_open(self):
+        self.health.require_healthy()
+        if (self._closing or self.registry._closing or self.registry._stopped
+                or self.registry.health is not self.health):
+            raise WikiError("Filesystem recovery cleanup is in progress", 503)
+
+    def resume(self):
+        with self._lock:
+            if not self._drained or self._handles:
+                raise WikiError("Filesystem recovery cleanup is not confirmed", 503)
+            self._closing = False
+            self._drained = False
+
+    def is_drained(self):
+        with self._lock:
+            return self._closing and self._drained and not self._handles
 
     def owns(self, handle):
         with self._lock:
             return self._handles.get(self.key(handle.metadata.user_id)) is handle
 
     def inspect(self, user_id):
-        return Metadata(self.registry, user_id).snapshot()
+        return Metadata(self.registry, user_id, health=self.health).snapshot()
 
     def status(self, user_id, recovery_id):
-        metadata = Metadata(self.registry, user_id)
+        metadata = Metadata(self.registry, user_id, health=self.health)
         with metadata.connect() as db:
             return summary(metadata.record(db, recovery_id))
 
     def full_plan(self, user_id, recovery_id):
-        metadata = Metadata(self.registry, user_id)
+        metadata = Metadata(self.registry, user_id, health=self.health)
         with metadata.connect() as db:
             row = metadata.record(db, recovery_id)
             if row["plan"] is None:
@@ -295,7 +310,7 @@ class RecoveryManager:
             return {"plan_hash": row["plan_hash"], "plan": plan}
 
     def export(self, user_id):
-        metadata = Metadata(self.registry, user_id)
+        metadata = Metadata(self.registry, user_id, health=self.health)
         raw = (ledger.encoded(metadata.snapshot(full=True)) + "\n").encode()
         folder = metadata.state / "recovery-exports"
         folder.mkdir(exist_ok=True, mode=0o700)
@@ -317,6 +332,10 @@ class RecoveryManager:
         metadata.check_binding()
         if metadata.root.is_symlink() or metadata.root.resolve() != metadata.root:
             raise WikiError("Filesystem recovery root changed", 409)
+        try:
+            guard_vault(settings, metadata.root, metadata.state, health=self.health)
+        except InstallationError as error:
+            raise WikiError(str(error), 503) from error
         key = self.key(metadata.user_id)
         with metadata.connect() as db:
             state = metadata.inbox.state(db)
@@ -374,7 +393,8 @@ class RecoveryManager:
                 h.handoff_permit.active = False
             h.recovery_id, h.permit, h.handoff_permit = identifier, Permit(h, generation), None
             h.error = None
-            h.observer.journal = EventInbox(metadata.db_path, metadata.root, metadata.config["vault_id"], recovery=h.permit)
+            h.observer.journal = EventInbox(metadata.db_path, metadata.root, metadata.config["vault_id"],
+                                            recovery=h.permit, health=self.health)
             h.observer._uncertain_reason = None
         h.start()  # Reception precedes any blocking/closing of normal Stores.
         self.registry.block(metadata.user_id)
@@ -455,7 +475,7 @@ class RecoveryManager:
 
     def plan(self, user_id, retain=()):
         with self.gate(user_id):
-            metadata = Metadata(self.registry, user_id)
+            metadata = Metadata(self.registry, user_id, health=self.health)
             h = self._begin(metadata)
             files, directories = self._scan(h)
             h.drain()
@@ -499,7 +519,8 @@ class RecoveryManager:
                 return summary(metadata.record(db, h.recovery_id))
 
     def _current(self, user_id, recovery_id, plan_hash):
-        metadata = Metadata(self.registry, user_id)
+        metadata = Metadata(self.registry, user_id, health=self.health)
+        metadata.check_binding()
         with metadata.connect() as db:
             row = metadata.record(db, recovery_id)
             if (row["registration"] != metadata.config["registration_generation"] or row["plan_hash"] != plan_hash
@@ -562,7 +583,7 @@ class RecoveryManager:
                 store.registration_generation = h.metadata.config["registration_generation"]
 
             h.store = WikiStore(h.metadata.root, h.metadata.state, h.metadata.config["vault_id"],
-                                on_construct=captured, recovery=h.permit)
+                                on_construct=captured, recovery=h.permit, health=self.health)
         return h.store
 
     def _reload(self, h):
@@ -740,7 +761,8 @@ class RecoveryManager:
             h.drain()
             self._fence(h, row, plan)
             h.handoff_permit = Permit(h, row["generation"], intake=False)
-            receiver = EventInbox(h.metadata.db_path, h.metadata.root, h.metadata.config["vault_id"], recovery=h.handoff_permit)
+            receiver = EventInbox(h.metadata.db_path, h.metadata.root, h.metadata.config["vault_id"],
+                                  recovery=h.handoff_permit, health=self.health)
             h.observer.journal = receiver
             self._reload(h)
             # Exercise the ordinary durable arm/receive path without inventing
@@ -818,6 +840,7 @@ class RecoveryManager:
     def _close(self):
         with self._lock:
             self._closing = True
+            self._drained = False
             captured = list(self._gates.items())
         for key, gate in captured:
             with gate:
@@ -828,4 +851,4 @@ class RecoveryManager:
                     with self._lock:
                         self._handles.pop(key, None)
         with self._lock:
-            self._closing = False
+            self._drained = True

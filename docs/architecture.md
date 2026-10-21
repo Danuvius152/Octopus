@@ -232,19 +232,31 @@ React 19 + TypeScript (strict) + Vite + zustand + Tailwind v4 + Radix.
 
 ```
 ChatView → useWebSocket.sendMessage()
-  → optimistic user message in store
-  → ws: {"type":"send_message","session_id","content","attachment_ids":[]}
+  → ws: {"type":"send_message","session_id","client_request_id","content","attachment_ids":[]}
 
-ws.py receives → asyncio.create_task(stream)
-  → SessionManager.start_message(session_id, content)
+ws.py receives → submit_client_message()
+  → persist input, attachment proofs and submission identity
+  → SessionManager.start_message() admits to the existing dispatcher
+  → persist and return the admission receipt
+  → dispatcher commits and verifies the execution claim before executor I/O
+    → persist and broadcast user_message (no optimistic transcript row)
     → large_prompts.spill_if_large(...)        (only if huge)
     → broadcast status: running
-    → Harness.run() spawns the agent's backend CLI with injected MCP servers
+    → HarnessRun spawns the agent's backend CLI with injected MCP servers
       → streams HarnessEvents: assistant_text / tool_use / tool_result /
         question_request / result
       → each event is persisted (messages) and broadcast to clients
     → broadcast status: idle
 ```
+
+Admission is historical; status queries also report the current execution state
+and any committed terminal. The same client identity never enqueues a second
+execution. On restart, unclaimed browser inputs become withdrawn and can be
+restored to the composer; claimed inputs without a provable terminal remain
+unknown. Recovery never sends automatically. A manual resubmission has a new
+identity linked to the withdrawn input, with current authorization and files
+checked again. Unknown writers block a successor until their process group is
+confirmed gone or a changed host boot identity proves retirement.
 
 ### `/showme` — the in-app file viewer (browser only)
 
@@ -407,8 +419,13 @@ GET                /health
 ## Data model
 
 `server/db/schema.py` `_SCHEMA` is authoritative; this is the conceptual map.
-SQLite, WAL, foreign-key cascade; additive `ALTER`s go through idempotent
+SQLite, WAL with `synchronous=FULL`, foreign-key cascade; additive `ALTER`s go through idempotent
 migrations (never re-create or duplicate the schema in docs).
+
+- **`client_submissions`** — browser input, attachment proofs, immutable admission
+  receipt, execution owner/state and manual recovery provenance. Scoped through
+  its owning session and deleted by the session's foreign-key cascade. The
+  process-local dispatch queue is not restored or automatically replayed.
 
 - **`users`** + **`invites`** + **`auth_tokens`** — accounts (username, scrypt
   `password_hash`, `is_admin`, wrapped `dek_wrapped`), invite codes (use count +

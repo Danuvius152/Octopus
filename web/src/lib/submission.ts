@@ -5,6 +5,7 @@ export interface SubmissionReply {
   requestId?: string;
   state?: "unknown";
   clientRequestId?: string;
+  execution?: import("../api").ClientSubmissionStatus["execution"];
 }
 
 export interface ControlCommandStatus {

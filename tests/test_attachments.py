@@ -7,6 +7,10 @@ file paths and prepends an `<attachments>` header to the prompt.
 
 from __future__ import annotations
 
+import asyncio
+import json
+import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -20,6 +24,8 @@ from server.attachments import (
     save_upload,
 )
 from server.database import Database
+from server.harness import get_harness
+from server.harness.profile import StdinMode
 from server.main import app
 from server.session_manager import session_manager
 
@@ -54,6 +60,30 @@ async def client(attachments_root):
         yield c
 
     await db.close()
+
+
+@pytest.fixture
+def runtime_input(tmp_path, monkeypatch):
+    """Capture the actual input frame delivered to an offline Python child."""
+    received = tmp_path / "received-input.json"
+    model = tmp_path / "attachment_model.py"
+    model.write_text(
+        "import json,sys\n"
+        "from pathlib import Path\n"
+        "Path(sys.argv[1]).write_text(sys.stdin.readline())\n"
+        "print(json.dumps({'type':'thread.started','thread_id':'attachment-thread'}),flush=True)\n"
+        "print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_tokens':1}}),flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", replace(
+        harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
+        stdin_mode=StdinMode.STREAM_JSON,
+        build_turn_argv=lambda context: (
+            [sys.executable, "-u", str(model), str(received)], {"cwd": context.working_dir},
+        ),
+    ))
+    return received
 
 
 # ---------------------------------------------------------------------------
@@ -256,16 +286,15 @@ async def test_delete_session_cleans_up_attachments(client, attachments_root):
 
 @pytest.mark.asyncio
 async def test_send_message_prepends_attachment_header(
-    client, attachments_root, monkeypatch
+    client, attachments_root, runtime_input,
 ):
     """An uploaded attachment's absolute path is injected into the prompt
     that hits the backend, so the agent can `Read` it.
 
-    We stub `_run_backend` to capture the prompt rather than spawning a
-    real CLI — that's a separate integration concern.
+    An offline Python child captures the actual input frame.
     """
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "P"}
+        "/api/sessions", headers=HEADERS, json={"name": "P", "backend": "codex"}
     )
     sid = create.json()["id"]
     files = {"file": ("notes.txt", b"hello", "text/plain")}
@@ -274,23 +303,12 @@ async def test_send_message_prepends_attachment_header(
     )
     aid = up.json()["id"]
 
-    captured: dict = {}
-
-    async def fake_run(session, prompt):
-        captured["prompt"] = prompt
-        captured["session_id"] = session.id
-        if False:
-            yield {}  # turn into async generator
-
-    monkeypatch.setattr(session_manager, "_run_backend", fake_run)
-
-    # Drive a single turn through send_message (the WS path does the same).
-    async for _evt in session_manager._execute_claimed_request(
+    receipt = await session_manager.start_message(
         sid, "what's in this file?", attachment_ids=[aid]
-    ):
-        pass
+    )
+    assert (await asyncio.wait_for(receipt.wait(), 5)).outcome.status == "success"
 
-    prompt = captured["prompt"]
+    prompt = json.loads(runtime_input.read_text())["message"]["content"]
     assert "<attachments>" in prompt
     assert "</attachments>" in prompt
     # Absolute path to the file we uploaded should be in the header
@@ -303,66 +321,68 @@ async def test_send_message_prepends_attachment_header(
 
 
 @pytest.mark.asyncio
-async def test_send_message_no_attachments_unchanged(client, monkeypatch):
+async def test_send_message_no_attachments_unchanged(client, runtime_input):
     """No attachments → no `<attachments>` block, prompt is verbatim."""
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "Plain"}
+        "/api/sessions", headers=HEADERS, json={"name": "Plain", "backend": "codex"}
     )
     sid = create.json()["id"]
 
-    captured: dict = {}
-
-    async def fake_run(session, prompt):
-        captured["prompt"] = prompt
-        if False:
-            yield {}
-
-    monkeypatch.setattr(session_manager, "_run_backend", fake_run)
-
-    async for _evt in session_manager._execute_claimed_request(sid, "hello there"):
-        pass
-
-    assert captured["prompt"] == "hello there"
+    receipt = await session_manager.start_message(sid, "hello there")
+    assert (await asyncio.wait_for(receipt.wait(), 5)).outcome.status == "success"
+    assert json.loads(runtime_input.read_text())["message"]["content"] == "hello there"
 
 
 @pytest.mark.asyncio
 async def test_send_message_missing_attachment_id_rejects_complete_input(
-    client, attachments_root, monkeypatch
+    client, attachments_root, runtime_input,
 ):
     """Execution rechecks the files and records a recoverable failure."""
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "Drop"}
+        "/api/sessions", headers=HEADERS, json={"name": "Drop", "backend": "codex"}
     )
     sid = create.json()["id"]
 
-    captured: dict = {}
+    uploaded = await client.post(
+        f"/api/sessions/{sid}/attachments", headers=HEADERS,
+        files={"file": ("vanishing.txt", b"Required original bytes", "text/plain")},
+    )
+    aid = uploaded.json()["id"]
+    paused = asyncio.Event()
 
-    async def fake_run(session, prompt):
-        captured["prompt"] = prompt
-        if False:
-            yield {}
+    async def pause_before_claim(event):
+        if event.get("session_id") == sid and event.get("type") == "dequeued" and not paused.is_set():
+            await session_manager.interrupt(sid)
+            paused.set()
 
-    monkeypatch.setattr(session_manager, "_run_backend", fake_run)
-
-    events = [event async for event in session_manager._execute_claimed_request(
-        sid, "still send", attachment_ids=["nonexistent"]
-    )]
-
-    assert captured == {}
-    result = next(event for event in events if event["type"] == "result")
-    assert result["code"] == "attachment_unavailable"
-    assert result["tool_input"]["rejected_input"]["content"] == "still send"
+    session_manager.on_broadcast("pause-attachment-before-claim", pause_before_claim)
+    try:
+        receipt = await session_manager.start_message(sid, "still send", attachment_ids=[aid])
+        assert receipt.accepted
+        await asyncio.wait_for(paused.wait(), 5)
+        await session_manager.await_session_execution(sid, timeout=5)
+        get_path(sid, aid).unlink()
+        await session_manager.resume_dispatch(sid)
+        completed = await asyncio.wait_for(receipt.wait(), 5)
+    finally:
+        session_manager.remove_broadcast("pause-attachment-before-claim")
+    assert not runtime_input.exists()
+    assert completed.outcome.code == "attachment_unavailable"
+    messages = await session_manager.db.load_messages(sid)
+    result = next(row for row in messages if row["type"] == "result")
+    assert result["tool_input"]["rejected_input"] == {"content": "still send", "attachment_ids": [aid]}
+    assert not [row for row in messages if row["role"] == "user"]
 
 
 @pytest.mark.asyncio
 async def test_user_message_persists_attachments_metadata(
-    client, attachments_root, monkeypatch
+    client, attachments_root, runtime_input,
 ):
     """After a turn with attachments, the DB row for the user message
     carries the metadata so the chat history can re-render the chips on
     reload."""
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "Persist"}
+        "/api/sessions", headers=HEADERS, json={"name": "Persist", "backend": "codex"}
     )
     sid = create.json()["id"]
     files = {"file": ("doc.md", b"x", "text/markdown")}
@@ -371,15 +391,9 @@ async def test_user_message_persists_attachments_metadata(
     )
     aid = up.json()["id"]
 
-    async def fake_run(session, prompt):
-        if False:
-            yield {}
-
-    monkeypatch.setattr(session_manager, "_run_backend", fake_run)
-    async for _evt in session_manager._execute_claimed_request(
-        sid, "look", attachment_ids=[aid]
-    ):
-        pass
+    receipt = await session_manager.start_message(sid, "look", attachment_ids=[aid])
+    assert (await asyncio.wait_for(receipt.wait(), 5)).outcome.status == "success"
+    assert "look" in json.loads(runtime_input.read_text())["message"]["content"]
 
     msgs = await session_manager.db.load_messages(sid)
     user_msgs = [m for m in msgs if m["role"] == "user"]

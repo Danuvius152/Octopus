@@ -8,61 +8,17 @@ so no call site moved.
 
 from __future__ import annotations
 
-import asyncio
-import time
 from typing import Any
 
-from ..config import settings
-from ..harness import HarnessRun
 from ..oauth_errors import RefreshErrorCode
 from .base import (
     Session,
     SessionManagerBase,
-    logger,
 )
 
 
 class OutcomesMixin(SessionManagerBase):
 
-    def _start_turn_watchdog(
-        self, backend: HarnessRun, state: dict[str, Any], *, started_at: float | None = None
-    ) -> asyncio.Task | None:
-        """Stop `backend` if the turn goes silent for `turn_idle_timeout_seconds`
-        or runs past `turn_max_seconds` (turn-safety.md §3). Returns the watchdog
-        task (or None if both checks are disabled). On a trip it records
-        `state["tripped"] = (reason, limit)` and calls `backend.stop()`, which
-        emits the stream-end sentinel so the run loop unblocks cleanly — no
-        generator cancellation. `state["last"]` is the caller-updated last-event
-        timestamp."""
-        idle = settings.turn_idle_timeout_seconds
-        overall = settings.turn_max_seconds
-        if idle <= 0 and overall <= 0:
-            return None
-        limits = [x for x in (idle, overall) if x and x > 0]
-        tick = min(5.0, max(0.05, min(limits) / 4))
-        started = started_at if started_at is not None else time.monotonic()
-
-        async def _run() -> None:
-            while True:
-                await asyncio.sleep(tick)
-                now = time.monotonic()
-                if overall > 0 and now - started > overall:
-                    state["tripped"] = ("overall", overall)
-                elif idle > 0 and not state.get("waiting_questions") and now - state["last"] > idle:
-                    state["tripped"] = ("idle", idle)
-                else:
-                    continue
-                logger.warning(
-                    "Session turn watchdog tripped (%s); stopping backend",
-                    state["tripped"][0],
-                )
-                try:
-                    await backend.stop()
-                except Exception:
-                    logger.exception("watchdog backend.stop() failed")
-                return
-
-        return asyncio.create_task(_run())
 
     async def _surface_turn_timeout(
         self, session: Session, *, reason: str, limit: int, backend: str, retries: int = 0

@@ -91,18 +91,29 @@ not a trust boundary.
 POST /api/applications           create row + dir + build session, send brief
       ↓ (status=building)
   agent's turn runs in the build session
-      ↓ result / error broadcast on the session bus
-ApplicationManager re-checks the entrypoint
+      ↓ original request completion with its recording/outcome facts
+ApplicationManager evaluates that build's entrypoint and outcome
       ↓
 status = ready (entrypoint exists)  |  failed (it doesn't)
 ```
 
-`ApplicationManager` subscribes to `SessionManager`'s broadcast bus (the
-pattern `DelegationManager` uses). Every terminal event (`result`, `error`) on
-a session that is some application's build session re-evaluates that app:
-entrypoint present → `ready`, absent → `failed` with the reason. That makes
-*every* turn in the build session a rebuild check, so "ask for changes" gets
-status tracking for free.
+In the ticket20 worktree, `ApplicationManager` observes each original request
+completion through `SessionManager.on_request_complete`, including direct
+chat in the build session. An acknowledged business outcome triggers the
+existing entrypoint check: present means ready, absent means failed with the
+turn's error when available. A turn can fail after writing a usable app;
+the entrypoint rule still applies. An unavailable/unconfirmed outcome instead
+produces failed with an explicit reason. Failed result notification cannot
+leave the build permanently building. This revision's shared contract and
+acceptance boundary are in the
+[architecture execution plan](minimal-architecture-execution-20261020.md),
+section3.2; it is not a deployed-release claim.
+
+The broadcast subscriber only derives running progress from current execution.
+Per-session projection updates coordinate without holding that coordination
+across subscriber callbacks; after awaited backend rebuild work, the consumer
+checks that it still represents the original request. Thus a late old running
+frame or old completion cannot overwrite the next build's status.
 
 Each transition broadcasts `application_created` / `application_updated` /
 `application_deleted` over the same WS bus every client already listens to, so
@@ -176,8 +187,9 @@ fetched. Forks use the same helper, replacing their own copy of the logic.
 
 * `tests/test_applications.py` — manager + routes + static serving:
   slug allocation and de-duplication, create wires a build session and fires
-  the brief, the broadcast subscriber flips `building → ready` when the
-  entrypoint appears and `→ failed` when it doesn't, follow-up build reuses
+  the brief, the original request completion triggers `building → ready`
+  when the entrypoint exists and `→ failed` when it does not (or the outcome
+  is unconfirmed), while broadcast only updates running progress; follow-up build reuses
   the session, path traversal is refused, cookie/query/bearer auth, delete
   removes the dir only inside the managed root, and the delete guard against
   a tampered `app_dir`.

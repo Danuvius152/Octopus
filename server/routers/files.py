@@ -101,6 +101,7 @@ async def resolve_showme(
             cred_id,
             style=harness.profile.credential_style,
             context=f"showme resolver for session {session_id}",
+            user_id=user_id,
         )
         result = await resolve_showme_reference(
             req.text,

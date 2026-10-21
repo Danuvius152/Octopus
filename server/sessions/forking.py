@@ -13,12 +13,10 @@ import json
 import os
 import shutil
 import uuid
-from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
 from .. import fork_helpers
-from ..aio import stopped_within
 from ..attachments import get_path as get_attachment_path
 from ..harness import BackendForkNotSupported, get_harness
 from ..models import MessageContent
@@ -28,14 +26,15 @@ from .base import (
     SessionManagerBase,
     logger,
 )
+from .owner_runtime import ReserveFork
 
 
 class ForkingMixin(SessionManagerBase):
 
     async def _require_unambiguous_transcript(self, parent: Session) -> None:
-        if self.db:
-            parent.restore_message_state(*await self.db.message_sequence_state(parent.id))
-        if parent._transcript_integrity != "ok":
+        ambiguous = ((await self.db.message_sequence_state(parent.id))[2] != 0
+                     if self.db else parent._transcript_integrity != "ok")
+        if ambiguous:
             raise ForkError(
                 "Transcript has duplicate sequences; export and review the original rows",
                 reason="duplicate_message_sequences", status_code=409,
@@ -63,6 +62,11 @@ class ForkingMixin(SessionManagerBase):
             fork_id = row["id"]
             status = row["fork_status"]
             if status == "initializing":
+                # A retained recovery row is evidence of incomplete artifacts,
+                # not an installed session, even when cleanup cannot finish.
+                incomplete = self.sessions.pop(fork_id, None)
+                if incomplete is not None:
+                    self._session_removed(incomplete)
                 try:
                     harness = get_harness(row["backend"])
                     # Codex needs the credential to find its CODEX_HOME rollout
@@ -90,6 +94,7 @@ class ForkingMixin(SessionManagerBase):
                         style=harness.profile.credential_style,
                         context=f"fork recovery {fork_id}",
                         require_auth=False,
+                        user_id=row.get("user_id"),
                     )
                     await harness.cleanup_incomplete_fork_artifacts(
                         row["working_dir"], row["resume_id"], fork_id,
@@ -103,7 +108,6 @@ class ForkingMixin(SessionManagerBase):
                     )
                     continue
                 await self.db.delete_session(fork_id)
-                self.sessions.pop(fork_id, None)
                 # A /fork duplicate owns a private working-dir copy under
                 # ~/.octopus/fork/ — remove it too so an abandoned saga doesn't
                 # leak the copied tree (session-fork.md). A /rewind fork
@@ -180,11 +184,12 @@ class ForkingMixin(SessionManagerBase):
             raise ForkError(f"Session {parent_id} not found", reason="parent_not_found", status_code=404)
         await self._require_unambiguous_transcript(parent)
         try:
-            async with self.agent_operation(parent.agent_id):
-                return await self._fork_session(
+            return await self._run_agent_operation(
+                parent.agent_id, lambda: self._fork_session(
                     parent_id, rewind_to_msg_seq, revert_files=revert_files,
                     label=label, user_id=user_id,
-                )
+                ),
+            )
         except ValueError as exc:
             raise ForkError(str(exc), reason="agent_admission_closed", status_code=409) from exc
 
@@ -204,7 +209,6 @@ class ForkingMixin(SessionManagerBase):
         validate → lock+`_forking` → classify → DB-only insert → `prepare_fork`
         (with compensation) → stamp ephemeral metadata → optional safe-revert.
         No `if backend ==` anywhere — the harness owns the strategy."""
-        from ..delegations import delegation_manager
 
         # Scoped, and through the same error as a missing parent: "belongs to
         # somebody else" must be indistinguishable from "does not exist", or the
@@ -244,40 +248,16 @@ class ForkingMixin(SessionManagerBase):
         if not harness.can_fork:
             raise BackendForkNotSupported(parent.backend)
 
+        # A running turn holds this lock until it exits. Refuse it before
+        # waiting, so adoption can join this command and then stop that turn.
+        if self.session_is_executing(parent):
+            raise ForkError(
+                "Parent session has an active turn",
+                reason="fork_blocked_parent_turn_active", status_code=409,
+            )
         # 2. Acquire the lock, validate no live parent work, claim `_forking`.
-        async with parent._lock:
-            if parent._dispatch_paused:
-                raise ForkError(
-                    "Parent session dispatch is paused; resume it before forking",
-                    reason="fork_blocked_parent_turn_active", status_code=409,
-                )
-            if parent._forking:
-                raise ForkError(
-                    "Another fork is already in progress for this session",
-                    reason="fork_blocked_parent_turn_active",
-                    status_code=409,
-                )
-            if parent._active_task and not parent._active_task.done():
-                raise ForkError(
-                    "Parent session has an active turn",
-                    reason="fork_blocked_parent_turn_active",
-                    status_code=409,
-                )
-            if parent._pending_queue:
-                raise ForkError(
-                    "Parent session has a queued message",
-                    reason="fork_blocked_parent_turn_active",
-                    status_code=409,
-                )
-            if delegation_manager.has_active_delegation_for_parent(parent.id):
-                raise ForkError(
-                    "Parent session has an active delegation",
-                    reason="fork_blocked_parent_turn_active",
-                    status_code=409,
-                )
-            parent._forking = True
-            async with self.configuration_lock:
-                source = replace(parent)
+        owner = self._session_owner(parent)
+        source = await owner.call_runtime(ReserveFork(True))
 
         fork_id = uuid.uuid4().hex[:12]
         # Pre-mint the backend resume id BEFORE the INSERT so startup recovery
@@ -332,7 +312,6 @@ class ForkingMixin(SessionManagerBase):
             )
             # Copied M messages (seq 0..M-1); next assigned seq is M.
             fork.restore_message_state(len(copied), M, 0)
-            self.sessions[fork_id] = fork
 
             # 6. prepare_fork (external state) with explicit compensation.
             try:
@@ -355,14 +334,10 @@ class ForkingMixin(SessionManagerBase):
                         "leaving DB row 'initializing' for startup retry",
                         fork_id,
                     )
-                    # Drop the in-memory session so a failed fork can't appear
-                    # as a normal idle session (fork_status isn't exposed to
-                    # clients — Vera review SHOULD-FIX #2). The DB row stays for
-                    # the startup sweep to purge on the next boot.
-                    self.sessions.pop(fork_id, None)
+                    # The candidate was never installed. Its durable row stays
+                    # available to the startup artifact cleanup protocol.
                     raise
                 await self.db.delete_session(fork_id)
-                self.sessions.pop(fork_id, None)
                 raise
 
             fork.claude_session_id = artifact.resume_id
@@ -419,6 +394,11 @@ class ForkingMixin(SessionManagerBase):
                 fork.fork_status = "ready"
                 await self.db.update_session_field(fork_id, fork_status="ready")
 
+            # Only the fully prepared candidate is visible to session commands.
+            # Install its original owner in the same event-loop turn.
+            self.sessions[fork_id] = fork
+            self._session_owner(fork)
+
             # 9. Rewind, not branch: the fork takes the parent's place. Archive
             # the parent and surface the swap with the same `session_archived`
             # event `/archive` uses, so the fork slots into the sidebar wearing
@@ -426,34 +406,18 @@ class ForkingMixin(SessionManagerBase):
             # archival hiccup must not fail it (worst case the parent lingers,
             # recoverable by a manual archive), so only announce the swap when
             # the parent actually went away.
-            archived_ok = True
             try:
-                await self._archive_forked_parent(parent, fork)
+                await self._archive_original(parent, successor=fork)
             except Exception:
-                archived_ok = False
                 logger.exception(
-                    "fork %s: archiving parent %s failed; fork is ready, "
-                    "parent left visible",
+                    "fork %s is ready; parent %s archive did not complete",
                     fork.id,
                     parent_id,
                 )
-            if archived_ok:
-                await self._broadcast(
-                    {
-                        "type": "session_archived",
-                        "old_session_id": parent_id,
-                        "new_session_id": fork.id,
-                        "name": fork.name,
-                        "model": fork.model,
-                        "reasoning_effort": fork.reasoning_effort,
-                        "service_tier": fork.service_tier,
-                    },
-                    user_id=parent.user_id,
-                )
             return fork
         finally:
-            # 10. Always release `_forking` (even on prepare_fork failure).
-            parent._forking = False
+            if self.sessions.get(parent.id) is parent:
+                await self._release_session_reservation(owner, ReserveFork(False))
 
     @staticmethod
     def _fork_copy_base() -> str:
@@ -503,8 +467,9 @@ class ForkingMixin(SessionManagerBase):
             raise ForkError(f"Session {parent_id} not found", reason="parent_not_found", status_code=404)
         await self._require_unambiguous_transcript(parent)
         try:
-            async with self.agent_operation(parent.agent_id):
-                return await self._duplicate_session(parent_id, label=label, user_id=user_id)
+            return await self._run_agent_operation(
+                parent.agent_id, lambda: self._duplicate_session(parent_id, label=label, user_id=user_id),
+            )
         except ValueError as exc:
             raise ForkError(str(exc), reason="agent_admission_closed", status_code=409) from exc
 
@@ -520,7 +485,6 @@ class ForkingMixin(SessionManagerBase):
         the parent's whole conversation and continues it at the copied path; the
         PARENT is left untouched (not archived). Distinct from `fork_session`
         (/rewind), which rewinds to a message and archives the parent."""
-        from ..delegations import delegation_manager
 
         parent = self.get_session(parent_id, user_id)
         if parent is None:
@@ -534,27 +498,11 @@ class ForkingMixin(SessionManagerBase):
 
         # Same idle guard as fork_session — a copy of a mid-turn workspace would
         # be inconsistent, and the resume artifact needs a settled transcript.
-        async with parent._lock:
-            if parent._dispatch_paused:
-                raise ForkError(
-                    "Parent session dispatch is paused; resume it before forking",
-                    reason="fork_blocked_parent_turn_active", status_code=409,
-                )
-            if parent._forking:
-                raise ForkError("Another fork is already in progress for this session",
-                                reason="fork_blocked_parent_turn_active", status_code=409)
-            if parent._active_task and not parent._active_task.done():
-                raise ForkError("Parent session has an active turn",
-                                reason="fork_blocked_parent_turn_active", status_code=409)
-            if parent._pending_queue:
-                raise ForkError("Parent session has a queued message",
-                                reason="fork_blocked_parent_turn_active", status_code=409)
-            if delegation_manager.has_active_delegation_for_parent(parent.id):
-                raise ForkError("Parent session has an active delegation",
-                                reason="fork_blocked_parent_turn_active", status_code=409)
-            parent._forking = True
-            async with self.configuration_lock:
-                source = replace(parent)
+        if self.session_is_executing(parent):
+            raise ForkError("Parent session has an active turn",
+                            reason="fork_blocked_parent_turn_active", status_code=409)
+        owner = self._session_owner(parent)
+        source = await owner.call_runtime(ReserveFork(True))
 
         fork_id = uuid.uuid4().hex[:12]
         resume_id_hint = str(uuid.uuid4())
@@ -578,6 +526,7 @@ class ForkingMixin(SessionManagerBase):
             parent_cred = await self.resolve_credential_by_id(
                 eff_cred_id, style=harness.profile.credential_style,
                 context=f"fork {parent.id}", require_auth=False,
+                user_id=source.user_id,
             )
 
             # 1. Full literal copy of the working dir (large/slow → off-thread).
@@ -641,7 +590,6 @@ class ForkingMixin(SessionManagerBase):
                 fork_metadata=fork_meta, fork_status="initializing",
             )
             fork.restore_message_state(len(messages), last_seq + 1, 0)
-            self.sessions[fork_id] = fork
 
             # 3. Native-copy the parent's real transcript so the fork resumes
             #    with the WHOLE conversation as genuine context — no history
@@ -674,10 +622,8 @@ class ForkingMixin(SessionManagerBase):
                         "dir for next-boot retry",
                         fork_id,
                     )
-                    self.sessions.pop(fork_id, None)
                     raise
                 await self.db.delete_session(fork_id)
-                self.sessions.pop(fork_id, None)
                 shutil.rmtree(dest, ignore_errors=True)
                 raise
 
@@ -696,6 +642,9 @@ class ForkingMixin(SessionManagerBase):
                 fork_status="ready",
             )
 
+            self.sessions[fork_id] = fork
+            self._session_owner(fork)
+
             # 5. Parent is left untouched (NOT archived). Announce the new fork
             #    so other tabs add it.
             await self._broadcast({
@@ -706,42 +655,8 @@ class ForkingMixin(SessionManagerBase):
             }, user_id=parent.user_id)
             return fork
         finally:
-            parent._forking = False
-
-    async def _archive_forked_parent(self, parent: Session, fork: Session) -> None:
-        """Archive a fork's parent so the fork takes its place as the live
-        thread — the rewind model (session-rewind.md): a fork REPLACES its
-        origin rather than living alongside it.
-
-        This is `archive_session`'s tail without the fresh-successor step — the
-        fork already IS the successor. The parent is guaranteed idle (the
-        `_forking` guard rejects any new turn while a fork is in flight), so the
-        teardown below is defensive. Exactly like `archive_session`'s tail:
-        schedules anchored on the parent follow onto the live successor (the
-        fork)."""
-        if parent._inner_task and not parent._inner_task.done():
-            parent._inner_task.cancel()
-        if parent._active_task and not parent._active_task.done():
-            parent._active_task.cancel()
-        if parent._backend:
-            await stopped_within(
-                parent._backend.stop(), f"session {parent.id} backend", timeout=2.0
-            )
-            for frame in self._forget_backend(parent):
-                await self._broadcast(frame, user_id=parent.user_id)
-        parent._pending_queue.clear()
-        parent._pending_questions.clear()
-        self._cancel_all_question_timers(parent)
-
-        if self.db:
-            await self.db.update_session_field(parent.id, archived=True)
-        self.sessions.pop(parent.id, None)
-
-        if self.db:
-            repointed = await self.db.repoint_schedules_origin(parent.id, fork.id)
-            if self._schedule_runner is not None:
-                for row in repointed:
-                    await self._schedule_runner.reschedule(row)
+            if self.sessions.get(parent.id) is parent:
+                await self._release_session_reservation(owner, ReserveFork(False))
 
     async def fork_preview(
         self,

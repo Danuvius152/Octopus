@@ -58,9 +58,8 @@ async def test_target_changed_during_exchange_is_not_written(accounts, monkeypat
         if change == "delete":
             await db.delete_credential(actor["id"])
         else:
-            async with db._writing():
-                await db.conn.execute("UPDATE backend_credentials SET user_id=? WHERE id=?", (other["id"], actor["id"]))
-                await db.conn.commit()
+            async with db.transaction() as tx:
+                await tx.execute("UPDATE backend_credentials SET user_id=? WHERE id=?", (other["id"], actor["id"]))
         changed = await db.get_credential(actor["id"])
         return oauth_login.LoginSession(id=login_id, url="", state=oauth_login.LoginState.success,
                                         user_id=actor["id"], token="new-secret")
@@ -101,14 +100,13 @@ async def test_owned_reauth_keeps_binding_and_decryptable_secret(accounts, monke
 
 async def test_reauth_rechecks_owner_after_waiting_for_the_storage_writer(accounts):
     connection, db, users, actor, other, headers = accounts
-    async with db._writing():
+    before = await db.get_credential(actor["id"])
+    async with db.transaction() as tx:
         updating = asyncio.create_task(db.reauthorize_credential(actor["id"], user_id=actor["id"],
             backend="claude-code", label="must not write", secret_encrypted="must not write"))
         await asyncio.sleep(0)
         assert not updating.done()
-        await db.conn.execute("UPDATE backend_credentials SET user_id=? WHERE id=?", (other["id"], actor["id"]))
-        await db.conn.commit()
-        before = await db.get_credential(actor["id"])
+        await tx.execute("UPDATE backend_credentials SET user_id=? WHERE id=?", (other["id"], actor["id"]))
     assert await updating is None
-    assert await db.get_credential(actor["id"]) == before
+    assert await db.get_credential(actor["id"]) == {**before, "user_id": other["id"]}
     assert await db.reauthorize_credential(other["id"], user_id=None, backend="claude-code", label="install") is None

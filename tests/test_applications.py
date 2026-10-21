@@ -4,8 +4,8 @@ Covers:
   * Path helpers — slug allocation + de-duplication, entrypoint validation,
     and the traversal guard the static route depends on.
   * `ApplicationManager` — create wires a build session (origin='application',
-    working_dir = the app dir) and fires the brief; the broadcast subscriber
-    turns build-session turns into building/ready/failed; follow-up builds
+    working_dir = the app dir) and fires the brief; request completion
+    turns build sessions into ready/failed, while progress marks building; follow-up builds
     reuse the session (and rebuild one when it's gone); rename/entrypoint
     updates; delete removes the directory but only inside the managed root.
   * The REST routes under `/api/applications`.
@@ -19,9 +19,11 @@ is what's asserted, exactly like the delegation suite.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
+import sys
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -45,7 +47,8 @@ from server.main import app
 from server.routers import agents as agents_mod
 from server.routers import applications as applications_mod
 from server.session_manager import SessionManager, session_manager
-from tests.submission import accepted_receipt
+from tests.completion_models import CompletionModels
+from tests.fake_run import FakeRunBase
 
 TOKEN = "changeme"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
@@ -54,6 +57,11 @@ HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def models():
+    return CompletionModels()
 
 
 @pytest.fixture
@@ -88,14 +96,14 @@ async def am(mgr, db, apps_root):
 
 
 @pytest.fixture
-def sent(mgr, monkeypatch):
+def sent(mgr, monkeypatch, models):
     """Capture `start_message` calls instead of spawning a harness."""
     calls: list[tuple[str, str]] = []
 
     async def fake_start_message(session_id, prompt, attachment_ids=None, *, source):
         assert source == "application"
         calls.append((session_id, prompt))
-        return accepted_receipt()
+        return await models.start_message(mgr, session_id, prompt, source=source)
 
     monkeypatch.setattr(mgr, "start_message", fake_start_message)
     return calls
@@ -117,12 +125,14 @@ async def _create_app(am, db, *, name="Todo App", **extra) -> dict:
 
 @pytest.mark.asyncio
 async def test_application_creation_reports_failed_build_when_admission_is_closed(am, db, mgr):
-    mgr._admission_closed = True
+    mgr.close_admission()
     row = await _create_app(am, db)
     assert row["status"] == "failed"
     assert "closed" in row["error"].lower()
     assert (await db.get_application(row["id"]))["status"] == "failed"
-    assert mgr.get_session(row["session_id"])._active_task is None
+    assert not mgr.session_is_executing(mgr.get_session(row["session_id"]))
+    assert mgr.dispatch_snapshot(row["session_id"])["items"] == []
+    assert not await db.load_messages(row["session_id"])
 
 
 # ---------------------------------------------------------------------------
@@ -273,12 +283,12 @@ async def test_create_rejects_escaping_entrypoint(am, db, sent):
 
 @pytest.mark.asyncio
 async def test_create_marks_failed_when_the_build_session_wont_start(
-    am, db, mgr, monkeypatch
+    models, am, db, mgr, monkeypatch
 ):
     async def boom(session_id, prompt, attachment_ids=None, *, source):
         assert source == "application"
         raise RuntimeError("harness exploded")
-        return accepted_receipt()
+        return await models.start_message(mgr, session_id, prompt, source=source)
 
     monkeypatch.setattr(mgr, "start_message", boom)
     agent = await _make_agent(db)
@@ -295,11 +305,11 @@ async def test_create_marks_failed_when_the_build_session_wont_start(
 
 
 @pytest.mark.asyncio
-async def test_result_with_entrypoint_flips_to_ready(am, db, mgr, sent):
+async def test_result_with_entrypoint_flips_to_ready(models, am, db, mgr, sent):
     row = await _create_app(am, db)
     open(os.path.join(row["app_dir"], "index.html"), "w").write("<h1>hi</h1>")
 
-    await mgr._broadcast({"type": "result", "session_id": row["session_id"]})
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
 
     updated = await db.get_application(row["id"])
     assert updated["status"] == "ready"
@@ -308,18 +318,18 @@ async def test_result_with_entrypoint_flips_to_ready(am, db, mgr, sent):
 
 
 @pytest.mark.asyncio
-async def test_result_without_entrypoint_flips_to_failed(am, db, mgr, sent):
+async def test_result_without_entrypoint_flips_to_failed(models, am, db, mgr, sent):
     row = await _create_app(am, db)
-    await mgr._broadcast({"type": "result", "session_id": row["session_id"]})
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
     updated = await db.get_application(row["id"])
     assert updated["status"] == "failed"
     assert "index.html" in updated["error"]
 
 
 @pytest.mark.asyncio
-async def test_error_event_flips_to_failed_with_the_message(am, db, mgr, sent):
+async def test_error_event_flips_to_failed_with_the_message(models, am, db, mgr, sent):
     row = await _create_app(am, db)
-    await mgr._broadcast(
+    await models.emit(mgr,
         {"type": "error", "session_id": row["session_id"], "message": "credit exhausted"}
     )
     updated = await db.get_application(row["id"])
@@ -327,138 +337,292 @@ async def test_error_event_flips_to_failed_with_the_message(am, db, mgr, sent):
     assert updated["error"] == "credit exhausted"
 
 
-async def test_build_stays_running_through_recovery_events(am, db, mgr, sent):
+async def test_build_stays_running_through_recovery_events(models, am, db, mgr, sent):
     row = await _create_app(am, db)
     for event in (
         {"type": "result", "is_error": True, "retrying": True},
         {"type": "error", "code": "turn_timeout_retry", "retrying": True},
     ):
-        await mgr._broadcast({**event, "session_id": row["session_id"]})
+        await models.emit(mgr, {**event, "session_id": row["session_id"]})
         updated = await db.get_application(row["id"])
         assert updated["status"] == "building"
         assert updated["error"] is None
     open(os.path.join(row["app_dir"], "index.html"), "w").write("<h1>recovered</h1>")
-    await mgr._broadcast({"type": "result", "session_id": row["session_id"], "is_error": False})
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"], "is_error": False})
     assert (await db.get_application(row["id"]))["status"] == "ready"
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entrypoint_exists", [True, False])
-async def test_unconfirmed_build_result_is_reported_and_original_commit_restores_status(am, db, mgr, monkeypatch, entrypoint_exists):
+async def test_build_commit_failure_exits_and_cold_read_keeps_original_result(tmp_path, entrypoint_exists):
+    artifacts = tmp_path / "application-commit"
+    artifacts.mkdir()
+    process = await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", "-s",
+        str(Path(__file__).resolve()), "-o", "python_functions=_application_commit_child",
+        "--basetemp", str(artifacts / "child-tests"),
+        cwd=Path(__file__).resolve().parents[1],
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1",
+             "OCTOPUS_TEST_APP_ENTRYPOINT": str(int(entrypoint_exists))},
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+    )
+    output = asyncio.create_task(process.communicate())
+    try:
+        stdout, stderr = await asyncio.wait_for(asyncio.shield(output), 12)
+        assert process.returncode == 70, (stdout + stderr).decode(errors="replace")
+        proof = json.loads((artifacts / "proof.json").read_text())
+        assert (artifacts / "actual-commit-applied").exists()
+        assert not (artifacts / "result-published").exists()
+        assert not (artifacts / "application-updated").exists()
+        assert len((artifacts / "starts.jsonl").read_text().splitlines()) == 1
+        db = Database(proof["database"])
+        manager = SessionManager()
+        applications = ApplicationManager()
+        try:
+            await db.initialize()
+            await manager.initialize(db)
+            applications.bind(manager, db)
+            row = await applications.get_application(proof["application_id"])
+            # A lost terminal acknowledgment cannot publish a derived badge.
+            # This existing projection has no automatic cold rebuild contract.
+            assert row["status"] == "building" and row["last_built_at"] is None
+            assert row["error"] is None
+            assert applications.is_built(row) is entrypoint_exists
+            if entrypoint_exists:
+                assert Path(row["app_dir"], "index.html").read_text() == "<h1>Verified application</h1>"
+            messages = await db.load_messages(proof["session_id"])
+            assert [message["content"] for message in messages if message["role"] == "user"] == [proof["prompt"]]
+            outcomes = [message["content"] for message in messages if message["type"] == "result"]
+            assert outcomes == [proof["outcome"]]
+            assert outcomes[0]["request_id"] == proof["request_id"] and outcomes[0]["status"] == "success"
+            assert manager.dispatch_snapshot(proof["session_id"])["items"] == []
+            assert not manager.session_is_executing(manager.get_session(proof["session_id"]))
+            assert len((artifacts / "starts.jsonl").read_text().splitlines()) == 1
+        finally:
+            applications.shutdown()
+            await db.close()
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await asyncio.wait_for(output, 5)
+
+
+def application_model(manager, monkeypatch, *, entrypoint_exists, starts_path=None):
     from server.harness import HarnessEvent
 
+    entered, release = asyncio.Event(), asyncio.Event()
     starts = []
 
-    class Run:
-        reusable = False
-
-        def is_alive(self):
-            return False
-
+    class Run(FakeRunBase):
         async def start(self, prompt, working_dir, resume_id=None, credential=None):
             starts.append(prompt)
+            if starts_path is not None:
+                with starts_path.open("a") as stream:
+                    stream.write(json.dumps(prompt) + "\n")
             if entrypoint_exists:
                 Path(working_dir, "index.html").write_text("<h1>Verified application</h1>")
+            entered.set()
 
         async def stream(self):
+            await release.wait()
             yield HarnessEvent(type="result", is_error=False)
 
         async def stop(self):
-            pass
+            release.set()
 
         async def interrupt(self):
-            pass
+            await self.stop()
 
-    monkeypatch.setattr(mgr, "_make_run", lambda *args, **kwargs: Run())
-    record_terminal = db.record_terminal
+    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: Run())
+    return entered, release, starts
 
-    async def lost_acknowledgement(**kwargs):
-        await record_terminal(**kwargs)
-        raise OSError("Terminal commit acknowledgement lost")
 
-    monkeypatch.setattr(db, "record_terminal", lost_acknowledgement)
-    row = await _create_app(am, db)
-    session = mgr.get_session(row["session_id"])
-    async with asyncio.timeout(2):
-        while session._recording_blocked is None:
-            await asyncio.sleep(0)
-        driver = session._active_task
-        if driver is not None:
-            await driver
-    blocked = await db.get_application(row["id"])
-    assert blocked["status"] == "failed"
-    assert "saving" in blocked["error"].lower() and "unconfirmed" in blocked["error"].lower()
-    assert blocked["last_built_at"] is None
-    assert session._recording_blocked.outcome.status == "success"
+async def _application_commit_child(tmp_path, tmp_path_factory, monkeypatch):
+    artifacts = tmp_path_factory.getbasetemp().parent
+    monkeypatch.setattr(settings, "applications_dir", str(artifacts / "applications"))
+    database_path = tmp_path / "application.db"
+    db = Database(str(database_path))
+    await db.initialize()
+    manager = SessionManager()
+    await manager.initialize(db)
+    applications = ApplicationManager()
+    applications.bind(manager, db)
+    entered, release, starts = application_model(
+        manager, monkeypatch, entrypoint_exists=os.environ["OCTOPUS_TEST_APP_ENTRYPOINT"] == "1",
+        starts_path=artifacts / "starts.jsonl",
+    )
+    proof = {"database": str(database_path)}
+    terminal = None
+    execute, commit = db.conn.execute, db.conn.commit
+
+    async def terminal_sql(sql, parameters=()):
+        nonlocal terminal
+        cursor = await execute(sql, parameters)
+        if sql.startswith("INSERT INTO messages ") and parameters[3] == "result":
+            terminal = json.loads(parameters[4])
+        return cursor
+
+    async def lost_driver_acknowledgment():
+        if terminal is None:
+            return await commit()
+        await commit()
+        proof["outcome"] = terminal
+        (artifacts / "proof.json").write_text(json.dumps(proof))
+        (artifacts / "actual-commit-applied").touch()
+        raise OSError("actual application terminal commit acknowledgment lost")
+
+    async def observe(event):
+        if event.get("type") == "result":
+            (artifacts / "result-published").touch()
+        if event.get("type") == "application_updated":
+            (artifacts / "application-updated").touch()
+
+    monkeypatch.setattr(db.conn, "execute", terminal_sql)
+    monkeypatch.setattr(db.conn, "commit", lost_driver_acknowledgment)
+    manager.on_broadcast("application-commit-proof", observe)
+    row = await _create_app(applications, db)
+    proof.update(application_id=row["id"], session_id=row["session_id"])
+    await asyncio.wait_for(entered.wait(), 3)
+    inputs = [message for message in await db.load_messages(row["session_id"]) if message["role"] == "user"]
+    assert len(inputs) == 1
+    proof.update(prompt=inputs[0]["content"], request_id=inputs[0]["tool_input"]["request_context"]["request_id"])
     assert len(starts) == 1
+    release.set()
+    await asyncio.wait_for(asyncio.Event().wait(), 8)
 
+
+@pytest.mark.parametrize("entrypoint_exists", [True, False])
+async def test_committed_build_result_derives_status_once(am, db, mgr, monkeypatch, entrypoint_exists):
+    entered, release, starts = application_model(mgr, monkeypatch, entrypoint_exists=entrypoint_exists)
+    terminal = asyncio.get_running_loop().create_future()
     updates = []
+    application_updated = asyncio.Event()
 
-    async def observe(message):
-        if message.get("type") == "application_updated" and message.get("application_id") == row["id"]:
-            updates.append(message)
+    async def observe(event):
+        if event.get("type") == "result" and not terminal.done():
+            terminal.set_result(event)
+        if event.get("type") == "application_updated":
+            updates.append(event)
+            application_updated.set()
 
-    mgr.on_broadcast("recording-recovery-observer", observe)
+    mgr.on_broadcast("committed-build-proof", observe)
+    row = await _create_app(am, db)
     try:
-        monkeypatch.setattr(db, "record_terminal", record_terminal)
-        assert await mgr.resume_dispatch(session.id, resume_queue=False)
-        restored = await db.get_application(row["id"])
+        await asyncio.wait_for(entered.wait(), 2)
+        release.set()
+        event = await asyncio.wait_for(terminal, 2)
+        await mgr.await_session_execution(row["session_id"], timeout=2)
+        await asyncio.wait_for(application_updated.wait(), 2)
+        restored = await am.get_application(row["id"])
+        assert event["content"]["status"] == "success"
+        assert await db.get_committed_terminal(row["session_id"], event["request_id"]) == event["content"]
         assert restored["status"] == ("ready" if entrypoint_exists else "failed")
         if entrypoint_exists:
             assert restored["error"] is None and restored["last_built_at"]
         else:
             assert "index.html" in restored["error"] and "unconfirmed" not in restored["error"].lower()
-        assert len(starts) == 1
-        assert len(updates) == 1
-        assert await mgr.resume_dispatch(session.id, resume_queue=False)
-        assert len(updates) == 1
+        assert len(starts) == 1 and len(updates) == 1
+        assert await mgr.resume_dispatch(row["session_id"], resume_queue=False)
+        assert len(starts) == 1 and len(updates) == 1
     finally:
-        mgr.remove_broadcast("recording-recovery-observer")
+        release.set()
+        await mgr.await_session_execution(row["session_id"], timeout=2)
+        mgr.remove_broadcast("committed-build-proof")
+
+
+async def test_conflicting_build_outcome_reports_domain_error_without_retrying_storage(am, db, mgr, monkeypatch):
+    from server.models import TurnOutcome
+
+    entered, release, starts = application_model(mgr, monkeypatch, entrypoint_exists=True)
+    conflict = asyncio.get_running_loop().create_future()
+    updates = []
+    application_updated = asyncio.Event()
+
+    async def observe(event):
+        if event.get("type") == "recording_failed" and not conflict.done():
+            conflict.set_result(event)
+        if event.get("type") == "application_updated":
+            updates.append(event)
+            application_updated.set()
+
+    mgr.on_broadcast("conflicting-build-proof", observe)
+    row = await _create_app(am, db)
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        messages = await db.load_messages(row["session_id"])
+        assert len(messages) == 1 and messages[0]["role"] == "user"
+        request_id = messages[0]["tool_input"]["request_context"]["request_id"]
+        committed = TurnOutcome(request_id=request_id, status="failed", message="Previously committed original outcome").model_dump()
+        await db.record_terminal(
+            request_id=request_id, session_id=row["session_id"], seq=1, role="system", type="result",
+            content=committed, is_error=True, created_at="2026-10-21T00:00:00+00:00",
+        )
+        release.set()
+        event = await asyncio.wait_for(conflict, 2)
+        assert event["request_id"] == request_id and event["terminal"] is False
+        assert event["message"] == "This request conflicts with an already recorded outcome."
+        await mgr.await_session_execution(row["session_id"], timeout=2)
+        await asyncio.wait_for(application_updated.wait(), 2)
+        failed = await am.get_application(row["id"])
+        assert failed["status"] == "failed" and failed["last_built_at"] is None
+        assert failed["error"] == event["message"]
+        assert "saving" not in failed["error"].lower() and "retry" not in failed["error"].lower()
+        assert await db.get_committed_terminal(row["session_id"], request_id) == committed
+        assert len(starts) == 1 and len(updates) == 1
+        assert await mgr.resume_dispatch(row["session_id"], resume_queue=False)
+        assert await db.get_committed_terminal(row["session_id"], request_id) == committed
+        assert len(starts) == 1 and len(updates) == 1
+    finally:
+        release.set()
+        await mgr.await_session_execution(row["session_id"], timeout=2)
+        mgr.remove_broadcast("conflicting-build-proof")
 
 
 @pytest.mark.asyncio
-async def test_a_written_app_stays_ready_even_if_the_turn_errored(am, db, mgr, sent):
+async def test_a_written_app_stays_ready_even_if_the_turn_errored(models, am, db, mgr, sent):
     """The filesystem is the source of truth: an agent that wrote a perfectly
     good app and *then* hit an error still produced a working application."""
     row = await _create_app(am, db)
     open(os.path.join(row["app_dir"], "index.html"), "w").write("<h1>hi</h1>")
-    await mgr._broadcast(
+    await models.emit(mgr,
         {"type": "error", "session_id": row["session_id"], "message": "late failure"}
     )
     assert (await db.get_application(row["id"]))["status"] == "ready"
 
 
 @pytest.mark.asyncio
-async def test_running_status_returns_the_app_to_building(am, db, mgr, sent):
+async def test_running_status_returns_the_app_to_building(models, am, db, mgr, sent, monkeypatch):
     row = await _create_app(am, db)
     open(os.path.join(row["app_dir"], "index.html"), "w").write("<h1>hi</h1>")
-    await mgr._broadcast({"type": "result", "session_id": row["session_id"]})
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
     assert (await db.get_application(row["id"]))["status"] == "ready"
 
     # A change typed straight into the build session's chat — no REST call.
-    await mgr._broadcast(
+    monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
+    await mgr.start_message(row["session_id"], "Change this application through chat.")
+    await models.emit(mgr,
         {"type": "status", "session_id": row["session_id"], "status": "running"}
     )
     assert (await db.get_application(row["id"]))["status"] == "building"
 
-    await mgr._broadcast(
+    await models.emit(mgr,
         {"type": "status", "session_id": row["session_id"], "status": "idle"}
     )
     assert (await db.get_application(row["id"]))["status"] == "building"
 
 
 @pytest.mark.asyncio
-async def test_events_for_other_sessions_are_ignored(am, db, mgr, sent):
+async def test_events_for_other_sessions_are_ignored(models, am, db, mgr, sent):
     row = await _create_app(am, db)
     agent = await _make_agent(db, "Bystander")
     other = await mgr.create_session(agent_id=agent["id"], name="unrelated")
     open(os.path.join(row["app_dir"], "index.html"), "w").write("x")
-    await mgr._broadcast({"type": "result", "session_id": other.id})
+    await models.emit(mgr, {"type": "result", "session_id": other.id})
     assert (await db.get_application(row["id"]))["status"] == "building"
 
 
 @pytest.mark.asyncio
-async def test_broadcasts_carry_the_row(am, db, mgr, sent):
+async def test_broadcasts_carry_the_row(models, am, db, mgr, sent):
     seen: list[dict] = []
 
     mgr.on_broadcast("test-sink", lambda m: seen.append(m))
@@ -467,7 +631,7 @@ async def test_broadcasts_carry_the_row(am, db, mgr, sent):
     assert created and created[0]["application"]["id"] == row["id"]
 
     open(os.path.join(row["app_dir"], "index.html"), "w").write("x")
-    await mgr._broadcast({"type": "result", "session_id": row["session_id"]})
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
     updated = [m for m in seen if m["type"] == "application_updated"]
     assert updated and updated[-1]["application"]["status"] == "ready"
     mgr.remove_broadcast("test-sink")
@@ -495,9 +659,9 @@ async def test_request_build_reuses_the_session(am, db, mgr, sent):
 
 
 @pytest.mark.asyncio
-async def test_request_build_clears_a_previous_failure(am, db, mgr, sent):
+async def test_request_build_clears_a_previous_failure(models, am, db, mgr, sent):
     row = await _create_app(am, db)
-    await mgr._broadcast({"type": "result", "session_id": row["session_id"]})
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
     assert (await db.get_application(row["id"]))["status"] == "failed"
 
     await am.request_build(row["id"], "try again")
@@ -575,10 +739,10 @@ async def test_rename_to_an_existing_name_is_409(am, db, sent):
 
 
 @pytest.mark.asyncio
-async def test_entrypoint_change_re_derives_status(am, db, mgr, sent):
+async def test_entrypoint_change_re_derives_status(models, am, db, mgr, sent):
     row = await _create_app(am, db)
     open(os.path.join(row["app_dir"], "main.html"), "w").write("<h1>hi</h1>")
-    await mgr._broadcast({"type": "result", "session_id": row["session_id"]})
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
     assert (await db.get_application(row["id"]))["status"] == "failed"
 
     updated = await am.update_application(row["id"], entrypoint="main.html")
@@ -673,7 +837,7 @@ async def test_delete_keeps_the_build_session(am, db, mgr, sent):
 
 
 @pytest.fixture
-async def client(apps_root, monkeypatch):
+async def client(models, apps_root, monkeypatch):
     """The real app wired to a fresh DB + the singleton managers, with
     `start_message` stubbed so no harness ever spawns."""
     db = Database(":memory:")
@@ -691,7 +855,7 @@ async def client(apps_root, monkeypatch):
     async def fake_start_message(session_id, prompt, attachment_ids=None, *, source):
         assert source == "application"
         calls.append((session_id, prompt))
-        return accepted_receipt()
+        return await models.start_message(session_manager, session_id, prompt, source=source)
 
     monkeypatch.setattr(session_manager, "start_message", fake_start_message)
 
@@ -1277,7 +1441,8 @@ def test_data_and_runtime_are_siblings_not_subdirectories(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_real_backend_answers_through_the_proxy(client):
+@pytest.mark.parametrize("query_contract", ["baseline", "multiplicity", "credentials"])
+async def test_a_real_backend_answers_through_the_proxy(client, query_contract):
     """The whole feature, end to end: an application ships `start.sh`, Octopus
     starts it, and `/apps/{id}/api/…` reaches it.
 
@@ -1301,6 +1466,8 @@ async def test_a_real_backend_answers_through_the_proxy(client):
         "class H(BaseHTTPRequestHandler):\n"
         "    def do_GET(self):\n"
         "        body = json.dumps({'path': self.path,\n"
+        "                           'authorization': self.headers.get('authorization'),\n"
+        "                           'cookie': self.headers.get('cookie'),\n"
         "                           'data_dir': os.environ['APP_DATA_DIR']}).encode()\n"
         "        self.send_response(200)\n"
         "        self.send_header('content-type', 'application/json')\n"
@@ -1324,6 +1491,33 @@ async def test_a_real_backend_answers_through_the_proxy(client):
         assert payload["path"] == "/api/notes?limit=2"
         # And it ran with the data directory the contract promises.
         assert payload["data_dir"] == app_dir + ".data"
+
+        if query_contract == "multiplicity":
+            pairs = [
+                ("tag", "alpha"), ("limit", "2"), ("tag", "beta"), ("empty", ""),
+                ("text", "中文 + & ="), ("limit", "3"), ("token_hint", "visible"), ("Token", "ordinary-value"),
+            ]
+            # Build the actual incoming URL: httpx's params helper itself groups
+            # repeated keys, hiding the interleaving this contract protects.
+            echoed = await client.get(f"/apps/{app_row['id']}/api/notes?{urlencode(pairs)}", headers=HEADERS)
+            assert echoed.status_code == 200, echoed.text
+            assert parse_qsl(urlsplit(echoed.json()["path"]).query, keep_blank_values=True) == pairs
+        elif query_contract == "credentials":
+            from server.applications import app_scope_token
+
+            cases = [
+                (HEADERS, ["discarded-first", "discarded-last"]),
+                ({}, ["discarded-first", TOKEN]),
+                ({"Cookie": f"octopus_app_token={TOKEN}; private_cookie=private"}, [""]),
+                ({"X-Octopus-App-Token": app_scope_token(app_row["id"])}, ["discarded-first", "discarded-last"]),
+            ]
+            for headers, tokens in cases:
+                pairs = [("tag", "visible"), *[("token", token) for token in tokens], ("token_hint", "kept")]
+                echoed = await client.get(f"/apps/{app_row['id']}/api/notes?{urlencode(pairs)}", headers=headers)
+                assert echoed.status_code == 200, echoed.text
+                observed = echoed.json()
+                assert parse_qsl(urlsplit(observed["path"]).query, keep_blank_values=True) == [("tag", "visible"), ("token_hint", "kept")]
+                assert observed["authorization"] is None and observed["cookie"] is None
 
         # Static files still come from the code directory, unproxied.
         page = await client.get(f"/apps/{app_row['id']}/index.html", headers=HEADERS)

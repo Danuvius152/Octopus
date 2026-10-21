@@ -60,7 +60,10 @@ def _fake_report(question="q"):
     )
 
 
-async def test_delivery_receipts_distinguish_queue_processing_and_current_browser_confirmation(rm, mgr, db, monkeypatch):
+@pytest.mark.parametrize("completion_kind", ["delivered", "notification_failed", "unavailable"])
+async def test_delivery_receipts_distinguish_queue_processing_and_current_browser_confirmation(
+    rm, mgr, db, monkeypatch, completion_kind,
+):
     from server.models import TurnOutcome
     from server.sessions.submission import RequestCompletion, SubmissionReceipt
     future = asyncio.get_running_loop().create_future()
@@ -79,15 +82,26 @@ async def test_delivery_receipts_distinguish_queue_processing_and_current_browse
     await mgr._broadcast({"type": "dequeued", "session_id": session.id, "request_id": "report-follow-up"})
     processing = (await db.get_research_job(row["id"]))["delivery_receipt"]
     assert processing["stage"] == "processing"
-    future.set_result(RequestCompletion("report-follow-up", "report-follow-up", "completed",
-        TurnOutcome(request_id="report-follow-up", status="success"), "committed"))
+    if completion_kind == "unavailable":
+        future.set_result(RequestCompletion("report-follow-up", "report-follow-up", "unavailable",
+            reason="The original writer ended without an acknowledged result", notification_state="unavailable"))
+    else:
+        future.set_result(RequestCompletion("report-follow-up", "report-follow-up", "completed",
+            TurnOutcome(request_id="report-follow-up", status="success"), "committed",
+            notification_state="failed" if completion_kind == "notification_failed" else "delivered"))
     await rm._delivery_tasks[row["id"]]
     final = (await db.get_research_job(row["id"]))["delivery_receipt"]
-    assert final["stage"] == "processed" and final["processed_at"]
+    if completion_kind == "unavailable":
+        assert final["stage"] == "unknown" and "processed_at" not in final
+        assert final["error"] == "The original writer ended without an acknowledged result"
+        assert (await db.get_research_job(row["id"]))["status"] == "completed"
+    else:
+        assert final["stage"] == "processed" and final["processed_at"]
     assert await db.acknowledge_research_delivery(row["id"], "report-follow-up", receipt["version"]) is None
     acknowledged = await db.acknowledge_research_delivery(row["id"], "report-follow-up", final["version"])
     assert acknowledged["browser_confirmed_version"] == final["version"]
-    assert (await db.advance_research_delivery(row["id"], "report-follow-up", "processing"))["stage"] == "processed"
+    if completion_kind != "unavailable":
+        assert (await db.advance_research_delivery(row["id"], "report-follow-up", "processing"))["stage"] == "processed"
     await rm.shutdown()
 
 

@@ -138,7 +138,7 @@ def normalise_root(raw: str) -> Path:
 
 
 def _within(candidate: Path, root: Path) -> bool:
-    """Is `candidate` inside `root`, both already resolved?
+    """Is the resolved candidate inside the captured canonical root?
 
     `Path.is_relative_to` rather than string prefixes, which say yes to
     `/home/archer-evil` for a root of `/home/archer`.
@@ -161,13 +161,10 @@ def allowed_roots(user_id: str | None, extra_roots: list[str] | None = None) -> 
     """
     if user_id is None:
         return []
-    roots = [user_root(user_id).resolve()]
-    for raw in extra_roots or []:
-        try:
-            roots.append(_expand(raw).resolve())
-        except OSError:  # pragma: no cover - an unreadable configured path
-            continue
-    return roots
+    # Extra roots were resolved when granted. Resolving them again would
+    # approve a new target if a saved path or one of its ancestors became a
+    # symlink. Only the requested access follows today's filesystem links.
+    return [user_root(user_id).resolve(), *(Path(raw) for raw in extra_roots or [])]
 
 
 def confine(

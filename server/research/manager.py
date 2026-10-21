@@ -220,6 +220,7 @@ class ResearchManager:
                     session.credential_id or (agent or {}).get("credential_id"),
                     style=harness.profile.credential_style,
                     context=f"research {job_id}",
+                    user_id=self._contexts[job_id].execution.origin.user_id,
                 )
                 if not work_is_open(self._contexts[job_id].return_binding.work_id):
                     raise asyncio.CancelledError("original research work is closed")
@@ -340,7 +341,7 @@ class ResearchManager:
             return
         self._delivery_jobs[receipt.request_id] = (job_id, session_id)
         current = self.session_mgr.get_session(session_id)
-        processing = current and current._current_request and current._current_request.request_id == receipt.request_id
+        processing = current and current._run.request and current._run.request.request_id == receipt.request_id
         await self._advance_delivery(job_id, session_id, receipt.request_id, "processing" if processing else "queued")
         await self._settle_delivery(job_id, session_id)
         task = asyncio.create_task(self._observe_delivery(job_id, session_id, receipt), name=f"research-delivery-{job_id}")
@@ -371,7 +372,8 @@ class ResearchManager:
             completion = await receipt.wait()
             successful = (completion.state == "completed" and completion.recording_state == "committed"
                           and completion.outcome is not None and completion.outcome.status == "success")
-            stage = "processed" if successful else "recording_unconfirmed" if completion.recording_state in {"failed", "unconfirmed"} else "failed"
+            stage = ("processed" if successful else "unknown" if completion.state == "unavailable" else
+                     "recording_unconfirmed" if completion.recording_state in {"failed", "unconfirmed"} else "failed")
             await self._advance_delivery(job_id, session_id, receipt.request_id, stage, error=None if successful else completion.reason or completion.state)
         except asyncio.CancelledError:
             await self._advance_delivery(job_id, session_id, receipt.request_id, "unknown", error="Delivery observation stopped; the request was not replayed.")

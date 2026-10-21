@@ -22,7 +22,7 @@ from server.wiki.store import WikiError, WikiStore, revision
 def history(tmp_path):
     root = tmp_path / "vault"
     root.mkdir()
-    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
     try:
         yield WikiHistory(store)
     finally:
@@ -726,7 +726,7 @@ def test_lost_durable_origin_table_is_reported_not_rebuilt_empty(history, missin
     with sqlite3.connect(store.db_path) as db:
         db.execute("DROP TABLE " + missing)
     with pytest.raises(WikiError, match="ledger is missing") as error:
-        WikiStore(store.root, store.state, store.vault_id)
+        WikiStore(store.root, store.state, store.vault_id, health=store.health)
     assert error.value.status == 503
     assert store.path("note.md").read_bytes() == raw
     with sqlite3.connect(store.db_path) as db:

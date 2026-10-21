@@ -5,6 +5,7 @@ build_args), event normalization, and the one-shot call.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -289,42 +290,42 @@ def test_oneshot_argv_and_parse(tmp_path):
     assert ei.value.code == "bad_output"
 
 
-def test_a_namespace_that_failed_to_connect_is_logged(caplog):
+def test_a_namespace_that_failed_to_connect_is_reported():
     """The init event lists every MCP server with its status, and a namespace
     that failed to connect used to leave no trace on our side — the only
     evidence was the model saying the tool was unavailable, in prose, inside its
     reply. These namespaces are served by this very process, so a connection
     failure is ours to know about."""
     p = ClaudeEventParser()
-    with caplog.at_level("WARNING"):
-        out = p.parse(
-            {
-                "type": "system",
-                "subtype": "init",
-                "session_id": "abc",
-                "mcp_servers": [
-                    {"name": "bg", "status": "connected"},
-                    {"name": "ask", "status": "failed"},
-                    {"name": "schedule", "status": "needs-auth"},
-                ],
-            }
-        )
-    # Still the session_started event; the log is additional, not instead.
+    out = p.parse(
+        {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "abc",
+            "mcp_servers": [
+                {"name": "bg", "status": "connected"},
+                {"name": "ask", "status": "failed"},
+                {"name": "schedule", "status": "needs-auth"},
+            ],
+        }
+    )
+    # The run logs this note with credentials masked; the event is unchanged.
     assert [e.type for e in out.events] == ["session_started"]
-    assert "ask=failed" in caplog.text
-    assert "schedule=needs-auth" in caplog.text
-    assert "bg" not in caplog.text.split("not connected:")[-1]
+    assert len(out.diagnostics) == 1
+    level, message = out.diagnostics[0]
+    assert level == logging.WARNING
+    assert "not connected" in message and "count=2" in message
+    assert "ask=failed" in message and "schedule=needs-auth" in message
 
 
-def test_all_namespaces_connected_logs_nothing(caplog):
+def test_all_namespaces_connected_produce_no_warning():
     p = ClaudeEventParser()
-    with caplog.at_level("WARNING"):
-        p.parse(
-            {
-                "type": "system",
-                "subtype": "init",
-                "session_id": "abc",
-                "mcp_servers": [{"name": "bg", "status": "connected"}],
-            }
-        )
-    assert "not connected" not in caplog.text
+    out = p.parse(
+        {
+            "type": "system",
+            "subtype": "init",
+            "session_id": "abc",
+            "mcp_servers": [{"name": "bg", "status": "connected"}],
+        }
+    )
+    assert out.diagnostics == []

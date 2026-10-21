@@ -7,6 +7,8 @@ import json
 from server.database import Database
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submit_client_message
+from tests.test_submission_recovery import _submit_paused
+from tests.test_submission_recovery import offline_harness as offline_harness
 
 
 async def test_submission_reservation_and_receipt_survive_database_reopen(tmp_path, monkeypatch):
@@ -17,8 +19,7 @@ async def test_submission_reservation_and_receipt_survive_database_reopen(tmp_pa
     await manager.initialize(db)
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "receipt", str(tmp_path), backend="codex")
-    monkeypatch.setattr(manager, "_schedule_dispatch", lambda session: False)
-    first = await submit_client_message(manager, session.id, "once", [], "accepted", wiki_mode=None)
+    first = await _submit_paused(manager, session.id, "once", "accepted")
     unknown_payload = json.dumps({"content": "uncertain", "attachment_ids": [], "wiki_mode": None}, sort_keys=True, separators=(",", ":"))
     await db.reserve_client_submission(session.id, "uncertain", hashlib.sha256(unknown_payload.encode()).hexdigest(), "reserved-request")
     await db.close()
@@ -28,10 +29,13 @@ async def test_submission_reservation_and_receipt_survive_database_reopen(tmp_pa
     await restored.initialize(reopened)
     try:
         duplicate = await submit_client_message(restored, session.id, "once", [], "accepted", wiki_mode=None)
-        assert duplicate == first
+        assert duplicate["request_id"] == first["request_id"]
+        assert duplicate["accepted"] is first["accepted"] is True
+        assert duplicate["execution"]["state"] == "withdrawn"
+        assert duplicate["input"]["content"] == "once"
         unknown = await submit_client_message(restored, session.id, "uncertain", [], "uncertain", wiki_mode=None)
         assert unknown["state"] == "unknown" and unknown["request_id"] == "reserved-request"
-        assert restored.get_session(session.id)._pending_queue == []
+        assert restored.dispatch_snapshot(session.id)["items"] == []
     finally:
         await reopened.close()
 
@@ -43,11 +47,20 @@ async def test_concurrent_duplicate_submission_has_one_admission(tmp_path, monke
     await manager.initialize(db)
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "concurrent", str(tmp_path), backend="codex")
-    monkeypatch.setattr(manager, "_schedule_dispatch", lambda session: False)
+    stopped = asyncio.Event()
+
+    async def pause_original(event):
+        if event.get("type") == "dequeued" and event.get("session_id") == session.id:
+            await manager.interrupt(session.id)
+            stopped.set()
+
+    manager.on_broadcast("pause-original-submission", pause_original)
     try:
         results = await asyncio.gather(*(submit_client_message(manager, session.id, "once", [], "same", wiki_mode=None) for _ in range(2)))
         assert len({row["request_id"] for row in results}) == 1
         assert any(row["accepted"] for row in results)
-        assert len(session._pending_queue) == 1
+        await asyncio.wait_for(stopped.wait(), 5)
+        await manager.await_session_execution(session.id, timeout=5)
+        assert len(manager.dispatch_snapshot(session.id)["items"]) == 1
     finally:
         await db.close()

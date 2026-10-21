@@ -26,8 +26,10 @@ from .auth import verify_token
 from .bg_tasks import bg_task_manager
 from .config import settings
 from .connector_manager import ConnectorManager
+from .crypto import master_key
 from .database import Database
 from .delegations import delegation_manager
+from .installation_keys import InstallationKeyRetired
 from .mcp_http import lifespan as mcp_lifespan
 from .mcp_http import mount_all as mount_mcp
 from .monitor import Event as _MonEvent
@@ -57,7 +59,10 @@ from .routers import monitor as monitor_router
 from .routers import research as research_router
 from .routers import wiki as wiki_router
 from .scheduler import ScheduleRunner
+from .service_health import ServiceHealth
+from .service_installation import InstallationOwner, read_service_profile
 from .session_manager import session_manager
+from .sessions.owner import SessionOwnerUnavailable
 from .tunnel import CloudflareTunnel
 from .users import UserManager
 from .wiki import WikiError
@@ -73,14 +78,30 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    db = Database(settings.db_path)
+    installation = InstallationOwner(settings)
+    installation.acquire()
+    app.state.installation_owner = installation
+    app.state.service_health = service_health = ServiceHealth()
+    db = Database(settings.db_path, health=service_health)
     started: set[str] = set()
     schedule_runner = metrics = sampler_task = tunnel = None
     mcp_owner = None
     mcp_stop = asyncio.Event()
     original: BaseException | None = None
+    retired = False
     try:
+        from .wiki.registry import registry as wiki_registry
+        wiki_registry.bind_health(service_health)
+        try:
+            master_key()
+        except (OSError, ValueError) as error:
+            service_health.fail(error)
         await db.initialize()
+        from .token_rotation import recover_auth_token
+        await recover_auth_token(db)
+        from .memory_handoff import handoff_agent_memory
+        async with db._bootstrap_lock:
+            await handoff_agent_memory(db)
         from .wiki.app_bridge import reopen as reopen_wiki_app_writers
         reopen_wiki_app_writers()
         from .wiki.account_upgrade import pending_upgrade
@@ -100,7 +121,7 @@ async def lifespan(app: FastAPI):
         # Initialize scheduler
         schedule_runner = ScheduleRunner(session_manager, db)
         started.add("scheduler")
-        await schedule_runner.initialize()
+        await schedule_runner.initialize(paused=True)
         app.state.schedule_runner = schedule_runner
         session_manager.set_schedule_runner(schedule_runner)
         schedules._db = db
@@ -143,7 +164,6 @@ async def lifespan(app: FastAPI):
         # Applications with a backend (application-backends.md): stop the ones
         # nobody is using, and never leave one running past our own exit.
         started.add("backends")
-        backend_supervisor.start_reaper()
         # Applications talking to agents (app-agent-access.md). Also a bus
         # subscriber: it turns a conversation session's events into the small
         # vocabulary an app consumes.
@@ -158,41 +178,18 @@ async def lifespan(app: FastAPI):
         research_manager.bind(session_mgr=session_manager, db=db)
         await research_manager.recover_interrupted()
 
-        # Start Cloudflare Tunnel if enabled
-        if settings.enable_tunnel:
-            tunnel = CloudflareTunnel(port=settings.port)
-            url = await tunnel.start()
-            if url:
-                print("\n" + "=" * 60)
-                print(f"  Tunnel URL: {url}")
-                print("=" * 60 + "\n")
-                logger.info("Cloudflare Tunnel active: %s", url)
-
-        # Idle-process reaper (inline-steering.md §7): a session keeps its CLI
-        # process after a turn so the next one skips the ~1.5s spawn, and this
-        # drops the ones that stop earning their ~255MB.
-        session_manager.start_reaper()
-
         # The MCP tool namespaces are served from this app rather than spawned per
         # session (polish-2026-09.md §4 B1). Each one's session manager has to be
         # running before it will answer, and mounting does not start it, so they run
         # for the lifetime of the app.
         metrics = MetricsStore(settings.metrics_db_path, settings.metrics_retention_days)
         await metrics.initialize()
-        metrics.start()
         monitor_pkg.set_store(metrics)
         await metrics.prune()  # honour retention on every boot, not only on a timer
-        sampler_task = asyncio.create_task(
-            metrics_sampler.run(
-                settings.db_path,
-                held_process_count=lambda: len(getattr(session_manager, "_held", {}) or {}),
-            ), name="metrics-sampler",
-        )
 
         ready = asyncio.get_running_loop().create_future()
         mcp_owner = asyncio.create_task(_serve_mcp(app, ready, mcp_stop), name="mcp-lifespan")
         await asyncio.shield(ready)
-        from .wiki.registry import registry as wiki_registry
         wiki_registry.legacy_enabled = not bool(await db.count_users())
         from .wiki.account_upgrade import pending_upgrade
         if pending := pending_upgrade():
@@ -201,22 +198,44 @@ async def lifespan(app: FastAPI):
             if pending.get("user_id"):
                 wiki_registry.begin_transition(pending["user_id"])
         started.add("wiki_registry")
-        await wiki_registry.start()
+        await wiki_registry.start(paused=True)
         from .wiki.cleanup import sweep as sweep_wiki_history
         await sweep_wiki_history()
         started.add("wiki_worker")
-        await wiki_worker.start(session_manager)
+        await wiki_worker.start(session_manager, paused=True)
+
+        # Recovery is complete. No producer above can dispatch new work.
+        service_health.open_admission()
+        schedule_runner.start()
+        wiki_registry.start_reconciler()
+        wiki_worker.start_producing()
+        backend_supervisor.start_reaper()
+        session_manager.start_reaper()
+        metrics.start()
+        sampler_task = asyncio.create_task(
+            metrics_sampler.run(
+                settings.db_path,
+                held_process_count=lambda: len(getattr(session_manager, "_held", {}) or {}),
+            ), name="metrics-sampler",
+        )
+        if settings.enable_tunnel:
+            tunnel = CloudflareTunnel(port=settings.port)
+            url = await tunnel.start()
+            if url:
+                logger.info("Cloudflare Tunnel active: %s", url)
         logger.info("MCP namespaces served in-process: %s", ", ".join(_mcp_mounts))
         yield
     except BaseException as exc:
         original = exc
         raise
     finally:
+        service_health.begin_shutdown()
         cancelled_mcp_startup = mcp_owner is not None and not ready.done()
         if cancelled_mcp_startup:
             mcp_owner.cancel("service-startup-aborted")
         try:
             await complete_cleanup(_shutdown_service(db, started, schedule_runner, metrics, sampler_task, tunnel))
+            retired = True
         except BaseException:
             if original is None:
                 raise
@@ -227,9 +246,13 @@ async def lifespan(app: FastAPI):
                     mcp_stop.set()
                     await complete_cleanup(_join_mcp(mcp_owner, cancelled_startup=cancelled_mcp_startup))
             except BaseException:
+                retired = False
                 if original is None:
                     raise
                 logger.exception("MCP startup compensation failed")
+            finally:
+                if retired:
+                    installation.close()
 
 
 async def _serve_mcp(app, ready, stop):
@@ -343,6 +366,16 @@ async def _shutdown_service(db, started, schedule_runner, metrics, sampler_task,
 
 
 app = FastAPI(title="Octopus", version="0.1.0", lifespan=lifespan)
+
+
+@app.exception_handler(SessionOwnerUnavailable)
+async def _session_owner_unavailable(_request: Request, exc: SessionOwnerUnavailable) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+@app.exception_handler(InstallationKeyRetired)
+async def _installation_key_retired(_request: Request, exc: InstallationKeyRetired) -> JSONResponse:
+    return JSONResponse(status_code=401, content={"detail": str(exc)})
 
 
 @app.exception_handler(WikiError)
@@ -483,6 +516,13 @@ async def health():
     return {"status": "ok"}
 
 
+@app.get("/ready")
+async def readiness(request: Request):
+    health = getattr(request.app.state, "service_health", None)
+    state = health.state if health is not None else "starting"
+    return JSONResponse({"status": state}, status_code=200 if state == "ready" else 503)
+
+
 # Serve built frontend as static files (SPA catch-all).
 # Mounted after API routes so /api/*, /ws, /health take priority.
 _dist_dir = Path(__file__).resolve().parent.parent / "web" / "dist"
@@ -491,6 +531,9 @@ if _dist_dir.is_dir():
 
 
 def run():
+    # Reject managed reload/worker configuration before Uvicorn can create
+    # another process. Direct ASGI entry also checks in lifespan.
+    read_service_profile(settings)
     uvicorn.run(
         "server.main:app",
         host=settings.host,

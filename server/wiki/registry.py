@@ -18,8 +18,10 @@ from typing import Any
 
 from ..aio import complete_cleanup
 from ..config import settings
+from ..service_health import ServiceHealth
+from ..service_installation import InstallationError, guard_vault
 from ..workspace import user_root
-from . import protocols
+from . import protocols, storage
 from .store import WikiError, WikiStore
 
 logger = logging.getLogger(__name__)
@@ -52,6 +54,7 @@ class MigrationConstruction:
 
 class WikiRegistry:
     def __init__(self) -> None:
+        self.health = ServiceHealth()
         self._lock = threading.RLock()
         self._stores: OrderedDict[tuple, WikiStore] = OrderedDict()
         self._task: asyncio.Task | None = None
@@ -73,6 +76,26 @@ class WikiRegistry:
         self._close_gate = threading.Lock()
         self._drain_locks: dict[str | None, Any] = {}
         self._recoveries = None
+
+    def bind_health(self, health: ServiceHealth) -> None:
+        """A new service generation may bind only after every old owner exits."""
+        if not self._close_gate.acquire(blocking=False):
+            raise WikiError("Wiki cleanup must finish before binding service health", 503)
+        try:
+            with self._lock:
+                self.health.require_healthy()
+                health.require_healthy()
+                if self.health is health:
+                    return
+                self._check_reopen()
+                if (self._stores or self._retired_stores or self._constructing or self._task is not None
+                        or self._migration_caps or self._recoveries is not None and not self._recoveries.is_drained()):
+                    raise WikiError("Wiki owners must finish cleanup before binding service health", 503)
+                self.health = health
+                # A retained manager keeps its old health and its closed gates.
+                self._recoveries = None
+        finally:
+            self._close_gate.release()
 
     @property
     def legacy_enabled(self):
@@ -154,30 +177,7 @@ class WikiRegistry:
         )
 
     def config(self, user_id: str | None, *, require_root=True) -> dict[str, Any]:
-        path = self.state(user_id) / "config.json"
-        if not path.is_file():
-            raise WikiError("No local wiki is registered for this account", 404)
-        try:
-            config = json.loads(path.read_text(encoding="utf-8"))
-            if not isinstance(config, dict) or set(config) - {"root", "vault_id", "curator_agent_id", "app_id", "registration_protocol", "registration_generation"}:
-                raise ValueError("unsupported configuration structure")
-            if not isinstance(config.get("root"), str) or not Path(config["root"]).is_absolute():
-                raise ValueError("root must be an absolute path")
-            if require_root and not Path(config["root"]).is_dir():
-                raise ValueError("vault root is unavailable")
-            if not isinstance(config.get("curator_agent_id"), str) or not config["curator_agent_id"]:
-                raise ValueError("curator binding is missing")
-            if config.get("app_id") is not None and not isinstance(config["app_id"], str):
-                raise ValueError("invalid application binding")
-            uuid.UUID(config["vault_id"])
-            if "registration_protocol" in config or "registration_generation" in config:
-                if type(config.get("registration_protocol")) is not int or config["registration_protocol"] != 1 or uuid.UUID(config["registration_generation"]).hex != config["registration_generation"]:
-                    raise ValueError("invalid registration generation")
-            else:
-                protocols.registration_preflight(self.state(user_id).resolve(), legacy=True)
-            return config
-        except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
-            raise WikiError(f"Wiki registration is invalid; configuration retained: {exc}", 503) from exc
+        return protocols.read_registration(self.state(user_id), require_root=require_root, health=self.health)
 
     def configure(
         self,
@@ -186,6 +186,7 @@ class WikiRegistry:
         curator_agent_id: str,
         app_id: str | None = None,
     ) -> dict[str, Any]:
+        self.health.require_healthy()
         account = self._account_lock(user_id)
         state = self.state(user_id).resolve()
         with account, self._lock:
@@ -216,54 +217,107 @@ class WikiRegistry:
             raise WikiError("Vault root must be an existing directory")
         state = self.state(user_id)
         state.mkdir(parents=True, exist_ok=True, mode=0o700)
-        old = self.config(user_id) if (state / "config.json").exists() else None
+        config_path = state / "config.json"
+        old = self.config(user_id) if config_path.exists() or config_path.is_symlink() else None
         if old and Path(old["root"]).resolve() != root.resolve():
             raise WikiError(
                 "Changing the authoritative vault requires a separate migration", 409
             )
+        database = state / "index.sqlite3"
+        binding = None
+        if old or database.exists() or database.is_symlink():
+            binding = protocols.registration_preflight(state.resolve(), legacy=bool(old and "registration_generation" not in old),
+                                                       complete=old is None, health=self.health)
+        if binding is not None and (binding["root"] != str(root.resolve()) or old and binding["vault_id"] != old["vault_id"]):
+            raise WikiError("Wiki ledger belongs to another root or vault binding; durable state retained", 409)
+        vault_id = old["vault_id"] if old else binding["vault_id"] if binding else str(uuid.uuid4())
+        try:
+            uuid.UUID(vault_id)
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise WikiError("Wiki ledger has an invalid vault binding; durable state retained", 503) from exc
+        try:
+            guard_vault(settings, root, state, bind=True, health=self.health)
+        except InstallationError as error:
+            raise WikiError(str(error), 409) from error
+        if not old and binding is None:
+            self._create_ledger(root, state, vault_id)
+        elif not old:
+            # A prior process may have stopped immediately after link(), before
+            # confirming its namespace. Complete that sync before config exists.
+            with storage.file_effect(self.health):
+                with database.open("rb") as handle:
+                    os.fsync(handle.fileno())
+                self._sync_parents(state)
         config = {
             "root": str(root.resolve()),
             "curator_agent_id": curator_agent_id,
             "app_id": app_id,
-            "vault_id": old["vault_id"] if old else str(uuid.uuid4()),
+            "vault_id": vault_id,
         }
-        protocols.registration_preflight(state.resolve(), legacy=not old or "registration_generation" not in old)
         same = old and all(config[key] == old.get(key) for key in config)
         config |= {"registration_protocol": 1,
                    "registration_generation": old["registration_generation"] if old and same and old.get("registration_generation") else uuid.uuid4().hex}
         if old == config:
-            try:
+            with storage.file_effect(self.health):
                 self._sync_config(state)
-            except OSError as exc:
-                raise WikiError("Wiki registration durability is unconfirmed; retry the same registration", 503) from exc
             return config
         temporary = None
-        replaced = False
         try:
-            with tempfile.NamedTemporaryFile(
-                dir=state, mode="w", encoding="utf-8", delete=False
-            ) as handle:
-                temporary = Path(handle.name)
-                json.dump(config, handle, ensure_ascii=False)
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(temporary, state / "config.json")
-            replaced = True
-            self._sync_config(state)
-        except OSError as exc:
-            if replaced:
-                raise WikiError("Wiki registration replaced, but durability is unconfirmed; retry the same registration", 503) from exc
-            raise
+            with storage.file_effect(self.health):
+                with tempfile.NamedTemporaryFile(
+                    dir=state, mode="w", encoding="utf-8", delete=False
+                ) as handle:
+                    temporary = Path(handle.name)
+                    json.dump(config, handle, ensure_ascii=False)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(temporary, state / "config.json")
+                self._sync_config(state)
         finally:
             if temporary is not None:
-                temporary.unlink(missing_ok=True)
+                with contextlib.suppress(OSError):
+                    temporary.unlink(missing_ok=True)
         return config
+
+    def _create_ledger(self, root, state, vault_id):
+        """The registration lock owns first creation through config publication."""
+        temporary = None
+        try:
+            with storage.file_effect(self.health):
+                descriptor, name = tempfile.mkstemp(prefix=".index-", suffix=".sqlite3", dir=state)
+                temporary = Path(name)
+                os.close(descriptor)
+            WikiStore.create_database(root, state, vault_id, temporary, health=self.health)
+            with storage.file_effect(self.health):
+                with temporary.open("rb") as handle:
+                    os.fsync(handle.fileno())
+                try:
+                    os.link(temporary, state / "index.sqlite3")
+                except FileExistsError as exc:
+                    raise WikiError("Wiki ledger appeared during registration; retained without replacement", 409) from exc
+                temporary.unlink()
+                self._sync_parents(state)
+        finally:
+            if temporary is not None:
+                # An unpublished private file carries no business facts. Its
+                # cleanup is independent of the published database's durability.
+                with contextlib.suppress(OSError):
+                    temporary.unlink(missing_ok=True)
 
     @staticmethod
     def _sync_config(state):
         with (state / "config.json").open("rb") as handle:
             os.fsync(handle.fileno())
-        directory = os.open(state, os.O_RDONLY | os.O_DIRECTORY)
+        WikiRegistry._sync_parents(state)
+
+    @staticmethod
+    def _sync_parents(path):
+        for parent in (path, *path.parents):
+            WikiRegistry._sync_directory(parent)
+
+    @staticmethod
+    def _sync_directory(path):
+        directory = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(directory)
         finally:
@@ -277,6 +331,8 @@ class WikiRegistry:
 
         with self._lock:
             if self._recoveries is None:
+                if self._closing or self._stopped:
+                    raise WikiError("Wiki recovery owners are unavailable during cleanup", 503)
                 self._recoveries = RecoveryManager(self)
             return self._recoveries
 
@@ -320,6 +376,7 @@ class WikiRegistry:
                 config.get("curator_agent_id"), config.get("app_id"), config.get("registration_generation"))
 
     def _store(self, user_id, capability=None):
+        self.health.require_healthy()
         account = self._account_lock(user_id)
         outer_account = account._is_owned()
         state = self.state(user_id).resolve()
@@ -351,7 +408,13 @@ class WikiRegistry:
         candidate = None
         retire = []
         try:
-            protocols.registration_preflight(state, legacy="registration_generation" not in config)
+            binding = protocols.registration_preflight(state, legacy="registration_generation" not in config, health=self.health)
+            if binding is not None and binding != {"root": config["root"], "vault_id": config["vault_id"]}:
+                raise WikiError("Wiki ledger registration binding changed; durable state retained", 503)
+            try:
+                guard_vault(settings, Path(config["root"]), state, health=self.health)
+            except InstallationError as error:
+                raise WikiError(str(error), 503) from error
             if "registration_generation" not in config:
                 with account:
                     with self._lock:
@@ -369,7 +432,7 @@ class WikiRegistry:
                 # rechecks the permit and config after construction completes.
                 store.registration_generation = config["registration_generation"]
 
-            candidate = WikiStore(Path(config["root"]), state, config["vault_id"], on_construct=acquired)
+            candidate = WikiStore(Path(config["root"]), state, config["vault_id"], on_construct=acquired, health=self.health)
             with candidate.connect() as db:
                 protocols.require(db, "registration")
                 db.execute("INSERT OR IGNORE INTO wiki_protocols VALUES('registration_config',1)")
@@ -496,6 +559,9 @@ class WikiRegistry:
     def resume_access(self):
         with self._lock:
             self._check_reopen()
+            self.health.require_healthy()
+            if self._recoveries is not None and self._recoveries.is_drained():
+                self._recoveries.resume()
             self._incarnation += 1
             self._stopped = False
 
@@ -517,7 +583,7 @@ class WikiRegistry:
 
         return await complete_cleanup(asyncio.to_thread(run))
 
-    async def start(self) -> None:
+    async def start(self, *, paused: bool = False) -> None:
         with self._lock:
             self._check_reopen()
             if self._task is not None:
@@ -530,12 +596,20 @@ class WikiRegistry:
             with self._lock:
                 if self._incarnation != incarnation or self._stopped or self._closing:
                     raise WikiError("Wiki startup was revoked before publication", 503)
-                self._stopping = asyncio.Event()
-                self._task = asyncio.create_task(self._run(), name="wiki-index-sync")
+                if not paused:
+                    self.start_reconciler()
         finally:
             with self._lock:
                 if self._starting is starting:
                     self._starting = None
+
+    def start_reconciler(self) -> None:
+        with self._lock:
+            if self._stopped or self._closing:
+                raise WikiError("Wiki registry is stopping", 503)
+            if self._task is None:
+                self._stopping = asyncio.Event()
+                self._task = asyncio.create_task(self._run(), name="wiki-index-sync")
 
     async def _run(self) -> None:
         assert self._stopping is not None

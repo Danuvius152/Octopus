@@ -70,6 +70,10 @@ async def test_unconfirmed_request_input_never_opens_wiki_or_starts_the_backend(
     monkeypatch.setattr(get_harness("codex"), "create_run", create)
     receipt = await manager.start_message(session.id, "/wiki Explain the source constraint")
     completion = await receipt.wait()
-    assert completion.outcome.status == "failed"
-    assert started == [] and session._knowledge_context is None and session._wiki_task_id is None
+    assert completion.input_request_id == completion.request_id == receipt.request_id
+    assert completion.state == "unavailable" and completion.outcome is None
+    assert completion.recording_state == "none"
+    assert completion.notification_state == "unavailable"
+    assert started == [] and session._run.knowledge_context is None and session._run.wiki_task_id is None
     assert not any(task.session_id == session.id for task in tasks.active.values())
+    assert await manager.db.get_committed_terminal(session.id, receipt.request_id) is None

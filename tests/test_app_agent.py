@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import json
 import os
+import sqlite3
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -107,12 +108,16 @@ class FakeTurns:
         self.reply = "Sure — the article argues three things."
         self.is_error = False
         self.emit = True
+        self.receipts = {}
 
     async def start_message(self, session_id, prompt, attachment_ids=None, **kw):
         self.prompts.append((session_id, prompt))
         receipt = accepted_receipt(kw.get("request_id"))
         if not self.emit:
-            return replace(receipt, _completion=asyncio.get_running_loop().create_future())
+            receipt = replace(receipt, _completion=asyncio.get_running_loop().create_future())
+        self.receipts[receipt.request_id] = receipt
+        if not self.emit:
+            return receipt
         async def broadcast(event):
             await self.mgr._broadcast({**event, "request_id": receipt.request_id})
         for chunk in ("Sure — ", "the article "):
@@ -399,14 +404,14 @@ async def test_a_turn_still_unwinding_is_waited_out_not_refused(
     be told its own conversation is busy."""
     row = await _make_app(am, db)
     unwinding = asyncio.Event()
+    running = {}
+    monkeypatch.setattr(mgr, "session_is_executing", lambda session: session.id in running and not running[session.id].done())
 
     async def start(session_id, prompt, attachment_ids=None, **kw):
-        session = mgr.get_session(session_id)
-
         async def tail():
             await unwinding.wait()
 
-        session._active_task = asyncio.ensure_future(tail())
+        running[session_id] = asyncio.ensure_future(tail())
         await mgr._broadcast(
             {"type": "result", "session_id": session_id, "is_error": False}
         )
@@ -425,6 +430,8 @@ async def test_a_turn_still_unwinding_is_waited_out_not_refused(
         row, message="two", conversation_id=first["conversation_id"]
     )
     assert second["conversation_id"] == first["conversation_id"]
+    unwinding.set()
+    await asyncio.gather(*running.values())
 
 
 @pytest.mark.asyncio
@@ -433,10 +440,11 @@ async def test_a_conversation_busy_with_someone_elses_turn_is_refused(
 ):
     row = await _make_app(am, db)
     monkeypatch.setattr(app_agent_mod, "IDLE_WAIT_SECONDS", 0.05)
+    running = {}
+    monkeypatch.setattr(mgr, "session_is_executing", lambda session: session.id in running and not running[session.id].done())
 
     async def start(session_id, prompt, attachment_ids=None, **kw):
-        session = mgr.get_session(session_id)
-        session._active_task = asyncio.ensure_future(asyncio.sleep(30))
+        running[session_id] = asyncio.ensure_future(asyncio.sleep(30))
         await mgr._broadcast(
             {"type": "result", "session_id": session_id, "is_error": False}
         )
@@ -450,7 +458,7 @@ async def test_a_conversation_busy_with_someone_elses_turn_is_refused(
 
     # Tidy the stand-in turn up rather than leaving a cancelled task for the
     # loop to complain about at collection time.
-    task = mgr.get_session(first["conversation_id"])._active_task
+    task = running[first["conversation_id"]]
     task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await task
@@ -479,7 +487,13 @@ async def test_app_waits_through_recovery_events(aam, am, db, mgr, turns):
         assert turn.error is None
     await mgr._broadcast({"type": "assistant_text", "session_id": sid, "request_id": turn.request_id, "content": "recovered"})
     await mgr._broadcast({"type": "result", "session_id": sid, "request_id": turn.request_id, "is_error": False})
-    events = [event async for event in aam.stream_turn(turn)]
+    assert not turn.done.is_set()
+    # This transport stub must acknowledge the original completion too; a
+    # successful result notification is no longer a separate completion path.
+    receipt = turns.receipts[turn.request_id]
+    receipt._completion.set_result(accepted_receipt(turn.request_id)._completion.result())
+    async with asyncio.timeout(2):
+        events = [event async for event in aam.stream_turn(turn)]
     assert events[-1]["type"] == "done"
     assert events[-1]["reply"] == "recovered"
     assert not any(event["type"] == "error" for event in events)
@@ -528,25 +542,41 @@ async def test_request_status_recovers_only_the_original_completed_attempt(aam, 
         created_at=datetime.now(UTC).isoformat(),
         content={"kind": "outcome", "request_id": turn.request_id, "status": "success"},
         tool_input={"attempt_context": {"request_id": turn.request_id, "attempt_id": "completed"}})
-    await db.flush()
     status = await aam.get_request_status(row["id"], turn.session_id, turn.request_id)
     assert status["state"] == "completed" and status["reply"] == "one\n\ntwo"
     with pytest.raises(AppAgentError):
         await aam.get_request_status("other-app", turn.session_id, turn.request_id)
 
 
-async def test_request_status_does_not_commit_an_unconfirmed_terminal(aam, am, db, turns):
+async def test_request_status_waits_for_the_terminal_transaction_acknowledgment(aam, am, db, turns, monkeypatch):
     row = await _make_app(am, db)
     turns.emit = False
     turn = await aam.begin_turn(row, message="request to recover")
     aam._release_turn(turn)
-    await db.append_message(session_id=turn.session_id, seq=0, role="system", type="result",
+    commit = db.conn.commit
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed_commit():
+        entered.set()
+        await release.wait()
+        await commit()
+
+    monkeypatch.setattr(db.conn, "commit", delayed_commit)
+    writer = asyncio.create_task(db.append_message(session_id=turn.session_id, seq=0, role="system", type="result",
         terminal_request_id=turn.request_id,
-        content={"kind": "outcome", "request_id": turn.request_id, "status": "success"})
-    assert db.conn.in_transaction
-    status = await aam.get_request_status(row["id"], turn.session_id, turn.request_id)
-    assert status["state"] == "unknown"
-    assert db.conn.in_transaction
+        content={"kind": "outcome", "request_id": turn.request_id, "status": "success"}))
+    reader = None
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        reader = asyncio.create_task(aam.get_request_status(row["id"], turn.session_id, turn.request_id))
+        await asyncio.sleep(0)
+        assert not writer.done() and not reader.done()
+        release.set()
+        await writer
+        assert (await reader)["state"] == "completed"
+    finally:
+        release.set()
+        await asyncio.gather(writer, *([reader] if reader else []), return_exceptions=True)
 
 
 async def test_reading_a_confirmed_request_does_not_commit_another_request(tmp_path):
@@ -562,11 +592,19 @@ async def test_reading_a_confirmed_request_does_not_commit_another_request(tmp_p
         await database.record_terminal(request_id="confirmed", session_id=session.id, seq=0,
             role="system", type="result", created_at=datetime.now(UTC).isoformat(),
             content={"kind": "outcome", "request_id": "confirmed", "status": "success"})
-        await database.append_message(session_id=session.id, seq=1, role="system", type="result",
-            terminal_request_id="uncertain", content={"kind": "outcome", "request_id": "uncertain", "status": "success"})
-        assert (await observer.get_request_status("app", session.id, "confirmed"))["state"] == "completed"
+        reader = None
+        with pytest.raises(ValueError, match="abort other request"):
+            async with database.transaction() as tx:
+                await database._append_message(tx, session_id=session.id, seq=1, role="system", type="result",
+                    terminal_request_id="uncertain", content={"kind": "outcome", "request_id": "uncertain", "status": "success"})
+                reader = asyncio.create_task(observer.get_request_status("app", session.id, "confirmed"))
+                await asyncio.sleep(0)
+                assert not reader.done()
+                with sqlite3.connect(database._db_path) as independent:
+                    assert independent.execute("SELECT terminal_request_id FROM messages WHERE session_id=?", (session.id,)).fetchall() == [("confirmed",)]
+                raise ValueError("abort other request")
+        assert (await reader)["state"] == "completed"
         assert await database.get_committed_terminal(session.id, "uncertain") is None
-        assert database.conn.in_transaction
     finally:
         await database.close()
 

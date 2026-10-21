@@ -12,7 +12,12 @@ The event payloads below are copied from real CLI runs.
 
 from __future__ import annotations
 
+import asyncio
 import json
+import sys
+from dataclasses import replace
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,6 +29,10 @@ from server.harness.claude_code import (
 )
 from server.harness.codex import CodexEventParser
 from server.harness.profile import TurnContext
+from tests import test_question_lifecycle as question_tests
+
+question_host = question_tests.question_host
+owned_question_host = question_tests.owned_question_host
 
 TOOL_USE_ID = "toolu_01Hgbnw2SWBPzZFH8wJyEZZT"
 TASK_ID = "ad54ad25029726077"
@@ -544,8 +553,149 @@ async def test_the_session_snapshot_carries_live_runs(client):
 # ------------------------------------------- work that outlives its own turn
 
 
+@pytest.fixture
+async def held_subagent_transport(owned_question_host, monkeypatch):
+    """Keep the actual process, stream and original idle reporter together."""
+    from server.harness import get_harness
+    from server.harness.run import HarnessRun
+
+    manager, original, client, events = owned_question_host
+    directory = Path(original.working_dir) / "held-subagent-transport"
+    directory.mkdir(parents=True)
+    model = directory / "held_model.py"
+    initial_path, late_path = directory / "initial.json", directory / "late.json"
+    identity_path, input_path = directory / "identity.json", directory / "input.json"
+    release = directory / "release-late"
+    model.write_text(
+        "import json,os,sys,time\nfrom pathlib import Path\n"
+        "fields=Path(f'/proc/{os.getpid()}/stat').read_text().rsplit(')',1)[1].split()\n"
+        "Path(sys.argv[2]).write_text(json.dumps({'pid':os.getpid(),'pgid':os.getpgrp(),'start_time':fields[19]}))\n"
+        "Path(sys.argv[3]).write_text(sys.stdin.readline())\n"
+        "for event in json.loads(Path(sys.argv[1]).read_text()): print(json.dumps(event),flush=True)\n"
+        "while not Path(sys.argv[5]).exists(): time.sleep(.005)\n"
+        "for event in json.loads(Path(sys.argv[4]).read_text()): print(json.dumps(event),flush=True)\n"
+        "sys.stdin.read()\n"
+    )
+    initial_path.write_text(json.dumps([
+        {"type": "system", "subtype": "init", "session_id": "held-original-thread"},
+        {"type": "assistant", "message": {"content": [{
+            "type": "tool_use", "id": TOOL_USE_ID, "name": "Task",
+            "input": {"description": "searching", "prompt": "find it", "subagent_type": "general-purpose"},
+        }]}},
+        {"type": "system", "subtype": "task_started", "task_id": TASK_ID,
+         "tool_use_id": TOOL_USE_ID, "description": "searching", "subagent_type": "general-purpose"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "in turn"}]}},
+        {"type": "result", "subtype": "success", "session_id": "held-original-thread", "is_error": False},
+    ]))
+    harness = get_harness("claude-code")
+    monkeypatch.setattr(harness, "profile", replace(
+        harness.profile, binary=sys.executable, prepare_resume=None, activity_observer=None,
+        build_turn_argv=lambda context: (
+            [sys.executable, "-u", str(model), str(initial_path), str(identity_path),
+             str(input_path), str(late_path), str(release)],
+            {"cwd": context.working_dir},
+        ),
+    ))
+    processes, captured_runs, idle_events = [], [], []
+    stream_readers, stdout_readers = set(), set()
+    spawn, stream, install_reporter = asyncio.create_subprocess_exec, HarnessRun.stream, HarnessRun.set_idle_handler
+
+    async def observe_spawn(*args, **kwargs):
+        process = await spawn(*args, **kwargs)
+        if str(model) in args:
+            processes.append(process)
+        return process
+
+    async def observe_stream(run):
+        stream_readers.add(asyncio.current_task())
+        async for event in stream(run):
+            yield event
+
+    def capture_reporter(run, reporter):
+        captured_runs.append(run)
+
+        async def observe_original_idle(event):
+            stdout_readers.add(asyncio.current_task())
+            idle_events.append(event)
+            await reporter(event)
+
+        install_reporter(run, observe_original_idle)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observe_spawn)
+    monkeypatch.setattr(HarnessRun, "stream", observe_stream)
+    monkeypatch.setattr(HarnessRun, "set_idle_handler", capture_reporter)
+    session = await manager.create_session(
+        original.agent_id, "Original held subagent", str(directory), backend="claude-code",
+    )
+    owner_events, foreign_events = [], []
+
+    async def observe_owner(event):
+        if event.get("session_id") == session.id:
+            owner_events.append(event)
+
+    async def observe_foreign(event):
+        if event.get("session_id") == session.id:
+            foreign_events.append(event)
+
+    manager.on_broadcast("held-original-owner", observe_owner, user_id=session.user_id)
+    manager.on_broadcast("held-foreign-owner", observe_foreign, user_id="another-subagent-owner")
+    receipt = None
+
+    def emit_late(frames):
+        late_path.write_text(json.dumps(frames))
+        release.touch()
+
+    try:
+        prompt = "Keep the original native helper and its later report."
+        receipt = await manager.start_message(session.id, prompt, work_id=f"held-work-{session.id}")
+        completion = await asyncio.wait_for(receipt.wait(), 3)
+        assert completion.recording_state == "committed" and completion.outcome.status == "success"
+        assert len(processes) == len(captured_runs) == len(stream_readers) == 1
+        identity = json.loads(identity_path.read_text())
+        assert identity["pid"] == identity["pgid"] == processes[0].pid
+        assert Path(f"/proc/{identity['pid']}").exists() and processes[0].returncode is None
+        assert all(reader.done() for reader in stream_readers)
+        assert json.loads(input_path.read_text())["message"]["content"] == prompt
+        attempt = next(event["attempt_id"] for event in owner_events if event["type"] == "attempt_started")
+        yield SimpleNamespace(
+            manager=manager, session=session, client=client, events=events,
+            owner_events=owner_events, foreign_events=foreign_events, idle_events=idle_events,
+            processes=processes, stream_readers=stream_readers, stdout_readers=stdout_readers,
+            receipt=receipt, attempt=attempt, identity=identity, emit_late=emit_late, prompt=prompt,
+        )
+    finally:
+        if not release.exists():
+            emit_late([])
+        try:
+            await manager.interrupt(session.id)
+            await manager.await_session_execution(session.id, timeout=5)
+            await manager.drain_turns(timeout=5)
+        finally:
+            for process in processes:
+                if process.returncode is None:
+                    process.kill()
+                await asyncio.wait_for(process.wait(), 3)
+            await asyncio.gather(*stream_readers, *stdout_readers, return_exceptions=True)
+
+
+async def _retire_original_transport(env):
+    await env.manager.interrupt(env.session.id)
+    await env.manager.await_session_execution(env.session.id, timeout=5)
+    await asyncio.wait_for(env.processes[0].wait(), 3)
+    assert not Path(f"/proc/{env.identity['pid']}").exists()
+    assert len(env.stdout_readers) == 1
+    assert all(reader.done() for reader in env.stdout_readers | env.stream_readers)
+    assert (await env.receipt.wait()).outcome.status == "success"
+    print("Actual original held transport retired: " + json.dumps({
+        "pid": env.identity["pid"], "request_id": env.receipt.request_id,
+        "attempt_id": env.attempt, "work_id": f"held-work-{env.session.id}",
+        "returncode": env.processes[0].returncode, "stream_readers_joined": len(env.stream_readers),
+        "stdout_readers_joined": len(env.stdout_readers), "foreign_frames": len(env.foreign_events),
+    }), flush=True)
+
+
 @pytest.mark.asyncio
-async def test_events_after_a_turn_reach_the_session(client):
+async def test_events_after_a_turn_reach_the_session(held_subagent_transport):
     """The CLI's async sub-agents are the reason this exists.
 
     `Async agent launched successfully` returns immediately: the turn ends,
@@ -553,56 +703,48 @@ async def test_events_after_a_turn_reach_the_session(client):
     CLI wakes the agent to report it. Those events used to be dropped — the
     card spun forever and the answer never arrived (native-subagents.md §7).
     """
-    from server.harness import HarnessEvent
-    from server.session_manager import session_manager
+    env = held_subagent_transport
+    delivered = asyncio.Event()
+    body = "The background agent found 2 files."
 
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
-    made = await client.post(
-        "/api/sessions",
-        json={"name": "Async", "working_dir": "/tmp", "agent_id": agents[0]["id"]},
-        headers=HEADERS,
-    )
-    sid = made.json()["id"]
+    async def see_original_report(event):
+        if event.get("session_id") == env.session.id and event.get("content") == body:
+            delivered.set()
 
-    broadcast: list[dict] = []
-    session_manager.on_broadcast("test", lambda m: _collect(broadcast, m))
-    try:
-        # The sub-agent finishes…
-        await session_manager._handle_idle_event(
-            sid,
-            HarnessEvent(
-                type="subagent",
-                subagent=SubagentUpdate(
-                    task_id="t1",
-                    tool_use_id="tu1", tool_call_id="tu1",
-                    status="completed",
-                    name="general-purpose",
-                    summary="2 files",
-                ),
-            ),
-        )
-        # …and the agent reports it in a turn nobody asked for.
-        await session_manager._handle_idle_event(
-            sid, HarnessEvent(type="text", content="The background agent found 2 files.")
-        )
-    finally:
-        session_manager.remove_broadcast("test")
-
-    kinds = [m["type"] for m in broadcast]
+    env.manager.on_broadcast("original-late-report", see_original_report, user_id=env.session.user_id)
+    initial = await env.client.get(f"/api/sessions/{env.session.id}")
+    assert initial.status_code == 200
+    assert initial.json()["subagents"][0]["status"] == "running"
+    original_call = initial.json()["subagents"][0]["tool_call_id"]
+    env.emit_late([
+        {"type": "system", "subtype": "task_notification", "task_id": TASK_ID,
+         "tool_use_id": TOOL_USE_ID, "status": "completed", "summary": "2 files"},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": body}]}},
+    ])
+    await asyncio.wait_for(delivered.wait(), 3)
+    kinds = [message["type"] for message in env.owner_events]
     assert "subagent" in kinds and "assistant_text" in kinds
 
     # The report is persisted, so it's still there after a reload — unlike
     # the progress that produced it.
-    detail = (await client.get(f"/api/sessions/{sid}", headers=HEADERS)).json()
+    detail = (await env.client.get(f"/api/sessions/{env.session.id}")).json()
     assert any(
         m["type"] == "text" and "background agent found 2 files" in (m["content"] or "")
         for m in detail["messages"]
     )
     assert detail["subagents"][0]["status"] == "completed"
-
-
-async def _collect(sink: list[dict], message: dict) -> None:
-    sink.append(message)
+    assert detail["subagents"][0]["summary"] == "2 files"
+    assert detail["subagents"][0]["tool_call_id"] == original_call
+    assert [row["content"] for row in detail["messages"] if row["role"] == "assistant" and row["type"] == "text"] == ["in turn", body]
+    assert [row["content"] for row in detail["messages"] if row["role"] == "user"] == [env.prompt]
+    assert len([row for row in detail["messages"] if row["type"] == "result"]) == 1
+    late = [event for event in env.owner_events if event.get("content") == body
+            or event.get("type") == "subagent" and event.get("status") == "completed"]
+    assert len(late) == 2
+    assert all(event["request_id"] == env.receipt.request_id and event["attempt_id"] == env.attempt
+               and event["work_id"] == f"held-work-{env.session.id}" for event in late)
+    assert env.foreign_events == []
+    await _retire_original_transport(env)
 
 
 @pytest.mark.asyncio
@@ -632,11 +774,11 @@ def test_losing_the_process_ends_its_sub_agents():
             task_id="t2", tool_use_id="tu2", tool_call_id="tu2", status="completed", summary="done"
         ),
     )
-    session._held_run_at = 1.0
+    session._run.held_since = 1.0
 
     mgr._forget_backend(session)
 
-    assert session._backend is None and session._held_run_at is None
+    assert session._run.backend is None and session._run.held_since is None
     assert session._subagents["tu1"].status == "interrupted"
     assert session._subagents["tu1"].stop_reason == "process_ended"
     # A run that already finished keeps its result.
@@ -719,7 +861,7 @@ def test_the_trail_is_bounded():
 
 
 @pytest.mark.asyncio
-async def test_out_of_turn_token_deltas_are_dropped(client):
+async def test_out_of_turn_token_deltas_are_dropped(held_subagent_transport):
     """A delta is a live view of a block that is about to arrive complete.
 
     Out of turn there is nothing live to view: the UI has already painted the
@@ -727,29 +869,36 @@ async def test_out_of_turn_token_deltas_are_dropped(client):
     of the answer. An e2e run caught this under load, where a short reply's
     completed block beat its own deltas.
     """
-    from server.harness import HarnessEvent
-    from server.session_manager import session_manager
+    env = held_subagent_transport
+    delivered = asyncio.Event()
 
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
-    made = await client.post(
-        "/api/sessions",
-        json={"name": "Deltas", "working_dir": "/tmp", "agent_id": agents[0]["id"]},
-        headers=HEADERS,
-    )
-    sid = made.json()["id"]
+    async def see_original_answer(event):
+        if event.get("session_id") == env.session.id and event.get("content") == "the real answer":
+            delivered.set()
 
-    broadcast: list[dict] = []
-    session_manager.on_broadcast("delta-test", lambda m: _collect(broadcast, m))
-    try:
-        await session_manager._handle_idle_event(
-            sid, HarnessEvent(type="text_delta", content="stale part")
-        )
-        await session_manager._handle_idle_event(
-            sid, HarnessEvent(type="text", content="the real answer")
-        )
-    finally:
-        session_manager.remove_broadcast("delta-test")
-
-    kinds = [m["type"] for m in broadcast]
+    env.manager.on_broadcast("original-complete-answer", see_original_answer, user_id=env.session.user_id)
+    env.emit_late([
+        {"type": "stream_event", "event": {"type": "content_block_delta", "index": 0,
+                                             "delta": {"type": "text_delta", "text": "stale part"}}},
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "the real answer"}]}},
+    ])
+    await asyncio.wait_for(delivered.wait(), 3)
+    assert [(event.type, event.content) for event in env.idle_events] == [
+        ("text_delta", "stale part"), ("text", "the real answer"),
+    ]
+    kinds = [message["type"] for message in env.owner_events]
     assert "assistant_delta" not in kinds
     assert "assistant_text" in kinds
+    late = [event for event in env.owner_events if event.get("content") == "the real answer"]
+    assert len(late) == 1
+    assert late[0]["request_id"] == env.receipt.request_id and late[0]["attempt_id"] == env.attempt
+    assert late[0]["work_id"] == f"held-work-{env.session.id}"
+    detail = (await env.client.get(f"/api/sessions/{env.session.id}")).json()
+    assert [row["content"] for row in detail["messages"] if row["role"] == "assistant" and row["type"] == "text"] == [
+        "in turn", "the real answer",
+    ]
+    assert not any("stale part" in str(row["content"]) for row in detail["messages"])
+    assert len([row for row in detail["messages"] if row["type"] == "result"]) == 1
+    assert [row["content"] for row in detail["messages"] if row["role"] == "user"] == [env.prompt]
+    assert env.foreign_events == []
+    await _retire_original_transport(env)

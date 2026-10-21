@@ -1,6 +1,7 @@
 """Targeted app text journaling and bounded recovery, including crash windows."""
 
 import asyncio
+import fcntl
 import json
 import threading
 import uuid
@@ -21,7 +22,7 @@ from server.wiki.store import WikiError, WikiStore, revision
 def history(tmp_path):
     root = tmp_path / "vault"
     root.mkdir()
-    return WikiHistory(WikiStore(root, tmp_path / "state", str(uuid.uuid4())))
+    return WikiHistory(WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True))
 
 
 def date_changes(history, changes, when):
@@ -352,8 +353,16 @@ async def test_attachment_upload_and_git_commit_hold_lock_without_text_capture(
             row, "POST", endpoint, {"vault": "obv"}, json.dumps(body).encode()
         )
         assert mutation is not None and mutation.before is None
-        await mutation.finish()
-    assert list(history.blobs.iterdir()) == []
+        with (history.state / "vault.lock").open("a+b") as contender:
+            try:
+                with pytest.raises(BlockingIOError):
+                    fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            finally:
+                await mutation.finish()
+            fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    assert list(history.blobs.glob("*")) == []
+    assert history.history("note.md")["items"] == []
+    assert not (history.state / "external-change.json").exists()
 
 
 async def test_sapphire_rename_delete_restore_preserve_identity_and_owned_additions(
@@ -382,7 +391,7 @@ async def test_sapphire_rename_delete_restore_preserve_identity_and_owned_additi
         row,
         "POST",
         "rename",
-        {},
+        {"vault": "obv"},
         json.dumps({"path": "note.md", "to": "renamed.md"}).encode(),
     )
     history.store.path("note.md").rename(history.store.path("renamed.md"))
@@ -391,7 +400,7 @@ async def test_sapphire_rename_delete_restore_preserve_identity_and_owned_additi
     with history.store.connect() as db:
         assert origins.get(db, original["id"]) == origin_state
     delete = await begin(
-        row, "POST", "delete", {}, json.dumps({"path": "renamed.md"}).encode()
+        row, "POST", "delete", {"vault": "obv"}, json.dumps({"path": "renamed.md"}).encode()
     )
     tid = uuid.uuid4().hex
     trash = Path(row["app_dir"] + ".data") / "trash" / "obv" / tid
@@ -410,13 +419,13 @@ async def test_sapphire_rename_delete_restore_preserve_identity_and_owned_additi
     replacement_id = history.store.read("renamed.md")["id"]
     assert replacement_id != original["id"]
     failed_restore = await begin(
-        row, "POST", "restore", {}, json.dumps({"id": tid}).encode()
+        row, "POST", "restore", {"vault": "obv"}, json.dumps({"id": tid}).encode()
     )
     await failed_restore.finish()  # app rejects because destination exists
     assert history.store.read("renamed.md")["revision"] == other["revision"]
     history.store.path("renamed.md").unlink()
     history.store.refresh()
-    restore = await begin(row, "POST", "restore", {}, json.dumps({"id": tid}).encode())
+    restore = await begin(row, "POST", "restore", {"vault": "obv"}, json.dumps({"id": tid}).encode())
     (trash / "file").rename(history.store.path("renamed.md"))
     (trash / "info.json").unlink()
     trash.rmdir()
@@ -435,7 +444,7 @@ async def test_sync_partial_failure_records_only_actual_text_changes_and_crash_r
 ):
     row, history = sapphire
     mutation = await begin(
-        row, "POST", "git", {}, json.dumps({"action": "sync"}).encode()
+        row, "POST", "git", {"vault": "obv"}, json.dumps({"action": "sync"}).encode()
     )
     history.store.path("note.md").write_bytes(b"merge succeeded; push failed")
     # Simulate a process restart after journaling, before final journal unlink.

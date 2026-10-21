@@ -13,6 +13,7 @@ from server.session_manager import session_manager
 from server.users import UserManager
 from server.wiki import account_upgrade as upgrade
 from server.wiki.registry import registry
+from server.wiki.store import WikiError
 from tests.test_bootstrap import legacy as legacy_install
 
 legacy = legacy_install
@@ -59,6 +60,32 @@ async def test_failed_migration_can_resume_without_losing_identity_or_secrets(re
     assert registry.store(user["id"]).read("Library/note.md")["id"] == note["id"]
     assert upgrade.pending_upgrade() is None
     assert not session_manager._legacy_transition
+
+
+async def test_known_preparation_rejection_reopens_and_next_prepare_captures_new_history(registered, monkeypatch):
+    from server.wiki.history import WikiHistory
+
+    db, _vault, _config, note = registered
+    prepare = upgrade.prepare
+
+    def reject_before_preparation(*_):
+        raise WikiError("Preparation declined before publishing a snapshot", 409)
+
+    monkeypatch.setattr(upgrade, "prepare", reject_before_preparation)
+    with pytest.raises(WikiError, match="Preparation declined") as rejection:
+        await bootstrap_first_account(db, username="owner", password="password1", session_manager=session_manager)
+    assert rejection.value.status == 409
+    assert await db.count_users() == 0
+    assert upgrade.pending_upgrade()["phase"] == "preparing"
+    late = WikiHistory(registry.store(None)).write(
+        note["path"], b"# Source\nConfirmed after a known preparation rejection.\n", note["revision"],
+        "human", "A confirmed write before the next prepare",
+    )
+    monkeypatch.setattr(upgrade, "prepare", prepare)
+    result = await bootstrap_first_account(db, username="owner", password="password1", session_manager=session_manager)
+    current = registry.store(result["user_id"])
+    assert current.read(note["id"])["revision"] == late["revision"]
+    assert late["change_id"] in {row["id"] for row in WikiHistory(current).history(note["path"])["items"]}
 
 
 async def test_resume_keeps_another_accounts_roots_and_secret_private(registered, monkeypatch, tmp_path):

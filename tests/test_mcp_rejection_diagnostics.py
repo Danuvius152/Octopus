@@ -1,20 +1,31 @@
 """Signed rejection diagnoses distinguish lifecycle reasons without payloads."""
 
-from unittest.mock import AsyncMock
-
 import httpx
 import pytest
 
 from server import deps, mcp_identity
+from server.database import Database
 from server.mcp_http import _ScopeMiddleware
+from server.users import UserManager
+
+
+@pytest.fixture
+async def active_account():
+    db = Database(":memory:")
+    await db.initialize()
+    users = UserManager(db)
+    deps.set_user_manager(users)
+    try:
+        yield await users.create_user(username="owner", password="test-password")
+    finally:
+        await db.close()
 
 
 @pytest.mark.parametrize("reason", ["missing_bearer", "invalid_signature", "closed_work", "missing_run_lease", "retired_run_lease", "mismatched_run_lease", "legacy_era", "live"])
-async def test_rejection_reason_keeps_authority_and_logs_only_verified_correlation(monkeypatch, caplog, reason):
+async def test_rejection_reason_keeps_authority_and_logs_only_verified_correlation(monkeypatch, caplog, reason, active_account):
     monkeypatch.setattr(mcp_identity, "_run_leases", {})
     monkeypatch.setattr(mcp_identity, "_closed_works", set())
-    monkeypatch.setattr(deps, "accounts_exist", AsyncMock(return_value=True))
-    session, lease, work, owner = "signed-session", "signed-run", "signed-work", "owner"
+    session, lease, work, owner = "signed-session", "signed-run", "signed-work", active_account["id"]
     token = mcp_identity.mint(session, user_id=owner, run_lease_id=lease, work_id=work)
     if reason == "missing_bearer":
         token = None

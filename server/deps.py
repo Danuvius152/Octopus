@@ -98,6 +98,15 @@ async def accounts_exist() -> bool:
     return _accounts_exist
 
 
+async def owner_is_available(user_id: str) -> bool:
+    """Runtime capabilities consult the same current account rows as bearers."""
+    from .users import owner_is_available as available
+
+    if _user_manager is None:
+        return False
+    return await available(_user_manager.db, user_id)
+
+
 def forget_accounts_exist() -> None:
     """Drop the cached answer. Called when an account is created, and by tests
     that build a fresh database under the same process."""

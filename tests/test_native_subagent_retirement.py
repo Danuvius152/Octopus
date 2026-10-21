@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import signal
 import sys
 from dataclasses import replace
+from pathlib import Path
 
 import httpx
 import pytest
@@ -18,6 +21,56 @@ from server.harness import get_harness
 from server.harness.run import HarnessRun
 from server.routers.sessions import router
 from server.sessions import SessionManager
+
+
+@pytest.mark.parametrize("action", ["stop", "auto_archive"])
+async def test_idle_native_parent_retires_original_process_and_delivers_its_ending(native_runtime, monkeypatch, tmp_path, action):
+    manager, original, _client, events, _seen = native_runtime
+    session = await manager.create_session(
+        original.agent_id, "Held native parent", str(tmp_path), backend="claude-code", origin="delegation",
+    )
+    identity = tmp_path / "native-held.pid"
+    code = (
+        "import json,os,sys\n"
+        f"open({str(identity)!r},'w').write(str(os.getpid()))\n"
+        "for line in sys.stdin:\n"
+        " print(json.dumps({'type':'system','subtype':'init','session_id':'held-native-parent'}),flush=True)\n"
+        " print(json.dumps({'type':'assistant','message':{'role':'assistant','content':[{'type':'tool_use','id':'native-tool','name':'Task','input':{'description':'Original native helper','prompt':'Continue independently'}}]}}),flush=True)\n"
+        " print(json.dumps({'type':'system','subtype':'task_started','task_id':'held-native-child','tool_use_id':'native-tool','description':'Original native helper'}),flush=True)\n"
+        " print(json.dumps({'type':'result','subtype':'success','session_id':'held-native-parent','is_error':False}),flush=True)\n"
+    )
+
+    def argv(context):
+        return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
+
+    harness = get_harness("claude-code")
+    monkeypatch.setattr(harness, "profile", replace(
+        harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None,
+    ))
+    receipt = await manager.start_message(session.id, "Keep the original native transport")
+    completion = await asyncio.wait_for(receipt.wait(), 3)
+    assert completion.recording_state == "committed" and completion.outcome.status == "success"
+    pid = int(identity.read_text())
+    assert Path(f"/proc/{pid}").exists()
+    try:
+        assert any(event.get("session_id") == session.id and event.get("type") == "subagent"
+                   and event.get("status") == "running" and event.get("tool_call_id") for event in events)
+        if action == "stop":
+            await manager.interrupt(session.id)
+            await manager.await_session_execution(session.id, timeout=3)
+        else:
+            assert await manager.auto_archive_scheduled_session(session.id)
+        assert not Path(f"/proc/{pid}").exists(), "The original held process must actually retire"
+        async with asyncio.timeout(1):
+            while not any(event.get("session_id") == session.id and event.get("type") == "subagent"
+                          and event.get("status") == "interrupted" for event in events):
+                await asyncio.sleep(.01)
+        assert (await manager.db.load_messages(session.id))[-1]["content"] == completion.outcome.model_dump()
+    finally:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
 
 
 @pytest.fixture

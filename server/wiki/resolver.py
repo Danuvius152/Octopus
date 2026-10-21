@@ -3,6 +3,7 @@
 import json
 from dataclasses import dataclass
 
+from .format import DocumentFormat
 from .links import anchor_exists, note_name
 from .references import candidate_keys
 
@@ -40,8 +41,8 @@ def index(db, row, metadata):
     return previous | current
 
 
-def resolve(db, reference, parent, *, source_doc=None, overlay=None, check_anchor=True):
-    """No file enumeration, metadata connections, or decoding at this layer."""
+def resolve(db, reference, parent, *, source_doc=None, overlay=None, check_anchor=True, source_parse: DocumentFormat | None = None):
+    """Resolve indexed identities; source_parse belongs to the current source text."""
     keys = candidate_keys(reference, parent, source_doc)
     if reference.namespace == "external":
         return Resolution(None, "external", keys)
@@ -49,7 +50,7 @@ def resolve(db, reference, parent, *, source_doc=None, overlay=None, check_ancho
         return Resolution(None, reference.diagnostic or reference.namespace, keys)
     overlay_id = overlay["id"] if overlay is not None else None
     overlay_names = names(overlay, overlay["metadata"]) if overlay is not None else set()
-    selected = []
+    selected: list[str] = []
     for namespace, key in keys:
         if namespace == "doc":
             targets = [item[0] for item in db.execute("SELECT id FROM document_identities WHERE id=?", (key,))]
@@ -83,6 +84,6 @@ def resolve(db, reference, parent, *, source_doc=None, overlay=None, check_ancho
     current = overlay if target == overlay_id else db.execute("SELECT text FROM documents WHERE id=?", (target,)).fetchone()
     if current is None:
         return Resolution(target, "missing", keys)
-    if check_anchor and reference.fragment and reference.relation in {"wikilink", "markdown_link"} and not anchor_exists(current["text"], reference.fragment):
+    if check_anchor and reference.fragment and reference.relation in {"wikilink", "markdown_link"} and not anchor_exists(current["text"], reference.fragment, parsed=source_parse if target == source_doc else None):
         return Resolution(target, "missing_anchor", keys)
     return Resolution(target, "resolved", keys)

@@ -6,6 +6,7 @@ import json
 import sqlite3
 import threading
 import uuid
+from pathlib import Path
 
 import pytest
 
@@ -30,6 +31,69 @@ async def stage(client, result, wanted):
         response = await apply(client, result)
         assert response.status_code == 200, response.text
     raise AssertionError("Recovery did not reach its bounded stage")
+
+
+@pytest.mark.parametrize("complete", [False, True])
+async def test_recovery_receivers_keep_service_health_through_registration_replacement(uncertain, complete):
+    client, root, _, original, _ = uncertain
+    result = await plan(client)
+    if complete:
+        await approve(client, result)
+        await finish(client, result)
+        receiver = registry.store(None).events.journal
+    else:
+        receiver = handle().observer.journal
+    if not complete:
+        assert receiver.health is registry.health
+        return
+    current = registry.store(None).read(original["path"])
+    from server.agent_manager import AgentManager
+
+    created = await AgentManager(wiki_api.session_manager.db).create_agent(name="Replacement curator")
+    configured = await client.put("/api/wiki/config", headers=wiki_api.HEADERS,
+                                  json={"root": str(root), "curator_agent_id": created["id"]})
+    assert configured.status_code == 200, configured.text
+    read = await client.get("/api/wiki/read", params={"doc": original["path"]}, headers=wiki_api.HEADERS)
+    assert read.status_code == 200, read.text
+    assert read.json()["id"] == current["id"]
+    assert read.json()["content"] == "# Original\nKeep this argument and its conditions.\n"
+    assert registry.store(None).events.journal.health is registry.health
+
+
+async def test_offline_body_root_keeps_recovery_diagnostics_and_evidence_available(uncertain):
+    client, root, store, original, _ = uncertain
+    result = await plan(client)
+    await approve(client, result)
+    registry.recoveries().close()
+    before = sql(store, "SELECT * FROM filesystem_state")
+    identities = sql(store, "SELECT * FROM document_identities")
+    offline = root.with_name("offline-vault")
+    root.rename(offline)
+    try:
+        inspected = await client.get("/api/wiki/recovery", headers=wiki_api.HEADERS)
+        assert inspected.status_code == 200, inspected.text
+        assert inspected.json()["root_available"] is False
+        assert inspected.json()["filesystem"] == before[0]
+        status = await client.get(f"/api/wiki/recovery/{result['recovery_id']}", headers=wiki_api.HEADERS)
+        assert status.status_code == 200, status.text
+        saved = await client.get(result["plan_url"], headers=wiki_api.HEADERS)
+        assert saved.status_code == 200 and saved.json()["plan_hash"] == result["plan_hash"]
+        exported = await client.post("/api/wiki/recovery/export", headers=wiki_api.HEADERS)
+        assert exported.status_code == 200, exported.text
+        receipt = exported.json()
+        raw = Path(receipt["path"]).read_bytes()
+        assert len(raw) == receipt["bytes"] and hashlib.sha256(raw).hexdigest() == receipt["sha256"]
+        assert json.loads(raw)["root_available"] is False
+        refused = await client.post("/api/wiki/recovery/plan", headers=wiki_api.HEADERS, json={"retain": []})
+        assert refused.status_code in {409, 503}, refused.text
+        refused = await apply(client, result)
+        assert refused.status_code in {409, 503}, refused.text
+        assert sql(store, "SELECT * FROM filesystem_state") == before
+        assert sql(store, "SELECT * FROM document_identities") == identities
+        assert not root.exists()
+        assert (offline / original["path"]).read_bytes() == b"# Original\nKeep this argument and its conditions.\n"
+    finally:
+        offline.rename(root)
 
 
 @pytest.mark.parametrize("when", ["prepared", "mapping_applied", "rebuilding", "handoff"])
@@ -211,6 +275,7 @@ async def test_restart_reobserves_same_recovery_with_new_generation_and_never_re
     mapped = await stage(client, result, "mapping_applied")
     old_epoch = handle().observer.epoch
     registry.close()
+    registry.resume_access()
     assert (await client.get("/api/wiki/recovery", headers=wiki_api.HEADERS)).status_code == 200
     assert (await apply(client, result)).status_code == 409
     revised = await plan(client)
@@ -340,7 +405,7 @@ async def test_changed_root_requires_new_observer_and_owner_plan(uncertain):
 
 async def test_replaced_root_does_not_close_another_captured_observer_lease(uncertain):
     client, root, store, original, config = uncertain
-    extra = WikiStore(root, store.state, config["vault_id"])
+    extra = WikiStore(root, store.state, config["vault_id"], health=store.health)
     try:
         result = await plan(client)
         old = handle().observer

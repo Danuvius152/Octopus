@@ -1,9 +1,11 @@
 """Consumers select the completed attempt without dropping its text blocks."""
 
-from unittest.mock import AsyncMock
-
+from server.agent_manager import AgentManager
 from server.app_agent import AppAgentManager, _Turn
-from server.delegations import DelegationManager, DelegationRunState
+from server.database import Database
+from server.delegations import DelegationManager
+from server.sessions import SessionManager
+from tests.completion_models import CompletionModels
 
 
 async def test_app_recovery_replaces_failed_text_and_tells_stream_consumer():
@@ -27,18 +29,38 @@ async def test_app_recovery_replaces_failed_text_and_tells_stream_consumer():
     assert all("attempt_id" in event for event in events)
 
 
-async def test_delegation_recovery_discards_only_failed_attempt():
-    manager = DelegationManager()
-    rec = DelegationRunState("child", "parent", "agent", "Worker", "review")
-    manager._records["child"] = rec
-    manager._inject_terminal = AsyncMock()
-    async def emit(kind, attempt, **fields):
-        await manager._on_broadcast({"type": kind, "session_id": "child", "work_id": rec.work_id,
-                                     "request_id": "r1", "attempt_id": attempt, **fields})
-    await emit("assistant_text", "a1", content="obsolete")
-    await emit("result", "a1", retrying=True, is_error=True)
-    await emit("assistant_text", "a2", content="correct one ")
-    await emit("assistant_text", "a2", content="correct two")
-    await emit("result", "a2", is_error=False)
-    assert "".join(rec.captured_text) == "correct one correct two"
-    assert rec.state == "completed"
+async def test_delegation_recovery_discards_only_failed_attempt(monkeypatch, tmp_path):
+    database = Database(":memory:")
+    await database.initialize()
+    sessions, manager, models = SessionManager(), DelegationManager(), CompletionModels()
+    await sessions.initialize(database)
+    manager.bind(sessions, database)
+    monkeypatch.setattr(sessions, "start_message", models.start_for(sessions))
+    root = await database.get_system_agent()
+    await AgentManager(database).create_agent(name="Worker")
+    parent = await sessions.create_session(root["id"], "Caller", str(tmp_path))
+    try:
+        rec = await manager.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="review")
+        original = models.pending(sessions, rec.delegation_id)
+
+        async def emit(kind, attempt, **fields):
+            original.attempt_id = attempt
+            await models.emit(manager, {"type": kind, "session_id": rec.delegation_id,
+                "work_id": rec.work_id, "attempt_id": attempt, **fields})
+
+        await emit("assistant_text", "a1", content="obsolete")
+        await emit("result", "a1", retrying=True, is_error=True)
+        await emit("assistant_text", "a2", content="correct one ")
+        await emit("assistant_text", "a2", content="correct two")
+        assert rec.state == "running" and not original.receipt._completion.done()
+        await emit("result", "a2", is_error=False)
+        assert rec.state == "completed"
+        replies = models.requests[(id(sessions), parent.id)]
+        assert len(replies) == 1
+        rows = await database.load_messages(parent.id)
+        reply = next(row["content"] for row in rows if row["role"] == "user")
+        assert "correct one correct two" in reply and "obsolete" not in reply
+        assert (await original.receipt.wait()).outcome.status == "success"
+    finally:
+        manager.shutdown()
+        await database.close()

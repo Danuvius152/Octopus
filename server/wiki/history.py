@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from . import origins, source_bindings
+from .storage import file_effect
 from .store import WikiError, is_maintainable_text, revision
 
 _owners = threading.local()
@@ -47,13 +48,19 @@ def atomic(path: Path, raw: bytes, *, before_replace=None) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def sync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
 class WikiHistory:
     def __init__(self, store):
         self.store = store
         self.state = store.state
         self.blobs = self.state / "blobs"
-        with store.operation():
-            self.blobs.mkdir(exist_ok=True)
 
     @contextlib.contextmanager
     def under_existing_lock(self, handle, lease=None):
@@ -100,8 +107,16 @@ class WikiHistory:
             return None
         digest = revision(raw)
         path = self.blobs / digest
-        if not path.exists():
-            atomic(path, raw)
+        with self.store.operation(), file_effect(self.store.health):
+            self.blobs.mkdir(exist_ok=True)
+            sync_directory(self.state)
+            if not path.exists():
+                atomic(path, raw)
+            else:
+                # A prior process may have lost the directory-sync receipt.
+                with path.open("rb") as handle:
+                    os.fsync(handle.fileno())
+                sync_directory(self.blobs)
         return digest
 
     def record(self, *args, **kwargs):
@@ -299,9 +314,12 @@ class WikiHistory:
                 )
                 # Persist stable source identities and claims before moving
                 # anything. Every subsequent replay uses the same change IDs.
-                atomic(external, json.dumps(entry).encode())
+                with file_effect(self.store.health):
+                    atomic(external, json.dumps(entry).encode())
             self.finish_external(entry)
-            external.unlink()
+            with file_effect(self.store.health):
+                external.unlink()
+                sync_directory(self.state)
             self.store.refresh()
         with self.store.connect() as db:
             pending = db.execute(
@@ -421,7 +439,7 @@ class WikiHistory:
 
     def write_locked(
         self, relative, raw, expected_revision, actor, reason, management=_UNCHANGED,
-        publication=None, restore_document_id=None,
+        publication=None, restore_document_id=None, target_document_id=None,
         operation="save",
         operation_details=None,
         origin_state=origins.UNCHANGED,
@@ -431,6 +449,13 @@ class WikiHistory:
         # Consume earlier notifications before attaching/restoring a binding.
         # In particular, a journalled delete must not later retire its successor.
         self.store.synchronize(dirty=False)
+        if target_document_id is not None:
+            target = self.store.resolve_identity(target_document_id)
+            if target is None or target["id"] != target_document_id or target["path"] is None:
+                raise WikiError("The selected candidate document is unavailable; evidence retained for manual review", 409)
+            relative = target["path"]
+            if isinstance(management, dict):
+                management = {**management, "path": relative}
         path = self.store.path(relative)
         if path.exists() and not path.is_file():
             raise WikiError("The target is not a regular file", 409)
@@ -439,7 +464,7 @@ class WikiHistory:
         current = revision(before) if before is not None else None
         if current != expected_revision:
             row = self.record(relative, before, raw, actor, reason, "conflict", proposal={
-                "job_id": publication["job_id"], "source_path": publication["source_path"],
+                "job_id": publication["job_id"], "source_doc": publication["source_doc"], "source_path": publication["source_path"],
                 "expected_revision": expected_revision,
             } if publication else None)
             raise WikiError(
@@ -492,15 +517,21 @@ class WikiHistory:
                 # retain the observed human bytes. Recovery never applies a
                 # conflict, including one whose bytes equal our proposed bytes.
                 self.record(relative, live, raw, actor, reason + "; target changed during journal preparation", "conflict", proposal={
-                    "job_id": publication["job_id"], "source_path": publication["source_path"],
+                    "job_id": publication["job_id"], "source_doc": publication["source_doc"], "source_path": publication["source_path"],
                     "expected_revision": expected_revision,
                 } if publication else None)
                 raise WikiError(f"Target changed during journal preparation; proposal retained as change {row['id']}", 409)
         check_target()
-        if raw is None:
-            path.unlink(missing_ok=True)
-        else:
-            atomic(path, raw, before_replace=check_target)
+        with file_effect(self.store.health):
+            if raw is None:
+                path.unlink(missing_ok=True)
+            else:
+                atomic(path, raw, before_replace=check_target)
+            # A new nested path also publishes its ancestor directory entries.
+            for directory in path.parents:
+                sync_directory(directory)
+                if directory == self.store.root:
+                    break
         self.status(row["id"], "applied")
         if raw is not None and history_text(relative):
             with self.store.connect() as db:
@@ -527,17 +558,65 @@ class WikiHistory:
         with self.locked():
             return self._history(path, offset, limit)
 
+    def candidate_recovery_error(self, db, row, proposal):
+        if not proposal or proposal.get("operation") != "reread-and-organize":
+            return None
+        source_doc = proposal.get("source_doc")
+        if source_doc is None:
+            # Legacy rereads inferred retention ownership from a mutable path.
+            # The job's exact candidate association can prove the selected ID;
+            # neither current path occupants nor matching bytes can prove it.
+            job = None
+            if db.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='jobs'").fetchone():
+                job = db.execute("SELECT items FROM jobs WHERE id=?", (proposal.get("job_id"),)).fetchone()
+            owners = {
+                item["doc"] for item in json.loads(job["items"]) if row["id"] in item.get("candidate_changes", [])
+            } if job else set()
+            if len(owners) != 1:
+                return "Legacy candidate ownership cannot be verified; evidence retained for manual review"
+            source_doc = owners.pop()
+        if source_doc != row["document_id"]:
+            return "Candidate belongs to a different selected document; evidence retained for manual review"
+        return None
+
+    def preserve_candidate_owners(self, db, job):
+        """Retain proven legacy ownership before re-admission replaces items."""
+        candidates = {change for item in job["items"] for change in item.get("candidate_changes", [])}
+        for change in candidates:
+            row = db.execute(
+                "SELECT p.change_id AS id,p.operation,r.document_id FROM change_proposals p "
+                "JOIN change_retention r ON r.change_id=p.change_id WHERE p.change_id=?", (change,),
+            ).fetchone()
+            if row is None:
+                continue
+            try:
+                proposal = json.loads(row["operation"])
+            except (ValueError, TypeError):
+                continue
+            if (not isinstance(proposal, dict) or proposal.get("operation") != "reread-and-organize"
+                    or proposal.get("job_id") != job["id"] or proposal.get("source_doc") is not None):
+                continue
+            if self.candidate_recovery_error(db, row, proposal) is None:
+                proposal["source_doc"] = row["document_id"]
+                db.execute("UPDATE change_proposals SET operation=? WHERE change_id=?",
+                           (json.dumps(proposal, ensure_ascii=False), change))
+
     def _history(self, path, offset=0, limit=50):
         if offset < 0 or not 1 <= limit <= 100:
             raise WikiError("Invalid history pagination", 422)
         with self.store.connect() as db:
             rows = db.execute(
-                "SELECT c.*,r.before_available,r.after_available,r.resolved_at,p.operation AS proposal_operation FROM changes c JOIN change_retention r ON r.change_id=c.id LEFT JOIN change_proposals p ON p.change_id=c.id WHERE path=? ORDER BY created_at DESC,c.rowid DESC LIMIT ? OFFSET ?",
+                "SELECT c.*,r.document_id,r.before_available,r.after_available,r.resolved_at,p.operation AS proposal_operation FROM changes c JOIN change_retention r ON r.change_id=c.id LEFT JOIN change_proposals p ON p.change_id=c.id WHERE path=? ORDER BY created_at DESC,c.rowid DESC LIMIT ? OFFSET ?",
                 (path, limit + 1, offset),
             ).fetchall()
+            recovery_errors = {
+                row["id"]: self.candidate_recovery_error(db, row, json.loads(row["proposal_operation"]))
+                for row in rows[:limit] if row["proposal_operation"] is not None and not row["resolved_at"]
+            }
         items = []
         for row in rows[:limit]:
             item = dict(row)
+            item.pop("document_id")
             proposal = item.pop("proposal_operation")
             item["recoverable"] = {
                 side: bool(row[f"{side}_available"])
@@ -551,6 +630,9 @@ class WikiHistory:
                 item["proposed_operation"] = json.loads(proposal)
             if proposal is not None:
                 item["recoverable"]["after"] = False
+            if error := recovery_errors.get(row["id"]):
+                item["recoverable"] = {"before": False, "after": False}
+                item["recovery_error"] = error
             if (
                 proposal is None
                 and not row["resolved_at"]
@@ -581,9 +663,12 @@ class WikiHistory:
         if side not in {"before", "after"}:
             raise WikiError("Restore side must be before or after")
         with self.store.connect() as db:
-            proposal = db.execute(
-                "SELECT 1 FROM change_proposals WHERE change_id=?", (change_id,)
+            entry = db.execute(
+                "SELECT operation FROM change_proposals WHERE change_id=?", (change_id,)
             ).fetchone()
+            proposal = json.loads(entry["operation"]) if entry else None
+            if error := self.candidate_recovery_error(db, row, proposal):
+                raise WikiError(error, 409)
         if proposal and side == "after":
             raise WikiError(
                 "This is a structured proposal; re-read and organize after review", 409
@@ -594,6 +679,8 @@ class WikiHistory:
         ):
             raise WikiError("This recovery version has expired or is unavailable", 410)
         raw = (self.blobs / digest).read_bytes() if digest else None
+        if raw is not None and revision(raw) != digest:
+            raise WikiError("Recovery content hash mismatch; current document and evidence retained", 409)
         with self.locked():
             with self.store.connect() as db:
                 entry = db.execute(
@@ -619,6 +706,7 @@ class WikiHistory:
                 f"Restore {change_id} {side} as a new revision",
                 management,
                 restore_document_id=row["document_id"],
+                target_document_id=row["document_id"] if proposal and proposal.get("operation") == "reread-and-organize" else None,
                 origin_builder=restored_origin,
                 source_plan={"plan": selected_sources},
             )
@@ -692,6 +780,27 @@ class WikiHistory:
             for relative in paths
             if history_text(relative) and self.store.path(relative).is_file()
         }
+        if not self.store.root.is_dir() or self.store.root.is_symlink():
+            raise WikiError("Vault root is unavailable; external mutation evidence retained", 503)
+        # Sapphire owns the file effect; Octopus confirms its durability before
+        # publishing applied history or retiring the external intent.
+        # A same-byte rewrite still has a file effect. The intent's paths
+        # determine confirmation; byte differences determine history records.
+        affected = set(before) | set(paths)
+        with file_effect(self.store.health):
+            directories = set()
+            for relative in affected:
+                path = self.store.path(relative)
+                if relative in after:
+                    with path.open("rb") as handle:
+                        os.fsync(handle.fileno())
+                for directory in path.parents:
+                    if directory.is_dir():
+                        directories.add(directory)
+                    if directory == self.store.root:
+                        break
+            for directory in sorted(directories, key=lambda value: len(value.parts), reverse=True):
+                sync_directory(directory)
         # Rename is trusted from the request, with bytes validated after success.
         moves = []
         for old in set(before) - set(after):
@@ -733,7 +842,8 @@ class WikiHistory:
             entry["source_policies"] = policies
             journal = self.state / "external-change.json"
             if journal.is_file() and json.loads(journal.read_text()).get("id") == entry["id"]:
-                atomic(journal, json.dumps(entry).encode())
+                with file_effect(self.store.health):
+                    atomic(journal, json.dumps(entry).encode())
         self.store.synchronize(
             dirty=False, removed_paths=set(before) - set(after),
             journal_moves=[(old, new, before[old]["document_id"]) for old, new in moves],

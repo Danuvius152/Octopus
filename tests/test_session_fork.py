@@ -17,7 +17,7 @@ from server.database import Database
 from server.delegations import DelegationRunState, delegation_manager
 from server.harness import BackendForkNotSupported, get_harness
 from server.harness.events import HarnessEvent
-from server.session_manager import ForkError, QueuedPrompt, SessionManager
+from server.session_manager import ForkError, SessionManager
 from server.sessions import forking as sm_forking
 from tests.fake_run import FakeRunBase
 
@@ -54,7 +54,6 @@ async def _seed_parent(mgr, *, backend="claude-code", working_dir="/repo",
             content=f"a{i}",
         )
         seq += 1
-    await mgr.db.flush()
     parent._message_count = seq
     return parent
 
@@ -188,7 +187,6 @@ async def test_fork_of_fork(manager):
     # Give the fork some messages so it can be re-forked.
     await manager.db.append_message(session_id=fork.id, seq=2, role="user",
                                     type="text", content="fork-q")
-    await manager.db.flush()
     fork._message_count = 3
     grandchild = await manager.fork_session(fork.id, 2)
     assert grandchild.forked_from_session_id == fork.id
@@ -269,26 +267,43 @@ async def test_fork_backend_not_supported(manager, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fork_refused_active_task(manager):
+async def test_fork_refused_active_task(manager, monkeypatch):
     parent = await _seed_parent(manager, backend="codex")
-    import asyncio
+    await manager.initialize(manager.db)
+    started, release = asyncio.Event(), asyncio.Event()
 
-    async def _never():
-        await asyncio.sleep(60)
+    class HeldParent(FakeRunBase):
+        async def start(self, *_args, **_kwargs):
+            started.set()
 
-    parent._active_task = asyncio.create_task(_never())
+        async def stream(self):
+            await release.wait()
+            yield HarnessEvent(type="result")
+
+        async def interrupt(self):
+            release.set()
+
+        async def stop(self):
+            release.set()
+
+    monkeypatch.setattr(manager, "_make_run", lambda *_args, **_kwargs: HeldParent())
+    receipt = await manager.start_message(parent.id, "Keep this parent active")
     try:
+        await asyncio.wait_for(started.wait(), 1)
         with pytest.raises(ForkError) as ei:
             await manager.fork_session(parent.id, 0)
         assert ei.value.reason == "fork_blocked_parent_turn_active"
     finally:
-        parent._active_task.cancel()
+        await manager.interrupt(parent.id)
+        await asyncio.wait_for(receipt.wait(), 1)
 
 
 @pytest.mark.asyncio
 async def test_fork_refused_queued_message(manager):
     parent = await _seed_parent(manager, backend="codex")
-    parent._pending_queue.append(QueuedPrompt(prompt="x", attachment_ids=[]))
+    await manager.interrupt(parent.id)
+    queued = await manager.start_message(parent.id, "x", source="bg")
+    assert manager.dispatch_snapshot(parent.id)["items"][0]["request_id"] == queued.request_id
     with pytest.raises(ForkError) as ei:
         await manager.fork_session(parent.id, 0)
     assert ei.value.reason == "fork_blocked_parent_turn_active"
@@ -506,7 +521,6 @@ async def test_fork_with_revert_restores_files(manager, tmp_path, monkeypatch):
                                     type="tool_use", tool_name="Edit",
                                     tool_input={"file_path": str(repo / "a.py")},
                                     tool_use_id="e1")
-    await manager.db.flush()
     parent._message_count = 2
     # The agent's edit is now on disk (dirty tree).
     (repo / "a.py").write_text("agent-edited\n")
@@ -528,7 +542,6 @@ async def test_fork_with_revert_refused_non_git(manager, tmp_path, monkeypatch):
                                           backend="claude-code")
     await manager.db.append_message(session_id=parent.id, seq=0, role="user",
                                     type="text", content="x")
-    await manager.db.flush()
     parent._message_count = 1
     fork = await manager.fork_session(parent.id, 0, revert_files=True)
     rec = json.loads(fork.fork_revert_record)
@@ -569,8 +582,10 @@ async def test_codex_first_turn_wraps_dispatch_only(manager, monkeypatch):
     fake = _FakeRun()
     monkeypatch.setattr(manager, "_make_run", lambda *a, **k: fake)
 
-    async for _ in manager._execute_claimed_request(fork.id, "edited prompt"):
-        pass
+    receipt = await manager.start_message(fork.id, "edited prompt")
+    completion = await asyncio.wait_for(receipt.wait(), 2)
+    assert completion.recording_state == "committed" and completion.outcome.status == "success"
+    await manager.await_session_execution(fork.id)
 
     # Dispatch prompt was wrapped with the fork history…
     assert "<fork-history" in fake.started_prompt
@@ -591,13 +606,17 @@ async def test_codex_turn_two_not_wrapped(manager, monkeypatch):
     fork = await manager.fork_session(parent.id, 2)
     fake = _FakeRun()
     monkeypatch.setattr(manager, "_make_run", lambda *a, **k: fake)
-    async for _ in manager._execute_claimed_request(fork.id, "turn one"):
-        pass
+    receipt = await manager.start_message(fork.id, "turn one")
+    completion = await asyncio.wait_for(receipt.wait(), 2)
+    assert completion.recording_state == "committed" and completion.outcome.status == "success"
+    await manager.await_session_execution(fork.id)
     # Turn 2: replay flag cleared → no wrap.
     fake2 = _FakeRun()
     monkeypatch.setattr(manager, "_make_run", lambda *a, **k: fake2)
-    async for _ in manager._execute_claimed_request(fork.id, "turn two"):
-        pass
+    receipt = await manager.start_message(fork.id, "turn two")
+    completion = await asyncio.wait_for(receipt.wait(), 2)
+    assert completion.recording_state == "committed" and completion.outcome.status == "success"
+    await manager.await_session_execution(fork.id)
     assert "<fork-history" not in fake2.started_prompt
     assert fake2.started_prompt == "turn two"
 

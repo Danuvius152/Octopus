@@ -10,6 +10,7 @@ you see is a suite that passes twice and stalls forever on the third run.
 from __future__ import annotations
 
 import asyncio
+import os
 import sys
 from dataclasses import replace
 
@@ -18,6 +19,7 @@ import pytest
 from server.database import Database
 from server.harness import get_harness
 from server.session_manager import SessionManager
+from server.sessions.questions import QuestionClosedError
 
 
 @pytest.mark.asyncio
@@ -94,34 +96,46 @@ async def test_a_closed_database_is_closed_before_its_connection_goes():
 
 
 @pytest.mark.asyncio
-async def test_the_session_manager_drains_its_turns_when_the_db_closes():
+async def test_the_session_manager_drains_its_turns_when_the_db_closes(tmp_path, monkeypatch):
     """The hook that matters: a turn in flight is stopped while it can still
     unwind, rather than cancelled into a connection that has gone."""
     db = Database(":memory:")
     await db.initialize()
     mgr = SessionManager()
-    mgr.sessions.clear()
-    mgr._admission_closed = False
     await mgr.initialize(db)
 
     agent = await db.get_system_agent()
-    session = await mgr.create_session(agent["id"], "work", "/tmp")
-    started, unwound = asyncio.Event(), asyncio.Event()
+    session = await mgr.create_session(agent["id"], "work", str(tmp_path), backend="codex")
+    started = asyncio.Event()
+    process_identity = tmp_path / "original-process"
 
-    async def never_ends() -> None:
-        started.set()
-        try:
-            await asyncio.sleep(3600)
-        finally:
-            unwound.set()
+    def argv(context):
+        code = (
+            "import json,os,time\nfrom pathlib import Path\n"
+            f"Path({str(process_identity)!r}).write_text(str(os.getpid()))\n"
+            "print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'running'}}),flush=True)\n"
+            "time.sleep(3600)\n"
+        )
+        return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
-    session._active_task = asyncio.create_task(never_ends())
-    await started.wait()
+    async def observe(event):
+        if event.get("session_id") == session.id and event.get("type") == "assistant_text":
+            started.set()
+
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", replace(
+        harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None,
+    ))
+    mgr.on_broadcast("closing-original-process", observe)
+    receipt = await mgr.start_message(session.id, "Keep running")
+    await asyncio.wait_for(started.wait(), 5)
+    pid = int(process_identity.read_text())
     await db.close()
-    assert unwound.is_set(), "the turn was not drained before the DB closed"
-    assert session._active_task.done()
-    mgr.sessions.clear()
-    mgr._admission_closed = False
+    completion = await asyncio.wait_for(receipt.wait(), 2)
+    assert completion.outcome.status == "interrupted"
+    assert completion.recording_state == "committed"
+    with pytest.raises(ProcessLookupError):
+        os.kill(pid, 0)
 
 
 @pytest.mark.asyncio
@@ -155,16 +169,19 @@ async def test_shutdown_keeps_database_open_until_terminal_writer_finishes(tmp_p
     monkeypatch.setattr(db, "record_terminal", blocked_record)
     db._close_hooks[-1] = bounded_drain
     receipt = await manager.start_message(session.id, "finish once")
+    waiting = asyncio.create_task(receipt.wait())
+    late = None
     try:
         await asyncio.wait_for(entered.wait(), 3)
         with pytest.raises(RuntimeError, match="teardown"):
             await db.close()
         assert not db._closed
         await db._ensure_connected()
-        assert not receipt._completion.done()
-        assert (await manager.start_message(session.id, "late", source="bg")).disposition == "closed"
+        assert not waiting.done()
+        late = asyncio.create_task(manager.start_message(session.id, "late", source="bg"))
         release.set()
-        completion = await asyncio.wait_for(receipt.wait(), 3)
+        completion = await asyncio.wait_for(waiting, 3)
+        assert (await asyncio.wait_for(late, 3)).disposition == "closed"
         assert completion.outcome.status == "success"
         assert completion.recording_state == "committed"
         assert len(starts) == 1
@@ -172,12 +189,13 @@ async def test_shutdown_keeps_database_open_until_terminal_writer_finishes(tmp_p
         assert db._closed and completion.recording_state == "committed"
     finally:
         release.set()
+        await asyncio.gather(waiting, *([late] if late is not None else []), return_exceptions=True)
         await manager.drain_turns()
         await db.close()
 
 
 @pytest.mark.asyncio
-async def test_failed_question_cleanup_keeps_database_open_for_remaining_questions(tmp_path, monkeypatch):
+async def test_failed_question_owner_closes_observers_before_database_retry(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "questions-shutdown.db"))
     await db.initialize()
     manager = SessionManager()
@@ -186,6 +204,15 @@ async def test_failed_question_cleanup_keeps_database_open_for_remaining_questio
     session = await manager.create_session(agent["id"], "Question shutdown", str(tmp_path))
     first = await manager.create_pending_question(session.id, [{"question": "first", "options": []}])
     second = await manager.create_pending_question(session.id, [{"question": "second", "options": []}])
+    polls_started = [asyncio.Event(), asyncio.Event()]
+
+    async def poll_original(question, started):
+        started.set()
+        return await manager.wait_for_question_answer(session.id, question, timeout=5)
+
+    polls = [asyncio.create_task(poll_original(question, started))
+             for question, started in zip((first, second), polls_started, strict=True)]
+    await asyncio.gather(*(started.wait() for started in polls_started))
     append = db.append_message
     failures = []
 
@@ -201,12 +228,18 @@ async def test_failed_question_cleanup_keeps_database_open_for_remaining_questio
             await asyncio.wait_for(db.close(), 2)
         assert failures == [first]
         assert not manager.has_pending_question(session.id, first)
-        assert manager.has_pending_question(session.id, second)
-        # This public storage read succeeds only while teardown keeps the
-        # original connection available; retry can close the remaining form.
+        assert not manager.has_pending_question(session.id, second)
+        # The failed owner seals every original observer. Retaining a live
+        # form would promise an answer path whose sole writer has ended.
+        for poll in polls:
+            with pytest.raises(QuestionClosedError):
+                await asyncio.wait_for(poll, 1)
+        # Cleanup failure still retains the original connection and history;
+        # retry joins the original cleanup instead of resurrecting a writer.
         assert await db.count_messages(session.id) >= 2
         await asyncio.wait_for(db.close(), 2)
         assert not manager.has_pending_question(session.id, second)
     finally:
         monkeypatch.setattr(db, "append_message", append)
+        await asyncio.gather(*polls, return_exceptions=True)
         await db.close()

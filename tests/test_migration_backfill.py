@@ -2,7 +2,7 @@
 
 Boots a DB created with the *old* (pre-agents) schema — sessions without
 agent_id, schedules with a NOT NULL session_id + FK, and the since-removed
-bridge_mappings — runs `_apply_migrations()` (twice), and asserts the ownership
+bridge_mappings — starts the database twice, and asserts the ownership
 graph is rebuilt onto a Default Agent, idempotently. See
 docs/plans/agent-refactor.md §4.5.
 
@@ -125,8 +125,11 @@ async def test_backfill_from_old_schema(tmp_path):
         # table nothing reads is a question every future reader has to answer.
         assert not await _table_exists(db, "bridge_mappings")
 
-        # Idempotency: a second migration run changes nothing.
-        await db._apply_migrations()
+        # Idempotency through the real startup boundary, with no unfinished
+        # migration SQL leaking into public runtime operations.
+        await db.close()
+        db = Database(db_path)
+        await db.initialize()
         agents2 = await db.load_agents()
         assert len([a for a in agents2 if a["is_system"]]) == 1
         assert (await db.get_agent(default["id"]))["id"] == default["id"]
@@ -151,8 +154,10 @@ async def test_fresh_db_gets_default_agent(tmp_path):
         assert "session_id" not in await _column_names(db, "schedules")
         assert not await _table_exists(db, "bridge_mappings")
 
-        # Second run no-ops (still exactly one system agent).
-        await db._apply_migrations()
+        # Second startup no-ops (still exactly one system agent).
+        await db.close()
+        db = Database(str(tmp_path / "fresh.db"))
+        await db.initialize()
         agents = await db.load_agents(include_archived=True)
         assert len([a for a in agents if a["is_system"]]) == 1
     finally:

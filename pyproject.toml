@@ -159,7 +159,8 @@ addopts = "--strict-markers"
 # import: evaluating them during collection made plain `--collect-only`
 # spawn a real `claude --print` (0.80 s hermetic vs 16.44 s full).
 markers = [
-    "real: talks to a real CLI/model; deselect with -m 'not real'",
+    "real: real provider or supervisor integration; deselect with -m 'not real'",
+    "supervisor: isolated systemd user-unit checks; no provider CLI or production service mutations",
     "knowledge_eval: optional natural knowledge-answer evaluation; requires --run-knowledge-evals",
     "real_claude: needs a claude CLI that is installed AND signed in",
     "real_codex: needs a codex CLI that is installed AND signed in",

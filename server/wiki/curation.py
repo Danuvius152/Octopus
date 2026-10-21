@@ -73,7 +73,7 @@ class WikiCuration:
             metadata = native | managed_metadata
             metadata["aliases"] = list(dict.fromkeys([*native.get("aliases", []), *managed_metadata.get("aliases", [])]))
             overlay = {"id": original["id"] if original else "candidate:" + path, "path": path,
-                       "title": native.get("title") or next((line[2:].strip() for line in text.splitlines() if line.startswith("# ")), Path(path).stem),
+                       "title": native.get("title") or parsed.title(Path(path).stem),
                        "text": text, "metadata": metadata}
             if original is not None and candidate is not None:
                 previous = Counter((ref.selection, ref.fragment) for ref in local_references(original["text"]))
@@ -97,7 +97,7 @@ class WikiCuration:
                             raise WikiError(f"New local link target disappeared: {reference.raw_resource}", 409)
                         if reference.fragment:
                             target_text = file.read_text(encoding="utf-8-sig")
-                    if reference.fragment and not anchor_exists(target_text, reference.fragment):
+                    if reference.fragment and not anchor_exists(target_text, reference.fragment, parsed=parsed if resolved.target == overlay["id"] else None):
                         raise WikiError(f"New local anchor does not exist: {reference.raw_resource}", 422)
                     continue
                 relative = os.path.normpath(os.path.join(parent, reference.value)).replace(os.sep, "/")
@@ -266,6 +266,7 @@ class WikiCuration:
             trace = Trace(base)
             rendered_base = base
             base = original_text(base, previous)
+            offset = top_offset(base)
             trace.edit([(rendered_base.index(part["raw"]), rendered_base.index(part["raw"]) + len(part["raw"]), "") for part in previous])
             additions = []
             # Omitted fields retain only our trusted saved metadata. Retained
@@ -299,7 +300,7 @@ class WikiCuration:
                     "Supply Key note or explicitly choose reuse_existing_summary after reading its content",
                     422,
                 )
-            if reuse_existing_summary and not re.sub(r"(?ms)<!--.*?-->|^#{1,6}\s+[^\n]*$", "", base[top_offset(base):]).strip():
+            if reuse_existing_summary and not re.sub(r"(?ms)<!--.*?-->|^#{1,6}\s+[^\n]*$", "", base[offset:]).strip():
                 raise WikiError("An empty note has no existing points to reuse", 422)
             if supplied_points:
                 additions.append(
@@ -342,7 +343,6 @@ class WikiCuration:
                     )
                 )
             additions.extend(part for part in previous if part["role"] == "navigation_links")
-            offset = top_offset(base)
             head = "".join(
                 part["raw"]
                 for part in additions

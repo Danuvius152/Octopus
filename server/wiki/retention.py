@@ -1,10 +1,12 @@
 """Deterministic retention of text recovery roots, under the vault writer lock."""
 
 import json
+import os
 import re
 from datetime import UTC, datetime, timedelta
 
-from .history import atomic, history_text
+from .history import atomic, history_text, sync_directory
+from .storage import file_effect
 from .store import WikiError
 
 POLICY = {
@@ -31,6 +33,11 @@ def retire(history, identifier, reason):
         file = history.state / "snapshots" / f"{identifier}.json"
         tombstone = history.state / "retired-snapshots" / file.name
         if tombstone.is_file():
+            with file_effect(history.store.health):
+                with tombstone.open("rb") as handle:
+                    os.fsync(handle.fileno())
+                sync_directory(tombstone.parent)
+                sync_directory(history.state)
             file.unlink(missing_ok=True)
             return json.loads(tombstone.read_text())
         if not file.is_file():
@@ -57,7 +64,9 @@ def retire(history, identifier, reason):
             "recoverable": False,
             "files": {},
         }
-        atomic(tombstone, json.dumps(receipt, ensure_ascii=False, indent=2).encode())
+        with file_effect(history.store.health):
+            atomic(tombstone, json.dumps(receipt, ensure_ascii=False, indent=2).encode())
+            sync_directory(history.state)
         file.unlink()
         return receipt
 
@@ -123,6 +132,7 @@ def collect(history, now=None):
             expired_sides = 0
             expired_proposals = 0
             for row in rows:
+                retained_sides = set()
                 recent = timestamp(row["created_at"]) >= ordinary_cutoff
                 unresolved = (
                     row["status"] == "conflict"
@@ -168,6 +178,8 @@ def collect(history, now=None):
                             roots.add(digest)
                         else:
                             keep = False
+                    if keep:
+                        retained_sides.add(side)
                     if available and not keep:
                         expired_sides += 1
                         db.execute(
@@ -182,14 +194,22 @@ def collect(history, now=None):
                             f"UPDATE change_material_origins SET {side}_state=NULL WHERE change_id=?",
                             (row["id"],),
                         )
-                if row["status"] == "conflict" and not unresolved and not safe:
+                # A recoverable preimage still needs its original candidate
+                # identity and qualification. Resolution ends special retention,
+                # but must not turn a structured candidate into an ordinary
+                # path-based restore while its bytes remain available.
+                if row["status"] == "conflict" and not unresolved and not safe and not retained_sides:
                     expired_proposals += db.execute(
                         "DELETE FROM change_proposals WHERE change_id=?", (row["id"],)
                     ).rowcount
             # Commit unavailable-side flags BEFORE unlinking any object. If
             # interrupted, another pass safely collects the remaining orphans.
         removed, removed_bytes = 0, 0
-        for file in history.blobs.iterdir():
+        try:
+            files = list(history.blobs.iterdir())
+        except FileNotFoundError:
+            files = []  # No blob has been retained in this ledger yet.
+        for file in files:
             if file.is_symlink() or not file.is_file():
                 continue
             if not re.fullmatch(r"[a-f0-9]{64}", file.name):

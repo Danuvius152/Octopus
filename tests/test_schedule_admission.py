@@ -8,12 +8,13 @@ from httpx import ASGITransport, AsyncClient
 
 from server.agent_manager import AgentManager
 from server.database import Database
-from server.deps import get_session_manager
+from server.deps import get_session_manager, set_user_manager
 from server.knowledge import encode, for_account
 from server.main import app
 from server.routers import agents, schedules
 from server.scheduler import ScheduleRunner
 from server.session_manager import SessionManager
+from server.users import UserManager
 
 
 @pytest.fixture
@@ -146,9 +147,18 @@ async def test_http_rejects_other_agents_origin_before_parsing(domain, monkeypat
 async def test_http_does_not_disclose_or_execute_another_owners_origin(domain, monkeypatch, entry):
     import server.schedule_ai as parser
 
-    db, manager, _runner, agent, _other = domain
-    foreign_agent = await AgentManager(db).create_agent(name="Foreign", user_id="another-owner")
+    db, manager, _runner, _legacy_agent, _other = domain
+    users = UserManager(db)
+    set_user_manager(users)
+    caller = await users.create_user(username="caller", password="test-password")
+    foreign_owner = await users.create_user(username="foreign", password="test-password")
+    caller_token = await users.issue_token(caller["id"])
+    foreign_token = await users.issue_token(foreign_owner["id"])
+    agent_manager = AgentManager(db)
+    agent = await agent_manager.create_agent(name="Caller", backend="codex", user_id=caller["id"])
+    foreign_agent = await agent_manager.create_agent(name="Foreign", user_id=foreign_owner["id"])
     foreign = await manager.create_session(foreign_agent["id"])
+    assert foreign.user_id == foreign_owner["id"]
     parse = AsyncMock(side_effect=AssertionError("unauthorized origin reached parser"))
     monkeypatch.setattr(parser, "parse_schedule_text", parse)
     url = "/api/schedules" if entry == "standalone" else f"/api/agents/{agent['id']}/schedules"
@@ -158,7 +168,18 @@ async def test_http_does_not_disclose_or_execute_another_owners_origin(domain, m
         url += "/from_text"
         body = {"session_id": foreign.id, "text": "every morning check"}
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(url, json=body, headers={"Authorization": "Bearer changeme"})
+        for owner, token, owned_agent in (
+            (caller, caller_token, agent),
+            (foreign_owner, foreign_token, foreign_agent),
+        ):
+            headers = {"Authorization": f"Bearer {token}"}
+            identity = await client.get("/api/auth/identity", headers=headers)
+            assert identity.status_code == 200, identity.text
+            assert identity.json()["user_id"] == owner["id"]
+            own_agent = await client.get(f"/api/agents/{owned_agent['id']}", headers=headers)
+            assert own_agent.status_code == 200, own_agent.text
+            assert own_agent.json()["id"] == owned_agent["id"]
+        response = await client.post(url, json=body, headers={"Authorization": f"Bearer {caller_token}"})
     assert response.status_code == 404
     parse.assert_not_called()
     assert await db.load_schedules() == []

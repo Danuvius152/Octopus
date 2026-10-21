@@ -6,6 +6,11 @@
 > shipped feature; see commit history for the review-driven fixes that
 > closed the plan/implementation drift.
 
+The ticket20 ownership/completion revision below describes the current
+worktree, not a deployed release. Its shared contract and acceptance boundary
+are in the [architecture execution plan](minimal-architecture-execution-20261020.md),
+section3.2.
+
 ## 0. What we're building, and the mental model
 
 Today an Octopus session has one human on the outside and one agent on
@@ -114,7 +119,7 @@ to mimic its shape almost exactly:
 | Returns `task_id` immediately | Returns `delegation_id` immediately |
 | Parent turn ends | Parent turn ends |
 | Subprocess runs in background | Child Session runs in background |
-| Captured stdout/stderr | Captured `assistant_text` events |
+| Captured stdout/stderr | Final-attempt text from the exact committed child request |
 | On completion: inject follow-up turn `[bg-task-result …]` | On completion: inject follow-up turn `[agent-reply:<name> …]` |
 | `mcp__bg__cancel(task_id)` SIGTERM | `mcp__ask_agent__cancel(delegation_id)` stops the child session and its running descendants |
 | `mcp__bg__list()` recent tasks | `mcp__ask_agent__list()` recent delegations |
@@ -154,12 +159,11 @@ treat an orphaned delegation as a normal archived session.
 
 ### 4.2 `pending_agent_questions` — derive from existing AskQuestion
 
-The existing `ask` MCP server already maintains an in-process
-"session has a pending question" queue (per `Session._pending_questions`
-in the inventory). We add **no new table**: a question from a child
-session is stored in that same in-memory queue *and* routed to the
-parent. The parent's `mcp__ask_agent__answer` tool call posts the
-answer back into that queue, identical to how a human UI click does.
+The existing `ask` MCP server uses the Session Owner's question records.
+We add **no new table**: a question from a child session is stored in
+that same record *and* routed to the parent. The parent's
+`mcp__ask_agent__answer` tool call submits an Answer command to that
+Owner, identical to the human HTTP answer path.
 
 What changes is the *delivery side*, not the storage: when an `ask`
 call lands on a session with `parent_session_id != null`, instead of
@@ -252,8 +256,8 @@ Server-side flow:
    learn.
 5. **Kick off the child's first turn** via the normal
    `SessionManager.start_message(...)` path. The already-registered
-   delegation broadcast listener (see 5.3) observes the child's
-   events.
+   completion observer (see5.3) watches that exact admitted receipt;
+   the broadcast listener forwards its questions.
 6. **Return immediately** `{delegation_id: child_session.id, status:
    "started"}`. The MCP shim translates this to a short text the
    model can quote: "Started delegation `<id>` to Vera. I'll receive
@@ -278,7 +282,7 @@ except two:
 - **A delegation with a sub-delegation in flight does not finalise.**
   The load-bearing half of the note above. `ask_agent` is asynchronous, so
   Vera's turn-1 `result` arrives the instant she has asked Pete — it is not
-  her answer. `DelegationManager._on_broadcast` therefore skips terminal
+  her answer. The original receipt's completion classification therefore skips terminal
   injection while `_has_running_children(sid)` holds **or** the record's
   `_awaiting_sub_relay` flag is set, and finalises on the next non-error
   result (the turn Pete's reply wakes her for). Without this Octo received
@@ -295,7 +299,7 @@ except two:
   session, was dropped on a record that was no longer `running`. What decides
   the deferral is that she *asked* someone during the turn, not whether they
   are still working when it ends, so `start_delegation` marks the caller's own
-  record and `_on_broadcast` consumes the mark on the deferred turn (a relay
+  record and completion classification consumes the mark on the deferred turn (a relay
   turn that asks again re-arms it). The real-CLI 3-hop test only caught this
   on runs slow enough to invert the two events; `test_delegations.py` now pins
   both orderings, plus the one-hop case that must still finalise on its first
@@ -312,42 +316,42 @@ on concurrency. The split is reflected in `SessionManager`:
 `_AUTO_ARCHIVE_ELIGIBLE` includes `"delegation"` for explicit
 post-terminal archival (`server/session_manager.py:416`).
 
-### 5.3 Reply delivery: the delegation listener
+### 5.3 Reply delivery: the original request completion
 
-For each live delegation, the FastAPI process holds a small in-memory
-record `DelegationRunState` keyed by child session id:
+Each delegation round is a `DelegationRunState` with a stable `work_id`,
+parent/target identities and a confirmed round state. A follow-up creates a
+new round record in the same conversation; an old cancellation or completion
+continues to refer to its captured original record.
 
-- `parent_session_id`
-- `target_agent_name` (cached so we can format the injection prefix)
-- `captured_text: list[str]`
-- `state: "running" | "completed" | "failed" | "cancelled"`
-- `_terminal_injected: bool` — idempotency guard for terminal delivery
+`_watch_completion()` observes the exact `SubmissionReceipt` for initial,
+follow-up, question and terminal-relay inputs. `_complete_request()` consumes
+its one completion through the existing round CAS/coordination path. Nested
+classification happens before any awaited reply-text SELECT, so a slow
+initial read cannot let a later relay redefine the initial turn as a reply.
+The callback-to-command handoff is owned by `confirm_recording()` without
+making it wait for unrelated requests still running.
 
-The manager subscribes once to the `SessionManager` broadcast bus and
-filters for tracked child session ids. It captures the same
-high-signal stream the bridge cares about, with delegation-specific
-terminal and question handling: `assistant_text`, `question_request`,
-`result`, and `error` (`server/delegations.py:571`). Behavior per
-event kind:
+A confirmed success selects text from the exact committed request and its
+final attempt, then submits `[agent-reply:<name> delegation=<id>]` to the
+parent. No second `captured_text` copy is maintained. Failure, cancellation
+or interrupted classification produces the corresponding `[agent-error:…]`.
+Stable `agent-terminal:{work_id}` admission identity, persisted
+`_terminal_disposition` and the in-flight guard prevent duplicate delivery.
 
-- `assistant_text` → append chunk to `captured_text`.
-- `question_request` → inject `[agent-question:…]` into the parent;
-  see 5.4.
-- `result` (terminal) → finalise. Build the injection string:
+Business outcome and notification delivery are independent. A failed child
+notification prefix cannot erase its acknowledged success or leave its
+delegation permanently running. A writer ending without an acknowledged
+terminal yields unavailable; it does not fabricate a success/failure terminal
+or replay the input. Public deletion between classification and reply reading
+retains the original successful result. The same stable relay delivers an
+explicit `reply_unavailable` error to the still-open caller, so a nested parent
+can finish without invented reply text or child replay. Normal deletion does
+not turn command/database drain into an invariant failure.
 
-  ```
-  [agent-reply:vera delegation=ab12cd34ef56]
-  <joined captured_text>
-  ```
-
-  Call `SessionManager.start_message(parent_session_id, text)` so the
-  parent receives a fresh turn through the same queued path bg-task
-  delivery uses. Mark `state="completed"` and keep the record in the
-  in-memory registry so `mcp__ask_agent__list` can still see recent
-  terminal delegations.
-- `error` → finalise with `[agent-error:…]`, same injection path.
-  `_terminal_injected` ensures that races between `result`, `error`,
-  and cancellation still yield one parent turn.
+The broadcast listener only forwards `question_request` for the captured
+work. `assistant_text`, `result` and `error` are no longer parallel delegation
+completion writers. Progress and history remain visible through the normal
+session surfaces.
 
 Other tool approval requests (e.g. dangerous shell command) stay in
 the child session — they're the *agent's* policy, not the user's. If
@@ -361,14 +365,14 @@ Today the `ask` MCP server's flow is roughly:
 
 ```
 ask.tool(question, options) -- HTTP --> POST /sessions/{sid}/questions
-                                         pending_questions.put(...)
-                                         broadcast to UI websocket
-                                         wait for answer
+                                         Owner registers the question record
+                                         ordered publisher notifies UI
+                                         HTTP long-poll waits for that record
                                          return answer to model
 ```
 
-The design intent was one extra caller-aware step after putting the
-question on `pending_questions` and broadcasting to the websocket:
+The caller-aware step follows registration and the original question
+notification:
 
 ```python
 if session.parent_session_id is not None:
@@ -425,16 +429,15 @@ expressible in its normal language/tool loop:
 
 `mcp__ask_agent__cancel(delegation_id, reason?)` →
 `POST /api/sessions/{parent_sid}/delegations/{child_sid}/cancel`.
-Server flips the record to `state="cancelled"` before interrupting the
-child so the interrupt's own `error` broadcast cannot produce a second
-terminal injection. Then it cascade-cancels running descendants whose
-`parent_session_id` chain leads to the cancelled delegation, walking
-`DelegationManager._records` breadth-first and recursing through the
-same public cancel path for each descendant. Each cancelled record gets
-the same state-flip-before-interrupt + terminal-inject treatment; the
-`_terminal_injected` flag preserves single-inject idempotency across
-races (`server/delegations.py:256`, `server/delegations.py:310`,
-`server/delegations.py:749`).
+The owned cancel command captures the selected round and its original work
+branch before awaiting. It CAS-updates running rounds to cancelled, closes
+their exact work admission and retires their captured session, BG and Research
+resources before reporting cancellation. A completed answer stays completed
+while its residual work retires; a later follow-up's independent work is not
+cancelled. Cancelling the HTTP waiter does not withdraw this owned command.
+An ordinary relationship/CAS refusal is reported after all captured resources
+are cleaned; physical storage uncertainty retains the fail-stop boundary.
+Stable work identity and terminal disposition protect one parent injection.
 
 The parent gets an injected
 `[agent-error:vera delegation=… reason=cancelled]`. Descendant
@@ -492,20 +495,19 @@ Server-side flow:
    `delegation_request`, restored in round 3) and registers it in
    the live sessions map. A hard-deleted child can't be reused —
    409 with a "start a fresh delegation" hint.
-3. Round-reset the in-memory `DelegationRunState`:
-   `state="running"`, `captured_text=[]`, `error=None`,
-   `finished_at=None`, `_terminal_injected=False`,
-   `request=<new>`. Identity (`delegation_id`,
+3. Create the next `DelegationRunState` with a new `work_id`,
+   `state="running"`, cleared error/finished/disposition fields,
+   and `request=<new>`. The original record stays bound to its old work.
+   Conversation identity (`delegation_id`,
    `parent_session_id`, `target_agent_id`, `target_agent_name`,
    `created_at`) stays stable, so the request card and event
    cards continue to render against the same id across rounds.
 4. Compose a thin "follow-up" preamble — "Agent X has a follow-up
    for you in the same line of work; your previous reply is above
    in this transcript. Their new request follows." — and call
-   `SessionManager.start_message(child_sid, prompt)`. The
-   broadcast subscriber that was already wired for this child id
-   handles the next `result` event the same way it does a fresh
-   delegation: `_inject_terminal` fires an
+   `SessionManager.start_message(child_sid, prompt)`. The exact new
+   receipt is watched by the same completion path as a fresh delegation:
+   `_inject_terminal` fires an
    `[agent-reply:<name> delegation=<id>]` into the parent, then
    auto-archives the child for the next round.
 

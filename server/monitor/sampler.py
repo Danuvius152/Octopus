@@ -125,8 +125,7 @@ def collect() -> list[Sample]:
 
 
 def collect_db(db_path: str) -> list[Sample]:
-    """Database size and WAL growth. The WAL is where deferred commits show up,
-    so it is the observable side of §4 B4's bounded flush."""
+    """Measure the database and its committed pages awaiting WAL checkpoint."""
     out: list[Sample] = []
     for suffix, metric in (("", "db_size_mb"), ("-wal", "db_wal_mb")):
         p = Path(db_path + suffix)

@@ -1,141 +1,137 @@
-# Rotating the access token without breaking anything
+# Rotating the installation access token
 
-> **Status:** shipped — Rotating `OCTOPUS_AUTH_TOKEN`: re-key every stored secret, rewrite the env files, and keep open tabs working.
+> **Status:** in-progress — Migrating token rotation to the minimal architecture contract; candidate verification and review remain open.
+>
+> The existing feature is being migrated under the
+> [minimal architecture execution plan](minimal-architecture-execution-20261020.md).
+> The protocol below is implemented in the unpublished candidate; expanded
+> verification and independent review remain required.
 
-> **Implementation status: SHIPPED.** `server/token_rotation.py`, the
-> `/api/auth/rotate` route, the Change-token panel in Settings, and the two
-> client paths (`auth_token_rotated`, and a WebSocket closed with `4001`).
-> Tests: `tests/test_token_rotation.py` (15 — every refusal, the all-or-nothing
-> re-encryption, the env rewrite, and the broadcast in both modes),
-> `SettingsDialog.test.tsx`, `useWebSocket.test.ts`.
+## 1. Secret ownership
 
-## 1. Why this needs a feature at all
+`OCTOPUS_AUTH_TOKEN` is both the install-era access credential and the input to
+`crypto.py`'s Fernet key derivation. Secret ownership determines what a rotation
+must change:
 
-`OCTOPUS_AUTH_TOKEN` is not just the password on the door. `server/crypto.py`
-derives a Fernet key from it (PBKDF2), and that key encrypts everything
-secret in the database:
+| Storage | Owner and encryption key |
+| --- | --- |
+| `credential_secrets.secret_encrypted` | Install token for NULL owners; account DEK for owned API keys/OAuth bundles |
+| `connector_installation_secrets.secret_encrypted` | Install token for NULL owners; account DEK for owned Connector tokens |
+| `connector_oauth_clients.client_secret_encrypted` | Master key; verifiable legacy token ciphertext is migrated to that key |
 
-| table | column | what it holds |
-|---|---|---|
-| `credential_secrets` | `secret_encrypted` | an agent's API key or OAuth bundle |
-| `connector_installation_secrets` | `secret_encrypted` | GitHub / Gmail tokens |
-| `connector_oauth_clients` | `client_secret_encrypted` | OAuth client secrets |
+Editing a token file by hand can separate the next startup's key from stored
+ciphertext. Rotation must coordinate the files, database and live token. It
+must also prevent a provider refresh from capturing the old key, crossing a
+rekey commit and writing an obsolete ciphertext afterward.
 
-So "change the token" is really three operations that have to agree: rewrite
-those ciphertexts, change what the server checks requests against, and change
-what every signed-in client sends. Doing them by hand — edit `.env`, restart —
-performs the middle one and silently breaks the other two: credentials stop
-decrypting (the session logs `Could not decrypt credential … (wrong auth
-token?)` and quietly falls back to the host CLI's own login), and every open
-tab spins on a WebSocket that closes with `4001` forever, because nothing
-tells it to ask for a new token.
+## 2. One owned command, explicit commit facts
 
-## 2. One operation, server-side
+`POST /api/auth/rotate` is an install-era operation. Its command owns the
+installation key lock even if the HTTP waiter disconnects. Credential and
+Connector operations using this key share the scope through key capture,
+external refresh and ciphertext persistence. Account DEKs and the master key
+remain independent. Ordinary transcript writes use short SQL transactions;
+no SQL transaction spans provider or filesystem work.
 
-`POST /api/auth/rotate` does all of it, in an order chosen so a failure
-anywhere leaves the system consistent:
+| Point | Durable fact and action |
+| --- | --- |
+| C0 | Validate the new literal token, startup sources and old ciphertext. A short transaction records one prepared intent encrypted with the durable master key, binding the database path, old/new tokens and canonical env-file paths. |
+| F1 | Replace only the token definition in every target file using a private temporary file, file fsync, atomic replacement and directory-chain fsync. Other configuration fields remain untouched. |
+| C1 | Re-read the current secret set, rekey NULL-owner credential/Connector ciphertext, preserve master-key client secrets and delete the prepared intent in one short transaction. |
+| F2 | Update the live token and confirm retirement of CLI processes carrying the old callback environment before reporting success. |
 
-1. **Validate** the new token: not empty, not the default, not the current
-   one, long enough, and free of characters that break the places a token
-   travels — it rides in a URL query (`/ws?token=`) and a cookie
-   (`octopus_app_token`), so whitespace, `;` and `,` are refused.
-2. **Write the env files** that actually define `OCTOPUS_AUTH_TOKEN`, atomically
-   (temp file + rename, mode 0600), keeping their previous contents in memory.
-   Doing this first means a filesystem failure aborts with nothing changed.
-3. **Re-encrypt** every secret in one DB transaction: decrypt with the old
-   token, encrypt with the new. A row that doesn't decrypt aborts the whole
-   rotation — and restores the env files — rather than leaving half the
-   secrets keyed to a token nobody has.
-4. **Swap the live token** in `settings`. From here the new token is the one
-   the server checks.
-5. **Drop held CLI processes that may carry the old callback environment**.
-   They respawn on demand. Application backends are left running: their
-   whitelisted environment does not inherit the install token, and their
-   `OCTOPUS_APP_TOKEN` is derived from the master key. An install-token change
-   does not invalidate their token or in-flight requests.
+There is no committed phase or follow-up commit. A domain refusal before C0
+changes no token files. A known C1 domain rejection rolls back SQL, reconciles
+files to the old token and clears the intent. An unconfirmed storage operation,
+filesystem write or CLI retirement stops the process through the shared fatal
+boundary; it never reports that uncertain work was rolled back.
 
-No restart: the server changes its own configuration and its own memory in the
-same breath. Nothing to keep in sync by hand, so nothing can drift.
+Startup reconciles before producers are admitted. A remaining intent proves
+C1 did not commit: restore old file values, sync them, then remove the intent.
+An absent intent after C1 means the durable new files and new ciphertext agree.
+Recovery never repeats secret re-encryption. Unknown versions, database
+bindings, token values or changed startup sources retain evidence and prevent
+admission instead of overwriting an unproved configuration. Recovery changes
+only token definitions, preserving later edits to unrelated fields.
+
+The successful path does not restart the service. Application backends retain
+their master-key-derived `OCTOPUS_APP_TOKEN` and in-flight requests.
 
 ### Which env files
 
-Whichever ones currently define the key — here that's both the file systemd
-hands the service (`EnvironmentFile`) and the one pydantic reads from the
-working directory. Updating only one would resurrect the old token on the next
-restart, which is the worst outcome available: a server that can't decrypt its
-own database.
+Managed installations use their generated private `<database>.service.env`.
+Rotation verifies the loaded unit's actual EnvironmentFile ordering and entry
+command. Later files or an unset token that defeat the generated source are
+refused before effects. A systemd EnvironmentFile passes a literal value;
+python-dotenv interpolation must not reinterpret an existing managed token.
+New tokens must be literal and round-trip through the supported startup rules.
+
+Standalone mode requires the selected `OCTOPUS_ENV_FILE`, or the working-directory
+`.env`, to define the token. Without an explicit pointer, a package-root `.env`
+can also be updated as a compatibility mirror; it cannot alone prove restart
+configuration. An explicit pointer is the whole list. Source selection is shared
+with `Settings`. Token names follow its case-insensitive matching: one lowercase
+or mixed-case file definition is supported, while duplicate aliases and external
+environment overrides are refused before effects. A managed unit must use the
+generated canonical name without inherited case aliases. Changing a child process
+environment cannot change its parent's next-start override. Recovery verifies that
+startup still uses the recorded file sources.
+
+One earlier lookup bug fell back to the working directory and repository root
+even when `OCTOPUS_ENV_FILE` named a file. Tests then rewrote the developer's
+real `.env`. The explicit pointer must remain the whole list; a configuration
+lookup that writes secrets must keep its file scope exact.
 
 ## 3. Open tabs
 
-Rotation broadcasts `auth_token_rotated` carrying the new token, and every
-connected client stores it and carries on. That sounds alarming and isn't:
-the only clients receiving it are ones already authenticated **with the old
-token** — the owner's own tabs. It is the difference between "one click" and
-"go and re-paste a token on four devices".
+After successful rotation, the route broadcasts `auth_token_rotated` carrying
+the new token to clients already authenticated with the old one. Connected
+clients store it and carry on. With `revoke_other_clients: true`, the key is
+omitted and other clients must sign in again.
 
-When the point of the rotation is that the old token leaked, that assumption
-is wrong, so `revoke_other_clients: true` skips the broadcast and every other
-client is dropped to the login screen.
+Clients offline during rotation return with an expired token. A WebSocket
+closed with `4001` clears that token and shows sign-in. HTTP waiter cancellation
+does not cancel the owned rotation, and does not prove that its effects failed;
+a client that missed the result may need the new token to sign in again.
+Cancellation of the command owner itself during C0/C1 is a different boundary:
+even a normally acknowledged commit can precede the propagated cancellation.
+Such a non-domain exit enters shared fatal while holding the installation key
+scope, and startup reconciles the retained commit fact before admitting work.
 
-Either way, clients that were offline during the rotation come back with a
-dead token. That path is now handled too: a WebSocket closed with `4001`
-clears the stored token and shows the login screen instead of reconnecting
-every three seconds forever behind a "Disconnected" badge.
+## 4. Verification boundaries
 
-## 4. Testing, and the one thing not covered end-to-end
+`tests/test_token_rotation.py` covers refusals, key ownership, concurrent SQL,
+a changed secret set, case-insensitive Settings reloads, cancelled waiters and
+both broadcast modes.
+`tests/test_token_rotation_recovery.py` exits real processes around C0/F1/C1/F2,
+then uses public ASGI startup. It includes zero secrets, partial multi-file
+replacement, command-owner cancellation after confirmed commits, interrupted
+recovery, package mirrors without an effective source, unknown evidence and
+unrelated configuration edits. Stored ciphertext is compared to prove recovery
+does not re-encrypt it.
 
-The re-encryption is the part that can destroy data, so it's pinned hardest:
-every refusal (weak, blank, unchanged, characters that break a URL or a
-cookie), the all-or-nothing guarantee (a row that won't decrypt aborts with
-the env files restored and the live token unchanged), and the route in both
-broadcast modes.
+`tests/test_installation_keys.py` controls actual provider refresh boundaries
+while rotation and bootstrap queue, including a cancelled HTTP waiter.
+Disposable user-unit checks in `tests/test_service_supervisor.py` verify the
+generated startup, cold restart and loaded drop-ins. Browser/client checks
+remain separate release gates; no test rotates a shared test server out from
+under unrelated cases.
 
-There is deliberately **no e2e test**. The e2e suite runs 40 tests against one
-shared server with two workers; a test that rotates that server's token would
-401 whatever else is mid-flight. The integration it would cover — rotate →
-broadcast → client keeps working — is covered either side of the wire instead.
+## 5. Account transition
 
-One scar worth recording: an early version of the env-file lookup fell back to
-the working directory and the repo root even when `OCTOPUS_ENV_FILE` named a
-file. Running the tests rewrote the developer's real `.env` with a test token,
-which would have locked the next restart out of its own database. The lookup
-now treats an explicit pointer as the *whole* list. When a module rewrites
-secrets, a "helpful" fallback is a loaded gun.
+The first-account command closes legacy execution admission and drains old
+runs before taking the installation key lock. Its user, rekey, adoption and
+working-root facts share one SQL commit. Once accounts exist, the installation
+token is retired and rotation is refused; account password and DEK behavior is
+unchanged. Captured NULL-owner secret callers are rejected after handoff,
+rather than deriving an account's key from an adopted row. Wiki publication
+retains its existing migration journal and recovery evidence.
 
-## 5. What this defers
+## 10. What this defers
 
-* **A CLI entry point** (`octopus rotate-token`). The server has to be running
-  to do this safely — it owns the live setting and the processes that need
-  dropping — so the CLI would be a thin HTTP client for the same route, and
-  the Settings dialog already is one.
-* **Rotating while the server is down.** Same reason: the operation is
-  in-process by design.
-* **Per-device tokens.** The real answer to "one device leaked" is a token per
-  client, which is a different design (issue, list, revoke) and a bigger UI.
-
-## 6. Known gap: not re-scoped for multi-tenancy (to fix later)
-
-This feature was designed when the access token was the key for *every* stored
-secret. [`multi-tenancy.md`](multi-tenancy.md) §4 changed that: an account's
-credentials and connector tokens are now encrypted under its own **DEK** (a
-master-wrapped per-user key), and only **install-era** secrets (`user_id IS
-NULL`) are still keyed by the token.
-
-`_reencrypt_secrets` was not updated for that split. It still walks *all* rows in
-`credential_secrets` / `connector_installation_secrets` / `connector_oauth_clients`
-and does `decrypt(ciphertext, old_token)` on each. For an account-owned row that
-`decrypt` fails (`InvalidToken`), so `POST /api/auth/rotate` raises and rolls
-back the whole operation.
-
-Consequences:
-
-* It fails **safe** — the rewrite is transactional, so nothing is changed or
-  corrupted.
-* But rotation is **blocked** on any install where an account has stored a
-  credential or connector (which is the normal case once accounts exist).
-
-The fix (deferred, deliberately): scope `_reencrypt_secrets` to `WHERE user_id
-IS NULL` (plus the un-owned `connector_oauth_clients`), so it re-keys only the
-token-encrypted install-era secrets and leaves DEK-keyed account rows untouched.
-Until then, `§1`–`§2` above describe the *intended* behaviour, not what runs on
-a multi-tenant install.
+- A CLI client for the same route; the existing Settings control is the
+  current entry point.
+- Rotation while the server is down; the operation owns the live token and
+  processes in the running service.
+- Per-device install tokens, which require a separate issuance and revocation
+  product contract.

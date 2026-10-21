@@ -213,6 +213,44 @@ Auth for the agent's backend uses your existing CLI login (`claude login` /
 it to an agent.
 
 Install development dependencies with `pip install -e '.[test]'`.
+
+For a managed Linux/WSL installation, `scripts/setup-services.sh` previews a
+systemd user unit. After validation and natural drain, stop the existing
+service and run it with `--apply` to bind the configured data paths and install
+the unit. Setup never stops or starts a service. Use `systemctl --user start
+octopus.service` after installation; subsequent `octopus serve` calls use that
+unit. Configure ports, paths and tunnel settings in its environment before
+rerunning setup; conflicting CLI/environment settings are rejected.
+Setup captures the effective settings, including shell overrides, in the
+private `*.service.env` file beside the installation database (mode 0600).
+The unit and application both read that file; secrets are absent from the unit
+text. Change setup inputs and rerun setup after natural drain to update the
+service configuration. Token rotation updates its active environment file.
+Setup rejects an outdated token instead of replacing the active configuration.
+For `--manager=system`, run setup as `--service-user`; sudo is used only to
+install the unit and reload systemd, keeping private data owned by that user.
+
+The managed server owns an installation lock before recovery, requires a
+single main process in the configured unit, and rejects reload/multiple
+workers and direct ASGI launches outside that unit. `/health` reports liveness;
+`/ready` returns 200 only after startup recovery. Fresh standalone development
+remains available with isolated database, Wiki, uploads, applications, keys and
+provider homes. It does not provide systemd's cross-process cleanup guarantee.
+Isolation includes the default working directory, `CODEX_HOME` and `CLAUDE_CONFIG_DIR` (or their
+usual home-directory locations), as well as per-credential homes. A vault body
+range has one authoritative state directory; another account or installation
+cannot register the same root, an ancestor, or a descendant. Existing conflicting
+registrations block those writers before creating ownership references; opening
+order never selects an owner. First-account adoption transfers this ownership
+through its existing migration journal after the old writer has drained.
+Range ownership assumes one mount namespace and canonical directory tree;
+bind-mount aliases and separate mount namespaces are outside this guarantee.
+If a vault root is offline, retained recovery status, saved plans and evidence
+exports remain readable. Planning and applying recovery require the live root
+and an admitted recovery owner.
+Moving an existing standalone install requires stopping and confirming all its
+old execution has ended before the first managed start.
+
 Compatibility bounds live in `pyproject.toml`, including `mcp>=1.30,<2` for
 the supported FastMCP API. Validate dependency updates in a separate virtual
 environment with `pip check`, server import and MCP/account isolation tests.

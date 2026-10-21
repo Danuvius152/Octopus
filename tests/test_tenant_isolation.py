@@ -30,6 +30,38 @@ from server.routers import auth as auth_router
 from server.session_manager import session_manager
 from server.users import UserManager
 from server.workspace import WorkspaceError, paths_for
+from tests.fake_run import FakeRunBase
+
+
+def held_model_runs(monkeypatch):
+    """Hold only the external Harness while real owners admit/retire work."""
+    starts = asyncio.Queue()
+
+    class Run(FakeRunBase):
+        def __init__(self, session_id):
+            self.session_id = session_id
+            self.stopped = asyncio.Event()
+
+        def is_alive(self):
+            return not self.stopped.is_set()
+
+        async def start(self, prompt, working_dir, resume_id=None, credential=None):
+            self.prompt = prompt
+            starts.put_nowait(self)
+
+        async def stream(self):
+            await self.stopped.wait()
+            if False:
+                yield
+
+        async def stop(self):
+            self.stopped.set()
+
+        async def interrupt(self):
+            await self.stop()
+
+    monkeypatch.setattr(session_manager, "_make_run", lambda session, *args, **kwargs: Run(session.id))
+    return starts
 
 
 @pytest.fixture
@@ -137,8 +169,6 @@ async def test_owned_fork_survives_interrupt_refresh_and_restart(
         await ctx["db"].append_message(
             session_id=parent.id, seq=seq, role=role, type="text", content=content
         )
-    await ctx["db"].flush()
-    parent._message_count = 4
     monkeypatch.setattr(
         session_manager, "_fork_copy_dest", lambda src, sid: str(tmp_path / f"copy-{sid}")
     )
@@ -165,25 +195,20 @@ async def test_owned_fork_survives_interrupt_refresh_and_restart(
         assert any(e["type"] == fork_event for e in owner_events)
         assert not any(e["type"] == fork_event for e in other_events)
 
-        entered = asyncio.Event()
-
-        async def stalled_turn(session, prompt):
-            entered.set()
-            await asyncio.Event().wait()
-            yield {}  # the stand-in remains an async iterator
-
-        monkeypatch.setattr(session_manager, "_run_backend", stalled_turn)
-        fork = session_manager.get_session(fork_id, owner)
-        await session_manager.start_message(fork_id, "new request")
-        active = fork._active_task
-        await asyncio.wait_for(entered.wait(), timeout=1)
+        starts = held_model_runs(monkeypatch)
+        active = await session_manager.start_message(fork_id, "new request")
+        original = await asyncio.wait_for(starts.get(), timeout=1)
+        assert original.session_id == fork_id
         assert await session_manager.interrupt(fork_id)
-        await asyncio.wait_for(active, timeout=1)
+        completed = await asyncio.wait_for(active.wait(), timeout=1)
+        assert completed.outcome.status == "interrupted"
+        assert completed.outcome.request_id == active.request_id
+        await session_manager.await_session_execution(fork_id, timeout=1)
+        assert original.stopped.is_set() and starts.empty()
 
         # Reload from persisted rows as a restart would, then use the browser's
         # account-scoped list/detail paths. Neither path may hide this fork.
-        session_manager.sessions.clear()
-        session_manager._admission_closed = False
+        await session_manager.drain_turns()
         await session_manager.initialize(ctx["db"])
         live = (await ctx["client"].get("/api/sessions", headers=headers)).json()
         assert fork_id in {s["id"] for s in live}
@@ -446,13 +471,14 @@ async def test_one_account_cannot_run_the_box_out_of_memory(two_accounts, monkey
     ctx = two_accounts
     archer, vera = ctx["archer"], ctx["vera"]
 
-    # Pretend one of Archer's sessions is mid-turn.
-    async def forever():
-        await asyncio.sleep(3600)
-
-    busy = asyncio.create_task(forever())
-    archer["session"]._active_task = busy
+    starts = held_model_runs(monkeypatch)
+    archer_request = await session_manager.start_message(archer["session"].id, "Archer's current turn")
+    vera_request = None
+    vera_second = None
     try:
+        original = await asyncio.wait_for(starts.get(), 2)
+        assert original.session_id == archer["session"].id
+        assert session_manager.running_turns_for(archer["user"]["id"]) == 1
         second = await session_manager.create_session(
             archer["agent"]["id"],
             "another",
@@ -468,14 +494,21 @@ async def test_one_account_cannot_run_the_box_out_of_memory(two_accounts, monkey
             "vera's second",
             str(paths_for(vera["user"]["id"]).workspace),
         )
-        # Far enough to prove the quota did not refuse it; the turn itself
-        # needs a CLI, which is the real tier's business.
-        session_manager._check_turn_quota(
-            session_manager.get_session(vera_second.id)
-        )
+        vera_request = await session_manager.start_message(vera_second.id, "Vera's independent turn")
+        assert vera_request.accepted
+        independent = await asyncio.wait_for(starts.get(), 2)
+        assert independent.session_id == vera_second.id
+        assert session_manager.running_turns_for(vera["user"]["id"]) == 1
+        assert session_manager.running_turns_for(archer["user"]["id"]) == 1
+        assert starts.empty()
     finally:
-        busy.cancel()
-        archer["session"]._active_task = None
+        await session_manager.interrupt(archer["session"].id)
+        assert (await asyncio.wait_for(archer_request.wait(), 2)).outcome.status == "interrupted"
+        await session_manager.await_session_execution(archer["session"].id, timeout=2)
+        if vera_request is not None:
+            await session_manager.interrupt(vera_second.id)
+            assert (await asyncio.wait_for(vera_request.wait(), 2)).outcome.status == "interrupted"
+            await session_manager.await_session_execution(vera_second.id, timeout=2)
 
 
 @pytest.mark.asyncio
@@ -490,22 +523,30 @@ async def test_a_message_queued_behind_a_running_turn_is_not_refused(
     ctx = two_accounts
     session = ctx["archer"]["session"]
 
-    async def forever():
-        await asyncio.sleep(3600)
-
-    busy = asyncio.create_task(forever())
-    session._active_task = busy
+    starts = held_model_runs(monkeypatch)
+    active = await session_manager.start_message(session.id, "Original running input")
+    pending = None
     try:
-        await session_manager.start_message(session.id, "queue me")
-        assert [q.prompt for q in session._pending_queue] == ["queue me"]
+        original = await asyncio.wait_for(starts.get(), 2)
+        assert original.session_id == session.id
+        pending = await session_manager.start_message(session.id, "queue me")
+        assert pending.accepted
+        queued = session_manager.dispatch_snapshot(session.id)["items"]
+        assert len(queued) == 1
+        assert queued[0]["summary"] == "queue me" and queued[0]["request_id"] == pending.request_id
+        assert session_manager.running_turns_for(session.user_id) == 1
+        assert starts.empty()
     finally:
-        busy.cancel()
-        session._active_task = None
-        session._pending_queue.clear()
+        await session_manager.interrupt(session.id)
+        assert (await asyncio.wait_for(active.wait(), 2)).outcome.status == "interrupted"
+        await session_manager.await_session_execution(session.id, timeout=2)
+        if pending is not None:
+            assert await session_manager.cancel_request(session.id, pending.request_id)
+            assert (await asyncio.wait_for(pending.wait(), 2)).state == "withdrawn"
 
 
 @pytest.mark.asyncio
-async def test_two_accounts_can_both_have_an_application_called_notes(two_accounts, monkeypatch):
+async def test_two_accounts_can_both_have_an_application_called_notes(two_accounts, monkeypatch, request):
     """The name index was unique across the box. That is a bug with accounts:
     the second person who wants an app called "Notes" cannot have one, and the
     refusal tells them somebody else already does."""
@@ -513,6 +554,7 @@ async def test_two_accounts_can_both_have_an_application_called_notes(two_accoun
 
     ctx = two_accounts
     application_manager.bind(db=ctx["db"], session_mgr=session_manager)
+    request.addfinalizer(application_manager.shutdown)
     # This case exercises allocation and ownership, not an agent build.
     from unittest.mock import AsyncMock
 

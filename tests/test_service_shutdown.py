@@ -18,6 +18,7 @@ from server.app_backends import BackendSupervisor
 from server.applications import ApplicationManager
 from server.bg_tasks import BgTaskManager
 from server.config import settings
+from server.database import Database
 from server.delegations import DelegationManager
 from server.harness import get_harness
 from server.harness.profile import StdinMode
@@ -32,6 +33,8 @@ from server.wiki.store import WikiError
 
 @pytest.fixture
 async def service(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "default-codex-home"))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "default-claude-home"))
     servers = build_servers(fresh=True)
     application = FastAPI(lifespan=main.lifespan)
     mount_all(application, servers)
@@ -89,9 +92,9 @@ async def test_scheduler_startup_failure_cleans_all_acquired_resources(service, 
     initialize = main.ScheduleRunner.initialize
     captured = []
 
-    async def fail_after_start(runner):
+    async def fail_after_start(runner, **kwargs):
         captured.append(runner)
-        await initialize(runner)
+        await initialize(runner, **kwargs)
         raise RuntimeError("injected scheduler startup failure")
 
     monkeypatch.setattr(main.ScheduleRunner, "initialize", fail_after_start)
@@ -197,6 +200,8 @@ def synthetic_cli(monkeypatch, starts, code=None):
             "'type':'agent_message','text':'ready'}}),flush=True)\n"
             "for line in sys.stdin: pass\n"
         )
+    # A completed turn must follow receipt of the initial stream input.
+    code = "import sys\nsys.stdin.readline()\n" + code
 
     def argv(context):
         starts.append(context.prompt)
@@ -285,6 +290,13 @@ async def test_user_stop_keeps_its_reason_when_service_shutdown_follows(service,
     starts = []
     synthetic_cli(monkeypatch, starts)
     ready, paused, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    close_admission = service.close_admission
+
+    def begin_shutdown():
+        close_admission()
+        release.set()
+
+    monkeypatch.setattr(service, "close_admission", begin_shutdown)
     stopping = None
     try:
         async with main.app.router.lifespan_context(main.app):
@@ -304,6 +316,7 @@ async def test_user_stop_keeps_its_reason_when_service_shutdown_follows(service,
             await asyncio.wait_for(ready.wait(), 5)
             stopping = asyncio.create_task(service.interrupt(session.id))
             await asyncio.wait_for(paused.wait(), 5)
+            assert not release.is_set()
         completion = await receipt.wait()
         assert completion.outcome.status == "interrupted"
         assert completion.outcome.code == "interrupted"
@@ -355,8 +368,8 @@ async def test_unconfirmed_lifespan_keeps_selected_success_writer_and_database(s
 
 
 @pytest.mark.asyncio
-async def test_lifespan_reports_finished_but_unconfirmed_result_and_keeps_database(
-    service, tmp_path, monkeypatch,
+async def test_lifespan_retires_failed_writer_without_inventing_an_unconfirmed_result(
+    service, tmp_path, monkeypatch, caplog,
 ):
     starts = []
     synthetic_cli(monkeypatch, starts, (
@@ -364,37 +377,41 @@ async def test_lifespan_reports_finished_but_unconfirmed_result_and_keeps_databa
         "print(json.dumps({'type':'thread.started','thread_id':'completed-thread'}),flush=True)\n"
         "print(json.dumps({'type':'turn.completed','usage':{}}),flush=True)\n"
     ))
-    fail_storage = True
-    receipt = None
-    session = None
+    terminal_events = []
+    async with main.app.router.lifespan_context(main.app):
+        async def record_terminal(**kwargs):
+            # This failure precedes the real transaction. Driver uncertainty
+            # has its separate subprocess fail-stop tests.
+            raise OSError("synthetic terminal adapter failure")
+
+        monkeypatch.setattr(service.db, "record_terminal", record_terminal)
+        agent = await service.db.get_system_agent()
+        session = await service.create_session(agent["id"], "completed", str(tmp_path), backend="codex")
+
+        async def observe(event):
+            if event.get("session_id") == session.id and event.get("type") == "result":
+                terminal_events.append(event)
+
+        service.on_broadcast("unconfirmed-terminal", observe)
+        receipt = await service.start_message(session.id, "finish once")
+        completion = await asyncio.wait_for(receipt.wait(), 5)
+        assert completion.input_request_id == completion.request_id == receipt.request_id
+        assert completion.state == "unavailable" and completion.outcome is None
+        assert completion.recording_state == "none"
+        assert completion.notification_state == "unavailable"
+        assert await service.db.get_committed_terminal(session.id, receipt.request_id) is None
+        retained = await service.db.load_messages(session.id)
+        assert [row["content"] for row in retained if row["role"] == "user"] == ["finish once"]
+    assert "synthetic terminal adapter failure" in caplog.text
+    assert terminal_events == []
+    assert service.db._conn is None
+    reopened = Database(settings.db_path)
+    await reopened.initialize()
     try:
-        with pytest.raises(Exception) as failure:
-            async with main.app.router.lifespan_context(main.app):
-                original = service.db.record_terminal
-
-                async def record_terminal(**kwargs):
-                    if fail_storage:
-                        raise OSError("synthetic storage failure")
-                    return await original(**kwargs)
-
-                monkeypatch.setattr(service.db, "record_terminal", record_terminal)
-                agent = await service.db.get_system_agent()
-                session = await service.create_session(agent["id"], "completed", str(tmp_path), backend="codex")
-                receipt = await service.start_message(session.id, "finish once")
-                completion = await asyncio.wait_for(receipt.wait(), 5)
-                assert completion.outcome.status == "success"
-                assert completion.recording_state == "unconfirmed"
-        assert "unconfirmed" in repr(failure.value)
-        assert await service.db.count_messages(session.id) > 0
-        assert starts == ["finish once"]
+        assert await reopened.load_messages(session.id) == retained
+        assert await reopened.get_committed_terminal(session.id, receipt.request_id) is None
     finally:
-        fail_storage = False
-        if session is not None:
-            from anyio import CancelScope
-
-            with CancelScope(shield=True):
-                await service.resume_dispatch(session.id)
-    await service.drain_turns()
+        await reopened.close()
     assert starts == ["finish once"]
 
 

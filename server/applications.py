@@ -11,16 +11,15 @@ like a browser tab. The row owns three things:
   * a ``building | ready | failed`` status, derived from whether the
     entrypoint exists when a build turn ends.
 
-Status is not something the model reports; it's observed. This manager
-subscribes to ``SessionManager``'s broadcast bus (the ``DelegationManager``
-pattern) and re-evaluates an application every time its build session starts
-or finishes a turn. So "ask for changes" — which is just another turn in the
-same session — gets live status for free, whether it was requested from the
-application view or typed straight into the chat.
+Status is observed from the original build request's committed completion.
+Broadcasts report progress; a failed notification does not erase the build
+result. Requests typed straight into the build session use the same
+completion observer as requests from the application view.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -31,8 +30,11 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
+from weakref import WeakValueDictionary
 
 from .config import settings
+from .models import SessionStatus
+from .sessions.submission import RequestCompletion
 from .workspace import paths_for
 
 if TYPE_CHECKING:
@@ -324,15 +326,20 @@ class ApplicationManager:
     def __init__(self) -> None:
         self.session_mgr: SessionManager | None = None
         self.db: Database | None = None
+        # Only projection writers share this short-lived coordination. No
+        # request result or application status is copied into this map.
+        self._build_updates: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
 
     def bind(self, session_mgr: SessionManager, db: Database) -> None:
         self.session_mgr = session_mgr
         self.db = db
         session_mgr.on_broadcast(self.BROADCAST_KEY, self._on_broadcast)
+        session_mgr.on_request_complete(self.BROADCAST_KEY, self._on_completion)
 
     def shutdown(self) -> None:
         if self.session_mgr is not None:
             self.session_mgr.remove_broadcast(self.BROADCAST_KEY)
+            self.session_mgr.remove_request_complete(self.BROADCAST_KEY)
 
     def _require_db(self) -> Database:
         if self.db is None:
@@ -775,7 +782,8 @@ class ApplicationManager:
         return changed
 
     async def _evaluate(
-        self, app_id: str, *, error: str | None = None, broadcast: bool = True
+        self, app_id: str, *, error: str | None = None, broadcast: bool = True,
+        request_id: str | None = None,
     ) -> dict[str, Any] | None:
         """Derive terminal status from the filesystem: the entrypoint exists →
         `ready`, it doesn't → `failed`. `error` is the turn-level failure
@@ -821,6 +829,8 @@ class ApplicationManager:
         except Exception:
             logger.exception("failed restarting backend for application %s", app_id)
 
+        if request_id is not None and not self._completion_is_current(row["session_id"], request_id):
+            return None
         fields["updated_at"] = _now()
         await db.update_application(app_id, **fields)
         updated = await db.get_application(app_id)
@@ -829,64 +839,63 @@ class ApplicationManager:
         return updated
 
     async def _on_broadcast(self, msg: dict[str, Any]) -> None:
-        """Watch the session bus for build-session turns.
-
-        `status: running` means a build turn started (this is how a change
-        typed directly into the build session's chat still flips the badge to
-        "building"); `result` / `error` end one and hand status over to the
-        filesystem check. An unconfirmed recording shows an explicit saving
-        failure until the original committed result arrives.
-        """
+        """Progress can mark a build running; only completion ends it."""
         sid = msg.get("session_id")
         if not sid or self.db is None:
             return
-        kind = msg.get("type")
-        if kind not in ("status", "result", "error", "recording_failed"):
+        if msg.get("type") != "status" or msg.get("status") != "running":
             return
-        if kind in ("result", "error") and msg.get("retrying"):
-            return
-        if kind == "status" and msg.get("status") != "running":
-            return
-        try:
+        updates = []
+        async with self._build_updates.setdefault(sid, asyncio.Lock()):
             rows = await self.db.get_applications_for_session(sid)
-        except Exception:
-            logger.exception("application lookup failed for session %s", sid)
+            for row in rows:
+                session = self.session_mgr.get_session(sid) if self.session_mgr is not None else None
+                # Progress can outlive its writer and completion. Read the
+                # current execution projection instead of replaying running.
+                if (session is None or session.status is not SessionStatus.running
+                        or self.session_mgr.dispatch_snapshot(sid)["paused"]):
+                    continue
+                if row["status"] != STATUS_BUILDING:
+                    await self.db.update_application(row["id"], status=STATUS_BUILDING, updated_at=_now())
+                    updates.append(await self.db.get_application(row["id"]))
+        for updated in updates:
+            await self._broadcast_application("application_updated", updated)
+
+    def _completion_is_current(self, session_id: str, request_id: str) -> bool:
+        assert self.session_mgr is not None
+        if self.session_mgr.get_session(session_id) is None:
+            return True
+        dispatch = self.session_mgr.dispatch_snapshot(session_id)
+        return not dispatch["items"] and dispatch["active_request_id"] in {None, request_id}
+
+    async def _on_completion(self, session_id: str, completion: RequestCompletion) -> None:
+        """Also observe direct chat in the build session when publication fails."""
+        if self.db is None or self.session_mgr is None:
             return
-        for row in rows:
-            try:
-                if kind == "status":
-                    if row["status"] == STATUS_BUILDING:
-                        continue
-                    await self.db.update_application(
-                        row["id"], status=STATUS_BUILDING, updated_at=_now()
-                    )
-                    updated = await self.db.get_application(row["id"])
-                    await self._broadcast_application("application_updated", updated)
-                elif kind == "recording_failed":
-                    # Files can already exist, but the chosen result has not
-                    # been confirmed saved. The eventual original terminal
-                    # event will run normal output derivation after verification.
+        updates = []
+        async with self._build_updates.setdefault(session_id, asyncio.Lock()):
+            rows = await self.db.get_applications_for_session(session_id)
+            for row in rows:
+                if not self._completion_is_current(session_id, completion.request_id):
+                    continue
+                if completion.recording_state != "committed" or completion.outcome is None:
                     await self.db.update_application(
                         row["id"], status=STATUS_FAILED,
-                        error="Saving the build result is unconfirmed. Open the build conversation to verify and retry saving.",
+                        error=completion.reason or f"The build has no confirmed result ({completion.state}).",
                         updated_at=_now(),
                     )
-                    await self._broadcast_application(
-                        "application_updated", await self.db.get_application(row["id"])
-                    )
-                elif kind == "result":
-                    err = (
-                        str(msg.get("message") or "The build turn ended with an error.")
-                        if msg.get("is_error")
-                        else None
-                    )
-                    await self._evaluate(row["id"], error=err)
-                else:  # error
-                    await self._evaluate(
-                        row["id"], error=str(msg.get("message") or "build error")
-                    )
-            except Exception:
-                logger.exception("application %s status update failed", row["id"])
+                    updates.append(await self.db.get_application(row["id"]))
+                else:
+                    outcome = completion.outcome
+                    updated = await self._evaluate(row["id"], error=(
+                        outcome.message or "The build turn ended with an error."
+                    ) if outcome.status != "success" else None, broadcast=False, request_id=completion.request_id)
+                    if updated is not None:
+                        updates.append(updated)
+        # A subscriber may submit more build work. It never holds the
+        # projection lock while that work emits its own progress/completion.
+        for updated in updates:
+            await self._broadcast_application("application_updated", updated)
 
     # ---------------------------------------------------------------- prompts
 

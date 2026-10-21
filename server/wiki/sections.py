@@ -1,9 +1,9 @@
 """Owned additions are replaceable; all other text belongs to the user."""
 
 import json
-import re
 import uuid
 
+from . import format
 from .store import WikiError, revision
 
 
@@ -28,11 +28,13 @@ def region(role, content, metadata):
     return {"role": role, "raw": raw}
 
 
-def top_offset(text):
-    front = re.match(r"\A\ufeff?---\r?\n.*?\r?\n---(?:\r?\n|$)", text, re.S)
-    offset = front.end() if front else (1 if text.startswith("\ufeff") else 0)
-    title = re.match(r"(?:\r?\n)*# [^\n]*(?:\n|$)", text[offset:])
-    return offset + title.end() if title else offset
+def top_offset(text: str, *, parsed: format.DocumentFormat | None = None) -> int:
+    parsed = parsed if parsed is not None else format.parse(text)
+    offset = parsed.body_start
+    title = next((heading for heading in parsed.headings if heading["level"] == 1 and heading["depth"] == 0), None)
+    if title is not None and not text[offset:title["start"]].strip(" \t\r\n"):
+        return title["end"]
+    return offset
 
 
 def managed_metadata(store, path, raw):

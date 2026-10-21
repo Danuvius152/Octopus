@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from server.config import settings
+from server.service_health import ServiceHealth
 from server.wiki.registry import WikiRegistry
 from server.wiki.store import WikiError
 
@@ -16,6 +17,9 @@ from server.wiki.store import WikiError
 def registries(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "wiki_dir", str(tmp_path / "state"))
     instances = [WikiRegistry(), WikiRegistry()]
+    health = ServiceHealth()
+    for registry in instances:
+        registry.bind_health(health)
     roots = [tmp_path / "a", tmp_path / "b"]
     for root in roots:
         root.mkdir()

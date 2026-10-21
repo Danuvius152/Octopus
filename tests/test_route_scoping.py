@@ -50,6 +50,7 @@ SCOPE_GUARDS = (
 # (method, path) -> why this one carries no account scope.
 UNSCOPED_BY_DESIGN: dict[tuple[str, str], str] = {
     ("GET", "/health"): "liveness; says nothing about anybody's data",
+    ("GET", "/ready"): "installation readiness; exposes no account data",
     ("GET", "/api/backends"): (
         "which harnesses this box has installed — a property of the install"
     ),

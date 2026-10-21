@@ -10,6 +10,7 @@ web/test-results/
 test-results/
 .claude/
 .pytest_cache/
+/.scratch/
 octopus.db*
 octopus-dev.db*
 *.egg-info/

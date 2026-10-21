@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from server.routers.sessions import get_session
-from server.sessions.turns import _Settlement
 from server.wiki.curation import WikiCuration
 from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiJobs
@@ -42,7 +41,7 @@ notes = test_wiki_legacy_metadata.notes
 def test_prepared_mutations_recheck_live_target_and_never_replay_conflict(tmp_path, monkeypatch, mode):
     root = tmp_path / "vault"
     root.mkdir()
-    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
     history = WikiHistory(store)
     path, original, human = "Library/note.md", b"# Original\n", b"# Human edit\n"
     target = store.path(path)
@@ -121,7 +120,7 @@ async def test_publication_race_keeps_attention_and_unindexed_receipt(client, no
     item = dict(jobs.get(job["id"])["items"][0])
     assert jobs.recover_publication(job["id"], item)
     assert item["status"] == "attention" and not item["index_complete"]
-    assert jobs.has_conflict(job["id"], NOTE)
+    assert jobs.has_conflict(job["id"], document["id"])
     receipt = jobs.publication(job["id"], document["id"])
     assert receipt["change_status"] == "conflict" and not receipt["indexed"]
     assert (root / NOTE).read_bytes() == human
@@ -132,7 +131,7 @@ def test_external_save_during_atomic_temporary_fsync_is_checked_again(tmp_path, 
 
     root = tmp_path / "vault"
     root.mkdir()
-    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
     history = WikiHistory(store)
     original, human = b"# Original\n", b"# Saved during temporary-file fsync\n"
     history.write("note.md", original, None, "human", "seed")
@@ -186,7 +185,7 @@ def test_bad_portable_metadata_is_local_and_original_bytes_survive(tmp_path, met
     bad = b"# Bad\n<!-- octopus-wiki " + json.dumps(metadata).encode() + b" -->\n"
     if not incremental:
         (root / "bad.md").write_bytes(bad)
-    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
     try:
         if incremental:
             (root / "bad.md").write_bytes(bad)
@@ -205,7 +204,7 @@ def test_portable_metadata_cannot_forge_index_or_extraction_fields(tmp_path):
     root.mkdir()
     supplied = {"body_start": [], "body_sections": "bad", "doc_role": [], "pipeline_version": [], "format_version": [], "html_body_version": [], "html_body_readable": [], "quality": "verified", "metadata_error": "forged", "source_refs": [{}]}
     (root / "note.md").write_text('# Note\nEvidence.\n<!-- octopus-wiki ' + json.dumps(supplied) + ' -->\n')
-    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
     try:
         result = store.read("note.md")
         assert result["metadata"]["body_start"] == 0
@@ -224,7 +223,7 @@ def test_valid_portable_fields_recover_after_bad_metadata_without_losing_identit
     (root / "good.md").write_bytes(raw)
     target = root / "note.md"
     target.write_text('# Note\n<!-- octopus-wiki {"title": []} -->\n')
-    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
     try:
         old = store.read("note.md")
         metadata = {
@@ -290,45 +289,18 @@ async def test_legacy_to_yaml_replacement_is_independent_and_restorable(client, 
     assert managed(store)[0] == old_metadata
 
 
-@pytest.mark.parametrize("mode", ["before_insert", "writing", "lost_ack"])
-async def test_snapshot_watermark_uses_exact_loaded_rows_during_recording(runtime, monkeypatch, mode):
+async def test_snapshot_watermark_uses_exact_loaded_rows_during_recording(runtime, monkeypatch):
     manager, session = runtime
+    test_session_retirement.scripted_codex(monkeypatch)
     record = manager.db.record_terminal
-    settlement = _Settlement(request_id="recording-replay")
-    session._settlement = settlement
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def faulty(**kwargs):
-        if mode == "before_insert":
-            raise OSError("before INSERT")
-        if mode == "writing":
-            entered.set()
-            await release.wait()
-        await record(**kwargs)
-        if mode == "lost_ack":
-            raise OSError("commit acknowledgement lost")
+    async def before_insert(**kwargs):
+        entered.set()
+        await release.wait()
+        return await record(**kwargs)
 
-    monkeypatch.setattr(manager.db, "record_terminal", faulty)
-    final = asyncio.create_task(manager._settle_turn(session, settlement, status="success"))
-    if mode == "writing":
-        await entered.wait()
-        snapshot = await get_session(manager, session.id, user_id=None)
-        assert snapshot.next_message_seq == 0 and snapshot.messages == []
-        release.set()
-    await final
-    snapshot = await get_session(manager, session.id, user_id=None)
-    assert snapshot.next_message_seq == (0 if mode == "before_insert" else 1)
-    assert len(snapshot.messages) == snapshot.next_message_seq
-    replay = json.loads((Path(__file__).parents[1] / "web/src/lib/recordingReplay.json").read_text())
-
-    def projection(snapshot):
-        return {"next_message_seq": snapshot.next_message_seq, "messages": [
-            {key: row.model_dump()[key] for key in ("seq", "role", "type", "content", "is_error")}
-            for row in snapshot.messages
-        ]}
-
-    assert projection(snapshot) == replay["before" if mode == "before_insert" else "after"]
-    monkeypatch.setattr(manager.db, "record_terminal", record)
+    monkeypatch.setattr(manager.db, "record_terminal", before_insert)
     delivered = []
 
     async def capture(event):
@@ -336,16 +308,57 @@ async def test_snapshot_watermark_uses_exact_loaded_rows_during_recording(runtim
             delivered.append(event)
 
     manager.on_broadcast("recording-replay", capture)
-    if mode != "writing":
-        assert await manager._reconcile_recording(session)
-        assert delivered[0]["seq"] == 0
-        event = dict(delivered[0], session_id="recording-replay-session")
-        assert {key: event[key] for key in replay["event"]} == replay["event"]
-    reconciled = await get_session(manager, session.id, user_id=None)
-    assert len(reconciled.messages) == 1 and reconciled.next_message_seq == 1
-    assert projection(reconciled) == replay["after"]
-    assert await manager._reconcile_recording(session)
-    assert len(delivered) <= 1
+    replay = json.loads((Path(__file__).parents[1] / "web/src/lib/recordingReplay.json").read_text())
+
+    def terminal_projection(snapshot):
+        return {"next_message_seq": snapshot.next_message_seq - 2, "messages": [
+            {**{key: row.model_dump()[key] for key in ("role", "type", "content", "is_error")}, "seq": row.seq - 2}
+            for row in snapshot.messages[2:]
+        ]}
+
+    receipt = await manager.start_message(session.id, "Original input", request_id="recording-replay")
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        snapshot = await get_session(manager, session.id, user_id=None)
+        assert [row.content for row in snapshot.messages] == ["Original input", "ready"]
+        assert snapshot.next_message_seq == 2
+        assert terminal_projection(snapshot) == replay["before"]
+        assert not delivered
+    finally:
+        release.set()
+    completion = await asyncio.wait_for(receipt.wait(), 5)
+    snapshot = await get_session(manager, session.id, user_id=None)
+    assert snapshot.next_message_seq == 3 and len(snapshot.messages) == 3
+    assert len(delivered) == 1 and delivered[0]["seq"] == 2
+    assert delivered[0]["request_id"] == receipt.request_id
+    assert snapshot.messages[-1].content == delivered[0]["content"] == completion.outcome.model_dump()
+    assert terminal_projection(snapshot) == replay["after"]
+    replayed = dict(delivered[0], session_id="recording-replay-session", seq=delivered[0]["seq"] - 2)
+    assert {key: replayed[key] for key in replay["event"]} == replay["event"]
+    assert (await get_session(manager, session.id, user_id=None)).messages == snapshot.messages
+    assert len(delivered) == 1
+
+
+@pytest.mark.parametrize("committed", [False, True])
+async def test_snapshot_after_recording_commit_failure_reads_only_cold_rows(tmp_path, committed):
+    from server.database import Database
+    from server.sessions import SessionManager
+    from tests.test_terminal_recording import _crash_runtime_terminal
+
+    proof, _ = _crash_runtime_terminal(tmp_path, committed)
+    database = Database(proof["database"])
+    await database.initialize()
+    manager = SessionManager()
+    await manager.initialize(database)
+    try:
+        snapshot = await get_session(manager, proof["session_id"], user_id=None)
+        assert snapshot.next_message_seq == (3 if committed else 2)
+        assert [row.seq for row in snapshot.messages] == list(range(snapshot.next_message_seq))
+        assert [row.content for row in snapshot.messages if row.role.value == "user"] == ["Original input 中文"]
+        assert [row.content for row in snapshot.messages if row.type == "result"] == ([proof["selected"]] if committed else [])
+        assert manager.dispatch_snapshot(proof["session_id"])["items"] == []
+    finally:
+        await database.close()
 
 
 def writer_available(path):
@@ -359,72 +372,18 @@ def writer_available(path):
             return False
 
 
-async def test_idle_append_and_continuous_activity_batches_do_not_starve(runtime, monkeypatch):
-    from server.db import base
-
-    monkeypatch.setattr(base, "_FLUSH_AFTER_SECONDS", .05)
-    manager, session = runtime
-    db = manager.db
-    await db.append_message(session.id, 0, "user", "text", content="last message")
-    await asyncio.sleep(.12)
-    assert await asyncio.to_thread(writer_available, db._db_path)
-    commits = []
-    commit = db.conn.commit
-
-    async def counted():
-        commits.append(asyncio.get_running_loop().time())
-        await commit()
-
-    monkeypatch.setattr(db.conn, "commit", counted)
-    # Missing hashes still perform real deferred UPDATEs. Frequent activity
-    # must share batches without moving the first write's deadline forward.
-    async def traffic():
-        for _ in range(24):
-            await db.touch_token("not-a-real-token", at="test")
-            await asyncio.sleep(.01)
-
-    await asyncio.gather(traffic(), traffic())
-    await asyncio.sleep(.08)
-    assert 3 <= len(commits) < 24
-    assert await asyncio.to_thread(writer_available, db._db_path)
-
-
-async def test_deferred_commit_failure_is_visible_and_retries_without_lost_batch(runtime, monkeypatch, caplog):
-    from server.db import base
-
-    monkeypatch.setattr(base, "_FLUSH_AFTER_SECONDS", .02)
+async def test_cancelled_close_waiter_does_not_abandon_connection_retirement(runtime, monkeypatch):
     db = runtime[0].db
-    commit = db.conn.commit
-    attempts = 0
-
-    async def fail_once():
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise sqlite3.OperationalError("injected commit failure")
-        await commit()
-
-    monkeypatch.setattr(db.conn, "commit", fail_once)
-    await db.touch_token("test", at="test")
-    await asyncio.sleep(.12)
-    assert attempts == 2 and not db._dirty
-    assert "Deferred database commit failed" in caplog.text
-    assert await asyncio.to_thread(writer_available, db._db_path)
-
-
-async def test_cancelled_close_joins_timer_and_commits_before_connection_is_retired(runtime, monkeypatch):
-    db = runtime[0].db
-    commit = db.conn.commit
+    close = db.conn.close
     entered, release = asyncio.Event(), asyncio.Event()
 
     async def delayed():
+        await close()
         entered.set()
         await release.wait()
-        await commit()
 
-    monkeypatch.setattr(db.conn, "commit", delayed)
+    monkeypatch.setattr(db.conn, "close", delayed)
     await db.touch_token("test", at="test")
-    timer = db._flush_task
     waiter = asyncio.create_task(db.close())
     await entered.wait()
     waiter.cancel()
@@ -432,36 +391,13 @@ async def test_cancelled_close_joins_timer_and_commits_before_connection_is_reti
         await waiter
     release.set()
     await db.close()
-    assert timer.done() and db._closed and db._conn is None
+    assert db._closed and db._conn is None
     assert await asyncio.to_thread(writer_available, db._db_path)
-
-
-async def test_close_commit_failure_keeps_the_batch_and_timer_for_retry(runtime, monkeypatch, caplog):
-    db = runtime[0].db
-    commit = db.conn.commit
-    attempts = 0
-
-    async def fail_once():
-        nonlocal attempts
-        attempts += 1
-        if attempts == 1:
-            raise sqlite3.OperationalError("injected close commit failure")
-        await commit()
-
-    monkeypatch.setattr(db.conn, "commit", fail_once)
-    await db.touch_token("test", at="test")
-    timer = db._flush_task
-    with pytest.raises(sqlite3.OperationalError, match="close commit"):
-        await db.close()
-    assert timer.done() and db._dirty and not db._closed
-    assert db._flush_task is not None and not db._flush_task.done()
-    assert "Database close failed" in caplog.text
-    await db.close()
-    assert db._closed and db._flush_task is None
 
 
 async def test_snapshot_waits_for_inflight_sql_commit_and_does_not_claim_future_rows(runtime, monkeypatch):
     manager, session = runtime
+    test_session_retirement.scripted_codex(monkeypatch)
     db = manager.db
     commit = db.conn.commit
     entered, release = asyncio.Event(), asyncio.Event()
@@ -471,28 +407,34 @@ async def test_snapshot_waits_for_inflight_sql_commit_and_does_not_claim_future_
         await release.wait()
         await commit()
 
-    monkeypatch.setattr(db.conn, "commit", delayed)
-    settlement = _Settlement()
-    final = asyncio.create_task(manager._settle_turn(session, settlement, status="success"))
+    record = db.record_terminal
+
+    async def terminal_commit(**kwargs):
+        monkeypatch.setattr(db.conn, "commit", delayed)
+        return await record(**kwargs)
+
+    monkeypatch.setattr(db, "record_terminal", terminal_commit)
+    receipt = await manager.start_message(session.id, "Original input")
     await entered.wait()
     snapshot_task = asyncio.create_task(get_session(manager, session.id, user_id=None))
     await asyncio.sleep(.01)
     assert not snapshot_task.done()
     release.set()
-    await final
+    await asyncio.wait_for(receipt.wait(), 5)
     snapshot = await snapshot_task
-    assert snapshot.next_message_seq == 1 and len(snapshot.messages) == 1
+    assert snapshot.next_message_seq == 3 and len(snapshot.messages) == 3
 
     load = db.load_messages
 
     async def load_then_advance(*args, **kwargs):
         messages = await load(*args, **kwargs)
-        session._next_message_seq += 1  # A later reservation after SQL loaded.
+        assert await manager.retain_result_notice(session.id, "later-material", "Saved after the loaded rows")
         return messages
 
     monkeypatch.setattr(db, "load_messages", load_then_advance)
     snapshot = await get_session(manager, session.id, user_id=None)
-    assert snapshot.next_message_seq == 1
+    assert snapshot.next_message_seq == 3
+    assert await db.count_messages(session.id) == 4
 
 
 async def test_config_uses_owner_approved_roots_for_rebinding_and_rejects_escapes(two_accounts, tmp_path):

@@ -27,21 +27,38 @@ async def dispatch(monkeypatch, request):
     started: asyncio.Queue[str] = asyncio.Queue()
     holds = {name: asyncio.Event() for name in ("first", "correction held")}
     holds.update({"frame entered": asyncio.Event(), "frame": asyncio.Event()})
+    holds.update({"stop entered": asyncio.Event(), "stop": asyncio.Event(), "stop calls": []})
+    holds["resume ids"] = []
+    holds["stop"].set()
 
     class Run(FakeRunBase):
         reusable = bool(getattr(request, "param", False))
+        run_lease_id = None
+        work_id = None
+
+        def __init__(self):
+            self.input_ready = asyncio.Event()
+            self.prompt = ""
+
+        def prepare_turn_stream(self):
+            self.input_ready.clear()
 
         async def start(self, prompt, *args, **kwargs):
             self.prompt = prompt
+            holds["resume ids"].append(args[1] if len(args) > 1 else kwargs.get("resume_id"))
+            self.input_ready.set()
 
         async def send_turn(self, prompt):
             self.prompt = prompt
+            holds["resume ids"].append("context")
+            self.input_ready.set()
 
         async def send_user_frame(self, prompt):
             holds["frame entered"].set()
             await holds["frame"].wait()
 
         async def stream(self):
+            await self.input_ready.wait()
             started.put_nowait(self.prompt)
             yield HarnessEvent(type="session_started", session_id="context")
             if self.prompt in holds:
@@ -49,7 +66,9 @@ async def dispatch(monkeypatch, request):
             yield HarnessEvent(type="result", session_id="context", is_error=False)
 
         async def stop(self):
-            pass
+            holds["stop calls"].append(self.prompt)
+            holds["stop entered"].set()
+            await holds["stop"].wait()
 
         async def interrupt(self):
             pass
@@ -58,7 +77,9 @@ async def dispatch(monkeypatch, request):
     try:
         yield manager, session, started, holds
     finally:
-        await manager.stop_all_held_processes()
+        for hold in holds.values():
+            if isinstance(hold, asyncio.Event):
+                hold.set()
         await database.close()
 
 
@@ -126,9 +147,12 @@ async def test_stop_captures_current_request_before_delayed_broadcast(dispatch):
     stopping = asyncio.create_task(manager.interrupt(session.id))
     await asyncio.wait_for(paused.wait(), 2)
     holds["first"].set()
-    await manager.start_message(session.id, "correction held", steerable=True)
+    try:
+        correction = await asyncio.wait_for(manager.start_message(session.id, "correction held", steerable=True), .2)
+        assert correction.accepted
+    finally:
+        release.set()
     assert await asyncio.wait_for(started.get(), 2) == "correction held"
-    release.set()
     await stopping
     await asyncio.sleep(0.05)
     assert manager.get_session(session.id).status.value == "running"
@@ -202,11 +226,13 @@ async def test_concurrent_returns_are_preserved_once_across_correction_and_resum
         for i in range(20) for _ in range(2)
     ))
     assert len(manager.dispatch_snapshot(session.id)["items"]) == 20
+    queued = [item["summary"] for item in manager.dispatch_snapshot(session.id)["items"]]
+    assert sorted(queued) == sorted(f"return {i}" for i in range(20))
     await manager.start_message(session.id, "correction")
     assert await asyncio.wait_for(started.get(), 2) == "correction"
     await manager.resume_dispatch(session.id)
     delivered = [await asyncio.wait_for(started.get(), 2) for _ in range(20)]
-    assert delivered == [f"return {i}" for i in range(20)]
+    assert delivered == queued
     assert started.empty()
 
 
@@ -253,13 +279,27 @@ async def test_second_stop_pauses_human_messages_accepted_before_it(dispatch):
 
 
 @pytest.mark.parametrize("dispatch", [True], indirect=True)
-async def test_stop_releases_blocked_steering_and_preserves_undelivered_message(dispatch):
+async def test_stop_releases_blocked_steering_and_preserves_undelivered_message(dispatch, monkeypatch):
+    from server import fork_helpers
+
     manager, session, started, holds = dispatch
     await manager.start_message(session.id, "first")
     assert await asyncio.wait_for(started.get(), 2) == "first"
+    entered, release = asyncio.Event(), asyncio.Event()
+    capture = fork_helpers.capture_git_anchor
+
+    async def blocked_anchor(*args, **kwargs):
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return await capture(*args, **kwargs)
+
+    monkeypatch.setattr(fork_helpers, "capture_git_anchor", blocked_anchor)
     await manager.start_message(session.id, "undelivered steer", steerable=True)
-    await asyncio.wait_for(holds["frame entered"].wait(), 2)
+    await asyncio.wait_for(entered.wait(), 2)
     await manager.interrupt(session.id)
+    assert not holds["frame entered"].is_set()
+    release.set()
     await manager.start_message(session.id, "fresh correction", steerable=True)
     assert await asyncio.wait_for(started.get(), 1) == "fresh correction"
     assert [item["summary"] for item in manager.dispatch_snapshot(session.id)["items"]] == [
@@ -268,16 +308,18 @@ async def test_stop_releases_blocked_steering_and_preserves_undelivered_message(
     await manager.resume_dispatch(session.id)
     retried = await asyncio.wait_for(started.get(), 2)
     assert retried.endswith("undelivered steer")
-    assert "first" in retried
+    assert holds["resume ids"][-1] == "context"
+    assert [row["content"] for row in await manager.db.load_messages(session.id)
+            if row["role"] == "user"] == ["first", "fresh correction", "undelivered steer"]
 
 
 async def test_deleting_running_session_does_not_leave_failed_dispatch_task(dispatch):
     manager, session, started, _ = dispatch
     await manager.start_message(session.id, "first")
     assert await asyncio.wait_for(started.get(), 2) == "first"
-    active = session._active_task
+    waiting = asyncio.create_task(manager.await_session_execution(session.id))
     assert await manager.delete_session(session.id)
-    completed = await asyncio.gather(active, return_exceptions=True)
+    completed = await asyncio.gather(waiting, return_exceptions=True)
     assert all(value is None or isinstance(value, asyncio.CancelledError) for value in completed)
 
 
@@ -321,16 +363,17 @@ async def test_paused_schedule_neither_notifies_completion_nor_archives_until_re
     scheduled = await manager.create_session(agent["id"], "Paused schedule", origin="schedule")
     await manager.interrupt(scheduled.id)
     await manager.start_message(scheduled.id, "pending automatic return", source="bg")
-    await manager.start_message(scheduled.id, "correct schedule")
-    correcting = scheduled._active_task
+    correcting = await manager.start_message(scheduled.id, "correct schedule")
     assert await asyncio.wait_for(started.get(), 2) == "correct schedule"
-    await asyncio.wait_for(correcting, 2)
+    await asyncio.wait_for(correcting.wait(), 2)
     assert manager.get_session(scheduled.id) is scheduled
     assert notifications == []
     await manager.resume_dispatch(scheduled.id)
-    resumed = scheduled._active_task
     assert await asyncio.wait_for(started.get(), 2) == "pending automatic return"
-    await asyncio.wait_for(resumed, 2)
+    await manager.await_session_execution(scheduled.id, timeout=2)
+    async with asyncio.timeout(2):
+        while manager.get_session(scheduled.id) is not None:
+            await asyncio.sleep(.01)
     assert manager.get_session(scheduled.id) is None
     assert len(notifications) == 1
 
@@ -349,7 +392,7 @@ async def test_submission_receipt_duplicate_and_closed_are_explicit(dispatch):
     closed = await manager.start_message(session.id, "ignored", source="bg", work_id="closed-receipt-work")
     assert closed.disposition == "closed"
     assert (await closed.wait()).state == "withdrawn"
-    assert len(session._pending_queue) == 1
+    assert len(manager.dispatch_snapshot(session.id)["items"]) == 1
 
 
 async def test_cancelled_receipt_waiter_does_not_cancel_execution(dispatch):
@@ -360,7 +403,7 @@ async def test_cancelled_receipt_waiter_does_not_cancel_execution(dispatch):
     waiting.cancel()
     with pytest.raises(asyncio.CancelledError):
         await waiting
-    assert session._inner_task is not None and not session._inner_task.done()
+    assert manager.session_is_executing(session)
     holds["first"].set()
     completion = await asyncio.wait_for(receipt.wait(), 2)
     assert completion.state == "completed"
@@ -380,7 +423,8 @@ async def test_accepted_receipt_does_not_wait_for_notification(dispatch):
     manager.on_broadcast("blocked-admission", blocked)
     receipt = await asyncio.wait_for(manager.start_message(session.id, "fast"), .2)
     assert receipt.disposition == "accepted"
-    assert session._active_task is not None
+    await asyncio.wait_for(entered.wait(), .2)
+    assert manager.dispatch_snapshot(session.id)["active_request_id"] == receipt.request_id
     release.set()
     assert (await asyncio.wait_for(receipt.wait(), 2)).outcome.status == "success"
 
@@ -389,8 +433,8 @@ async def test_withdrawn_queued_receipt_has_no_model_outcome(dispatch):
     manager, session, _, _ = dispatch
     await manager.interrupt(session.id)
     receipt = await manager.start_message(session.id, "return", source="bg", work_id="withdraw-receipt-work")
-    affected = manager.close_work("withdraw-receipt-work")
-    await manager.finish_work_cancellation(affected)
+    affected = await manager.close_work("withdraw-receipt-work")
+    await manager.finish_work_cancellation([affected])
     completion = await asyncio.wait_for(receipt.wait(), .2)
     assert completion.state == "withdrawn"
     assert completion.outcome is None
@@ -431,18 +475,34 @@ async def test_inline_steer_receipt_follows_actual_logical_request(dispatch):
 
 
 @pytest.mark.parametrize("dispatch", [True], indirect=True)
-async def test_failed_inline_delivery_retains_receipt_for_queued_execution(dispatch):
+async def test_failed_inline_delivery_retains_receipt_for_queued_execution(dispatch, monkeypatch):
+    from server import fork_helpers
+
     manager, session, started, holds = dispatch
     original = await manager.start_message(session.id, "first")
     assert await asyncio.wait_for(started.get(), 2) == "first"
+    entered, release = asyncio.Event(), asyncio.Event()
+    capture = fork_helpers.capture_git_anchor
+
+    async def blocked_anchor(*args, **kwargs):
+        if not entered.is_set():
+            entered.set()
+            await release.wait()
+        return await capture(*args, **kwargs)
+
+    monkeypatch.setattr(fork_helpers, "capture_git_anchor", blocked_anchor)
     steer = await manager.start_message(session.id, "fallback input", steerable=True)
-    await asyncio.wait_for(holds["frame entered"].wait(), 2)
+    await asyncio.wait_for(entered.wait(), 2)
     await manager.interrupt(session.id)
+    assert not holds["frame entered"].is_set()
+    release.set()
     assert (await asyncio.wait_for(original.wait(), 2)).outcome.status == "interrupted"
     await manager.resume_dispatch(session.id)
     retried = await asyncio.wait_for(started.get(), 2)
     assert retried.endswith("fallback input")
-    assert "first" in retried
+    assert holds["resume ids"][-1] == "context"
+    assert [row["content"] for row in await manager.db.load_messages(session.id)
+            if row["role"] == "user"] == ["first", "fallback input"]
     completed = await asyncio.wait_for(steer.wait(), 2)
     assert completed.request_id == steer.request_id
     assert completed.outcome.status == "success"
@@ -477,7 +537,7 @@ async def test_duplicate_delivery_after_shutdown_keeps_original_request_and_comp
     assert duplicate.request_id == original.request_id
     assert await duplicate.wait() == await original.wait()
     assert (await duplicate.wait()).state == "shutdown"
-    assert started.empty() and not session._pending_queue
+    assert started.empty() and manager.dispatch_snapshot(session.id)["items"] == []
 
 
 async def test_precise_request_cancel_keeps_later_input(dispatch):
@@ -487,67 +547,49 @@ async def test_precise_request_cancel_keeps_later_input(dispatch):
     later = await manager.start_message(session.id, "later", source="wiki")
     assert await manager.cancel_request(session.id, older.request_id)
     assert (await older.wait()).state == "withdrawn"
-    assert [item.request_id for item in session._pending_queue] == [later.request_id]
+    assert [item["request_id"] for item in manager.dispatch_snapshot(session.id)["items"]] == [later.request_id]
 
 
 async def test_unconfirmed_old_backend_retirement_blocks_replacement(dispatch, monkeypatch):
-    from tests.fake_run import FakeRunBase
-
-    manager, session, _, _ = dispatch
-    reaped = asyncio.Event()
-    entered = asyncio.Event()
-    created = []
-
-    class OldRun(FakeRunBase):
-        async def interrupt(self):
-            pass
-
-        async def stop(self):
-            entered.set()
-            await reaped.wait()
-
-    session._backend = OldRun()
-    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: created.append(True))
+    manager, session, started, holds = dispatch
+    original = await manager.start_message(session.id, "first")
+    assert await asyncio.wait_for(started.get(), 2) == "first"
+    holds["stop"].clear()
+    await manager.interrupt(session.id)
+    await asyncio.wait_for(holds["stop entered"].wait(), 2)
+    replacement = await manager.start_message(session.id, "replacement")
     try:
-        with pytest.raises(RuntimeError, match="retirement remains unconfirmed"):
-            await manager._acquire_backend(session, None, None, None, retirement_timeout=.01)
-        assert entered.is_set()
-        assert created == []
-        assert len(session._backend_retirements) == 1
-        cleanup = next(iter(session._backend_retirements.values()))[1]
-        assert not cleanup.cancelled() and not cleanup.done()
-        reaped.set()
-        await cleanup
-        await manager._await_backend_retirement(session)
+        with pytest.raises(TimeoutError):
+            await manager.await_session_execution(session.id, timeout=.01)
+        assert started.empty()
+        assert manager.session_is_executing(session)
+        assert holds["stop calls"] == ["first"]
+        holds["stop"].set()
+        assert (await asyncio.wait_for(original.wait(), 2)).outcome.status == "interrupted"
+        assert await asyncio.wait_for(started.get(), 2) == "replacement"
+        assert (await asyncio.wait_for(replacement.wait(), 2)).outcome.status == "success"
     finally:
-        reaped.set()
+        holds["stop"].set()
 
 
 async def test_cancelled_acquire_waiter_keeps_old_retirement_owned(dispatch):
-    from tests.fake_run import FakeRunBase
-
-    manager, session, _, _ = dispatch
-    entered, reaped = asyncio.Event(), asyncio.Event()
-
-    class OldRun(FakeRunBase):
-        async def interrupt(self):
-            pass
-
-        async def stop(self):
-            entered.set()
-            await reaped.wait()
-
-    session._backend = OldRun()
-    acquiring = asyncio.create_task(manager._acquire_backend(session, None, None, None))
+    manager, session, started, holds = dispatch
+    original = await manager.start_message(session.id, "first")
+    assert await asyncio.wait_for(started.get(), 2) == "first"
+    holds["stop"].clear()
+    await manager.interrupt(session.id)
+    await asyncio.wait_for(holds["stop entered"].wait(), 2)
+    acquiring = asyncio.create_task(manager.await_session_execution(session.id))
     try:
-        await asyncio.wait_for(entered.wait(), 2)
         acquiring.cancel()
         with pytest.raises(asyncio.CancelledError):
             await acquiring
-        cleanup = next(iter(session._backend_retirements.values()))[1]
-        assert not cleanup.cancelled() and cleanup in manager._owned_tasks
-        reaped.set()
-        await cleanup
+        assert manager.session_is_executing(session)
+        assert holds["stop calls"] == ["first"]
+        holds["stop"].set()
+        assert (await asyncio.wait_for(original.wait(), 2)).outcome.status == "interrupted"
+        await manager.await_session_execution(session.id, timeout=2)
+        assert not manager.session_is_executing(session)
     finally:
-        reaped.set()
+        holds["stop"].set()
         await asyncio.gather(acquiring, return_exceptions=True)

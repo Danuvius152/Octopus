@@ -1,4 +1,4 @@
-"""Request outcomes through the real driver, CLI parser and history API."""
+"""Request outcomes through public receipts, the real parser and history API."""
 
 import asyncio
 import json
@@ -30,13 +30,14 @@ async def runtime(monkeypatch):
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_session_manager] = lambda: manager
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app), base_url="http://test",
-        headers={"Authorization": "Bearer changeme"},
-    ) as client:
-        yield manager, session, client
-    await manager.stop_all_held_processes()
-    await db.close()
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app), base_url="http://test",
+            headers={"Authorization": "Bearer changeme"},
+        ) as client:
+            yield manager, session, client
+    finally:
+        await db.close()
 
 
 def scripted_cli(monkeypatch, scripts):
@@ -81,8 +82,8 @@ async def drive(runtime, prompt="request"):
         events.append(event)
 
     manager.on_broadcast("outcomes-test", capture)
-    await manager.start_message(session.id, prompt)
-    await asyncio.wait_for(session._active_task, 10)
+    receipt = await manager.start_message(session.id, prompt)
+    await asyncio.wait_for(receipt.wait(), 10)
     response = await client.get(f"/api/sessions/{session.id}")
     assert response.status_code == 200
     return events, response.json()["messages"]
@@ -134,10 +135,10 @@ async def test_stop_delivers_one_interrupted_result_without_success(runtime, mon
             running.set()
 
     manager.on_broadcast("stop-test", capture)
-    await manager.start_message(session.id, "first")
+    receipt = await manager.start_message(session.id, "first")
     await asyncio.wait_for(running.wait(), 3)
     assert await manager.interrupt(session.id)
-    await asyncio.wait_for(session._active_task, 5)
+    await asyncio.wait_for(receipt.wait(), 5)
     final = [e for e in live if e["type"] == "result"]
     assert len(final) == 1
     assert final[0]["content"]["status"] == "interrupted"
@@ -267,14 +268,14 @@ async def test_stop_during_recovery_preserves_snapshot_and_allows_a_fresh_reques
             retrying.set()
 
     manager.on_broadcast("backoff-test", capture)
-    await manager.start_message(session.id, "first")
+    receipt = await manager.start_message(session.id, "first")
     await asyncio.wait_for(retrying.wait(), 3)
     snapshot = (await client.get(f"/api/sessions/{session.id}")).json()["messages"]
     assert not any(m["type"] == "result" for m in snapshot)
     marker = next(m for m in snapshot if m["type"] == "recovery" and m["content"]["phase"] == "retrying")
     assert marker["content"]["attempt"] == 1
     assert await manager.interrupt(session.id)
-    await asyncio.wait_for(session._active_task, 5)
+    await asyncio.wait_for(receipt.wait(), 5)
     final = [e for e in live if e["type"] == "result"]
     assert len(final) == 1 and final[0]["content"]["status"] == "interrupted"
     assert final[0]["content"]["recovery"]["transient"] == 1

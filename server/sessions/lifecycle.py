@@ -11,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
@@ -22,6 +22,7 @@ from ..credential_bindings import validate_credential_binding
 from ..harness import get_harness
 from ..large_prompts import delete_session_large_prompts
 from ..models import MessageContent, SessionDetail, SessionStatus
+from ..users import owner_is_available
 from ..workspace import confine
 from .base import (
     _BACKEND_RETIRE_TIMEOUT,
@@ -31,12 +32,18 @@ from .base import (
     fork_info_fields,
     resolve_working_dir,
 )
+from .owner import SessionOwnerUnavailable
+from .owner_runtime import AutoArchive, CloseExecution, ReleaseArchive
 
 # The window an archived open returns, matching the live one in
 # `routers/sessions.MESSAGE_WINDOW`. Declared here rather than imported to keep
 # the slice free of a router import; the read-only manage view pages back
 # through the same `…/messages` cursor.
 _ARCHIVED_MESSAGE_WINDOW = 200
+
+
+class LifecycleAdmissionError(ValueError):
+    """The lifecycle command was refused before taking ownership of effects."""
 
 
 class LifecycleMixin(SessionManagerBase):
@@ -47,20 +54,58 @@ class LifecycleMixin(SessionManagerBase):
         agent = await self.db.get_agent(agent_id) if self.db and agent_id else None
         if self.db and (agent is None or agent["archived"]):
             raise ValueError("Agent not found or archived")
+        if self.db and agent is not None and not await owner_is_available(self.db, agent.get("user_id")):
+            raise ValueError("Account is unavailable")
         if agent_id in self._closed_agents:
             raise ValueError("Agent admission is closed")
         return agent
 
     @asynccontextmanager
     async def agent_operation(self, agent_id: str | None) -> AsyncIterator[None]:
-        """Reserve agent work; archive joins it outside the lock.
+        """Reserve agent work; archive and adoption join it outside the lock.
 
         Global turn admission is checked by start_message, which also records
         a refused application/delegation attempt. Session restoration must
         remain available to confirm earlier receipts during shutdown recovery.
         """
         async with self._agent_lifecycle_lock:
+            if self._legacy_transition:
+                raise LifecycleAdmissionError("Account memory handoff is in progress; retry after account recovery")
             await self.require_active_agent(agent_id)
+            completion = asyncio.get_running_loop().create_future()
+            owners = self._agent_operations.setdefault(agent_id, set())
+            owners.add(completion)
+        try:
+            yield
+        finally:
+            owners.discard(completion)
+            completion.set_result(None)
+
+    async def _run_agent_operation[T](
+        self, agent_id: str | None, command: Callable[[], Awaitable[T]],
+    ) -> T:
+        """Keep the original lifecycle command alive when its waiter leaves."""
+        async def run() -> T:
+            async with self.agent_operation(agent_id):
+                return await command()
+
+        task = asyncio.create_task(run(), name=f"agent-operation-{agent_id}")
+        self._own_task(task)
+        return await asyncio.shield(task)
+
+    @asynccontextmanager
+    async def _retirement_operation(
+        self, agent_id: str | None, *, only_request_id: str | None = None,
+    ) -> AsyncIterator[None]:
+        """Register cleanup without requiring the retired agent to stay open.
+
+        Wiki shutdown closes a captured request after transition starts. That
+        exact request is still checked by _retire_archived_session; an external
+        archive or delete has no such cleanup authority.
+        """
+        async with self._agent_lifecycle_lock:
+            if self._legacy_transition and only_request_id is None:
+                raise LifecycleAdmissionError("Account memory handoff is in progress; retry after account recovery")
             completion = asyncio.get_running_loop().create_future()
             owners = self._agent_operations.setdefault(agent_id, set())
             owners.add(completion)
@@ -103,6 +148,8 @@ class LifecycleMixin(SessionManagerBase):
         from ..agent_manager import AgentError, AgentManager
 
         async with self._agent_lifecycle_lock:
+            if self._legacy_transition:
+                raise AgentError("Account memory handoff is in progress; retry after account recovery")
             agent = await self.db.get_agent(agent_id, user_id=user_id)
             if agent is None or agent.get("user_id") != user_id:
                 raise AgentError("Agent not found")
@@ -143,11 +190,12 @@ class LifecycleMixin(SessionManagerBase):
         parent_session_id: str | None = None, delegation_request: str | None = None,
         app_id: str | None = None,
     ) -> Session:
-        async with self.agent_operation(agent_id):
-            return await self._create_session(
+        return await self._run_agent_operation(
+            agent_id, lambda: self._create_session(
                 agent_id, name, working_dir, credential_id, origin, backend,
                 parent_session_id, delegation_request, app_id,
-            )
+            ),
+        )
 
     async def _create_session(
         self,
@@ -243,11 +291,12 @@ class LifecycleMixin(SessionManagerBase):
         messages: list[MessageContent] | None = None, agent_id: str | None = None,
         origin: str = "user", backend: str | None = None,
     ) -> Session:
-        async with self.agent_operation(agent_id):
-            return await self._import_session(
+        return await self._run_agent_operation(
+            agent_id, lambda: self._import_session(
                 name, working_dir, claude_session_id, credential_id, messages,
                 agent_id, origin, backend,
-            )
+            ),
+        )
 
     async def _import_session(
         self,
@@ -299,12 +348,10 @@ class LifecycleMixin(SessionManagerBase):
                 backend=session.backend,
                 user_id=session.user_id,
             )
-        self.sessions[sid] = session
         if messages:
             for msg in messages:
                 await self._persist_message(session, msg)
-            if self.db:
-                await self.db.flush()
+        self.sessions[sid] = session
         return session
 
     async def archive_session(
@@ -343,71 +390,98 @@ class LifecycleMixin(SessionManagerBase):
         self, session: Session, reservation: object, *, only_request_id: str | None = None,
     ) -> bool:
         """Close explicit admission and finish captured work before hiding it."""
-        async with session._dispatch_lock:
-            if self.sessions.get(session.id) is not session:
-                raise ValueError(f"Session {session.id} not found")
-            if only_request_id is not None:
-                requests = [*session._pending_queue, *session._steer_queue,
-                            *([session._current_request] if session._current_request else [])]
-                if (any(request.request_id != only_request_id for request in requests)
-                        or session._recording_blocked is not None
-                        and session._recording_blocked.request_id != only_request_id):
-                    return False
-            if session._admission_closed or session._archive_reservation is not None:
-                raise ValueError(f"Session {session.id} is already being archived")
-            if session._recording_blocked is not None:
-                raise ValueError("Result recording must be verified before archiving the session")
-            session._archive_reservation = reservation
-            session._admission_closed = True
-            session._dispatch_paused = True
-            session._steer_open = False
-            self._withdraw_requests(session, [*session._pending_queue, *session._steer_queue], reason="withdrawn")
-            session._pending_queue.clear()
-            session._steer_queue.clear()
-            current = session._current_request
-            if current is not None and not current.started:
-                self._withdraw_requests(session, [current], reason="withdrawn")
-            backend = session._backend
-            if backend is not None:
-                self._retire_backend(session, backend)
-            tasks = {task for task in (session._inner_task, session._active_task)
-                     if task is not None and task is not asyncio.current_task() and not task.done()}
-            for task in tasks:
-                task.cancel()
-        await self._close_session_questions(session, reason="archived")
-        if tasks:
-            _, pending = await asyncio.wait(tasks, timeout=_BACKEND_RETIRE_TIMEOUT)
-            if pending:
-                raise ValueError("Session execution retirement remains unconfirmed")
-        await self._await_backend_retirement(session)
-        if session._recording_blocked is not None:
-            raise ValueError("Result recording must be verified before archiving the session")
+        owner = self._session_owners.get(id(session)) or self._session_owner(session)
+        accepted = await owner.call_runtime(CloseExecution("archived", reservation, only_request_id))
+        if not accepted:
+            return False
+        await self.await_session_execution(session.id, timeout=_BACKEND_RETIRE_TIMEOUT)
+        await self._join_session_owner_commands(session)
         return True
 
     async def _archive_live_session(
         self, old: Session, *, replace: bool, only_request_id: str | None = None,
     ) -> Session | None:
+        operation = (
+            self.agent_operation(old.agent_id) if replace
+            else self._retirement_operation(old.agent_id, only_request_id=only_request_id)
+        )
+        async with operation:
+            _, successor = await self._archive_original(old, replace=replace, only_request_id=only_request_id)
+            return successor
+
+    async def _archive_original(
+        self, session: Session, *, replace: bool = False, successor: Session | None = None,
+        only_request_id: str | None = None, automatic: bool = False,
+    ) -> tuple[bool, Session | None]:
+        """Own one reservation, resource deadline, archive effect and release.
+
+        Explicit close may interrupt; autoarchive instead keeps its original
+        idle/revision decision and rolls back a refused database projection.
+        A prepared rewind successor is never discarded on a failed tail.
+        """
+        owner = self._session_owners.get(id(session)) or self._session_owner(session)
+        decision = None
         reservation = object()
+        if automatic:
+            if owner.failed:
+                return False, None
+            operation = asyncio.current_task()
+            assert operation is not None
+            decision = await owner.call_runtime(AutoArchive(operation))
+            if decision is None:
+                return False, None
+            reservation = decision.reservation
         try:
-            if not await self._retire_archived_session(old, reservation, only_request_id=only_request_id):
-                return None
-            return await self._finish_session_archive(old, replace=replace)
+            if not automatic:
+                try:
+                    accepted = not owner.failed and await owner.call_runtime(CloseExecution("archived", reservation, only_request_id))
+                except SessionOwnerUnavailable:
+                    if not owner.failed:
+                        raise
+                    accepted = False
+                if owner.failed:
+                    # Manager now owns the ended writer's original state and
+                    # resources. New admission is already closed; no command
+                    # or successor writer is needed to reserve this archive.
+                    await self._failed_owner_retirement(owner)
+                    if not owner.runtime.can_close_request(only_request_id):
+                        return False, None
+                    if session._archive_reservation not in {None, reservation}:
+                        raise ValueError(f"Session {session.id} is already being archived")
+                    session._archive_reservation = reservation
+                elif not accepted:
+                    return False, None
+            await self.await_session_execution(session.id, timeout=_BACKEND_RETIRE_TIMEOUT)
+            await self._join_session_owner_commands(session)
+            if automatic and owner.failed:
+                return False, None
+            if self.db:
+                await self.db.update_session_field(session.id, archived=True)
+            if decision is not None:
+                try:
+                    removed = await owner.call_runtime(decision)
+                except SessionOwnerUnavailable:
+                    if not owner.failed:
+                        raise
+                    removed = False
+                if not removed:
+                    if self.db:
+                        await self.db.update_session_field(session.id, archived=False)
+                    return False, None
+            else:
+                self.sessions.pop(session.id, None)
+                self._session_removed(session)
+            return True, await self._finish_session_archive(session, replace=replace, successor=successor)
         finally:
-            if old._archive_reservation is reservation:
-                old._archive_reservation = None
-                if self.sessions.get(old.id) is old:
-                    old._admission_closed = False
+            if self.sessions.get(session.id) is session and self._session_owners.get(id(session)) is owner:
+                await self._release_session_reservation(owner, ReleaseArchive(reservation))
 
-    async def _finish_session_archive(self, old: Session, *, replace: bool) -> Session | None:
-        session_id = old.id
+    async def _finish_session_archive(
+        self, old: Session, *, replace: bool, successor: Session | None = None,
+    ) -> Session | None:
+        """The archive effect is confirmed; publish or create its successor."""
 
-        # Mark the DB row archived; drop it from the in-memory dict so
-        # subsequent list/get calls don't surface it.
-        if self.db:
-            await self.db.update_session_field(session_id, archived=True)
-        self.sessions.pop(session_id, None)
-
-        if not replace:
+        if not replace and successor is None:
             await self._broadcast(
                 {
                     "type": "session_archived",
@@ -420,26 +494,21 @@ class LifecycleMixin(SessionManagerBase):
 
         # New session inherits agent / name / working_dir / credential_id /
         # origin but starts with no claude_session_id (fresh conversation).
-        agent_id = old.agent_id
-        if agent_id is None and self.db:
-            sys_agent = await self.db.get_system_agent()
-            agent_id = sys_agent["id"] if sys_agent else None
-        new = await self.create_session(
-            agent_id=agent_id,
-            name=old.name,
-            working_dir=old.working_dir,
-            credential_id=old.credential_id,
-            origin=old.origin,
-            backend=old.backend,
-        )
-        new.model = old.model
-        new.reasoning_effort = old.reasoning_effort
-        new.service_tier = old.service_tier
-        if self.db:
-            await self.db.update_session_field(
-                new.id, model=new.model, reasoning_effort=new.reasoning_effort,
-                service_tier=new.service_tier,
+        new = successor
+        if new is None:
+            agent_id = old.agent_id
+            if agent_id is None and self.db:
+                sys_agent = await self.db.get_system_agent()
+                agent_id = sys_agent["id"] if sys_agent else None
+            # Replacement belongs to this already registered lifecycle command.
+            new = await self._create_session(
+                agent_id=agent_id, name=old.name, working_dir=old.working_dir,
+                credential_id=old.credential_id, origin=old.origin, backend=old.backend,
             )
+            new.model, new.reasoning_effort, new.service_tier = old.model, old.reasoning_effort, old.service_tier
+            if self.db:
+                await self.db.update_session_field(new.id, model=new.model,
+                    reasoning_effort=new.reasoning_effort, service_tier=new.service_tier)
 
         # Schedules are agent-owned, so ownership needs no repoint.
         # But a schedule created from this session (origin_session_id == old.id)
@@ -487,52 +556,13 @@ class LifecycleMixin(SessionManagerBase):
             or session.origin not in self._AUTO_ARCHIVE_ELIGIBLE
         ):
             return False
-        def idle() -> bool:
-            return (
-                self.sessions.get(session_id) is session
-                and not session._dispatch_paused
-                and session._recording_blocked is None
-                and not session._pending_queue
-                and session._current_request is None
-                and not (session._active_task and not session._active_task.done())
-            )
+        task = asyncio.create_task(self._auto_archive_idle_session(session), name=f"auto-archive-{session.id}")
+        self._own_task(task)
+        return await asyncio.shield(task)
 
-        reservation = object()
-        async with session._dispatch_lock:
-            if not idle() or session._archive_reservation is not None:
-                return False
-            session._archive_reservation = reservation
-            revision = session._dispatch_revision
-
-        async def restore_live_row() -> None:
-            if self.db and self.sessions.get(session_id) is session:
-                await self.db.update_session_field(session_id, archived=False)
-
-        try:
-            if self.db:
-                await self.db.update_session_field(session_id, archived=True)
-            async with session._dispatch_lock:
-                archived = idle() and session._dispatch_revision == revision
-                if archived:
-                    self.sessions.pop(session_id)
-            if not archived:
-                await restore_live_row()
-                return False
-        except BaseException:
-            await asyncio.shield(restore_live_row())
-            raise
-        finally:
-            if session._archive_reservation is reservation:
-                session._archive_reservation = None
-        await self._broadcast(
-            {
-                "type": "session_archived",
-                "old_session_id": session_id,
-                "new_session_id": None,
-                "name": session.name,
-            }, user_id=session.user_id,
-        )
-        return True
+    async def _auto_archive_idle_session(self, session: Session) -> bool:
+        archived, _ = await self._archive_original(session, automatic=True)
+        return archived
 
     async def evict_agent_sessions(self, agent_id: str) -> list[str]:
         """Drop all live sessions owned by an agent from the in-memory map
@@ -547,8 +577,6 @@ class LifecycleMixin(SessionManagerBase):
 
     async def _evict_agent_sessions(self, agent_id: str) -> list[str]:
         sessions = [session for session in self.sessions.values() if session.agent_id == agent_id]
-        if any(session._recording_blocked is not None for session in sessions):
-            raise ValueError("Result recording must be verified before archiving the agent")
         reservations = {session.id: object() for session in sessions}
         try:
             for session in sessions:
@@ -557,6 +585,7 @@ class LifecycleMixin(SessionManagerBase):
             # available for verification, instead of partially evicting them.
             for session in sessions:
                 self.sessions.pop(session.id, None)
+                self._session_removed(session)
                 await self._broadcast(
                     {"type": "session_archived", "old_session_id": session.id,
                      "new_session_id": None, "name": session.name},
@@ -565,10 +594,10 @@ class LifecycleMixin(SessionManagerBase):
             return [session.id for session in sessions]
         finally:
             for session in sessions:
-                if session._archive_reservation is reservations[session.id]:
-                    session._archive_reservation = None
-                    if self.sessions.get(session.id) is session:
-                        session._admission_closed = False
+                if self.sessions.get(session.id) is session:
+                    owner = self._session_owners.get(id(session))
+                    if owner is not None and not owner.failed:
+                        await owner.call_runtime(ReleaseArchive(reservations[session.id]))
 
     async def list_archived_sessions(
         self, user_id: str | None = None
@@ -685,8 +714,9 @@ class LifecycleMixin(SessionManagerBase):
         binding = await self.db.get_session_binding(session_id) if self.db else None
         if binding is None or (user_id is not None and binding["user_id"] != user_id):
             raise ValueError(f"Archived session {session_id} not found")
-        async with self.agent_operation(binding["agent_id"]):
-            return await self._unarchive_session(session_id, user_id)
+        return await self._run_agent_operation(
+            binding["agent_id"], lambda: self._unarchive_session(session_id, user_id),
+        )
 
     async def _unarchive_session(
         self, session_id: str, user_id: str | None = None
@@ -726,35 +756,24 @@ class LifecycleMixin(SessionManagerBase):
             return False
         task = session._deletion_task
         if task is None or task.done():
-            session._admission_closed = True
-            session._dispatch_paused = True
             task = asyncio.create_task(self._delete_live_session(session), name=f"delete-session-{session_id}")
             session._deletion_task = task
             self._own_task(task)
         return await asyncio.shield(task)
 
     async def _delete_live_session(self, session: Session) -> bool:
+        async with self._retirement_operation(session.agent_id):
+            return await self._finish_session_deletion(session)
+
+    async def _finish_session_deletion(self, session: Session) -> bool:
         session_id = session.id
-        session._admission_closed = True
-        session._dispatch_paused = True
-        self._withdraw_requests(session, [*session._pending_queue, *session._steer_queue], reason="deleted")
-        if session._current_request is not None and not session._current_request.started:
-            self._withdraw_requests(session, [session._current_request], reason="deleted")
-        session._pending_queue.clear()
-        session._steer_queue.clear()
-        await self._close_session_questions(session, reason="deleted")
-        if session._inner_task and not session._inner_task.done():
-            session._inner_task.cancel()
-        if session._active_task and not session._active_task.done():
-            session._active_task.cancel()
-        if session._backend:
-            self._retire_backend(session, session._backend)
-        tasks = [task for task in (session._inner_task, session._active_task) if task is not None]
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        await self._await_backend_retirement(session)
+        owner = self._session_owners.get(id(session)) or self._session_owner(session)
+        await owner.call_runtime(CloseExecution("deleted"))
+        await self.await_session_execution(session_id, timeout=_BACKEND_RETIRE_TIMEOUT)
+        await self._join_session_owner_commands(session)
         if self.sessions.get(session_id) is session:
             self.sessions.pop(session_id)
+            self._session_removed(session)
         # Blit attachment files into descendant forks BEFORE removing this
         # session's dir, so the read-time fallback stays valid (§5.5). Done
         # before the DB delete so the descendant message rows are still
@@ -766,6 +785,6 @@ class LifecycleMixin(SessionManagerBase):
         # this after the DB delete so the FK cascade has already removed
         # message rows pointing at them — if rmtree fails, the session
         # row is still gone, which is the user-visible expectation.
-        delete_session_attachments(session_id)
-        delete_session_large_prompts(session_id)
+        await asyncio.to_thread(delete_session_attachments, session_id)
+        await asyncio.to_thread(delete_session_large_prompts, session_id)
         return True

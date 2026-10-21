@@ -24,11 +24,11 @@ uncommitted unless the user requests a commit; it does not trigger deployment.
 
 Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验收已完成（2026-10-17）。开发过程、当前合同和证据集中在总结；Sapphire、SmartReader 等后续功能单列未来计划。
 
-随后收到的代码审查整改尚未完成；已修范围、失败回归、未接入代码和模型验证范围见
+随后选定的 Wiki A01/A02/A03/A05 整改已交付；当前合同、验收范围和历史证据见
 **[2026-10-17 缺陷修复交接](plans/wiki-bug-remediation-20261017.md)**。
 
 - **[共享 Wiki 开发过程总结](plans/wiki-development-summary.md)** — 本期已完成；实际交付、当前合同、证据边界与开发方法。
-- **[接管前后框架行为评估（2026-10-18）](review/before-takeover-behavior-review-20261018.md)** — 对照 before-takeover、线上版本和草稿；汇总当前 Codex 修复范围、优先级与验收，区分正常输出预算和条件项。
+- **[接管前后框架行为核查（2026-10-19 更新）](review/before-takeover-behavior-review-20261018.md)** — 对照 `203f7f3` 的当前问题清单；置顶 Codex 重复控制指令，删除已修复和过时条目，保留适用边界与验收要求。
 - **[共享 Wiki 未来计划](plans/wiki-future-plan.md)** — Sapphire、SmartReader、共享能力及有触发条件的后续工作。
 - **[user-guide.md](user-guide.md)** — practical instructions for this local
   WSL + Codex installation: startup, agents, and phone access with the
@@ -63,6 +63,8 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | Plan | Status | What |
 |---|---|---|
 | [Multi-tenancy, second pass: Connectors, Schedules, Harness](plans/multi-tenancy-gaps.md) | in-progress | Proposal: close the gaps a read-only review found where accounts can reach each other's work through the Manage surfaces, and make each class of gap structurally impossible. |
+| [Octopus 最小机制架构：执行计划](plans/minimal-architecture-execution-20261020.md) | in-progress | 票20及文档已验收，本轮停止；后续实施和完整发布等待用户恢复。 |
+| [Rotating the installation access token](plans/token-rotation.md) | in-progress | Migrating token rotation to the minimal architecture contract; candidate verification and review remain open. |
 | [/fork — duplicate a session onto a copied working directory](plans/session-fork.md) | shipped | Duplicate a session onto an independent full copy of its working directory. |
 | [Agent Collaboration — Tech Plan (agent-to-agent delegation)](plans/agent-collaboration.md) | shipped | Agent-to-agent delegation — the `mcp__ask_agent__*` tools, one hop, replies injected as follow-up turns. Reverses the "no A2A" carve-out in `agent-refactor.md` §40-41. |
 | [Agent Memory — Tech Plan (native, agent-written, per-agent)](plans/memory.md) | shipped | Per-agent native memory: one markdown directory per agent, shared by both harnesses. |
@@ -81,7 +83,6 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | [Octopus on a phone](plans/mobile.md) | shipped | Octopus on a phone — the drawer that puts itself away, 16px fields, touch targets, and safe-area insets. |
 | [Octopus-native deep research](plans/native-deep-research.md) | shipped | Octopus-orchestrated deep research: scoped fan-out of web-search sub-turns, adversarially verified, then synthesized. |
 | [Polish pass, September 2026](plans/polish-2026-09.md) | shipped | The September 2026 polish pass: size debt, migration safety, the MCP sidecar footprint, gates, docs, and monitoring. All eleven items in §10 landed; the changes and four defects are recorded in docs/2026-09-25-polish-pass.md. |
-| [Rotating the access token without breaking anything](plans/token-rotation.md) | shipped | Rotating `OCTOPUS_AUTH_TOKEN`: re-key every stored secret, rewrite the env files, and keep open tabs working. |
 | [Scheduled runs: what a fire is, and what stops it stacking](plans/scheduled-runs.md) | shipped | What a scheduled fire is: the overlap guard, the `[scheduled:…]` marker, and the link from "last run" to the run. |
 | [Session Tree-Rewind — Tech Plan (`/rewind`)](plans/session-rewind.md) | shipped | Branch a conversation at any prior user message, with an optional git revert of the working tree. |
 | [Sidebar pins: the sidebar is shortcuts, the page is everything](plans/sidebar-pins.md) | shipped | The sidebar lists pinned agents and applications; the Agents and Applications pages list all of them. |
@@ -93,6 +94,7 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | [Wiki 与运行基础缺陷修复：2026-10-17 交接](plans/wiki-bug-remediation-20261017.md) | shipped | 简化后的 A01/A02/A03/A05 实现与本机验收；A04/A06/A07 不在范围。§16 记录当前合同与交付证据，§1–§15 保留历史。 |
 | [共享 Wiki：开发过程总结与当前合同](plans/wiki-development-summary.md) | shipped | Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验收已完成；保留当前合同、证据边界和开发方法。 |
 | [运行日志缺陷修复：设计访谈与行为契约](plans/runtime-log-repair-20261013.md) | shipped | Q12 修复及本地 Codex 验收已完成；Stop 暂停内存积压、人工纠偏优先、明确恢复；保留主要框架，Q11 持久队列不实施。 |
+| [P1 问题整改：CR-03 输入恢复](plans/p1-remediation-20261020.md) | superseded by minimal-architecture-execution-20261020.md | CR-03 暂存实现并入最小机制架构计划，以下保留原范围决定与历史验收，不再作为单独发布入口。 |
 | [Codex performance in Monitor](plans/codex-performance-monitor.md) | completed | effective output TPS implemented and validated for local Codex; client windows, model grouping and passive collection. |
 | [共享 Wiki：未来计划与应用协同](plans/wiki-future-plan.md) | proposed | Sapphire、SmartReader 与条件性扩展的统一计划；保留未完成合同，不把本文当作开发或生产写入授权。 |
 | [运行时接口修补：接管、记录与调用身份](plans/runtime-interface-repair.md) | completed | Q13–Q30 中已确认实施的修补全部通过本机验收；按 Q31 合并 main 并上线 `01c16a6` 独立服务快照，已验证并清理两个旧 release；Q25 脱敏未纳入。 |

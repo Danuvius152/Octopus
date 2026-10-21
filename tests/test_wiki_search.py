@@ -137,7 +137,7 @@ def store(tmp_path):
     root = tmp_path / "vault"
     root.mkdir()
     populate(root)
-    return WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+    return WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
 
 
 @pytest.mark.parametrize("query,expected", CASES)
@@ -341,7 +341,7 @@ def test_rebuilding_only_derived_tables_preserves_identity_ownership_and_history
     with store.connect() as db:
         assert db.execute("SELECT count(*) FROM managed_notes").fetchone()[0] == 1
         db.execute("DROP TABLE search_fts")
-    reconstructed = WikiStore(store.root, store.state, store.vault_id)
+    reconstructed = WikiStore(store.root, store.state, store.vault_id, health=store.health)
     assert reconstructed.search("SSL")["items"][0]["id"] == hit["id"]
 
 

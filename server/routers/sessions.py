@@ -24,6 +24,9 @@ from ..models import (
 )
 from ..session_manager import ForkError, fork_info_fields
 from ..sessions import SessionManager
+from ..sessions.lifecycle import LifecycleAdmissionError
+from ..sessions.runtime_types import QuotaExceeded
+from ..submission_models import ClientSubmissionStatus, SubmissionRecoveryPage
 from ..wiki.contracts import JobCard
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -278,11 +281,8 @@ async def resume_dispatch(
     session = session_manager.get_session(session_id, user_id)
     if session is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-    from ..sessions.turns import QuotaExceeded
     try:
         if not await session_manager.resume_dispatch(session_id, resume_queue=resume_queue):
-            if session._recording_blocked is not None:
-                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, "Result saving remains unconfirmed; automatic dispatch is paused")
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     except QuotaExceeded as exc:
         raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS, str(exc)) from exc
@@ -348,8 +348,7 @@ async def import_session(
                 question_id=q.question_id, questions=q.questions, deadline=q.deadline,
                 request_id=q.request_id, attempt_id=q.attempt_id,
             )
-            for q in s._pending_questions.values()
-            if session_manager.has_pending_question(s.id, q.question_id)
+            for q in session_manager.get_pending_questions(s.id)
         ],
         subagents=[SubagentRun(**asdict(u)) for u in s._subagents.values()],
         # High-water mark: clients use this as the dedup baseline so any
@@ -374,7 +373,26 @@ async def wiki_jobs(
     return await session_manager.db.wiki_job_cards(session_id, user_id, offset=offset, limit=limit)
 
 
-@router.get("/{session_id}/submissions/{client_id}")
+@router.get("/{session_id}/submissions", response_model=SubmissionRecoveryPage)
+async def get_recoverable_inputs(session_manager: SessionMgr, session_id: str,
+                                before: int | None = Query(None, gt=0), limit: int = Query(20, ge=1, le=100),
+                                user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    from ..sessions.client_submissions import status_from_row
+    if not await session_manager.session_belongs_to(session_id, user_id):
+        raise HTTPException(404, "Session not found")
+    rows, cursor = await session_manager.db.list_recoverable_submissions(session_id, before=before, limit=limit)
+    items = []
+    for row in rows:
+        status = await status_from_row(session_manager, session_id, row, include_input=False)
+        if status["execution"]["state"] not in {"unknown", "withdrawn"}:
+            continue
+        items.append({"client_request_id": row["client_id"], "request_id": row["request_id"],
+                      "execution": status["execution"], "preview": row["payload"]["content"][:200],
+                      "attachment_count": len(row["payload"]["attachment_ids"])})
+    return {"items": items, "next_cursor": cursor}
+
+
+@router.get("/{session_id}/submissions/{client_id}", response_model=ClientSubmissionStatus)
 async def get_submission_status(session_manager: SessionMgr, session_id: str, client_id: str,
                                 user_id: ScopeUser = None, _: str = Depends(verify_token)):
     from ..sessions.client_submissions import submission_status
@@ -384,6 +402,51 @@ async def get_submission_status(session_manager: SessionMgr, session_id: str, cl
     if receipt is None:
         raise HTTPException(404, "Submission not found")
     return receipt
+
+
+@router.delete("/{session_id}/submissions/{client_id}/recovery", status_code=204)
+async def dismiss_recoverable_input(session_manager: SessionMgr, session_id: str, client_id: str,
+                                    user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    if not await session_manager.session_belongs_to(session_id, user_id):
+        raise HTTPException(404, "Session not found")
+    if not await session_manager.dismiss_recoverable_input(session_id, client_id):
+        raise HTTPException(404, "Recoverable input not found")
+
+
+@router.get("/{session_id}/submissions/{client_id}/attachments/{attachment_id}")
+async def recover_submission_attachment(session_manager: SessionMgr, session_id: str, client_id: str,
+                                         attachment_id: str, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    import asyncio
+    import hashlib
+    from urllib.parse import quote
+
+    from ..attachments import get_path
+    if not await session_manager.session_belongs_to(session_id, user_id):
+        raise HTTPException(404, "Session not found")
+    row = await session_manager.db.get_client_submission(session_id, client_id)
+    files = (row or {}).get("payload") or {}
+    saved = next((file for file in files.get("attachments", []) if file["id"] == attachment_id), None)
+    path = get_path(session_id, attachment_id) if saved else None
+    if path is None:
+        raise HTTPException(409, "A required attachment is unavailable. Re-upload the complete files.")
+    assert saved is not None
+
+    def read():
+        if path.stat().st_size != saved["size"]:
+            raise ValueError("Attachment size changed")
+        with path.open("rb") as stream:
+            data = stream.read(saved["size"] + 1)
+        if len(data) != saved["size"] or hashlib.sha256(data).hexdigest() != saved["sha256"]:
+            raise ValueError("Attachment content changed")
+        return data
+
+    try:
+        content = await asyncio.to_thread(read)
+    except (ValueError, OSError) as error:
+        raise HTTPException(409, "A required attachment is unavailable or changed. Re-upload the complete files.") from error
+    return Response(content, media_type=saved["mime_type"], headers={
+        "Cache-Control": "no-store", "Content-Disposition": f"attachment; filename*=utf-8''{quote(saved['filename'])}",
+    })
 
 
 @router.get("/{session_id}", response_model=SessionDetail)
@@ -403,8 +466,8 @@ async def get_session(
         if session_manager.get_session(session_id, user_id) is not s:
             raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
         messages = [MessageContent(**m) for m in messages_raw]
-        s.restore_message_state(*await session_manager.db.message_sequence_state(s.id))
-        if s._transcript_integrity != "ok":
+        message_count, _next_sequence, duplicates = await session_manager.db.message_sequence_state(s.id)
+        if duplicates:
             # Sequence-keyed clients cannot represent these rows faithfully.
             # Keep them available through the storage-id-preserving export.
             messages = []
@@ -415,8 +478,8 @@ async def get_session(
             working_dir=s.working_dir,
             status=s.status,
             created_at=s.created_at,
-            message_count=s._message_count,
-            transcript_integrity=s._transcript_integrity,
+            message_count=message_count,
+            transcript_integrity="duplicate_seq" if duplicates else "ok",
             claude_session_id=s.claude_session_id,
             credential_id=s.credential_id,
             agent_id=s.agent_id,
@@ -431,16 +494,15 @@ async def get_session(
             **_fork_fields(s),
             messages=messages,
             pending_queue=[qp.prompt for qp in s._pending_queue],
-            active_attempt={"request_id": s._current_request.request_id, "attempt_id": s._question_attempt_id}
-            if s._current_request and s._question_attempt_id else None,
+            active_attempt={"request_id": s._run.request.request_id, "attempt_id": s._run.question_attempt_id}
+            if s._run.request and s._run.question_attempt_id else None,
             dispatch_state=DispatchState(**session_manager.dispatch_snapshot(s.id)),
             pending_questions=[
                 PendingQuestionInfo(
                     question_id=q.question_id, questions=q.questions, deadline=q.deadline,
                     request_id=q.request_id, attempt_id=q.attempt_id,
                 )
-                for q in s._pending_questions.values()
-                if session_manager.has_pending_question(s.id, q.question_id)
+                for q in session_manager.get_pending_questions(s.id)
             ],
             subagents=[SubagentRun(**asdict(u)) for u in s._subagents.values()],
             oldest_loaded_seq=oldest,
@@ -532,7 +594,10 @@ async def delete_session(
     _: str = Depends(verify_token),
 ):
     _own_session(session_manager, session_id, user_id)
-    deleted = await session_manager.delete_session(session_id)
+    try:
+        deleted = await session_manager.delete_session(session_id)
+    except LifecycleAdmissionError as exc:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
     if not deleted:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
 
@@ -669,6 +734,8 @@ async def archive_session(
     _own_session(session_manager, session_id, user_id)
     try:
         new = await session_manager.archive_session(session_id, replace=replace)
+    except LifecycleAdmissionError as error:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(error))
     except ValueError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     if new is None:
@@ -690,6 +757,8 @@ async def unarchive_session(
     """
     try:
         s = await session_manager.unarchive_session(session_id, user_id)
+    except LifecycleAdmissionError as error:
+        raise HTTPException(status.HTTP_409_CONFLICT, str(error))
     except ValueError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     return _to_session_info(s)

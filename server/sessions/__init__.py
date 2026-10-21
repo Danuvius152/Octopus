@@ -22,6 +22,7 @@ from .base import (
     _MAX_PENDING_STEERS,
     _MAX_SUBAGENTS_PER_SESSION,
     _REAPER_INTERVAL_SECONDS,
+    ActiveRun,
     ForkError,
     PendingApproval,
     PendingQuestion,
@@ -36,12 +37,14 @@ from .events import EventsMixin
 from .forking import ForkingMixin
 from .lifecycle import LifecycleMixin
 from .outcomes import OutcomesMixin
+from .ownership import OwnershipMixin
 from .processes import ProcessesMixin
 from .questions import QuestionsMixin
 from .turns import TurnsMixin
 
 
 class SessionManager(
+    OwnershipMixin,
     TurnsMixin,
     ForkingMixin,
     LifecycleMixin,
@@ -77,6 +80,7 @@ __all__ = [
     "_MAX_SUBAGENTS_PER_SESSION",
     "_REAPER_INTERVAL_SECONDS",
 
+    "ActiveRun",
     "ForkError",
     "PendingApproval",
     "PendingQuestion",

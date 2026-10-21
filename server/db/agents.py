@@ -14,58 +14,56 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..config import settings
-from .base import DatabaseBase, _load_json_list, serialized_write
+from .base import DatabaseBase, _load_json_list
 from .schema import _DEFAULT_MCP_SERVERS
 
 
 class AgentsMixin(DatabaseBase):
     # --- agent-scoped enablement join -------------------------------------
 
-    @serialized_write
     async def set_agent_connector(
         self, agent_id: str, installation_id: str, enabled: bool
     ) -> None:
         """Toggle one connector for one agent (presence in the join = on)."""
-        await self._ensure_connected()
-        if enabled:
-            await self.conn.execute(
-                "INSERT OR IGNORE INTO agent_connectors "
-                "(agent_id, installation_id) VALUES (?, ?)",
-                (agent_id, installation_id),
-            )
-        else:
-            await self.conn.execute(
-                "DELETE FROM agent_connectors "
-                "WHERE agent_id = ? AND installation_id = ?",
-                (agent_id, installation_id),
-            )
-        await self.conn.commit()
+        async with self.transaction(write=True) as tx:
+            if enabled:
+                await tx.execute(
+                    "INSERT OR IGNORE INTO agent_connectors "
+                    "(agent_id, installation_id) VALUES (?, ?)",
+                    (agent_id, installation_id),
+                )
+            else:
+                await tx.execute(
+                    "DELETE FROM agent_connectors "
+                    "WHERE agent_id = ? AND installation_id = ?",
+                    (agent_id, installation_id),
+                )
 
     async def get_agent_connector_ids(self, agent_id: str) -> list[str]:
         """Installation ids enabled for an agent."""
-        await self._ensure_connected()
-        cursor = await self.conn.execute(
-            "SELECT installation_id FROM agent_connectors WHERE agent_id = ?",
-            (agent_id,),
-        )
-        rows = await cursor.fetchall()
-        return [row[0] for row in rows]
+        async with self.transaction(write=False) as tx:
+            cursor = await tx.execute(
+                "SELECT installation_id FROM agent_connectors WHERE agent_id = ?",
+                (agent_id,),
+            )
+            rows = await cursor.fetchall()
+            return [row[0] for row in rows]
 
     async def get_enabled_connectors_for_agent(
         self, agent_id: str
     ) -> list[dict[str, Any]]:
         """Full installation rows for an agent's enabled connectors — the
         join SessionManager reads at spawn time to build the MCP set."""
-        await self._ensure_connected()
-        cols = ", ".join(f"ci.{c}" for c in self._CONNECTOR_COLS.split(", "))
-        cursor = await self.conn.execute(
-            f"SELECT {cols} FROM connector_installations ci "
-            "JOIN agent_connectors ac ON ac.installation_id = ci.id "
-            "WHERE ac.agent_id = ? ORDER BY ci.created_at",
-            (agent_id,),
-        )
-        rows = await cursor.fetchall()
-        return [self._row_to_connector(row) for row in rows]
+        async with self.transaction(write=False) as tx:
+            cols = ", ".join(f"ci.{c}" for c in self._CONNECTOR_COLS.split(", "))
+            cursor = await tx.execute(
+                f"SELECT {cols} FROM connector_installations ci "
+                "JOIN agent_connectors ac ON ac.installation_id = ci.id "
+                "WHERE ac.agent_id = ? ORDER BY ci.created_at",
+                (agent_id,),
+            )
+            rows = await cursor.fetchall()
+            return [self._row_to_connector(row) for row in rows]
 
     @staticmethod
     def _row_to_agent(row: sqlite3.Row) -> dict[str, Any]:
@@ -106,7 +104,6 @@ class AgentsMixin(DatabaseBase):
             agent["active_session_count"] = row[trailing]
         return agent
 
-    @serialized_write
     async def save_agent(
         self,
         *,
@@ -129,27 +126,26 @@ class AgentsMixin(DatabaseBase):
         subagents: list[dict[str, Any]] | None = None,
         user_id: str | None = None,
     ) -> None:
-        await self._ensure_connected()
-        servers_json = json.dumps(
-            mcp_servers if mcp_servers is not None else _DEFAULT_MCP_SERVERS
-        )
-        await self.conn.execute(
-            "INSERT INTO agents "
-            "(id, name, description, avatar, system_prompt, model, "
-            " credential_id, backend, mcp_servers, tool_allow, tool_deny, "
-            " is_system, archived, created_at, updated_at, subagents, user_id, "
-            " reasoning_effort, service_tier, pinned, pin_order) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 1, "
-            f" {self._NEXT_PIN_ORDER.format(table='agents')})",
-            (
-                agent_id, name, description, avatar, system_prompt, model,
-                credential_id, backend or settings.default_backend, servers_json,
-                tool_allow, tool_deny, int(bool(is_system)),
-                created_at, updated_at, json.dumps(subagents or []), user_id, reasoning_effort,
-                service_tier,
-            ),
-        )
-        await self.conn.commit()
+        async with self.transaction(write=True) as tx:
+            servers_json = json.dumps(
+                mcp_servers if mcp_servers is not None else _DEFAULT_MCP_SERVERS
+            )
+            await tx.execute(
+                "INSERT INTO agents "
+                "(id, name, description, avatar, system_prompt, model, "
+                " credential_id, backend, mcp_servers, tool_allow, tool_deny, "
+                " is_system, archived, created_at, updated_at, subagents, user_id, "
+                " reasoning_effort, service_tier, pinned, pin_order) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, 1, "
+                f" {self._NEXT_PIN_ORDER.format(table='agents')})",
+                (
+                    agent_id, name, description, avatar, system_prompt, model,
+                    credential_id, backend or settings.default_backend, servers_json,
+                    tool_allow, tool_deny, int(bool(is_system)),
+                    created_at, updated_at, json.dumps(subagents or []), user_id, reasoning_effort,
+                    service_tier,
+                ),
+            )
 
     async def load_agents(
         self, *, include_archived: bool = False, user_id: str | None = None
@@ -162,40 +158,40 @@ class AgentsMixin(DatabaseBase):
         session's own account (§7): a name is not a way to reach into another
         account and run a turn there.
         """
-        await self._ensure_connected()
-        cols = ", ".join(f"a.{c}" for c in self._AGENT_COLS.split(", "))
-        query = (
-            f"SELECT {cols}, {self._ACTIVE_SESSION_COUNT} FROM agents a"
-        )
-        where: list[str] = []
-        params: list[Any] = []
-        if not include_archived:
-            where.append("a.archived = 0")
-        if user_id is not None:
-            where.append("a.user_id = ?")
-            params.append(user_id)
-        if where:
-            query += " WHERE " + " AND ".join(where)
-        query += " ORDER BY a.is_system DESC, a.created_at"
-        cursor = await self.conn.execute(query, params)
-        rows = await cursor.fetchall()
-        return [self._row_to_agent(row) for row in rows]
+        async with self.transaction(write=False) as tx:
+            cols = ", ".join(f"a.{c}" for c in self._AGENT_COLS.split(", "))
+            query = (
+                f"SELECT {cols}, {self._ACTIVE_SESSION_COUNT} FROM agents a"
+            )
+            where: list[str] = []
+            params: list[Any] = []
+            if not include_archived:
+                where.append("a.archived = 0")
+            if user_id is not None:
+                where.append("a.user_id = ?")
+                params.append(user_id)
+            if where:
+                query += " WHERE " + " AND ".join(where)
+            query += " ORDER BY a.is_system DESC, a.created_at"
+            cursor = await tx.execute(query, params)
+            rows = await cursor.fetchall()
+            return [self._row_to_agent(row) for row in rows]
 
     async def get_agent(
         self, agent_id: str, user_id: str | None = None
     ) -> dict[str, Any] | None:
         """One agent, or None — including when it exists and belongs to someone
         else, which a caller must not be able to tell from "no such agent"."""
-        await self._ensure_connected()
-        cols = ", ".join(f"a.{c}" for c in self._AGENT_COLS.split(", "))
-        sql = f"SELECT {cols}, {self._ACTIVE_SESSION_COUNT} FROM agents a WHERE a.id = ?"
-        params: list[Any] = [agent_id]
-        if user_id is not None:
-            sql += " AND a.user_id = ?"
-            params.append(user_id)
-        cursor = await self.conn.execute(sql, params)
-        row = await cursor.fetchone()
-        return self._row_to_agent(row) if row else None
+        async with self.transaction(write=False) as tx:
+            cols = ", ".join(f"a.{c}" for c in self._AGENT_COLS.split(", "))
+            sql = f"SELECT {cols}, {self._ACTIVE_SESSION_COUNT} FROM agents a WHERE a.id = ?"
+            params: list[Any] = [agent_id]
+            if user_id is not None:
+                sql += " AND a.user_id = ?"
+                params.append(user_id)
+            cursor = await tx.execute(sql, params)
+            row = await cursor.fetchone()
+            return self._row_to_agent(row) if row else None
 
     async def get_agent_by_name(
         self,
@@ -210,21 +206,21 @@ class AgentsMixin(DatabaseBase):
         `agents_name_unique` index): unscoped, the second person to want an
         agent called "Octo" would be told somebody else already had one.
         """
-        await self._ensure_connected()
-        cols = ", ".join(f"a.{c}" for c in self._AGENT_COLS.split(", "))
-        query = (
-            f"SELECT {cols}, {self._ACTIVE_SESSION_COUNT} FROM agents a "
-            "WHERE a.name = ?"
-        )
-        params: list[Any] = [name]
-        if not include_archived:
-            query += " AND a.archived = 0"
-        if user_id is not None:
-            query += " AND a.user_id = ?"
-            params.append(user_id)
-        cursor = await self.conn.execute(query, params)
-        row = await cursor.fetchone()
-        return self._row_to_agent(row) if row else None
+        async with self.transaction(write=False) as tx:
+            cols = ", ".join(f"a.{c}" for c in self._AGENT_COLS.split(", "))
+            query = (
+                f"SELECT {cols}, {self._ACTIVE_SESSION_COUNT} FROM agents a "
+                "WHERE a.name = ?"
+            )
+            params: list[Any] = [name]
+            if not include_archived:
+                query += " AND a.archived = 0"
+            if user_id is not None:
+                query += " AND a.user_id = ?"
+                params.append(user_id)
+            cursor = await tx.execute(query, params)
+            row = await cursor.fetchone()
+            return self._row_to_agent(row) if row else None
 
     async def get_system_agent(
         self, user_id: str | None = None
@@ -238,97 +234,91 @@ class AgentsMixin(DatabaseBase):
         The pre-accounts install has exactly one, created by the migration, and
         `user_id=None` still finds it.
         """
-        await self._ensure_connected()
-        cols = ", ".join(f"a.{c}" for c in self._AGENT_COLS.split(", "))
-        sql = (
-            f"SELECT {cols}, {self._ACTIVE_SESSION_COUNT} FROM agents a "
-            "WHERE a.is_system = 1"
-        )
-        params: list[Any] = []
-        if user_id is not None:
-            sql += " AND a.user_id = ?"
-            params.append(user_id)
-        cursor = await self.conn.execute(sql + " LIMIT 1", params)
-        row = await cursor.fetchone()
-        return self._row_to_agent(row) if row else None
+        async with self.transaction(write=False) as tx:
+            cols = ", ".join(f"a.{c}" for c in self._AGENT_COLS.split(", "))
+            sql = (
+                f"SELECT {cols}, {self._ACTIVE_SESSION_COUNT} FROM agents a "
+                "WHERE a.is_system = 1"
+            )
+            params: list[Any] = []
+            if user_id is not None:
+                sql += " AND a.user_id = ?"
+                params.append(user_id)
+            cursor = await tx.execute(sql + " LIMIT 1", params)
+            row = await cursor.fetchone()
+            return self._row_to_agent(row) if row else None
 
-    @serialized_write
     async def update_agent(self, agent_id: str, **fields: Any) -> None:
-        await self._ensure_connected()
-        allowed = {
-            "name", "description", "avatar", "system_prompt", "model",
-            "reasoning_effort", "service_tier",
-            "credential_id", "backend", "mcp_servers", "tool_allow", "tool_deny",
-            "subagents",
-            "archived",
-        }
-        # credential_id / model / avatar are nullable and may be cleared.
-        nullable = {"credential_id", "model", "avatar", "reasoning_effort", "service_tier"}
-        updates: dict[str, Any] = {}
-        for k, v in fields.items():
-            if k not in allowed:
-                continue
-            if v is None and k not in nullable:
-                continue
-            if k in ("mcp_servers", "subagents"):
-                updates[k] = json.dumps(v if v is not None else [])
-            elif k == "archived":
-                updates[k] = int(bool(v))
-            else:
-                updates[k] = v
-        if not updates:
-            return
-        updates["updated_at"] = datetime.now(UTC).isoformat()
-        set_clause = ", ".join(f"{k} = ?" for k in updates)
-        values = list(updates.values()) + [agent_id]
-        await self.conn.execute(
-            f"UPDATE agents SET {set_clause} WHERE id = ?", values
-        )
-        await self.conn.commit()
+        async with self.transaction(write=True) as tx:
+            allowed = {
+                "name", "description", "avatar", "system_prompt", "model",
+                "reasoning_effort", "service_tier",
+                "credential_id", "backend", "mcp_servers", "tool_allow", "tool_deny",
+                "subagents",
+                "archived",
+            }
+            # credential_id / model / avatar are nullable and may be cleared.
+            nullable = {"credential_id", "model", "avatar", "reasoning_effort", "service_tier"}
+            updates: dict[str, Any] = {}
+            for k, v in fields.items():
+                if k not in allowed:
+                    continue
+                if v is None and k not in nullable:
+                    continue
+                if k in ("mcp_servers", "subagents"):
+                    updates[k] = json.dumps(v if v is not None else [])
+                elif k == "archived":
+                    updates[k] = int(bool(v))
+                else:
+                    updates[k] = v
+            if not updates:
+                return
+            updates["updated_at"] = datetime.now(UTC).isoformat()
+            set_clause = ", ".join(f"{k} = ?" for k in updates)
+            values = list(updates.values()) + [agent_id]
+            await tx.execute(
+                f"UPDATE agents SET {set_clause} WHERE id = ?", values
+            )
 
-    @serialized_write
     async def archive_agent(self, agent_id: str) -> None:
         """Soft-delete an agent and cascade-archive its sessions."""
-        await self._ensure_connected()
-        await self.conn.execute(
-            "UPDATE agents SET archived = 1, updated_at = ? WHERE id = ?",
-            (datetime.now(UTC).isoformat(), agent_id),
-        )
-        await self.conn.execute(
-            "UPDATE sessions SET archived = 1 WHERE agent_id = ?",
-            (agent_id,),
-        )
-        await self.conn.commit()
+        async with self.transaction(write=True) as tx:
+            await tx.execute(
+                "UPDATE agents SET archived = 1, updated_at = ? WHERE id = ?",
+                (datetime.now(UTC).isoformat(), agent_id),
+            )
+            await tx.execute(
+                "UPDATE sessions SET archived = 1 WHERE agent_id = ?",
+                (agent_id,),
+            )
 
-    @serialized_write
     async def unarchive_agent(self, agent_id: str) -> None:
         """Restore an archived agent. Its sessions stay archived: they were
         archived as a cascade, and silently reviving a dozen old threads is
         not what "restore this agent" means — the archived-sessions page is
         where a session comes back from."""
-        await self._ensure_connected()
-        await self.conn.execute(
-            "UPDATE agents SET archived = 0, updated_at = ? WHERE id = ?",
-            (datetime.now(UTC).isoformat(), agent_id),
-        )
-        await self.conn.commit()
+        async with self.transaction(write=True) as tx:
+            await tx.execute(
+                "UPDATE agents SET archived = 0, updated_at = ? WHERE id = ?",
+                (datetime.now(UTC).isoformat(), agent_id),
+            )
 
     async def set_agent_pinned(self, agent_id: str, pinned: bool) -> None:
         """Put the agent in the sidebar (at the bottom) or take it out."""
-        await self._set_pinned("agents", agent_id, pinned)
+        async with self.transaction(write=True) as tx:
+            await self._set_pinned(tx, "agents", agent_id, pinned)
 
     async def reorder_agent_pins(self, ordered_ids: list[str]) -> None:
         """The sidebar order of the pinned agents — see `_reorder_pins`."""
-        await self._reorder_pins("agents", ordered_ids)
+        async with self.transaction(write=True) as tx:
+            await self._reorder_pins(tx, "agents", ordered_ids)
 
-    @serialized_write
     async def delete_agent(self, agent_id: str) -> bool:
         """Hard-delete an agent. FK ON DELETE CASCADE removes its sessions,
         schedules — guarded by AgentManager so this is
         only reached when the agent has no sessions."""
-        await self._ensure_connected()
-        cursor = await self.conn.execute(
-            "DELETE FROM agents WHERE id = ?", (agent_id,)
-        )
-        await self.conn.commit()
-        return cursor.rowcount > 0
+        async with self.transaction(write=True) as tx:
+            cursor = await tx.execute(
+                "DELETE FROM agents WHERE id = ?", (agent_id,)
+            )
+            return cursor.rowcount > 0

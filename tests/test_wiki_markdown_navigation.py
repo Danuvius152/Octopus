@@ -20,7 +20,7 @@ VIEWS = ["full", "compact"]
 def store(tmp_path):
     root = tmp_path / "vault"
     root.mkdir()
-    value = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+    value = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
     yield value
     value.close()
 

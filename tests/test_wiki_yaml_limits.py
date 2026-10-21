@@ -41,7 +41,7 @@ def test_invalid_note_is_local_to_its_index_row(tmp_path, source):
     bad = ("---\n" + source + "\n---\n# Original\nBad metadata, intact body.\n").encode()
     (root / "bad.md").write_bytes(bad)
     (root / "good.md").write_text("# Healthy\nUnrelated evidence remains readable.\n")
-    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
     try:
         store.refresh()
         with store.connect() as db:
@@ -70,7 +70,7 @@ def test_retained_metadata_requires_the_same_document_identity(tmp_path):
     root.mkdir()
     uid = "urn:uuid:" + str(uuid.uuid4())
     (root / "note.md").write_text(f"---\nuid: {uid}\ntitle: Stable title\ntags: [stable]\n---\n# Original\n")
-    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
     try:
         original = store.read("note.md")
         (root / "note.md").write_text("---\nx_wiki: &x {self: *x}\n---\n# Edited\n")

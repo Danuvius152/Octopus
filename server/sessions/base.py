@@ -4,7 +4,8 @@ import asyncio
 import json
 import logging
 import uuid
-from collections.abc import Callable
+from collections import deque
+from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -28,6 +29,10 @@ from .submission import RequestCompletion, SubmissionReceipt
 
 if TYPE_CHECKING:
     from ..knowledge import KnowledgeContext
+    from .owner import SessionOwner
+    from .owner_questions import QuestionNotification
+    from .owner_runtime import ReleaseArchive, ReserveFork
+    from .runtime_types import _Settlement
 
 logger = logging.getLogger(__name__)
 
@@ -214,6 +219,8 @@ class QueuedPrompt:
     question_session_id: str | None = None
     question_id: str | None = None
     recorded_input: RecordedInput | None = None
+    durable_client_input: bool = False
+    queued_event: dict[str, Any] | None = field(default=None, repr=False)
 
 
 @dataclass
@@ -235,10 +242,10 @@ class PendingApproval:
 
 @dataclass
 class PendingQuestion:
-    """Mirror of an AskUserQuestion the backend is currently asking us.
+    """One question's form, answer delivery and publication lifetime.
 
-    The backend owns the actual control-protocol future; this is just the
-    info we surface to the UI so reload-on-reconnect can re-render the form.
+    Answered records remain readable by late polls until their attempt ends.
+    A closed record stays owned while its closure is still being published.
     """
 
     question_id: str
@@ -248,6 +255,51 @@ class PendingQuestion:
     request_id: str | None = None
     attempt_id: str | None = None
     work_id: str | None = None
+    state: Literal["pending", "answered", "closed"] = "pending"
+    answer: str | None = None
+    ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    timer: asyncio.Task[None] | None = field(default=None, repr=False)
+    request_publication: QuestionNotification | None = field(default=None, repr=False)
+    publication: QuestionNotification | None = field(default=None, repr=False)
+    retirement_requested: bool = False
+
+
+@dataclass
+class BackendRetirement:
+    """One original resource and the bounded native cards its owner ended."""
+
+    backend: HarnessRun
+    task: asyncio.Task[None]
+    notifications: deque[dict[str, Any]] = field(default_factory=deque)
+    audience: str | None = None
+
+
+@dataclass
+class ActiveRun:
+    """The session's execution resources, retained for their actual lifetimes.
+
+    Dispatch, result selection, question admission and backend retirement end
+    separately. Replacing a request never drops a held or retiring handle.
+    Identities come from the existing request, settlement, attempt and backend.
+    """
+
+    request: QueuedPrompt | None = None
+    # Selected before backend initialization and retained for terminal identity.
+    settlement: _Settlement | None = None
+    backend: HarnessRun | None = field(default=None, repr=False)
+    # The reaper's clock only applies while a finished process is held.
+    held_since: float | None = None
+    retirements: dict[int, BackendRetirement] = field(default_factory=dict, repr=False)
+    # Question admission closes before the settlement loses its last attempt.
+    question_attempt_id: str | None = None
+    question_watchdog: dict[str, Any] | None = field(default=None, repr=False)
+    knowledge_context: KnowledgeContext | None = None
+    wiki_task_id: str | None = None
+    wiki_mode: str | None = None
+
+    @property
+    def work_id(self) -> str | None:
+        return self.settlement.work_id if self.settlement is not None else None
 
 
 @dataclass
@@ -319,75 +371,31 @@ class Session:
         self._transcript_integrity = "duplicate_seq" if duplicates else "ok"
     # Set True for the lifetime of a fork-create saga against this session as
     # the PARENT (session-rewind.md §5.4). start_message() refuses while
-    # set; cleared in fork_session's finally. A real mutex even though
-    # start_message sets _active_task without holding _lock.
+    # set; the original owner installs and releases this lifecycle reservation.
     _forking: bool = field(default=False, repr=False)
-    _active_task: asyncio.Task | None = field(default=None, repr=False)
-    _dispatch_release_task: asyncio.Task | None = field(default=None, repr=False)
+    _run: ActiveRun = field(default_factory=ActiveRun, repr=False)
     _deletion_task: asyncio.Task | None = field(default=None, repr=False)
-    # Per-prompt task that interrupt() targets; the outer _active_task is
-    # the orchestrator loop and survives interrupts so it can drain the queue.
-    _inner_task: asyncio.Task | None = field(default=None, repr=False)
-    # The accepted request's once-only outcome, including initialization and
-    # cancellation. Owned by TurnsMixin; queue dispatch may supply its identity.
-    _settlement: Any | None = field(default=None, repr=False)
-    _work_id: str | None = field(default=None, repr=False)
-    _backend: HarnessRun | None = field(default=None, repr=False)
-    # When the held CLI process last finished a turn — the reaper's clock
-    # (inline-steering.md §7). None whenever no process is being held.
-    _held_run_at: float | None = field(default=None, repr=False)
-    _command_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _command_receipts: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict, repr=False)
-    _pending_questions: dict[str, PendingQuestion] = field(default_factory=dict, repr=False)
-    # question_id -> background timer that auto-answers if the user
-    # never replies (see SessionManager._schedule_question_timeout).
-    _question_timers: dict[str, asyncio.Task] = field(default_factory=dict, repr=False)
-    # AUQ delivery coordination for the new MCP-based flow. The
-    # `mcp__ask__user` tool (server/mcp_servers/ask.py) creates a
-    # pending question via REST, then HTTP-long-polls the answer
-    # endpoint, which awaits the Event below. The user's UI submit
-    # sets `_pending_question_answers[q_id]` and signals the Event;
-    # the long-poll unblocks and returns the answer to the MCP tool,
-    # which returns it as the tool result so the model can continue.
-    # Replaces the old --permission-prompt-tool=stdio deny-channel
-    # hack that exposed us to the CLI's premature-exit bug.
-    _pending_question_events: dict[str, asyncio.Event] = field(default_factory=dict, repr=False)
-    _pending_question_answers: dict[str, str] = field(default_factory=dict, repr=False)
-    _question_answer_attempts: dict[str, str | None] = field(default_factory=dict, repr=False)
-    _question_attempt_id: str | None = field(default=None, repr=False)
-    _question_watchdog: dict[str, Any] | None = field(default=None, repr=False)
-    _question_publications: set[asyncio.Task[None]] = field(default_factory=set, repr=False)
-    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
-    _wiki_task_id: str | None = field(default=None, repr=False)
-    _wiki_mode: str | None = field(default=None, repr=False)
-    _knowledge_context: KnowledgeContext | None = field(default=None, repr=False)
+    _questions: dict[str, PendingQuestion] = field(default_factory=dict, repr=False)
     _pending_queue: list[QueuedPrompt] = field(default_factory=list, repr=False)
     _dispatch_paused: bool = field(default=False, repr=False)
     _admission_closed: bool = field(default=False, repr=False)
-    _dispatch_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _archive_reservation: object | None = field(default=None, repr=False)
     _dispatch_revision: int = field(default=0, repr=False)
     _dispatch_order: int = field(default=0, repr=False)
-    _current_request: QueuedPrompt | None = field(default=None, repr=False)
     _delivery_receipts: dict[str, SubmissionReceipt] = field(default_factory=dict, repr=False)
     _request_completions: dict[str, asyncio.Future[RequestCompletion]] = field(default_factory=dict, repr=False)
     _inline_requests: dict[str, list[QueuedPrompt]] = field(default_factory=dict, repr=False)
     _delivery_notice_ids: set[str] = field(default_factory=set, repr=False)
-    _backend_retirements: dict[int, tuple[HarnessRun, asyncio.Task[None]]] = field(default_factory=dict, repr=False)
-    _recording_blocked: Any | None = field(default=None, repr=False)
     # Steers: messages typed while THIS turn is running, to be handed to the
     # CLI mid-turn rather than queued behind the turn (inline-steering.md §8).
-    # The turn's writer task drains this; `_steer_ready` is how it learns
-    # there's something to write without waiting for the next event — during a
-    # long tool call no events arrive at all, and a slow tool is exactly when
-    # someone reaches for the keyboard.
+    # The owner captures one prepared/write operation at a time and receives
+    # its result independently of the backend's stdout progress.
     _steer_queue: list[QueuedPrompt] = field(default_factory=list, repr=False)
-    _steer_ready: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     # Set while a turn can still accept a steer: from the moment the stream
-    # starts until `result` is seen. Checked under `_steer_lock` so accepting a
-    # steer and closing the window can't interleave.
+    # starts after the initial input completes until `result` is seen. Only
+    # the owner accepts steers or changes this window.
     _steer_open: bool = field(default=False, repr=False)
-    _steer_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
 class SessionManagerBase:
@@ -412,6 +420,21 @@ class SessionManagerBase:
     # checker can verify the calls, which is the check that caught the database
     # split dropping its class constants.
 
+    def _session_owner(self, session: Session) -> SessionOwner:
+        raise NotImplementedError  # provided by a mixin
+
+    def _require_session_writer(self, session: Session) -> None:
+        raise NotImplementedError  # provided by a mixin
+
+    def _session_removed(self, session: Session) -> None:
+        raise NotImplementedError  # provided by a mixin
+
+    async def _join_session_owner_commands(self, session: Session) -> None:
+        raise NotImplementedError  # provided by a mixin
+
+    async def close_session_owners(self) -> None:
+        raise NotImplementedError  # provided by a mixin
+
     async def _blit_attachments_to_descendant_forks(self, session_id: str) -> None:
         raise NotImplementedError  # provided by a mixin
 
@@ -421,13 +444,22 @@ class SessionManagerBase:
     def agent_operation(self, agent_id: str | None) -> AbstractAsyncContextManager[None]:
         raise NotImplementedError
 
+    async def _run_agent_operation[T](
+        self, agent_id: str | None, command: Callable[[], Awaitable[T]],
+    ) -> T:
+        raise NotImplementedError
+
     def _own_task(self, task: asyncio.Task[Any]) -> None:
         raise NotImplementedError
 
-    def _withdraw_requests(self, session: Session, requests: list[QueuedPrompt], *, reason: str) -> None:
+    def session_is_executing(self, session: Session) -> bool:
         raise NotImplementedError
 
-    def _retire_backend(self, session: Session, backend: HarnessRun, *, reason: str = "process_ended") -> asyncio.Task[None]:
+    async def await_session_execution(self, session_id: str, *, timeout: float | None = None) -> None:
+        raise NotImplementedError
+
+
+    async def _retire_backend(self, session: Session, backend: HarnessRun, *, reason: str = "process_ended") -> asyncio.Task[None]:
         raise NotImplementedError
 
     async def _await_backend_retirement(self, session: Session, *, timeout: float | None = None) -> None:
@@ -436,13 +468,8 @@ class SessionManagerBase:
     async def cancel_request(self, session_id: str, request_id: str) -> bool:
         raise NotImplementedError
 
-    async def _reconcile_recording(self, session: Session) -> bool:
-        raise NotImplementedError
 
     async def drain_turns(self, timeout: float = 5.0) -> int:
-        raise NotImplementedError  # provided by a mixin
-
-    def _cancel_all_question_timers(self, session: Session) -> None:
         raise NotImplementedError  # provided by a mixin
 
     def dispatch_snapshot(self, session_id: str) -> dict[str, Any]:
@@ -451,19 +478,15 @@ class SessionManagerBase:
     def has_pending_question(self, session_id: str, question_id: str) -> bool:
         raise NotImplementedError  # provided by a mixin
 
+    def get_pending_questions(self, session_id: str) -> tuple[PendingQuestion, ...]:
+        raise NotImplementedError  # provided by a mixin
+
     async def resume_dispatch(self, session_id: str, *, resume_queue: bool = True) -> bool:
         raise NotImplementedError  # provided by a mixin
 
-    async def _begin_question_attempt(self, session: Session, attempt_id: str, state: dict[str, Any]) -> None:
-        raise NotImplementedError
-
-    async def _end_question_attempt(self, session: Session, attempt_id: str | None, *, reason: str = "attempt_ended") -> None:
-        raise NotImplementedError
-
-    async def _close_session_questions(self, session: Session, *, reason: str) -> None:
-        raise NotImplementedError
-
-    def _register_pending_question(self, session: Session, question_id: str, questions: list[dict[str, Any]]) -> PendingQuestion:
+    async def _record_native_question(
+        self, session: Session, question_id: str, questions: list[dict[str, Any]], *, attempt_id: str,
+    ) -> PendingQuestion | None:
         raise NotImplementedError
 
     async def _clear_fork_first_turn_state(self, session: Session) -> None:
@@ -532,26 +555,8 @@ class SessionManagerBase:
     ) -> HarnessCredential | None:
         raise NotImplementedError  # provided by a mixin
 
-    def _reusable_run(
-        self,
-        session: Session,
-        working_dir: str,
-        credential: Any,
-        agent: dict[str, Any] | None,
-        connectors: list[tuple[Any, Any]] | None,
-    ) -> HarnessRun | None:
-        raise NotImplementedError  # provided by a mixin
 
-    async def _safe_backend_interrupt(self, backend: HarnessRun) -> None:
-        raise NotImplementedError  # provided by a mixin
 
-    def _schedule_question_timeout(self, session: Session, question_id: str) -> None:
-        raise NotImplementedError  # provided by a mixin
-
-    def _start_turn_watchdog(
-        self, backend: HarnessRun, state: dict[str, Any], *, started_at: float | None = None
-    ) -> asyncio.Task | None:
-        raise NotImplementedError  # provided by a mixin
 
     async def _surface_auth_expiry(
         self, session: Session, *, cred_id: str | None, backend: str
@@ -594,6 +599,18 @@ class SessionManagerBase:
     async def auto_archive_scheduled_session(self, session_id: str) -> bool:
         raise NotImplementedError  # provided by a mixin
 
+    async def _archive_original(
+        self, session: Session, *, replace: bool = False, successor: Session | None = None,
+        only_request_id: str | None = None, automatic: bool = False,
+    ) -> tuple[bool, Session | None]:
+        raise NotImplementedError  # provided by lifecycle
+
+    async def _release_session_reservation(self, owner: SessionOwner, command: ReleaseArchive | ReserveFork) -> None:
+        raise NotImplementedError  # provided by a mixin
+
+    async def _failed_owner_retirement(self, owner: SessionOwner) -> asyncio.Task[None] | None:
+        raise NotImplementedError  # provided by ownership
+
     async def interrupt(self, session_id: str) -> bool:
         raise NotImplementedError  # provided by a mixin
 
@@ -604,6 +621,7 @@ class SessionManagerBase:
         style: str = "env_secret",
         context: str = "",
         require_auth: bool = True,
+        user_id: str | None = None,
     ) -> HarnessCredential | None:
         raise NotImplementedError  # provided by a mixin
 
@@ -631,6 +649,7 @@ class SessionManagerBase:
 
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
+        self._session_owners: dict[int, SessionOwner] = {}
         self._dispatch_generation = uuid.uuid4().hex
         self._admission_closed = False
         self._legacy_transition = False
@@ -644,6 +663,9 @@ class SessionManagerBase:
         self._agent_archive_tasks: dict[str, asyncio.Task[None]] = {}
         # key -> (callback, subscriber user_id or None for internal)
         self._broadcast_callbacks: dict[str, tuple[Callable, str | None]] = {}
+        # Business observers receive the same completion value as the receipt;
+        # subscriber delivery is an independent fact in that value.
+        self._completion_callbacks: dict[str, Callable[[str, RequestCompletion], Coroutine[Any, Any, None]]] = {}
         self.db: Database | None = None
         # Background task that drops idle held CLI processes.
         self._reaper_task: asyncio.Task[None] | None = None
@@ -664,6 +686,9 @@ class SessionManagerBase:
         self._schedule_runner = runner
 
     async def initialize(self, db: Database) -> None:
+        if self._session_owners:
+            await self.close_session_owners()
+            self._session_owners.clear()
         if self.db is not db:
             # Lifespan binds a new runner after initialization. Retirement
             # must never query a runner that still owns an earlier database.
@@ -675,10 +700,12 @@ class SessionManagerBase:
         self._agent_archive_tasks.clear()
         self._admission_closed = False
         self.db = db
+        await db.recover_client_submissions()
         # Turns in flight unwind before this connection does (see
         # `drain_turns`). Registered here rather than in the lifespan so a test
         # that builds its own manager gets it too — which is where the hang it
         # prevents actually showed up.
+        db.add_close_hook(self.close_session_owners)
         db.add_close_hook(self.drain_turns)
         rows = await db.load_sessions()
         for row in rows:
@@ -706,6 +733,12 @@ class SessionManagerBase:
 
     def remove_broadcast(self, key: str) -> None:
         self._broadcast_callbacks.pop(key, None)
+
+    def on_request_complete(self, key: str, callback: Callable[[str, RequestCompletion], Coroutine[Any, Any, None]]) -> None:
+        self._completion_callbacks[key] = callback
+
+    def remove_request_complete(self, key: str) -> None:
+        self._completion_callbacks.pop(key, None)
 
     def _audience(self, message: dict, user_id: str | None) -> str | None:
         """Whose frame this is, or None for one that belongs to the install.
@@ -784,26 +817,8 @@ class SessionManagerBase:
         rows = await self.db.load_sessions(include_archived=True, user_id=user_id)
         return any(row["id"] == session_id for row in rows)
 
-    def adopt_orphan_sessions(self, user_id: str) -> int:
-        """Give every live session with no owner to `user_id`.
-
-        The database half of the upgrade (`db.adopt_orphan_rows`) does not
-        reach the `Session` objects already in memory, and this manager is a
-        long-lived process: until it was restarted, the account that had just
-        claimed the install saw none of its own sessions (they no longer match
-        the filter) and their frames still went out to everyone (`_audience`
-        reads the same field). Called by `bootstrap_first_account`, so the two
-        halves happen together.
-        """
-        from ..mcp_identity import revoke_run
-
-        adopted = 0
-        for session in self.sessions.values():
-            if session.user_id is None:
-                revoke_run(getattr(session._backend, "run_lease_id", None))
-                session.user_id = user_id
-                adopted += 1
-        return adopted
+    async def adopt_orphan_sessions(self, user_id: str) -> int:
+        raise NotImplementedError
 
     def get_session(
         self, session_id: str, user_id: str | None = None
@@ -859,7 +874,7 @@ class SessionManagerBase:
         Best-effort: any failure inside a notifier is logged by the
         manager. Skipped if no manager is wired (tests, etc.).
         """
-        if self._notifier_manager is None or session._dispatch_paused or session._recording_blocked is not None or session._pending_queue:
+        if self._notifier_manager is None or session._dispatch_paused or session._pending_queue:
             return
         try:
             from ..notifiers import NotifierEvent

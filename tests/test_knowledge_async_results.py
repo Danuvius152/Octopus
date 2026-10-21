@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 import sys
 import uuid
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -116,26 +118,161 @@ async def test_background_contract_is_committed_before_process_launch(database, 
         await reader.close()
 
 
-async def test_background_commit_failure_never_launches_a_process(database, tmp_path, monkeypatch):
+@pytest.mark.parametrize("committed", [False, True])
+async def test_background_commit_failure_never_launches_a_process(tmp_path, monkeypatch, committed):
+    path = tmp_path / "async-jobs.db"
+    context = admit(
+        session_id="parent", request_id="background-request", user_id=None,
+        prompt="/wiki Keep the original background request.",
+    )
+    owned = derive(AdmittedRequest(context.origin, context, "background-work"), "touch must-not-run")
+    program = """
+import asyncio
+import sys
+from pathlib import Path
+from server.bg_tasks import BgTaskManager
+from server.database import Database
+from server.knowledge import decode_owned
+
+async def main():
+    path, working_dir, encoded, committed = sys.argv[1:5]
+    root = Path(working_dir)
+    database = Database(path)
+    await database.initialize()
+    stamp = "2026-10-19T12:00:00+00:00"
+    await database.save_agent(
+        agent_id="background-agent", name="Background agent", created_at=stamp, updated_at=stamp,
+    )
+    await database.save_session("parent", "Parent", working_dir, stamp, agent_id="background-agent")
+    await database.append_message(
+        "parent", 0, "user", "text", "Original background request",
+        tool_input={"request_context": {
+            "request_id": "background-request", "work_id": "background-work",
+        }},
+    )
+    await database.append_message("parent", 1, "assistant", "text", "Already acknowledged output")
+
+    async def deliver(record):
+        (root / "delivery-notice").write_text(record.id)
+    async def broadcast(event):
+        (root / "broadcast-notice").write_text(event["type"])
     manager = BgTaskManager()
-
-    async def ignored(value):
-        pass
-
-    manager.bind(database, ignored, ignored)
+    manager.bind(database, deliver, broadcast)
     await manager.start()
 
+    spawn = asyncio.create_subprocess_exec
+    async def observed_spawn(*args, **kwargs):
+        (root / "spawn-attempted").touch()
+        return await spawn(*args, **kwargs)
+    asyncio.create_subprocess_exec = observed_spawn
+    commit = database.conn.commit
     async def failed_commit():
-        raise OSError("contract commit rejected")
+        if committed == "True":
+            await commit()
+        raise OSError("background contract commit acknowledgement unavailable")
+    database.conn.commit = failed_commit
+    def record(sql):
+        with (root / "storage-sql.log").open("a") as stream:
+            stream.write(sql + "\\n")
+    await database.conn.set_trace_callback(record)
 
-    with monkeypatch.context() as patch:
-        patch.setattr(database.conn, "commit", failed_commit)
-        with pytest.raises(OSError, match="contract commit rejected"):
-            await manager.start_task(
-                session_id="parent", command="touch must-not-run", working_dir=str(tmp_path),
+    # Supplying the captured contract reaches the INSERT, rather than failing
+    # the optional internal-action session lookup's earlier read transaction.
+    try:
+        await manager.start_task(
+            session_id="parent", command="touch must-not-run", working_dir=working_dir,
+            work_id="background-work", owned_context=decode_owned(encoded),
+        )
+    except BaseException:
+        (root / "returned-storage-error").touch()
+    else:
+        (root / "published-success").touch()
+    await manager.shutdown()
+    await database.close()
+
+asyncio.run(main())
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", program, str(path), str(tmp_path), encode(owned), str(committed)],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 70, result.stderr
+    for marker in ("spawn-attempted", "must-not-run", "published-success", "returned-storage-error",
+                   "delivery-notice", "broadcast-notice"):
+        assert not (tmp_path / marker).exists(), marker
+    statements = (tmp_path / "storage-sql.log").read_text().splitlines()
+    inserts = [sql for sql in statements if sql.startswith("INSERT INTO bg_tasks ")]
+    assert len(inserts) == 1
+    assert statements.count("COMMIT") == int(committed)
+    assert not any(sql.startswith(("SELECT", "UPDATE", "ROLLBACK")) for sql in statements)
+
+    notices = []
+    async def notice(value):
+        notices.append(value)
+    spawn = asyncio.create_subprocess_exec
+    async def observed_spawn(*args, **kwargs):
+        (tmp_path / "spawn-attempted").touch()
+        return await spawn(*args, **kwargs)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observed_spawn)
+
+    reopened = Database(str(path))
+    await reopened.initialize()
+    manager = BgTaskManager()
+    manager.bind(reopened, notice, notice)
+    try:
+        assert await reopened.get_session_binding("parent") == {
+            "id": "parent", "agent_id": "background-agent", "user_id": None, "archived": False,
+        }
+        messages = await reopened.load_messages("parent")
+        assert [(row["seq"], row["role"], row["content"]) for row in messages] == [
+            (0, "user", "Original background request"),
+            (1, "assistant", "Already acknowledged output"),
+        ]
+        assert messages[0]["tool_input"] == {"request_context": {
+            "request_id": "background-request", "work_id": "background-work",
+        }}
+        original = await reopened.list_bg_tasks_for_session("parent")
+        assert len(original) == int(committed)
+        if committed:
+            row = original[0]
+            assert f"'{row['id']}'" in inserts[0]
+            assert (row["session_id"], row["work_id"], row["command"], row["working_dir"]) == (
+                "parent", "background-work", "touch must-not-run", str(tmp_path),
             )
+            assert (row["status"], row["exit_code"], row["completed_at"], row["stop_reason"]) == (
+                "running", None, None, None,
+            )
+            assert decode_owned(row["knowledge_context"]) == owned
+
+        # Startup classifies the old row as interrupted; it never replays it.
+        await manager.start()
+        restored = await manager.list_tasks("parent")
+        assert len(restored) == int(committed)
+        if committed:
+            task = restored[0]
+            assert (task.id, task.session_id, task.work_id, task.command) == (
+                original[0]["id"], "parent", "background-work", "touch must-not-run",
+            )
+            assert (task.status, task.stop_reason, task.exit_code) == ("interrupted", "server_restart", None)
+            assert task.completed_at is not None
+            assert (task.stdout, task.stderr) == ("", "")
+            assert decode_owned(task.knowledge_context) == owned
+        settled = await reopened.list_bg_tasks_for_session("parent")
+        assert await reopened.load_messages("parent") == messages
+    finally:
+        await manager.shutdown()
+        await reopened.close()
+
+    cold = Database(str(path))
+    await cold.initialize()
+    try:
+        assert await cold.list_bg_tasks_for_session("parent") == settled
+        assert await cold.load_messages("parent") == messages
+    finally:
+        await cold.close()
+    assert notices == []
+    assert not (tmp_path / "spawn-attempted").exists()
     assert not (tmp_path / "must-not-run").exists()
-    await asyncio.wait_for(manager.shutdown(), 0.2)
 
 
 async def test_research_return_restores_original_read_request_at_backend_boundary(

@@ -8,7 +8,6 @@ import uuid
 import pytest
 
 from server.routers.sessions import get_session
-from server.sessions.turns import _Settlement
 from server.users import UserManager
 from server.wiki.history import WikiHistory
 from server.wiki.registry import registry
@@ -31,7 +30,7 @@ notes = test_wiki_legacy_metadata.notes
 def test_journal_window_preserves_external_editor(tmp_path, monkeypatch, delete):
     root = tmp_path / "vault"
     root.mkdir()
-    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
     history = WikiHistory(store)
     path = "Library/note.md"
     original = b"# Original\n"
@@ -77,7 +76,7 @@ def test_bad_portable_note_does_not_abort_vault(tmp_path, metadata):
         "# Bad\n<!-- octopus-wiki " + json.dumps(metadata) + " -->\n"
     )
     (root / "good.md").write_text("# Good\nOriginal.\n")
-    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()))
+    store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
     try:
         assert store.read("bad.md")["metadata"]["metadata_error"]
         assert store.read("good.md")["title"] == "Good"
@@ -99,24 +98,28 @@ async def test_legacy_to_frontmatter_clear_is_authoritative(client, notes):
 
 async def test_unsaved_terminal_is_not_in_snapshot_watermark(runtime, monkeypatch):
     manager, session = runtime
+    test_session_retirement.scripted_codex(monkeypatch)
     record = manager.db.record_terminal
-    settlement = _Settlement()
-    session._settlement = settlement
+    entered, release = asyncio.Event(), asyncio.Event()
 
-    async def fail_before_insert(**kwargs):
-        raise OSError("injected before INSERT")
+    async def wait_before_insert(**kwargs):
+        entered.set()
+        await release.wait()
+        return await record(**kwargs)
 
-    monkeypatch.setattr(manager.db, "record_terminal", fail_before_insert)
+    monkeypatch.setattr(manager.db, "record_terminal", wait_before_insert)
+    receipt = await manager.start_message(session.id, "Original input")
     try:
-        await manager._settle_turn(session, settlement, status="success")
+        await asyncio.wait_for(entered.wait(), 5)
         snapshot = await get_session(manager, session.id, user_id=None)
-        assert snapshot.messages == []
-        assert snapshot.next_message_seq == 0, (
+        assert [row.content for row in snapshot.messages] == ["Original input", "ready"]
+        assert [row.seq for row in snapshot.messages] == [0, 1]
+        assert snapshot.next_message_seq == 2, (
             "Snapshot claims unsaved result sequence was already received"
         )
     finally:
-        monkeypatch.setattr(manager.db, "record_terminal", record)
-        await manager._reconcile_recording(session)
+        release.set()
+        assert (await asyncio.wait_for(receipt.wait(), 5)).recording_state == "committed"
 
 
 async def test_config_preserves_approved_extra_root(two_accounts, tmp_path):
@@ -134,14 +137,13 @@ async def test_config_preserves_approved_extra_root(two_accounts, tmp_path):
     assert response.status_code == 200, response.text
 
 
-async def test_idle_activity_write_releases_sqlite_writer_within_batch_bound(runtime):
+async def test_acknowledged_token_activity_releases_sqlite_writer(runtime):
     manager, _ = runtime
     db = manager.db
     users = UserManager(db)
     user = await users.create_user(username="idle-activity", password="password1")
     token = await users.issue_token(user["id"])
     await users.record_token_activity(token)
-    await asyncio.sleep(0.8)
 
     def write_slot():
         connection = sqlite3.connect(db._db_path, timeout=0.05, isolation_level=None)
@@ -155,14 +157,4 @@ async def test_idle_activity_write_releases_sqlite_writer_within_batch_bound(run
         finally:
             connection.close()
 
-    try:
-        available = await asyncio.to_thread(write_slot)
-        await db.flush()
-        assert await asyncio.to_thread(write_slot), (
-            "The control must acquire after an explicit flush"
-        )
-        assert available, (
-            "Idle token activity holds the SQLite writer beyond the documented 0.5-second batch bound"
-        )
-    finally:
-        await db.flush()
+    assert await asyncio.to_thread(write_slot), "Acknowledged token activity retained the SQLite writer"

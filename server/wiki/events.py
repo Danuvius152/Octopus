@@ -64,18 +64,22 @@ class FileChanges:
 
 class VaultEvents:
     @classmethod
-    def acquire(cls, root: Path, state: Path):
+    def acquire(cls, root: Path, state: Path, *, health):
         # Registry replacement may retain old operation leases. They must share
         # both the observer and uncommitted events, rather than replay a deletion
         # against the successor identity. One process owns this state at a time.
         key = (os.getpid(), str(root), str(state.resolve()))
         with _OBSERVERS_LOCK:
             observer = _OBSERVERS.get(key)
+            if observer is not None and not observer._closed and observer.health is not health:
+                from .store import WikiError
+
+                raise WikiError("Filesystem observer belongs to another service generation", 503)
             if observer is None or observer._closed:
                 owner = (state / "observer.lock").open("a+b")
                 try:
                     fcntl.flock(owner, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    observer = cls(root)
+                    observer = cls(root, health=health)
                 except BaseException:
                     owner.close()
                     raise
@@ -84,7 +88,10 @@ class VaultEvents:
             observer._references += 1
             return observer
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, health=None):
+        from ..service_health import ServiceHealth
+
+        self.health = health if health is not None else ServiceHealth()
         self.root = root
         self._lock = threading.RLock()
         self._directories: dict[int, Path] = {}
@@ -124,12 +131,12 @@ class VaultEvents:
 
         with self._lock:
             if self.journal is not None:
-                if (self.journal.db_path, self.journal.vault_id) != (db_path, vault_id):
+                if (self.journal.db_path, self.journal.vault_id) != (db_path, vault_id) or self.journal.health is not self.health:
                     from .store import WikiError
 
                     raise WikiError("Filesystem observer binding changed", 503)
                 return
-            journal = EventInbox(db_path, self.root, vault_id)
+            journal = EventInbox(db_path, self.root, vault_id, health=self.health)
             rows = journal.pending()
             previous_epoch = None
             for row, records in rows:

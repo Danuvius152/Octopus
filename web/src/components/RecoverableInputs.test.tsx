@@ -1,0 +1,83 @@
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import type { ClientSubmissionStatus, ClientSubmissionSummary } from "../api";
+import { useSessionStore } from "../stores/sessionStore";
+import { RecoverableInputs } from "./RecoverableInputs";
+
+const execution = { state: "withdrawn" as const, state_version: 2, execution_owner_request_id: "request", recoverable_input: true };
+const item: ClientSubmissionSummary = { client_request_id: "original", request_id: "request", execution, preview: "Saved original", attachment_count: 0 };
+const saved: ClientSubmissionStatus = { session_id: "s", client_request_id: "original", request_id: "request", accepted: true,
+  execution, input: { content: "Saved original in full 中文", attachment_ids: [], attachments: [] } };
+
+beforeEach(() => useSessionStore.setState({ token: "recovery-test", activeSessionId: "s", dispatchStates: {}, dispatchGeneration: null }));
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+
+function mockFetch(detail = saved) {
+  const fetch = vi.fn(async (url: string) => Response.json(url.endsWith("/original") ? detail : { items: [item], next_cursor: null }));
+  vi.stubGlobal("fetch", fetch);
+  return fetch;
+}
+
+it("loads and reviews input without executing or restoring it; restore is explicit", async () => {
+  const fetch = mockFetch();
+  const restore = vi.fn();
+  render(<RecoverableInputs sessionId="s" connected disabled={false} onRestore={restore} />);
+  await screen.findByText("Not executed · input saved");
+  expect(restore).not.toHaveBeenCalled();
+  expect(fetch).toHaveBeenCalledTimes(1);
+  fireEvent.click(screen.getByRole("button", { name: "Review saved input" }));
+  await screen.findByText("Saved original in full 中文");
+  expect(restore).not.toHaveBeenCalled();
+  fireEvent.click(screen.getByRole("button", { name: "Restore to input" }));
+  await waitFor(() => expect(restore).toHaveBeenCalledWith(saved, []));
+});
+
+it("has no restore action for an execution whose result is unknown", async () => {
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ items: [{ ...item, execution: { ...execution, state: "unknown", recoverable_input: false } }] })));
+  render(<RecoverableInputs sessionId="s" connected disabled={false} onRestore={vi.fn()} />);
+  await screen.findByText("Execution result unknown");
+  expect(screen.queryByRole("button", { name: "Restore to input" })).toBeNull();
+});
+
+it("keeps complete input when a required attachment cannot be recovered", async () => {
+  const attachment = { id: "abcdef123456", filename: "required.txt", size: 7, mime_type: "text/plain", sha256: "digest" };
+  const detail = { ...saved, input: { ...saved.input!, attachment_ids: [attachment.id], attachments: [attachment] } };
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => url.includes("/attachments/") ? new Response("Changed", { status: 409 })
+    : Response.json(url.endsWith("/original") ? detail : { items: [{ ...item, attachment_count: 1 }] })));
+  const restore = vi.fn();
+  render(<RecoverableInputs sessionId="s" connected disabled={false} onRestore={restore} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Restore to input" }));
+  await screen.findByRole("alert");
+  expect(restore).not.toHaveBeenCalled();
+  expect(screen.getByText("Saved original in full 中文")).toBeVisible();
+});
+
+it("does not replace a draft edited while saved input is downloading", async () => {
+  let resolve!: (response: Response) => void;
+  vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("/original") ? new Promise<Response>((finish) => { resolve = finish; })
+    : Promise.resolve(Response.json({ items: [item] }))));
+  const oldRestore = vi.fn();
+  const { rerender } = render(<RecoverableInputs sessionId="s" connected disabled={false} onRestore={oldRestore} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Restore to input" }));
+  const editedRestore = vi.fn();
+  rerender(<RecoverableInputs sessionId="s" connected disabled onRestore={editedRestore} />);
+  await act(async () => resolve(Response.json(saved)));
+  await screen.findByText(/conversation or draft changed/);
+  expect(oldRestore).not.toHaveBeenCalled();
+  expect(editedRestore).not.toHaveBeenCalled();
+});
+
+it("follows the server cursor and dismisses only the selected notice", async () => {
+  const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+    if (init?.method === "DELETE") return new Response(null, { status: 204 });
+    return Response.json(url.includes("before=20") ? { items: [{ ...item, client_request_id: "older", preview: "Older saved input" }], next_cursor: null }
+      : { items: [item], next_cursor: 20 });
+  });
+  vi.stubGlobal("fetch", fetch);
+  render(<RecoverableInputs sessionId="s" connected disabled={false} onRestore={vi.fn()} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Load more saved inputs" }));
+  await screen.findByText("Older saved input");
+  fireEvent.click(screen.getAllByRole("button", { name: "Dismiss notice" })[0]);
+  await waitFor(() => expect(screen.queryByText("Saved original")).toBeNull());
+  expect(screen.getByText("Older saved input")).toBeVisible();
+});

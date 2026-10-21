@@ -19,18 +19,18 @@ AI 后端使用已经登录 ChatGPT 的 Linux 版 Codex。`.env` 设置
 
 ## 配置和数据
 
-- 开发目录：`/home/jack/Octopus`。
-- 服务代码：`/home/jack/.octopus/releases/main-<commit>`，是已验证提交的独立
-  Git 工作树；`/home/jack/.octopus/releases/current` 指向正在使用的版本。
+- 开发目录：`~/Octopus`。
+- 服务代码：`~/.octopus/releases/main-<commit>`，是已验证提交的独立
+  Git 工作树；`~/.octopus/releases/current` 指向正在使用的版本。
   开发目录中尚未验收的改动不会随服务重启上线。
-- 本地配置：项目根目录的 `.env`，权限为 `0600`，已由 Git 忽略。
-- 数据库：`/home/jack/.octopus/octopus.db`。
-- 监控数据库：`/home/jack/.octopus/octopus-metrics.db`。
-- 初始工作目录：`/home/jack/.octopus/workspace`。创建账户后，项目按账户分配工作目录。
-- 代理记忆、应用、附件、账户目录等持久数据：`/home/jack/.octopus/`。
-- 用户服务：`/home/jack/.config/systemd/user/octopus.service`。
-- 服务代码覆盖配置：`/home/jack/.config/systemd/user/octopus.service.d/runtime-release.conf`。
-- 服务代理配置：`/home/jack/.octopus/proxy.env`，权限 `0600`。
+- 开发配置：项目根目录的 `.env`，权限为 `0600`，已由 Git 忽略；受管服务使用下文的中央配置。
+- 数据库：`~/.octopus/octopus.db`。
+- 监控数据库：`~/.octopus/octopus-metrics.db`。
+- 初始工作目录：`~/.octopus/workspace`。创建账户后，项目按账户分配工作目录。
+- 代理记忆、应用、附件、账户目录等持久数据：`~/.octopus/`。
+- 用户服务：`~/.config/systemd/user/octopus.service`。
+- 旧部署的代码覆盖配置：`~/.config/systemd/user/octopus.service.d/runtime-release.conf`。
+- 旧部署的代理环境文件：`~/.octopus/proxy.env`，权限 `0600`；首次受管安装时捕获其有效值。
 - 服务时区：`Asia/Shanghai`。
 
 Windows 浏览器访问 <http://localhost:8000>。
@@ -57,7 +57,7 @@ Ubuntu 的标准虚拟环境需要 `python3-venv` 软件包，本机已经安装
 `.bashrc` 中写死带版本号的 bin 路径。
 
 ```bash
-cd /home/jack/Octopus
+cd ~/Octopus
 python3 -m venv .venv
 .venv/bin/pip install -e '.[test]'
 
@@ -82,7 +82,7 @@ Windows 风格的 `127.*`
 ### 本地 Codex skills
 
 本机通过 Codex 原生的用户级发现目录共享已安装技能：
-`/home/jack/.agents/skills` 软链接到 `/home/jack/.codex/skills`。
+`~/.agents/skills` 软链接到 `~/.codex/skills`。
 首次重建时，目标路径不存在才创建，不覆盖已有技能目录：
 
 ```bash
@@ -138,7 +138,7 @@ Codex 实机测试按 AGENTS 的 marker 选择。其中 research 测试需要
 
 ```bash
 (
-  cd /home/jack/Octopus || exit
+  cd ~/Octopus || exit
   octopus_test_homes=$(mktemp -d) || exit
   trap 'rm -f -- "$octopus_test_homes/host"; rmdir -- "$octopus_test_homes"' EXIT
   ln -s "$HOME/.codex" "$octopus_test_homes/host" || exit
@@ -153,7 +153,7 @@ Wiki 自然问答使用独立的 `knowledge_eval` 标记，默认排除，不作
 新目录，避免覆盖先前证据：
 
 ```bash
-cd /home/jack/Octopus
+cd ~/Octopus
 octopus_knowledge_evidence=$(mktemp -d /tmp/octopus-wiki-evals.XXXXXX)
 .venv/bin/pytest tests/test_wiki_query_real.py --run-knowledge-evals \
   --knowledge-eval-output="$octopus_knowledge_evidence" -q
@@ -214,11 +214,25 @@ journalctl --user -u octopus -n 100 --no-pager
 服务通过用户级 systemd 启动。WSL 关闭时服务也停止；它不会自动启动 Windows
 或阻止 WSL 关闭。
 
-服务的工作目录是 `releases/current`，入口是现有虚拟环境中的
-`python -m server.cli serve`。这个入口从服务工作目录导入源码，避免 editable
-安装的 `octopus` 入口重新导入开发目录中的未提交改动。服务工作树的 `.env`、
-`.venv` 和 `web/node_modules` 复用开发目录中的本机配置与依赖；账户数据和
-Codex 登录位置不变。修改这些共享配置或依赖仍会影响正式服务。
+服务的工作目录是 `releases/current`。受管 unit 使用现有虚拟环境中的
+`python -m server.cli serve --service-process`，从服务工作目录导入源码，避免
+editable 安装的 `octopus` 入口导入开发目录中的未提交改动。普通 `serve`
+在发现受管安装后转交 systemd，不能代替 unit 的服务进程入口。
+
+安装身份与中央配置分别保存在数据库旁的 `<db_path>.service.json` 和
+`<db_path>.service.env`；配置文件权限为 0600，unit 只加载这一份 Settings
+环境文件，并用 `OCTOPUS_ENV_FILE` 指向它。proxy、TZ、PATH 与 provider homes
+由同一 unit 的原生 Environment 保留，UMask 也沿用实际配置。不再额外叠加
+旧项目 `.env` 或 proxy EnvironmentFile，以免令牌轮换出现多个写入来源。
+服务工作树的 `.venv` 和 `web/node_modules` 仍复用本机依赖；账户数据和
+Codex 登录位置保持原绑定。共享依赖的改变仍会影响正式服务。
+
+旧部署仍可能使用不带 `--service-process` 的入口和 release drop-in。首次发布
+受管版本时，由私有发布流程接管：冻结旧 unit 的实际环境，在消费原进程的
+单次切换许可后屏蔽自动抢跑，旧进程继续自然退出；确认退出后安装 profile、
+中央配置及新 unit，最后启动同一候选。安装中断只沿原计划向前恢复，不能
+单独覆盖入口、恢复旧数据库或让未完成安装的候选先运行。具体完成状态以
+该次发布回执和实际 unit/profile 为准，源码或本文更新不表示服务已切换。
 
 `systemctl --user stop octopus` / `restart octopus` 是变更操作；先等执行中、
 排队和待回报任务自然结束，不能为发布 kill CLI 或取消用户工作。只需查看状态
@@ -239,19 +253,23 @@ push、构建、重启或发布。用户明确要求文档提交时才提交，�
 1. 为已验证提交创建 `releases/main-<commit>` 的独立工作树，连接本机配置和
    共享依赖，先在候选快照执行 `cd web && bun run build`，再运行
    `.venv/bin/python scripts/validate-release.py <候选快照>` 核验入口及其引用的
-   JS / CSS。候选缺少资源时不能切换；保留当前快照用于回退。
+   JS / CSS。候选缺少资源时不能切换；保留当前快照及其兼容性诊断依据。
 2. 用不依赖当前模型回合继续存活的独立发布进程等待自然排空，包括主控会话、
    队列、CLI 和待交付的后台/委托回报。已有发布进程运行时只观察，不叠加切换
    或重启。切换前再确认目标和准入条件仍有效。
-3. 原子替换 `current` 指向新快照，重启服务；确认实际进程工作目录与目标提交一致，
-   `/health` 正常。候选中已构建并验证的前端产物随同一次切换生效。
-4. 验证健康接口、登录页面、静态资源和真实浏览器，确认代码与构建产物属于
+3. 原服务确认自然排空并交出单次许可后，原子替换 `current`，等待原进程自然
+   退出，再幂等启动候选；首次受管安装还须完成上面的 unit/profile 过渡。
+   确认实际 MainPID、工作目录、cgroup 和配置绑定属于目标，`/health` 为 ok、
+   `/ready` 为 ready。候选中已构建并验证的前端产物随同一次切换生效。
+4. 验证存活与就绪接口、登录页面、静态资源和真实浏览器，确认代码与构建产物属于
    本次提交；在服务快照运行
    `.venv/bin/python scripts/validate-release.py <服务快照> --base-url http://127.0.0.1:8000`
    比对实际 HTML / JS / CSS 的 SHA-256。验收失败时，只有旧构建仍兼容实际
    schema 和持久协议才可恢复旧指向并重启验证。更高 schema 迁移已提交时，
    不自动切回不兼容的旧构建，保留当前状态并采用兼容代码恢复或前向修复；
-   不恢复旧 DB，不清理尚需诊断的代码快照。
+   不恢复旧 DB，不清理尚需诊断的代码快照。另以只读检查核对现有数据库、
+   Wiki schema 与持久协议兼容性，保留历史及会话设置。通知创建成功只表示
+   已接纳通知任务；部署验收和通知实际交付分别记录，不等待发布进程自身通知。
 5. 验收全部通过且旧工作树干净、没有进程继续使用后，用 `git worktree remove`
    退役旧源码，不强制删除脏工作树。账户、数据库、工作区、Wiki、登录及共享
    配置/依赖保留。记录实际部署提交与结果到相应任务产物；必要时更新现有文档，

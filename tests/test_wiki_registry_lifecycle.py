@@ -3,11 +3,10 @@
 import asyncio
 import importlib
 import json
-import os
 import sqlite3
-import stat
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +14,8 @@ from server.config import settings
 from server.wiki import schema, source_bindings
 from server.wiki.registry import WikiRegistry
 from server.wiki.store import WikiError
+from tests.test_service_runtime import installation_settings
+from tests.test_wiki_storage import registration_process
 
 registry_module = importlib.import_module("server.wiki.registry")
 
@@ -101,17 +102,23 @@ def test_same_generation_constructors_publish_one_winner_and_release_loser(regis
     registry.close()
     real_store = registry_module.WikiStore
     built = threading.Barrier(2)
+    first_built = threading.Event()
     candidates = []
 
     def construction(*args, **kwargs):
         candidate = real_store(*args, **kwargs)
         candidates.append(candidate)
+        first_built.set()
         built.wait(timeout=5)
         return candidate
 
     monkeypatch.setattr(registry_module, "WikiStore", construction)
     with ThreadPoolExecutor(2) as pool:
-        futures = [pool.submit(registry.store, None) for _ in range(2)]
+        futures = [pool.submit(registry.store, None)]
+        # The first claim has completed, but its candidate is not published.
+        # Race publication rather than the separately retryable range claim.
+        assert first_built.wait(3)
+        futures.append(pool.submit(registry.store, None))
         results = [future.result(timeout=7) for future in futures]
     assert results[0] is results[1]
     assert len(candidates) == 2
@@ -191,23 +198,40 @@ def test_unblock_cannot_revive_an_old_drain_after_registry_close(registered):
     assert registry.store(None).search("Preserved")["items"]
 
 
-def test_same_value_retry_after_directory_fsync_failure_preserves_committed_nonce(registered, monkeypatch):
-    registry, root, first = registered
-    fsync = os.fsync
-
-    def interrupted(descriptor):
-        if stat.S_ISDIR(os.fstat(descriptor).st_mode):
-            raise OSError("synthetic directory durability failure")
-        return fsync(descriptor)
-
-    with monkeypatch.context() as patch:
-        patch.setattr(registry_module.os, "fsync", interrupted)
-        with pytest.raises(WikiError, match="durability is unconfirmed"):
-            registry.configure(None, root, "curator-b", "app-a")
-    committed = registry.config(None)
+def test_same_value_retry_after_directory_fsync_failure_preserves_committed_nonce(tmp_path):
+    config, config_file = installation_settings(tmp_path / "installation")
+    marker = tmp_path / "registration.json"
+    failed = registration_process(config_file, marker, """
+first=registry.configure(None,root,'curator-a','app-a')
+marker.with_suffix('.before').write_text(json.dumps(first))
+fsync=os.fsync
+def interrupted(descriptor):
+    if Path(os.readlink(f'/proc/self/fd/{descriptor}'))==state:
+        marker.with_suffix('.sync-started').touch()
+        raise OSError('synthetic directory durability failure')
+    return fsync(descriptor)
+os.fsync=interrupted
+try:
+    registry.configure(None,root,'curator-b','app-a')
+except Exception:
+    pass
+marker.touch()
+""")
+    assert marker.with_suffix(".sync-started").is_file(), failed.stderr
+    assert failed.returncode == 70, failed.stderr
+    assert not marker.exists()
+    path = Path(config.wiki_dir) / "config.json"
+    committed = json.loads(path.read_text())
+    first = json.loads(marker.with_suffix(".before").read_text())
     assert committed["registration_generation"] != first["registration_generation"]
-    retried = registry.configure(None, root, "curator-b", "app-a")
-    assert retried == committed
+    assert committed["vault_id"] == first["vault_id"]
+    retried = registration_process(config_file, marker, """
+result=registry.configure(None,root,'curator-b','app-a')
+marker.write_text(json.dumps(result))
+registry.close()
+""")
+    assert retried.returncode == 0, retried.stderr
+    assert json.loads(marker.read_text()) == committed
 
 
 def test_initialized_registration_cannot_recreate_missing_generation(registered):
