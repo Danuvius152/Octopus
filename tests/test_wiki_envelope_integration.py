@@ -59,7 +59,9 @@ async def configure(client, tmp_path, files):
 
 
 async def test_navigation_http_shape_and_shortened_final_pages_keep_every_identity(client, tmp_path, monkeypatch):
-    files = {f"Library/note{index:02}.md": f"# shared {index:02} " + "中文😀" * 12000 +
+    # Keep multibyte truncation and overlong titles without turning pagination
+    # correctness into a million-character Chinese tokenization workload.
+    files = {f"Library/note{index:02}.md": f"# shared {index:02} " + "中文😀" * 100 + "x" * 36000 +
              "\n\nA distinct paragraph " + str(index) + "说明" * 400 + "\n\n[[note00]]\n" for index in range(36)}
     _, config = await configure(client, tmp_path, files)
     grants = []

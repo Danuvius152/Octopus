@@ -147,9 +147,9 @@ disable_error_code = [
 asyncio_mode = "auto"
 testpaths = ["tests"]
 addopts = "--strict-markers"
-# The real-CLI tier. `real` is the umbrella every tests/*_real.py file
-# carries, so `-m "not real"` is the hermetic tier (1,147 of 1,181 tests)
-# — it replaces hand-listing --ignore for each file. The rest say WHICH
+# `real` covers provider and supervisor integration. The ordinary full suite
+# selects hermetic correctness; optional Wiki performance and answer evaluation
+# require their own opt-in flags in tests/conftest.py. Provider markers say WHICH
 # CLI a test needs and how strongly: `*_bin` wants only the binary on
 # PATH (a login test must NOT require being logged in), `real_claude` /
 # `real_codex` want one that is signed in and actually answers.
@@ -162,6 +162,7 @@ markers = [
     "real: real provider or supervisor integration; deselect with -m 'not real'",
     "supervisor: isolated systemd user-unit checks; no provider CLI or production service mutations",
     "knowledge_eval: optional natural knowledge-answer evaluation; requires --run-knowledge-evals",
+    "wiki_perf: optional Wiki scale and performance measurements; requires --run-wiki-perf",
     "real_claude: needs a claude CLI that is installed AND signed in",
     "real_codex: needs a codex CLI that is installed AND signed in",
     "claude_bin: needs only the claude binary on PATH, not a login",

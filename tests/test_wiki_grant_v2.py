@@ -230,6 +230,7 @@ async def test_existing_note_remains_writable_and_publish_is_hidden(client, tmp_
         assert not tasks.current_grant(task)["allow_new_pages"]
 
 
+@pytest.mark.wiki_perf
 async def test_three_document_grant_lookup_does_not_scan_the_whole_job(client, tmp_path):
     """Measure SQLite work, not just the three hydrated result rows."""
     import uuid

@@ -2,13 +2,15 @@
 
 import os
 import uuid
+from itertools import product
 from pathlib import Path
 
 import pytest
 
 from server.wiki.store import WikiStore
 
-INTENTS = [None, "question", "overview", "compare", "lookup"]
+QUESTION_INTENTS = [None, "question", "overview", "compare"]
+INTENTS = [*QUESTION_INTENTS, "lookup"]
 VIEWS = ["compact", "full"]
 SOURCE_UID = "urn:uuid:abcdef12-3456-4789-8abc-def012345678"
 SUMMARY_UID = "urn:uuid:fedcba98-7654-4321-8fed-cba987654321"
@@ -94,50 +96,47 @@ def test_path_id_uid_keep_exact_object_in_all_sixty_cases(make_store, intent, vi
             ]
 
 
-@pytest.mark.parametrize("intent", INTENTS)
-@pytest.mark.parametrize("view", VIEWS)
-def test_registered_mixed_case_uid_wins_over_same_spelling_titles(make_store, intent, view):
+def test_registered_mixed_case_uid_wins_over_same_spelling_titles(make_store):
     store = make_store()
     target = rows(store)["Summaries/summary.md"]
     queries = [target["path"], target["id"], SUMMARY_UID, SUMMARY_UID.upper(), "UrN:uUiD:" + SUMMARY_UID[9:].upper()]
     for index, query in enumerate(queries):
         write(store, f"collision-{index}.md", f"---\ntitle: {query}\n---\n# Collision\n{query} is another document.\n")
     store.refresh()
-    for query in queries:
+    for intent, view, query in product(INTENTS, VIEWS, queries):
         found = store.search(query, intent=intent, view=view)
         assert found["match_mode"] == "exact" and found["total"] == 1
         assert [item["id"] for item in found["items"]] == [target["id"]]
 
 
-@pytest.mark.parametrize("intent", [None, "question", "overview", "compare"])
+@pytest.mark.parametrize("intent", QUESTION_INTENTS)
 @pytest.mark.parametrize("view", VIEWS)
-@pytest.mark.parametrize("query", ["Realtime", "Live rendering", "What is Realtime"])
-def test_natural_title_and_alias_use_source_selector(make_store, intent, view, query):
+def test_natural_title_and_alias_use_source_selector(make_store, intent, view):
     store = make_store()
     source = rows(store)["alpha.md"]
-    found = store.search(query, intent=intent, view=view)
-    assert found["total"] == 1 and found["match_mode"] in {"lexical", "comparison"}
-    assert [item["id"] for item in found["items"]] == [source["id"]]
-    item = found["items"][0]
-    assert_locations(store, item, view)
-    assert "fixed frame length" in item["snippet"] or "calibration accuracy" in item["snippet"]
+    for query in ["Realtime", "Live rendering", "What is Realtime"]:
+        found = store.search(query, intent=intent, view=view)
+        assert found["total"] == 1 and found["match_mode"] in {"lexical", "comparison"}
+        assert [item["id"] for item in found["items"]] == [source["id"]]
+        item = found["items"][0]
+        assert_locations(store, item, view)
+        assert "fixed frame length" in item["snippet"] or "calibration accuracy" in item["snippet"]
 
 
 @pytest.mark.parametrize("view", VIEWS)
-@pytest.mark.parametrize("query", ["Realtime", "Live rendering"])
-def test_lookup_title_alias_keep_the_named_summary(make_store, view, query):
+def test_lookup_title_alias_keep_the_named_summary(make_store, view):
     store = make_store()
-    found = store.search(query, intent="lookup", view=view)
-    assert found["total"] == 1 and found["match_mode"] == "exact"
-    assert [item["path"] for item in found["items"]] == ["Summaries/summary.md"]
+    for query in ["Realtime", "Live rendering"]:
+        found = store.search(query, intent="lookup", view=view)
+        assert found["total"] == 1 and found["match_mode"] == "exact"
+        assert [item["path"] for item in found["items"]] == ["Summaries/summary.md"]
 
 
-@pytest.mark.parametrize("intent", [None, "question", "overview", "compare"])
 @pytest.mark.parametrize("view", VIEWS)
-def test_unregistered_urn_title_is_semantic_not_identity(make_store, intent, view):
+def test_unregistered_urn_title_is_semantic_not_identity(make_store, view):
     fake = "urn:uuid:00000000-0000-4000-8000-000000000099"
     store = make_store(source=SOURCE + f"The topic {fake} describes this evidence.\n", title=fake)
-    for query in [fake, fake.upper()]:
+    for intent, query in product(QUESTION_INTENTS, [fake, fake.upper()]):
         found = store.search(query, intent=intent, view=view)
         assert found["total"] == 1 and found["match_mode"] in {"lexical", "comparison"}
         assert [item["path"] for item in found["items"]] == ["alpha.md"]
@@ -159,10 +158,8 @@ def test_path_and_id_remain_case_sensitive(make_store):
         assert store.search(query, intent="question")["match_mode"] != "exact"
 
 
-@pytest.mark.parametrize("intent", [None, "question", "overview", "compare"])
-@pytest.mark.parametrize("view", VIEWS)
 @pytest.mark.parametrize("case", ["nonmatching", "unreadable", "directory", "kind", "asset", "error", "excluded"])
-def test_source_qualification_and_scope_precede_representation_selection(make_store, intent, view, case):
+def test_source_qualification_and_scope_precede_representation_selection(make_store, case):
     source = SOURCE
     source_path = "Library/assets/alpha.md" if case == "asset" else "Library/alpha.md"
     if case == "nonmatching":
@@ -175,20 +172,19 @@ def test_source_qualification_and_scope_precede_representation_selection(make_st
         with store.connect() as db:
             db.execute("UPDATE documents SET quality=? WHERE id=?", (case, source_id))
     filters = {"directory": "Summaries"} if case == "directory" else {"kind": "topic"} if case == "kind" else {}
-    found = store.search("Realtime", intent=intent, view=view, **filters)
-    assert found["total"] == 1
-    assert [item["path"] for item in found["items"]] == ["Summaries/summary.md"]
-    assert_locations(store, found["items"][0], view)
-    if case == "asset":
-        included = store.search("Realtime", intent=intent, view=view, include_assets=True)
-        assert included["total"] == 1 and included["items"][0]["id"] == source_id
-        assert_locations(store, included["items"][0], view)
+    for intent, view in product(QUESTION_INTENTS, VIEWS):
+        found = store.search("Realtime", intent=intent, view=view, **filters)
+        assert found["total"] == 1
+        assert [item["path"] for item in found["items"]] == ["Summaries/summary.md"]
+        assert_locations(store, found["items"][0], view)
+        if case == "asset":
+            included = store.search("Realtime", intent=intent, view=view, include_assets=True)
+            assert included["total"] == 1 and included["items"][0]["id"] == source_id
+            assert_locations(store, included["items"][0], view)
 
 
-@pytest.mark.parametrize("intent", INTENTS)
-@pytest.mark.parametrize("view", VIEWS)
 @pytest.mark.parametrize("scope", ["directory", "kind", "asset"])
-def test_filtered_identity_does_not_fall_back_to_another_title(make_store, intent, view, scope):
+def test_filtered_identity_does_not_fall_back_to_another_title(make_store, scope):
     path = "Library/assets/alpha.md" if scope == "asset" else "Library/alpha.md"
     store = make_store(source_path=path)
     source = rows(store)[path]
@@ -197,7 +193,7 @@ def test_filtered_identity_does_not_fall_back_to_another_title(make_store, inten
         write(store, f"Summaries/title-{index}.md", f"---\ntitle: {query}\n---\n# Match\n{query} refers to something else.\n")
     store.refresh()
     filters = {"directory": "Summaries"} if scope == "directory" else {"kind": "topic"} if scope == "kind" else {}
-    for query in queries:
+    for intent, view, query in product(INTENTS, VIEWS, queries):
         found = store.search(query, intent=intent, view=view, **filters)
         assert found["match_mode"] == "exact"
         assert found["items"] == [] and found["total"] == 0
@@ -228,49 +224,48 @@ def test_retired_registered_id_and_uid_do_not_select_a_same_spelling_title(make_
 
 
 @pytest.mark.parametrize("represented", [True, False])
-@pytest.mark.parametrize("view", VIEWS)
-def test_duplicate_titles_are_ambiguous_only_for_lookup(make_store, represented, view):
+def test_duplicate_titles_are_ambiguous_only_for_lookup(make_store, represented):
     source = SOURCE.replace("title: Alpha report", "title: Realtime")
     store = make_store(source=source, represented=represented)
-    lookup = store.search("Realtime", intent="lookup", view=view)
-    assert lookup["match_mode"] == "ambiguous" and lookup["total"] == 2
-    for intent in [None, "question"]:
-        found = store.search("Realtime", intent=intent, view=view)
-        assert found["match_mode"] == "lexical"
-        assert found["total"] == (1 if represented else 2)
-        assert {item["path"] for item in found["items"]} == ({"alpha.md"} if represented else {"alpha.md", "Summaries/summary.md"})
-        for item in found["items"]:
-            assert_locations(store, item, view)
+    for view in VIEWS:
+        lookup = store.search("Realtime", intent="lookup", view=view)
+        assert lookup["match_mode"] == "ambiguous" and lookup["total"] == 2
+        for intent in [None, "question"]:
+            found = store.search("Realtime", intent=intent, view=view)
+            assert found["match_mode"] == "lexical"
+            assert found["total"] == (1 if represented else 2)
+            assert {item["path"] for item in found["items"]} == ({"alpha.md"} if represented else {"alpha.md", "Summaries/summary.md"})
+            for item in found["items"]:
+                assert_locations(store, item, view)
 
 
-@pytest.mark.parametrize("intent", [None, "question", "overview", "compare"])
-@pytest.mark.parametrize("view", VIEWS)
-def test_exact_title_pagination_counts_selected_sources_once(make_store, intent, view):
+def test_exact_title_pagination_counts_selected_sources_once(make_store):
     store = make_store()
     for index in range(20):
         write(store, f"Summaries/extra-{index}.md", summary())
     for name in ["beta", "gamma"]:
         write(store, name + ".md", f"---\ntitle: Realtime\n---\n# {name}\nRealtime independent {name} evidence.\n")
     store.refresh()
-    complete = store.search("Realtime", intent=intent, view=view)
-    assert complete["total"] == 3
-    pages = []
-    page = store.search("Realtime", intent=intent, view=view, limit=1)
-    while True:
-        assert page["total"] == 3
-        assert len(page["items"]) == 1
-        pages.extend(page["items"])
-        assert_locations(store, page["items"][0], view)
-        if page["next_cursor"] is None:
-            assert page["next_offset"] is None
-            break
-        assert page["next_offset"] == len(pages)
-        page = store.search("Realtime", intent=intent, view=view, limit=1, cursor=page["next_cursor"])
-    assert [item["id"] for item in pages] == [item["id"] for item in complete["items"]]
-    assert len({item["id"] for item in pages}) == 3
-    assert {item["path"] for item in pages} == {"alpha.md", "beta.md", "gamma.md"}
-    offset = store.search("Realtime", intent=intent, view=view, limit=1, offset=1)
-    assert [item["id"] for item in offset["items"]] == [pages[1]["id"]]
+    for intent, view in product(QUESTION_INTENTS, VIEWS):
+        complete = store.search("Realtime", intent=intent, view=view)
+        assert complete["total"] == 3
+        pages = []
+        page = store.search("Realtime", intent=intent, view=view, limit=1)
+        while True:
+            assert page["total"] == 3
+            assert len(page["items"]) == 1
+            pages.extend(page["items"])
+            assert_locations(store, page["items"][0], view)
+            if page["next_cursor"] is None:
+                assert page["next_offset"] is None
+                break
+            assert page["next_offset"] == len(pages)
+            page = store.search("Realtime", intent=intent, view=view, limit=1, cursor=page["next_cursor"])
+        assert [item["id"] for item in pages] == [item["id"] for item in complete["items"]]
+        assert len({item["id"] for item in pages}) == 3
+        assert {item["path"] for item in pages} == {"alpha.md", "beta.md", "gamma.md"}
+        offset = store.search("Realtime", intent=intent, view=view, limit=1, offset=1)
+        assert [item["id"] for item in offset["items"]] == [pages[1]["id"]]
 
 
 def test_title_alias_and_registered_identity_queries_never_open_source_files(make_store, monkeypatch):

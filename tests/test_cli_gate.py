@@ -1,5 +1,5 @@
 """The real-CLI gates decide whether the `*_real.py` suites run at all, so a
-gate that answers wrongly is worse than a failing test: it turns 18 real tests
+gate that answers wrongly is worse than a failing test: it turns real tests
 into skips and the suite still reads green.
 
 CLAUDE.md's rule is that a skip means a lapsed login, not a passing suite.
@@ -68,6 +68,42 @@ def test_two_timeouts_raise_instead_of_skipping(monkeypatch):
     monkeypatch.setattr(subprocess, "run", always_timeout)
     with pytest.raises(CliProbeTimeout, match="NOT a lapsed login"):
         _probe(["whatever"], timeout=1)
+
+
+@pytest.mark.parametrize("markers,expected", [
+    ({"real", "real_codex"}, "low"),
+    ({"real", "codex_bin"}, "low"),
+    ({"real", "real_codex", "knowledge_eval"}, "high"),
+    ({"real", "real_claude"}, "high"),
+    (set(), "high"),
+])
+async def test_codex_smoke_effort_is_scoped_and_preserves_callers(monkeypatch, markers, expected):
+    from types import SimpleNamespace
+
+    from server.harness import OneShotContext, RunConfig
+    from tests import conftest
+
+    class Harness:
+        def create_run(self, config=None):
+            return config or RunConfig()
+
+        async def run_oneshot(self, context, *, timeout):
+            return context, timeout
+
+    harness = Harness()
+    monkeypatch.setattr("server.harness.get_harness", lambda backend: harness)
+    request = SimpleNamespace(node=SimpleNamespace(get_closest_marker=lambda name: name in markers))
+    conftest._codex_smoke_uses_low_effort.__wrapped__(request, monkeypatch)
+
+    config = RunConfig(reasoning_effort="high", service_tier="fast", mcp_servers=[])
+    context = OneShotContext(prompt="A protocol probe", reasoning_effort="high", service_tier="fast")
+    configured = harness.create_run(config)
+    oneshot, timeout = await harness.run_oneshot(context, timeout=17)
+    assert configured.reasoning_effort == oneshot.reasoning_effort == expected
+    assert config.reasoning_effort == context.reasoning_effort == "high"
+    assert configured.mcp_servers == [] and oneshot.prompt == context.prompt
+    assert configured.service_tier == oneshot.service_tier == "fast" and timeout == 17
+    assert harness.create_run().reasoning_effort == ("low" if expected == "low" else None)
 
 
 # --------------------------------------------------------------- marker invariants

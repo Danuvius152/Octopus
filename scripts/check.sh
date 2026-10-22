@@ -1,9 +1,9 @@
 #!/bin/bash
-# Run the fast gates documented in AGENTS.md before a commit.
+# Run the full commit/integration checks documented in AGENTS.md.
 #
 # Usage:
-#   ./scripts/check.sh          # the four fast gates (~40s)
-#   ./scripts/check.sh --e2e    # also run Playwright (~4.5 min, needs real CLIs)
+#   ./scripts/check.sh          # includes the full hermetic backend suite
+#   ./scripts/check.sh --e2e    # also run Playwright (needs signed-in CLIs)
 #
 # Runs every gate even after one fails, so you get the full picture in one
 # pass instead of discovering problems one commit at a time. Exit status is
@@ -49,8 +49,8 @@ run_gate() {
 }
 
 gate_pytest() {
-  # The release tier never opts into natural-answer evaluation or a CLI.
-  "$ROOT/.venv/bin/pytest" tests/ -m "not real and not knowledge_eval" -q
+  # Full correctness excludes live providers, answer evaluation and Wiki benchmarks.
+  "$ROOT/.venv/bin/pytest" tests/ -m "not real and not knowledge_eval and not wiki_perf" -q
 }
 
 gate_vitest() { cd "$ROOT/web" && bun run test; }
@@ -84,7 +84,7 @@ run_gate "docs plans index in sync"            gate_docs_index
 if [ "${1:-}" = "--e2e" ]; then
   run_gate "e2e (playwright)" gate_e2e
 else
-  printf '\n\033[2mskipped: e2e — run ./scripts/check.sh --e2e (~4.5 min, needs signed-in CLIs)\033[0m\n'
+  printf '\n\033[2mskipped: e2e — run ./scripts/check.sh --e2e (needs signed-in CLIs)\033[0m\n'
 fi
 
 printf '\n\033[1m── summary\033[0m\n'

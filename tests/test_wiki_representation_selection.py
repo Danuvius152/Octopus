@@ -2,6 +2,7 @@
 
 import json
 import os
+from itertools import product
 from pathlib import Path
 
 import pytest
@@ -113,18 +114,18 @@ async def test_twenty_summaries_preserve_original_other_direction_and_comparison
     assert "under fixed frame length" in read.json()["content"]
 
 
-@pytest.mark.parametrize("intent", INTENTS)
-def test_source_returns_its_own_score_sections_and_lookup_identity(store, intent):
+def test_source_returns_its_own_score_sections_and_lookup_identity(store):
     alpha = represented_pair(store, summaries=20)
     lookup = store.search("realtime", intent="lookup", limit=30)
     lexical_source = next(item for item in lookup["items"] if item["id"] == alpha["id"])
-    found = store.search("realtime", intent=intent)["items"]
-    assert len(found) == 1
-    hit = found[0]
-    assert hit["id"] == alpha["id"] and hit["revision"] == alpha["revision"]
-    assert hit["score"] == lexical_source["score"]
-    assert hit["section"] == lexical_source["section"]
-    assert hit["snippet"] == lexical_source["snippet"]
+    for intent in INTENTS:
+        found = store.search("realtime", intent=intent)["items"]
+        assert len(found) == 1
+        hit = found[0]
+        assert hit["id"] == alpha["id"] and hit["revision"] == alpha["revision"]
+        assert hit["score"] == lexical_source["score"]
+        assert hit["section"] == lexical_source["section"]
+        assert hit["snippet"] == lexical_source["snippet"]
     for path in ["alpha.md", "Summaries/summary-00.md"]:
         exact = store.search(path, intent="lookup", view="compact")
         assert exact["total"] == 1 and exact["items"][0]["path"] == path
@@ -159,9 +160,8 @@ def test_limit_one_pages_have_same_set_and_old_epoch_is_rejected(store, intent):
     assert error.value.status == 409
 
 
-@pytest.mark.parametrize("intent", INTENTS)
 @pytest.mark.parametrize("case", ["nonmatching", "directory", "kind", "asset", "template", "source_snapshot"])
-def test_filtered_or_nonmatching_source_falls_back_to_summary(store, intent, case):
+def test_filtered_or_nonmatching_source_falls_back_to_summary(store, case):
     source_path = "Library/assets/alpha.md" if case == "asset" else "Library/alpha.md"
     source = None
     if case == "nonmatching":
@@ -172,17 +172,18 @@ def test_filtered_or_nonmatching_source_falls_back_to_summary(store, intent, cas
         source = "---\ntype: SourceSnapshot\n---\n# Alpha study\nRealtime snapshot.\n"
     alpha = represented_pair(store, source_path, source)
     filters = {"directory": "Summaries"} if case == "directory" else {"kind": "topic"} if case == "kind" else {}
-    result = store.search("realtime", intent=intent, **filters)
-    assert result["total"] == 1 and len(result["items"]) == 1
-    fallback = result["items"][0]
-    assert fallback["path"].startswith("Summaries/") and fallback["id"] != alpha["id"]
-    current = store.read(fallback["id"])
-    assert fallback["revision"] == current["revision"]
-    assert "fixed frame length" not in fallback["snippet"]
-    assert store.search("realtime", intent=intent, **filters)["items"][0]["id"] == fallback["id"]
-    if case == "asset":
-        explicit = store.search("realtime", intent=intent, include_assets=True)
-        assert explicit["total"] == 1 and explicit["items"][0]["id"] == alpha["id"]
+    for intent in INTENTS:
+        result = store.search("realtime", intent=intent, **filters)
+        assert result["total"] == 1 and len(result["items"]) == 1
+        fallback = result["items"][0]
+        assert fallback["path"].startswith("Summaries/") and fallback["id"] != alpha["id"]
+        current = store.read(fallback["id"])
+        assert fallback["revision"] == current["revision"]
+        assert "fixed frame length" not in fallback["snippet"]
+        assert store.search("realtime", intent=intent, **filters)["items"][0]["id"] == fallback["id"]
+        if case == "asset":
+            explicit = store.search("realtime", intent=intent, include_assets=True)
+            assert explicit["total"] == 1 and explicit["items"][0]["id"] == alpha["id"]
 
 
 @pytest.mark.parametrize("quality", ["error", "excluded"])
@@ -207,8 +208,6 @@ def test_metadata_match_without_available_body_falls_back_to_summary(store):
     assert result["items"][0]["path"].startswith("Summaries/")
 
 
-@pytest.mark.parametrize("intent", INTENTS)
-@pytest.mark.parametrize("view", ["compact", "full"])
 @pytest.mark.parametrize("body", [
     "# Alpha realtime\n\n",
     "Alpha realtime\n==============\n\n",
@@ -244,28 +243,28 @@ def test_metadata_match_without_available_body_falls_back_to_summary(store):
         "hidden-heading-fence", "hidden-long-fence", "html-curator", "html-related",
         "html-curator-child-code-media", "quoted-body-does-not-release-related",
         "list-body-does-not-release-curator", "whitespace"])
-def test_non_evidence_source_does_not_hide_readable_summary(store, intent, view, body):
+def test_non_evidence_source_does_not_hide_readable_summary(store, body):
     alpha = represented_pair(
         store, source="---\ntype: Reference\ntitle: Alpha realtime\n---\n" + body,
         summaries=1,
     )
-    result = store.search("realtime", intent=intent, view=view, limit=1)
-    assert result["total"] == 1 and result["next_offset"] is None
-    hit = result["items"][0]
-    assert hit["id"] != alpha["id"] and hit["path"] == "Summaries/summary-00.md"
-    assert hit["revision"] == store.read(hit["id"])["revision"]
-    section = hit["sections"][0]
-    actual = store.read(hit["id"], start=section["start"],
-                        length=section["end"] - section["start"],
-                        expected_revision=hit["revision"])
-    assert "Realtime uses video distillation" in actual["content"]
-    # Exact lookup can still locate the original, even if it has no evidence.
-    lookup = store.search(alpha["id"], intent="lookup", view=view)
-    assert lookup["items"][0]["id"] == alpha["id"]
+    # These queries leave the source unchanged; each body needs one fresh store.
+    for intent, view in product(INTENTS, ("compact", "full")):
+        result = store.search("realtime", intent=intent, view=view, limit=1)
+        assert result["total"] == 1 and result["next_offset"] is None
+        hit = result["items"][0]
+        assert hit["id"] != alpha["id"] and hit["path"] == "Summaries/summary-00.md"
+        assert hit["revision"] == store.read(hit["id"])["revision"]
+        section = hit["sections"][0]
+        actual = store.read(hit["id"], start=section["start"],
+                            length=section["end"] - section["start"],
+                            expected_revision=hit["revision"])
+        assert "Realtime uses video distillation" in actual["content"]
+        # Exact lookup can still locate the original, even if it has no evidence.
+        lookup = store.search(alpha["id"], intent="lookup", view=view)
+        assert lookup["items"][0]["id"] == alpha["id"]
 
 
-@pytest.mark.parametrize("intent", INTENTS)
-@pytest.mark.parametrize("view", ["full", "compact"])
 @pytest.mark.parametrize("body", [
     "42\n",
     "$$\\sum_{i=1}^{2} i = 3$$\n",
@@ -293,19 +292,18 @@ def test_non_evidence_source_does_not_hide_readable_summary(store, intent, view,
         "wrapped-html-image", "audio", "video-source", "visible-after-hidden", "literal-script-code",
         "visible-after-hidden-fence", "html-body-after-curator", "html-keynote-after-related", "literal-heading-code",
         "quoted-curator-does-not-hide-body", "list-related-does-not-hide-body", "nested-quote-list-with-code-media"])
-def test_visible_body_key_note_math_and_code_keep_original_identity(store, intent, view, body):
+def test_visible_body_key_note_math_and_code_keep_original_identity(store, body):
     alpha = represented_pair(
         store, source="---\ntype: Reference\ntitle: Alpha realtime\n---\n" + body,
         summaries=1,
     )
-    result = store.search("realtime", intent=intent, view=view)
-    assert result["total"] == 1 and result["items"][0]["id"] == alpha["id"]
-    actual = store.read(alpha["id"], expected_revision=result["items"][0]["revision"])
-    assert actual["content"].endswith(body)
+    for intent, view in product(INTENTS, ("full", "compact")):
+        result = store.search("realtime", intent=intent, view=view)
+        assert result["total"] == 1 and result["items"][0]["id"] == alpha["id"]
+        actual = store.read(alpha["id"], expected_revision=result["items"][0]["revision"])
+        assert actual["content"].endswith(body)
 
 
-@pytest.mark.parametrize("intent", INTENTS)
-@pytest.mark.parametrize("view", ["full", "compact"])
 @pytest.mark.parametrize("suffix", ["html", "htm"])
 @pytest.mark.parametrize("body,usable", [
     ("<h1>Alpha realtime</h1>", False),
@@ -318,29 +316,30 @@ def test_visible_body_key_note_math_and_code_keep_original_identity(store, inten
     ("<h2>相关笔记</h2><p>Realtime links only.</p>", False),
 ], ids=["heading", "hidden", "heading-image", "image-only", "wrapped-image", "paragraph", "curator", "related"])
 def test_physical_html_stays_readable_without_entering_markdown_navigation(
-    store, intent, view, suffix, body, usable,
+    store, suffix, body, usable,
 ):
     from server.wiki.extract import HTMLText
 
     path = "alpha-realtime." + suffix
     alpha = represented_pair(store, source_path=path, source=body, summaries=1)
-    result = store.search("realtime", intent=intent, view=view, limit=1)
-    assert result["total"] == 1
-    hit = result["items"][0]
-    assert hit["id"] != alpha["id"]
-    assert hit["path"] == "Summaries/summary-00.md"
-    assert hit["revision"] == store.read(hit["id"])["revision"]
-    assert store.search(alpha["id"], intent="lookup", view=view)["items"] == []
-    # Qualification uses original structure; the evidence text still has the
-    # established extractor's exact code-point coordinates.
-    legacy = HTMLText()
-    legacy.feed(body)
-    read = store.read(alpha["id"], expected_revision=alpha["revision"])
-    assert read["content"] == "".join(legacy.parts).strip()
-    assert read["characters"] == len(read["content"])
-    assert read["metadata"]["html_body_readable"] is usable
-    if usable and "img" in body:
-        assert read["metadata"]["html_media_refs"] == [{"tag": "img", "src": "diagram.png"}]
+    for intent, view in product(INTENTS, ("full", "compact")):
+        result = store.search("realtime", intent=intent, view=view, limit=1)
+        assert result["total"] == 1
+        hit = result["items"][0]
+        assert hit["id"] != alpha["id"]
+        assert hit["path"] == "Summaries/summary-00.md"
+        assert hit["revision"] == store.read(hit["id"])["revision"]
+        assert store.search(alpha["id"], intent="lookup", view=view)["items"] == []
+        # Qualification uses original structure; the evidence text still has the
+        # established extractor's exact code-point coordinates.
+        legacy = HTMLText()
+        legacy.feed(body)
+        read = store.read(alpha["id"], expected_revision=alpha["revision"])
+        assert read["content"] == "".join(legacy.parts).strip()
+        assert read["characters"] == len(read["content"])
+        assert read["metadata"]["html_body_readable"] is usable
+        if usable and "img" in body:
+            assert read["metadata"]["html_media_refs"] == [{"tag": "img", "src": "diagram.png"}]
 
 
 @pytest.mark.parametrize("legacy_version", ["sections-v4", "sections-v5", "sections-v6"])

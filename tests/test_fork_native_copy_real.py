@@ -91,10 +91,14 @@ async def test_claude_native_copy_resume_recalls_context(tmp_path):
 
 
 def _codex_home_with_auth() -> str | None:
-    """A signed-in CODEX_HOME: the host default if it has auth.json, else any
-    Octopus per-credential dir (~/.octopus/codex/<id>/auth.json). None if none.
+    """Honor selected CODEX_HOME without falling back to another credential.
+    Otherwise discover host auth or an Octopus per-credential directory.
     (Presence only — a revoked token still passes here but the env-failure skip
     below catches it at call time.)"""
+    selected = os.environ.get("CODEX_HOME")
+    if selected:
+        home = os.path.expanduser(selected)
+        return home if os.path.exists(os.path.join(home, "auth.json")) else None
     host = os.path.expanduser("~/.codex")
     if os.path.exists(os.path.join(host, "auth.json")):
         return host
@@ -120,7 +124,8 @@ async def test_codex_native_copy_resume_recalls_context(tmp_path):
     def _run(wd, extra):
         return subprocess.run(
             [exe, "exec", "--json", "--skip-git-repo-check", "-C", str(wd),
-             "--dangerously-bypass-approvals-and-sandbox", *extra],
+             "--dangerously-bypass-approvals-and-sandbox",
+             "-c", 'model_reasoning_effort="low"', *extra],
             capture_output=True, text=True, timeout=180, env=env,
         )
 

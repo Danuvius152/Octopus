@@ -50,7 +50,8 @@ def _usable_codex_credential() -> str | None:
         try:
             proc = subprocess.run(
                 [exe, "exec", "--json", "--skip-git-repo-check",
-                 "--dangerously-bypass-approvals-and-sandbox", "--", "Reply with OK."],
+                 "--dangerously-bypass-approvals-and-sandbox",
+                 "-c", 'model_reasoning_effort="low"', "--", "Reply with OK."],
                 stdin=subprocess.DEVNULL, capture_output=True,
                 cwd=tempfile.gettempdir(), env=env, timeout=90,
             )

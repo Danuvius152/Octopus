@@ -1,4 +1,4 @@
-"""Maintenance costs stay scoped across shared jobs and unrelated job barriers."""
+"""Small correctness boundaries and opt-in measurements at production scale."""
 
 import json
 from contextlib import contextmanager
@@ -10,8 +10,7 @@ from tests.test_wiki_maintenance_inputs import prepared as prepared
 from tests.test_wiki_maintenance_projection import observe
 
 
-@pytest.mark.parametrize("count", [513, 1025])
-def test_shared_job_items_are_loaded_once_across_projection_batches(prepared, monkeypatch, count):
+def assert_shared_job_items_loaded_once(prepared, monkeypatch, count):
     jobs, _ = prepared
     for number in range(count - 3):
         jobs.store.path(f"Library/wide-{number:04}.md").write_text(f"# Wide {number}\n")
@@ -42,12 +41,26 @@ def test_shared_job_items_are_loaded_once_across_projection_batches(prepared, mo
         measurements.append({"phase": phase, "documents": count, "batches": list(loaded),
                              "loaded_items": sum(batch["items"] for batch in loaded),
                              "calculated_documents": sum(batch["documents"] for batch in loaded)})
-    print(json.dumps({"shared_job_projection_cost": measurements}))
     assert all(row["calculated_documents"] == count for row in measurements)
     assert all(row["loaded_items"] == count for row in measurements), measurements
+    return measurements
 
 
-def test_collection_barrier_vm_work_ignores_unrelated_dirty_jobs(prepared, monkeypatch):
+@pytest.mark.parametrize("count", [5, 9])
+def test_shared_job_items_are_loaded_once_across_projection_batches(prepared, monkeypatch, count):
+    # Exercise two and three batches without indexing hundreds of fixture files.
+    monkeypatch.setattr(maintenance_projection, "BATCH_SIZE", 4)
+    assert_shared_job_items_loaded_once(prepared, monkeypatch, count)
+
+
+@pytest.mark.wiki_perf
+@pytest.mark.parametrize("count", [513, 1025])
+def test_shared_job_projection_cost_at_production_batch_size(prepared, monkeypatch, count):
+    measurements = assert_shared_job_items_loaded_once(prepared, monkeypatch, count)
+    print(json.dumps({"shared_job_projection_cost": measurements}))
+
+
+def collection_barrier_measurements(prepared, monkeypatch, counts):
     jobs, _ = prepared
     jobs.store.path("Other").mkdir()
     jobs.store.path("Other/unrelated.md").write_text("# Unrelated\n")
@@ -80,7 +93,7 @@ def test_collection_barrier_vm_work_ignores_unrelated_dirty_jobs(prepared, monke
     monkeypatch.setattr(jobs.store, "connect", counted_connect)
     measurements = []
     inserted = 0
-    for count in (0, 1000, 5000):
+    for count in counts:
         with connect() as db:
             item = {"doc": outside["id"], "path": outside["path"],
                     "revision": outside["revision"], "status": "pending"}
@@ -96,9 +109,19 @@ def test_collection_barrier_vm_work_ignores_unrelated_dirty_jobs(prepared, monke
         assert [item["review"] for item in response["items"]] == [item["review"] for item in first["items"]]
         measurements.append({"unrelated_dirty_jobs": count, "vm_steps": current["steps"]})
     with connect() as db:
-        assert db.execute("SELECT count(*) FROM maintenance_job_dirty").fetchone()[0] == 5000
+        assert db.execute("SELECT count(*) FROM maintenance_job_dirty").fetchone()[0] == counts[-1]
         plans = [row["detail"] for row in db.execute("EXPLAIN QUERY PLAN " + current["barriers"][-1])]
-    print(json.dumps({"collection_barrier_cost": measurements, "query_plan": plans}))
-    assert measurements[-1]["vm_steps"] <= measurements[1]["vm_steps"] + 1000, measurements
     assert any("SEARCH d " in detail and "path>?" in detail for detail in plans), plans
     assert not any("SCAN pending" in detail for detail in plans), plans
+    return measurements, plans
+
+
+def test_collection_barrier_keeps_unrelated_dirty_jobs_out_of_the_page(prepared, monkeypatch):
+    collection_barrier_measurements(prepared, monkeypatch, (0, 1, 2))
+
+
+@pytest.mark.wiki_perf
+def test_collection_barrier_vm_work_ignores_unrelated_dirty_jobs(prepared, monkeypatch):
+    measurements, plans = collection_barrier_measurements(prepared, monkeypatch, (0, 1000, 5000))
+    print(json.dumps({"collection_barrier_cost": measurements, "query_plan": plans}))
+    assert measurements[-1]["vm_steps"] <= measurements[1]["vm_steps"] + 1000, measurements

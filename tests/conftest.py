@@ -6,6 +6,7 @@ import shutil
 import signal
 import tempfile
 import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,27 @@ os.environ["OCTOPUS_AUTH_TOKEN"] = "changeme"
 os.environ["OCTOPUS_DEFAULT_BACKEND"] = "claude-code"
 
 _PROC = Path("/proc")
+
+
+@pytest.fixture(autouse=True)
+def _codex_smoke_uses_low_effort(request, monkeypatch):
+    """Pin live protocol checks without changing the caller or host configuration."""
+    marker = request.node.get_closest_marker
+    if not marker("real") or marker("knowledge_eval") or not (marker("real_codex") or marker("codex_bin")):
+        return
+    from server.harness import RunConfig, get_harness
+
+    harness = get_harness("codex")
+    create_run, run_oneshot = harness.create_run, harness.run_oneshot
+
+    def low_run(config=None):
+        return create_run(replace(config or RunConfig(), reasoning_effort="low"))
+
+    async def low_oneshot(context, **kwargs):
+        return await run_oneshot(replace(context, reasoning_effort="low"), **kwargs)
+
+    monkeypatch.setattr(harness, "create_run", low_run)
+    monkeypatch.setattr(harness, "run_oneshot", low_oneshot)
 
 
 @pytest.fixture(autouse=True)
@@ -243,6 +265,11 @@ def _no_cli_left_behind(request):
 
 
 def pytest_addoption(parser):
+    performance = parser.getgroup("Wiki performance")
+    performance.addoption(
+        "--run-wiki-perf", action="store_true", default=False,
+        help="Run optional Wiki scale and performance measurements (not release gates)",
+    )
     group = parser.getgroup("knowledge evaluation")
     group.addoption(
         "--run-knowledge-evals", action="store_true", default=False,
@@ -260,12 +287,19 @@ def pytest_addoption(parser):
 
 def pytest_collection_modifyitems(config, items):
     """Opt in before setup, including the signed-in CLI availability probe."""
-    if config.getoption("run_knowledge_evals"):
-        return
-    evaluations = [item for item in items if item.get_closest_marker("knowledge_eval")]
-    if evaluations:
-        items[:] = [item for item in items if not item.get_closest_marker("knowledge_eval")]
-        config.hook.pytest_deselected(items=evaluations)
+    disabled = [marker for marker, option in (
+        ("knowledge_eval", "run_knowledge_evals"),
+        ("wiki_perf", "run_wiki_perf"),
+    ) if not config.getoption(option)]
+    selected, deselected = [], []
+    for item in items:
+        if any(item.get_closest_marker(marker) for marker in disabled):
+            deselected.append(item)
+        else:
+            selected.append(item)
+    if deselected:
+        items[:] = selected
+        config.hook.pytest_deselected(items=deselected)
 
 
 def pytest_runtest_setup(item):

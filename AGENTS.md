@@ -30,95 +30,105 @@ This rule exists because past sessions repeatedly took the shortcut
 and then had to be told to go back and do the real thing. Skip the
 shortcut. Do the real thing the first time.
 
-## After Every Code Change
+## Verification
 
-You MUST verify your changes before considering them done:
+Use fast checks for repeated development iterations and full checks before a
+code commit. **Both exclude `knowledge_eval` and `wiki_perf` by default.** These
+optional tiers require a separate evaluation or measurement task and explicit
+opt-in; they are outside commit and release gates.
 
-Wiki `knowledge_eval` is opt-in, deselected before setup/CLI probes, and is
-not a release gate. Assess answers against recorded source versions, not exact
-wording or fixed personal facts. Permission, source-preservation, revision/index,
-pagination, receipt, settlement and CLI/browser checks remain required.
+### Fast checks during development
 
-1. **Backend tests**: run the hermetic tier and the available provider's
-   real-CLI tier. This installation defaults to **Codex**; **Claude is not
-   installed/configured and its live tests are not selected**. Do not probe,
-   install or authenticate Claude merely to run this task's checks. Offline
-   protocol tests for either backend remain part of the hermetic tier. A
-   machine with both providers must validate both. Select live tests by marker,
-   not by listing filenames:
+Get feedback on each change promptly with the smallest relevant test set:
 
-   - `pytest -m "not real and not knowledge_eval"` — the hermetic tier, with
-     no CLI required. This is the release selection; `knowledge_eval` remains
-     opt-in even if its fixtures do not call a model.
-   - `pytest -m real` — all live-provider cases. `real_claude` and `real_codex`
-     want an installed, signed-in CLI; mixed-provider cases require both.
-     `claude_bin` and `codex_bin` need only the binary. Apply the local provider
-     selection below instead of probing providers this installation lacks.
+- **Backend:** run affected test files or node IDs:
+  `.venv/bin/pytest <affected-files-or-node-ids> -m "not real and not knowledge_eval and not wiki_perf" -q`.
+  Start with the regression scenario, then adjacent cases. Run Ruff on changed
+  Python files and check types regularly with `.venv/bin/mypy`.
+- **Frontend:** `cd web && bun run test <affected-test-files>`; use
+  `bun run typecheck` when TypeScript or shared interfaces change. This invokes
+  `tsc -b --force`; the solution-level `tsc --noEmit` checks zero source files.
+- **Integration changes:** add the specific offline API/browser regression
+  needed to exercise the changed boundary. Run live tests when the question
+  needs the installed CLI or provider, using this installation's selection.
 
-   The markers resolve in `tests/conftest.py:pytest_runtest_setup`, so the
-   availability probe fires at setup and never at import — evaluating it at
-   import is what used to make a plain `--collect-only` spawn a real `claude`
-   call (16.44 s vs 0.80 s). Run with the nvm bin prepended so `codex`
-   resolves (see Conventions).
-2. **Frontend unit tests**: `cd web && bun run test`.
-3. **TypeScript check**: `cd web && bun run typecheck` (`tsc -b --force`).
-   Not `tsc --noEmit`: `web/tsconfig.json` is a solution file — `"files": []`
-   plus two references — so `--noEmit` on it checks *zero* files and exits 0
-   whatever is broken. It passed for months while `bun run build` failed.
-4. **E2E tests**: `cd web && bun run test:e2e` (Playwright auto-starts servers).
-   It *is* the two buckets, run as two
-   invocations — not one run that covers both. The accounts spec needs a second
-   backend and dev server of its own (`playwright.config.ts`: claiming an
-   install retires the token every other spec signs in with), and with those two
-   idle servers up the real-CLI half failed a different Chat test on each of two
-   runs. So the buckets are also the unit of iteration —
-   `bun run test:e2e:fast` (pure UI — login / accounts /
-   sessions /
-   dialogs / sidebar / sidebar pins / virtualized chat / attachments / etc.) and
-   `bun run test:e2e:llm` (real LLM, **one worker** — two
-   concurrent real-CLI turns on this box time out about one run in three, a
-   different test each time, and serially the bucket is faster anyway — chat, /schedule,
-   an agent scheduling itself, /showme, /archive, mcp__bg__run, AskUserQuestion, agent-collaboration,
-   notifier, codex sign-in, handoff/pull). Anything that drives a real
-   `claude` / `codex` turn carries `@llm` in its describe title; the
-   `:fast` script uses `--grep-invert @llm`. `codex.spec.ts` needs a
-   signed-in `codex` (`codex login --device-auth`); a lapsed login fails
-   it rather than hiding it.
+Keep this feedback loop focused while editing. The hermetic selection over all
+of `tests/` is the full backend suite. Fast checks establish local correctness;
+complete the full checks at the commit boundary.
 
-**All required release checks must pass before committing.** Investigate and
-fix failures; do not dismiss them as "flaky" or "pre-existing". Unavailable,
-skipped or deselected checks do not count as passes.
+### Full checks before code commits
 
-### Local Codex validation
+At the code commit boundary, complete the check set in `./scripts/check.sh`:
+the full hermetic backend suite, backend/frontend lint and types, frontend unit
+tests, generated contracts and the docs index check. Use the script for a
+combined run, or use the pre-commit hook for its gates and run the remaining
+checks separately. Give each check one executor. The backend
+selection includes Wiki correctness and excludes live integration and both
+optional tiers; see Test Coverage for individual commands.
 
-On this WSL installation, require hermetic backend, frontend unit/types,
-pure-UI E2E, Codex real-CLI/browser, lint, generated-contract and docs-index
-checks. Reports and reviewer briefs must state the provider scope explicitly:
-**Codex: actual results; Claude: unavailable, live tests not run**. Never call
-this a passing two-provider suite. Claude-only and mixed-provider live tests
-are outside this installation's release gate, not an unresolved release task.
-Do not change the project's supported backends or existing agent settings.
-The Codex selection is
-`real and (real_codex or codex_bin) and not real_claude and not knowledge_eval`.
+**All required correctness checks must pass before committing.** Investigate
+and fix failures. Reuse passing evidence for unchanged code, environment and
+checks; rerun checks invalidated by subsequent changes. Release adds the
+installation-specific checks below.
 
-Opt-in evaluation setup, registration and evidence rules are in
-[local-wsl.md](docs/local-wsl.md#本机测试). Preserve failures and raw usage;
-execution success still needs independent semantic review. Do not change agent
-defaults or add paid availability probes. Fixed event-replay assertions remain
-valid protocol checks.
+### Release and documentation checks
+
+| When | Required validation |
+|------|---------------------|
+| Before release on this Codex installation | All commit gates, **offline E2E**, **live Codex pytest** and **Codex browser E2E** from Test Coverage below; then follow [自动发布](docs/local-wsl.md#自动发布). Include supervisor checks when managed-service behavior changed. |
+| Documentation only | Affected links, index and diff checks; follow Repository and Upstream Maintenance below. |
 
 ## Test Coverage
 
-| Suite | Tool | Command | Scope |
-|-------|------|---------|-------|
-| Backend unit | pytest | `pytest -m "not real and not knowledge_eval"` | Config, models, session lifecycle, DB/migrations, REST/WS, harness protocols, integrations, scheduling, accounts, workspace/tenant isolation, MCP and Wiki. No CLI or network. |
-| Real-CLI tier | pytest | Local marker selection above | Actual available-provider execution, recording, recovery, delegation and CLI contracts. Deselected providers are not passes. |
-| Frontend unit | vitest | `cd web && bun run test` | Stores, HTTP/WS handling and components, including persistent task cards and account/service generation boundaries. |
-| E2E | Playwright | `cd web && bun run test:e2e` | Real browser and server persistence. Run the offline `:fast` bucket separately from the configured-provider `:llm` bucket. |
+Use `.venv/bin/pytest tests/ --collect-only -q` with the relevant marker/opt-in
+selection for current cases and counts. Commands below start at the repository
+root; use the PATH setup under Conventions.
 
-For what any individual test covers, ask the suite rather than this table:
-`pytest --collect-only -q` with the relevant marker selection. Record actual
-counts and provider scope from that run's logs; counts here would become stale.
+| Suite | Command | Scope and execution boundary |
+|-------|---------|------------------------------|
+| Backend hermetic | `.venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" -q` | Full correctness, including Wiki sources/jobs/maintenance, permissions, transactions and recovery. No live model or external network dependency; guards reject real model CLI execution and production callback port 8000. |
+| Wiki performance (opt-in) | `.venv/bin/pytest tests/ --run-wiki-perf -m wiki_perf -v -s` | Large-dataset projection and grant-lookup cost measurements. Outside default full checks and release gates; small correctness and query-boundary checks remain in the hermetic tier. |
+| Live Codex pytest | `.venv/bin/pytest tests/ -m "real and (real_codex or codex_bin) and not real_claude and not knowledge_eval" -v` | Actual Codex execution, streaming/tools, scheduling, memory, fork, research, Wiki and login contracts. Use the isolated credential setup in [本机测试](docs/local-wsl.md#本机测试). |
+| Supervisor integration | `.venv/bin/pytest tests/ -m "real and supervisor" -v` | Isolated systemd user units: installation ownership, environment/token handling, process retirement and managed restart. No provider CLI or production-service mutation. |
+| Frontend unit | `cd web && bun run test` | Stores, HTTP/WS events, components, input lifecycle, account/service generation boundaries and Wiki job cards. Vitest tests are colocated with source. |
+| Offline browser E2E | `cd web && bun run test:e2e:fast` | Real browser plus isolated backend: login/accounts, sessions, input recovery, sidebar/pins, attachments, Wiki cards and page readiness. Uses a test-only harness and verifies an offline execution audit; actual provider behavior needs the live tier. |
+| Codex browser E2E | `cd web && bun run test:e2e:llm codex.spec.ts` | Real Codex session creation, response streaming and Monitor reporting through the product backend. Needs the installed, signed-in Codex CLI. |
+
+### Markers, providers and isolation
+
+- **`real` selects live-provider and supervisor integration.** `real_claude`
+  and `real_codex` require a signed-in CLI; `claude_bin` and `codex_bin` require
+  the binary. Availability probes run at setup in `tests/conftest.py`, so
+  collection and hermetic checks do not invoke model CLIs.
+- **This installation validates Codex. Claude is unavailable; its live CLI and
+  browser tests are not run and are outside this installation's release gate.**
+  Report that scope explicitly. Hermetic protocol coverage of both backends
+  does not establish a passing two-provider live suite. Preserve supported
+  backends and agent settings; do not probe, install or authenticate Claude.
+- **Persistent state stays in temporary test roots**, including databases,
+  account/Wiki/workspace paths and provider output. Live tests reference the
+  existing selected credentials without copying secrets or changing defaults.
+- **Browser E2E uses separate offline and live buckets.** The package scripts
+  isolate servers; `@llm` selects real-provider cases and the offline bucket
+  excludes them. Run Codex browser checks with one worker. The combined
+  `bun run test:e2e` command needs both providers configured; use this
+  installation's release selection instead.
+- **Default Codex live checks use `low` effort**, enforced for harness runs and
+  one-shots by `tests/conftest.py`; raw CLI calls set it explicitly. Assert
+  protocol events, actual tool data and persisted effects. Do not grade generated
+  Wiki wording or require the model to emit optional reasoning records; replay
+  tests cover acceptance of those records.
+- **`knowledge_eval` is opt-in**, deselected before setup/CLI probes and outside
+  fast checks, full checks and release gates. It requires
+  `--run-knowledge-evals`; `wiki_perf` independently requires `--run-wiki-perf`.
+  Both are excluded from `scripts/check.sh` and the Python pre-commit hook.
+  Setup and evidence rules are in
+  [本机测试](docs/local-wsl.md#本机测试). Assess answers against recorded source
+  versions; execution success alone is not semantic acceptance.
+- **`wiki_perf` is independently opt-in**, including when answer evaluations are
+  enabled. Keep correctness cases at the smallest useful size and reuse setup
+  across read-only variations; mark dedicated scale/cost measurements instead
+  of excluding Wiki behavior tests as a group.
 
 ## Project Structure
 
@@ -276,7 +286,7 @@ agents, which gained `POST /api/agents/{id}/unarchive` for the same section).
 
 ```bash
 # Backend
-.venv/bin/pytest tests/ -v              # run backend tests
+.venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" -v
 .venv/bin/uvicorn server.main:app       # start server (serves web/dist/)
 
 # Frontend

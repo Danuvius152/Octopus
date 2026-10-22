@@ -9,8 +9,7 @@ to surface in the app.)
 
 These probe ACTUAL usability once per session (lru_cache):
   - claude: a tiny real `--print` call must exit 0 (there's no auth.json to stat).
-  - codex:  binary present AND ~/.codex/auth.json exists (a real call is slower;
-            the login file is the same signal codex itself uses).
+  - codex: a tiny real `exec` call must exit 0; a stale auth.json is not enough.
 
 Imported as `from tests.cli_gate import claude_cli_works, codex_cli_works`
 (the repo root is on sys.path during the test run, so `tests` resolves as a
@@ -101,7 +100,8 @@ def codex_cli_works() -> bool:
     return _probe(
         [
             exe, "exec", "--json", "--skip-git-repo-check",
-            "--dangerously-bypass-approvals-and-sandbox", "--", "Reply with OK.",
+            "--dangerously-bypass-approvals-and-sandbox",
+            "-c", 'model_reasoning_effort="low"', "--", "Reply with OK.",
         ],
         timeout=90,
         cwd=tempfile.gettempdir(),
