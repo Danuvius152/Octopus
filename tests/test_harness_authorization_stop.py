@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -155,6 +156,100 @@ async def test_stop_during_spawn_authorization_closes_observer_without_spawning(
             if process.returncode is None:
                 process.kill()
             await process.wait()
+
+
+async def test_spawn_authorization_reads_account_and_credential_as_one_view(accounts, tmp_path, monkeypatch):
+    from server.codex_login import codex_home_for
+    from server.db.transaction import Transaction
+    from server.routers import credentials
+
+    database, owner = accounts["db"], accounts["owner"]["id"]
+    monkeypatch.setattr(credentials, "_db", database)
+    created = await accounts["http"].post("/api/credentials", headers=accounts["owner_headers"], json={
+        "backend": "codex", "label": "Atomic authorization", "secret": "test-only",
+    })
+    assert created.status_code == 201, created.text
+    credential_id = created.json()["id"]
+    home = Path(codex_home_for(credential_id))
+    home.mkdir(parents=True, exist_ok=True)
+    (home / "auth.json").write_text("{}")
+    model = tmp_path / "atomic_authorization_model.py"
+    marker = tmp_path / "authorized-effect"
+    model.write_text(
+        "import sys\nfrom pathlib import Path\nPath(sys.argv[1]).touch()\n"
+        "print('{\"type\":\"turn.completed\",\"usage\":{}}',flush=True)\n"
+    )
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", replace(
+        harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
+        stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
+        build_turn_argv=lambda context: ([sys.executable, "-u", str(model), str(marker)], {"cwd": context.working_dir}),
+    ))
+    auth_task = disable_task = None
+    owner_read, release, write_requested = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    order = []
+    create, fetch, transaction, spawn = harness.create_run, Transaction.fetch_one, database.transaction, asyncio.create_subprocess_exec
+
+    def observe_authorization(config):
+        check = config.authorize_spawn
+
+        async def authorize():
+            nonlocal auth_task
+            auth_task = asyncio.current_task()
+            await check()
+
+        return create(replace(config, authorize_spawn=authorize))
+
+    async def hold_account_read(tx, sql, parameters=()):
+        row = await fetch(tx, sql, parameters)
+        if (asyncio.current_task() is auth_task and "SELECT disabled_at FROM users" in sql
+                and not owner_read.is_set()):
+            owner_read.set()
+            await release.wait()
+        return row
+
+    @asynccontextmanager
+    async def observe_transaction(*, write):
+        if write and asyncio.current_task() is disable_task:
+            write_requested.set()
+        async with transaction(write=write) as tx:
+            yield tx
+
+    async def observe_spawn(*argv, **kwargs):
+        if str(model) in argv:
+            order.append("spawn")
+        return await spawn(*argv, **kwargs)
+
+    async def disable():
+        await database.update_user_field(owner, disabled_at="2026-10-22T00:00:00Z")
+        order.append("disabled")
+
+    monkeypatch.setattr(harness, "create_run", observe_authorization)
+    monkeypatch.setattr(Transaction, "fetch_one", hold_account_read)
+    monkeypatch.setattr(database, "transaction", observe_transaction)
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observe_spawn)
+    agent = await AgentManager(database).create_agent(name="Atomic authorization", user_id=owner,
+                                                      backend="codex", credential_id=credential_id)
+    session = await session_manager.create_session(agent["id"], "Atomic authorization", str(paths_for(owner).workspace))
+    receipt = await session_manager.start_message(session.id, "Observe authorization ordering")
+    try:
+        await asyncio.wait_for(owner_read.wait(), 3)
+        disable_task = asyncio.create_task(disable())
+        await asyncio.wait_for(write_requested.wait(), 3)
+        release.set()
+        await asyncio.wait_for(disable_task, 5)
+        completion = await asyncio.wait_for(receipt.wait(), 5)
+        assert "disabled" in order
+        assert order != ["disabled", "spawn"], "Account revocation committed between authorization reads but spawn was still submitted"
+        if "spawn" in order:
+            assert order == ["spawn", "disabled"]
+            assert marker.exists()
+        else:
+            assert completion.outcome.status == "failed" and not marker.exists()
+    finally:
+        release.set()
+        if disable_task is not None:
+            await asyncio.gather(disable_task, return_exceptions=True)
 
 
 async def test_session_stopped_during_spawn_authorization_can_run_again_without_holding_quota(

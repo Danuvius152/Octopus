@@ -608,30 +608,6 @@ class SessionsMixin(DatabaseBase):
                 )
             return results
 
-    async def clear_credential_from_sessions(self, credential_id: str) -> list[str]:
-        """Unbind a credential from every session that pins it, returning the
-        session ids changed.
-
-        `sessions.credential_id` predates foreign keys on that table (it was
-        added by a plain ALTER), so deleting a credential used to leave live
-        sessions pointing at a row that no longer exists — they'd silently stop
-        using the auth the user intended and couldn't be repointed, because a
-        session's credential was only settable at creation. Clearing it makes
-        them fall back to the agent's credential (or the CLI's own login),
-        which is what the FK on `agents.credential_id` already does for agents.
-        """
-        async with self.transaction(write=True) as tx:
-            cursor = await tx.execute(
-                "SELECT id FROM sessions WHERE credential_id = ?", (credential_id,)
-            )
-            ids = [row[0] for row in await cursor.fetchall()]
-            if ids:
-                await tx.execute(
-                    "UPDATE sessions SET credential_id = NULL WHERE credential_id = ?",
-                    (credential_id,),
-                )
-            return ids
-
     async def load_incomplete_forks(self) -> list[dict[str, Any]]:
         """Fork rows whose §5.1 saga didn't reach 'ready' — startup recovery
         dispatches on `fork_status` (session-rewind.md §5.6.7). The

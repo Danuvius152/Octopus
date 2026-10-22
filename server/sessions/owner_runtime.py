@@ -1090,6 +1090,13 @@ class OwnerRuntime:
     async def _prepare_run(self, configured: Session, prompt: str, copied: list[MessageContent], diagnostic: PreparationDiagnostic) -> _PreparedRun:
         manager = self.owner.manager
         async with manager.configuration_lock:
+            # The Owner's copy carries this request's runtime context. Read
+            # its defaults together with the agent, after pending updates
+            # commit, rather than mixing an earlier session copy with them.
+            defaults = manager.sessions[configured.id]
+            configured = replace(configured, backend=defaults.backend, credential_id=defaults.credential_id,
+                                 model=defaults.model, reasoning_effort=defaults.reasoning_effort,
+                                 service_tier=defaults.service_tier)
             agent = await manager._load_agent(configured)
         harness = get_harness(configured.backend)
         credential = await manager._resolve_credential(configured, agent, harness)

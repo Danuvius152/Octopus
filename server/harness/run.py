@@ -211,7 +211,10 @@ class RunConfig:
     # so an agent that defines some still works on a harness that can't take
     # them (the CLI's built-in sub-agents remain available either way).
     subagents: list[dict[str, Any]] = field(default_factory=list)
+    credential_id: str | None = None
     # Resolved by the request owner, after asynchronous resume/observer work.
+    # Current authority before OS spawn and every input frame, including a
+    # held process's next turn. Captured configuration is not an authorization.
     authorize_spawn: Callable[[], Awaitable[None]] | None = None
 
 
@@ -234,6 +237,7 @@ class HarnessRun:
         self._activity_observer: ActivityObserver | None = None
         self._parser = profile.new_event_parser()
         self._process: asyncio.subprocess.Process | None = None
+        self._spawn_identity: str | None = None
         self._started_at: float | None = None
         self._event_queue: deque[tuple[HarnessEvent, int]] = deque()
         self._event_bytes = 0
@@ -376,6 +380,7 @@ class HarnessRun:
             raise RuntimeError("Delegated work is closed")
 
         ctx = self._make_context(prompt, working_dir, resume_id, credential)
+        spawn_identity = self.spawn_signature(working_dir, credential)
         argv, kwargs = self._profile.build_turn_argv(ctx)
         argv, kwargs = prepare_spawn(argv, kwargs)
         if ctx.resume_id and self._profile.prepare_resume is not None:
@@ -489,6 +494,7 @@ class HarnessRun:
             await asyncio.wait_for(process.wait(), timeout=4.0)
             raise asyncio.CancelledError
         self._process = process
+        self._spawn_identity = spawn_identity
         self._stdout_task = asyncio.create_task(
             self._read_stdout(), name=f"{self._profile.backend}-stdout"
         )
@@ -532,6 +538,10 @@ class HarnessRun:
             raise RuntimeError(
                 f"{self._profile.backend} does not take input on stdin"
             )
+        if self._config.authorize_spawn is not None:
+            await self._config.authorize_spawn()
+        if self._lease_closed:
+            raise RuntimeError("HarnessRun has been retired")
         proc = self._process
         if proc is None or proc.stdin is None or proc.stdin.is_closing():
             raise RuntimeError("CLI stdin is not open")
@@ -551,7 +561,7 @@ class HarnessRun:
     def spawn_signature(
         self, working_dir: str, credential: HarnessCredential | None
     ) -> str:
-        """Identity of the *process* a turn would need.
+        """Actual spawn identity, or the prospective identity before spawn.
 
         Everything a `STREAM_JSON` process bakes in at spawn — system prompt,
         model, tool policy, MCP set, memory dir, credential, working dir —
@@ -562,7 +572,11 @@ class HarnessRun:
 
         `resume_id` is deliberately absent: a live process already holds the
         conversation, and that's what makes reuse worth having.
+        A started process keeps its original hash; a caller's new credential
+        cannot change which configuration that process actually captured.
         """
+        if self._spawn_identity is not None:
+            return self._spawn_identity
         parts = [
             self._profile.backend,
             self.work_id or "",
@@ -572,6 +586,7 @@ class HarnessRun:
             self._config.model or "",
             self._config.reasoning_effort or "",
             self._config.service_tier or "default",
+            self._config.credential_id or "",
             ",".join(sorted(self._config.mcp_servers or [])),
             # WHERE those namespaces are served, and with what credential. Since
             # they moved in-process (polish-2026-09.md §4 B1) each entry's URL
@@ -606,6 +621,7 @@ class HarnessRun:
             ),
             str(Path(working_dir).resolve()),
             (credential.auth_type + ":" + (credential.secret or "")) if credential else "",
+            (credential.home_dir or "") if credential else "",
         ]
         return hashlib.sha256("\x1f".join(parts).encode()).hexdigest()
 

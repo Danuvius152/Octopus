@@ -35,7 +35,6 @@ from ..models import (
     TurnRecovery,
 )
 from ..monitor import Event as _MonEvent
-from ..users import owner_is_available
 from .base import (
     _BACKEND_RETIRE_TIMEOUT,
     _DELTA_FLUSH_SECONDS,
@@ -1311,13 +1310,15 @@ class TurnsMixin(SessionManagerBase):
         knowledge_instructions = render(session._run.knowledge_context, original=False)
 
         database, user_id = self.db, session.user_id
+        credential_id, backend = effective["credential_id"], session.backend
 
         async def authorize_spawn() -> None:
-            if database is not None and not await owner_is_available(database, user_id):
-                raise ValueError("Account is unavailable")
+            if database is not None:
+                await database.require_run_authority(user_id, credential_id, backend)
 
         return RunConfig(
             session_id=session.id,
+            credential_id=credential_id,
             user_id=session.user_id,
             wiki_task_id=session._run.wiki_task_id,
             wiki_mode=session._run.wiki_mode,

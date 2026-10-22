@@ -13,9 +13,22 @@ from typing import Any
 
 from .base import DatabaseBase
 from .transaction import Transaction
+from .users import owner_is_available
 
 
 class CredentialsMixin(DatabaseBase):
+
+    async def require_run_authority(self, user_id: str | None, credential_id: str | None, backend: str) -> None:
+        """Check the account and captured credential in one committed view."""
+        async with self.transaction(write=False) as tx:
+            if not await owner_is_available(tx, user_id):
+                raise ValueError("Account is unavailable")
+            if credential_id:
+                credential = await self._get_credential(tx, credential_id, user_id)
+                if (credential is None or credential.get("user_id") != user_id
+                        or credential["backend"] != backend or credential.get("needs_reconnect")
+                        or credential.get("status") != "active"):
+                    raise ValueError("Credential is unavailable. Reconnect it or choose an active credential before sending new work.")
 
     def _row_to_credential(self, row: sqlite3.Row) -> dict[str, Any]:
         return {
@@ -176,6 +189,10 @@ class CredentialsMixin(DatabaseBase):
 
     async def delete_credential(self, credential_id: str) -> bool:
         async with self.transaction(write=True) as tx:
+            # Session bindings predate the credential FK. Clear them in the
+            # deletion's transaction, so a rejected delete leaves defaults
+            # intact just like the agent FK does.
+            await tx.execute("UPDATE sessions SET credential_id=NULL WHERE credential_id=?", (credential_id,))
             # ON DELETE CASCADE on credential_secrets handles the secret row.
             cursor = await tx.execute(
                 "DELETE FROM backend_credentials WHERE id = ?", (credential_id,)
