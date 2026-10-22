@@ -140,9 +140,14 @@ async def require_retired_writers(manager: SessionManager, session_id: str) -> N
     if manager.db is None:
         return
     for row in await manager.db.uncertain_submission_writers(session_id):
+        if row["execution_generation"] in manager._retired_dispatch_generations:
+            continue
         owner = row["execution_owner"] or row["request_id"]
         if (row["reason_code"] != "steer_delivery_unknown"
                 and await manager.db.get_committed_terminal(session_id, owner) is not None):
             continue
         if not process_group_exited(row["process_group"], row["execution_boot"]):
-            raise ValueError("Previous execution has an unknown result and its process exit is unconfirmed. Review the saved request; new execution is blocked until the old process group exits or the host restarts.")
+            raise ValueError("Previous execution has an unknown result and its process exit is unconfirmed. "
+                             "Hiding its saved input does not retire the writer. Wait for the original execution "
+                             "to stop, or restart through the managed service. Standalone execution requires "
+                             "independent confirmation that the previous writer has exited.")

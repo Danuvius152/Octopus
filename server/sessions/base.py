@@ -651,6 +651,7 @@ class SessionManagerBase:
         self.sessions: dict[str, Session] = {}
         self._session_owners: dict[int, SessionOwner] = {}
         self._dispatch_generation = uuid.uuid4().hex
+        self._retired_dispatch_generations: frozenset[str] = frozenset()
         self._admission_closed = False
         self._legacy_transition = False
         self._owned_tasks: set[asyncio.Task[Any]] = set()
@@ -685,7 +686,7 @@ class SessionManagerBase:
     def set_schedule_runner(self, runner: Any) -> None:
         self._schedule_runner = runner
 
-    async def initialize(self, db: Database) -> None:
+    async def initialize(self, db: Database, *, previous_writers_retired: bool = False) -> None:
         if self._session_owners:
             await self.close_session_owners()
             self._session_owners.clear()
@@ -700,7 +701,14 @@ class SessionManagerBase:
         self._agent_archive_tasks.clear()
         self._admission_closed = False
         self.db = db
-        await db.recover_client_submissions()
+        self._dispatch_generation = uuid.uuid4().hex
+        self._retired_dispatch_generations = frozenset()
+        previous_generations = await db.recover_client_submissions()
+        # Only the verified startup boundary can prove retirement of these
+        # pre-existing generations. Current work always retains its Owner and
+        # exact resources; later unknown inputs cannot inherit this proof.
+        if previous_writers_retired:
+            self._retired_dispatch_generations = previous_generations
         # Turns in flight unwind before this connection does (see
         # `drain_turns`). Registered here rather than in the lifespan so a test
         # that builds its own manager gets it too — which is where the hang it

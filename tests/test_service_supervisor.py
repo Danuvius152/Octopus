@@ -307,6 +307,134 @@ def test_systemd_retires_detached_forked_writers_before_the_next_server(tmp_path
         print(f"Detached forked writers stopped and successor ready in {elapsed:.3f}s")
 
 
+def submit_message(config, session_id, content, client_id):
+    from websockets.sync.client import connect
+
+    with connect(f"ws://127.0.0.1:{config.port}/ws?token={config.auth_token}", open_timeout=3) as connection:
+        connection.send(json.dumps({"type": "send_message", "session_id": session_id,
+                                   "content": content, "client_request_id": client_id}))
+        while True:
+            event = json.loads(connection.recv(timeout=5))
+            if event.get("type") == "submission" and event.get("client_request_id") == client_id:
+                return event
+
+
+def claim_window_program(window):
+    return '''
+import asyncio,json,os,sqlite3,sys
+from dataclasses import replace
+from pathlib import Path
+from server.config import settings
+from server.harness import get_harness
+from server.harness.profile import StdinMode
+from server.main import app
+import uvicorn
+
+root=Path.cwd()
+model=root/'model.py'
+model.write_text("import json,os,sys\\nfrom pathlib import Path\\n"
+                 "Path('spawned').write_text(str(os.getpid()))\\n"
+                 "message=json.loads(sys.stdin.readline())\\n"
+                 "with Path('executed').open('a') as out: out.write(message['message']['content']+'\\\\n')\\n"
+                 "print(json.dumps({'type':'turn.completed','usage':{'input_tokens':1,'output_tokens':1}}),flush=True)\\n"
+                 "sys.stdin.read()\\n")
+harness=get_harness('codex')
+harness.profile=replace(harness.profile,binary=sys.executable,prepare_resume=None,activity_observer=None,
+    stdin_mode=StdinMode.STREAM_JSON,
+    build_turn_argv=lambda context: ([sys.executable,'-u',str(model)],{'cwd':str(root)}))
+spawn=asyncio.create_subprocess_exec
+async def interrupted_spawn(*args,**kwargs):
+    if str(model) not in args or (root/'loss.json').exists():
+        return await spawn(*args,**kwargs)
+    if 'WINDOW' in {'before_registration','late_spawn'}:
+        process=await spawn(*args,**kwargs)
+        async with asyncio.timeout(3):
+            while not (root/'spawned').exists(): await asyncio.sleep(.01)
+    with sqlite3.connect(settings.db_path) as db:
+        row=db.execute("SELECT session_id,request_id,execution_state,process_group,execution_generation "
+                       "FROM client_submissions WHERE client_id='original'").fetchone()
+    assert row is not None and row[2]=='claimed' and row[3] is None, row
+    (root/'loss.json').write_text(json.dumps(row))
+    if 'WINDOW'=='late_spawn':
+        while not (root/'release').exists(): await asyncio.sleep(.01)
+        return process
+    os._exit(73)
+asyncio.create_subprocess_exec=interrupted_spawn
+uvicorn.run(app,host=settings.host,port=settings.port,log_level='info')
+'''.replace("WINDOW", window)
+
+
+@pytest.mark.parametrize("window", ["before_spawn", "before_registration"])
+def test_managed_restart_retires_claim_without_a_recorded_process_group(tmp_path, window):
+    from websockets.exceptions import ConnectionClosed
+
+    with isolated_unit(tmp_path, program=claim_window_program(window)) as (unit, config, project):
+        wait_for(lambda: ready(config))
+        previous = properties(unit)["MainPID"]
+        session = request(config, "/api/sessions", {
+            "name": "Claim before registration", "agent_id": request(config, "/api/agents")[0]["id"],
+            "working_dir": config.default_working_dir, "backend": "codex",
+        })
+        # The transport may lose either the response or just its completion.
+        try:
+            submit_message(config, session["id"], "original effects", "original")
+        except ConnectionClosed:
+            pass
+        loss = project / "loss.json"
+        wait_for(lambda: loss.exists())
+        evidence = json.loads(loss.read_text())
+        assert evidence[0] == session["id"] and evidence[2:4] == ["claimed", None]
+        assert (project / "spawned").exists() is (window == "before_registration")
+        old_pid = int((project / "spawned").read_text()) if window == "before_registration" else None
+        wait_for(lambda: properties(unit)["MainPID"] not in {"0", previous} and ready(config))
+        if old_pid is not None:
+            assert not Path(f"/proc/{old_pid}").exists(), "The old unit's writer survived recovery"
+        status = request(config, f"/api/sessions/{session['id']}/submissions/original")
+        assert status["request_id"] == evidence[1]
+        assert status["execution"]["state"] == "unknown"
+        duplicate = submit_message(config, session["id"], "original effects", "original")
+        assert duplicate["request_id"] == evidence[1] and duplicate["execution"]["state"] == "unknown"
+        successor = submit_message(config, session["id"], "new effects", "successor")
+        assert successor["accepted"] is True, successor
+        wait_for(lambda: request(config, f"/api/sessions/{session['id']}/submissions/successor").get("outcome"))
+        assert (project / "executed").read_text().splitlines() == ["new effects"]
+        assert request(config, f"/api/sessions/{session['id']}/submissions/original")["execution"]["state"] == "unknown"
+
+
+def test_managed_startup_proof_does_not_release_a_current_generations_late_spawn(tmp_path):
+    from websockets.sync.client import connect
+
+    with isolated_unit(tmp_path, program=claim_window_program("late_spawn")) as (unit, config, project):
+        wait_for(lambda: ready(config))
+        previous = properties(unit)["MainPID"]
+        session = request(config, "/api/sessions", {
+            "name": "Current generation retirement", "agent_id": request(config, "/api/agents")[0]["id"],
+            "working_dir": config.default_working_dir, "backend": "codex",
+        })
+        original = submit_message(config, session["id"], "original effects", "original")
+        wait_for(lambda: (project / "loss.json").exists())
+        pid = int((project / "spawned").read_text())
+        with connect(f"ws://127.0.0.1:{config.port}/ws?token={config.auth_token}") as connection:
+            connection.send(json.dumps({"type": "interrupt", "session_id": session["id"]}))
+            while True:
+                event = json.loads(connection.recv(timeout=3))
+                if event.get("type") == "dispatch_state" and event["dispatch_state"]["paused"]:
+                    break
+        successor = submit_message(config, session["id"], "new effects", "successor")
+        assert successor["accepted"] is True
+        snapshot = request(config, f"/api/sessions/{session['id']}")["dispatch_state"]
+        assert snapshot["active_request_id"] == original["request_id"]
+        assert [item["request_id"] for item in snapshot["items"]] == [successor["request_id"]]
+        assert not (project / "executed").exists(), "Successor bypassed the original spawn's retirement"
+        assert Path(f"/proc/{pid}").exists(), "The delayed original spawn was not exercised"
+        (project / "release").touch()
+        wait_for(lambda: request(config, f"/api/sessions/{session['id']}/submissions/successor").get("outcome"))
+        assert not Path(f"/proc/{pid}").exists()
+        assert (project / "executed").read_text().splitlines() == ["new effects"]
+        assert request(config, f"/api/sessions/{session['id']}/submissions/original")["outcome"]["status"] == "interrupted"
+        assert properties(unit)["MainPID"] == previous, "Same-generation retirement required a restart"
+
+
 def test_fatal_restarts_are_bounded_without_entering_ordinary_cleanup(tmp_path):
     program = (
         "import asyncio\nfrom pathlib import Path\n"

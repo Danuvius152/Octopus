@@ -112,7 +112,10 @@ async def lifespan(app: FastAPI):
             from .wiki.app_bridge import _blocked_owners
             _blocked_owners.add(None)
         started.add("sessions")
-        await session_manager.initialize(db)
+        # acquire() verified this installation's exclusive managed cgroup.
+        # Its prior writers are gone; recovery still preserves their unknown
+        # outcomes. Standalone startup has no corresponding retirement proof.
+        await session_manager.initialize(db, previous_writers_retired=installation.profile is not None)
         # Restore round receipts before any background producer can start work.
         started.add("delegations")
         delegation_manager.bind(session_mgr=session_manager, db=db)

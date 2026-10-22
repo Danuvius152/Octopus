@@ -151,8 +151,17 @@ class ClientSubmissionsMixin(DatabaseBase):
                 (state, owner, reason, datetime.now(UTC).isoformat(), session_id, request_id),
             )
 
-    async def recover_client_submissions(self) -> None:
+    async def recover_client_submissions(self) -> frozenset[str]:
+        """Classify inputs and return the pre-existing uncertain generations.
+
+        This snapshot is not retirement evidence. The startup caller needs
+        verified installation ownership before treating its writers as gone.
+        """
         async with self.transaction(write=True) as tx:
+            generations = await tx.fetch_all(
+                "SELECT DISTINCT execution_generation FROM client_submissions WHERE payload IS NOT NULL "
+                "AND execution_state IN ('claimed','unknown') AND execution_generation IS NOT NULL",
+            )
             await tx.execute(
                 "UPDATE client_submissions SET reason_code=CASE WHEN reason_code='steer_delivery_unknown' THEN reason_code "
                 "WHEN execution_state IN ('reserved','queued') "
@@ -161,6 +170,7 @@ class ClientSubmissionsMixin(DatabaseBase):
                 "state_version=state_version+1,updated_at=? WHERE execution_state IN ('reserved','queued','claimed')",
                 (datetime.now(UTC).isoformat(),),
             )
+            return frozenset(row[0] for row in generations)
 
     async def list_recoverable_submissions(self, session_id: str, *, before: int | None = None,
                                             limit: int = 20) -> tuple[list[dict[str, Any]], int | None]:

@@ -147,6 +147,43 @@ async def test_claimed_input_is_unknown_and_never_replayed_after_restart(tmp_pat
         await reopened.close()
 
 
+async def test_startup_retirement_does_not_cover_later_unknown_inputs_even_after_dismissal(tmp_path):
+    """Exercise the recovery handoff; real supervisor proof lives in its suite."""
+    evidence = _lose_submission_process(tmp_path, "claimed")
+    db = Database(evidence["database"])
+    await db.initialize()
+    manager = SessionManager()
+    await manager.initialize(db, previous_writers_retired=True)
+    session_id = evidence["session_id"]
+    try:
+        await manager.interrupt(session_id)
+        assert manager.dispatch_snapshot(session_id)["paused"]
+        created, current = await db.reserve_client_submission(
+            session_id, "current", "current-digest", "current-request",
+            payload={"content": "Current generation input", "attachment_ids": [], "attachments": [], "wiki_mode": None},
+        )
+        assert created
+        snapshot = manager.dispatch_snapshot(session_id)
+        assert await db.claim_client_submission(session_id, current["request_id"], current["request_id"], snapshot["generation"])
+        queued = await manager.start_message(session_id, "Already accepted independent return", source="bg")
+        assert queued.accepted
+        await db.complete_client_submission(session_id, current["request_id"], owner=current["request_id"], state="unknown")
+        assert await manager.dismiss_recoverable_input(session_id, "current")
+        assert (await submission_status(manager, session_id, "current"))["execution"]["state"] == "unknown"
+        with pytest.raises(ValueError, match="process exit is unconfirmed"):
+            await manager.start_message(session_id, "New work after hiding the input")
+        # An input accepted before uncertainty appeared must obey the same
+        # retirement evidence when it eventually reaches actual dispatch.
+        assert await manager.resume_dispatch(session_id)
+        completion = await asyncio.wait_for(queued.wait(), 5)
+        assert completion.outcome.status == "failed"
+        assert "process exit is unconfirmed" in completion.outcome.message
+        assert not [row for row in await db.load_messages(session_id) if row["role"] == "user"]
+        assert (await submission_status(manager, session_id, "claimed"))["execution"]["state"] == "unknown"
+    finally:
+        await db.close()
+
+
 async def test_manual_resubmission_has_new_identity_and_one_recovery_owner(tmp_path, monkeypatch):
     db = Database(":memory:")
     await db.initialize()

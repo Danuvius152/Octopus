@@ -255,8 +255,11 @@ execution. On restart, unclaimed browser inputs become withdrawn and can be
 restored to the composer; claimed inputs without a provable terminal remain
 unknown. Recovery never sends automatically. A manual resubmission has a new
 identity linked to the withdrawn input, with current authorization and files
-checked again. Unknown writers block a successor until their process group is
-confirmed gone or a changed host boot identity proves retirement.
+checked again. Verified managed startup retires only the generations captured
+by input recovery, without changing their unknown outcomes or replaying them.
+Admission and dispatch share that frozen retirement evidence. Current writers
+remain with their original SessionOwner until the captured resources retire;
+standalone startup retains conservative process-group/host-boot checks.
 
 ### `/showme` — the in-app file viewer (browser only)
 
