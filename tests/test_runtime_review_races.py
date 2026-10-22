@@ -1074,7 +1074,7 @@ async def completed_delegation(runtime):
     async with asyncio.timeout(5):
         while original.state == "running":
             await asyncio.sleep(0.01)
-    # The committed outcome precedes the original relay and archive command.
+    # Wait for the original relay before explicitly archiving the retained child.
     await asyncio.wait_for(delegations.confirm_recording(), 5)
     if manager.get_session(original.delegation_id) is not None:
         await wait_dispatch_idle(manager, original.delegation_id)
@@ -1116,7 +1116,7 @@ async def test_cancelled_follow_up_waiter_keeps_the_owned_round_and_its_reply(ru
         assert not manager.has_pending_or_active_work(accepted.delegation_id, accepted.work_id)
         saved = next(row for row in await manager.db.load_sessions(include_archived=True)
                      if row["id"] == accepted.delegation_id)
-        assert saved["archived"]
+        assert not saved["archived"]
         assert not delegations.has_active_delegation_for_parent(parent.id)
         assert starts.qsize() == 1, "exactly one child round survives the cancelled waiter"
     finally:

@@ -4,6 +4,7 @@ import json
 from pathlib import PurePosixPath
 
 from . import catalog, maintenance_inputs
+from .index_state import maintenance_blockers
 from .links import note_name
 from .maintenance_contract import PURPOSE, digest
 from .maintenance_projection import Batch, bounds, dirty_ids, readiness
@@ -18,7 +19,7 @@ class MaintenanceSnapshot:
         self.store, self.registration, self.user_id, self.db = store, registration, user_id, db
         self.actor = actor
         self.index = readiness(db, store)
-        self.ready = self.index["index_status"] == "ready"
+        self.ready = self.index["index_status"] in {"ready", "partial"}
         state = maintenance_inputs.state(db)
         self.generation = digest([user_id, registration, actor, PURPOSE, state, self.index])
         self.documents, self.paths = {}, {}
@@ -71,7 +72,8 @@ class MaintenanceSnapshot:
                 stored = self.load_page([row])[0]
         self.documents[identifier] = stored["current"]
         return {key: value for key, value in stored.items() if key != "dependency_generation"} | {
-            "actionable": self.ready and stored["actionable"], "historical_path_links": len(self.impact(identifier)),
+            "actionable": self.ready and stored["actionable"] and not maintenance_blockers(self.db, [identifier]),
+            "historical_path_links": len(self.impact(identifier)),
             "review": self.review(stored)}
 
     def review(self, stored):

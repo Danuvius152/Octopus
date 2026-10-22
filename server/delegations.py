@@ -598,6 +598,7 @@ class DelegationManager:
                 rec, state="failed", error=f"failed to start child session: {exc}",
                 finished_at=datetime.now(UTC).isoformat(),
             )
+            await self.session_mgr.auto_archive_scheduled_session(child.id)
             await self._inject_terminal(rec)
             raise DelegationError(
                 f"failed to start delegation: {exc}", status_code=500
@@ -607,6 +608,7 @@ class DelegationManager:
                 rec, state="cancelled", error="Child request suppressed: admission is closed",
                 finished_at=datetime.now(UTC).isoformat(),
             )
+            await self.session_mgr.auto_archive_scheduled_session(child.id)
             await self._inject_terminal(rec)
         else:
             self._watch_completion(child.id, rec.work_id, receipt)
@@ -890,9 +892,7 @@ class DelegationManager:
         returns None for a non-null ancestor id, we fall back to the
         DB (``include_archived=True``) so that a legitimately archived
         delegation parent still contributes its agent_id / origin to
-        the walk. This matters after the round-2 fix that archives
-        delegation children once their terminal turn is delivered:
-        without the DB fallback, an unarchived child whose parent
+        the walk. Without the DB fallback, an unarchived child whose parent
         remains archived would over-reject every subsequent
         ``ask_agent``.
         """
@@ -1000,14 +1000,9 @@ class DelegationManager:
         We do NOT include any of the parent's transcript — that's a
         deliberate scope/privacy boundary (plan §2).
 
-        IMPORTANT — single-turn delivery contract: the child's entire
-        response (all assistant_text blocks) is concatenated and injected
-        into the parent's session as ONE turn when this turn ends.  There
-        is no mechanism for subsequent turns on the child session to reach
-        the parent.  The delegation protocol note below tells the child
-        agent about this so it completes all work in this turn rather than
-        sending a preliminary "I'll start" reply and deferring to a second
-        turn that will never be delivered."""
+        The original request's completion supplies one reply for this round.
+        The conversation stays open, but human follow-ups do not resend that
+        reply. An explicit parent follow-up creates a new round."""
         from pathlib import Path
 
         lines = [
@@ -1017,7 +1012,9 @@ class DelegationManager:
             "**Delegation protocol — read before responding:**",
             "- This is a **single-turn delegation**. When your turn ends, "
             "everything you have written is delivered to the caller as one "
-            "reply. There is no follow-up turn.",
+            "reply for this round. Your conversation remains open; human "
+            "follow-ups do not send another reply to the caller. The caller "
+            "can explicitly start a new delegation round in this conversation.",
             "- **Do the work now, in this turn.** Do not send a preliminary "
             '"I\'ll start reviewing…" message and stop — that preamble would '
             "become the entire reply the caller receives.",
@@ -1285,7 +1282,6 @@ class DelegationManager:
                     f"Delegation {rec.delegation_id}: the result is retained in the child conversation. "
                     "The original request is unavailable, so no automatic reply was started.",
                 )
-                await self._archive_terminal(rec)
                 return
             delivery_failure: tuple[str, str] | None = None
             if rec.state == "completed":
@@ -1337,7 +1333,6 @@ class DelegationManager:
                 logger.exception("Failed to inject delegation %s terminal into parent %s", rec.delegation_id, rec.parent_session_id)
                 disposition = "rejected"
             await self._save_round(rec, _terminal_disposition=disposition)
-            await self._archive_terminal(rec)
         finally:
             rec._terminal_injecting = False
 
@@ -1349,32 +1344,6 @@ class DelegationManager:
             return None
         return receive_return(rec.owned_context, session_id=parent.id,
                               user_id=parent.user_id, work_id=rec.parent_work_id)
-
-    async def _archive_terminal(self, rec: DelegationRunState) -> None:
-        assert self.session_mgr is not None
-        # Regardless of whether the parent notification above
-        # succeeded (it may not, if the parent itself was deleted
-        # while the child was running — in which case we already
-        # logged), the delegation child is now done with the chain
-        # and can be archived (plan §5.2). We deliberately archive
-        # HERE, not from session_manager's idle hook, because an
-        # intermediate delegation parent (Vera in Octo→Vera→Pete) is
-        # "idle" while waiting for its own child's reply — archiving
-        # on idle would break the nested chain (Vera would vanish
-        # before Pete's reply could reach her).
-        try:
-            if self._records.get(rec.delegation_id) is not rec:
-                return
-            await self.session_mgr.auto_archive_scheduled_session(
-                rec.delegation_id
-            )
-        except Exception:
-            logger.exception(
-                "Failed to auto-archive delegation child %s after "
-                "terminal injection",
-                rec.delegation_id,
-            )
-
 
 # Module-level singleton (mirrors the session_manager / bg_tasks
 # pattern). Wired in main.py's lifespan with .bind(...).

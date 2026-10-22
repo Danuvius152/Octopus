@@ -285,13 +285,14 @@ class WikiStore:
         with self.operation():
             return self._index_state()
 
-    def _index_state(self) -> dict[str, Any]:
+    def _index_state(self, db: sqlite3.Connection | None = None) -> dict[str, Any]:
         from .index_state import DOCUMENT_ERROR, summary
 
-        with self.connect() as db:
-            db.execute("BEGIN")
-            state = summary(db, self.events.needs_reconciliation)
-            errors = [{"path": row["path"], "error": json.loads(row["metadata"]).get("frontmatter_error") or json.loads(row["metadata"]).get("error", "Extraction failed")} for row in db.execute(f"SELECT path,metadata FROM documents WHERE {DOCUMENT_ERROR}")]
+        with self.connect() if db is None else contextlib.nullcontext(db) as connection:
+            if db is None:
+                connection.execute("BEGIN")
+            state = summary(connection, self.events.needs_reconciliation)
+            errors = [{"path": row["path"], "error": json.loads(row["metadata"]).get("frontmatter_error") or json.loads(row["metadata"]).get("error", "Extraction failed")} for row in connection.execute(f"SELECT path,metadata FROM documents WHERE {DOCUMENT_ERROR}")]
         errors.extend({"path": "", "error": error} for error in state.pop("index_diagnostics"))
         state.pop("index_error_count")
         return {**state, "index_errors": errors, "observer_mode": self.events.mode}
@@ -798,19 +799,19 @@ class WikiStore:
                 merged[field] = list(dict.fromkeys([*native.get(field, []), *supplied.get(field, [])]))
         return merged
 
-    def public(self, row: sqlite3.Row, *, raw: bytes | None = None) -> dict[str, Any]:
+    def public(self, row: sqlite3.Row, *, raw: bytes | None = None, db: sqlite3.Connection | None = None) -> dict[str, Any]:
         metadata = json.loads(row["metadata"])
         from .sections import managed_metadata
 
         if raw is None:
             raw = b"" if Path(row["path"]).suffix.lower() == ".pdf" else self.path(row["path"]).read_bytes()
-        managed, stale = managed_metadata(self, row["path"], raw)
+        managed, stale = managed_metadata(self, row["path"], raw, db=db)
         native_fields = {field: metadata.get(field, []) for field in ("tags", "aliases")}
         metadata |= managed
         for field, original in native_fields.items():
             if original or field in managed:
                 metadata[field] = list(dict.fromkeys([*original, *managed.get(field, [])]))
-        with self.connect() as db:
+        with self.connect() if db is None else contextlib.nullcontext(db) as db:
             refs = catalog.dependencies(db, row["id"])
             metadata["source_refs"] = refs
             for ref in refs:
@@ -1020,7 +1021,7 @@ class WikiStore:
                 page_end = selected["end"]
             start = min(start, page_end)
             end = min(page_end, start + length)
-            return self.public(row, raw=raw) | {
+            return self.public(row, raw=raw, db=db) | {
                 "content": text[start:end],
                 "page": page,
                 "start": start - page_offset,
@@ -1028,7 +1029,7 @@ class WikiStore:
                 "next_start": end - page_offset if end < page_end else None,
                 "line_start": text[:start].count("\n") + 1,
                 "line_end": text[:end].count("\n") + 1,
-                "freshness": "live", **self.index_state(),
+                "freshness": "live", **self._index_state(db=db),
             }, raw
 
     def resolve_identity(self, doc):

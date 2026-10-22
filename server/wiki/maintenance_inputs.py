@@ -9,7 +9,7 @@ import uuid
 
 from . import protocols
 
-VERSION = "maintenance-inputs-v5"
+VERSION = "maintenance-inputs-v6"
 PREFIX = "maintenance_input_"
 TABLES = {
     "maintenance_input_state": """CREATE TABLE maintenance_input_state(
@@ -193,12 +193,13 @@ def triggers(with_jobs):
     writer_check = """SELECT CASE WHEN (SELECT recursive_triggers FROM pragma_recursive_triggers)=0
         THEN RAISE(ABORT,'maintenance inputs require recursive triggers') END;"""
 
-    def add(table, action, body, *, before=False):
+    def add(table, action, body, *, before=False, columns=()):
         name = PREFIX + table + "_" + action.lower() + ("_check" if before else "")
         # REPLACE deletes conflicting rows before the final INSERT/UPDATE.
         # With recursive triggers disabled, those implicit deletes are invisible.
         # ABORT also rolls them back when a direct writer violates this protocol.
-        result[name] = f"CREATE TRIGGER {name} {'BEFORE' if before else 'AFTER'} {action} ON {table} BEGIN {writer_check}{body} END"
+        changed = " WHEN " + " OR ".join(f"old.{column} IS NOT new.{column}" for column in columns) if action == "UPDATE" and columns else ""
+        result[name] = f"CREATE TRIGGER {name} {'BEFORE' if before else 'AFTER'} {action} ON {table}{changed} BEGIN {writer_check}{body} END"
 
     for action in ("INSERT", "UPDATE", "DELETE"):
         sides = ("old", "new") if action == "UPDATE" else ("old",) if action == "DELETE" else ("new",)
@@ -213,11 +214,14 @@ def triggers(with_jobs):
         ids = " UNION ".join(f"SELECT {side}.id AS doc_id" for side in sides)
         incoming = (f"{ids} UNION SELECT source_doc FROM wiki_edges WHERE target_doc IN ({ids})"
                     f" UNION SELECT source_doc FROM source_bindings WHERE target_doc IN ({ids})")
-        add("documents", action, bump + _mark_docs(incoming))
+        add("documents", action, bump + _mark_docs(incoming),
+            columns=("id", "path", "revision", "title", "kind", "text", "pages", "quality", "metadata"))
         for table in ("wiki_edges", "source_bindings", "source_binding_head", "source_binding_observations"):
             add(table, action, bump + _mark_docs(" UNION ".join(f"SELECT {side}.source_doc AS doc_id" for side in sides)))
-        for table in ("wiki_lookup_names", "index_state", "filesystem_state"):
-            add(table, action, bump)
+        # Inbox receipt/application watermarks affect live readiness, not the
+        # semantic generation. Applying real changes invalidates their facts.
+        for table in ("wiki_lookup_names", "index_state"):
+            add(table, action, bump, columns=("epoch", "error") if table == "index_state" else ())
 
         receipt_docs = " UNION ".join(f"SELECT {side}.{column} AS doc_id" for side in sides for column in ("doc_id", "item_doc"))
         receipt_jobs = " UNION ".join(f"SELECT {side}.job_id" for side in sides)

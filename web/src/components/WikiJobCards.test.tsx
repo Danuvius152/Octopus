@@ -1,11 +1,11 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { WikiJobCards } from "./WikiJobCards";
 import { useSessionStore } from "../stores/sessionStore";
 import { wikiJob } from "../lib/wikiJobs.fixture";
 
 beforeEach(() => {
-  useSessionStore.setState({ token: "token-a", wikiJobs: {}, dispatchGeneration: "service-a", connected: true });
+  useSessionStore.setState({ token: "token-a", wikiJobs: {}, wikiJobDirty: {}, dispatchGeneration: "service-a", connected: true });
   vi.stubGlobal("fetch", vi.fn(async () => new Response("[]")));
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
@@ -51,4 +51,20 @@ it("cancels the displayed task and refreshes its persistent result without a mes
   expect(post).toHaveLength(1);
   expect(post[0][0]).toContain("/api/wiki/jobs/job-1/cancel");
   expect(JSON.parse(post[0][1]!.body as string)).toEqual({ expected_attempt: 1, expected_vault_id: "vault-1" });
+});
+
+it("reconciles a retained task missed while disconnected even after it leaves the first page", async () => {
+  useSessionStore.setState({ connected: false });
+  const old = wikiJob({ vault_id: "historical-vault", job_id: "old-job" });
+  useSessionStore.getState().mergeWikiJobs("original", [old]);
+  const firstPage = Array.from({ length: 30 }, (_, index) => wikiJob({ job_id: `newer-${index}`, status: "completed" }));
+  const fetcher = vi.fn().mockResolvedValueOnce(new Response("offline", { status: 503 }))
+    .mockImplementation(async (url: string) => Response.json(String(url).includes("job_id=old-job")
+      && String(url).includes("vault_id=historical-vault") ? [{ ...old, status: "completed", state_version: 3 }] : firstPage));
+  vi.stubGlobal("fetch", fetcher);
+  const { container } = render(<WikiJobCards sessionId="original" />);
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("503"));
+  await act(async () => useSessionStore.setState({ connected: true }));
+  await waitFor(() => expect(container.querySelector('[data-wiki-job="old-job"]')).toHaveAttribute("data-status", "completed"));
+  expect(fetcher.mock.calls.every(([, init]) => !(init as RequestInit | undefined)?.method || (init as RequestInit).method === "GET")).toBe(true);
 });

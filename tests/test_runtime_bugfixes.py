@@ -197,6 +197,10 @@ async def test_live_registration_change_settles_old_worker_and_allows_retry(jobs
             config[binding] = "new-application-binding"
         registry.configure(None, Path(config["root"]), config["curator_agent_id"], config["app_id"])
         current = WikiJobs(None)
+        # Registration retires the old observer. Finish the existing background
+        # reconciliation before expecting a new maintenance execution to run.
+        await registry.reconcile()
+        assert current.store.index_state()["index_status"] == "ready"
         with pytest.raises(WikiError, match="retired"):
             jobs.get(job["id"])
         # The old process cannot inherit publication authority even when only

@@ -536,19 +536,14 @@ class LifecycleMixin(SessionManagerBase):
         return new
 
     async def auto_archive_scheduled_session(self, session_id: str) -> bool:
-        """Hide a finished transient session (schedule or delegation
-        child) once it goes idle. agent-refactor.md §5.6 + agent-
-        collaboration.md §5.2.
+        """Apply the schedule or abandoned-delegation-setup archive policy.
 
         Unlike `archive_session`, no replacement thread is created — the
-        next fire (schedule) or delegation request materializes its own
-        fresh session under the agent. No-op if the session is gone,
+        next fire or fresh delegation creates its own session. Delegation
+        setup cleanup calls this only before admission; completing an admitted
+        round never requests archival. No-op if the session is gone,
         not auto-archivable by origin, or still running. Returns True
         if it archived.
-
-        The function name is kept (rather than renamed) because it's
-        referenced from main.py / scheduler.py; the behaviour
-        generalises while the call sites stay stable.
         """
         session = self.sessions.get(session_id)
         if (

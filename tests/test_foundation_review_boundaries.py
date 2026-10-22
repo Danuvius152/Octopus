@@ -142,11 +142,14 @@ async def test_frontmatter_diagnostic_is_shared_by_reads_and_checked_maintenance
         assert all(response.json()["index_status"] == "partial" for response in (bad, good_read, found, info))
         assert found.json()["items"] and good_read.json()["content"].startswith("# Healthy")
         observed_bad = await state(client, "Library/bad.md", headers=headers)
-        assert observed_bad["index_status"] == "partial" and observed_bad["ready"] is False
-        assert observed_bad["items"] == []
-        refused = await client.post("/api/wiki/maintain", headers=headers, json=submission(good))
-        assert refused.status_code == 503, refused.text
+        assert observed_bad["index_status"] == "partial" and observed_bad["ready"] is True
+        assert len(observed_bad["items"]) == 1 and not observed_bad["items"][0]["actionable"]
+        refused = await client.post("/api/wiki/maintain", headers=headers, json=submission(observed_bad["items"][0]))
+        assert refused.status_code == 409, refused.text
         assert jobs.list()["items"] == []
+        accepted = await client.post("/api/wiki/maintain", headers=headers, json=submission(good))
+        assert accepted.status_code == 200, accepted.text
+        assert len(jobs.list()["items"]) == 1
         assert (vault / "Library/bad.md").read_text() == malformed
         (vault / "Library/bad.md").write_text("---\ntitle: Repaired\n---\n# Repaired\n")
         assert (await current_read(client, "Library/bad.md")).json()["index_status"] == "ready"

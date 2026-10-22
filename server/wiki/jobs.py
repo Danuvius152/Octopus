@@ -1072,6 +1072,17 @@ class WikiJobs:
             item.pop("index_recovery", None)
             return True
 
+    def require_maintenance_health(self, identifier):
+        from .index_state import maintenance_blockers
+        from .maintenance_projection import readiness
+
+        with self.store.connect() as db:
+            db.execute("BEGIN")
+            if readiness(db, self.store)["index_status"] not in {"ready", "partial"}:
+                raise WikiError("Current index must settle before worker admission", 503)
+            if maintenance_blockers(db, [identifier]):
+                raise WikiError("The target or its current source chain needs repair before maintenance", 409)
+
     def reread(self, job_id, item, error, *, retryable=True):
         if item.get("recording_failure"):
             item.update(status="attention", error="Execution result recording remains unconfirmed; verify the original request without regenerating content")
@@ -1395,6 +1406,7 @@ class WikiWorker:
                     require_markdown_maintenance(item["path"])
                     doc = await _io(jobs.store.read, item["doc"], length=1)
                     require_markdown_maintenance(doc["path"])
+                    await _io(jobs.require_maintenance_health, doc["id"])
                 except WikiError as exc:
                     item.update(status="attention", error=str(exc))
                     continue

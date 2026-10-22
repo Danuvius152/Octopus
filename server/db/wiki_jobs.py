@@ -67,19 +67,25 @@ class WikiJobsMixin(DatabaseBase):
 
     async def wiki_job_cards(
         self, session_id: str, user_id: str | None, *, offset: int = 0, limit: int = 30,
+        job_id: str | None = None, vault_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """Select the newest committed version, including for archived chats."""
         async with self.transaction(write=False) as tx:
             if offset < 0 or not 1 <= limit <= 100:
                 raise ValueError("Invalid Wiki card pagination")
+            if (job_id is None) != (vault_id is None):
+                raise ValueError("Supply both Wiki job and vault identities")
+            selected = " AND n.vault_id=? AND n.job_id=?" if job_id is not None else ""
+            identity = (vault_id, job_id) if job_id is not None else ()
             cursor = await tx.execute(
                 "SELECT vault_id,subscriber_id,request_id,body,received_at FROM ("
                 "SELECT n.*,row_number() OVER (PARTITION BY vault_id,job_id "
                 "ORDER BY state_version DESC,event_id) AS position "
                 "FROM wiki_job_notifications n JOIN sessions s ON s.id=n.target AND s.user_id IS n.user_id "
                 "WHERE n.user_id IS ? AND n.target=? AND n.kind IN ('chat','schedule') AND n.outcome='delivered'"
+                + selected +
                 ") WHERE position=1 ORDER BY received_at DESC LIMIT ? OFFSET ?",
-                (user_id, session_id, limit, offset),
+                (user_id, session_id, *identity, limit, offset),
             )
             return [JobCard(**json.loads(row[3]), vault_id=row[0], subscriber_id=row[1],
                             origin_request_id=row[2], received_at=row[4]).model_dump() for row in await cursor.fetchall()]

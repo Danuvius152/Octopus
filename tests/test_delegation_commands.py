@@ -190,7 +190,7 @@ async def test_delegation_answers_oldest_pending_form_after_an_earlier_form_was_
 async def test_followup_rolls_back_confirmed_round_when_real_session_refuses_archived_target(runtime, monkeypatch):
     boot, starts = runtime
     current, original = await completed_before_restart(boot, starts)
-    await current.manager.unarchive_session(original.delegation_id)
+    assert current.manager.get_session(original.delegation_id) is not None
     confirmed = current.delegations.get_delegation(original.delegation_id)
     previous = confirmed.to_public_dict()
     snapshot = await current.database.load_delegation_state(

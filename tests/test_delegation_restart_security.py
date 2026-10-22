@@ -159,7 +159,7 @@ async def test_legacy_child_without_round_receipt_is_not_guessed_on_restart(runt
 async def test_deleted_restored_child_is_reported_as_gone_without_starting_a_round(runtime):
     boot, starts = runtime
     current, original = await completed_before_restart(boot, starts)
-    await current.manager.unarchive_session(original.delegation_id)
+    assert current.manager.get_session(original.delegation_id) is not None
     assert await current.manager.delete_session(original.delegation_id)
     with pytest.raises(DelegationError) as rejected:
         await current.delegations.follow_up_delegation(
@@ -190,12 +190,15 @@ async def test_confirmed_failed_or_cancelled_round_survives_restart_and_accepts_
         )
         assert cancelled is original
     await wait_finished(first_boot.manager, original)
+    await first_boot.delegations.confirm_recording()
     assert original.state == terminal
+    assert first_boot.manager.get_session(original.delegation_id) is not None
     confirmed = original.to_public_dict()
     assert confirmed["recording_state"] == "committed"
     assert confirmed["finished_at"] and confirmed["error"]
     await first_boot.close()
     current = await boot()
+    assert current.manager.get_session(original.delegation_id) is not None
     recovered = current.delegations.get_delegation(original.delegation_id)
     assert recovered is not None
     assert recovered.to_public_dict() == confirmed

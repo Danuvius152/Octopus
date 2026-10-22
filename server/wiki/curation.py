@@ -269,13 +269,11 @@ class WikiCuration:
             offset = top_offset(base)
             trace.edit([(rendered_base.index(part["raw"]), rendered_base.index(part["raw"]) + len(part["raw"]), "") for part in previous])
             additions = []
-            # Omitted fields retain only our trusted saved metadata. Retained
+            # Omitted sources retain the saved or native evidence. Retained
             # citations keep their recorded identity/version, even when stale;
             # validating them as new citations would silently refresh evidence.
-            inherited_sources = sources is None and "sources" in owned_metadata
-            if inherited_sources:
-                retained = owned_metadata["sources"]
-                refs = retained + [ref for ref in refs if not any(previous_ref["doc"] == ref["doc"] for previous_ref in retained)]
+            if sources is None:
+                refs = owned_metadata.get("sources", source["metadata"].get("sources", []))
             provenance = {
                 "sources": refs + linked,
                 "source_revision": source["revision"],
@@ -361,8 +359,8 @@ class WikiCuration:
                 "original_revision": revision(base.encode()),
                 "organized_from_revision": source["revision"],
             }
-            if sources is not None or inherited_sources or refs or linked:
-                metadata["sources"] = [ref for ref in refs + linked if ref["path"] != path]
+            if sources is not None or "sources" in owned_metadata or linked:
+                metadata["sources"] = [ref for ref in refs + linked if ref.get("path") != path]
             self.validate_links(path, text, candidate=text, managed_metadata=metadata)
             management = {
                 "path": path,

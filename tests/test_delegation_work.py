@@ -125,7 +125,8 @@ async def test_cancel_queued_round_preserves_independent_human_request(work_runt
     await starts.get()
     await wait_state(delegations, first.delegation_id, "completed")
     await asyncio.wait_for(delegations.confirm_recording(), 5)
-    child = manager.get_session(first.delegation_id) or await manager.unarchive_session(first.delegation_id)
+    child = manager.get_session(first.delegation_id)
+    assert child is not None
     await manager.await_session_execution(child.id, timeout=5)
     human = await manager.start_message(child.id, "held independent human")
     assert human.accepted
@@ -523,6 +524,8 @@ async def test_archived_completed_round_still_owns_background_process(work_runti
     await wait_state(delegations, rec.delegation_id, "completed")
     await asyncio.wait_for(delegations.confirm_recording(), 5)
     await manager.await_session_execution(rec.delegation_id, timeout=5)
+    assert manager.get_session(rec.delegation_id) is not None
+    await manager.archive_session(rec.delegation_id, replace=False)
     assert manager.get_session(rec.delegation_id) is None
     stored = next(row for row in await manager.db.load_sessions(include_archived=True)
                   if row["id"] == rec.delegation_id)

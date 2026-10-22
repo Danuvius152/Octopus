@@ -5,7 +5,9 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi.dependencies.utils import request_params_to_args
 from fastapi.responses import JSONResponse, Response
+from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
 from ..auth import verify_token
@@ -103,88 +105,22 @@ async def app_wiki(request: Request, app_id: str, operation: str):
     function, schema = handler
     kwargs = {"request": request, "user_id": user_id, "_": "app"}
     try:
+        route = next(route for route in router.routes if isinstance(route, APIRoute) and route.endpoint is function)
+        query, errors = request_params_to_args(route.dependant.query_params, request.query_params)
+        if errors:
+            raise WikiError(f"Invalid knowledge request: {errors}", 422)
+        kwargs |= query
+        if operation.startswith("jobs/"):
+            kwargs["job_id"] = operation.split("/")[1]
+        elif operation.startswith("maintenance-selections/"):
+            kwargs["selection_id"] = operation.split("/")[1]
         if operation == "revise":
             from pydantic import TypeAdapter
 
             kwargs["body"] = TypeAdapter(Revision).validate_python(await request.json())
         elif schema:
             payload = await request.json() if await request.body() else {}
-            kwargs["body"] = schema.model_validate(payload)
-        elif operation == "search":
-            kwargs |= {
-                "query": request.query_params["query"],
-                "limit": int(request.query_params.get("limit", 12)),
-                "offset": int(request.query_params.get("offset", 0)),
-                "kind": request.query_params.get("kind"),
-                "directory": request.query_params.get("directory"),
-                "intent": request.query_params.get("intent"),
-                "view": request.query_params.get("view", "full"),
-                "cursor": request.query_params.get("cursor"),
-                "include_assets": request.query_params.get(
-                    "include_assets", "false"
-                ).lower()
-                == "true",
-            }
-        elif operation == "read":
-            kwargs |= {
-                "doc": request.query_params["doc"],
-                "start": int(request.query_params.get("start", 0)),
-                "length": int(request.query_params.get("length", 16000)),
-                "expected_revision": request.query_params.get("expected_revision"),
-                "view": request.query_params.get("view", "full"),
-                "page": int(request.query_params["page"])
-                if "page" in request.query_params
-                else None,
-            }
-        elif operation == "blocks":
-            kwargs["doc"] = request.query_params["doc"]
-            kwargs |= {"view": request.query_params.get("view", "full"), "ids": request.query_params.getlist("ids") or None, "expected_revision": request.query_params.get("expected_revision"), "budget_chars": int(request.query_params["budget_chars"]) if "budget_chars" in request.query_params else None, "offset": int(request.query_params.get("offset", 0)), "limit": int(request.query_params["limit"]) if "limit" in request.query_params else None}
-            kwargs["start"] = int(request.query_params["start"]) if "start" in request.query_params else None
-        elif operation == "image":
-            kwargs["path"] = request.query_params["path"]
-        elif operation == "history":
-            kwargs |= {
-                "path": request.query_params["path"],
-                "offset": int(request.query_params.get("offset", 0)),
-                "limit": int(request.query_params.get("limit", 50)),
-            }
-        elif operation == "jobs":
-            kwargs |= {
-                "offset": int(request.query_params.get("offset", 0)),
-                "limit": int(request.query_params.get("limit", 30)),
-                "view": request.query_params.get("view", "full"),
-                "idempotency_key": request.query_params.get("idempotency_key"),
-            }
-        elif operation == "documents":
-            kwargs |= {
-                "kind": request.query_params.get("kind"),
-                "quality": request.query_params.get("quality"),
-                "source": request.query_params.get("source"),
-                "offset": int(request.query_params.get("offset", 0)),
-                "limit": int(request.query_params.get("limit", 30)),
-                "include_assets": request.query_params.get(
-                    "include_assets", "false"
-                ).lower()
-                == "true",
-                "directory": request.query_params.get("directory"),
-                "view": request.query_params.get("view", "full"),
-                "cursor": request.query_params.get("cursor"),
-            }
-        elif operation == "maintenance-status":
-            kwargs |= {"doc": request.query_params.get("doc"), "directory": request.query_params.get("directory", "Library"),
-                       "view": request.query_params.get("view", "state"), "limit": int(request.query_params.get("limit", 20)),
-                       "cursor": request.query_params.get("cursor")}
-        elif operation.startswith("maintenance-selections/"):
-            kwargs |= {"selection_id": operation.split("/")[1],
-                       "limit": int(request.query_params["limit"]) if "limit" in request.query_params else None,
-                       "cursor": request.query_params.get("cursor")}
-        elif operation == "graph":
-            kwargs["doc"] = request.query_params["doc"]
-            kwargs |= {"offset": int(request.query_params.get("offset", 0)), "limit": int(request.query_params.get("limit", 100)), "cursor": request.query_params.get("cursor")}
-        elif operation.startswith("jobs/"):
-            kwargs["job_id"] = operation.split("/")[1]
-            if request.method == "GET":
-                kwargs["view"] = request.query_params.get("view", "full")
+            kwargs["body"] = None if payload is None and schema is JobControlRequest else schema.model_validate(payload)
     except (ValueError, KeyError, ValidationError) as exc:
         raise WikiError(f"Invalid knowledge request: {exc}", 422)
     # The same handlers enforce task grants when an MCP credential reaches this app path.

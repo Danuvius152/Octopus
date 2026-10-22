@@ -303,6 +303,8 @@ interface SessionStore {
 
   dispatchStates: Record<string, DispatchState>;
   wikiJobs: Record<string, WikiJobCard[]>;
+  wikiJobDirty: Record<string, Record<string, Pick<WikiJobCard, "job_id" | "vault_id" | "state_version">>>;
+  invalidateWikiJob: (sessionId: string, target: Pick<WikiJobCard, "job_id" | "vault_id" | "state_version">) => void;
   mergeWikiJobs: (sessionId: string, cards: WikiJobCard[]) => void;
   dispatchGeneration: string | null;
   retiredDispatchGenerations: string[];
@@ -767,10 +769,19 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     })),
 
   wikiJobs: {},
+  wikiJobDirty: {},
+  invalidateWikiJob: (sessionId, target) => set((state) => {
+    const key = `${target.vault_id}/${target.job_id}`;
+    const dirty = state.wikiJobDirty[sessionId] || {};
+    if (dirty[key] && dirty[key].state_version >= target.state_version) return state;
+    return { wikiJobDirty: { ...state.wikiJobDirty, [sessionId]: { ...dirty, [key]: target } } };
+  }),
   mergeWikiJobs: (sessionId, cards) => set((state) => {
     const current = state.wikiJobs[sessionId] || [];
     const values = new Map(current.map((card) => [`${card.vault_id}/${card.job_id}`, card]));
     let changed = false;
+    const dirty = { ...state.wikiJobDirty[sessionId] };
+    let refreshed = false;
     for (const card of cards) {
       const key = `${card.vault_id}/${card.job_id}`;
       const previous = values.get(key);
@@ -778,10 +789,15 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         values.set(key, card);
         changed = true;
       }
+      if (dirty[key] && card.state_version >= dirty[key].state_version) {
+        delete dirty[key];
+        refreshed = true;
+      }
     }
-    if (!changed) return state;
+    if (!changed && !refreshed) return state;
     return { wikiJobs: { ...state.wikiJobs, [sessionId]: [...values.values()]
-      .sort((a, b) => b.received_at.localeCompare(a.received_at)) } };
+      .sort((a, b) => b.received_at.localeCompare(a.received_at)) },
+      wikiJobDirty: { ...state.wikiJobDirty, [sessionId]: dirty } };
   }),
   dispatchStates: {},
   dispatchGeneration: null,

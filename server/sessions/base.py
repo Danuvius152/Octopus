@@ -723,8 +723,6 @@ class SessionManagerBase:
         logger.info("Loaded %d sessions from database", len(rows))
         # Sweep forks left mid-saga by a crash (session-rewind.md §5.6.7).
         await self._recover_incomplete_forks()
-        # Sweep delegation children orphaned by a restart (agent-collaboration.md §5.2).
-        await self._recover_orphaned_delegations()
 
     def on_broadcast(
         self, key: str, callback: Callable, user_id: str | None = None
@@ -840,41 +838,6 @@ class SessionManagerBase:
         if user_id is not None and session.user_id != user_id:
             return None
         return session
-
-    async def _recover_orphaned_delegations(self) -> None:
-        """Archive delegation children left live by a restart
-        (agent-collaboration.md §5.2).
-
-        The old subprocess and delivery loop do not survive restart. Archive
-        their sessions so an unfinished child cannot linger in the sidebar
-        as live work. DelegationManager separately restores future round
-        receipts from the same session rows; only an explicit follow-up can
-        reopen that child conversation and admit a new round.
-
-        Any delegation-origin session that reaches this boot un-archived is
-        by definition abandoned (a healthy one archives itself the moment
-        its terminal turn is delivered, before the process ever exits). So
-        sweep them all into the archive — they stay browsable via the
-        account-menu manage page, exactly like a normal terminal delegation.
-        Idempotent: a clean boot finds none. Pure session lifecycle — no
-        backend specifics, so no harness involvement."""
-        orphans = [
-            sid for sid, s in self.sessions.items() if s.origin == "delegation"
-        ]
-        archived = 0
-        for sid in orphans:
-            try:
-                if await self.auto_archive_scheduled_session(sid):
-                    archived += 1
-            except Exception:
-                logger.exception(
-                    "delegation recovery: failed to archive orphan %s", sid
-                )
-        if archived:
-            logger.info(
-                "delegation recovery: archived %d orphaned delegation session(s)",
-                archived,
-            )
 
     async def _fire_session_idle_notification(self, session: Session) -> None:
         """Notify async targets that this session just went fully idle.

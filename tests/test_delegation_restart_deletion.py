@@ -18,8 +18,7 @@ async def test_relationship_deleted_during_followup_setup_is_reported_as_gone(
 ):
     boot, starts = runtime
     current, original = await completed_before_restart(boot, starts)
-    if deleted == "child":
-        await current.manager.unarchive_session(original.delegation_id)
+    assert current.manager.get_session(original.delegation_id) is not None
     save = current.database.compare_and_set_delegation_state
     saving = asyncio.Event()
     release = asyncio.Event()

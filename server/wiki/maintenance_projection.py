@@ -198,7 +198,7 @@ def settle(store, *, doc=None, directory="Library", retries=3):
     for _ in range(retries):
         with store.connect() as db:
             db.execute("BEGIN")
-            if readiness(db, store)["index_status"] != "ready":
+            if readiness(db, store)["index_status"] not in {"ready", "partial"}:
                 return False
             selected = exact_document(db, doc) if doc is not None else None
             identifiers = [selected["id"]] if selected is not None else [] if doc is not None else None

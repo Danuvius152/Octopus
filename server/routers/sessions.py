@@ -365,12 +365,17 @@ async def wiki_jobs(
     user_id: ScopeUser = None,
     offset: int = Query(0, ge=0),
     limit: int = Query(30, ge=1, le=100),
+    job_id: str | None = Query(None, min_length=1),
+    vault_id: str | None = Query(None, min_length=1),
     _: str = Depends(verify_token),
 ):
     binding = await session_manager.db.get_session_binding(session_id)
     if binding is None or binding["user_id"] != user_id:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-    return await session_manager.db.wiki_job_cards(session_id, user_id, offset=offset, limit=limit)
+    if (job_id is None) != (vault_id is None):
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_CONTENT, "Supply both Wiki job and vault identities")
+    return await session_manager.db.wiki_job_cards(session_id, user_id, offset=offset, limit=limit,
+                                                  job_id=job_id, vault_id=vault_id)
 
 
 @router.get("/{session_id}/submissions", response_model=SubmissionRecoveryPage)

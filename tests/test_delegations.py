@@ -273,16 +273,10 @@ async def test_files_resolved_against_working_dir(
 
 
 @pytest.mark.asyncio
-async def test_delegation_session_archived_after_terminal_inject(
+async def test_delegation_session_remains_open_after_terminal_inject(
     models, dm, mgr, db, monkeypatch
 ):
-    """Plan §5.2 with Vera's round-2 nuance: a delegation child is
-    archived when its OWN terminal turn has been injected into its
-    parent — NOT on generic idle (which would prematurely archive an
-    intermediate parent that's waiting for its own child to reply).
-    Verifies _inject_terminal drives auto_archive_scheduled_session
-    itself, so the chain work is genuinely complete by the time the
-    archive runs."""
+    """A completed round returns once and leaves its conversation open."""
     monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
@@ -293,30 +287,19 @@ async def test_delegation_session_archived_after_terminal_inject(
     child = mgr.get_session(rec.delegation_id)
     assert child is not None
     assert not mgr.session_is_executing(child)
-    # Drive the terminal event. _inject_terminal should both inject
-    # into the parent AND archive the child.
+    # The terminal completes the round without archiving the conversation.
     await models.emit(dm, {
         "type": "result", "session_id": rec.delegation_id, "is_error": False,
     })
     assert rec.state == "completed"
-    assert mgr.get_session(rec.delegation_id) is None
+    assert mgr.get_session(rec.delegation_id) is child
 
 
 @pytest.mark.asyncio
-async def test_idle_handler_does_not_archive_delegation_child(
+async def test_delegation_child_can_be_explicitly_archived(
     models, dm, mgr, db, monkeypatch
 ):
-    """Vera's round-2 BLOCKING finding: the generic idle hook used to
-    archive delegation children, breaking nested chains. The
-    intermediate parent (Vera in Octo→Vera→Pete) is idle while
-    waiting for its grandchild's reply; archiving it from the idle
-    path would orphan the grandchild's terminal turn.
-
-    _AUTO_ARCHIVE_ORIGINS no longer includes 'delegation' — only
-    'schedule'. The auto_archive_scheduled_session helper itself
-    still ACCEPTS delegation origin (it's how DelegationManager
-    archives after terminal inject), but the idle path no longer
-    calls it for delegation children."""
+    """Retaining a delegation does not remove the user's Archive action."""
     monkeypatch.setattr(mgr, "start_message", models.start_for(mgr))
     octo = await db.get_system_agent()
     await _make_agent(db, "Vera")
@@ -326,16 +309,8 @@ async def test_idle_handler_does_not_archive_delegation_child(
     )
     child = mgr.get_session(rec.delegation_id)
     assert child is not None
-    # The session is still alive; the auto-archive idle-origins set
-    # does NOT include "delegation", so a generic idle wouldn't fire
-    # the helper for it.
-    assert "delegation" not in mgr._AUTO_ARCHIVE_ORIGINS
-    # Confirm: even with the child quiesced, the auto-archive helper
-    # archives it when called directly (the DelegationManager path),
-    # but it's never called from the idle hook for a delegation child.
     assert not mgr.session_is_executing(child)
-    ok = await mgr.auto_archive_scheduled_session(rec.delegation_id)
-    assert ok is True  # helper still accepts delegation origin
+    await mgr.archive_session(rec.delegation_id, replace=False)
     assert mgr.get_session(rec.delegation_id) is None
 
 
@@ -353,13 +328,8 @@ async def test_auto_archive_skips_user_origin_sessions(mgr, db, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_orphaned_delegation_archived_on_restart(db):
-    """A restart wipes DelegationManager._records (in-memory only) and
-    kills the child's subprocess, so a delegation child that was live at
-    restart can never finish or auto-archive itself — it would linger
-    forever in the sidebar's hidden-delegation count. SessionManager's
-    boot-time sweep archives such orphans; a healthy user-origin session
-    is left untouched."""
+async def test_delegation_conversation_remains_open_on_restart(db):
+    """Restart changes round recovery, not the conversation retention policy."""
     from server.session_manager import SessionManager
 
     # Boot 1: a normal parent + a live delegation child (mid-flight when
@@ -380,12 +350,10 @@ async def test_orphaned_delegation_archived_on_restart(db):
     m2 = SessionManager()
     await m2.initialize(db)
 
-    # The orphaned delegation child is swept into the archive and dropped
-    # from memory; the user-origin parent survives as a live session.
-    assert child.id not in m2.sessions
+    assert m2.get_session(child.id) is not None
     assert parent.id in m2.sessions
     rows = {r["id"]: r for r in await db.load_sessions(include_archived=True)}
-    assert rows[child.id]["archived"]
+    assert not rows[child.id]["archived"]
     assert not rows[parent.id]["archived"]
 
 
@@ -489,8 +457,8 @@ async def test_nested_chain_intermediate_stays_alive_while_grandchild_runs(
         f"Pete's terminal injection didn't target Vera. "
         f"delivered={delivered!r}"
     )
-    # Pete's session is archived now that his chain work is done.
-    assert mgr.get_session(pete_rec.delegation_id) is None
+    # Pete's round is complete and his conversation remains accessible.
+    assert mgr.get_session(pete_rec.delegation_id) is not None
     # Vera is STILL alive — she hasn't fired her own terminal yet.
     assert mgr.get_session(vera_rec.delegation_id) is not None
 
@@ -517,8 +485,8 @@ async def test_nested_chain_intermediate_stays_alive_while_grandchild_runs(
         f"Vera's reply failed to reach Octo. Captured errors: "
         f"{inject_errors!r}"
     )
-    # Vera is archived now. Octo (root user session) is untouched.
-    assert mgr.get_session(vera_rec.delegation_id) is None
+    # Both conversations remain accessible after their rounds complete.
+    assert mgr.get_session(vera_rec.delegation_id) is not None
     assert mgr.get_session(octo_sess.id) is octo_sess
 
 
@@ -1286,11 +1254,7 @@ async def test_cancel_delegation(models, dm, mgr, db, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_follow_up_happy_path(models, dm, mgr, db, monkeypatch):
-    """Octo asks Vera, Vera replies + her session auto-archives. Octo
-    follows up with a new round in the same session. The child is
-    unarchived, the record is reset to running, and the new request
-    flows to start_message — Vera will see her previous round in
-    her transcript when she resumes."""
+    """Parent follow-up creates a new round in the retained conversation."""
     injected: list[tuple[str, str]] = []
 
     async def capture(sid, prompt, attachment_ids=None, *, source="human", work_id=None, delivery_id=None, **kwargs):
@@ -1308,12 +1272,13 @@ async def test_follow_up_happy_path(models, dm, mgr, db, monkeypatch):
     await models.emit(dm, {
         "type": "assistant_text", "session_id": rec.delegation_id, "content": "First round original reply.",
     })
-    # Drive Vera to terminal so she auto-archives.
+    # Drive Vera's first round to terminal.
     await models.emit(dm, {
         "type": "result", "session_id": rec.delegation_id, "is_error": False,
     })
     assert rec.state == "completed"
-    assert mgr.get_session(rec.delegation_id) is None  # archived
+    child = mgr.get_session(rec.delegation_id)
+    assert child is not None
 
     # Follow up.
     injected.clear()
@@ -1328,8 +1293,7 @@ async def test_follow_up_happy_path(models, dm, mgr, db, monkeypatch):
     assert updated.request == "round 2 — please re-check finding 3"
     assert updated.error is None
     assert updated.finished_at is None
-    # Child is back in the live map.
-    assert mgr.get_session(rec.delegation_id) is not None
+    assert mgr.get_session(rec.delegation_id) is child
     # The new request was delivered to the child's session.
     assert injected
     sid, prompt = injected[0]

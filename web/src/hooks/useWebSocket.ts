@@ -106,6 +106,9 @@ export function handleWsMessage(data: Record<string, unknown>) {
       }
       break;
     case "wiki_job_changed":
+      if (typeof data.vault_id !== "string" || typeof data.job_id !== "string" ||
+        !Number.isInteger(data.state_version) || Number(data.state_version) < 1) break;
+      getState().invalidateWikiJob(sessionId, { vault_id: data.vault_id, job_id: data.job_id, state_version: Number(data.state_version) });
       if (sessionId === getState().activeSessionId) void refreshWikiJobs(sessionId).catch(() => {});
       break;
     case "dispatch_state":

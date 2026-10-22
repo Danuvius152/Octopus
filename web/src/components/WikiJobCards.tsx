@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { IconBook, IconCheck, IconAlertTriangle } from "@tabler/icons-react";
 import type { WikiJobCard } from "../api";
 import { useSessionStore } from "../stores/sessionStore";
-import { controlWikiJob, refreshWikiJobs } from "../lib/wikiJobs";
+import { controlWikiJob, reconcileWikiJobs, refreshWikiJobs } from "../lib/wikiJobs";
 
 const LABELS: Record<string, string> = {
   queued: "Queued", running: "Reviewing", interrupted: "Verifying original execution",
@@ -72,7 +72,7 @@ export function WikiJobCards({ sessionId }: { sessionId: string }) {
   const [loading, setLoading] = useState(false);
   useEffect(() => {
     let active = true;
-    void refreshWikiJobs(sessionId).then((count) => {
+    void reconcileWikiJobs(sessionId).then((count) => {
       if (active) { setOffset(count); setMore(count === 30); setError(""); }
     }).catch((failure) => {
       if (active) setError(failure instanceof Error ? failure.message : "Could not load Wiki maintenance.");

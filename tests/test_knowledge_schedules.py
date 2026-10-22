@@ -349,6 +349,16 @@ async def test_fire_reads_the_confirmed_definition_after_update_interruption(pla
     schedule_id = created.json()["id"]
     work_id = uuid.uuid4().hex
     receipt, headers = await live_caller(manager, parent, starts, work_id=work_id)
+    scheduled = []
+    start_message = manager.start_message
+
+    async def capture_fire(*args, **kwargs):
+        accepted = await start_message(*args, **kwargs)
+        if kwargs.get("source") == "schedule":
+            scheduled.append(accepted)
+        return accepted
+
+    monkeypatch.setattr(manager, "start_message", capture_fire)
     written, release, snapshot = asyncio.Event(), asyncio.Event(), asyncio.Event()
     execute = manager.db.conn._execute
     schedule_row = runner._schedule_row
@@ -389,7 +399,11 @@ async def test_fire_reads_the_confirmed_definition_after_update_interruption(pla
                 await patch
         await receipt.wait()
         await asyncio.wait_for(fire, 5)
-        await manager.drain_turns()
+        # In-session fire returns on admission. Shutdown can cancel that input
+        # before recording; wait for its original completion instead.
+        assert len(scheduled) == 1 and scheduled[0].accepted
+        completion = await asyncio.wait_for(scheduled[0].wait(), 5)
+        assert completion.recording_state == "committed" and completion.outcome.status == "success"
         row = (await manager.db.load_schedules())[0]
         # Closing the original work refuses and rolls back the definition.
         # Cancelling only its waiter preserves the acknowledged transaction.

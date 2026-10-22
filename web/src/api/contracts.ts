@@ -6952,6 +6952,8 @@ export interface operations {
             query?: {
                 offset?: number;
                 limit?: number;
+                job_id?: string | null;
+                vault_id?: string | null;
                 token?: string | null;
             };
             header?: never;

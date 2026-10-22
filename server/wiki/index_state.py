@@ -3,6 +3,27 @@
 DOCUMENT_ERROR = "quality='error' OR json_extract(metadata, '$.frontmatter_error') IS NOT NULL"
 
 
+def maintenance_blockers(db, identifiers):
+    """Only current source occurrences extend a target's health boundary."""
+    if not identifiers:
+        return set()
+    requested = ",".join("(?)" for _ in identifiers)
+    return {row[0] for row in db.execute(f"""WITH RECURSIVE
+        requested(doc) AS (VALUES {requested}),
+        dependencies(root,doc) AS (
+            SELECT doc,doc FROM requested UNION
+            SELECT prior.root,b.target_doc FROM dependencies prior
+            JOIN source_binding_head h ON h.source_doc=prior.doc
+            JOIN source_binding_observations o ON o.id=h.observation_id
+            JOIN json_each(o.occurrences) occurrence
+            JOIN source_bindings b ON b.id=json_extract(occurrence.value,'$.binding_id')
+            WHERE b.policy='bound')
+        SELECT DISTINCT dependency.root FROM dependencies dependency
+        LEFT JOIN documents d ON d.id=dependency.doc
+        WHERE d.id IS NULL OR d.quality='error' OR length(d.text)=0
+          OR json_extract(d.metadata,'$.frontmatter_error') IS NOT NULL""", tuple(identifiers))}
+
+
 def summary(db, observed_pending):
     index = db.execute("SELECT * FROM index_state WHERE singleton=1").fetchone()
     stream = db.execute("SELECT * FROM filesystem_state WHERE singleton=1").fetchone()

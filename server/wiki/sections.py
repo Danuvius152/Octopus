@@ -1,5 +1,6 @@
 """Owned additions are replaceable; all other text belongs to the user."""
 
+import contextlib
 import json
 import uuid
 
@@ -37,8 +38,8 @@ def top_offset(text: str, *, parsed: format.DocumentFormat | None = None) -> int
     return offset
 
 
-def managed_metadata(store, path, raw):
-    with store.connect() as db:
+def managed_metadata(store, path, raw, *, db=None):
+    with store.connect() if db is None else contextlib.nullcontext(db) as db:
         row = db.execute("SELECT * FROM managed_notes WHERE path=?", (path,)).fetchone()
     if row is None:
         return {}, False

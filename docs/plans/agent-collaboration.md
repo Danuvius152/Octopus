@@ -155,7 +155,8 @@ A delegation session has `parent_session_id` set and
 no separate id space. `ON DELETE SET NULL` (not CASCADE) is
 deliberate: if the parent is hard-deleted we orphan the child rather
 than mass-delete; sessions are precious. Listing/cancellation/UI
-treat an orphaned delegation as a normal archived session.
+retain an orphaned child's conversation; its missing parent cannot start a
+new delegation round or receive a reply.
 
 ### 4.2 `pending_agent_questions` — derive from existing AskQuestion
 
@@ -265,20 +266,18 @@ Server-side flow:
 
 ### 5.2 Sub-session lifecycle
 
-A delegation child session is an ordinary session for every purpose
-except two:
+A delegation child session keeps the ordinary session retention policy:
 
-- **Auto-archive after terminal delivery.** Delegation sessions are
-  eligible for auto-archive, but the generic idle hook does not
-  archive them. Archival happens in
-  `DelegationManager._inject_terminal` after the terminal
-  `[agent-reply:…]` or `[agent-error:…]` turn has been delivered (or
-  attempted) to the parent (`server/delegations.py:739`,
-  `server/delegations.py:788`). This is load-bearing for nested
-  chains: Vera in Octo → Vera → Pete is idle while waiting for Pete,
-  but must remain live so Pete's terminal turn can reach her. The
-  session is not auto-deleted — the user can still browse it from
-  Vera's archived-sessions list.
+- **A terminal round leaves the conversation open.** Success, failure,
+  cancellation and reply delivery do not archive the child. Restart restores
+  the conversation and classifies its old round without replaying its reply
+  or running the child. Humans can open it from the delegation card and submit
+  a new ordinary request; that request does not resend the old caller's reply.
+  An explicit parent follow-up creates a new round/work in the same conversation.
+  Explicit Archive and the schedule-only idle policy still retire resources
+  through SessionOwner. Setup failures before admission retain their cleanup
+  policy. Already archived history stays read-only until explicitly continued;
+  startup does not mass-unarchive it. Sidebar delegation filters still apply.
 - **A delegation with a sub-delegation in flight does not finalise.**
   The load-bearing half of the note above. `ask_agent` is asynchronous, so
   Vera's turn-1 `result` arrives the instant she has asked Pete — it is not
@@ -468,7 +467,7 @@ but at the model's surface it's the same tool, distinguished by
 which id is present.
 
 The intended use of mode 2 is review/iteration loops: Octo asks
-Vera, Vera replies + auto-archives; on the next round Octo calls
+Vera, Vera replies and her conversation stays open; on the next round Octo calls
 `ask` again with the previous `delegation_id` and Vera resumes with
 her previous reply still visible in her own conversation — no
 re-reading of files, no re-establishing context. Mode 1 is still
@@ -488,13 +487,11 @@ Server-side flow:
 1. Validate the delegation belongs to this parent (404 if not), and
    is in a terminal state (409 if `running` — wait for the reply
    first, there is no sound semantic for "follow up mid-flight").
-2. Unarchive the child session if needed. The round-2 auto-archive
-   timing means *every* completed delegation child is archived by
-   the time we get here; `SessionManager.unarchive_session`
-   reloads the row (including `parent_session_id` and
-   `delegation_request`, restored in round 3) and registers it in
-   the live sessions map. A hard-deleted child can't be reused —
-   409 with a "start a fresh delegation" hint.
+2. Reuse the retained live child. If the user previously archived it,
+   this explicit follow-up unarchives it through
+   `SessionManager.unarchive_session`, retaining `parent_session_id` and
+   `delegation_request`. A hard-deleted child can't be reused — 409 with a
+   "start a fresh delegation" hint.
 3. Create the next `DelegationRunState` with a new `work_id`,
    `state="running"`, cleared error/finished/disposition fields,
    and `request=<new>`. The original record stays bound to its old work.
@@ -508,8 +505,8 @@ Server-side flow:
    `SessionManager.start_message(child_sid, prompt)`. The exact new
    receipt is watched by the same completion path as a fresh delegation:
    `_inject_terminal` fires an
-   `[agent-reply:<name> delegation=<id>]` into the parent, then
-   auto-archives the child for the next round.
+   `[agent-reply:<name> delegation=<id>]` into the parent once for this round.
+   The child conversation remains open for later human or parent requests.
 
 The model picks between the two `ask` modes (fresh `name` vs.
 continuation via `delegation_id`) via the system-prompt rule
@@ -566,7 +563,7 @@ Two consequences worth surfacing:
 - **Fail-closed ancestor lookup.** The walk starts in memory and falls
   back to `db.load_sessions(include_archived=True)` when an ancestor
   is not live in `SessionManager`. That fallback is legitimate state:
-  a delegation parent can be archived after its own terminal delivery,
+  a delegation parent can be explicitly archived,
   and an unarchived descendant must still be able to count that
   ancestor for depth and cycle checks. If neither memory nor DB has
   the ancestor row, reject; if the loop exhausts the safety cap, the
@@ -634,9 +631,9 @@ chat stream plus delegation store state:
   `/api/sessions/{delegation_id}` and inserts the response into the
   live or archived bucket based on the row's `archived` flag
   (`web/src/components/AgentDelegationEventCard.tsx:131`). The request
-  card uses the same fetch-and-bucket logic before navigating, because
-  terminal delegation children are usually archived by the time the
-  user clicks through (`web/src/components/AgentDelegationRequestCard.tsx:142`).
+  card uses the same fetch-and-bucket logic before navigating, so explicitly
+  archived children and historical archived conversations remain accessible
+  (`web/src/components/AgentDelegationRequestCard.tsx:142`).
 
 - **Child session view.** Vera's session renders normally, with a
   header banner:
@@ -660,7 +657,7 @@ Phased so each phase is independently shippable, testable, and gives
 a usable demo at its end. All five phases have shipped. The review
 rounds after the original plan added the important polish called out
 above: short MCP tool names, cancel single-inject idempotency,
-terminal-delivery auto-archive timing for nested chains,
+conversation retention across terminal delivery and restart,
 cascade-cancel, archived-ancestor DB fallback in the chain walk, and
 archived-child UI navigation.
 
@@ -730,9 +727,10 @@ question routing, `mcp__ask_agent__answer` draining the child's
 pending question, empty/malformed question events, terminated
 delegations ignoring late questions, concurrent same-target
 delegations, bridge non-fan-out, and depth/cycle guards. The review
-fixes have direct regression tests: terminal auto-archive happens from
-`_inject_terminal`, the idle hook does not archive delegation parents
-too early, nested Pete-under-Vera delivery survives Vera's idle
+fixes have direct regression tests: terminal delivery and restart preserve
+delegation conversations, human follow-ups do not repeat a round's reply,
+explicit Archive and schedule cleanup retain their policies,
+nested Pete-under-Vera delivery survives Vera's idle
 window, archived ancestors are found through the DB fallback,
 session-id pointer cycles fail closed, cancellation cascade-cancels
 descendants, and cancellation injects exactly one terminal turn even

@@ -20,18 +20,25 @@ function cardsFrom(value: unknown): WikiJobCard[] {
   return value as WikiJobCard[];
 }
 
-async function load(sessionId: string, offset: number): Promise<number> {
+type Target = Pick<WikiJobCard, "job_id" | "vault_id" | "state_version">;
+
+async function load(sessionId: string, offset: number, target?: Target): Promise<number> {
   // Capture both coordinates before the request. A later generation getter
   // would bless a response from the service or account that just retired.
   const { token, dispatchGeneration } = useSessionStore.getState();
   if (!token) return 0;
-  const response = await fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/wiki-jobs?offset=${offset}&limit=30`, {
+  const query = new URLSearchParams({ offset: String(offset), limit: "30" });
+  if (target) { query.set("job_id", target.job_id); query.set("vault_id", target.vault_id); }
+  const response = await fetch(`${API}/api/sessions/${encodeURIComponent(sessionId)}/wiki-jobs?${query}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
   const state = useSessionStore.getState();
   if (state.token !== token || state.dispatchGeneration !== dispatchGeneration) return 0;
   if (!response.ok) throw new Error(`Could not load Wiki maintenance (HTTP ${response.status}).`);
   const cards = cardsFrom(await response.json());
+  if (target && cards.some((card) => card.job_id !== target.job_id || card.vault_id !== target.vault_id)) {
+    throw new Error("Wiki maintenance returned a different task identity.");
+  }
   const current = useSessionStore.getState();
   if (current.token !== token || current.dispatchGeneration !== dispatchGeneration) return 0;
   current.mergeWikiJobs(sessionId, cards);
@@ -39,6 +46,20 @@ async function load(sessionId: string, offset: number): Promise<number> {
 }
 
 const loading = new Map<string, { token: string; generation: string | null; again: boolean; promise: Promise<number> }>();
+
+export function reconcileWikiJobs(sessionId: string): Promise<number> {
+  const state = useSessionStore.getState();
+  // A disconnected browser may have missed the only invalidation. Recheck
+  // retained work by identity even when newer cards fill the first page.
+  for (const card of state.wikiJobs[sessionId] || []) {
+    if (card.status !== "completed" || card.settlement_phase === "pending" ||
+      card.settlement_phase === "unconfirmed" || (card.recording_pending ?? 0) > 0 ||
+      (card.effects?.index_pending ?? 0) > 0) {
+      state.invalidateWikiJob(sessionId, card);
+    }
+  }
+  return refreshWikiJobs(sessionId);
+}
 
 export function refreshWikiJobs(sessionId: string, offset = 0): Promise<number> {
   if (offset) return load(sessionId, offset);
@@ -54,6 +75,12 @@ export function refreshWikiJobs(sessionId: string, offset = 0): Promise<number> 
     do {
       pending.again = false;
       count = await load(sessionId, 0);
+      const dirty = useSessionStore.getState().wikiJobDirty[sessionId] || {};
+      for (const target of Object.values(dirty)) {
+        const state = useSessionStore.getState();
+        if (state.token !== token || state.dispatchGeneration !== generation) return count;
+        await load(sessionId, 0, target);
+      }
       const current = useSessionStore.getState();
       if (current.token !== token || current.dispatchGeneration !== generation) break;
     } while (pending.again);
@@ -68,6 +95,7 @@ export function refreshWikiJobs(sessionId: string, offset = 0): Promise<number> 
 export async function controlWikiJob(sessionId: string, card: WikiJobCard, action: "cancel" | "retry"): Promise<void> {
   const { token } = useSessionStore.getState();
   if (!token) throw new Error("Sign in before controlling Wiki maintenance.");
+  useSessionStore.getState().invalidateWikiJob(sessionId, card);
   const response = await fetch(`${API}/api/wiki/jobs/${encodeURIComponent(card.job_id)}/${action}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
