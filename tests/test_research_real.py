@@ -15,8 +15,6 @@ from __future__ import annotations
 import asyncio
 import functools
 import os
-import subprocess
-import tempfile
 from datetime import UTC, datetime
 
 import pytest
@@ -28,7 +26,7 @@ from server.research.manager import ResearchManager
 from server.research.orchestrator import ResearchLimits
 from server.research.orchestrator import run_research as _real_run
 from server.session_manager import SessionManager
-from tests.cli_gate import _resolve_cli
+from tests.cli_gate import codex_home_works
 from tests.submission import accepted_receipt
 
 
@@ -36,9 +34,6 @@ from tests.submission import accepted_receipt
 def _usable_codex_credential() -> str | None:
     """A signed-in, directory-backed codex credential id whose CODEX_HOME holds
     a WORKING auth.json (probed for real). None if none is usable."""
-    exe = _resolve_cli("codex")
-    if exe is None:
-        return None
     base = os.path.dirname(codex_home_for("_probe_"))  # the per-credential root
     if not os.path.isdir(base):
         return None
@@ -46,18 +41,7 @@ def _usable_codex_credential() -> str | None:
         home = os.path.join(base, cid)
         if not os.path.exists(os.path.join(home, "auth.json")):
             continue
-        env = {**os.environ, "CODEX_HOME": home}
-        try:
-            proc = subprocess.run(
-                [exe, "exec", "--json", "--skip-git-repo-check",
-                 "--dangerously-bypass-approvals-and-sandbox",
-                 "-c", 'model_reasoning_effort="low"', "--", "Reply with OK."],
-                stdin=subprocess.DEVNULL, capture_output=True,
-                cwd=tempfile.gettempdir(), env=env, timeout=90,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            continue
-        if proc.returncode == 0:
+        if codex_home_works(home):
             return cid
     return None
 

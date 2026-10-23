@@ -387,6 +387,52 @@ async def test_only_navigation_output_does_not_complete_primary_or_unstarted_cre
     assert result["grant"]["reservations"][0]["state"] == "released"
 
 
+@pytest.mark.parametrize("edited", [False, True])
+async def test_cancel_keeps_excluded_navigation_target_and_checks_its_original_receipt(client, tmp_path, edited):
+    from server.wiki import job_execution
+    from server.wiki.registry import registry
+
+    root, jobs, _, config, _ = await setup_notes(client, tmp_path)
+    index = "Library/index.md"
+    job = jobs.maintain("finite-navigation-scope", "", "Review the selected notes",
+                        [index, "Library/requested.md"], None, [], "human")
+    with assigned(job, config, paths=["Library/requested.md"]) as (headers, _):
+        source, navigation = await read_pair(client, headers, index)
+        added = await client.post("/api/wiki/organize", headers=headers, json=addition(source, navigation))
+        assert added.status_code == 200, added.text
+    jobs.update(job["id"], status="failed", session_id=None)
+    jobs.retry(job["id"])
+    jobs.update(job["id"], status="failed")
+    registry.configure(None, root, "replacement-curator")
+    current = WikiJobs(None)
+    readmitted = current.readmit(job["id"], ["Library/requested.md"])
+    excluded = next(item for item in readmitted["items"] if item["path"] == index)
+    assert excluded["status"] == "excluded"
+    original_receipts = readmitted["receipts"]
+    assert len(original_receipts) == 1 and original_receipts[0]["operation"] == "navigation_link"
+    if edited:
+        with (root / index).open("ab") as output:
+            output.write(b"\nA later human correction.\n")
+    original_bytes = {path: (root / path).read_bytes() for path in [index, "Library/requested.md"]}
+    running = current.update(job["id"], status="running")
+    batch = [item for item in running["items"] if item["status"] == "pending"]
+    reference = job_execution.prepare(current, running, batch, "unstarted-worker", "unstarted-request")
+    job_execution.transition(current, job["id"], reference, "rejected", disposition="not_admitted", retired=True)
+    await current.cancel(job["id"], None)
+    await current.settle_cancelled(job["id"], None)
+    cancelled = current.get(job["id"])
+    retained = next(item for item in cancelled["items"] if item["doc"] == excluded["doc"])
+    assert retained["status"] == "excluded"
+    assert cancelled["receipts"] == original_receipts
+    assert {path: (root / path).read_bytes() for path in original_bytes} == original_bytes
+    assert cancelled["settlement_phase"] == ("attention" if edited else "confirmed")
+    if edited:
+        assert retained["cancellation_effect_error"]
+    else:
+        retried = current.retry(job["id"])
+        assert [item["path"] for item in retried["items"] if item["status"] != "excluded"] == ["Library/requested.md"]
+
+
 async def test_navigation_recovery_preserves_the_original_change_and_receipt_without_completing_A(client, tmp_path, monkeypatch):
     from server.wiki.history import WikiHistory
 
@@ -408,6 +454,7 @@ async def test_navigation_recovery_preserves_the_original_change_and_receipt_wit
         with jobs.store.connect() as db:
             before = dict(db.execute("SELECT * FROM operation_receipts WHERE job_id=?", (job["id"],)).fetchone())
             assert db.execute("SELECT status FROM changes WHERE id=?", (before["change_id"],)).fetchone()[0] == "prepared"
+        WikiHistory(jobs.store).recover()
         source, navigation = await read_pair(client, headers, navigation["path"])
         repeated = await client.post("/api/wiki/organize", headers=headers, json=addition(source, navigation))
         assert repeated.status_code == 200 and repeated.json()["changed"] is False

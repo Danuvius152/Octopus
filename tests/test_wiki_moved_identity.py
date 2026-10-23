@@ -292,7 +292,13 @@ async def test_candidate_retention_boundary_preserves_identity_after_readmission
     assert changed.status_code == 200, changed.text
     current = WikiJobs(None)
     readmitted = current.readmit(job["id"], [old])  # Only B remains selected; A has no active-job protection.
-    assert [entry["doc"] for entry in readmitted["items"]] == [other_item["doc"]]
+    assert current.next_queued() == job["id"]
+    current.recover_jobs()
+    readmitted = current.get(job["id"])
+    assert [entry["doc"] for entry in readmitted["items"] if entry["status"] != "excluded"] == [other_item["doc"]]
+    excluded = [entry for entry in readmitted["items"] if entry["status"] == "excluded"]
+    assert len(excluded) == 1 and excluded[0]["doc"] == item["doc"]
+    assert excluded[0]["candidate_changes"] == item["candidate_changes"]
     assert readmitted["items"][0]["retry_count"] == 1
     assert current.store.read(old)["id"] == other_item["doc"]
     history = WikiHistory(current.store)

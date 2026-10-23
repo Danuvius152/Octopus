@@ -7,9 +7,10 @@ AI-parse failures) that look like product regressions but are really just a
 logged-out CLI. (That's the exact failure harness-credential-reauth.md exists
 to surface in the app.)
 
-These probe ACTUAL usability once per session (lru_cache):
+These probe ACTUAL usability once per session:
   - claude: a tiny real `--print` call must exit 0 (there's no auth.json to stat).
-  - codex: a tiny real `exec` call must exit 0; a stale auth.json is not enough.
+  - codex: a tiny real `exec` call must exit 0 per credential/configuration;
+    aliases of the same auth/config files share a result, not provider output.
 
 Imported as `from tests.cli_gate import claude_cli_works, codex_cli_works`
 (the repo root is on sys.path during the test run, so `tests` resolves as a
@@ -19,8 +20,11 @@ namespace package — `import conftest` is NOT reliable under pytest).
 from __future__ import annotations
 
 import functools
+import os
 import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 
 def _resolve_cli(binary: str) -> str | None:
@@ -45,7 +49,8 @@ class CliProbeTimeout(RuntimeError):
     """
 
 
-def _probe(argv: list[str], *, timeout: float, cwd: str | None = None) -> bool:
+def _probe(argv: list[str], *, timeout: float, cwd: str | None = None,
+           env: dict[str, str] | None = None) -> bool:
     """Run a gate probe, retrying once with a doubled timeout.
 
     A loaded machine (a parallel suite, several CLIs mid-turn) can push a
@@ -57,7 +62,7 @@ def _probe(argv: list[str], *, timeout: float, cwd: str | None = None) -> bool:
         try:
             proc = subprocess.run(
                 argv, stdin=subprocess.DEVNULL, capture_output=True,
-                timeout=limit, cwd=cwd,
+                timeout=limit, cwd=cwd, env=env,
             )
             return proc.returncode == 0
         except subprocess.TimeoutExpired as exc:
@@ -84,25 +89,49 @@ def claude_cli_works() -> bool:
     return _probe([exe, "--print", "--", "ok"], timeout=60)
 
 
-@functools.lru_cache(maxsize=1)
-def codex_cli_works() -> bool:
-    """True only if `codex` is installed AND actually authenticated. A present
-    `~/.codex/auth.json` is NOT sufficient — its token can be invalidated while
-    the file lingers (a real 401 we hit in practice). So we probe with a tiny
-    real `codex exec`, exactly like the claude gate; a logged-out CLI exits
-    non-zero, so dependent tests skip rather than hollow-pass/fail."""
+_codex_probe_results: dict[tuple, bool] = {}
+
+
+def _file_identity(path: Path) -> tuple | None:
+    path = path.resolve()
+    try:
+        info = path.stat()
+    except FileNotFoundError:
+        return None
+    return str(path), info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
+
+
+def codex_home_works(home: str | Path) -> bool:
+    """Probe the selected login once; keep every probe's output in a temp home.
+
+    The cache belongs to this pytest process. Only the same executable and
+    unchanged auth/config files share a result. A timeout never becomes a
+    cached login failure. Missing auth stays scoped to its original home.
+    """
     exe = _resolve_cli("codex")
     if exe is None:
         return False
-    import tempfile
+    root = Path(home).expanduser().resolve()
+    auth = _file_identity(root / "auth.json")
+    key = exe, auth if auth is not None else str(root), _file_identity(root / "config.toml")
+    if key not in _codex_probe_results:
+        with tempfile.TemporaryDirectory(prefix="octopus-codex-probe-") as probe:
+            for name in ("auth.json", "config.toml"):
+                if (root / name).is_file():
+                    (Path(probe) / name).symlink_to((root / name).resolve())
+            result = _probe(
+                [
+                    exe, "exec", "--json", "--skip-git-repo-check",
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    "-c", 'model_reasoning_effort="low"', "--", "Reply with OK.",
+                ],
+                timeout=90, cwd=tempfile.gettempdir(),
+                env={**os.environ, "CODEX_HOME": probe},
+            )
+        _codex_probe_results[key] = result
+    return _codex_probe_results[key]
 
-    # A 401 / invalidated token exits non-zero and prints the auth error.
-    return _probe(
-        [
-            exe, "exec", "--json", "--skip-git-repo-check",
-            "--dangerously-bypass-approvals-and-sandbox",
-            "-c", 'model_reasoning_effort="low"', "--", "Reply with OK.",
-        ],
-        timeout=90,
-        cwd=tempfile.gettempdir(),
-    )
+
+def codex_cli_works() -> bool:
+    """Check actual usability of the ambient login, not auth.json presence."""
+    return codex_home_works(os.environ.get("CODEX_HOME") or Path.home() / ".codex")

@@ -444,13 +444,16 @@ class ResearchManager:
     # ---------------------------------------------------------------- cancel
 
     async def cancel_work(self, work_id: str) -> None:
-        """Cancel the jobs captured by a closed delegated work, including launch."""
-        jobs = [job_id for job_id, context in self._contexts.items()
-                if context.return_binding.work_id == work_id]
-        for job_id in jobs:
-            task = self._tasks.get(job_id)
-            if task is not None and not task.done() and not task.cancelling():
+        """Join the original launch/pipeline owners after closing their work."""
+        tasks = [self._tasks[job_id] for job_id, context in self._contexts.items()
+                 if context.return_binding.work_id == work_id and job_id in self._tasks]
+        for task in tasks:
+            if not task.done() and not task.cancelling():
                 task.cancel()
+        results = await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, asyncio.CancelledError):
+                raise result
 
     async def cancel(self, job_id: str) -> dict[str, Any]:
         if self.db is None:

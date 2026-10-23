@@ -7,6 +7,7 @@ import uuid
 from datetime import UTC, datetime
 
 from ..mcp_identity import McpScope
+from . import job_items
 from . import maintenance_selections as selections
 from .formats import is_markdown_maintenance
 from .history import WikiHistory
@@ -95,9 +96,9 @@ def commit(jobs, key, request, review, task, *, selection_id=None, selection_ord
             job_id, now = uuid.uuid4().hex, datetime.now(UTC).isoformat()
             items = [{"status": "pending", "path": current["path"], "doc": current["id"],
                       "revision": current["revision"], "quality": current["quality"]}]
-            db.execute("INSERT INTO jobs VALUES(?,?,?,?,?,?,?,?,?,?)",
+            db.execute("INSERT INTO jobs(id,request_key,payload_hash,payload,status,items,error,session_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                        (job_id, key, hashlib.sha256(raw.encode()).hexdigest(), raw, "queued",
-                        json.dumps(items, ensure_ascii=False), None, None, now, now))
+                        job_items.encode(items), None, None, now, now))
             db.execute("INSERT INTO job_requests VALUES(?,?,?)", (key, jobs.request_hash(request), job_id))
             from . import grants
 

@@ -95,7 +95,7 @@ def test_review_request_key_replacement_removes_old_job_members(prepared, operat
         control = tuple(db.execute("SELECT state_version,attempt FROM wiki_job_state WHERE job_id=?", (second["id"],)).fetchone())
         if operation == "insert":
             db.execute("""INSERT OR REPLACE INTO jobs
-                          SELECT id,?,payload_hash,payload,status,items,error,session_id,created_at,updated_at
+                          SELECT id,?,payload_hash,payload,status,items,error,session_id,created_at,updated_at,attempt_errors
                           FROM jobs WHERE id=?""", (key, second["id"]))
         else:
             db.execute("UPDATE OR REPLACE jobs SET request_key=? WHERE id=?", (key, second["id"]))
@@ -133,7 +133,7 @@ def test_review_direct_writer_without_recursive_triggers_fails_atomically(prepar
                 replace_receipt(db, second, docs["c"], docs["a"])
             elif operation == "job_replace":
                 db.execute("""INSERT OR REPLACE INTO jobs
-                              SELECT ?,request_key,payload_hash,payload,status,items,error,session_id,created_at,updated_at
+                              SELECT ?,request_key,payload_hash,payload,status,items,error,session_id,created_at,updated_at,attempt_errors
                               FROM jobs WHERE id=?""", ("replacement", first["id"]))
             elif operation == "job_update":
                 key = db.execute("SELECT request_key FROM jobs WHERE id=?", (first["id"],)).fetchone()[0]

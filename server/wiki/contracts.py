@@ -55,12 +55,16 @@ class GrantReadmissionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     paths: list[str] = Field(default_factory=list, max_length=5000)
     creation: CreationRequest | None = None
+    expected_attempt: int | None = Field(default=None, ge=0, strict=True)
+    expected_vault_id: str | None = None
+    operation_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class JobControlRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     expected_attempt: int | None = Field(default=None, ge=0, strict=True)
     expected_vault_id: str | None = None
+    operation_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class JobProgress(BaseModel):
@@ -89,7 +93,7 @@ class JobSnapshot(BaseModel):
     state_version: int = Field(ge=1)
     attempt: int = Field(ge=0)
     status: str
-    settlement_phase: Literal["none", "pending", "confirmed", "unconfirmed"]
+    settlement_phase: Literal["none", "pending", "confirmed", "attention", "unconfirmed"]
     worker_session_id: str | None
     scope: str = Field(max_length=512)
     scope_truncated: bool
@@ -110,6 +114,65 @@ class JobCard(JobSnapshot):
     subscriber_id: str
     origin_request_id: str
     received_at: str
+
+
+class JobItemDetail(BaseModel):
+    key: str
+    doc: str | None
+    path: str
+    status: str
+    error: str | None
+    execution: dict[str, Any] | None
+
+
+class JobOutputDetail(BaseModel):
+    receipt_id: str
+    doc: str | None
+    path: str
+    revision: str | None
+    current_path: str | None
+    current_revision: str | None
+    operation: str
+    status: str
+    reason: str
+    change_id: str | None
+    attempt: int | None
+    details: dict[str, Any]
+
+
+class JobActions(BaseModel):
+    verify: bool
+    retry: bool
+    readmit: bool
+    blocked_reason: str | None
+
+
+class JobDetail(BaseModel):
+    job_id: str
+    vault_id: str
+    state_version: int
+    current_attempt: int
+    attempt: int
+    attempts: list[int]
+    status: str
+    settlement_phase: str
+    error: str | None
+    items: list[JobItemDetail]
+    outputs: list[JobOutputDetail]
+    next_offset: int | None
+    actions: JobActions
+
+
+class JobOutputPage(BaseModel):
+    receipt_id: str
+    doc: str | None
+    path: str
+    revision: str
+    view: Literal["history", "current"]
+    content: str
+    start: int
+    next_start: int | None
+    characters: int
 
 
 class ReadBatch(BaseModel):

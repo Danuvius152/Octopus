@@ -211,10 +211,20 @@ async def test_cancel_cleans_bg_whose_spawn_returns_after_work_closed(work_runti
         headers={"Authorization": f"Bearer {token}"},
         json={"command": "echo started; sleep 30", "idle_timeout_seconds": 0},
     ))
-    await asyncio.wait_for(spawned.wait(), 3)
-    await delegations.cancel_delegation(rec.delegation_id, work_id=rec.work_id)
-    release.set()
-    response = await creating
+    cancelling = None
+    try:
+        await asyncio.wait_for(spawned.wait(), 3)
+        cancelling = asyncio.create_task(delegations.cancel_delegation(rec.delegation_id, work_id=rec.work_id))
+        await wait_state(delegations, rec.delegation_id, "cancelled")
+        # The original startup still owns its delayed process handle. Closing
+        # work must wait for it rather than treating a cancellation as exit.
+        assert not cancelling.done()
+        release.set()
+        await asyncio.wait_for(asyncio.shield(cancelling), 6)
+        response = await creating
+    finally:
+        release.set()
+        await asyncio.gather(creating, *([cancelling] if cancelling else []), return_exceptions=True)
     assert response.status_code == 201
     async with asyncio.timeout(6):
         while (await manager.work_test_bg.get_task(response.json()["id"])).status == "running":

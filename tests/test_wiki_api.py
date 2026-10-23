@@ -944,7 +944,11 @@ async def test_explicit_submissions_are_idempotent_and_jobs_can_be_cancelled_and
     job_id = first.json()["id"]
     cancelled = await client.post(f"/api/wiki/jobs/{job_id}/cancel", headers=HEADERS)
     assert cancelled.json()["status"] == "cancelled"
+    verified = await client.post(f"/api/wiki/jobs/{job_id}/verify", json={}, headers=HEADERS)
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["settlement_phase"] == "confirmed"
     retried = await client.post(f"/api/wiki/jobs/{job_id}/retry", headers=HEADERS)
+    assert retried.status_code == 200, retried.text
     assert retried.json()["status"] == "queued"
 
 
@@ -1825,7 +1829,9 @@ async def test_bom_frontmatter_is_one_protected_block_even_with_blank_lines(
 async def test_interrupted_organization_recovers_owned_sections_and_restore_state(
     client, tmp_path, monkeypatch
 ):
+    from server.service_health import ServiceHealth
     from server.wiki.history import WikiHistory
+    from server.wiki.registry import registry
 
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -1853,6 +1859,10 @@ async def test_interrupted_organization_recovers_owned_sections_and_restore_stat
             },
         )
     monkeypatch.setattr(WikiHistory, "status", real_status)
+    # Simulate the new service generation that owns startup recovery. Ordinary
+    # reads and locks in the old generation do not replay prepared effects.
+    registry.close()
+    registry.bind_health(ServiceHealth())
     recovered = (await client.get("/api/wiki/read?doc=笔记.md", headers=HEADERS)).json()
     assert recovered["metadata"]["author"] == "Weber 整理"
     assert recovered["stale"] is False
@@ -2100,8 +2110,7 @@ async def test_note_move_preserves_identity_ownership_and_source_relations(
         )
         (vault / "Library/b.md").write_bytes((vault / "Library/a.md").read_bytes())
         (vault / "Library/a.md").unlink()
-        with history.locked():
-            pass
+        history.recover()
     moved = (
         await client.get("/api/wiki/read", params={"doc": first["id"]}, headers=HEADERS)
     ).json()

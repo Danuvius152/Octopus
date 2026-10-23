@@ -600,7 +600,7 @@ def test_receipt_recovery_rejects_non_file_temporary_without_deleting_evidence(t
     assert target.stat().st_ino == inode and not source.exists() and not receipt.exists()
 
 
-def test_retirement_receipt_binding_is_required_before_any_further_deletion(tmp_path):
+async def test_retirement_receipt_binding_is_required_before_any_further_deletion(tmp_path, monkeypatch):
     config, configuration, environment = _process_installation(tmp_path)
     interrupted = _child(_INTERRUPTED_BOOTSTRAP, configuration, environment, "first_unlink", "crash")
     assert interrupted.returncode == 71, interrupted.stderr
@@ -609,16 +609,32 @@ def test_retirement_receipt_binding_is_required_before_any_further_deletion(tmp_
     receipt = source.parent / ".memory-retirement.json"
     record = json.loads(receipt.read_text())
     observation = tmp_path / "admitted.json"
-    # Every refusal proves no effects, so the six bindings share one interrupted
-    # installation. Each admission check still runs in a fresh startup process.
-    for binding in ("owner", "agent_id", "source", "target", "version", "tree"):
-        changed = record | {binding: {} if binding == "tree" else "changed"}
-        receipt.write_text(json.dumps(changed))
-        before = _files(source), _files(target), receipt.read_bytes()
-        restarted = _child(_STARTUP, configuration, environment, observation)
-        assert restarted.returncode != 0 and "MemoryHandoffConflict" in restarted.stderr, (binding, restarted.stderr)
-        assert not observation.exists(), binding
-        assert (_files(source), _files(target), receipt.read_bytes()) == before, binding
+    monkeypatch.setattr(settings, "agents_dir", config.agents_dir)
+    monkeypatch.setattr(settings, "users_root", config.users_root)
+    database = Database(config.db_path)
+    await database.initialize()
+    try:
+        assert (await database.get_agent(record["agent_id"]))["user_id"] == record["owner"]
+        # The real crash supplies the receipt and committed ownership. Check
+        # every binding through the handoff boundary without six app imports.
+        async with database._bootstrap_lock:
+            for binding in ("owner", "agent_id", "source", "target", "version", "tree"):
+                changed = record | {binding: {} if binding == "tree" else "changed"}
+                receipt.write_text(json.dumps(changed))
+                before = _files(source), _files(target), receipt.read_bytes()
+                with pytest.raises(MemoryHandoffConflict, match="evidence needs verification"):
+                    await handoff_agent_memory(database, user_id=record["owner"])
+                assert (_files(source), _files(target), receipt.read_bytes()) == before, binding
+    finally:
+        await database.close()
+    # The public startup must propagate that same conflict and keep admission
+    # closed. The six field checks above share this exception-to-admission path.
+    receipt.write_text(json.dumps(record | {"owner": "changed"}))
+    before = _files(source), _files(target), receipt.read_bytes()
+    restarted = _child(_STARTUP, configuration, environment, observation)
+    assert restarted.returncode != 0 and "MemoryHandoffConflict" in restarted.stderr, restarted.stderr
+    assert not observation.exists()
+    assert (_files(source), _files(target), receipt.read_bytes()) == before
 
 
 def test_authenticated_wiki_resume_after_memory_unlink_crash_preserves_original_history_and_journal(tmp_path):

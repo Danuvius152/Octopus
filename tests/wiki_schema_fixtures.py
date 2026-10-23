@@ -6,6 +6,8 @@ def remove_future_job_events(db):
 
     job_events.require(db)
     recovery_state.require(db)
+    assert db.execute("SELECT count(*) FROM wiki_job_controls").fetchone()[0] == 0
+    db.execute("DROP TABLE wiki_job_controls")
     for table in recovery_state.TABLES:
         assert db.execute("SELECT count(*) FROM " + table).fetchone()[0] == 0
     for trigger in recovery_state.TRIGGERS:
@@ -21,7 +23,10 @@ def remove_future_job_events(db):
     for table in reversed(job_events.TABLES):
         db.execute("DROP TABLE " + table)
     db.execute("DELETE FROM wiki_protocols WHERE name='wiki_job_events'")
-    db.execute("DELETE FROM wiki_schema WHERE version=11")
+    db.execute("DELETE FROM wiki_schema WHERE version>=11")
+    if db.execute("SELECT 1 FROM sqlite_master WHERE name='jobs'").fetchone():
+        assert all(row[0] == '{}' for row in db.execute("SELECT attempt_errors FROM jobs"))
+        db.execute("ALTER TABLE jobs DROP COLUMN attempt_errors")
 
 
 def remove_future_selections(db):

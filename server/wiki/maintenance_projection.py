@@ -140,6 +140,8 @@ class Batch:
         result = []
         for item in ordered:
             job = self.jobs[item["job_id"]]
+            if item["status"] == "excluded":
+                continue
             code = None
             if item["recording_failure"]:
                 code = "recording_unconfirmed"

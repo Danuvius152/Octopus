@@ -100,6 +100,12 @@ class AssetCurator:
     async def _await_backend_retirement(self, session):
         pass
 
+    async def close_work(self, work_id):
+        return await wiki_api.session_manager.close_work(work_id)
+
+    async def finish_work_cancellation(self, affected):
+        await wiki_api.session_manager.finish_work_cancellation(affected)
+
     async def _events(self, session_id, prompt, **kwargs):
         session = next(session for session in self.sessions if session.id == session_id)
         assert kwargs["wiki_mode"] == "maintain"

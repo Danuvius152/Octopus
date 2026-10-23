@@ -227,7 +227,7 @@ async def test_framework_ingest_cancellation_settles_without_preparing_or_regene
         release.set()
         await running
         if restart:
-            assert jobs.get(job["id"])["settlement_phase"] == "unconfirmed"
+            assert jobs.get(job["id"])["settlement_phase"] == "attention"
             monkeypatch.setattr(jobs.store, "require_indexed", indexed)
             registry.close()
             jobs = WikiJobs(None)
@@ -235,7 +235,7 @@ async def test_framework_ingest_cancellation_settles_without_preparing_or_regene
         current = jobs.get(job["id"])
         assert current["settlement_phase"] == "confirmed", current
         assert current["receipts"] == original["receipts"]
-        assert not any(item.get("worker_request") for item in current["items"])
+        assert all(item["worker_request"]["disposition"] == "not_admitted" for item in current["items"])
         assert current["items"][0]["index_complete"] is True
         assert current["items"][0].get("retry_count", 0) == 0
         assert jobs.store.path("Library/ingested.md").read_text() == raw
@@ -286,9 +286,13 @@ async def test_cancellation_checks_original_effects_before_confirmation(jobs, di
         db.execute("UPDATE job_publications SET indexed=0 WHERE job_id=?", (job["id"],))
     original = jobs.get(job["id"])
     raw = target.read_bytes()
+    # This fixture represents the startup boundary after its previous writers
+    # have been retired. A missing runtime object alone supplies no proof.
+    jobs.recover_jobs(previous_writers_retired=True)
     await jobs.cancel(job["id"], disk_manager)
+    await jobs.settle_cancelled(job["id"], disk_manager)
     current = jobs.get(job["id"])
-    assert current["settlement_phase"] == ("confirmed" if window == "applied" else "unconfirmed")
+    assert current["settlement_phase"] == ("confirmed" if window == "applied" else "attention")
     # The status is joined from the recovered change, not a receipt column.
     assert [{key: value for key, value in receipt.items() if key != "status"} for receipt in current["receipts"]] == [
         {key: value for key, value in receipt.items() if key != "status"} for receipt in original["receipts"]]

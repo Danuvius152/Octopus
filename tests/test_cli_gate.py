@@ -15,6 +15,7 @@ the same silent-failure mode as a wrong gate: a `*_real.py` file that forgets
 until CI-less local runs start making network calls.
 """
 
+import ast
 import pathlib
 import re
 import subprocess
@@ -68,6 +69,133 @@ def test_two_timeouts_raise_instead_of_skipping(monkeypatch):
     monkeypatch.setattr(subprocess, "run", always_timeout)
     with pytest.raises(CliProbeTimeout, match="NOT a lapsed login"):
         _probe(["whatever"], timeout=1)
+
+
+@pytest.fixture
+def codex_probe(tmp_path, monkeypatch):
+    from tests import cli_gate
+
+    home = tmp_path / "provider"
+    home.mkdir()
+    (home / "auth.json").write_text('{"test_credential": "first"}')
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setattr(cli_gate, "_resolve_cli", lambda _: "/test/bin/codex")
+    monkeypatch.setattr(cli_gate, "_codex_probe_results", {}, raising=False)
+    calls, answers = [], []
+
+    def answer(argv, **kwargs):
+        probe_home = pathlib.Path(kwargs["env"]["CODEX_HOME"])
+        calls.append({
+            "home": probe_home, "auth": (probe_home / "auth.json").resolve(),
+            "config": (probe_home / "config.toml").resolve() if (probe_home / "config.toml").exists() else None,
+            "timeout": kwargs["timeout"], "argv": argv,
+        })
+        response = answers.pop(0) if answers else 0
+        if response == "timeout":
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        return subprocess.CompletedProcess(argv, response)
+
+    monkeypatch.setattr(subprocess, "run", answer)
+    return home, calls, answers
+
+
+@pytest.mark.parametrize("configured", [False, True])
+def test_codex_gate_reuses_the_same_credentials_without_writing_provider_output(codex_probe, configured):
+    from tests import cli_gate
+
+    home, calls, _ = codex_probe
+    if configured:
+        (home / "config.toml").write_text('model_reasoning_effort = "low"\n')
+    alias = home.parent / "credential-alias"
+    alias.mkdir()
+    for name in ("auth.json", "config.toml"):
+        if (home / name).exists():
+            (alias / name).symlink_to(home / name)
+    assert cli_gate.codex_cli_works()
+    assert cli_gate.codex_home_works(alias)
+    assert cli_gate.codex_cli_works()
+    assert len(calls) == 1
+    assert calls[0]["home"] not in {home, alias}
+    assert calls[0]["auth"] == home / "auth.json"
+    assert calls[0]["config"] == (home / "config.toml" if configured else None)
+    assert not calls[0]["home"].exists()
+    assert 'model_reasoning_effort="low"' in calls[0]["argv"]
+    assert set(path.name for path in home.iterdir()) == ({"auth.json", "config.toml"} if configured else {"auth.json"})
+
+
+def test_codex_gate_keeps_different_credential_results_separate(codex_probe):
+    from tests import cli_gate
+
+    home, calls, answers = codex_probe
+    other = home.parent / "other"
+    other.mkdir()
+    (other / "auth.json").write_text('{"test_credential": "second"}')
+    answers.extend([0, 1])
+    assert cli_gate.codex_cli_works()
+    assert not cli_gate.codex_home_works(other)
+    assert not cli_gate.codex_home_works(other)
+    assert cli_gate.codex_cli_works()
+    assert [call["auth"] for call in calls] == [home / "auth.json", other / "auth.json"]
+
+
+@pytest.mark.parametrize("changed", ["auth.json", "config.toml", "executable"])
+def test_codex_gate_rechecks_changed_credentials_or_configuration(codex_probe, monkeypatch, changed):
+    from tests import cli_gate
+
+    home, calls, answers = codex_probe
+    answers.extend([0, 1])
+    assert cli_gate.codex_cli_works()
+    if changed == "executable":
+        monkeypatch.setattr(cli_gate, "_resolve_cli", lambda _: "/test/bin/new-codex")
+    else:
+        (home / changed).write_text("changed test input")
+    assert not cli_gate.codex_cli_works()
+    assert len(calls) == 2
+
+
+def test_codex_gate_propagates_timeouts_and_allows_a_later_probe(codex_probe):
+    from tests import cli_gate
+
+    _, calls, answers = codex_probe
+    answers.extend(["timeout", "timeout", 0])
+    with pytest.raises(CliProbeTimeout):
+        cli_gate.codex_cli_works()
+    assert cli_gate.codex_cli_works()
+    assert [call["timeout"] for call in calls] == [90, 180, 90]
+    assert all(not call["home"].exists() for call in calls)
+
+
+@pytest.mark.parametrize("timed_out", [False, True])
+def test_research_credential_discovery_uses_the_shared_gate(tmp_path, monkeypatch, timed_out):
+    from server.config import settings
+    from tests import test_research_real as research
+
+    for name in ("first", "second"):
+        home = tmp_path / name
+        home.mkdir()
+        (home / "auth.json").write_text('{"test_credential": "configured"}')
+    monkeypatch.setattr(settings, "codex_home_dir", str(tmp_path))
+    calls = []
+
+    def probe(home):
+        calls.append(pathlib.Path(home).name)
+        if timed_out:
+            raise CliProbeTimeout("could not verify login")
+        return pathlib.Path(home).name == "second"
+
+    monkeypatch.setattr(research, "codex_home_works", probe, raising=False)
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 1))
+    research._usable_codex_credential.cache_clear()
+    try:
+        if timed_out:
+            with pytest.raises(CliProbeTimeout):
+                research._usable_codex_credential()
+            assert calls == ["first"]
+        else:
+            assert research._usable_codex_credential() == "second"
+            assert calls == ["first", "second"]
+    finally:
+        research._usable_codex_credential.cache_clear()
 
 
 @pytest.mark.parametrize("markers,expected", [
@@ -144,11 +272,30 @@ def test_real_suite_does_not_probe_at_import(path):
     the old pattern coming back.
     """
     src = path.read_text()
-    offenders = [
-        line.strip()
-        for line in src.splitlines()
-        if re.search(r"\b(claude|codex)_cli_works\s*\(", line)
-    ]
+    gates = {"claude_cli_works", "codex_cli_works", "codex_home_works"}
+    offenders = []
+
+    class CallsAtImport(ast.NodeVisitor):
+        def visit_FunctionDef(self, node):
+            # Defaults and decorators run at import; fixture bodies do not.
+            for expression in [*node.decorator_list, *node.args.defaults, *node.args.kw_defaults]:
+                if expression is not None:
+                    self.visit(expression)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_Lambda(self, node):
+            for expression in [*node.args.defaults, *node.args.kw_defaults]:
+                if expression is not None:
+                    self.visit(expression)
+
+        def visit_Call(self, node):
+            if ((isinstance(node.func, ast.Name) and node.func.id in gates)
+                    or (isinstance(node.func, ast.Attribute) and node.func.attr in gates)):
+                offenders.append(ast.unparse(node))
+            self.generic_visit(node)
+
+    CallsAtImport().visit(ast.parse(src))
     assert not offenders, (
         f"{path.name} evaluates a gate probe at import; use a marker instead: "
         f"{offenders}"

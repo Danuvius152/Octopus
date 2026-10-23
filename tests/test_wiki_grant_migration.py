@@ -42,6 +42,7 @@ async def test_readmission_retains_original_recording_reference_for_its_document
                     [tuple(row) for row in db.execute("SELECT * FROM wiki_grant_documents WHERE job_id=? ORDER BY doc_id", (job["id"],))])
 
     original_scope = scope_facts(jobs.store)
+    jobs.recover_jobs(previous_writers_retired=True)
     registry.configure(None, root, "replacement-curator")
     refused = await client.post(f"/api/wiki/jobs/{job['id']}/retry", headers=wiki_api.HEADERS)
     assert refused.status_code == 409
@@ -50,7 +51,8 @@ async def test_readmission_retains_original_recording_reference_for_its_document
     assert accepted.status_code == 200, accepted.text
     current = WikiJobs(None)
     by_path = {item["path"]: item for item in accepted.json()["items"]}
-    assert by_path[first["path"]]["recording_failure"] == reference
+    assert by_path[first["path"]]["legacy_evidence"]["recording_failure"] == reference
+    assert by_path[first["path"]]["worker_request"]["retired"] is True
     assert by_path[first["path"]]["revision"] == observed["revision"] != first["revision"]
     assert "recording_failure" not in by_path["Library/b.md"]
     assert {item["doc"] for item in by_path.values()} == {item["doc"] for item in items}
@@ -97,7 +99,7 @@ async def test_v9_exact_queued_work_gains_no_new_page_rights_and_keeps_original_
     jobs = WikiJobs(None)
     migrated = jobs.get("old-job")
     assert migrated["status"] == "queued"
-    assert migrated["items"] == items
+    assert migrated["items"] == [item | {"version": 1} for item in items]
     assert migrated["grant"]["registration_generation"] == config["registration_generation"]
     assert migrated["grant"]["allowed_new_paths"] == []
     assert [item["doc_id"] for item in migrated["grant"]["selected_documents"]] == [document["id"]]

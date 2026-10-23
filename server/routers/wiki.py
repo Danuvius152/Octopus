@@ -19,6 +19,8 @@ from ..wiki.contracts import (
     GrantReadmissionRequest,
     GuideModule,
     JobControlRequest,
+    JobDetail,
+    JobOutputPage,
     MaintenanceSelectionRequest,
     ReadBatch,
     ReadView,
@@ -90,13 +92,17 @@ async def app_wiki(request: Request, app_id: str, operation: str):
         parts = operation.split("/")
         if len(parts) == 2 and request.method == "GET":
             handlers[("GET", operation)] = (get_job, None)
+        elif len(parts) == 3 and parts[2] == "details" and request.method == "GET":
+            handlers[("GET", operation)] = (job_details, None)
+        elif len(parts) == 4 and parts[2] == "outputs" and request.method == "GET":
+            handlers[("GET", operation)] = (job_output, None)
         elif (
             len(parts) == 3
             and request.method == "POST"
-            and parts[2] in {"cancel", "retry"}
+            and parts[2] in {"cancel", "retry", "verify"}
         ):
             handlers[("POST", operation)] = (
-                cancel_job if parts[2] == "cancel" else retry_job,
+                {"cancel": cancel_job, "retry": retry_job, "verify": verify_job}[parts[2]],
                 JobControlRequest,
             )
     handler = handlers.get((request.method, operation))
@@ -112,6 +118,8 @@ async def app_wiki(request: Request, app_id: str, operation: str):
         kwargs |= query
         if operation.startswith("jobs/"):
             kwargs["job_id"] = operation.split("/")[1]
+            if len(operation.split("/")) == 4:
+                kwargs["receipt_id"] = operation.split("/")[3]
         elif operation.startswith("maintenance-selections/"):
             kwargs["selection_id"] = operation.split("/")[1]
         if operation == "revise":
@@ -984,6 +992,32 @@ def get_job(
     return result
 
 
+@router.get("/jobs/{job_id}/details", response_model=JobDetail)
+def job_details(
+    job_id: str, request: Request, attempt: int | None = Query(None, ge=0),
+    offset: int = Query(0, ge=0), limit: int = Query(30, ge=1, le=100),
+    user_id: ScopeUser = None, _: str = Depends(verify_token),
+):
+    access(request)
+    from ..wiki.job_details import detail
+
+    return detail(WikiJobs(user_id), job_id, attempt=attempt, offset=offset, limit=limit)
+
+
+@router.get("/jobs/{job_id}/outputs/{receipt_id}", response_model=JobOutputPage)
+def job_output(
+    job_id: str, receipt_id: str, request: Request, attempt: int = Query(ge=0),
+    view: Literal["history", "current"] = "history", start: int = Query(0, ge=0),
+    length: int = Query(16000, ge=1, le=24000), expected_revision: str | None = None,
+    user_id: ScopeUser = None, _: str = Depends(verify_token),
+):
+    access(request)
+    from ..wiki.job_details import output_page
+
+    return output_page(WikiJobs(user_id), job_id, receipt_id, attempt=attempt, view=view,
+                       start=start, length=length, expected_revision=expected_revision)
+
+
 @router.post("/jobs/{job_id}/cancel")
 async def cancel_job(
     job_id: str,
@@ -1021,6 +1055,21 @@ def control_result(result):
     return {key: result[key] for key in ("id", "status", "state_version", "attempt", "settlement_phase", "progress")}
 
 
+@router.post("/jobs/{job_id}/verify")
+async def verify_job(
+    job_id: str, request: Request, body: JobControlRequest,
+    user_id: ScopeUser = None, _: str = Depends(verify_token),
+):
+    task = access(request, write=True)
+    if task and task.job_id and task.job_id != job_id:
+        raise WikiError("A worker can control only its original assigned job", 403)
+    import anyio
+
+    jobs = await anyio.to_thread.run_sync(lambda: WikiJobs(user_id))
+    result = await jobs.verify(job_id, worker.manager, **body.model_dump())
+    return control_result(result) if task is not None else result
+
+
 @router.post("/jobs/{job_id}/readmit")
 def readmit_job(
     job_id: str,
@@ -1030,4 +1079,6 @@ def readmit_job(
     _: str = Depends(verify_token),
 ):
     access(request, human_only=True)
-    return WikiJobs(user_id).readmit(job_id, body.paths, body.creation.model_dump() if body.creation else None)
+    return WikiJobs(user_id).readmit(job_id, body.paths, body.creation.model_dump() if body.creation else None,
+                                    expected_attempt=body.expected_attempt, expected_vault_id=body.expected_vault_id,
+                                    operation_id=body.operation_id)

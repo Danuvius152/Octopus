@@ -291,8 +291,7 @@ def test_restore_copy_recovers_its_own_identity_without_revoking_the_moved_sourc
             patch.setattr(history.store, "_index", reindex)
         with pytest.raises(RuntimeError, match="restore-copy interruption"):
             history.restore(change["change_id"], None, "after", "human")
-    with history.locked():
-        pass
+    history.recover()
     history.store.refresh()
     if window == "prepared":
         assert not history.store.path(original["path"]).exists()

@@ -40,6 +40,7 @@ class Construction:
     finished: threading.Event = field(default_factory=threading.Event)
     cleanup_gate: Any = field(default_factory=threading.Lock)
     candidate: WikiStore | None = None
+    failure: BaseException | None = None
 
 
 @dataclass(eq=False)
@@ -76,6 +77,10 @@ class WikiRegistry:
         self._close_gate = threading.Lock()
         self._drain_locks: dict[str | None, Any] = {}
         self._recoveries = None
+        # One startup recovery result per vault in this service generation.
+        # A failed pipeline remains closed for explicit owner recovery.
+        self._recovery_results: dict[tuple[str, str], BaseException | None] = {}
+        self._previous_writers_retired = False
 
     def bind_health(self, health: ServiceHealth) -> None:
         """A new service generation may bind only after every old owner exits."""
@@ -94,6 +99,8 @@ class WikiRegistry:
                 self.health = health
                 # A retained manager keeps its old health and its closed gates.
                 self._recoveries = None
+                self._recovery_results.clear()
+                self._previous_writers_retired = False
         finally:
             self._close_gate.release()
 
@@ -350,6 +357,7 @@ class WikiRegistry:
                 if receipt is None or receipt["phase"] != "complete" or not receipt["completion_receipt"]:
                     raise WikiError("Filesystem recovery handoff is not durably complete", 503)
             key = self._key(user_id, self.state(user_id).resolve(), config)
+            self._recovery_results[(str(store.state.resolve()), store.vault_id)] = None
             self._stores[key] = store
             store._recovery = None
             self._advance(user_id)
@@ -401,10 +409,22 @@ class WikiRegistry:
                 if existing is not None and not existing._retired:
                     self._stores.move_to_end(key)
                     return existing
+                failure = self._recovery_results.get((str(state), config["vault_id"]))
+                if failure is not None:
+                    raise WikiError(f"Wiki recovery failed; durable evidence retained: {failure}", 503) from failure
                 if outer_account or outer_history:
                     raise WikiError("Prepare the current Wiki Store before entering locked work", 503)
-                permit = Construction(user_id, state, config, self._owner_epochs.get(user_id, 0), self._incarnation, capability)
-                self._constructing[permit] = None
+                waiting = next((entry for entry in self._constructing if entry.owner == user_id
+                                and entry.state == state and entry.config.get("vault_id") == config["vault_id"]), None)
+                if waiting is None:
+                    permit = Construction(user_id, state, config, self._owner_epochs.get(user_id, 0), self._incarnation, capability)
+                    self._constructing[permit] = None
+        if waiting is not None:
+            if not waiting.finished.wait(30):
+                raise WikiError("Wiki recovery is still running; ordinary access remains closed", 503)
+            if waiting.failure is not None and not waiting.revoked and waiting.config == config:
+                raise WikiError(f"Wiki recovery failed; durable evidence retained: {waiting.failure}", 503) from waiting.failure
+            return self._store(user_id, capability)
         candidate = None
         retire = []
         try:
@@ -432,16 +452,15 @@ class WikiRegistry:
                 # rechecks the permit and config after construction completes.
                 store.registration_generation = config["registration_generation"]
 
-            candidate = WikiStore(Path(config["root"]), state, config["vault_id"], on_construct=acquired, health=self.health)
+            candidate = WikiStore(Path(config["root"]), state, config["vault_id"], on_construct=acquired,
+                                  health=self.health, defer_recovery=True)
             with candidate.connect() as db:
                 protocols.require(db, "registration")
                 db.execute("INSERT OR IGNORE INTO wiki_protocols VALUES('registration_config',1)")
                 protocols.require(db, "registration_config")
+            self._prepare_store(candidate, permit)
             with account, self.registration_lock(user_id), self._lock:
-                if (permit.revoked or permit.owner_epoch != self._owner_epochs.get(user_id, 0)
-                        or permit.incarnation != self._incarnation or not self._allowed(user_id, capability)
-                        or self.config(user_id) != config):
-                    raise WikiError("Wiki construction or registration changed before publication", 503)
+                self._require_construction(permit)
                 winner = self._stores.get(key)
                 if winner is None or winner._retired:
                     if winner is not None:
@@ -464,11 +483,55 @@ class WikiRegistry:
             for old in retire:
                 old.retire()
             return winner
+        except BaseException as error:
+            permit.failure = error
+            raise
         finally:
             try:
                 self._dispose(permit)
             finally:
                 permit.finished.set()
+
+    def _require_construction(self, permit):
+        if (permit.revoked or permit.owner_epoch != self._owner_epochs.get(permit.owner, 0)
+                or permit.incarnation != self._incarnation or not self._allowed(permit.owner, permit.migration)
+                or self.config(permit.owner) != permit.config):
+            raise WikiError("Wiki construction or registration changed before admission", 503)
+
+    def _prepare_store(self, candidate, permit):
+        """Recover only the captured candidate; never borrow our unpublished Store."""
+        from .history import WikiHistory
+        from .jobs import WikiJobs
+
+        user_id, config = permit.owner, permit.config
+        with self._account_lock(user_id), self.registration_lock(user_id), self._lock:
+            self._require_construction(permit)
+        key = (str(candidate.state.resolve()), config["vault_id"])
+        if key in self._recovery_results:
+            if error := self._recovery_results[key]:
+                raise WikiError(f"Wiki recovery failed; durable evidence retained: {error}", 503) from error
+            with candidate.connect() as db:
+                checked = db.execute("SELECT checked_at FROM index_state WHERE singleton=1").fetchone()[0]
+            if checked is None:
+                candidate.refresh()
+            return
+        try:
+            WikiHistory(candidate).recover()
+            candidate.refresh()
+        except BaseException as error:
+            self._recovery_results[key] = error
+            raise
+        # Registration may change while history or indexing is running. Only a
+        # still-valid permit may classify jobs or stamp old-writer retirement.
+        with WikiHistory(candidate).locked(shared=True), self._account_lock(user_id), self.registration_lock(user_id), self._lock:
+            self._require_construction(permit)
+            try:
+                jobs = WikiJobs(user_id, store=candidate, registration=config)
+                jobs.recover_jobs(previous_writers_retired=self._previous_writers_retired)
+            except BaseException as error:
+                self._recovery_results[key] = error
+                raise
+            self._recovery_results[key] = None
 
     def _dispose(self, permit):
         with permit.cleanup_gate:
@@ -565,7 +628,7 @@ class WikiRegistry:
             self._incarnation += 1
             self._stopped = False
 
-    async def reconcile(self) -> list[dict]:
+    async def reconcile(self, *, initial=False) -> list[dict]:
         """Startup/periodic compensation; never called by an ordinary query."""
         def run():
             states = self.states()
@@ -575,7 +638,8 @@ class WikiRegistry:
                     continue
                 try:
                     store = self.store(user_id)
-                    store.refresh()
+                    if not initial:
+                        store.refresh()
                     results.append({"user_id": user_id, **store.index_state()})
                 except Exception:
                     logger.exception("Wiki reconciliation failed for account=%s", user_id)
@@ -583,16 +647,17 @@ class WikiRegistry:
 
         return await complete_cleanup(asyncio.to_thread(run))
 
-    async def start(self, *, paused: bool = False) -> None:
+    async def start(self, *, paused: bool = False, previous_writers_retired: bool = False) -> None:
         with self._lock:
             self._check_reopen()
             if self._task is not None:
                 return
             self.resume_access()
+            self._previous_writers_retired = previous_writers_retired
             starting = self._starting = object()
             incarnation = self._incarnation
         try:
-            await self.reconcile()
+            await self.reconcile(initial=True)
             with self._lock:
                 if self._incarnation != incarnation or self._stopped or self._closing:
                     raise WikiError("Wiki startup was revoked before publication", 503)

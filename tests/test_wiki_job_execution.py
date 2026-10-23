@@ -8,7 +8,7 @@ from server.database import Database
 from server.mcp_identity import work_is_open
 from server.models import TurnOutcome
 from server.wiki import job_execution
-from server.wiki.jobs import WikiWorker
+from server.wiki.jobs import JobOwner, WikiWorker
 from server.wiki.store import WikiError
 from server.wiki.tasks import tasks
 from tests import test_wiki_api as wiki_api
@@ -107,7 +107,7 @@ async def test_exact_request_is_committed_before_model_admission_and_matches_ass
 async def test_prepared_commit_without_terminal_never_readmits_or_resets_budget(jobs, disk_manager):
     job, reference = prepare(jobs, enqueue(jobs))
     before = jobs.store.path(job["items"][0]["path"]).read_bytes()
-    jobs.recover_jobs()
+    jobs.recover_jobs(previous_writers_retired=True)
     assert jobs.next_queued() == job["id"]
     worker = WikiWorker()
     worker.manager = disk_manager
@@ -116,7 +116,7 @@ async def test_prepared_commit_without_terminal_never_readmits_or_resets_budget(
     item = attention["items"][0]
     assert attention["attempt"] == reference["attempt"]
     assert attention["status"] == "completed_with_attention"
-    assert item["recording_failure"]["request_id"] == reference["request_id"]
+    assert item["worker_request"]["request_id"] == reference["request_id"]
     assert item.get("retry_count", 0) == 0
     assert disk_manager.turns == disk_manager.sessions == 0
     assert jobs.store.path(item["path"]).read_bytes() == before
@@ -139,7 +139,7 @@ async def test_committed_original_terminal_and_publication_resume_without_new_re
     await disk_manager.db.close()
     disk_manager.db = Database(path)
     await disk_manager.db.initialize()
-    jobs.recover_jobs()
+    jobs.recover_jobs(previous_writers_retired=True)
     assert jobs.next_queued() == job["id"]
     worker = WikiWorker()
     worker.manager = disk_manager
@@ -157,7 +157,8 @@ async def test_mismatched_original_terminal_is_not_proof(jobs, disk_manager):
     job, reference = prepare(jobs, enqueue(jobs))
     await record_terminal(disk_manager.db, content_id="another-request")
     await jobs.cancel(job["id"], disk_manager)
-    assert jobs.get(job["id"])["settlement_phase"] == "unconfirmed"
+    await jobs.settle_cancelled(job["id"], disk_manager)
+    assert jobs.get(job["id"])["settlement_phase"] == "attention"
     with pytest.raises(WikiError, match="Confirm the original cancellation"):
         jobs.retry(job["id"])
     with pytest.raises(WikiError, match="Confirm the original cancellation"):
@@ -170,13 +171,15 @@ async def test_accepted_original_is_not_settled_while_writer_is_owned(jobs, disk
     job_execution.transition(jobs, job["id"], reference, "accepted", disposition="accepted")
     await record_terminal(disk_manager.db)
     key = (str(jobs.store.state.resolve()), job["id"])
-    owner = object()
+    owner = JobOwner(entered_attempt=job["attempt"])
     WikiWorker.executing[key] = owner
     try:
         await jobs.cancel(job["id"], disk_manager)
         assert jobs.get(job["id"])["settlement_phase"] == "pending"
     finally:
         assert WikiWorker.executing.pop(key) is owner
+        job_execution.transition(jobs, job["id"], reference, reference["phase"], retired=True)
+        owner.retired.set()
     await jobs.settle_cancelled(job["id"], disk_manager)
     assert jobs.get(job["id"])["settlement_phase"] == "confirmed"
 
@@ -203,7 +206,7 @@ async def test_cancel_before_admission_closes_exact_work_and_rejection_keeps_ori
 
 async def test_late_old_attempt_cannot_overwrite_a_new_claim(jobs):
     job, reference = prepare(jobs, enqueue(jobs))
-    job_execution.transition(jobs, job["id"], reference, "settled", recording_state="committed")
+    job_execution.transition(jobs, job["id"], reference, "settled", recording_state="committed", retired=True)
     jobs.update(job["id"], status="failed", session_id=None)
     jobs.retry(job["id"])
     assert jobs.next_queued() == job["id"]
@@ -298,7 +301,7 @@ async def test_cancel_during_session_creation_is_confirmed_only_after_live_worke
         current = jobs.get(job["id"])
         assert current["settlement_phase"] == "confirmed"
         assert current["attempt"] == 1
-        assert "worker_request" not in current["items"][0]
+        assert current["items"][0]["worker_request"]["disposition"] == "not_admitted"
         assert manager.turns == 0
     finally:
         release.set()

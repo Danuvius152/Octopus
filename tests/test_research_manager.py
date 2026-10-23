@@ -53,6 +53,38 @@ async def _session(mgr, db, *, backend="claude-code"):
     return await mgr.create_session(agent["id"], "S", "/tmp", backend=backend)
 
 
+async def test_closed_work_cancellation_joins_research_cleanup(rm, mgr, db, monkeypatch):
+    from server.mcp_identity import close_work
+
+    started, cleaning, release = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def blocked_pipeline(*args, **kwargs):
+        started.set()
+        try:
+            await asyncio.Future()
+        finally:
+            cleaning.set()
+            await release.wait()
+
+    monkeypatch.setattr(rm_mod, "run_research", blocked_pipeline)
+    session = await _session(mgr, db)
+    job = await rm.start(session.id, "Retire this research")
+    await asyncio.wait_for(started.wait(), 3)
+    work_id = rm._contexts[job["id"]].return_binding.work_id
+    close_work(work_id)
+    stopping = asyncio.create_task(rm.cancel_work(work_id))
+    try:
+        await asyncio.wait_for(cleaning.wait(), 3)
+        assert not stopping.done(), "Cancellation acknowledgement must wait for tool cleanup"
+        release.set()
+        await stopping
+        assert (await db.get_research_job(job["id"]))["status"] == "cancelled"
+    finally:
+        release.set()
+        await asyncio.gather(stopping, return_exceptions=True)
+        await rm.shutdown()
+
+
 def _fake_report(question="q"):
     return ResearchReport(
         question=question, report="# Final report\nThe answer [http://a].",
@@ -357,7 +389,7 @@ async def test_research_shutdown_reports_selected_result_recording_failure(
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cancel_before_shutdown", [False, True])
 async def test_research_shutdown_reports_web_cli_retirement_failure(
-    rm, mgr, db, monkeypatch, tmp_path, cancel_before_shutdown
+    rm, mgr, db, monkeypatch, tmp_path, cancel_before_shutdown, short_process_shutdown
 ):
     pid_file = _blocking_research_cli(monkeypatch, tmp_path, stage="web")
     session = await _session(mgr, db)

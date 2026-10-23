@@ -74,7 +74,7 @@ async def test_idle_native_parent_retires_original_process_and_delivers_its_endi
 
 
 @pytest.fixture
-async def native_runtime(tmp_path, monkeypatch):
+async def native_runtime(tmp_path, monkeypatch, short_process_shutdown):
     database = Database(str(tmp_path / "native.db"))
     await database.initialize()
     manager = SessionManager()
@@ -266,7 +266,7 @@ async def test_parent_retirement_preserves_a_confirmed_helper_outcome(native_run
     assert not any(event.get("type") == "subagent" and event.get("status") == "interrupted" for event in events)
 
 
-async def test_idle_recovery_keeps_ended_helper_separate_from_the_new_attempt(native_runtime, monkeypatch, short_process_shutdown):
+async def test_idle_recovery_keeps_ended_helper_separate_from_the_new_attempt(native_runtime, monkeypatch):
     manager, session, client, events, _ = native_runtime
     starts = native_cli(monkeypatch, hold=True, recover_after_timeout=True)
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", 1)

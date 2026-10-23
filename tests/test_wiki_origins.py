@@ -99,8 +99,7 @@ def test_crash_windows_recover_file_and_origin_as_one_change(history, monkeypatc
     monkeypatch.setattr(history_module, "atomic", atomic)
     monkeypatch.setattr(history, "status", status)
     monkeypatch.setattr(history.store, "_index", index)
-    with history.locked():
-        pass
+    history.recover()
     history.store.refresh()
     if window == "prepared":
         assert history.store.path("note.md").read_bytes() == raw
@@ -223,16 +222,17 @@ def test_trash_restore_cannot_take_an_identity_active_at_another_path(history):
     with pytest.raises(WikiError, match="Restored document identity changed"):
         history.recover()
     assert journal.exists()
-    # Ordinary reads retry recovery and must keep reporting the retained
-    # conflict. Inspect durable identities without bypassing that read guard.
-    with pytest.raises(WikiError, match="Restored document identity changed"):
-        history.store.read("elsewhere.md")
     with history.store.connect() as db:
         assert db.execute("SELECT id FROM document_identities WHERE path='elsewhere.md'").fetchone()[0] == doc["id"]
         assert db.execute("SELECT id FROM document_identities WHERE path='note.md'").fetchone()[0] != doc["id"]
     assert history.store.path("elsewhere.md").read_bytes() == raw
     assert history.store.path("note.md").read_bytes() == returned
     assert current_origin(history, doc["id"]) == state
+    # A new Store performs startup recovery before it can be exposed. Join the
+    # old observer first; the retained conflict must still block opening.
+    history.store.close()
+    with pytest.raises(WikiError, match="Restored document identity changed"):
+        WikiStore(history.store.root, history.store.state, history.store.vault_id)
 
 
 def test_external_capture_binds_unobserved_preimage_without_certifying_it(history):
@@ -257,6 +257,7 @@ def test_legacy_journal_of_unobserved_edit_and_move_preserves_invalid_payload(hi
         history.store.path("note.md").rename(history.store.path(destination))
         external_journal(history, {"version": 1, "before": before,
                                    "actor": "human", "reason": "legacy rename"})
+    history.recover()
     history.write("unrelated.md", b"New work.", None, "human", "create")
     current = current_origin(history, doc["id"])
     assert current["status"] == "invalid" and current["revision"] == revision(edited)
@@ -281,6 +282,7 @@ def test_unobserved_human_edit_then_move_recovers_without_blocking_other_writes(
                  "paths": ["note.md", destination], "actor": "human", "reason": "rename"}
         external_journal(history, entry)
         history.store.path("note.md").rename(history.store.path(destination))
+    history.recover()
     history.write("unrelated.md", b"An unrelated write remains possible.", None, "human", "create")
     with history.locked():
         history.finish_external(entry)
@@ -325,6 +327,7 @@ def test_unobserved_human_edit_then_trash_restore_retains_bytes_and_invalid_payl
                  "restored": restored, "trash_id": "saved"}
         external_journal(history, entry)
         (archive / "file").rename(history.store.path("note.md"))
+    history.recover()
     history.write("unrelated.md", b"Available after trash restore.", None, "human", "create")
     with history.locked():
         history.finish_external(entry)
@@ -382,9 +385,9 @@ def test_legacy_journal_upgrade_replays_stable_origin_and_change_identity(
         else:
             patch.setattr(type(journal), "unlink", crash_before_unlink)
         with pytest.raises(RuntimeError, match="legacy recovery crash"):
-            with history.locked():
-                pass
+            history.recover()
     assert json.loads(journal.read_text())["version"] == 2
+    history.recover()
     history.write("unrelated.md", b"Recovery no longer blocks writes.", None, "human", "create")
     with history.locked():
         history.recover()
@@ -419,6 +422,7 @@ def test_preexisting_partly_committed_legacy_journal_preserves_current_payload(
                 )
         external_journal(history, {"version": 1, "before": before,
                                    "actor": "human", "reason": "legacy rename"})
+    history.recover()
     history.write("unrelated.md", b"New work.", None, "human", "create")
     with history.locked():
         history.recover()
@@ -472,6 +476,7 @@ def test_legacy_deleted_path_reservation_cannot_replace_the_real_moved_identity(
         upgraded = WikiStore(root, state_dir, vault_id)
         active = WikiHistory(upgraded)
     try:
+        active.recover()
         active.write("unrelated.md", b"New work after legacy recovery.", None, "human", "create")
         with active.locked():
             active.recover()
@@ -523,10 +528,10 @@ def test_upgraded_legacy_journal_keeps_selected_identity_across_another_crash(
         else:
             interruption.setattr(history, "record", after_record)
         with pytest.raises(RuntimeError, match="crash after"):
-            with history.locked():
-                pass
+            history.recover()
     saved = json.loads(journal.read_text())
     assert saved["version"] == 2 and saved["before"]["note.md"]["document_id"] == doc["id"]
+    history.recover()
     history.write("unrelated.md", b"Recovery remains usable.", None, "human", "create")
     assert history.store.read(doc["metadata"]["uid"])["id"] == doc["id"]
     assert history.store.read(doc["id"])["path"] == destination
@@ -559,8 +564,7 @@ def test_legacy_reservation_recovery_requires_verified_ownership(
     journal = history.state / "external-change.json"
     saved = journal.read_bytes()
     with pytest.raises(WikiError, match="Ambiguous external move identity"):
-        with history.locked():
-            pass
+        history.recover()
     assert journal.read_bytes() == saved
     assert history.store.path(destination).read_bytes() == raw
     with history.store.connect() as db:
@@ -583,8 +587,7 @@ def test_legacy_move_does_not_merge_competing_real_identities_by_content(history
         entry = {"version": 1, "before": before, "actor": "human", "reason": "legacy rename"}
         journal = external_journal(history, entry)
     with pytest.raises(WikiError, match="Ambiguous external move identity") as error:
-        with history.locked():
-            pass
+        history.recover()
     assert error.value.status == 409
     assert json.loads(journal.read_text()) == entry
     assert history.store.path(destination).read_bytes() == raw
@@ -605,6 +608,7 @@ def test_legacy_move_preserves_verified_source_over_a_stale_target_binding(histo
         history.store.path("note.md").rename(history.store.path(destination))
         external_journal(history, {"version": 1, "before": before,
                                    "actor": "human", "reason": "legacy rename"})
+    history.recover()
     history.write("unrelated.md", b"New work.", None, "human", "create")
     assert history.store.read(doc["id"])["path"] == destination
     assert history.store.path(destination).read_bytes() == raw

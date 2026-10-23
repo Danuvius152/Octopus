@@ -42,6 +42,8 @@ export type SubagentRun = components["schemas"]["SubagentRun"];
 export type SubagentDefinition = components["schemas"]["SubagentDefinition"];
 export type RuntimeMetadata = components["schemas"]["RuntimeMetadata"];
 export type WikiJobCard = components["schemas"]["JobCard"];
+export type WikiJobDetail = components["schemas"]["JobDetail"];
+export type WikiJobOutput = components["schemas"]["JobOutputPage"];
 export type ToolReceipt = components["schemas"]["ToolReceipt"];
 export type MessageContent = components["schemas"]["MessageContent"];
 // A page of older transcript (polish-2026-09.md §4 B2).

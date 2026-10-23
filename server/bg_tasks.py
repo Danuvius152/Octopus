@@ -244,6 +244,7 @@ class _StartingTask:
     stop_reason: str | None = None
     running: _RunningTask | None = None
     owner: asyncio.Task[Any] | None = None
+    cleanup: asyncio.Task[None] | None = None
 
 
 class BgTaskManager:
@@ -496,6 +497,7 @@ class BgTaskManager:
                     )
                     self._starting.pop(task_id, None)
             cleanup = asyncio.create_task(reap_aborted_start(), name=f"bg-startup-cleanup-{task_id}")
+            reservation.cleanup = cleanup
             self._cleanup_tasks.add(cleanup)
             cleanup.add_done_callback(self._cleanup_done)
             raise
@@ -545,10 +547,28 @@ class BgTaskManager:
         running = [item for item in self._running.values() if item.record.work_id == work_id]
         for item in starting:
             item.stop_reason = item.stop_reason or "work_cancelled"
-            if item.running is not None:
-                running.append(item.running)
-        for task in running:
-            await self._terminate_proc(task, reason="work_cancelled")
+        owners = {item.owner for item in starting if item.owner is not None}
+        # A cancelled request may have handed its not-yet-returned process to
+        # compensating cleanup. Keep that exact reservation until handoff ends.
+        await asyncio.gather(*(asyncio.shield(owner) for owner in owners), return_exceptions=True)
+        running.extend(item.running for item in starting if item.running is not None)
+        captured = set(running)
+        # Stop every captured process before joining. A failed compensation or
+        # terminal recording must not skip another process or its original task.
+        results = await asyncio.gather(
+            *(self._terminate_proc(task, reason="work_cancelled") for task in captured),
+            return_exceptions=True,
+        )
+        results.extend(await asyncio.gather(
+            *(asyncio.shield(item.cleanup) for item in starting if item.cleanup is not None),
+            *(asyncio.shield(task.task) for task in captured if task.task is not None),
+            return_exceptions=True,
+        ))
+        errors = [result for result in results if isinstance(result, BaseException)]
+        if len(errors) == 1:
+            raise errors[0]
+        if errors:
+            raise BaseExceptionGroup("Original background resource retirement failed", errors)
 
     async def list_tasks(self, session_id: str) -> list[BgTaskRecord]:
         assert self._db is not None

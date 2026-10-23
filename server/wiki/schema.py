@@ -3,7 +3,7 @@
 import re
 from datetime import UTC, datetime
 
-VERSION = 11
+VERSION = 12
 
 
 def validate_filesystem_ledger(db):
@@ -227,5 +227,18 @@ def initialize(store):
             job_events.initialize(db)
             recovery_state.initialize(db)
             db.execute("INSERT INTO wiki_schema VALUES(11,?)", (datetime.now(UTC).isoformat(),))
+        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=12").fetchone():
+            from . import job_controls
+
+            if old_version >= 11:
+                job_events.upgrade(db)
+            job_controls.initialize(db)
+            from .jobs import WikiJobs
+
+            WikiJobs.upgrade_ledger(db)
+            db.execute("INSERT INTO wiki_schema VALUES(12,?)", (datetime.now(UTC).isoformat(),))
+        from . import job_controls
+
+        job_controls.require(db)
         job_events.require(db)
         recovery_state.require(db)

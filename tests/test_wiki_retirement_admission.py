@@ -24,6 +24,7 @@ async def test_terminal_job_requires_confirmed_writer_exit(client, tmp_path, mon
     job, _ = await proposed(client, root, paths=["Library/new.md"])
     await client.post(f"/api/wiki/jobs/{job['id']}/cancel", headers=wiki_api.HEADERS)
     jobs = WikiJobs(None)
+    await jobs.settle_cancelled(job["id"], wiki_api.session_manager)
     manager = SessionManager()
     session = Session(id="retirement-session", name="retiring", working_dir=str(tmp_path))
     manager.sessions[session.id] = session

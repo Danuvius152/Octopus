@@ -1,12 +1,13 @@
 """Schema 10 work is adopted without fabricating requesters or recording proof."""
 
 import contextlib
+import json
 import sqlite3
 from types import SimpleNamespace
 
 import pytest
 
-from server.wiki import job_events, schema
+from server.wiki import job_events, job_items, recovery_state, schema
 from server.wiki.jobs import WikiJobs
 from server.wiki.store import WikiError
 from tests.test_wiki_event_schema import database as database
@@ -29,9 +30,10 @@ def test_schema10_adoption_preserves_work_and_only_knows_proven_cancellation(dat
     before = old_jobs(database)
     schema.initialize(database)
     with database.connect() as db:
-        assert [tuple(row) for row in db.execute("SELECT * FROM jobs ORDER BY id")] == before
+        assert [tuple(row)[:10] for row in db.execute("SELECT * FROM jobs ORDER BY id")] == before
+        assert all(row[0] == '{}' for row in db.execute("SELECT attempt_errors FROM jobs"))
         assert [tuple(row) for row in db.execute("SELECT job_id,attempt,settlement_phase FROM wiki_job_state ORDER BY job_id")] == [
-            ("cancelled", 1, "unconfirmed"), ("completed", 1, "none"), ("queued", 0, "none"), ("running", 1, "none"),
+            ("cancelled", 1, "attention"), ("completed", 1, "none"), ("queued", 0, "none"), ("running", 1, "none"),
         ]
         assert db.execute("SELECT count(*) FROM wiki_job_outbox").fetchone()[0] == 4
         assert db.execute("SELECT count(*) FROM wiki_job_subscribers").fetchone()[0] == 0
@@ -78,3 +80,38 @@ def test_failed_job_state_migration_rolls_back_protocol_and_old_work(database):
         assert db.execute("SELECT 1 FROM wiki_protocols WHERE name='wiki_job_events'").fetchone() is None
         assert db.execute("SELECT 1 FROM wiki_schema WHERE version=11").fetchone() is None
         assert not any(db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone() for table in job_events.TABLES)
+
+
+def test_schema11_forward_upgrade_keeps_old_events_and_legacy_evidence_on_reentry(database):
+    with database.connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        WikiJobs.initialize_ledger(db)
+        remove_future_job_events(db)
+        for name, sql in job_events.TABLES.items():
+            db.execute(sql.replace("'attention'", "'unconfirmed'") if name == "wiki_job_state" else sql)
+        for sql in (job_events.INDEXES | job_events.TRIGGERS | job_events.job_triggers(legacy=True)).values():
+            db.execute(sql)
+        db.execute("INSERT INTO wiki_protocols VALUES('wiki_job_events',1)")
+        recovery_state.initialize(db)
+        db.execute("INSERT INTO wiki_schema VALUES(11,'old-time')")
+        legacy = {"doc": "original", "status": "attention", "recording_failure": {
+            "attempt": 1, "session_id": "old-session", "request_id": "old-request", "opaque": ["original", 7]},
+            "execution_unknown": {"retained": True}}
+        db.execute("INSERT INTO jobs VALUES('old','old','hash','{}','cancelled',?,NULL,'old-session','old-time','old-time')",
+                   (json.dumps([legacy]),))
+        before = [tuple(row) for row in db.execute("SELECT * FROM wiki_job_outbox")]
+        job_events.require(db, legacy=True)
+    schema.initialize(database)
+    with database.connect() as db:
+        assert [tuple(row) for row in db.execute("SELECT * FROM wiki_job_outbox ORDER BY rowid LIMIT ?", (len(before),))] == before
+        raw = db.execute("SELECT items FROM jobs WHERE id='old'").fetchone()[0]
+        assert raw == json.dumps([legacy])
+        assert [tuple(row) for row in db.execute("SELECT * FROM wiki_job_outbox")] == before
+        item = job_items.decode(raw)[0]
+        assert item["version"] == 1 and item["status"] == "unknown"
+        assert item["legacy_evidence"]["recording_failure"] == legacy["recording_failure"]
+        assert job_events.metadata(db, "old")["settlement_phase"] == "attention"
+        migrated = [tuple(row) for row in db.execute("SELECT * FROM wiki_job_outbox")]
+    schema.initialize(database)
+    with database.connect() as db:
+        assert [tuple(row) for row in db.execute("SELECT * FROM wiki_job_outbox")] == migrated

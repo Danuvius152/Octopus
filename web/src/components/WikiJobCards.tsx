@@ -3,6 +3,7 @@ import { IconBook, IconCheck, IconAlertTriangle } from "@tabler/icons-react";
 import type { WikiJobCard } from "../api";
 import { useSessionStore } from "../stores/sessionStore";
 import { controlWikiJob, reconcileWikiJobs, refreshWikiJobs } from "../lib/wikiJobs";
+import { WikiJobDetails } from "./WikiJobDetails";
 
 const LABELS: Record<string, string> = {
   queued: "Queued", running: "Reviewing", interrupted: "Verifying original execution",
@@ -13,8 +14,8 @@ const LABELS: Record<string, string> = {
 function Card({ card, sessionId }: { card: WikiJobCard; sessionId: string }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const unsettled = card.settlement_phase === "pending" || card.settlement_phase === "unconfirmed";
-  const retry = !unsettled && ["cancelled", "failed", "interrupted", "attention", "completed_with_attention"].includes(card.status);
+  const [details, setDetails] = useState(false);
+  const unsettled = ["pending", "attention", "unconfirmed"].includes(card.settlement_phase);
   const cancel = ["queued", "running", "interrupted"].includes(card.status);
   const act = async (action: "cancel" | "retry") => {
     setBusy(true);
@@ -53,10 +54,11 @@ function Card({ card, sessionId }: { card: WikiJobCard; sessionId: string }) {
       </li>)}</ul>
       {card.outcome_refs_truncated && <p>Additional outputs are retained in the Wiki task details.</p>}
     </details>}
-    {(cancel || retry) && <div className="mt-2 flex gap-3 text-xs">
+    <div className="mt-2 flex gap-3 text-xs">
       {cancel && <button type="button" disabled={busy} onClick={() => void act("cancel")} className="text-destructive disabled:opacity-50">Cancel maintenance</button>}
-      {retry && <button type="button" disabled={busy} onClick={() => void act("retry")} className="text-primary disabled:opacity-50">Retry unfinished work</button>}
-    </div>}
+      {!details && <button type="button" onClick={() => setDetails(true)} className="text-primary">Task details</button>}
+    </div>
+    {details && <WikiJobDetails card={card} sessionId={sessionId} close={() => setDetails(false)} />}
     {error && <p role="alert" className="mt-1 text-xs text-destructive">{error}</p>}
   </article>;
 }

@@ -88,7 +88,7 @@ async def test_pending_non_markdown_submission_is_not_an_alias_target(jobs):
     old = {"id": uuid.uuid4().hex}
     payload = json.dumps({"kind": "submission", "material": raw, "scope": "old", "actor": "human", "target": "Library/old.txt"}, sort_keys=True)
     with jobs.store.connect() as db:
-        db.execute("INSERT INTO jobs VALUES(?,?,?,?,?,'[]',NULL,NULL,'old-time','old-time')",
+        db.execute("INSERT INTO jobs(id,request_key,payload_hash,payload,status,items,error,session_id,created_at,updated_at) VALUES(?,?,?,?,?,'[]',NULL,NULL,'old-time','old-time')",
                    (old["id"], "legacy", hashlib.sha256(payload.encode()).hexdigest(), payload, "queued"))
     new = jobs.maintain("current", raw, "review", [], "Library/current.md", [], "human")
     assert new["id"] != old["id"] and new["status"] == "queued"

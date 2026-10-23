@@ -74,6 +74,14 @@ class Curator:
     async def _await_backend_retirement(self, session):
         pass
 
+    async def close_work(self, work_id):
+        from server.sessions.owner_runtime import WorkRetirement
+
+        return WorkRetirement(())
+
+    async def finish_work_cancellation(self, affected):
+        pass
+
     async def _events(self, session_id, prompt, **kwargs):
         from server.wiki.tasks import tasks
 
@@ -383,6 +391,8 @@ async def test_restart_claims_published_output_and_finishes_index_without_model(
     ):
         await process(jobs, job, curator)
     monkeypatch.setattr(WikiHistory, "status", original_status)
+    history.recover()
+    jobs.store.refresh()
     jobs.recover_jobs()
     assert jobs.next_queued() == job["id"]
     curator.crash = False
@@ -390,7 +400,8 @@ async def test_restart_claims_published_output_and_finishes_index_without_model(
     worker.manager = curator
     await worker.process(jobs, job["id"])
     result = jobs.get(job["id"])
-    assert result["status"] == "completed"
+    assert result["status"] == "completed_with_attention"
+    assert result["items"][0]["worker_request"]["terminal"]["status"] == "failed"
     assert curator.turns == 1
     assert result["items"][0]["index_complete"] is True
     assert result["items"][0]["output_change_id"]
@@ -458,7 +469,8 @@ async def test_restart_before_prepared_request_keeps_budget_and_marks_unknown_wi
     result = await process(jobs, job, curator)
     assert result["status"] == "completed_with_attention"
     assert result["items"][0]["retry_count"] == 1
-    assert result["items"][0]["execution_unknown"] == {"session_id": None}
+    assert result["items"][0]["status"] == "unknown"
+    assert not result["items"][0].get("worker_request")
     assert curator.turns == 0
     with pytest.raises(WikiError, match="new explicit task"):
         jobs.retry(job["id"])
@@ -492,7 +504,7 @@ async def test_active_publication_protects_unindexed_output_until_recovered(
     assert (history.blobs / publication["output_revision"]).is_file()
     jobs.recover_jobs()
     result = await process(jobs, job, curator)
-    assert result["status"] == "completed"
+    assert result["status"] == "completed_with_attention"
     assert result["items"][0]["index_complete"] is True
     assert curator.turns == 1
 
@@ -515,7 +527,7 @@ async def test_extraction_error_after_publish_recovers_index_without_another_mod
     result = await process(jobs, job, curator)
     assert result["status"] == "completed_with_attention"
     assert result["items"][0]["index_complete"] is False
-    assert result["items"][0]["index_recovery"] is True
+    assert result["items"][0]["status"] == "attention"
     assert curator.turns == 1
     published_bytes = jobs.store.path("Library/note.md").read_bytes()
     with jobs.store.connect() as db:
@@ -526,8 +538,9 @@ async def test_extraction_error_after_publish_recovers_index_without_another_mod
     retried = restarted.retry(job["id"])
     assert retried["items"][0].get("retry_count", 0) == 0
     result = await process(restarted, job, curator)
-    assert result["status"] == "completed"
+    assert result["status"] == "completed_with_attention"
     assert result["items"][0]["index_complete"] is True
+    assert result["items"][0]["worker_request"]["terminal"]["status"] == "failed"
     assert curator.turns == 1
     assert jobs.store.path("Library/note.md").read_bytes() == published_bytes
     with jobs.store.connect() as db:
@@ -608,7 +621,7 @@ async def test_published_item_recovery_never_generates_again_or_consumes_reread_
             restarted.retry(job["id"])
         await restarted.settle_cancelled(job["id"], curator)
         outcome = restarted.get(job["id"])
-        assert outcome["settlement_phase"] == "unconfirmed"
+        assert outcome["settlement_phase"] == "attention"
         assert outcome["items"][0]["status"] == "attention"
         with pytest.raises(WikiError, match="Confirm the original cancellation"):
             restarted.retry(job["id"])
@@ -618,7 +631,7 @@ async def test_published_item_recovery_never_generates_again_or_consumes_reread_
         restarted.recover_jobs()
     if scenario != "cancelled_source_changed":
         outcome = await process(restarted, job, curator)
-    expected = "cancelled" if scenario == "cancelled_source_changed" else "completed" if scenario == "missing_fts" else "completed_with_attention"
+    expected = "cancelled" if scenario == "cancelled_source_changed" else "completed_with_attention"
     assert outcome["status"] == expected, outcome
     assert curator.turns == 1
     assert outcome["items"][0].get("retry_count", 0) == 0
@@ -664,12 +677,13 @@ async def test_uncertain_publication_receipt_never_starts_another_model_turn(job
     elif stage == "after_atomic_reverted":
         path.write_bytes(original)
     before_recovery = path.read_bytes()
+    history.recover()
     restarted = WikiJobs(None)
     restarted.recover_jobs()
     outcome = await process(restarted, job, curator)
     assert outcome["status"] == "completed_with_attention", outcome
     item = outcome["items"][0]
-    assert item["status"] == "attention" and item["index_recovery"] is True
+    assert item["status"] == "attention"
     assert item["index_complete"] is False and item["output_change_id"] == receipt["change_id"]
     assert item.get("retry_count", 0) == 0 and curator.turns == 1
     assert path.read_bytes() == before_recovery
@@ -729,7 +743,8 @@ async def test_recording_failure_retry_verifies_original_without_new_model(jobs)
     first = await process(jobs, job, curator)
     item = first["items"][0]
     assert first["status"] == "completed_with_attention"
-    assert item["recording_failure"]["request_id"] == curator.request_id
+    assert item["worker_request"]["request_id"] == curator.request_id
+    assert item["worker_request"]["phase"] == "unknown"
     assert curator.turns == 1
     assert item.get("retry_count", 0) == 0
     second = await process(jobs, jobs.retry(job["id"]), curator)
@@ -752,7 +767,7 @@ async def test_worker_keeps_completed_session_until_owned_cleanup_and_archives_o
     started, finish_run = asyncio.Event(), asyncio.Event()
     cleaning, finish_cleanup = asyncio.Event(), asyncio.Event()
     automatic, archived, receipts = [], [], []
-    retirement = manager._await_backend_retirement
+    retirement = manager.finish_work_cancellation
     auto_archive = manager.auto_archive_scheduled_session
     admit = manager.start_message
     processing = None
@@ -776,8 +791,8 @@ async def test_worker_keeps_completed_session_until_owned_cleanup_and_archives_o
         async def stop(self):
             pass
 
-    async def owned_retirement(session, **kwargs):
-        await retirement(session, **kwargs)
+    async def owned_retirement(affected):
+        await retirement(affected)
         if receipts and receipts[0]._completion.done():
             cleaning.set()
             await finish_cleanup.wait()
@@ -797,7 +812,7 @@ async def test_worker_keeps_completed_session_until_owned_cleanup_and_archives_o
 
     monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: OwnedRun())
     monkeypatch.setattr(manager, "start_message", observed_admission)
-    monkeypatch.setattr(manager, "_await_backend_retirement", owned_retirement)
+    monkeypatch.setattr(manager, "finish_work_cancellation", owned_retirement)
     monkeypatch.setattr(manager, "auto_archive_scheduled_session", observed_auto_archive)
     manager.on_broadcast("observe-worker-archive", observe)
     worker = WikiWorker()
@@ -1114,7 +1129,7 @@ async def test_shutdown_cleanup_failure_is_reported_without_claiming_next_job(jo
         session_id = jobs.get(current["id"])["session_id"]
         worker.begin_shutdown()
         with pytest.raises(RuntimeError, match="Wiki curator teardown remains unconfirmed") as failure:
-            await worker.stop(timeout=.1)
+            await worker.stop()
 
         assert jobs.get(current["id"])["status"] == "interrupted"
         assert jobs.get(current["id"])["items"][0]["status"] == "pending"

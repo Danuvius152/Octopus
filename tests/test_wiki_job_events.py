@@ -2,6 +2,8 @@
 
 import json
 
+import pytest
+
 from server.wiki import job_events
 from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiWorker
@@ -15,6 +17,34 @@ def enqueue(jobs, key="event-contract"):
         None, "human", "Create isolated input",
     )
     return jobs.maintain(key, "", "Review existing note", ["Library/note.md"], None, [], "human")
+
+
+@pytest.mark.parametrize("legacy", [
+    {"recording_failure": {"attempt": 1, "session_id": "old", "request_id": "original"}},
+    {"recording_failure": "1"}, {"index_recovery": True}, {"recording_recovery": "true"},
+    {"execution_unknown": [1]}, {"execution_unknown": []}, {"status": "running"}, {"status": None},
+    {"recording_failure": {"attempt": 1, "session_id": "old", "request_id": "original"},
+     "worker_request": {"attempt": 2, "session_id": "new", "request_id": "replacement", "phase": "settled"}},
+])
+async def test_legacy_notification_projection_matches_codec_without_rewriting_jobs(jobs, legacy):
+    job = enqueue(jobs)
+    item = job["items"][0] | legacy
+    item.pop("version")
+    raw = json.dumps([item])
+    with jobs.store.connect() as db:
+        db.execute("UPDATE jobs SET items=? WHERE id=?", (raw, job["id"]))
+        event = dict(db.execute("SELECT * FROM wiki_job_outbox WHERE job_id=? ORDER BY state_version DESC LIMIT 1",
+                                (job["id"],)).fetchone())
+    current = jobs.get(job["id"])
+    snapshot = json.loads(event["body"])
+    assert snapshot["progress"] == current["progress"]
+    reference = current["items"][0].get("worker_request", {})
+    expected_pending = int(bool(reference.get("request_id")) and reference.get("phase") not in {"settled", "rejected"})
+    assert snapshot["recording_pending"] == expected_pending
+    jobs.recover_jobs()
+    with jobs.store.connect() as db:
+        assert db.execute("SELECT items FROM jobs WHERE id=?", (job["id"],)).fetchone()[0] == raw
+    assert jobs.get(job["id"])["state_version"] == current["state_version"]
 
 
 async def test_item_progress_changes_version_even_while_job_remains_running(jobs):
@@ -103,14 +133,18 @@ async def test_queued_cancellation_is_confirmed_without_a_model_or_writer(jobs):
     job = enqueue(jobs)
     cancelled = await jobs.cancel(job["id"], None)
     assert cancelled["status"] == "cancelled"
+    await jobs.settle_cancelled(job["id"], None)
+    cancelled = jobs.get(job["id"])
     assert cancelled["settlement_phase"] == "confirmed"
     assert cancelled["state_version"] > job["state_version"]
 
 
 async def test_late_unconfirmed_observation_cannot_regress_confirmed_cancellation(jobs):
     job = enqueue(jobs)
-    confirmed = await jobs.cancel(job["id"], None)
-    jobs._record_cancellation_phase(confirmed, "unconfirmed")
+    await jobs.cancel(job["id"], None)
+    await jobs.settle_cancelled(job["id"], None)
+    confirmed = jobs.get(job["id"])
+    jobs._record_cancellation_phase(confirmed, "attention")
     current = jobs.get(job["id"])
     assert current["settlement_phase"] == "confirmed"
     assert current["state_version"] == confirmed["state_version"]

@@ -201,7 +201,7 @@ async def lifespan(app: FastAPI):
             if pending.get("user_id"):
                 wiki_registry.begin_transition(pending["user_id"])
         started.add("wiki_registry")
-        await wiki_registry.start(paused=True)
+        await wiki_registry.start(paused=True, previous_writers_retired=installation.profile is not None)
         from .wiki.cleanup import sweep as sweep_wiki_history
         await sweep_wiki_history()
         started.add("wiki_worker")

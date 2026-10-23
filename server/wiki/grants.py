@@ -8,7 +8,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
 
-from . import maintenance_inputs, protocols
+from . import job_items, maintenance_inputs, protocols
 from .formats import is_markdown_maintenance
 from .store import WikiError, asset_reason, revision
 
@@ -112,7 +112,7 @@ def scope_blocked(error):
 def review_required(db, job, reason):
     """Retain the original work and show a proposal, never silently grant it."""
     try:
-        items = json.loads(job["items"])
+        items = job_items.decode(job["items"])
         paths = list(dict.fromkeys(item["path"] for item in items if isinstance(item, dict) and isinstance(item.get("path"), str)))
     except (ValueError, TypeError, KeyError):
         paths = []
@@ -151,7 +151,7 @@ def migrate_legacy(db, store):
     for job in db.execute("SELECT * FROM jobs WHERE status IN ('queued','running','interrupted')").fetchall():
         try:
             payload = json.loads(job["payload"])
-            items = json.loads(job["items"])
+            items = job_items.decode(job["items"])
             request = payload["request"]
             if (job["status"] != "queued" or not all(registration.values())
                     or not isinstance(request, dict) or not isinstance(items, list)

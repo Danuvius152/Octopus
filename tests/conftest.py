@@ -1,6 +1,5 @@
 """Global test configuration — ensure tests use known default settings."""
 
-import asyncio
 import atexit
 import os
 import shutil
@@ -27,21 +26,9 @@ def short_process_shutdown(monkeypatch):
     Only request this in tests of cancellation, ownership or recovery. Tests of
     the default shutdown timing keep the ordinary Harness budgets.
     """
-    from server.harness import run
+    from tests.process_shutdown import shorten_harness_shutdown
 
-    class ShortShutdownAsyncio:
-        def __getattr__(self, name):
-            # Resolve dynamically so each test's spawn/clock hooks still apply.
-            return getattr(asyncio, name)
-
-        async def wait_for(self, future, timeout):
-            # Shorten only the two process-exit grace waits. Pipe drains and
-            # spawn cleanup retain their original deadlines.
-            if timeout == 2.0 and getattr(future, "cr_code", None) is asyncio.subprocess.Process.wait.__code__:
-                timeout = 0.05
-            return await asyncio.wait_for(future, timeout)
-
-    monkeypatch.setattr(run, "asyncio", ShortShutdownAsyncio())
+    shorten_harness_shutdown(monkeypatch)
 
 
 @pytest.fixture(autouse=True)
@@ -343,9 +330,9 @@ def pytest_runtest_setup(item):
     `-m "not real"`, which deselects before setup.
 
     `cli_gate` is imported inside the function for the same reason: keep
-    importing conftest side-effect-free. Both probes are `lru_cache`d there,
-    so the cost is paid at most once per CLI per session no matter how many
-    marked tests run.
+    importing conftest side-effect-free. The gates cache each login check;
+    Codex shares a result across temporary aliases of unchanged auth/config
+    files while keeping different credentials separate.
     """
     if item.get_closest_marker("knowledge_eval"):
         # The evidence-producing request verifies provider availability itself.

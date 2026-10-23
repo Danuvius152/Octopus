@@ -264,8 +264,8 @@ async def test_a_start_interrupted_by_stop_cannot_publish_its_background_task(re
     prepared, release = asyncio.Event(), asyncio.Event()
     reconcile = registry.reconcile
 
-    async def paused_reconcile():
-        result = await reconcile()
+    async def paused_reconcile(**kwargs):
+        result = await reconcile(**kwargs)
         prepared.set()
         await release.wait()
         return result
@@ -349,8 +349,8 @@ async def test_concurrent_start_does_not_create_two_background_tasks(registered,
     entered, release = asyncio.Event(), asyncio.Event()
     reconcile = registry.reconcile
 
-    async def paused_reconcile():
-        result = await reconcile()
+    async def paused_reconcile(**kwargs):
+        result = await reconcile(**kwargs)
         entered.set()
         await release.wait()
         return result

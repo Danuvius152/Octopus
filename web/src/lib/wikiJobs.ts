@@ -1,4 +1,4 @@
-import type { WikiJobCard } from "../api";
+import type { WikiJobCard, WikiJobDetail, WikiJobOutput } from "../api";
 import { useSessionStore } from "../stores/sessionStore";
 
 const API = window.location.origin;
@@ -14,7 +14,7 @@ function cardsFrom(value: unknown): WikiJobCard[] {
       !Number.isInteger(card.progress[key]) || card.progress[key] < 0) ||
     !Array.isArray(card.outcome_refs) || card.outcome_refs.some((ref: Record<string, unknown>) =>
       !ref || typeof ref.path !== "string" || typeof ref.revision !== "string") ||
-    !["none", "pending", "unconfirmed", "confirmed"].includes(card.settlement_phase))) {
+    !["none", "pending", "attention", "unconfirmed", "confirmed"].includes(card.settlement_phase))) {
     throw new Error("Wiki maintenance returned an invalid state snapshot.");
   }
   return value as WikiJobCard[];
@@ -53,7 +53,7 @@ export function reconcileWikiJobs(sessionId: string): Promise<number> {
   // retained work by identity even when newer cards fill the first page.
   for (const card of state.wikiJobs[sessionId] || []) {
     if (card.status !== "completed" || card.settlement_phase === "pending" ||
-      card.settlement_phase === "unconfirmed" || (card.recording_pending ?? 0) > 0 ||
+      ["unconfirmed", "attention"].includes(card.settlement_phase) || (card.recording_pending ?? 0) > 0 ||
       (card.effects?.index_pending ?? 0) > 0) {
       state.invalidateWikiJob(sessionId, card);
     }
@@ -92,16 +92,17 @@ export function refreshWikiJobs(sessionId: string, offset = 0): Promise<number> 
   return pending.promise;
 }
 
-export async function controlWikiJob(sessionId: string, card: WikiJobCard, action: "cancel" | "retry"): Promise<void> {
-  const { token } = useSessionStore.getState();
+export async function controlWikiJob(sessionId: string, card: WikiJobCard, action: "cancel" | "retry" | "verify" | "readmit",
+  options: { operation_id?: string; paths?: string[]; creation?: { purpose: "requested_knowledge_page"; paths: string[] } } = {}): Promise<void> {
+  const { token, dispatchGeneration } = useSessionStore.getState();
   if (!token) throw new Error("Sign in before controlling Wiki maintenance.");
   useSessionStore.getState().invalidateWikiJob(sessionId, card);
   const response = await fetch(`${API}/api/wiki/jobs/${encodeURIComponent(card.job_id)}/${action}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ expected_attempt: card.attempt, expected_vault_id: card.vault_id }),
+    body: JSON.stringify({ expected_attempt: card.attempt, expected_vault_id: card.vault_id, ...options }),
   });
-  if (useSessionStore.getState().token !== token) return;
+  if (useSessionStore.getState().token !== token || useSessionStore.getState().dispatchGeneration !== dispatchGeneration) return;
   try { await refreshWikiJobs(sessionId); }
   catch (failure) { if (response.ok) throw failure; }
   if (!response.ok) {
@@ -109,4 +110,33 @@ export async function controlWikiJob(sessionId: string, card: WikiJobCard, actio
       ? "The task changed or its original execution is not settled. Review current state before trying again."
       : `Wiki maintenance could not ${action} (HTTP ${response.status}).`);
   }
+}
+
+type JobIdentity = Pick<WikiJobCard, "job_id" | "vault_id">;
+
+async function readJob<T>(card: JobIdentity, suffix: string, query: URLSearchParams): Promise<T> {
+  const { token, dispatchGeneration } = useSessionStore.getState();
+  const response = await fetch(`${API}/api/wiki/jobs/${encodeURIComponent(card.job_id)}/${suffix}?${query}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!response.ok) {
+    const failure = await response.json().catch(() => null);
+    throw new Error(typeof failure?.detail === "string" ? failure.detail : `Could not read Wiki task (HTTP ${response.status}).`);
+  }
+  const data: T = await response.json();
+  const current = useSessionStore.getState();
+  if (current.token !== token || current.dispatchGeneration !== dispatchGeneration) throw new Error("Account or service changed. Reopen the task details.");
+  return data;
+}
+
+export async function loadWikiJobDetail(card: JobIdentity, attempt: number, offset = 0): Promise<WikiJobDetail> {
+  const detail = await readJob<WikiJobDetail>(card, "details", new URLSearchParams({ attempt: String(attempt), offset: String(offset) }));
+  if (detail.job_id !== card.job_id || detail.vault_id !== card.vault_id || detail.attempt !== attempt) throw new Error("Wiki task detail identity changed.");
+  return detail;
+}
+
+export function loadWikiJobOutput(card: WikiJobCard, attempt: number, receipt: string, view: "history" | "current", start = 0, revision?: string): Promise<WikiJobOutput> {
+  const query = new URLSearchParams({ attempt: String(attempt), view, start: String(start) });
+  if (revision) query.set("expected_revision", revision);
+  return readJob(card, `outputs/${encodeURIComponent(receipt)}`, query);
 }

@@ -4,6 +4,7 @@ import json
 import uuid
 from datetime import UTC, datetime
 
+from . import job_items
 from .store import WikiError, revision
 
 
@@ -12,6 +13,8 @@ def publication(task, store, document=None, item_doc=None, *, path=None, reserva
         return None
     from . import grants
 
+    execution = ({"attempt": task.assigned_attempt, "session_id": task.session_id,
+                  "request_id": task.request_id} if task.assigned_attempt is not None and task.request_id else None)
     with store.connect() as db:
         db.execute("BEGIN")
         grants.active(db, task, store)
@@ -21,8 +24,8 @@ def publication(task, store, document=None, item_doc=None, *, path=None, reserva
                 raise WikiError("This reservation does not authorize the requested path", 403)
             return {"job_id": task.job_id, "session_id": task.session_id, "source_doc": None,
                     "source_path": path, "input_revision": None, "authority": task,
-                    "reservation_id": reservation["id"]}
-        job = json.loads(db.execute("SELECT items FROM jobs WHERE id=?", (task.job_id,)).fetchone()[0])
+                    "reservation_id": reservation["id"], "execution": execution}
+        job = job_items.decode(db.execute("SELECT items FROM jobs WHERE id=?", (task.job_id,)).fetchone()[0])
         bound = db.execute("SELECT reservation_id FROM wiki_grant_documents WHERE job_id=? AND doc_id=?",
                            (task.job_id, document["id"])).fetchone() if document else None
     selected = [item for item in job if item.get("doc") == item_doc and item_doc is not None
@@ -41,7 +44,8 @@ def publication(task, store, document=None, item_doc=None, *, path=None, reserva
     with store.connect() as db:
         grants.authorize(db, task, store, document["path"])
     return {"job_id": task.job_id, "session_id": task.session_id, "source_doc": item.get("doc") or document["id"],
-            "source_path": document["path"], "input_revision": document["revision"], "authority": task}
+            "source_path": document["path"], "input_revision": document["revision"], "authority": task,
+            "execution": execution}
 
 
 def record(db, *, doc_id, path, before, after, operation, reason, publication=None, change_id=None, details=None, store=None):
@@ -52,6 +56,8 @@ def record(db, *, doc_id, path, before, after, operation, reason, publication=No
     identifier = uuid.uuid4().hex
     details = dict(details or {})
     if publication:
+        if publication.get("execution") is not None:
+            details["execution"] = publication["execution"]
         if publication.get("supporting_navigation"):
             # Keep the exact supporting association out of the primary item
             # field, which F09 uses to attribute maintenance attempts/baselines.

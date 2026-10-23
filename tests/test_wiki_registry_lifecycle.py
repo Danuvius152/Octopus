@@ -97,11 +97,11 @@ def test_block_waits_for_candidate_cleanup_before_owner_state_can_move(registere
     assert current.search("Preserved")["items"]
 
 
-def test_same_generation_constructors_publish_one_winner_and_release_loser(registered, monkeypatch):
+def test_same_generation_borrowers_share_one_recovered_candidate(registered, monkeypatch):
     registry, _, _ = registered
     registry.close()
     real_store = registry_module.WikiStore
-    built = threading.Barrier(2)
+    release = threading.Event()
     first_built = threading.Event()
     candidates = []
 
@@ -109,7 +109,7 @@ def test_same_generation_constructors_publish_one_winner_and_release_loser(regis
         candidate = real_store(*args, **kwargs)
         candidates.append(candidate)
         first_built.set()
-        built.wait(timeout=5)
+        assert release.wait(timeout=5)
         return candidate
 
     monkeypatch.setattr(registry_module, "WikiStore", construction)
@@ -119,10 +119,12 @@ def test_same_generation_constructors_publish_one_winner_and_release_loser(regis
         # Race publication rather than the separately retryable range claim.
         assert first_built.wait(3)
         futures.append(pool.submit(registry.store, None))
+        assert not futures[0].done() and not futures[1].done()
+        release.set()
         results = [future.result(timeout=7) for future in futures]
     assert results[0] is results[1]
-    assert len(candidates) == 2
-    assert sum(candidate._events_released for candidate in candidates) == 1
+    assert len(candidates) == 1
+    assert not candidates[0]._events_released
     assert not results[0]._events_released
     assert not registry._constructing
 

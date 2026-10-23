@@ -170,8 +170,9 @@ def test_prepared_write_and_active_job_receipts_survive_cleanup(history):
         "note.md", b"original", b"pending", "human", "pending", "prepared"
     )
     atomic(history.store.path("note.md"), b"pending")
-    # The first lock recovers this as an applied write. An active job continues
-    # to protect its input and creation receipt even beyond ordinary retention.
+    # Explicit startup recovery confirms the landed write. An active job keeps
+    # protecting its input and creation receipt beyond ordinary retention.
+    history.recover()
     with history.store.connect() as db:
         db.execute("CREATE TABLE jobs (id TEXT,status TEXT,items TEXT,payload TEXT)")
         db.execute(

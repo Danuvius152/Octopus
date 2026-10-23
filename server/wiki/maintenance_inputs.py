@@ -7,9 +7,9 @@ deleted identities too. Generated triggers abort writes that disable it.
 import json
 import uuid
 
-from . import protocols
+from . import job_items, protocols
 
-VERSION = "maintenance-inputs-v6"
+VERSION = "maintenance-inputs-v7"
 PREFIX = "maintenance_input_"
 TABLES = {
     "maintenance_input_state": """CREATE TABLE maintenance_input_state(
@@ -79,7 +79,10 @@ def _shape(db, table):
 
 
 def validate_jobs(db):
-    if _shape(db, "jobs") != JOB_COLUMNS or _shape(db, "job_requests") != REQUEST_COLUMNS:
+    columns = JOB_COLUMNS
+    if db.execute("SELECT 1 FROM wiki_schema WHERE version=12").fetchone():
+        columns += (("attempt_errors", "TEXT", 1, "'{}'", 0, 0),)
+    if _shape(db, "jobs") != columns or _shape(db, "job_requests") != REQUEST_COLUMNS:
         raise unavailable("job ledger is missing or incompatible")
     unique_request = any(row[2] and not row[4] and
                          [column[2] for column in db.execute("SELECT * FROM pragma_index_info(?)", (row[1],))] == ["request_key"]
@@ -333,22 +336,7 @@ def initialize(db):
 
 
 def _decode_items(raw):
-    def unique_object(pairs):
-        value = dict(pairs)
-        if len(value) != len(pairs):
-            raise ValueError("duplicate job item key")
-        return value
-
-    def invalid_constant(value):
-        raise ValueError("nonstandard JSON constant")
-
-    try:
-        items = json.loads(raw, object_pairs_hook=unique_object, parse_constant=invalid_constant)
-        if not isinstance(items, list) or any(not isinstance(i, dict) or i.get("doc") is not None and not isinstance(i["doc"], str) for i in items):
-            raise ValueError("invalid membership")
-        return items
-    except (ValueError, TypeError, RecursionError) as error:
-        raise unavailable("job membership is malformed") from error
+    return job_items.decode(raw)
 
 
 def _string(value):
@@ -376,8 +364,8 @@ def capture_jobs(db, doc_ids=None):
         for ordinal, item in enumerate(_decode_items(row["items"])):
             output_revision = item.get("output_revision")
             items.append((row["id"], ordinal, item.get("doc"), _string(item.get("status")),
-                          int(item.get("index_complete") is True), int(bool(item.get("recording_failure"))),
-                          int(bool(item.get("index_recovery"))), _string(item.get("output")), _string(output_revision),
+                          int(item.get("index_complete") is True), int(bool(job_items.unresolved(item)) or item.get("status") == "unknown"),
+                          int(item.get("status") in {"verifying", "unknown"}), _string(item.get("output")), _string(output_revision),
                           int(output_revision is None or isinstance(output_revision, str)), _string(item.get("receipt_id")),
                           int(bool(item.get("receipt_id"))), _string(item.get("output_change_id"))))
         captured.append({"job_id": row["id"], "token": row["cause_generation"],

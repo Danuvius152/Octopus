@@ -183,7 +183,15 @@ async def test_live_registration_change_settles_old_worker_and_allows_retry(jobs
         async def stop(self):
             release.set()
 
-    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: HeldRun())
+        async def interrupt(self):
+            release.set()
+
+    def held_run(session, *args):
+        run = HeldRun()
+        run.work_id = session._run.work_id
+        return run
+
+    monkeypatch.setattr(manager, "_make_run", held_run)
     job = jobs.maintain("registration-change", "# Original\nRetain source.\n", "organize", [], "Library/source.md", [], "human")
     worker = WikiWorker()
     await worker.start(manager)
@@ -238,6 +246,10 @@ async def test_live_registration_change_settles_old_worker_and_allows_retry(jobs
             grants.close(token)
         if ending == "cancel":
             await current.cancel(job["id"], manager)
+            # Repeated cancellation reuses its original work. Once the probe
+            # scopes retire, explicitly verify the retained result evidence.
+            await current.settle_cancelled(job["id"], manager)
+            assert current.get(job["id"])["settlement_phase"] == "confirmed"
         assert trusted_readmit(current, job["id"])["status"] == "queued"
         resumed = WikiWorker()
         resumed.manager = test_wiki_jobs.Curator(current)
@@ -321,7 +333,9 @@ async def test_unconfirmed_recording_survives_rebinding_without_regeneration(job
         current = WikiJobs(None)
         first = current.get(job["id"])
         assert first["status"] == "failed"
-        assert first["items"][0]["recording_failure"]["request_id"] == manager.original_request_id
+        reference = first["items"][0]["worker_request"]
+        assert reference["request_id"] == manager.original_request_id
+        assert reference["phase"] == "unknown" and reference["recording_state"] == "unconfirmed"
         retained = current.store.path("Library/unconfirmed.md").read_bytes()
         attention = await test_wiki_jobs.process(current, trusted_readmit(current, job["id"]), manager)
         assert attention["status"] == "completed_with_attention"
@@ -392,10 +406,13 @@ async def test_rebinding_terminal_commit_failure_preserves_original_without_rege
             # The original file receipt survives independently of the absent
             # execution terminal. P5 owns cold item classification/readmission.
             return
-        current.recover_jobs()
+        # The fault child really exited above; this is the startup owner's
+        # previous-writer proof, not a guess based on absent in-memory state.
+        current.recover_jobs(previous_writers_retired=True)
         readmitted = trusted_readmit(current, proof["job_id"])
         finished = await asyncio.wait_for(test_wiki_jobs.process(current, readmitted, manager), 5)
-        assert finished["attempt"] == readmitted["attempt"] + 1
+        # Rechecking the committed original request creates no new execution.
+        assert finished["attempt"] == readmitted["attempt"]
         assert finished["status"] == ("completed" if committed else "completed_with_attention")
         reference = finished["items"][0]["worker_request"]
         assert reference["request_id"] == proof["request_id"]
@@ -532,7 +549,9 @@ async def test_recording_reference_survives_a_cancellation_between_control_read_
     result = current.get(job["id"])
     assert raced
     assert result["status"] == "cancelled" and result["attempt"] == reference["attempt"]
-    assert result["items"][0]["recording_failure"]["request_id"] == "original-request"
+    retained = result["items"][0]["worker_request"]
+    assert retained["request_id"] == "original-request"
+    assert retained["phase"] == "unknown" and retained["recording_state"] == "unconfirmed"
 
 
 async def test_captured_web_lifecycle_prevents_idle_but_replays_and_silence_do_not(manager, monkeypatch, tmp_path):

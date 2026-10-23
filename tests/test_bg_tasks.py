@@ -171,6 +171,138 @@ async def test_shutdown_owns_cancelled_startup_until_its_process_handle_arrives(
         await asyncio.gather(startup, *(task for task in [cleanup] if task is not None), return_exceptions=True)
 
 
+@pytest.mark.parametrize("waiter_cancelled", [False, True])
+async def test_closed_work_joins_bg_startup_and_original_process(manager, db, tmp_path, monkeypatch, waiter_cancelled):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from server import bg_tasks
+    from server.knowledge import capture, derive
+    from server.mcp_identity import close_work
+
+    await _make_session_row(db, "work-spawn", str(tmp_path))
+    owned = derive(capture(SimpleNamespace(id="work-spawn", user_id=None, agent_id=None), None, prompt="sleep 60"), "sleep 60")
+    work_id = f"wiki-bg-startup-{waiter_cancelled}"
+    owned = replace(owned, return_binding=replace(owned.return_binding, work_id=work_id))
+    real_spawn = asyncio.create_subprocess_exec
+    spawned, release = asyncio.Event(), asyncio.Event()
+    processes = []
+
+    async def delayed_spawn(*args, **kwargs):
+        process = await real_spawn(*args, **kwargs)
+        processes.append(process)
+        spawned.set()
+        await release.wait()
+        return process
+
+    monkeypatch.setattr(bg_tasks.asyncio, "create_subprocess_exec", delayed_spawn)
+    monkeypatch.setattr(bg_tasks, "_TERM_GRACE_SECONDS", 0.03)
+    startup = asyncio.create_task(manager.start_task(session_id="work-spawn", command="sleep 60",
+                                                     working_dir=str(tmp_path), owned_context=owned))
+    stopping = None
+    try:
+        await asyncio.wait_for(spawned.wait(), 3)
+        close_work(work_id)
+        if waiter_cancelled:
+            startup.cancel()
+        stopping = asyncio.create_task(manager.cancel_work(work_id))
+        await asyncio.sleep(0)
+        assert not stopping.done(), "An outstanding original process handle is not retired"
+        release.set()
+        await asyncio.wait_for(stopping, 5)
+        assert processes[0].returncode is not None
+        final = (await manager.list_tasks("work-spawn"))[0]
+        assert final.status in {"cancelled", "interrupted"}
+        assert final.stop_reason == "work_cancelled"
+    finally:
+        release.set()
+        await asyncio.gather(startup, *([stopping] if stopping else []), return_exceptions=True)
+
+
+async def test_closed_work_drains_running_process_after_startup_cleanup_fails(db, tmp_path, monkeypatch):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from server import bg_tasks
+    from server.knowledge import capture, derive
+    from server.mcp_identity import close_work
+
+    await _make_session_row(db, "work-cleanup-failure", str(tmp_path))
+    owned = derive(capture(SimpleNamespace(id="work-cleanup-failure", user_id=None, agent_id=None), None,
+                           prompt="sleep 60"), "sleep 60")
+    work_id = "wiki-bg-cleanup-failure"
+    owned = replace(owned, return_binding=replace(owned.return_binding, work_id=work_id))
+    delivering, release_delivery, compensation_failed = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def deliver(record):
+        delivering.set()
+        await release_delivery.wait()
+
+    async def broadcast(message):
+        pass
+
+    manager = BgTaskManager()
+    manager.bind(db=db, deliver_cb=deliver, broadcast_cb=broadcast)
+    await manager.start()
+    real_spawn, real_update = asyncio.create_subprocess_exec, db.update_bg_task
+    spawned, release_handle = asyncio.Event(), asyncio.Event()
+    processes = []
+
+    async def delayed_second_spawn(*args, **kwargs):
+        process = await real_spawn(*args, **kwargs)
+        processes.append(process)
+        if len(processes) == 2:
+            spawned.set()
+            await release_handle.wait()
+        return process
+
+    async def fail_startup_recording(task_id, **kwargs):
+        if kwargs.get("status") == "interrupted":
+            compensation_failed.set()
+            raise RuntimeError("startup compensation recording failed")
+        return await real_update(task_id, **kwargs)
+
+    monkeypatch.setattr(bg_tasks.asyncio, "create_subprocess_exec", delayed_second_spawn)
+    monkeypatch.setattr(bg_tasks, "_TERM_GRACE_SECONDS", 0.03)
+    await manager.start_task(session_id="work-cleanup-failure", command="sleep 60",
+                             working_dir=str(tmp_path), owned_context=owned)
+    startup = asyncio.create_task(manager.start_task(session_id="work-cleanup-failure", command="sleep 60",
+                                                     working_dir=str(tmp_path), owned_context=owned))
+    stopping = delivery_waiter = None
+    try:
+        await asyncio.wait_for(spawned.wait(), 3)
+        startup.cancel()
+        await asyncio.gather(startup, return_exceptions=True)
+        monkeypatch.setattr(db, "update_bg_task", fail_startup_recording)
+        close_work(work_id)
+        stopping = asyncio.create_task(manager.cancel_work(work_id))
+        delivery_waiter = asyncio.create_task(delivering.wait())
+        release_handle.set()
+        await asyncio.wait({stopping, delivery_waiter}, timeout=3, return_when=asyncio.FIRST_COMPLETED)
+        assert delivering.is_set(), "A failed startup cleanup must still retire the captured running process"
+        await asyncio.wait_for(asyncio.gather(*(process.wait() for process in processes)), 3)
+        await asyncio.wait_for(compensation_failed.wait(), 3)
+        assert all(process.returncode is not None for process in processes)
+        await asyncio.wait({stopping}, timeout=0.05)
+        assert not stopping.done(), "Report cleanup failure only after the other original task is joined"
+        release_delivery.set()
+        with pytest.raises(RuntimeError, match="startup compensation recording failed"):
+            await asyncio.wait_for(stopping, 3)
+    finally:
+        release_handle.set()
+        release_delivery.set()
+        monkeypatch.setattr(db, "update_bg_task", real_update)
+        if delivery_waiter is not None:
+            delivery_waiter.cancel()
+        await asyncio.gather(startup, *[task for task in (stopping, delivery_waiter) if task is not None],
+                             return_exceptions=True)
+        # The failed durable acknowledgement keeps its original cleanup owner;
+        # all OS resources must nevertheless have been reaped before returning.
+        with pytest.raises(RuntimeError, match="shutdown incomplete"):
+            await manager.shutdown()
+        assert all(process.returncode is not None for process in processes)
+
+
 async def test_shutdown_retains_background_process_until_exit_is_confirmed(manager, db, tmp_path, monkeypatch):
     from server import bg_tasks
 

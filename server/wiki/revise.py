@@ -37,6 +37,7 @@ def revise(curation, body, actor, task):
         context = operations.publication(task, store, document, body.item_doc)
         if body.operation == "no_change":
             tasks.require_read(task, store, path, body.expected_revision)
+            curation.history.blob(text.encode())
             with store.connect() as db:
                 receipt = operations.record(db, doc_id=document["id"], path=path, before=document["revision"], after=document["revision"], operation="no_change", reason=body.reason, publication=context, store=store)
             return {"id": document["id"], "path": path, "revision": document["revision"], "changed": False, "change_id": None, "receipt_id": receipt, "operation": "no_change", **store.index_state()}

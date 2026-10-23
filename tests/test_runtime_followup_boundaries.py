@@ -176,24 +176,31 @@ BAD_METADATA = [
 
 
 @pytest.mark.parametrize("incremental", [False, True])
-@pytest.mark.parametrize("metadata", BAD_METADATA)
-def test_bad_portable_metadata_is_local_and_original_bytes_survive(tmp_path, metadata, incremental):
+def test_bad_portable_metadata_is_local_and_original_bytes_survive(tmp_path, incremental):
     root = tmp_path / "vault"
     root.mkdir()
     good = b"# Healthy\nSearchable evidence.\n"
     (root / "good.md").write_bytes(good)
-    bad = b"# Bad\n<!-- octopus-wiki " + json.dumps(metadata).encode() + b" -->\n"
+    malformed = {
+        f"bad-{index}.md": b"# Bad\n<!-- octopus-wiki " + json.dumps(metadata).encode() + b" -->\n"
+        for index, metadata in enumerate(BAD_METADATA)
+    }
+    # Every malformed field must remain local when several bad notes share an
+    # index. Exercise both the initial scan and the incremental batch once.
     if not incremental:
-        (root / "bad.md").write_bytes(bad)
+        for path, raw in malformed.items():
+            (root / path).write_bytes(raw)
     store = WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
     try:
         if incremental:
-            (root / "bad.md").write_bytes(bad)
+            for path, raw in malformed.items():
+                (root / path).write_bytes(raw)
             store.synchronize()
-        assert store.read("bad.md")["metadata"]["metadata_error"]
+        for path, raw in malformed.items():
+            assert store.read(path)["metadata"]["metadata_error"], path
+            assert (root / path).read_bytes() == raw, path
         assert store.read("good.md")["title"] == "Healthy"
         assert store.search("Searchable")["items"]
-        assert (root / "bad.md").read_bytes() == bad
         assert (root / "good.md").read_bytes() == good
     finally:
         store.close()

@@ -22,7 +22,7 @@ it("shows persisted completed outputs after a chat is reopened", () => {
   expect(screen.queryByText("Retry unfinished work")).toBeNull();
 });
 
-it.each(["pending", "unconfirmed"] as const)("keeps retry closed while cancellation is %s", (phase) => {
+it.each(["pending", "attention", "unconfirmed"] as const)("keeps retry closed while cancellation is %s", (phase) => {
   useSessionStore.getState().mergeWikiJobs("original", [wikiJob({ status: "cancelled", settlement_phase: phase })]);
   render(<WikiJobCards sessionId="original" />);
   expect(screen.getByRole("status")).toBeTruthy();
@@ -36,7 +36,7 @@ it("distinguishes saved content awaiting indexing from completed work", () => {
   render(<WikiJobCards sessionId="original" />);
   expect(screen.getByText(/Content saved; indexing remains pending/)).toBeTruthy();
   expect(screen.getByText(/Needs review/)).toBeTruthy();
-  expect(screen.getByText("Retry unfinished work")).toBeTruthy();
+  expect(screen.getByText("Task details")).toBeTruthy();
 });
 
 it("cancels the displayed task and refreshes its persistent result without a message POST", async () => {
@@ -46,7 +46,7 @@ it("cancels the displayed task and refreshes its persistent result without a mes
   vi.stubGlobal("fetch", fetcher);
   render(<WikiJobCards sessionId="original" />);
   fireEvent.click(screen.getByText("Cancel maintenance"));
-  await waitFor(() => expect(screen.getByText("Retry unfinished work")).toBeTruthy());
+  await waitFor(() => expect(screen.getByText(/Wiki maintenance · Cancelled/)).toBeTruthy());
   const post = fetcher.mock.calls.filter(([, init]) => init?.method === "POST");
   expect(post).toHaveLength(1);
   expect(post[0][0]).toContain("/api/wiki/jobs/job-1/cancel");
@@ -67,4 +67,97 @@ it("reconciles a retained task missed while disconnected even after it leaves th
   await act(async () => useSessionStore.setState({ connected: true }));
   await waitFor(() => expect(container.querySelector('[data-wiki-job="old-job"]')).toHaveAttribute("data-status", "completed"));
   expect(fetcher.mock.calls.every(([, init]) => !(init as RequestInit | undefined)?.method || (init as RequestInit).method === "GET")).toBe(true);
+});
+
+it("opens complete historical evidence and moved current text using only GET requests", async () => {
+  useSessionStore.getState().mergeWikiJobs("original", [wikiJob({ status: "completed" })]);
+  const diagnostic = "Complete error " + "retained condition ".repeat(100);
+  const fetcher = vi.fn(async (url: string, _init?: RequestInit) => {
+    if (String(url).includes("/details")) return Response.json({
+      job_id: "job-1", vault_id: "vault-1", state_version: 3, attempt: 1, current_attempt: 2, attempts: [1, 2],
+      status: "completed", settlement_phase: "none", error: diagnostic, next_offset: null,
+      items: [{ key: "doc", doc: "doc", path: "Library/original.md", status: "done", error: null, execution: null }],
+      outputs: [{ receipt_id: "receipt", doc: "doc", path: "Library/original.md", current_path: "Library/moved.md",
+        revision: "a".repeat(64), current_revision: "b".repeat(64), operation: "no_change", status: "applied",
+        reason: "All original conditions are retained.", change_id: null, attempt: 1, details: {} }],
+      actions: { verify: false, retry: false, readmit: false, blocked_reason: null },
+    });
+    if (String(url).includes("/outputs/")) return Response.json({
+      receipt_id: "receipt", doc: "doc", path: "Library/original.md", revision: "a".repeat(64),
+      view: "history", content: "Original historical body", start: 0, next_start: null, characters: 24,
+    });
+    return Response.json([wikiJob({ status: "completed" })]);
+  });
+  vi.stubGlobal("fetch", fetcher);
+  render(<WikiJobCards sessionId="original" />);
+  fireEvent.click(screen.getByText("Task details"));
+  await waitFor(() => expect(screen.getByText(diagnostic.trim()).textContent).toBe(diagnostic));
+  expect(screen.getByText(/Library\/moved.md/)).toBeTruthy();
+  expect(screen.getByText("All original conditions are retained.")).toBeTruthy();
+  fireEvent.click(screen.getByText("Historical output"));
+  await waitFor(() => expect(screen.getByText("Original historical body")).toBeTruthy());
+  expect(fetcher.mock.calls.every(([, init]) => !(init as RequestInit | undefined)?.method || (init as RequestInit).method === "GET")).toBe(true);
+});
+
+it("reuses the explicit continuation identity after a lost control response", async () => {
+  const card = wikiJob({ status: "cancelled", settlement_phase: "confirmed" });
+  useSessionStore.getState().mergeWikiJobs("original", [card]);
+  const posts: { url: string; body: Record<string, unknown> }[] = [];
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      posts.push({ url: String(url), body: JSON.parse(String(init.body)) });
+      return posts.length === 1 ? new Response("unavailable", { status: 503 }) : Response.json({});
+    }
+    if (String(url).includes("/details")) return Response.json({
+      job_id: card.job_id, vault_id: card.vault_id, state_version: 3, attempt: 1, current_attempt: 1, attempts: [1],
+      status: "cancelled", settlement_phase: "confirmed", error: null, items: [], outputs: [], next_offset: null,
+      actions: { verify: true, retry: true, readmit: false, blocked_reason: null },
+    });
+    return Response.json([card]);
+  }));
+  render(<WikiJobCards sessionId="original" />);
+  fireEvent.click(screen.getByText("Task details"));
+  await waitFor(() => expect(screen.getByText("Continue unfinished work")).toBeTruthy());
+  fireEvent.click(screen.getByText("Continue unfinished work"));
+  await waitFor(() => expect(screen.getByRole("alert").textContent).toContain("503"));
+  fireEvent.click(screen.getByText("Continue unfinished work"));
+  await waitFor(() => expect(posts).toHaveLength(2));
+  expect(posts[0].body).toEqual(posts[1].body);
+  expect(posts[0].body.operation_id).toEqual(expect.any(String));
+  expect(posts.every((post) => post.url.endsWith("/retry"))).toBe(true);
+});
+
+it("starts a new explicit verification after a confirmed verification and content repair", async () => {
+  const card = wikiJob({ status: "completed_with_attention" });
+  useSessionStore.getState().mergeWikiJobs("original", [card]);
+  const accepted = new Set<string>();
+  const operations: string[] = [];
+  let repaired = false;
+  let verified = false;
+  vi.stubGlobal("fetch", vi.fn(async (url: string, init?: RequestInit) => {
+    if (init?.method === "POST") {
+      const operation = JSON.parse(String(init.body)).operation_id;
+      operations.push(operation);
+      if (!accepted.has(operation)) { accepted.add(operation); verified = repaired; }
+      return Response.json({});
+    }
+    if (String(url).includes("/details")) return Response.json({
+      job_id: card.job_id, vault_id: card.vault_id, state_version: 3, attempt: 1, current_attempt: 1, attempts: [1],
+      status: verified ? "completed" : "completed_with_attention", settlement_phase: "none",
+      error: verified ? null : "Saved output still needs review", items: [], outputs: [], next_offset: null,
+      actions: { verify: true, retry: false, readmit: false, blocked_reason: null },
+    });
+    return Response.json([card]);
+  }));
+  render(<WikiJobCards sessionId="original" />);
+  fireEvent.click(screen.getByText("Task details"));
+  const verify = await screen.findByText("Verify saved result and index");
+  fireEvent.click(verify);
+  await waitFor(() => expect(operations).toHaveLength(1));
+  await screen.findByText("Saved output still needs review");
+  repaired = true;
+  fireEvent.click(await screen.findByText("Verify saved result and index"));
+  await waitFor(() => expect(operations).toHaveLength(2));
+  expect(operations[1]).not.toBe(operations[0]);
+  await waitFor(() => expect(screen.queryByText("Saved output still needs review")).toBeNull());
 });

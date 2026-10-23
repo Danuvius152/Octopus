@@ -1,8 +1,9 @@
 """Control the displayed attempt without turning a subscription into authority."""
 
+import asyncio
+
 from server.mcp_identity import mint, reset_current_scope, set_current_scope, verify
 from server.mcp_servers.wiki import mcp
-from server.wiki import job_notifications
 from server.wiki.tasks import tasks
 from tests import test_wiki_api as wiki_api
 from tests.test_wiki_job_events import enqueue
@@ -68,16 +69,11 @@ async def test_worker_controls_only_own_job_and_gets_bounded_result(jobs, client
         tasks.unassign(session.id)
 
 
-async def test_settlement_paging_does_not_starve_newer_unconfirmed_jobs(jobs):
+async def test_each_queued_cancellation_finishes_without_a_settlement_poller(jobs):
     first = enqueue(jobs)
     identifiers = [first["id"]]
     for index in range(10):
         identifiers.append(jobs.maintain(f"pending-{index}", "", "Review", ["Library/note.md"], None, [], "human")["id"])
-    for job_id in identifiers:
-        jobs.update(job_id, status="running")
-        jobs.mark_cancelled(job_id)
-    one = job_notifications._unsettled(jobs, "")
-    two = job_notifications._unsettled(jobs, one[-1])
-    assert len(one) == 10 and len(two) == 1
-    assert set(one + two) == set(identifiers)
-    assert job_notifications._unsettled(jobs, two[-1]) == []
+    await asyncio.gather(*(jobs.cancel(job_id, None) for job_id in identifiers))
+    await asyncio.gather(*(jobs.settle_cancelled(job_id, None) for job_id in identifiers))
+    assert all(jobs.get(job_id)["settlement_phase"] == "confirmed" for job_id in identifiers)

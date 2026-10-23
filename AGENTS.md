@@ -52,6 +52,11 @@ Get feedback on each change promptly with the smallest relevant test set:
   needed to exercise the changed boundary. Run live tests when the question
   needs the installed CLI or provider, using this installation's selection.
 
+Reuse unchanged preparation across read-only variations and keep the assertions
+for each case. Content reads that supply authorization evidence remain real
+reads. Use the named `short_process_shutdown` fixture only where the default
+process-exit grace period is outside the tested contract; signals and joins stay real.
+
 Keep this feedback loop focused while editing. The hermetic selection over all
 of `tests/` is the full backend suite. Fast checks establish local correctness;
 complete the full checks at the commit boundary.
@@ -65,6 +70,10 @@ combined run, or use the pre-commit hook for its gates and run the remaining
 checks separately. Give each check one executor. The backend
 selection includes Wiki correctness and excludes live integration and both
 optional tiers; see Test Coverage for individual commands.
+
+The full backend gate uses four pytest-xdist workers grouped by file, with worker
+restart disabled. Focused development checks and live-provider checks stay serial;
+parallelism is selected by the full-gate commands, not global pytest `addopts`.
 
 **All required correctness checks must pass before committing.** Investigate
 and fix failures. Reuse passing evidence for unchanged code, environment and
@@ -90,7 +99,7 @@ root; use the PATH setup under Conventions.
 
 | Suite | Command | Scope and execution boundary |
 |-------|---------|------------------------------|
-| Backend hermetic | `.venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" -q` | Full correctness, including Wiki sources/jobs/maintenance, permissions, transactions and recovery. No live model or external network dependency; guards reject real model CLI execution and production callback port 8000. |
+| Backend hermetic | `.venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" -n 4 --dist=loadfile --max-worker-restart=0 -q` | Full correctness, including Wiki sources/jobs/maintenance, permissions, transactions and recovery. No live model or external network dependency; guards reject real model CLI execution and production callback port 8000. |
 | Wiki performance (opt-in) | `.venv/bin/pytest tests/ --run-wiki-perf -m wiki_perf -v -s` | Large-dataset projection and grant-lookup cost measurements. Outside default full checks and release gates; small correctness and query-boundary checks remain in the hermetic tier. |
 | Live Codex pytest | `.venv/bin/pytest tests/ -m "real and (real_codex or codex_bin) and not real_claude and not knowledge_eval" -v` | Actual Codex execution, streaming/tools, scheduling, memory, fork, research, Wiki and login contracts. Use the isolated credential setup in [本机测试](docs/local-wsl.md#本机测试). |
 | Supervisor integration | `.venv/bin/pytest tests/ -m "real and supervisor" -v` | Isolated systemd user units: installation ownership, environment/token handling, process retirement and managed restart. No provider CLI or production-service mutation. |
@@ -296,7 +305,7 @@ agents, which gained `POST /api/agents/{id}/unarchive` for the same section).
 ./scripts/check.sh --e2e               # + both complete E2E buckets (both CLIs)
 
 # Backend
-.venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" -v
+.venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" -n 4 --dist=loadfile --max-worker-restart=0 -v
 .venv/bin/uvicorn server.main:app       # start server (serves web/dist/)
 
 # Frontend

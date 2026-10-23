@@ -257,7 +257,7 @@ async def test_three_document_grant_lookup_does_not_scan_the_whole_job(client, t
         expected = {doc["doc"] for doc in documents[:3]}
         for size in (100, 1000, 5000):
             job_id = uuid.uuid4().hex
-            db.execute("INSERT INTO jobs VALUES(?,?,?,'{}','queued','[]',NULL,NULL,?,?)",
+            db.execute("INSERT INTO jobs(id,request_key,payload_hash,payload,status,items,error,session_id,created_at,updated_at) VALUES(?,?,?,'{}','queued','[]',NULL,NULL,?,?)",
                        (job_id, job_id, "synthetic-grant-query-fixture", "2026-10-18", "2026-10-18"))
             grants.issue(db, registration, job_id, documents[:size])
             steps = 0
@@ -360,6 +360,7 @@ async def test_landed_creation_recovers_the_same_change_without_a_second_publish
         item = job["items"][0]
         response = await publish(client, headers, item["path"], item["reservation_id"])
         assert response.status_code == 503 and (root / item["path"]).exists(), response.text
+    WikiHistory(jobs.store).recover()
     assert jobs.recover_creation(job["id"], item) and item["status"] == "done", item
     with jobs.store.connect() as db:
         reservation = db.execute("SELECT * FROM wiki_path_reservations WHERE id=?", (item["reservation_id"],)).fetchone()

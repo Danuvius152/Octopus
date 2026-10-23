@@ -152,8 +152,10 @@ def test_schema8_migration_is_additive_idempotent_and_does_not_bind_a_vault(data
     assert first["filesystem_inbox"] == []
     assert first["wiki_schema"][:len(before["wiki_schema"])] == before["wiki_schema"]
     assert [row[0] for row in first["wiki_schema"][len(before["wiki_schema"]):]] == list(range(9, schema.VERSION + 1))
+    assert first["jobs"] == [(*row, '{}') for row in before["jobs"]]
     assert {name: first[name] for name in before if name != "wiki_schema"} == {
-        name: rows for name, rows in before.items() if name != "wiki_schema"
+        name: [(*row, '{}') for row in rows] if name == "jobs" else rows
+        for name, rows in before.items() if name != "wiki_schema"
     }
     schema.initialize(database)
     assert snapshot(database) == first

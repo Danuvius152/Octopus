@@ -249,6 +249,7 @@ async def test_ingest_seed_recovers_in_the_same_actual_new_file_transaction(jobs
         injected.setattr(jobs.store, "_index", index)
         with pytest.raises(RuntimeError, match="injected byte-map ingest crash"):
             jobs.ingest(job["id"])
+    WikiHistory(jobs.store).recover()
     current = jobs.ingest(job["id"])
     assert target.read_bytes() == raw.encode()
     state = state_for(jobs.store, current["id"])
@@ -328,6 +329,7 @@ def test_first_controlled_transform_recovers_its_exact_before_or_after_proof(his
         with pytest.raises(RuntimeError, match="injected byte-map transform crash"):
             WikiCuration(history.store).organize("Library/note.md", created["revision"], "Summary.", [], [], None,
                                                   "curator", "adapt", frontmatter_patch=PROFILE)
+    history.recover()
     with history.locked():
         history.store.refresh()
     current = history.store.read("Library/note.md")

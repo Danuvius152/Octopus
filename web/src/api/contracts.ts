@@ -1838,6 +1838,40 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/wiki/jobs/{job_id}/details": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Job Details */
+        get: operations["job_details_api_wiki_jobs__job_id__details_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/wiki/jobs/{job_id}/outputs/{receipt_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Job Output */
+        get: operations["job_output_api_wiki_jobs__job_id__outputs__receipt_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/wiki/jobs/{job_id}/cancel": {
         parameters: {
             query?: never;
@@ -1866,6 +1900,23 @@ export interface paths {
         put?: never;
         /** Retry Job */
         post: operations["retry_job_api_wiki_jobs__job_id__retry_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/wiki/jobs/{job_id}/verify": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Verify Job */
+        post: operations["verify_job_api_wiki_jobs__job_id__verify_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -4024,6 +4075,12 @@ export interface components {
             /** Paths */
             paths?: string[];
             creation?: components["schemas"]["CreationRequest"] | null;
+            /** Expected Attempt */
+            expected_attempt?: number | null;
+            /** Expected Vault Id */
+            expected_vault_id?: string | null;
+            /** Operation Id */
+            operation_id?: string | null;
         };
         /** HTTPValidationError */
         HTTPValidationError: {
@@ -4099,6 +4156,17 @@ export interface components {
             /** Revoked At */
             revoked_at?: string | null;
         };
+        /** JobActions */
+        JobActions: {
+            /** Verify */
+            verify: boolean;
+            /** Retry */
+            retry: boolean;
+            /** Readmit */
+            readmit: boolean;
+            /** Blocked Reason */
+            blocked_reason: string | null;
+        };
         /** JobCard */
         JobCard: {
             /** Job Id */
@@ -4113,7 +4181,7 @@ export interface components {
              * Settlement Phase
              * @enum {string}
              */
-            settlement_phase: "none" | "pending" | "confirmed" | "unconfirmed";
+            settlement_phase: "none" | "pending" | "confirmed" | "attention" | "unconfirmed";
             /** Worker Session Id */
             worker_session_id: string | null;
             /** Scope */
@@ -4156,6 +4224,36 @@ export interface components {
             expected_attempt?: number | null;
             /** Expected Vault Id */
             expected_vault_id?: string | null;
+            /** Operation Id */
+            operation_id?: string | null;
+        };
+        /** JobDetail */
+        JobDetail: {
+            /** Job Id */
+            job_id: string;
+            /** Vault Id */
+            vault_id: string;
+            /** State Version */
+            state_version: number;
+            /** Current Attempt */
+            current_attempt: number;
+            /** Attempt */
+            attempt: number;
+            /** Attempts */
+            attempts: number[];
+            /** Status */
+            status: string;
+            /** Settlement Phase */
+            settlement_phase: string;
+            /** Error */
+            error: string | null;
+            /** Items */
+            items: components["schemas"]["JobItemDetail"][];
+            /** Outputs */
+            outputs: components["schemas"]["JobOutputDetail"][];
+            /** Next Offset */
+            next_offset: number | null;
+            actions: components["schemas"]["JobActions"];
         };
         /** JobEffects */
         JobEffects: {
@@ -4175,6 +4273,23 @@ export interface components {
              */
             index_pending: number;
         };
+        /** JobItemDetail */
+        JobItemDetail: {
+            /** Key */
+            key: string;
+            /** Doc */
+            doc: string | null;
+            /** Path */
+            path: string;
+            /** Status */
+            status: string;
+            /** Error */
+            error: string | null;
+            /** Execution */
+            execution: {
+                [key: string]: unknown;
+            } | null;
+        };
         /** JobOutcome */
         JobOutcome: {
             /** Doc Id */
@@ -4183,6 +4298,59 @@ export interface components {
             path: string;
             /** Revision */
             revision: string;
+        };
+        /** JobOutputDetail */
+        JobOutputDetail: {
+            /** Receipt Id */
+            receipt_id: string;
+            /** Doc */
+            doc: string | null;
+            /** Path */
+            path: string;
+            /** Revision */
+            revision: string | null;
+            /** Current Path */
+            current_path: string | null;
+            /** Current Revision */
+            current_revision: string | null;
+            /** Operation */
+            operation: string;
+            /** Status */
+            status: string;
+            /** Reason */
+            reason: string;
+            /** Change Id */
+            change_id: string | null;
+            /** Attempt */
+            attempt: number | null;
+            /** Details */
+            details: {
+                [key: string]: unknown;
+            };
+        };
+        /** JobOutputPage */
+        JobOutputPage: {
+            /** Receipt Id */
+            receipt_id: string;
+            /** Doc */
+            doc: string | null;
+            /** Path */
+            path: string;
+            /** Revision */
+            revision: string;
+            /**
+             * View
+             * @enum {string}
+             */
+            view: "history" | "current";
+            /** Content */
+            content: string;
+            /** Start */
+            start: number;
+            /** Next Start */
+            next_start: number | null;
+            /** Characters */
+            characters: number;
         };
         /** JobProgress */
         JobProgress: {
@@ -9420,6 +9588,81 @@ export interface operations {
             };
         };
     };
+    job_details_api_wiki_jobs__job_id__details_get: {
+        parameters: {
+            query?: {
+                attempt?: number | null;
+                offset?: number;
+                limit?: number;
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    job_output_api_wiki_jobs__job_id__outputs__receipt_id__get: {
+        parameters: {
+            query: {
+                attempt: number;
+                view?: "history" | "current";
+                start?: number;
+                length?: number;
+                expected_revision?: string | null;
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                job_id: string;
+                receipt_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["JobOutputPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     cancel_job_api_wiki_jobs__job_id__cancel_post: {
         parameters: {
             query?: {
@@ -9471,6 +9714,43 @@ export interface operations {
         requestBody?: {
             content: {
                 "application/json": components["schemas"]["JobControlRequest"] | null;
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    verify_job_api_wiki_jobs__job_id__verify_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                job_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["JobControlRequest"];
             };
         };
         responses: {

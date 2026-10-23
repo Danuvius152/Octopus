@@ -35,13 +35,6 @@ def _acknowledge(jobs, delivery, outcome):
         job_events.acknowledge(db, delivery["event_id"], delivery["subscriber_id"], outcome)
 
 
-def _unsettled(jobs, after):
-    with jobs.store.connect() as db:
-        return [row[0] for row in db.execute("""SELECT j.id FROM jobs j JOIN wiki_job_state s ON s.job_id=j.id
-            WHERE j.status='cancelled' AND s.settlement_phase IN ('pending','unconfirmed')
-              AND j.id>? ORDER BY j.id LIMIT 10""", (after,))]
-
-
 async def dispatch(jobs, manager):
     """One fair bounded batch. Failed deliveries keep their original identity.
 
@@ -78,17 +71,12 @@ async def run(manager):
     """A worker-owned receiver survives jobs finishing and resumes after restart."""
     from .jobs import WikiJobs
 
-    after = {}
     while True:
         for user_id, state in registry.states():
             if not (state / "config.json").is_file():
                 continue
             try:
                 jobs = await _io(WikiJobs, user_id)
-                unsettled = await _io(_unsettled, jobs, after.get(user_id, ""))
-                for job_id in unsettled:
-                    await jobs.settle_cancelled(job_id, manager)
-                after[user_id] = unsettled[-1] if unsettled else ""
                 await dispatch(jobs, manager)
             except Exception as error:
                 logger.exception("Wiki notification delivery remains pending for account=%s", user_id)

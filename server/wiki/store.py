@@ -96,11 +96,7 @@ def vault_read(function):
                 if error.status != 503 or function.__name__ not in {"search", "documents"}:
                     raise
         history = WikiHistory(self)
-        with self.connect() as db:
-            pending = db.execute(
-                "SELECT 1 FROM changes WHERE status='prepared' LIMIT 1"
-            ).fetchone()
-        with history.locked(shared=not pending and function.__name__ != "refresh"):
+        with history.locked(shared=function.__name__ != "refresh"):
             try:
                 return function(self, *args, **kwargs)
             except (OSError, WikiError, sqlite3.DatabaseError) as error:
@@ -148,7 +144,7 @@ class WikiStore:
         candidate._create_database = False
 
     def __init__(self, root: Path, state: Path, vault_id: str, *, on_construct=None, recovery=None,
-                 health: ServiceHealth | None = None, create: bool = False) -> None:
+                 health: ServiceHealth | None = None, create: bool = False, defer_recovery: bool = False) -> None:
         self._prepare(root, state, vault_id, health, recovery)
         if on_construct is not None:
             on_construct(self)
@@ -194,7 +190,11 @@ class WikiStore:
             with self.connect() as db:
                 checked = db.execute("SELECT checked_at FROM index_state WHERE singleton=1").fetchone()[0]
                 watched = [row[0] for row in db.execute("SELECT path FROM watch_directories")]
-            if checked is None:
+            if not defer_recovery:
+                from .history import WikiHistory
+
+                WikiHistory(self).recover()
+            if checked is None and not defer_recovery:
                 self.refresh()
             else:
                 for directory in watched:

@@ -50,7 +50,9 @@ run_gate() {
 
 gate_pytest() {
   # Full correctness excludes live providers, answer evaluation and Wiki benchmarks.
-  "$ROOT/.venv/bin/pytest" tests/ -m "not real and not knowledge_eval and not wiki_perf" -q
+  # Keep each file on one worker; a crashed worker fails without replacement.
+  "$ROOT/.venv/bin/pytest" tests/ -m "not real and not knowledge_eval and not wiki_perf" \
+    -n 4 --dist=loadfile --max-worker-restart=0 -q
 }
 
 gate_vitest() { cd "$ROOT/web" && bun run test; }

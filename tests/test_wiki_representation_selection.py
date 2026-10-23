@@ -49,10 +49,8 @@ def represented_pair(store, source_path="alpha.md", source=None, summaries=2):
     return store.read(source_path)
 
 
-@pytest.mark.parametrize("intent", INTENTS)
-@pytest.mark.parametrize("view", ["full", "compact"])
 async def test_twenty_summaries_preserve_original_other_direction_and_comparison(
-    client, tmp_path, intent, view,
+    client, tmp_path,
 ):
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -75,12 +73,14 @@ async def test_twenty_summaries_preserve_original_other_direction_and_comparison
     alpha = (await client.get(
         "/api/wiki/read", params={"doc": "alpha.md"}, headers=HEADERS,
     )).json()
-    params = {"query": "realtime", "intent": intent, "view": view, "limit": 3}
-    baseline = await client.get("/api/wiki/search", params=params, headers=HEADERS)
-    assert baseline.status_code == 200, baseline.text
-    assert {item["path"] for item in baseline.json()["items"]} == {
-        "alpha.md", "beta.md", "comparison.md",
-    }
+    for intent, view in product(INTENTS, ("full", "compact")):
+        baseline = await client.get("/api/wiki/search", headers=HEADERS, params={
+            "query": "realtime", "intent": intent, "view": view, "limit": 3,
+        })
+        assert baseline.status_code == 200, baseline.text
+        assert {item["path"] for item in baseline.json()["items"]} == {
+            "alpha.md", "beta.md", "comparison.md",
+        }
     for index in range(20):
         (vault / f"summary-{index:02}.md").write_text(
             "---\ntype: Synthesis\ntags: [distillation]\n"
@@ -95,23 +95,27 @@ async def test_twenty_summaries_preserve_original_other_direction_and_comparison
             "SELECT count(*) FROM wiki_edges WHERE relation='representation_of' "
             "AND target_doc=?", (alpha["id"],),
         ).fetchone()[0] == 20
-    response = await client.get("/api/wiki/search", params=params, headers=HEADERS)
-    assert response.status_code == 200, response.text
-    found = response.json()
-    assert found["total"] == 3
-    assert {item["path"] for item in found["items"]} == {
-        "alpha.md", "beta.md", "comparison.md",
-    }
-    hit = next(item for item in found["items"] if item["path"] == "alpha.md")
-    assert hit["id"] == alpha["id"] and hit["revision"] == alpha["revision"]
-    part = hit["sections"][0]
-    read = await client.get(
-        "/api/wiki/read", headers=HEADERS,
-        params={"doc": hit["id"], "expected_revision": hit["revision"],
-                "start": part["start"], "length": part["end"] - part["start"]},
-    )
-    assert read.status_code == 200, read.text
-    assert "under fixed frame length" in read.json()["content"]
+    # Query variations share the unchanged source and all twenty summaries.
+    for intent, view in product(INTENTS, ("full", "compact")):
+        response = await client.get("/api/wiki/search", headers=HEADERS, params={
+            "query": "realtime", "intent": intent, "view": view, "limit": 3,
+        })
+        assert response.status_code == 200, response.text
+        found = response.json()
+        assert found["total"] == 3
+        assert {item["path"] for item in found["items"]} == {
+            "alpha.md", "beta.md", "comparison.md",
+        }
+        hit = next(item for item in found["items"] if item["path"] == "alpha.md")
+        assert hit["id"] == alpha["id"] and hit["revision"] == alpha["revision"]
+        part = hit["sections"][0]
+        read = await client.get(
+            "/api/wiki/read", headers=HEADERS,
+            params={"doc": hit["id"], "expected_revision": hit["revision"],
+                    "start": part["start"], "length": part["end"] - part["start"]},
+        )
+        assert read.status_code == 200, read.text
+        assert "under fixed frame length" in read.json()["content"]
 
 
 def test_source_returns_its_own_score_sections_and_lookup_identity(store):
@@ -133,31 +137,33 @@ def test_source_returns_its_own_score_sections_and_lookup_identity(store):
         assert store.search(document["id"], intent="lookup")["items"][0]["path"] == path
 
 
-@pytest.mark.parametrize("intent", INTENTS)
-def test_limit_one_pages_have_same_set_and_old_epoch_is_rejected(store, intent):
+def test_limit_one_pages_have_same_set_and_old_epoch_is_rejected(store):
     alpha = represented_pair(store, summaries=20)
     write_note(store, "beta.md", "# Beta study\nRealtime uses a calibrated Rig.\n")
     write_note(store, "comparison.md", "# Comparison\nRealtime studies differ.\n")
     store.refresh()
-    complete = store.search("realtime", intent=intent)
-    pages = []
-    page = store.search("realtime", intent=intent, limit=1)
-    first_cursor = page["next_cursor"]
-    assert first_cursor
-    while True:
-        assert page["total"] == 3
-        pages.extend(item["id"] for item in page["items"])
-        if page["next_cursor"] is None:
-            break
-        page = store.search("realtime", intent=intent, limit=1, cursor=page["next_cursor"])
-    assert len(pages) == len(set(pages)) == 3
-    assert set(pages) == {item["id"] for item in complete["items"]}
-    assert alpha["id"] in pages
+    cursors = {}
+    for intent in INTENTS:
+        complete = store.search("realtime", intent=intent)
+        pages = []
+        page = store.search("realtime", intent=intent, limit=1)
+        cursors[intent] = page["next_cursor"]
+        assert cursors[intent]
+        while True:
+            assert page["total"] == 3
+            pages.extend(item["id"] for item in page["items"])
+            if page["next_cursor"] is None:
+                break
+            page = store.search("realtime", intent=intent, limit=1, cursor=page["next_cursor"])
+        assert len(pages) == len(set(pages)) == 3
+        assert set(pages) == {item["id"] for item in complete["items"]}
+        assert alpha["id"] in pages
     write_note(store, "alpha.md", "# Alpha study\nRealtime still requires fixed frame length.\n")
     store.refresh()
-    with pytest.raises(WikiError) as error:
-        store.search("realtime", intent=intent, limit=1, cursor=first_cursor)
-    assert error.value.status == 409
+    for intent, cursor in cursors.items():
+        with pytest.raises(WikiError) as error:
+            store.search("realtime", intent=intent, limit=1, cursor=cursor)
+        assert error.value.status == 409
 
 
 @pytest.mark.parametrize("case", ["nonmatching", "directory", "kind", "asset", "template", "source_snapshot"])

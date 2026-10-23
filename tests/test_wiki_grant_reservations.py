@@ -31,6 +31,7 @@ async def test_cancel_releases_unused_path_and_retry_reacquires_the_original_res
     identifier = old["items"][0]["reservation_id"]
     cancelled = await client.post(f"/api/wiki/jobs/{old['id']}/cancel", headers=wiki_api.HEADERS)
     assert cancelled.status_code == 200, cancelled.text
+    await jobs.settle_cancelled(old["id"], wiki_api.session_manager)
     assert reservations(jobs, old["id"])[identifier]["state"] == "released"
     other, _ = await proposed(client, root, paths=["Library/new.md"], key="another")
     conflict = await client.post(f"/api/wiki/jobs/{old['id']}/retry", headers=wiki_api.HEADERS)
@@ -38,6 +39,7 @@ async def test_cancel_releases_unused_path_and_retry_reacquires_the_original_res
     assert jobs.get(old["id"])["status"] == "cancelled"
     assert reservations(jobs, old["id"])[identifier]["state"] == "released"
     assert (await client.post(f"/api/wiki/jobs/{other['id']}/cancel", headers=wiki_api.HEADERS)).status_code == 200
+    await jobs.settle_cancelled(other["id"], wiki_api.session_manager)
     retried = await client.post(f"/api/wiki/jobs/{old['id']}/retry", headers=wiki_api.HEADERS)
     assert retried.status_code == 200, retried.text
     assert retried.json()["id"] == old["id"] and retried.json()["items"][0]["reservation_id"] == identifier
@@ -61,6 +63,7 @@ async def test_cancel_does_not_release_a_live_assignment_or_allow_its_late_publi
         retried = await client.post(f"/api/wiki/jobs/{job['id']}/retry", headers=wiki_api.HEADERS)
         assert retried.status_code == 409
     assert (await client.post(f"/api/wiki/jobs/{job['id']}/cancel", headers=wiki_api.HEADERS)).status_code == 200
+    await jobs.settle_cancelled(job["id"], None)
     assert reservations(jobs, job["id"])[item["reservation_id"]]["state"] == "released"
     with jobs.store.connect() as db:
         assert db.execute("SELECT count(*) FROM operation_receipts WHERE job_id=?", (job["id"],)).fetchone()[0] == 0
@@ -138,24 +141,21 @@ async def _prepare_uncertain_reservation(http, root, evidence_file, also_unstart
 
 
 async def _check_uncertain_reservation(http, root, evidence_file, also_unstarted):
-    from server.wiki.history import WikiHistory
-
     evidence = json.loads(evidence_file.read_text())
     job, before = evidence["job"], evidence["before"]
     jobs = WikiJobs(None)
     item = job["items"][0]
     assert reservations(jobs, job["id"])[item["reservation_id"]] == before
     assert before["state"] in {"prepared", "blocked"} and before["change_id"]
-    # Exercise the new generation's real journal reconciliation before cancel;
-    # it may classify observed bytes, but must never apply the retained proposal.
-    with WikiHistory(jobs.store).locked():
-        pass
+    # Registry opening already completed this generation's recovery before
+    # exposing jobs.store; it must never apply the retained proposal.
     with jobs.store.connect() as db:
         original_status = db.execute("SELECT status FROM changes WHERE id=?", (before["change_id"],)).fetchone()[0]
     # Reopening classifies the missing file against the retained preimage;
     # cancellation must preserve that classification and the original proposal.
     assert original_status == "interrupted"
     assert (await http.post(f"/api/wiki/jobs/{job['id']}/cancel", headers=wiki_api.HEADERS)).status_code == 200
+    await jobs.settle_cancelled(job["id"], wiki_api.session_manager)
     assert reservations(jobs, job["id"])[item["reservation_id"]] == before
     with jobs.store.connect() as db:
         assert db.execute("SELECT status FROM changes WHERE id=?", (before["change_id"],)).fetchone()[0] == original_status
@@ -167,7 +167,7 @@ async def _check_uncertain_reservation(http, root, evidence_file, also_unstarted
     retried = await http.post(f"/api/wiki/jobs/{job['id']}/retry", headers=wiki_api.HEADERS)
     assert retried.status_code == 409, retried.text
     retained = jobs.get(job["id"])
-    assert retained["status"] == "cancelled" and retained["settlement_phase"] == "unconfirmed"
+    assert retained["status"] == "cancelled" and retained["settlement_phase"] == "attention"
     assert retained["items"][0]["status"] == "attention"
     after = reservations(jobs, job["id"])[item["reservation_id"]]
     assert (after["document_id"], after["change_id"]) == (before["document_id"], before["change_id"])
@@ -279,6 +279,7 @@ async def test_new_registration_readmission_reacquires_the_same_released_path(cl
     job, _ = await proposed(client, root, paths=["Library/new.md"])
     jobs = WikiJobs(None)
     assert (await client.post(f"/api/wiki/jobs/{job['id']}/cancel", headers=wiki_api.HEADERS)).status_code == 200
+    await jobs.settle_cancelled(job["id"], wiki_api.session_manager)
     old = reservations(jobs, job["id"])
     assert next(iter(old.values()))["state"] == "released"
     registry.configure(None, root, "new-curator")

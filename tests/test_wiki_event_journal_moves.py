@@ -30,8 +30,7 @@ def test_verified_copy_unlink_move_preserves_only_its_source_identity(store):
     with unrelated_path.open("rb"):
         unrelated_path.unlink()
         unrelated_path.write_bytes(b"# Replacement of the unrelated note\n")
-        with history.locked():
-            pass
+        history.recover()
     assert not journal.exists()
     assert store.read(source["id"])["path"] == "Library/b.md"
     assert store.read(unrelated["path"])["id"] != unrelated["id"]
@@ -59,8 +58,7 @@ def test_journal_cannot_assign_old_identity_to_an_ambiguous_same_hash_copy(store
             target.write_bytes(raw)
         path.unlink()
         with pytest.raises(WikiError, match="Ambiguous external copy/unlink move") as failure:
-            with history.locked():
-                pass
+            history.recover()
         assert failure.value.status == 409
     assert journal.exists()
     assert target.read_bytes() == raw
@@ -80,8 +78,7 @@ def test_matched_kernel_rename_does_not_resurrect_a_later_target_replacement(sto
         target.unlink()
         target.write_bytes(raw)
         with pytest.raises(WikiError, match="External move identity changed"):
-            with history.locked():
-                pass
+            history.recover()
     assert journal.exists()
     assert target.read_bytes() == raw
     with store.connect() as db:

@@ -43,6 +43,16 @@ test("Wiki cards persist, cancel their displayed attempt, and catch up after rec
     expect((await request.post(`${fixture}/deliver`, { headers })).ok()).toBeTruthy();
     return job;
   };
+  const settled = async (jobId: string) => {
+    await expect.poll(async () => {
+      const response = await request.get(`${API}/wiki/jobs/${jobId}`, { headers });
+      expect(response.ok()).toBeTruthy();
+      return (await response.json()).settlement_phase;
+    }).toBe("confirmed");
+    // This fixture pauses the real receiver. Deliver after the original owner
+    // settles, so the committed card includes its final cancellation evidence.
+    expect((await request.post(`${fixture}/deliver`, { headers })).ok()).toBeTruthy();
+  };
   try {
     await page.goto("/");
     await page.locator('input[type="password"]').fill("changeme");
@@ -57,15 +67,19 @@ test("Wiki cards persist, cancel their displayed attempt, and catch up after rec
     await card.getByRole("button", { name: "Cancel maintenance" }).click();
     const response = await control;
     expect(response.ok()).toBeTruthy();
-    expect((await response.json()).settlement_phase).toBe("confirmed");
+    expect(["pending", "confirmed"]).toContain((await response.json()).settlement_phase);
     expect(response.request().postDataJSON()).toEqual({
       expected_attempt: 0, expected_vault_id: scope.vault_id,
     });
-    expect((await request.post(`${fixture}/deliver`, { headers })).ok()).toBeTruthy();
+    await settled(first.id);
     const received = await (await request.get(`${API}/sessions/${session.id}/wiki-jobs`, { headers })).json();
     expect(received[0].settlement_phase).toBe("confirmed");
     await expect(card).toHaveAttribute("data-status", "cancelled");
-    await expect(card.getByRole("button", { name: "Retry unfinished work" })).toBeVisible();
+    await card.getByRole("button", { name: "Task details" }).click();
+    await expect(card.getByRole("dialog", { name: "Wiki task details" })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Continue unfinished work" })).toBeVisible();
+    await expect(card.getByRole("button", { name: "Verify saved result and index" })).toBeVisible();
+    await card.getByRole("button", { name: "Close details" }).click();
 
     const second = await submit("browser-card-second");
     const secondCard = page.locator(`[data-wiki-job="${second.id}"]`);
@@ -78,7 +92,7 @@ test("Wiki cards persist, cancel their displayed attempt, and catch up after rec
       headers, data: { expected_attempt: 0, expected_vault_id: scope.vault_id },
     });
     expect(cancelled.ok(), await cancelled.text()).toBeTruthy();
-    expect((await request.post(`${fixture}/deliver`, { headers })).ok()).toBeTruthy();
+    await settled(second.id);
     disconnected = false;
     await context.setOffline(false);
     await expect(page.locator(".conn-status.on")).toBeVisible();
@@ -93,8 +107,9 @@ test("Wiki cards persist, cancel their displayed attempt, and catch up after rec
     expect(archived.ok()).toBeTruthy();
     const persisted = await archived.json();
     expect(persisted).toHaveLength(2);
-    expect(persisted.every((value: { origin_request_id: string; status: string; settlement_phase: string }) =>
-      value.origin_request_id === scope.request_id && value.status === "cancelled" && value.settlement_phase === "confirmed")).toBe(true);
+    for (const value of persisted) {
+      expect(value).toMatchObject({ origin_request_id: scope.request_id, status: "cancelled", settlement_phase: "confirmed" });
+    }
     const detail = await (await request.get(`${API}/sessions/${session.id}`, { headers })).json();
     expect(detail.messages).toEqual([]);
     expect((await request.post(`${API}/sessions/${session.id}/unarchive`, { headers })).ok()).toBeTruthy();

@@ -136,10 +136,15 @@ class AppMutation:
             self.history.store.synchronize()
 
     def _journal_changes(self):
+        self._require_journal()
         self.history.finish_external(self.before)
         with file_effect(self.history.store.health):
             self.journal.unlink(missing_ok=True)
             sync_directory(self.journal.parent)
+
+    def _require_journal(self):
+        if not self.journal.is_file() or json.loads(self.journal.read_text()).get("id") != self.before["id"]:
+            raise WikiError("The original application mutation intent changed; retained without replacement", 409)
 
     async def receipt(self, payload):
         async with self._finish_lock:
@@ -152,6 +157,7 @@ class AppMutation:
             return
 
         def remember():
+            self._require_journal()
             trash_id = payload.get("id")
             if isinstance(trash_id, str) and re.fullmatch(r"[a-f0-9]{32}", trash_id):
                 self.before["trash_id"] = trash_id
@@ -276,7 +282,8 @@ async def _begin(app_row, method, endpoint, query, body=b""):
 
         def prepare():
             with history.under_existing_lock(handle, lease):
-                history.recover()
+                if journal.exists():
+                    raise WikiError("An earlier application mutation needs explicit recovery before another write", 409)
                 try:
                     payload = json.loads(body)
                     if not isinstance(payload, dict):

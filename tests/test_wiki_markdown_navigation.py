@@ -3,6 +3,8 @@
 import hashlib
 import json
 import uuid
+from functools import partial
+from itertools import product
 from types import SimpleNamespace
 
 import pytest
@@ -31,36 +33,36 @@ def write(store, path, content):
     target.write_text(content)
 
 
-@pytest.mark.parametrize("intent", INTENTS)
-@pytest.mark.parametrize("view", VIEWS)
-def test_all_navigation_intents_filter_formats_before_totals_and_pagination(store, intent, view):
+def test_all_navigation_intents_filter_formats_before_totals_and_pagination(store):
     for path in ["one.MD", "two.MarkDown", "legacy.html", "legacy.HTM", "legacy.txt"]:
         write(store, path, "# Realtime\nRealtime visible evidence with calibration conditions.\n")
     for path in ["static/tool.Md", "static/noise.html"]:
         write(store, path, "# Realtime\nRealtime tool evidence.\n")
-    for include_assets, expected in [(False, {"one.MD", "two.MarkDown"}), (True, {"one.MD", "two.MarkDown", "static/tool.Md"})]:
-        for operation in [store.documents, lambda **kw: store.search("Realtime", intent=intent, **kw)]:
-            paths = []
-            cursor = None
-            while True:
-                page = operation(view=view, include_assets=include_assets, limit=1, cursor=cursor)
-                assert page["total"] == len(expected)
-                assert len(page["items"]) == 1
-                paths.extend(item["path"] for item in page["items"])
-                cursor = page["next_cursor"]
-                if cursor is None:
-                    assert page["next_offset"] is None
-                    break
-            assert len(paths) == len(set(paths)) and set(paths) == expected
-            second = operation(view=view, include_assets=include_assets, limit=1, offset=1)
-            assert second["items"][0]["path"] == paths[1]
+    operations = [store.documents, *(partial(store.search, "Realtime", intent=intent) for intent in INTENTS)]
+    for view in VIEWS:
+        for include_assets, expected in [(False, {"one.MD", "two.MarkDown"}), (True, {"one.MD", "two.MarkDown", "static/tool.Md"})]:
+            # documents() has no intent; check each view once, alongside all
+            # five search intents, against the same read-only index.
+            for operation in operations:
+                paths = []
+                cursor = None
+                while True:
+                    page = operation(view=view, include_assets=include_assets, limit=1, cursor=cursor)
+                    assert page["total"] == len(expected)
+                    assert len(page["items"]) == 1
+                    paths.extend(item["path"] for item in page["items"])
+                    cursor = page["next_cursor"]
+                    if cursor is None:
+                        assert page["next_offset"] is None
+                        break
+                assert len(paths) == len(set(paths)) and set(paths) == expected
+                second = operation(view=view, include_assets=include_assets, limit=1, offset=1)
+                assert second["items"][0]["path"] == paths[1]
     assert store.documents(kind="asset", include_assets=True)["total"] == 1
     assert store.documents(directory="static", include_assets=True)["total"] == 1
 
 
-@pytest.mark.parametrize("intent", INTENTS)
-@pytest.mark.parametrize("view", VIEWS)
-def test_recognized_nonmarkdown_identity_never_falls_back_to_markdown_title(store, intent, view):
+def test_recognized_nonmarkdown_identity_never_falls_back_to_markdown_title(store):
     for suffix in ["html", "HTM", "txt"]:
         path = "legacy." + suffix
         write(store, path, "Legacy literal evidence.")
@@ -71,26 +73,28 @@ def test_recognized_nonmarkdown_identity_never_falls_back_to_markdown_title(stor
         for index, query in enumerate([path, document["id"], uid.upper()]):
             write(store, f"collision-{suffix}-{index}.md", f"---\ntitle: {query}\n---\n# Collision\n{query} is a separate note.\n")
         for query in [path, document["id"], uid, uid.upper()]:
-            result = store.search(query, intent=intent, view=view, include_assets=True)
-            assert result["items"] == [] and result["total"] == 0
-            assert result["match_mode"] == "exact"
-            assert result["next_cursor"] is None and result["next_offset"] is None
+            for intent, view in product(INTENTS, VIEWS):
+                result = store.search(query, intent=intent, view=view, include_assets=True)
+                assert result["items"] == [] and result["total"] == 0
+                assert result["match_mode"] == "exact"
+                assert result["next_cursor"] is None and result["next_offset"] is None
+            # Direct reads are independent of search intent and view.
             assert store.read(query)["id"] == document["id"]
 
 
-@pytest.mark.parametrize("intent", [None, "question", "overview", "compare"])
-@pytest.mark.parametrize("view", VIEWS)
-def test_format_filter_precedes_lexical_relaxation_and_representation_groups(store, intent, view):
+def test_format_filter_precedes_lexical_relaxation_and_representation_groups(store):
     write(store, "legacy.html", "<p>Realtime calibration fully matching original.</p>")
     write(store, "summary.md", "---\nx_wiki: {representation_of: legacy.html}\n---\n# Realtime\nRealtime calibration summary evidence.\n")
-    result = store.search("Realtime calibration", intent=intent, view=view)
-    assert result["total"] == 1 and result["items"][0]["path"] == "summary.md"
+    for intent, view in product([None, "question", "overview", "compare"], VIEWS):
+        result = store.search("Realtime calibration", intent=intent, view=view)
+        assert result["total"] == 1 and result["items"][0]["path"] == "summary.md"
     # A complete HTML match cannot prevent partial Markdown matches from
     # becoming candidates when no Markdown covers every requested term.
     write(store, "legacy.html", "<p>Realtime calibration invisiblefullterm</p>")
-    result = store.search("Realtime invisiblefullterm", intent=intent, view=view)
-    assert result["total"] == 1 and result["items"][0]["path"] == "summary.md"
-    assert result["match_mode"] == ("comparison" if intent == "compare" else "lexical_partial")
+    for intent, view in product([None, "question", "overview", "compare"], VIEWS):
+        result = store.search("Realtime invisiblefullterm", intent=intent, view=view)
+        assert result["total"] == 1 and result["items"][0]["path"] == "summary.md"
+        assert result["match_mode"] == ("comparison" if intent == "compare" else "lexical_partial")
 
 
 @pytest.mark.parametrize("view", VIEWS)

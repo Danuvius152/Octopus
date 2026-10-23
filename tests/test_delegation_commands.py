@@ -120,6 +120,7 @@ async def test_terminal_cas_keeps_list_running_until_commit_acknowledged(runtime
     finally:
         release.set()
     await wait_finished(current.manager, rec)
+    await current.delegations.confirm_recording()
     assert rec.state == "completed"
     assert len(current.manager.dispatch_snapshot(current.parent_id)["items"]) == 1
 

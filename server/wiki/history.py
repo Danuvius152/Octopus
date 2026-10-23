@@ -11,7 +11,7 @@ import uuid
 from datetime import UTC, datetime
 from pathlib import Path
 
-from . import origins, source_bindings
+from . import job_items, origins, source_bindings
 from .storage import file_effect
 from .store import WikiError, is_maintainable_text, revision
 
@@ -95,8 +95,6 @@ class WikiHistory:
             fcntl.flock(handle, fcntl.LOCK_SH if shared else fcntl.LOCK_EX)
             _owners.held = held | {key}
             try:
-                if not shared:
-                    self.recover()
                 yield
             finally:
                 _owners.held = held
@@ -297,7 +295,7 @@ class WikiHistory:
             # Direct recovery enters the same exclusive owner as writer/read
             # recovery. Nested synchronization must not replay the journal.
             with self.locked():
-                return
+                return self.recover()
         external = self.state / "external-change.json"
         if external.exists():
             entry = json.loads(external.read_text())
@@ -487,6 +485,7 @@ class WikiHistory:
             from .operations import record
 
             document = self.store.read(relative, length=1, expected_revision=current)
+            self.blob(before)
             with self.store.connect() as db:
                 receipt = record(db, doc_id=document["id"], path=relative, before=current, after=current, operation=operation, reason=reason, publication=publication, details=operation_details, store=self.store)
             return {"path": relative, "revision": current, "change_id": None, "receipt_id": receipt, "changed": False, **self.store.index_state()}
@@ -570,7 +569,7 @@ class WikiHistory:
             if db.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='jobs'").fetchone():
                 job = db.execute("SELECT items FROM jobs WHERE id=?", (proposal.get("job_id"),)).fetchone()
             owners = {
-                item["doc"] for item in json.loads(job["items"]) if row["id"] in item.get("candidate_changes", [])
+                item["doc"] for item in job_items.decode(job["items"]) if row["id"] in item.get("candidate_changes", [])
             } if job else set()
             if len(owners) != 1:
                 return "Legacy candidate ownership cannot be verified; evidence retained for manual review"

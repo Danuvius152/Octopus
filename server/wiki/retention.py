@@ -5,6 +5,7 @@ import os
 import re
 from datetime import UTC, datetime, timedelta
 
+from . import job_items
 from .history import atomic, history_text, sync_directory
 from .storage import file_effect
 from .store import WikiError
@@ -83,6 +84,10 @@ def collect(history, now=None):
             ).fetchall()
             prepared = {row["id"] for row in rows if row["status"] == "prepared"}
             protected_hashes, protected_changes = set(), set(prepared)
+            protected_hashes.update(row[0] for row in db.execute(
+                "SELECT output_revision FROM operation_receipts WHERE job_id IS NOT NULL AND change_id IS NULL AND created_at>=?",
+                (ordinary_cutoff.isoformat(),),
+            ) if row[0])
             if db.execute("SELECT 1 FROM sqlite_master WHERE name='jobs'").fetchone():
                 for row in db.execute(
                     "SELECT id,items,payload FROM jobs WHERE status IN ('queued','running','interrupted')"
@@ -91,7 +96,11 @@ def collect(history, now=None):
                     protected_changes.update(
                         payload.get("request", {}).get("created_changes", {}).values()
                     )
-                    for item in json.loads(row["items"]):
+                    for item in job_items.decode(row["items"]):
+                        # Evidence remains readable after scope exclusion, but
+                        # this item is no longer an active retention input.
+                        if item["status"] == "excluded":
+                            continue
                         protected_hashes.update(
                             item[key]
                             for key in ("revision", "input_revision", "output_revision")

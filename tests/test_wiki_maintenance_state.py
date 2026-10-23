@@ -631,7 +631,12 @@ async def test_unreceipted_unfinished_work_blocks_another_actor(client, tmp_path
     vault, config, jobs = await prepare(client, tmp_path)
     retained = jobs.maintain("legacy-retained", "", "Review selected note", ["Library/journal.md"], None, [], "earlier-actor")
     retained["items"][0]["status"] = item_status
-    jobs.update(retained["id"], status=job_status, items=retained["items"])
+    # Historical items had an unversioned running flag. Use their actual JSON
+    # representation; the current codec never writes that obsolete state.
+    retained["items"][0].pop("version", None)
+    with jobs.store.connect() as db:
+        db.execute("UPDATE jobs SET status=?,items=? WHERE id=?",
+                   (job_status, json.dumps(retained["items"]), retained["id"]))
     if newer_input:
         (vault / "Library/journal.md").write_text("# Journal\n\nLater human words.\n")
         assert (await current_read(client, "Library/journal.md")).status_code == 200
@@ -646,8 +651,9 @@ async def test_unreceipted_unfinished_work_blocks_another_actor(client, tmp_path
         assert len(jobs.list()["items"]) == 1
     if job_status == "interrupted":
         jobs.recover_jobs()
+    if job_status == "interrupted" or item_status == "running":
         unknown = jobs.get(retained["id"])
-        assert unknown["status"] == "interrupted" and unknown["items"][0]["execution_unknown"]
+        assert unknown["status"] == job_status and unknown["items"][0]["status"] == "unknown"
         original = (vault / "Library/journal.md").read_bytes()
         with pytest.raises(WikiError, match="original unknown execution") as denied:
             jobs.retry(retained["id"])

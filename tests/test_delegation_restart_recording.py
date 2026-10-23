@@ -113,6 +113,13 @@ async def _seed_running_round(path: Path, request: str, agents_dir: Path) -> Non
 
 async def _crash_scenario(directory: Path, mode: str, applied: bool) -> None:
     """Run only scripted Python children; the failing seam is the DB driver."""
+    if mode == "close":
+        from tests.process_shutdown import shorten_harness_shutdown
+
+        # This fresh process must exit through the real failing DB driver.
+        # Its held CLI still receives real signals, with a test-only grace.
+        shutdown_clock = pytest.MonkeyPatch()
+        shorten_harness_shutdown(shutdown_clock)
     os.environ["OCTOPUS_AGENTS_DIR"] = str(directory / "agents")
     from server.config import settings
 

@@ -6,14 +6,14 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
-from . import maintenance_inputs, protocols
+from . import job_items, maintenance_inputs, protocols
 from .store import WikiError
 
 TABLES = {
     "wiki_job_state": """CREATE TABLE wiki_job_state(
         job_id TEXT PRIMARY KEY NOT NULL,state_version INTEGER NOT NULL CHECK(state_version>0),
         attempt INTEGER NOT NULL CHECK(attempt>=0),settlement_phase TEXT NOT NULL
-        CHECK(settlement_phase IN ('none','pending','confirmed','unconfirmed')))""",
+        CHECK(settlement_phase IN ('none','pending','confirmed','attention')))""",
     "wiki_job_outbox": """CREATE TABLE wiki_job_outbox(
         event_id TEXT PRIMARY KEY NOT NULL,job_id TEXT NOT NULL,state_version INTEGER NOT NULL,
         body TEXT NOT NULL CHECK(json_valid(body)),created_at TEXT NOT NULL,
@@ -84,23 +84,29 @@ def unavailable():
     return WikiError("Wiki job notification ledger is missing or incompatible; durable state retained", 503)
 
 
-def _emit(job):
+def _emit(job, *, legacy=False):
     # Full paths/identities are never shortened. Oversize references are omitted
     # explicitly; the existing full job endpoint retains the complete evidence.
     # Applied receipts remain visible even when cancellation prevents a later
     # item update. Prepared receipts are counted separately, never as outputs.
-    applied = """SELECT r.doc_id AS doc,r.path AS path,r.output_revision AS revision
+    state = "json_extract(value,'$.status')" if legacy else job_items.sql_state()
+    output_state = "json_extract(i.value,'$.status')" if legacy else job_items.sql_state("i.value")
+    applied = f"""SELECT r.doc_id AS doc,r.path AS path,r.output_revision AS revision
         FROM operation_receipts r LEFT JOIN changes c ON c.id=r.change_id
         WHERE r.job_id=j.id AND r.output_revision IS NOT NULL AND coalesce(c.status,'applied')='applied'
         UNION SELECT coalesce(json_extract(i.value,'$.output_doc'),json_extract(i.value,'$.doc')),
           json_extract(i.value,'$.output'),json_extract(i.value,'$.output_revision')
         FROM json_each(j.items) i WHERE json_type(i.value,'$.output')='text'
           AND json_type(i.value,'$.output_revision')='text'
-          AND json_extract(i.value,'$.status')='done'"""
+          AND {output_state}='done'"""
     reference = "json_object('doc_id',doc,'path',path,'revision',revision)"
     refs = f"""SELECT {reference} AS value FROM ({applied})
         WHERE length(CAST({reference} AS BLOB))<=1024 ORDER BY path,doc,revision LIMIT 10"""
     outputs = f"(SELECT count(*) FROM ({applied}))"
+    recording_pending = ("json_extract(value,'$.recording_failure.request_id')" if legacy
+                         else job_items.sql_pending_request())
+    recording_filter = "json_type(value,'$.recording_failure')='object'" if legacy else "1"
+    attention = "='attention'" if legacy else " IN ('attention','unknown','verifying','excluded')"
     return f"""INSERT INTO wiki_job_outbox
         SELECT lower(hex(randomblob(16))),j.id,s.state_version,
           json_object('job_id',j.id,'state_version',s.state_version,'attempt',s.attempt,
@@ -108,9 +114,9 @@ def _emit(job):
             'scope',substr(coalesce(json_extract(j.payload,'$.scope'),''),1,512),
             'scope_truncated',length(coalesce(json_extract(j.payload,'$.scope'),''))>512,
             'progress',json_object('total',json_array_length(j.items),
-              'completed',(SELECT count(*) FROM json_each(j.items) WHERE json_extract(value,'$.status')='done'),
-              'attention',(SELECT count(*) FROM json_each(j.items) WHERE json_extract(value,'$.status')='attention'),
-              'failed',(SELECT count(*) FROM json_each(j.items) WHERE json_extract(value,'$.status')='failed')),
+              'completed',(SELECT count(*) FROM json_each(j.items) WHERE {state}='done'),
+              'attention',(SELECT count(*) FROM json_each(j.items) WHERE {state}{attention}),
+              'failed',(SELECT count(*) FROM json_each(j.items) WHERE {state}='failed')),
             'outcome_refs',json((SELECT coalesce(json_group_array(json(value)),'[]') FROM ({refs}))),
             'outcome_count',{outputs},
             'outcome_refs_truncated',{outputs}>(SELECT count(*) FROM ({refs})),
@@ -120,8 +126,8 @@ def _emit(job):
                 WHERE r.job_id=j.id AND coalesce(c.status,'applied')='applied'),
               'index_pending',(SELECT count(*) FROM job_publications p JOIN changes c ON c.id=p.change_id
                 WHERE p.job_id=j.id AND p.indexed=0 AND c.status='applied')),
-            'recording_pending',(SELECT count(DISTINCT json_extract(value,'$.recording_failure.request_id'))
-              FROM json_each(j.items) WHERE json_type(value,'$.recording_failure')='object'),
+            'recording_pending',(SELECT count(DISTINCT {recording_pending})
+              FROM json_each(j.items) WHERE {recording_filter}),
             'error',substr(j.error,1,512),'error_truncated',length(coalesce(j.error,''))>512,
             'created_at',j.created_at,'updated_at',j.updated_at),
           strftime('%Y-%m-%dT%H:%M:%fZ','now')
@@ -132,7 +138,8 @@ def _bump(selection):
     return f"UPDATE wiki_job_state SET state_version=state_version+1 WHERE job_id IN ({selection});"
 
 
-def job_triggers():
+def job_triggers(*, legacy=False):
+    unresolved = "unconfirmed" if legacy else "attention"
     result = {
         "wiki_job_state_owner": """CREATE TRIGGER wiki_job_state_owner BEFORE INSERT ON wiki_job_state
             WHEN NOT EXISTS(SELECT 1 FROM jobs WHERE id=new.job_id)
@@ -144,7 +151,7 @@ def job_triggers():
             UPDATE wiki_job_state SET state_version=state_version+1 WHERE job_id=new.id;
             INSERT INTO wiki_job_state
               SELECT new.id,1,CASE WHEN new.status='queued' THEN 0 ELSE 1 END,
-                CASE WHEN new.status='cancelled' THEN 'unconfirmed' ELSE 'none' END
+                CASE WHEN new.status='cancelled' THEN '{unresolved}' ELSE 'none' END
               WHERE NOT EXISTS(SELECT 1 FROM wiki_job_state WHERE job_id=new.id); END""",
         "wiki_job_update_state": f"""CREATE TRIGGER wiki_job_update_state AFTER UPDATE ON jobs
             WHEN new.status IS NOT old.status OR new.items IS NOT old.items
@@ -155,8 +162,8 @@ def job_triggers():
               settlement_phase=CASE WHEN new.status='cancelled' AND old.status<>'cancelled' THEN 'pending'
                 WHEN new.status='queued' AND old.status<>'queued' THEN 'none' ELSE settlement_phase END
               WHERE job_id=new.id; END""",
-        "wiki_job_state_emit_insert": "CREATE TRIGGER wiki_job_state_emit_insert AFTER INSERT ON wiki_job_state BEGIN " + _emit("new.job_id") + " END",
-        "wiki_job_state_emit_update": "CREATE TRIGGER wiki_job_state_emit_update AFTER UPDATE ON wiki_job_state BEGIN " + _emit("new.job_id") + " END",
+        "wiki_job_state_emit_insert": "CREATE TRIGGER wiki_job_state_emit_insert AFTER INSERT ON wiki_job_state BEGIN " + _emit("new.job_id", legacy=legacy) + " END",
+        "wiki_job_state_emit_update": "CREATE TRIGGER wiki_job_state_emit_update AFTER UPDATE ON wiki_job_state BEGIN " + _emit("new.job_id", legacy=legacy) + " END",
     }
     for table in ("operation_receipts", "job_publications"):
         for action in ("INSERT", "UPDATE", "DELETE"):
@@ -188,7 +195,7 @@ def initialize(db):
         db.execute(sql)
     for sql in TRIGGERS.values():
         db.execute(sql)
-    db.execute("INSERT INTO wiki_protocols VALUES('wiki_job_events',1)")
+    db.execute("INSERT INTO wiki_protocols VALUES('wiki_job_events',2)")
     if maintenance_inputs.jobs_initialized(db):
         attach_jobs(db)
 
@@ -199,13 +206,14 @@ def attach_jobs(db):
         db.execute(sql)
     db.execute("""INSERT INTO wiki_job_state
         SELECT id,1,CASE WHEN status='queued' THEN 0 ELSE 1 END,
-          CASE WHEN status='cancelled' THEN 'unconfirmed' ELSE 'none' END FROM jobs""")
+          CASE WHEN status='cancelled' THEN 'attention' ELSE 'none' END FROM jobs""")
 
 
-def require(db):
-    protocols.require(db, "wiki_job_events")
+def require(db, *, legacy=False):
+    protocols.require(db, "wiki_job_events", 1 if legacy else 2)
     with_jobs = maintenance_inputs.jobs_initialized(db)
-    expected = TABLES | INDEXES | TRIGGERS | (job_triggers() if with_jobs else {})
+    tables = TABLES | ({"wiki_job_state": TABLES["wiki_job_state"].replace("'attention'", "'unconfirmed'")} if legacy else {})
+    expected = tables | INDEXES | TRIGGERS | (job_triggers(legacy=legacy) if with_jobs else {})
     actual = dict(db.execute("SELECT name,sql FROM sqlite_master"))
     if any(canonical(actual.get(name)) != canonical(sql) for name, sql in expected.items()):
         raise unavailable()
@@ -214,6 +222,25 @@ def require(db):
         raise unavailable()
     if with_jobs and db.execute("SELECT 1 FROM jobs j LEFT JOIN wiki_job_state s ON s.job_id=j.id WHERE s.job_id IS NULL LIMIT 1").fetchone():
         raise unavailable()
+
+
+def upgrade(db):
+    """One forward transaction preserves events and upgrades their current view."""
+    require(db, legacy=True)
+    with_jobs = maintenance_inputs.jobs_initialized(db)
+    for name in TRIGGERS | (job_triggers() if with_jobs else {}):
+        db.execute(f'DROP TRIGGER "{name}"')
+    db.execute("ALTER TABLE wiki_job_state RENAME TO wiki_job_state_v1")
+    db.execute(TABLES["wiki_job_state"])
+    db.execute("""INSERT INTO wiki_job_state SELECT job_id,state_version,attempt,
+        CASE WHEN settlement_phase='unconfirmed' THEN 'attention' ELSE settlement_phase END FROM wiki_job_state_v1""")
+    db.execute("DROP TABLE wiki_job_state_v1")
+    for sql in TRIGGERS.values():
+        db.execute(sql)
+    if with_jobs:
+        for sql in job_triggers().values():
+            db.execute(sql)
+    db.execute("UPDATE wiki_protocols SET version=2 WHERE name='wiki_job_events'")
 
 
 def metadata(db, job_id):

@@ -21,7 +21,9 @@ def prepared(tmp_path, monkeypatch):
         (root / f"Library/{name}.md").write_text(f"# {name}\nCurrent words.\n")
     registry.configure(None, root, "curator")
     jobs = WikiJobs(None)
-    docs = {name: jobs.store.read(f"Library/{name}.md") for name in ("a", "b", "c")}
+    # Projection tests need indexed identities, not content or reading grants.
+    docs = {row["path"].removeprefix("Library/").removesuffix(".md"): row
+            for row in jobs.store.documents()["items"]}
     try:
         yield jobs, docs
     finally:
