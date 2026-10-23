@@ -208,6 +208,7 @@ class LifecycleMixin(SessionManagerBase):
         parent_session_id: str | None = None,
         delegation_request: str | None = None,
         app_id: str | None = None,
+        *, persist: bool = True,
     ) -> Session:
         """Create a conversation thread owned by `agent_id`.
 
@@ -266,7 +267,7 @@ class LifecycleMixin(SessionManagerBase):
             # no owner, and `adopt_orphan_rows` settles that at upgrade.
             user_id=owner_id,
         )
-        if self.db:
+        if self.db and persist:
             await self.db.save_session(
                 session_id=session.id,
                 name=session.name,
@@ -282,7 +283,8 @@ class LifecycleMixin(SessionManagerBase):
                 app_id=session.app_id,
                 user_id=session.user_id,
             )
-        self.sessions[sid] = session
+        if persist:
+            self.sessions[sid] = session
         return session
 
     async def import_session(

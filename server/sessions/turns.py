@@ -18,7 +18,6 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from .. import fork_helpers
 from .. import monitor as _monitor
-from ..attachments import validate_message_attachments
 from ..config import settings
 from ..diagnostics import exception_diagnostic, safe_diagnostic
 from ..harness import (
@@ -45,7 +44,6 @@ from .base import (
     _split_tool_list,
     logger,
 )
-from .client_submissions import require_retired_writers
 from .owner import RetainResultNotice, SessionOwner, SessionOwnerUnavailable
 from .owner_runtime import (
     CancelRequest,
@@ -61,7 +59,7 @@ from .owner_runtime import (
     WorkRetirement,
 )
 from .runtime_types import QuotaExceeded, _Attempt, _Decision, _Settlement, _Turn
-from .submission import RequestCompletion, SubmissionReceipt
+from .submission import RequestCompletion, SubmissionReceipt, receipt_for_input
 
 if TYPE_CHECKING:
     from ..knowledge import KnowledgeContext
@@ -79,15 +77,14 @@ class TurnsMixin(SessionManagerBase):
         session = self.sessions.get(session_id)
         if session is not None:
             owner = self._session_owners.get(id(session))
-            if owner is None and not session._admission_closed and session._archive_reservation is None:
-                owner = self._session_owner(session)
             if owner is not None and not owner.failed and not owner.sealed:
                 try:
                     await owner.call_runtime(RecoveryDismissed(client_id))
-                except SessionOwnerUnavailable:
+                except Exception:
                     # The edit is already committed. A dying original runtime
                     # cannot veto it or be replaced to publish a projection.
-                    pass
+                    logger.warning("Saved-input dismissal committed; original Owner notification failed session=%s client=%s",
+                                   session_id, client_id, exc_info=True)
         return True
 
     def dispatch_snapshot(self, session_id: str) -> dict[str, Any]:
@@ -104,7 +101,7 @@ class TurnsMixin(SessionManagerBase):
             ),
             "items": [{
                 "request_id": item.request_id, "source": item.source,
-                "summary": item.prompt[:1000], "priority": item.priority,
+                "summary": item.summary, "priority": item.priority,
             } for item in session._pending_queue],
         }
 
@@ -460,6 +457,8 @@ class TurnsMixin(SessionManagerBase):
         question_session_id: str | None = None, question_id: str | None = None,
         request_id: str | None = None, trusted_request: str | None = None,
         knowledge_context: KnowledgeContext | None = None, durable_client_input: bool = False,
+        client_request_id: str | None = None, recovery_of_client_id: str | None = None,
+        schedule: dict[str, Any] | None = None,
     ) -> SubmissionReceipt:
         session = self.sessions.get(session_id)
         if session is None:
@@ -468,8 +467,9 @@ class TurnsMixin(SessionManagerBase):
             if delivery_id and delivery_id in session._delivery_receipts:
                 return replace(session._delivery_receipts[delivery_id], disposition="duplicate")
             return SubmissionReceipt.closed(request_id or uuid.uuid4().hex, "shutdown")
-        await asyncio.to_thread(validate_message_attachments, session_id, list(attachment_ids or []))
-        await require_retired_writers(self, session_id)
+        from .client_submissions import _files
+
+        files = await asyncio.to_thread(_files, session_id, list(attachment_ids or []))
         queued = QueuedPrompt(
             prompt, list(attachment_ids or []), wiki_mode=wiki_mode, source=source,
             delivery_id=delivery_id, work_id=work_id, question_session_id=question_session_id,
@@ -478,7 +478,51 @@ class TurnsMixin(SessionManagerBase):
             **({"request_id": request_id} if request_id else {}),
         )
         owner = self._session_owners.get(id(session)) or self._session_owner(session)
-        return await owner.call_runtime(Submit(queued, steerable))
+        return await owner.call_runtime(Submit(queued, steerable, client_request_id, tuple(files), recovery_of_client_id, schedule))
+
+    async def source_receipt(self, source: str, delivery_id: str, *, session_id: str | None = None) -> tuple[str, SubmissionReceipt] | None:
+        """Confirm the original acceptance even after its target or caller retires."""
+        if self.db is None:
+            return None
+        row = await self.db.get_source_submission(source, delivery_id, session_id=session_id)
+        if row is None:
+            return None
+        session = self.sessions.get(row["session_id"])
+        future = session._request_completions.get(row["request_id"]) if session is not None else None
+        return row["session_id"], receipt_for_input(row, future)
+
+    async def start_one_shot(self, schedule: dict[str, Any], prompt: str, context: KnowledgeContext) -> tuple[str, SubmissionReceipt]:
+        """Prepare the target; Owner commits target, input and consumption once."""
+        from ..db.schedules import ScheduleChangedError
+
+        delivery_id = f"schedule:{schedule['id']}:{schedule['run_at']}"
+        existing = await self.source_receipt("schedule", delivery_id)
+        if existing is not None:
+            return existing
+        origin = self.sessions.get(schedule.get("origin_session_id"))
+        if origin is not None:
+            receipt = await self.start_message(origin.id, prompt, source="schedule", delivery_id=delivery_id,
+                                               knowledge_context=context, schedule=schedule)
+            return origin.id, receipt
+
+        async def admit():
+            candidate = await self._create_session(schedule["agent_id"], origin="schedule", persist=False)
+            owner = self._session_owner(candidate)
+            try:
+                request = QueuedPrompt(prompt, [], source="schedule", delivery_id=delivery_id, knowledge_context=context)
+                try:
+                    receipt = await owner.call_runtime(Submit(request, schedule=schedule))
+                except ScheduleChangedError:
+                    existing = await self.source_receipt("schedule", delivery_id)
+                    if existing is None:
+                        raise
+                    return existing
+                return candidate.id, receipt
+            finally:
+                if candidate.id not in self.sessions:
+                    await owner.close()
+
+        return await self._run_agent_operation(schedule["agent_id"], admit)
 
     async def await_session_execution(self, session_id: str, *, timeout: float | None = None) -> None:
         """Wait on captured execution/retirement resources, never a driver flag."""
@@ -567,6 +611,12 @@ class TurnsMixin(SessionManagerBase):
         from ..bg_tasks import render_delivery_prompt
         from ..knowledge import decode_owned, receive_return
 
+        existing = await self.source_receipt("bg", f"bg:{rec.id}", session_id=rec.session_id)
+        if existing is not None:
+            return existing[1].accepted
+        if self.session_owner_failed(rec.session_id):
+            logger.warning("Background task %s delivery stopped: destination owner is unavailable; output retained in the task record", rec.id)
+            return False
         session = self.sessions.get(rec.session_id)
         if session is None:
             logger.info(
@@ -589,17 +639,13 @@ class TurnsMixin(SessionManagerBase):
             )
             return False
         prompt = render_delivery_prompt(rec)
-        try:
-            receipt = await self.start_message(
-                rec.session_id, prompt, attachment_ids=None,
-                source="bg", delivery_id=f"bg:{rec.id}",
-                work_id=work_id, knowledge_context=knowledge_context,
-            )
-        except Exception as error:
-            logger.error("Failed to inject bg result task=%s session=%s error=%s\n%s",
-                         rec.id, rec.session_id, type(error).__name__,
-                         exception_diagnostic(error, secrets=(settings.auth_token,)))
-            return False
+        receipt = await self.start_message(
+            rec.session_id, prompt, attachment_ids=None,
+            source="bg", delivery_id=f"bg:{rec.id}",
+            work_id=work_id, knowledge_context=knowledge_context,
+        )
+        if not receipt.accepted and self._admission_closed:
+            raise SessionOwnerUnavailable("Background return admission is stopping; acknowledgment is pending")
         return receipt.accepted
 
 

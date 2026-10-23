@@ -34,7 +34,7 @@ from server.bg_tasks import (
 )
 from server.database import Database
 from server.main import app
-from server.session_manager import session_manager
+from server.session_manager import SessionManager, session_manager
 
 TOKEN = "changeme"
 HEADERS = {"Authorization": f"Bearer {TOKEN}"}
@@ -390,12 +390,14 @@ async def test_task_reports_the_actual_interruption_source(
     assert cause in render_delivery_prompt(result)
 
 
-async def test_cancel_reaps_a_descendant_that_ignores_sigterm(manager, db, tmp_path):
+async def test_cancel_reaps_a_descendant_that_ignores_sigterm(manager, db, tmp_path, monkeypatch):
     import os
     import shlex
     import signal
     import sys
 
+    # Exercise real group escalation; this test does not measure the grace time.
+    monkeypatch.setattr("server.bg_tasks._TERM_GRACE_SECONDS", 0.03)
     await _make_session_row(db, "s1", str(tmp_path))
     child_code = (
         "import os,signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); "
@@ -1104,7 +1106,9 @@ async def test_deliver_bg_result_starts_a_new_session_turn(api_client, context_p
         session_manager.remove_broadcast("test")
 
 
-async def test_deliver_bg_result_returns_false_for_missing_session():
+async def test_deliver_bg_result_returns_false_for_missing_session(db):
+    sessions = SessionManager()
+    await sessions.initialize(db)
     rec = BgTaskRecord(
         id="x",
         session_id="ghost",
@@ -1119,7 +1123,7 @@ async def test_deliver_bg_result_returns_false_for_missing_session():
         started_at="2026-01-01T00:00:00Z",
         completed_at="2026-01-01T00:00:00Z",
     )
-    assert await session_manager.deliver_bg_result(rec) is False
+    assert await sessions.deliver_bg_result(rec) is False
 
 
 # ---------------------------------------------------------------------------

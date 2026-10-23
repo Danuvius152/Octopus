@@ -2,6 +2,8 @@
 
 import asyncio
 import json
+import sys
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -10,6 +12,7 @@ from server import deps
 from server.config import settings
 from server.database import Database
 from server.deps import get_session_manager
+from server.harness import get_harness
 from server.routers.ws import router
 from server.sessions import SessionManager
 from tests import cli_gate, conftest
@@ -54,22 +57,40 @@ async def test_raw_question_real_websocket_identity_and_terminal_control(tmp_pat
     await manager.initialize(db)
     default = await db.get_system_agent()
     submitted, publishers = [], []
+    builds = []
+    answer_ready = tmp_path / "answer-ready"
+    real_start = manager.start_message
+
+    def argv(context):
+        builds.append(context)
+        code = "import json,time\nfrom pathlib import Path\n"
+        code += "print(json.dumps({'type':'thread.started','thread_id':'offline-chat'}),flush=True)\n"
+        code += f"while not Path({str(answer_ready)!r}).exists(): time.sleep(.005)\n"
+        code += "print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'A source-dependent answer.'}}),flush=True)\n"
+        terminal = ({"type": "turn.failed", "error": {"message": "Controlled offline failure"}}
+                    if outcome == "failed" else {"type": "turn.completed", "usage": {}})
+        code += f"print({json.dumps(json.dumps(terminal))},flush=True)\n"
+        return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
+
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv,
+                                                 prepare_resume=None, activity_observer=None))
 
     async def start_message(session_id, question, **kwargs):
-        submitted.append({"question": question, "kwargs": kwargs})
-        admitted_request = kwargs["request_id"]
+        if outcome == "rejected":
+            manager.close_admission()
+        receipt = await real_start(session_id, question, **kwargs)
+        submitted.append({"question": question, "kwargs": kwargs, "receipt": receipt})
 
         async def publish():
             await asyncio.sleep(0.01)
-            await manager._broadcast({"type": "assistant_text", "session_id": session_id, "content": "A source-dependent answer."})
-            for request_id in ["stale-request", admitted_request]:
-                await manager._broadcast({"type": "result", "session_id": session_id, "request_id": request_id,
-                                          "terminal": True, "is_error": outcome == "failed",
-                                          "content": {"status": outcome, "request_id": request_id}})
+            await manager._broadcast({"type": "result", "session_id": session_id, "request_id": "stale-request",
+                                      "terminal": True, "content": {"status": "success", "request_id": "stale-request"}})
+            answer_ready.write_text("Produce the original request's actual result")
 
-        if outcome != "rejected":
+        if receipt.accepted:
             publishers.append(asyncio.create_task(publish()))
-        return SimpleNamespace(accepted=outcome != "rejected", request_id=admitted_request, disposition="accepted")
+        return receipt
 
     monkeypatch.setattr(manager, "start_message", start_message)
     api = await start_callback_api(router, mcp=False, websocket=True, overrides={get_session_manager: lambda: manager})
@@ -78,19 +99,25 @@ async def test_raw_question_real_websocket_identity_and_terminal_control(tmp_pat
     try:
         if outcome == "success":
             assert await asyncio.wait_for(probe.ask(question), 5) == "A source-dependent answer."
-            assert probe.last_request_id == submitted[0]["kwargs"]["request_id"]
+            assert probe.last_request_id == submitted[0]["receipt"].request_id
             assert probe.last_events[-1]["content"]["request_id"] == probe.last_request_id
         else:
             with pytest.raises(AssertionError if outcome == "failed" else RuntimeError):
                 await asyncio.wait_for(probe.ask(question), 5)
         assert len(submitted) == 1 and submitted[0]["question"] == question
         kwargs = submitted[0]["kwargs"]
-        assert isinstance(kwargs["request_id"], str) and len(kwargs["request_id"]) == 32
-        assert {key: value for key, value in kwargs.items() if key != "request_id"} == {
-            "attachment_ids": [], "steerable": True, "durable_client_input": True,
+        assert isinstance(kwargs["client_request_id"], str) and len(kwargs["client_request_id"]) == 32
+        assert {key: value for key, value in kwargs.items() if key != "client_request_id"} == {
+            "attachment_ids": [], "steerable": True, "wiki_mode": None, "recovery_of_client_id": None,
         }
-        cursor = await db.conn.execute("SELECT payload FROM client_submissions WHERE request_id=?", (kwargs["request_id"],))
-        assert json.loads((await cursor.fetchone())[0])["content"] == question
+        saved = await db.get_client_submission(probe.last_session_id, kwargs["client_request_id"])
+        if outcome == "rejected":
+            assert saved is None and builds == []
+        else:
+            assert saved["payload"]["content"] == question
+            assert saved["request_id"] == probe.last_request_id == submitted[0]["receipt"].request_id
+            assert saved["terminal"]["status"] == outcome
+            assert len(builds) == 1 and question in builds[0].prompt
         session = manager.get_session(probe.last_session_id)
         assert session.origin == "user" and session.parent_session_id is None
         if outcome == "success":

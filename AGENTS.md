@@ -78,6 +78,10 @@ installation-specific checks below.
 | Before release on this Codex installation | All commit gates, **offline E2E**, **live Codex pytest** and **Codex browser E2E** from Test Coverage below; then follow [自动发布](docs/local-wsl.md#自动发布). Include supervisor checks when managed-service behavior changed. |
 | Documentation only | Affected links, index and diff checks; follow Repository and Upstream Maintenance below. |
 
+Complete the release checks during validation and reuse valid results. When the
+user says to release, proceed directly with [自动发布](docs/local-wsl.md#自动发布);
+routine release preparation does not open another review or approval round.
+
 ## Test Coverage
 
 Use `.venv/bin/pytest tests/ --collect-only -q` with the relevant marker/opt-in
@@ -145,12 +149,14 @@ root; use the PATH setup under Conventions.
 - `server/fork_helpers.py` — Pure helpers for session tree-rewind (`/rewind`): git-anchor capture at turn-start, side-effect classification over parent rows, safe-revert preflight + git-stash execution. Backend-agnostic and side-effect-contained.
 - `server/research/` — Native deep research orchestration (`docs/plans/native-deep-research.md`): `ResearchManager` (async job lifecycle, phase pipeline, concurrency cap, cancel + reap), `orchestrator` (scope → search → dedup → verify → synthesize phases), `leaf` (throwaway `HarnessRun` sub-turns for web-search leaves and `run_oneshot` for reasoning leaves), `schemas` (JSON schemas for scope/findings/synthesis). Agent-invoked via `mcp__research__deep_research`; user-invoked via `/research <question>`. Result injected as a follow-up turn; a `ResearchCard` tracks progress in the UI.
 - `server/mcp_servers/research.py` — MCP namespace exposing `mcp__research__deep_research(question)` to agents; thin HTTP shim to `/api/sessions/{sid}/research`. Returns `research_id` immediately so the model's turn ends cleanly.
-- `docs/plans/token-rotation.md` — `OCTOPUS_AUTH_TOKEN` is both the
-  credential clients send and the key `crypto.py` derives to encrypt every
-  stored secret, so changing it is one server-side operation (`POST
-  /api/auth/rotate`): re-key the secrets, rewrite the env files, swap the live
-  setting, drop the processes carrying the old one, and hand the new token to
-  the clients already holding the old one. No restart, nothing to edit by hand.
+- `docs/plans/token-rotation.md` — the install-era `OCTOPUS_AUTH_TOKEN` is both
+  the credential clients send and the Fernet key for unowned (NULL-owner)
+  secrets. Owned secrets use the master key → per-account DEK
+  ([crypto.py](server/crypto.py); see [architecture.md](docs/architecture.md)'s
+  `crypto.py` row). Rotation re-keys only the install-era set, rewrites the env
+  files, swaps the live setting and retires processes carrying the old token.
+  A password change re-encrypts nothing, and dropping a DEK crypto-shreds that
+  account. No restart, nothing to edit by hand.
 - `docs/plans/scheduled-runs.md` — What a scheduled fire is: the overlap
   guard that stops a slow schedule stacking runs, the `[scheduled:…]` marker
   that tells an agent nobody is waiting to answer questions, and
@@ -267,7 +273,7 @@ agents, which gained `POST /api/agents/{id}/unarchive` for the same section).
   `ApplicationFormPage`) rather than a dialog. `PageHeader` is the shared
   breadcrumb bar.
 - `tests/` — Backend tests (pytest)
-- `web/src/**/*.test.ts` — Frontend unit tests (vitest, colocated with source)
+- `web/src/**/*.test.{ts,tsx}` — Frontend unit tests (vitest, colocated with source)
 - `web/e2e/` — End-to-end tests (Playwright, auto-cleanup after runs)
 
 ## Commands
@@ -285,6 +291,10 @@ agents, which gained `POST /api/agents/{id}/unarchive` for the same section).
 > running release are separate; restarting does not publish unverified edits.
 
 ```bash
+# Full integration checks (includes the full hermetic backend suite)
+./scripts/check.sh
+./scripts/check.sh --e2e               # + both complete E2E buckets (both CLIs)
+
 # Backend
 .venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" -v
 .venv/bin/uvicorn server.main:app       # start server (serves web/dist/)
@@ -295,9 +305,9 @@ cd web && bun run build                 # typecheck + build (refreshes web/dist/
 cd web && bun dev                       # live dev server on :5173
 
 # E2E (Playwright)
-cd web && bun run test:e2e              # run e2e tests (headless)
-cd web && bun run test:e2e:ui           # run e2e tests with Playwright UI
-cd web && npx playwright test --reporter=list  # verbose output
+cd web && bun run test:e2e              # both buckets, headless
+cd web && bun run test:e2e:ui           # Playwright UI
+cd web && bun run test:e2e:fast --reporter=list  # verbose offline E2E
 ```
 
 ## Conventions

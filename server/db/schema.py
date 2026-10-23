@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS client_submissions (
     execution_generation TEXT,
     execution_boot TEXT,
     process_group INTEGER,
+    delivery_state TEXT NOT NULL DEFAULT 'none',
     reason_code TEXT,
     state_version INTEGER NOT NULL DEFAULT 0,
     created_at TEXT,

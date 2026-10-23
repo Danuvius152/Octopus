@@ -173,6 +173,8 @@ class QuotaExceeded(Exception):
     malformed request gets.
     """
 
+    code = "quota_exceeded"
+
 
 class SessionOwnerUnavailable(RuntimeError):
     """The original owner ended; its commands must not be replayed."""
@@ -180,3 +182,5 @@ class SessionOwnerUnavailable(RuntimeError):
 
 class SessionMailboxFull(ValueError):
     """This command was refused before taking ownership of any effects."""
+
+    code = "mailbox_full"

@@ -105,6 +105,7 @@ export function ChatView({
   const [restoredInput, setRestoredInput] = useState<{ sessionId: string; clientId: string } | null>(null);
   const [requiredAttachmentCount, setRequiredAttachmentCount] = useState(0);
   const submittedDrafts = useRef(new Map<string, { sessionId: string; text: string; attachments: PendingAttachment[] }>());
+  const [submissionError, setSubmissionError] = useState("");
   const [rejectedDrafts, setRejectedDrafts] = useState<{
     id: string; sessionId: string; text: string; attachments: PendingAttachment[];
     reason: string;
@@ -565,8 +566,16 @@ export function ChatView({
 
   const submitTurn = (content: string) => {
     if (!activeSessionId || hasUploadInFlight) return;
+    let draftId: string;
+    try {
+      draftId = newSubmissionId();
+    } catch (error) {
+      setSubmissionError(error instanceof Error ? error.message : "Secure randomness is unavailable.");
+      return;
+    }
+    setSubmissionError("");
     const draft = {
-      id: newSubmissionId(), sessionId: activeSessionId, text: input,
+      id: draftId, sessionId: activeSessionId, text: input,
       attachments: pendingAttachments.filter((attachment) => attachment.status === "ready"),
       ...(restoredInput?.sessionId === activeSessionId ? { recoveryOfClientId: restoredInput.clientId } : {}),
     };
@@ -1538,6 +1547,7 @@ export function ChatView({
     ) : null;
 
   const savedDrafts = <div className="shrink-0 max-h-72 overflow-auto px-6">
+          {submissionError && <p role="alert" className="mb-2 text-sm text-destructive">{submissionError}</p>}
           {rejectedDrafts.map((draft) => (
             <div key={draft.id} role="alert" className="mb-2 rounded-md border border-destructive/40 p-3 text-sm">
               <p>{draft.reason}</p>

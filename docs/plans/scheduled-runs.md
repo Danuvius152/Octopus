@@ -44,6 +44,15 @@ tries again. (VM0 answers the same situation with "Previous run is still
 active"; the difference is that Octopus can queue in the chat case, so it only
 refuses the second one.)
 
+One-time schedules use a different admission rule: a human backlog retains
+the fire rather than skipping it. The target session, complete input and
+consumption of the schedule commit in one database transaction. A one-shot
+is deleted at that admission point; callback return and model completion do
+not decide whether it was consumed. An overdue, unaccepted one-shot is
+registered on startup. A transient refusal retries the same source identity;
+an already accepted or uncertain execution is never submitted as a new fire.
+See [input reliability](../input-reliability.md) for the shared input contract.
+
 ## 3. A scheduled turn says it is one
 
 Every other machine-injected turn in Octopus announces itself —
@@ -74,10 +83,10 @@ auto-archived session the turn ran in.
 * **Per-fire history.** One pointer, to the latest run. A real run list means
   a `schedule_runs` table; the sessions themselves already hold the history,
   and nothing yet needs to page through it.
-* **Catch-up for missed fires.** A schedule that was due while Octopus was
-  down does not fire on boot (one-time schedules are deleted, recurring ones
-  wait for the next tick). Firing a backlog on startup is rarely what anyone
-  wants, and "run everything I missed" needs a policy per schedule.
+* **Catch-up for recurring fires.** Recurring schedules wait for the next
+  tick instead of replaying every tick missed during downtime. A backlog
+  policy for recurring work remains a separate product choice; unaccepted
+  one-time schedules retain their original fire as described above.
 * **A skipped-fire signal in the UI.** The skip is logged; surfacing it means
   deciding whether a skipped tick is worth a badge, which needs a real case of
   someone being surprised by one.

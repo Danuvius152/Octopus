@@ -23,7 +23,7 @@ HUMAN_HEADERS = {"Authorization": "Bearer changeme"}
 
 
 @pytest.fixture
-async def question_runtime(monkeypatch, tmp_path):
+async def question_runtime(monkeypatch, tmp_path, short_process_shutdown):
     database = Database(":memory:")
     await database.initialize()
     manager = SessionManager()

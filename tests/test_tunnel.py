@@ -203,7 +203,9 @@ class TestCloudflaredStop:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
-                await asyncio.sleep(100)  # Hang on first call (terminate)
+                # Inject the timeout outcome; the stdlib deadline is not the
+                # contract under test. stop() must still kill and join once.
+                raise TimeoutError
             else:
                 mock_process.returncode = -9
 

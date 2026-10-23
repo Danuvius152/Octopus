@@ -165,6 +165,7 @@ class DelegationRunState:
             "created_at": self.created_at,
             "finished_at": self.finished_at,
             "error": self.error,
+            "terminal_disposition": self._terminal_disposition,
             "recording_state": "committed",
         }
 
@@ -1101,10 +1102,6 @@ class DelegationManager:
         same queue on success — first to drain wins.
         """
         assert self.session_mgr is not None
-        context = self._return_context(rec)
-        if context is None:
-            logger.info("Delegation %s question retained without an admitted return contract", rec.delegation_id)
-            return
         question_id = msg.get("question_id") or ""
         questions = msg.get("questions") or []
         body = self._render_question_body(questions)
@@ -1122,24 +1119,36 @@ class DelegationManager:
             f"and forward their answer; or cancel via "
             f"`mcp__ask_agent__cancel`."
         )
-        try:
-            receipt = await self.session_mgr.start_message(
-                rec.parent_session_id, prompt, source="delegation",
-                delivery_id=f"agent-question:{rec.work_id}:{question_id}",
-                work_id=rec.parent_work_id,
-                question_session_id=rec.delegation_id, question_id=question_id,
-                knowledge_context=context,
+        retrying = False
+        while True:
+            existing = await self.session_mgr.source_receipt(
+                "delegation", f"agent-question:{rec.work_id}:{question_id}", session_id=rec.parent_session_id,
             )
-            if not receipt.accepted:
-                logger.info("Delegation %s question suppressed by closed parent work", rec.delegation_id)
-            else:
-                self._watch_completion(rec.parent_session_id, rec.parent_work_id, receipt)
-        except Exception:
-            logger.exception(
-                "Failed to inject delegation %s question into parent %s",
-                rec.delegation_id,
-                rec.parent_session_id,
-            )
+            if existing is not None:
+                self._watch_completion(rec.parent_session_id, rec.parent_work_id, existing[1])
+                return
+            if self.session_mgr.session_owner_failed(rec.parent_session_id):
+                logger.warning("Delegation %s question delivery stopped: parent owner is unavailable; original question retained", rec.delegation_id)
+                return
+            context = self._return_context(rec)
+            if (context is None or self.session_mgr._admission_closed
+                    or (retrying and not self.session_mgr.has_pending_question(rec.delegation_id, question_id))):
+                return
+            try:
+                receipt = await self.session_mgr.start_message(
+                    rec.parent_session_id, prompt, source="delegation",
+                    delivery_id=f"agent-question:{rec.work_id}:{question_id}",
+                    work_id=rec.parent_work_id,
+                    question_session_id=rec.delegation_id, question_id=question_id,
+                    knowledge_context=context,
+                )
+                if receipt.accepted:
+                    self._watch_completion(rec.parent_session_id, rec.parent_work_id, receipt)
+                return
+            except Exception:
+                logger.exception("Delegation %s question acknowledgment pending; retrying the original question", rec.delegation_id)
+                retrying = True
+                await asyncio.sleep(1)
 
     @staticmethod
     def _render_question_body(questions: list[dict[str, Any]]) -> str:
@@ -1269,6 +1278,14 @@ class DelegationManager:
             return
         rec._terminal_injecting = True
         try:
+            existing = await self.session_mgr.source_receipt(
+                "delegation", f"agent-terminal:{rec.work_id}", session_id=rec.parent_session_id,
+            )
+            if existing is not None:
+                await self._acknowledge_terminal(rec, existing[1])
+                return
+            if await self._end_unavailable_return(rec):
+                return
             if not work_is_open(rec.parent_work_id):
                 await self._save_round(rec, _terminal_disposition="closed")
                 logger.info("Delegation %s terminal return suppressed by closed parent work", rec.delegation_id)
@@ -1315,26 +1332,51 @@ class DelegationManager:
                     f"delegation={rec.delegation_id} reason={reason}]\n"
                     f"{detail}"
                 )
-            disposition: str
-            try:
-                receipt = await self.session_mgr.start_message(
-                    rec.parent_session_id, prompt, source="delegation",
-                    delivery_id=f"agent-terminal:{rec.work_id}", work_id=rec.parent_work_id,
-                    knowledge_context=context,
+            while True:
+                existing = await self.session_mgr.source_receipt(
+                    "delegation", f"agent-terminal:{rec.work_id}", session_id=rec.parent_session_id,
                 )
-                disposition = receipt.disposition
-                if not receipt.accepted:
-                    logger.info("Delegation %s terminal return suppressed by closed parent work", rec.delegation_id)
-                else:
-                    self._watch_completion(rec.parent_session_id, rec.parent_work_id, receipt)
-            except ValueError:
-                # A deleted parent is a normal domain refusal. Unknown failures
-                # retain the owned command so shutdown cannot forget cleanup.
-                logger.exception("Failed to inject delegation %s terminal into parent %s", rec.delegation_id, rec.parent_session_id)
-                disposition = "rejected"
-            await self._save_round(rec, _terminal_disposition=disposition)
+                if existing is not None:
+                    await self._acknowledge_terminal(rec, existing[1])
+                    return
+                if await self._end_unavailable_return(rec):
+                    return
+                if self.session_mgr._admission_closed:
+                    await self._save_round(rec, _terminal_disposition="closed")
+                    return
+                context = self._return_context(rec)
+                if context is None:
+                    await self._save_round(rec, _terminal_disposition="closed")
+                    return
+                try:
+                    receipt = await self.session_mgr.start_message(
+                        rec.parent_session_id, prompt, source="delegation",
+                        delivery_id=f"agent-terminal:{rec.work_id}", work_id=rec.parent_work_id,
+                        knowledge_context=context,
+                    )
+                except Exception:
+                    logger.exception("Delegation %s return acknowledgment pending; retrying its original round", rec.delegation_id)
+                    await asyncio.sleep(1)
+                    continue
+                if not receipt.accepted and self.session_mgr._admission_closed:
+                    continue  # Confirm the original admission before closing delivery.
+                await self._acknowledge_terminal(rec, receipt)
+                return
         finally:
             rec._terminal_injecting = False
+
+    async def _acknowledge_terminal(self, rec: DelegationRunState, receipt: SubmissionReceipt) -> None:
+        if receipt.accepted:
+            self._watch_completion(rec.parent_session_id, rec.parent_work_id, receipt)
+        await self._save_round(rec, _terminal_disposition=receipt.disposition)
+
+    async def _end_unavailable_return(self, rec: DelegationRunState) -> bool:
+        assert self.session_mgr is not None
+        if not self.session_mgr.session_owner_failed(rec.parent_session_id):
+            return False
+        await self._save_round(rec, _terminal_disposition="unavailable")
+        logger.warning("Delegation %s delivery stopped: parent owner is unavailable; result retained in the child conversation", rec.delegation_id)
+        return True
 
     def _return_context(self, rec: DelegationRunState):
         """Resolve the fixed immediate caller, independently of its retired lease."""

@@ -16,8 +16,6 @@ export interface ControlCommandStatus {
   message?: string;
 }
 
-let sequence = 0;
-
 /** Correlation only: authority always comes from the authenticated socket. */
 export function newSubmissionId(): string {
   const crypto = globalThis.crypto;
@@ -29,7 +27,5 @@ export function newSubmissionId(): string {
     const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
     return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
-  // Older HTTP browsers may have no Web Crypto at all. The counter prevents
-  // collisions within this page, even with a coarse clock or random source.
-  return `submission-${Date.now().toString(36)}-${(++sequence).toString(36)}-${Math.random().toString(36).slice(2)}`;
+  throw new Error("Secure randomness is unavailable. Open Octopus over HTTPS or localhost before sending work.");
 }

@@ -64,10 +64,9 @@ def make_store(tmp_path):
         store.close()
 
 
-def assert_locations(store, item, view):
-    row = rows(store)[item["path"]]
-    assert (item["id"], item["revision"], item["title"]) == (
-        row["id"], row["revision"], row["title"],
+def assert_locations(row, item, view):
+    assert (item["id"], item["path"], item["revision"], item["title"]) == (
+        row["id"], row["path"], row["revision"], row["title"],
     )
     snippet_start = item["snippet_start"]
     assert item["snippet"] == row["text"][snippet_start:snippet_start + len(item["snippet"])]
@@ -82,18 +81,19 @@ def assert_locations(store, item, view):
             assert section["line_end"] == row["text"].count("\n", 0, end) + 1
 
 
-@pytest.mark.parametrize("intent", INTENTS)
-@pytest.mark.parametrize("view", VIEWS)
-def test_path_id_uid_keep_exact_object_in_all_sixty_cases(make_store, intent, view):
+def test_path_id_uid_keep_exact_object_in_all_sixty_cases(make_store):
     store = make_store()
-    for path, uid in [("alpha.md", SOURCE_UID), ("Summaries/summary.md", SUMMARY_UID)]:
-        row = rows(store)[path]
-        for query in [path, row["id"], uid]:
-            found = store.search(query, intent=intent, view=view)
-            assert found["match_mode"] == "exact" and found["total"] == 1
-            assert [(hit["id"], hit["path"], hit["revision"]) for hit in found["items"]] == [
-                (row["id"], path, row["revision"]),
-            ]
+    expected = rows(store)
+    # All 60 read-only combinations share the same two indexed documents.
+    for intent, view in product(INTENTS, VIEWS):
+        for path, uid in [("alpha.md", SOURCE_UID), ("Summaries/summary.md", SUMMARY_UID)]:
+            row = expected[path]
+            for query in [path, row["id"], uid]:
+                found = store.search(query, intent=intent, view=view)
+                assert found["match_mode"] == "exact" and found["total"] == 1
+                assert [(hit["id"], hit["path"], hit["revision"]) for hit in found["items"]] == [
+                    (row["id"], path, row["revision"]),
+                ]
 
 
 def test_registered_mixed_case_uid_wins_over_same_spelling_titles(make_store):
@@ -109,41 +109,39 @@ def test_registered_mixed_case_uid_wins_over_same_spelling_titles(make_store):
         assert [item["id"] for item in found["items"]] == [target["id"]]
 
 
-@pytest.mark.parametrize("intent", QUESTION_INTENTS)
-@pytest.mark.parametrize("view", VIEWS)
-def test_natural_title_and_alias_use_source_selector(make_store, intent, view):
+def test_natural_title_and_alias_use_source_selector(make_store):
     store = make_store()
     source = rows(store)["alpha.md"]
-    for query in ["Realtime", "Live rendering", "What is Realtime"]:
+    for intent, view, query in product(QUESTION_INTENTS, VIEWS, ["Realtime", "Live rendering", "What is Realtime"]):
         found = store.search(query, intent=intent, view=view)
         assert found["total"] == 1 and found["match_mode"] in {"lexical", "comparison"}
         assert [item["id"] for item in found["items"]] == [source["id"]]
         item = found["items"][0]
-        assert_locations(store, item, view)
+        assert_locations(source, item, view)
         assert "fixed frame length" in item["snippet"] or "calibration accuracy" in item["snippet"]
 
 
-@pytest.mark.parametrize("view", VIEWS)
-def test_lookup_title_alias_keep_the_named_summary(make_store, view):
+def test_lookup_title_alias_keep_the_named_summary(make_store):
     store = make_store()
-    for query in ["Realtime", "Live rendering"]:
+    for view, query in product(VIEWS, ["Realtime", "Live rendering"]):
         found = store.search(query, intent="lookup", view=view)
         assert found["total"] == 1 and found["match_mode"] == "exact"
         assert [item["path"] for item in found["items"]] == ["Summaries/summary.md"]
 
 
-@pytest.mark.parametrize("view", VIEWS)
-def test_unregistered_urn_title_is_semantic_not_identity(make_store, view):
+def test_unregistered_urn_title_is_semantic_not_identity(make_store):
     fake = "urn:uuid:00000000-0000-4000-8000-000000000099"
     store = make_store(source=SOURCE + f"The topic {fake} describes this evidence.\n", title=fake)
-    for intent, query in product(QUESTION_INTENTS, [fake, fake.upper()]):
+    source = rows(store)["alpha.md"]
+    for view, intent, query in product(VIEWS, QUESTION_INTENTS, [fake, fake.upper()]):
         found = store.search(query, intent=intent, view=view)
         assert found["total"] == 1 and found["match_mode"] in {"lexical", "comparison"}
         assert [item["path"] for item in found["items"]] == ["alpha.md"]
-        assert_locations(store, found["items"][0], view)
-    named = store.search(fake, intent="lookup", view=view)
-    assert named["match_mode"] == "exact"
-    assert [item["path"] for item in named["items"]] == ["Summaries/summary.md"]
+        assert_locations(source, found["items"][0], view)
+    for view in VIEWS:
+        named = store.search(fake, intent="lookup", view=view)
+        assert named["match_mode"] == "exact"
+        assert [item["path"] for item in named["items"]] == ["Summaries/summary.md"]
 
 
 def test_path_and_id_remain_case_sensitive(make_store):
@@ -171,16 +169,17 @@ def test_source_qualification_and_scope_precede_representation_selection(make_st
     if case in {"error", "excluded"}:
         with store.connect() as db:
             db.execute("UPDATE documents SET quality=? WHERE id=?", (case, source_id))
+    expected = rows(store)
     filters = {"directory": "Summaries"} if case == "directory" else {"kind": "topic"} if case == "kind" else {}
     for intent, view in product(QUESTION_INTENTS, VIEWS):
         found = store.search("Realtime", intent=intent, view=view, **filters)
         assert found["total"] == 1
         assert [item["path"] for item in found["items"]] == ["Summaries/summary.md"]
-        assert_locations(store, found["items"][0], view)
+        assert_locations(expected[found["items"][0]["path"]], found["items"][0], view)
         if case == "asset":
             included = store.search("Realtime", intent=intent, view=view, include_assets=True)
             assert included["total"] == 1 and included["items"][0]["id"] == source_id
-            assert_locations(store, included["items"][0], view)
+            assert_locations(expected[included["items"][0]["path"]], included["items"][0], view)
 
 
 @pytest.mark.parametrize("scope", ["directory", "kind", "asset"])
@@ -206,9 +205,7 @@ def test_filtered_identity_does_not_fall_back_to_another_title(make_store, scope
         assert [item["id"] for item in included["items"]] == [source["id"]]
 
 
-@pytest.mark.parametrize("intent", INTENTS)
-@pytest.mark.parametrize("view", VIEWS)
-def test_retired_registered_id_and_uid_do_not_select_a_same_spelling_title(make_store, intent, view):
+def test_retired_registered_id_and_uid_do_not_select_a_same_spelling_title(make_store):
     store = make_store()
     source = rows(store)["alpha.md"]
     (store.root / "alpha.md").unlink()
@@ -217,7 +214,7 @@ def test_retired_registered_id_and_uid_do_not_select_a_same_spelling_title(make_
     for index, query in enumerate(queries):
         write(store, f"retired-title-{index}.md", f"---\ntitle: {query}\n---\n# Other\nAnother document.\n")
     store.refresh()
-    for query in queries:
+    for intent, view, query in product(INTENTS, VIEWS, queries):
         found = store.search(query, intent=intent, view=view)
         assert found["match_mode"] == "exact" and found["total"] == 0
         assert found["items"] == []
@@ -227,6 +224,7 @@ def test_retired_registered_id_and_uid_do_not_select_a_same_spelling_title(make_
 def test_duplicate_titles_are_ambiguous_only_for_lookup(make_store, represented):
     source = SOURCE.replace("title: Alpha report", "title: Realtime")
     store = make_store(source=source, represented=represented)
+    expected = rows(store)
     for view in VIEWS:
         lookup = store.search("Realtime", intent="lookup", view=view)
         assert lookup["match_mode"] == "ambiguous" and lookup["total"] == 2
@@ -236,7 +234,7 @@ def test_duplicate_titles_are_ambiguous_only_for_lookup(make_store, represented)
             assert found["total"] == (1 if represented else 2)
             assert {item["path"] for item in found["items"]} == ({"alpha.md"} if represented else {"alpha.md", "Summaries/summary.md"})
             for item in found["items"]:
-                assert_locations(store, item, view)
+                assert_locations(expected[item["path"]], item, view)
 
 
 def test_exact_title_pagination_counts_selected_sources_once(make_store):
@@ -246,6 +244,7 @@ def test_exact_title_pagination_counts_selected_sources_once(make_store):
     for name in ["beta", "gamma"]:
         write(store, name + ".md", f"---\ntitle: Realtime\n---\n# {name}\nRealtime independent {name} evidence.\n")
     store.refresh()
+    expected = rows(store)
     for intent, view in product(QUESTION_INTENTS, VIEWS):
         complete = store.search("Realtime", intent=intent, view=view)
         assert complete["total"] == 3
@@ -255,7 +254,7 @@ def test_exact_title_pagination_counts_selected_sources_once(make_store):
             assert page["total"] == 3
             assert len(page["items"]) == 1
             pages.extend(page["items"])
-            assert_locations(store, page["items"][0], view)
+            assert_locations(expected[page["items"][0]["path"]], page["items"][0], view)
             if page["next_cursor"] is None:
                 assert page["next_offset"] is None
                 break

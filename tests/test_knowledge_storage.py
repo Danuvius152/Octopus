@@ -124,6 +124,9 @@ async def main():
     database = Database(sys.argv[1])
     await database.initialize()
     await database.save_session("parent", "Parent", "/tmp", CREATED_AT)
+    transaction = database.transaction
+    # Keep the real driver stall and transaction deadline with a test budget.
+    database.transaction = lambda **kwargs: transaction(**(kwargs | {"timeout": .1}))
     driver_commit = database.conn._conn.commit
     def unconfirmed_driver_commit():
         if sys.argv[2] == "lost_acknowledgement":

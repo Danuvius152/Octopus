@@ -6,27 +6,47 @@ import json
 from datetime import UTC, datetime
 from typing import Any
 
+from ..submission_models import InputRecoveryUnavailable
 from .base import DatabaseBase
+from .schedules import ScheduleChangedError
 from .transaction import Transaction
 from .users import owner_is_available
 
-_COLUMNS = ("client_id", "payload_sha256", "request_id", "receipt", "payload", "execution_state",
+_COLUMNS = ("session_id", "client_id", "payload_sha256", "request_id", "receipt", "payload", "execution_state",
             "execution_owner", "execution_generation", "reason_code", "state_version", "created_at",
-            "updated_at", "recovery_of", "recovered_by", "dismissed", "execution_boot", "process_group")
+            "updated_at", "recovery_of", "dismissed", "execution_boot", "process_group", "delivery_state")
+
+_SELECT = (
+    f"SELECT {','.join('i.' + column for column in _COLUMNS)},successor.client_id,m.content "
+    "FROM client_submissions i LEFT JOIN messages m ON m.session_id=i.session_id "
+    "AND m.terminal_request_id=COALESCE(i.execution_owner,i.request_id) "
+    "LEFT JOIN client_submissions successor ON successor.session_id=i.session_id AND successor.recovery_of=i.client_id "
+)
 
 
 def _submission(row) -> dict[str, Any]:
-    result = dict(zip(_COLUMNS, row, strict=True))
-    for key in ("payload", "receipt"):
+    result = dict(zip((*_COLUMNS, "recovered_by", "terminal"), row, strict=True))
+    for key in ("payload", "receipt", "terminal"):
         result[key] = json.loads(result[key]) if result[key] is not None else None
     return result
 
 
 class ClientSubmissionsMixin(DatabaseBase):
+    async def get_source_submission(self, source: str, delivery_id: str, *, session_id: str | None = None) -> dict[str, Any] | None:
+        """Resolve the committed source identity, including its original target."""
+        async with self.transaction(write=False) as tx:
+            row = await tx.fetch_one(
+                _SELECT + "WHERE i.client_id=? AND json_extract(i.payload,'$.source')=? "
+                "AND json_extract(i.payload,'$.delivery_id')=? "
+                + ("AND i.session_id=?" if session_id is not None else ""),
+                (f"{source}:{delivery_id}", source, delivery_id, *((session_id,) if session_id is not None else ())),
+            )
+            return _submission(row) if row else None
+
     async def get_submission_for_request(self, session_id: str, request_id: str) -> dict[str, Any] | None:
         async with self.transaction(write=False) as tx:
             row = await tx.fetch_one(
-                f"SELECT {','.join(_COLUMNS)} FROM client_submissions WHERE session_id=? AND request_id=?",
+                _SELECT + "WHERE i.session_id=? AND i.request_id=?",
                 (session_id, request_id),
             )
             return _submission(row) if row else None
@@ -37,60 +57,64 @@ class ClientSubmissionsMixin(DatabaseBase):
 
     async def _get_client_submission(self, tx: Transaction, session_id: str, client_id: str) -> dict[str, Any] | None:
         cursor = await tx.execute(
-            f"SELECT {','.join(_COLUMNS)} FROM client_submissions WHERE session_id=? AND client_id=?",
+            _SELECT + "WHERE i.session_id=? AND i.client_id=?",
             (session_id, client_id),
         )
         row = await cursor.fetchone()
         return _submission(row) if row else None
 
-    async def reserve_client_submission(self, session_id: str, client_id: str, payload_sha256: str,
-                                        request_id: str, *, payload: dict | None = None,
-                                        recovery_of: str | None = None) -> tuple[bool, dict[str, Any]]:
+    async def admit_client_submission(self, session_id: str, client_id: str, payload_sha256: str,
+                                      request_id: str, *, payload: dict, receipt: dict,
+                                      recovery_of: str | None = None,
+                                      schedule: dict | None = None, new_session: dict | None = None) -> tuple[bool, dict[str, Any]]:
+        """Commit the complete input and its acceptance in the same operation.
+
+        The SessionOwner checks live admission before entering this transaction.
+        No dispatch or source acknowledgment precedes its commit.
+        """
         async with self.transaction(write=True) as tx:
             now = datetime.now(UTC).isoformat()
             existing = await self._get_client_submission(tx, session_id, client_id)
             if existing is not None:
                 return False, existing
+            if schedule is not None:
+                # The fire consumes exactly the definition it authorized. No
+                # session or input can survive a missing or concurrently edited
+                # one-shot; a later callback can try the current definition.
+                fields = ("agent_id", "origin_session_id", "prompt", "run_at", "knowledge_context", "enabled")
+                current = await tx.fetch_one(
+                    f"SELECT {','.join(fields)} FROM schedules WHERE id=?", (schedule["id"],),
+                )
+                if current is None or tuple(current) != tuple(schedule.get(field) for field in fields):
+                    raise ScheduleChangedError("Schedule changed before its fire was admitted")
+                if not schedule["enabled"] or not schedule["run_at"]:
+                    raise ValueError("Only an enabled one-shot can be consumed at admission")
+            if new_session is not None:
+                from .sessions import insert_session
+
+                await insert_session(tx, new_session)
             if recovery_of:
                 original = await self._get_client_submission(tx, session_id, recovery_of)
                 if (original is None or original["payload"] is None
-                        or original["execution_state"] != "withdrawn" or original["dismissed"]):
-                    raise ValueError("This input is not available for recovery. Review its current status.")
+                        or original["execution_state"] != "withdrawn" or original["dismissed"]
+                        or original["terminal"] is not None or original["reason_code"] == "legacy_rejected"):
+                    raise InputRecoveryUnavailable("This input is not available for recovery. Review its current status.")
                 if original["recovered_by"]:
-                    raise ValueError("This input has already been resubmitted. Review the new request.")
+                    raise InputRecoveryUnavailable("This input has already been resubmitted. Review the new request.")
             cursor = await tx.execute(
                 "INSERT INTO client_submissions "
-                "(session_id,client_id,payload_sha256,request_id,payload,execution_state,created_at,updated_at,recovery_of) "
-                "VALUES (?,?,?,?,?,?,?,?,?)",
+                "(session_id,client_id,payload_sha256,request_id,payload,receipt,execution_state,created_at,updated_at,recovery_of) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?)",
                 (session_id, client_id, payload_sha256, request_id,
-                 json.dumps(payload, ensure_ascii=False) if payload is not None else None,
-                 "reserved" if payload is not None else "unknown", now, now, recovery_of),
+                 json.dumps(payload, ensure_ascii=False), json.dumps(receipt, ensure_ascii=False),
+                 "pending", now, now, recovery_of),
             )
             created = cursor.rowcount == 1
-            if recovery_of:
-                await tx.execute(
-                    "UPDATE client_submissions SET recovered_by=?,state_version=state_version+1,updated_at=? "
-                    "WHERE session_id=? AND client_id=?", (client_id, now, session_id, recovery_of),
-                )
             row = await self._get_client_submission(tx, session_id, client_id)
             assert row is not None
+            if schedule is not None:
+                await tx.execute("DELETE FROM schedules WHERE id=?", (schedule["id"],))
             return created, row
-
-    async def settle_client_submission(self, session_id: str, client_id: str, request_id: str, receipt: dict[str, Any]) -> None:
-        async with self.transaction(write=True) as tx:
-            now = datetime.now(UTC).isoformat()
-            await tx.execute(
-                "UPDATE client_submissions SET receipt=?,execution_state=CASE "
-                "WHEN ?=0 THEN 'rejected' WHEN execution_state='reserved' THEN 'queued' ELSE execution_state END, "
-                "state_version=state_version+1,updated_at=? "
-                "WHERE session_id=? AND client_id=? AND request_id=? AND receipt IS NULL",
-                (json.dumps(receipt, ensure_ascii=False), receipt["accepted"], now, session_id, client_id, request_id),
-            )
-            if not receipt["accepted"]:
-                await tx.execute(
-                    "UPDATE client_submissions SET recovered_by=NULL WHERE session_id=? AND recovered_by=?",
-                    (session_id, client_id),
-                )
 
     async def claim_client_submission(self, session_id: str, request_id: str, owner: str, generation: str) -> bool:
         async with self.transaction(write=True) as tx:
@@ -101,11 +125,11 @@ class ClientSubmissionsMixin(DatabaseBase):
             )
             row = await cursor.fetchone()
             if row is None:
-                return True
-            if row[0] not in {"reserved", "queued"} and not (row[0] == "claimed" and row[1] == generation):
+                return False
+            if row[0] != "pending" and not (row[0] == "running" and row[1] == generation):
                 return False
             await tx.execute(
-                "UPDATE client_submissions SET execution_state='claimed',reason_code=NULL,execution_owner=?,execution_generation=?,execution_boot=?,"
+                "UPDATE client_submissions SET execution_state='running',reason_code=NULL,execution_owner=?,execution_generation=?,execution_boot=?,"
                 "state_version=state_version+1,updated_at=? WHERE session_id=? AND request_id=?",
                 (owner, generation, boot_identity(), datetime.now(UTC).isoformat(), session_id, request_id),
             )
@@ -119,24 +143,24 @@ class ClientSubmissionsMixin(DatabaseBase):
                     return False
             reason = None if confirmed else "steer_delivery_unknown"
             await tx.execute(
-                "UPDATE client_submissions SET reason_code=?,state_version=state_version+1,updated_at=? "
-                "WHERE session_id=? AND request_id=? AND execution_state='claimed'",
-                (reason, datetime.now(UTC).isoformat(), session_id, request_id),
+                "UPDATE client_submissions SET reason_code=?,delivery_state=?,state_version=state_version+1,updated_at=? "
+                "WHERE session_id=? AND request_id=? AND execution_state='running'",
+                (reason, "confirmed" if confirmed else "unknown", datetime.now(UTC).isoformat(), session_id, request_id),
             )
             return True
 
     async def note_submission_process(self, session_id: str, owner: str, group: int) -> None:
         async with self.transaction(write=True) as tx:
             await tx.execute(
-                "UPDATE client_submissions SET process_group=? WHERE session_id=? AND execution_owner=? AND execution_state='claimed'",
+                "UPDATE client_submissions SET process_group=? WHERE session_id=? AND execution_owner=? AND execution_state='running'",
                 (group, session_id, owner),
             )
 
     async def uncertain_submission_writers(self, session_id: str) -> list[dict[str, Any]]:
         async with self.transaction(write=False) as tx:
             cursor = await tx.execute(
-                f"SELECT {','.join(_COLUMNS)} FROM client_submissions WHERE session_id=? AND payload IS NOT NULL "
-                "AND execution_state='unknown' AND execution_generation IS NOT NULL", (session_id,),
+                _SELECT + "WHERE i.session_id=? AND i.payload IS NOT NULL "
+                "AND i.execution_state='unknown' AND i.execution_generation IS NOT NULL", (session_id,),
             )
             return [_submission(row) for row in await cursor.fetchall()]
 
@@ -144,10 +168,10 @@ class ClientSubmissionsMixin(DatabaseBase):
                                          state: str, reason: str | None = None) -> None:
         async with self.transaction(write=True) as tx:
             await tx.execute(
-                "UPDATE client_submissions SET execution_state=CASE WHEN reason_code='steer_delivery_unknown' THEN 'unknown' ELSE ? END,"
-                "execution_owner=?,reason_code=CASE WHEN reason_code='steer_delivery_unknown' THEN reason_code ELSE ? END,"
+                "UPDATE client_submissions SET execution_state=CASE WHEN delivery_state='unknown' THEN 'unknown' ELSE ? END,"
+                "execution_owner=?,reason_code=CASE WHEN delivery_state='unknown' THEN reason_code ELSE ? END,"
                 "state_version=state_version+1,updated_at=? WHERE session_id=? AND request_id=? "
-                "AND execution_state IN ('reserved','queued','claimed')",
+                "AND execution_state IN ('pending','running')",
                 (state, owner, reason, datetime.now(UTC).isoformat(), session_id, request_id),
             )
 
@@ -160,14 +184,14 @@ class ClientSubmissionsMixin(DatabaseBase):
         async with self.transaction(write=True) as tx:
             generations = await tx.fetch_all(
                 "SELECT DISTINCT execution_generation FROM client_submissions WHERE payload IS NOT NULL "
-                "AND execution_state IN ('claimed','unknown') AND execution_generation IS NOT NULL",
+                "AND execution_state IN ('running','unknown') AND execution_generation IS NOT NULL",
             )
             await tx.execute(
-                "UPDATE client_submissions SET reason_code=CASE WHEN reason_code='steer_delivery_unknown' THEN reason_code "
-                "WHEN execution_state IN ('reserved','queued') "
+                "UPDATE client_submissions SET reason_code=CASE WHEN delivery_state='unknown' THEN reason_code "
+                "WHEN execution_state='pending' "
                 "THEN 'service_restart_before_start' ELSE 'service_restart_execution_unknown' END, "
-                "execution_state=CASE WHEN execution_state IN ('reserved','queued') THEN 'withdrawn' ELSE 'unknown' END, "
-                "state_version=state_version+1,updated_at=? WHERE execution_state IN ('reserved','queued','claimed')",
+                "execution_state=CASE WHEN execution_state='pending' THEN 'withdrawn' ELSE 'unknown' END, "
+                "state_version=state_version+1,updated_at=? WHERE execution_state IN ('pending','running')",
                 (datetime.now(UTC).isoformat(),),
             )
             return frozenset(row[0] for row in generations)
@@ -176,12 +200,10 @@ class ClientSubmissionsMixin(DatabaseBase):
                                             limit: int = 20) -> tuple[list[dict[str, Any]], int | None]:
         async with self.transaction(write=False) as tx:
             cursor = await tx.execute(
-                f"SELECT rowid,{','.join(_COLUMNS)} FROM client_submissions "
-                "WHERE session_id=? AND payload IS NOT NULL AND execution_state IN ('withdrawn','unknown') "
-                "AND (reason_code='steer_delivery_unknown' OR NOT EXISTS (SELECT 1 FROM messages "
-                "WHERE messages.session_id=client_submissions.session_id "
-                "AND terminal_request_id=COALESCE(execution_owner,request_id))) "
-                "AND dismissed=0 AND recovered_by IS NULL AND (? IS NULL OR rowid<?) ORDER BY rowid DESC LIMIT ?",
+                _SELECT.replace("SELECT ", "SELECT i.rowid,", 1) +
+                "WHERE i.session_id=? AND i.payload IS NOT NULL AND i.execution_state IN ('withdrawn','unknown') "
+                "AND (i.delivery_state='unknown' OR m.id IS NULL) AND i.reason_code IS NOT 'legacy_rejected' "
+                "AND i.dismissed=0 AND successor.client_id IS NULL AND (? IS NULL OR i.rowid<?) ORDER BY i.rowid DESC LIMIT ?",
                 (session_id, before, before, limit + 1),
             )
             rows = list(await cursor.fetchall())

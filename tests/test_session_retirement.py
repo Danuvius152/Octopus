@@ -18,7 +18,7 @@ from server.sessions.client_submissions import submission_status, submit_client_
 
 
 @pytest.fixture
-async def runtime(tmp_path):
+async def runtime(tmp_path, short_process_shutdown):
     database = Database(str(tmp_path / "retirement.db"))
     await database.initialize()
     manager = SessionManager()
@@ -79,7 +79,7 @@ async def test_uncertain_recording_exits_and_cold_read_preserves_without_reexecu
         assert status["request_id"] == proof["request_id"]
         assert status["input"]["content"] == "execute once"
         assert status["execution"]["execution_owner_request_id"] == proof["request_id"]
-        assert status["execution"]["state"] == "succeeded"
+        assert status["execution"]["state"] == "done"
         assert status["outcome"]["status"] == "success"
         assert status["outcome"]["request_id"] == proof["request_id"]
         duplicate = await submit_client_message(

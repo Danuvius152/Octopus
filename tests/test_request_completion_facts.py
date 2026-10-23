@@ -407,8 +407,6 @@ async def test_slow_old_build_completion_cannot_finish_the_next_build(notificati
 
 
 async def test_failed_owner_keeps_an_unsent_correction_on_its_own_request(notification_runtime, monkeypatch):
-    from server.sessions import owner_runtime as runtime_module
-
     runtime = notification_runtime
     runtime.controls.enabled = False
     database = runtime.manager.db
@@ -419,16 +417,17 @@ async def test_failed_owner_keeps_an_unsent_correction_on_its_own_request(notifi
     session = await runtime.manager.create_session(agent["id"], "Unsent correction", backend="codex")
     availability_entered, release_availability, availability_returned = asyncio.Event(), asyncio.Event(), asyncio.Event()
     fault_entered, release_fault = asyncio.Event(), asyncio.Event()
-    availability = runtime_module.owner_is_available
+    availability = database.set_steer_delivery
     read = database.has_delivery_notice
     gate = False
 
-    async def hold_original_authority(db, user_id):
-        if gate and user_id == owner:
+    async def hold_original_authority(session_id, request_id, *, confirmed):
+        checking = gate and session_id == session.id and not confirmed
+        if checking:
             availability_entered.set()
             await release_availability.wait()
-        available = await availability(db, user_id)
-        if gate and user_id == owner:
+        available = await availability(session_id, request_id, confirmed=confirmed)
+        if checking:
             assert not available
             # No await follows a rejected final authority read in _write_steer.
             # Its False result exists before this waiter resumes.
@@ -443,7 +442,7 @@ async def test_failed_owner_keeps_an_unsent_correction_on_its_own_request(notifi
             raise RuntimeError("Original notice failed after the correction was rejected")
         return exists
 
-    monkeypatch.setattr(runtime_module, "owner_is_available", hold_original_authority)
+    monkeypatch.setattr(database, "set_steer_delivery", hold_original_authority)
     monkeypatch.setattr(database, "has_delivery_notice", fail_after_original_notice_read)
     fault = None
     try:

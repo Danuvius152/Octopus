@@ -31,13 +31,14 @@ from .base import (
     ActiveRun,
     BackendRetirement,
     ForkError,
+    PendingInput,
     QueuedPrompt,
     RecordedInput,
     Session,
     _augment_prompt_with_attachments,
     logger,
 )
-from .client_submissions import claim_input, require_retired_writers
+from .client_submissions import claim_input, load_pending_input, require_retired_writers
 from .commands import CorrelatedControl, _process_owned_command
 from .owner_questions import (
     BeginQuestionAttempt,
@@ -66,6 +67,10 @@ if TYPE_CHECKING:
 class Submit:
     request: QueuedPrompt
     steerable: bool = False
+    client_id: str | None = None
+    attachments: tuple[dict[str, Any], ...] = ()
+    recovery_of: str | None = None
+    schedule: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -550,9 +555,23 @@ class OwnerRuntime:
     async def _submit(self, command: Submit) -> SubmissionReceipt:
         from ..knowledge import for_entry
         from ..mcp_identity import work_is_open
+        from .client_submissions import input_digest
 
         session, manager, request = self.owner.session, self.owner.manager, command.request
-        if manager.sessions.get(session.id) is not session:
+        payload: dict[str, Any] = {"content": request.prompt, "attachment_ids": request.attachment_ids,
+                   "attachments": list(command.attachments), "wiki_mode": request.wiki_mode}
+        if command.recovery_of:
+            payload["recovery_of_client_id"] = command.recovery_of
+        digest = input_digest(payload)
+        client_id = command.client_id or (
+            f"{request.source}:{request.delivery_id}" if request.delivery_id else request.request_id
+        )
+        if manager.db is not None:
+            existing = await manager.db.get_client_submission(session.id, client_id)
+            if existing is not None:
+                return self._existing_input(existing, digest)
+        new_session = command.schedule is not None and session.origin == "schedule" and session.id not in manager.sessions
+        if not new_session and manager.sessions.get(session.id) is not session:
             raise ValueError(f"Session {session.id} not found")
         if request.delivery_id and request.delivery_id in session._delivery_receipts:
             return replace(session._delivery_receipts[request.delivery_id], disposition="duplicate")
@@ -563,6 +582,7 @@ class OwnerRuntime:
                   or session.agent_id in manager._closed_agents or not work_is_open(request.work_id))
         if closed:
             return SubmissionReceipt.closed(request.request_id, "shutdown" if manager._admission_closed else "withdrawn")
+        await require_retired_writers(manager, session.id)
         if session._forking or (session._archive_reservation is not None
                 and not (session._dispatch_paused and self._auto_archive_operation is not None)):
             raise ValueError(f"Session {session.id} is busy (forking or archiving)")
@@ -603,21 +623,59 @@ class OwnerRuntime:
         } if queued else {"type": "dispatch_state", "session_id": session.id, "dispatch_state": snapshot})
         if not self.owner.publisher.can_offer(notification):
             raise SessionMailboxFull("Session notification capacity is full; retry this input later")
-        session._dispatch_order += 1
-        request.order = session._dispatch_order
+        request.order = session._dispatch_order + 1
         disposition = "accepted"
         if steering:
-            session._steer_queue.append(request)
             disposition = "steered"
+        if manager.db is not None:
+            from ..knowledge import encode
+
+            payload.update(source=request.source, delivery_id=request.delivery_id, work_id=request.work_id,
+                           question_session_id=request.question_session_id, question_id=request.question_id,
+                           trusted_request=request.trusted_request, knowledge=encode(request.knowledge_context),
+                           priority=request.priority, order=request.order)
+            created, row = await manager.db.admit_client_submission(
+                session.id, client_id, digest, request.request_id, payload=payload,
+                receipt={"accepted": True, "disposition": disposition}, recovery_of=command.recovery_of,
+                schedule=command.schedule,
+                new_session={key: getattr(session, key) for key in (
+                    "id", "name", "working_dir", "created_at", "credential_id", "agent_id", "origin", "backend", "user_id",
+                )} if new_session else None,
+            )
+            if not created:
+                return self._existing_input(row, digest)
+            request.durable_client_input = True
+        if new_session:
+            manager.sessions[session.id] = session
+        if queued:
+            request.queued_event = notification
+        session._dispatch_order = request.order
+        if steering:
+            session._steer_queue.append(request)
         else:
-            session._pending_queue.append(request)
+            session._pending_queue.append(self._pending_input(request))
         receipt = manager._new_receipt(session, request, disposition)
         if request.delivery_id:
             session._delivery_receipts[request.delivery_id] = receipt
         self.changed()
-        if queued:
-            request.queued_event = notification
         return receipt
+
+    @staticmethod
+    def _pending_input(request: QueuedPrompt) -> PendingInput | QueuedPrompt:
+        if not request.durable_client_input:
+            return request
+        return PendingInput(request.request_id, request.source, request.summary, request.work_id,
+                            request.priority, request.order, request.queued_event)
+
+    def _existing_input(self, row: dict[str, Any], digest: str) -> SubmissionReceipt:
+        """A duplicate observes the original input; it never queues it again."""
+        if row["payload_sha256"] != digest:
+            from ..submission_models import SubmissionConflict
+
+            raise SubmissionConflict("This submission identity already belongs to different input.")
+        from .submission import receipt_for_input
+
+        return receipt_for_input(row, self.owner.session._request_completions.get(row["request_id"]))
 
     async def _interrupt(
         self, cause: Literal["user", "shutdown"], *, retain_unstarted: bool = False,
@@ -647,7 +705,7 @@ class OwnerRuntime:
         execution.settlement.request_interruption(cause)
         if not execution.request.started and retain_unstarted:
             execution.request.priority = False
-            session._pending_queue.append(execution.request)
+            session._pending_queue.append(self._pending_input(execution.request))
             session._pending_queue.sort(key=lambda request: request.order)
         elif execution.request.started:
             original_message, original_code = execution.settlement.interruption()
@@ -703,7 +761,7 @@ class OwnerRuntime:
         return task
 
     def completion(
-        self, request: QueuedPrompt, *, settlement: _Settlement | None = None,
+        self, request: QueuedPrompt | PendingInput, *, settlement: _Settlement | None = None,
         reason: str | None = None, actual_request_id: str | None = None,
         notification_state: Literal["delivered", "failed", "unavailable"] = "delivered",
         owner_ended: bool = False,
@@ -780,7 +838,7 @@ class OwnerRuntime:
             manager._finish_receipt(session, completion)
 
     async def complete(
-        self, request: QueuedPrompt, *, settlement: _Settlement | None = None,
+        self, request: QueuedPrompt | PendingInput, *, settlement: _Settlement | None = None,
         reason: str | None = None, actual_request_id: str | None = None,
         published: bool = True,
     ) -> None:
@@ -791,10 +849,13 @@ class OwnerRuntime:
             return
         completion = self.completion(request, settlement=settlement, reason=reason,
             actual_request_id=actual_request_id, notification_state="delivered" if published else "failed")
-        if request.durable_client_input and manager.db is not None:
+        if request.durable_client_input and manager.db is not None and not (
+            completion.state == "completed" and completion.recording_state == "committed"
+            and completion.request_id == request.request_id
+        ):
             await manager.db.complete_client_submission(
                 session.id, request.request_id, owner=actual_request_id or request.request_id,
-                state="completed" if completion.state == "completed" and completion.recording_state == "committed" else
+                state="done" if completion.state == "completed" and completion.recording_state == "committed" else
                       "unknown" if request.started or completion.outcome is not None else "withdrawn",
                 reason=reason or completion.state,
             )
@@ -901,13 +962,18 @@ class OwnerRuntime:
                     or session._forking or session._archive_reservation is not None or session._run.retirements
                     or self._idle_action is not None):
                 return
+            pending = session._pending_queue[eligible]
+            request = await load_pending_input(manager, session.id, pending) if isinstance(pending, PendingInput) else pending
+            # Retain the projection while loading. An awaited database read
+            # must not make admitted work disappear or leave a stale quota
+            # decision in force before this Owner reserves its active slot.
+            if manager._admission_closed or manager._legacy_transition:
+                return
             try:
                 manager._check_turn_quota(session)
-            except Exception as error:
-                if isinstance(error, QuotaExceeded):
-                    return
-                raise
-            request = session._pending_queue.pop(eligible)
+            except QuotaExceeded:
+                return
+            session._pending_queue.pop(eligible)
             settlement = _Settlement(request_id=request.request_id, work_id=request.work_id)
             execution = Execution(request, settlement, asyncio.get_running_loop().create_future(),
                                   asyncio.get_running_loop().create_future())
@@ -1480,7 +1546,7 @@ class OwnerRuntime:
             notice.publication is not None and notice.publication.delivered for notice in prefix
         ) and all(item.delivered for item in execution.prefix)
         # A stopped, unstarted claim remains in the original pending queue.
-        if execution.request.started or not any(item is execution.request for item in session._pending_queue):
+        if execution.request.started or not any(item.request_id == execution.request.request_id for item in session._pending_queue):
             await self.complete(execution.request, settlement=execution.settlement,
                                 reason=execution.completion_reason or ("request_not_executed" if execution.settlement.outcome is None else None),
                                 published=published)

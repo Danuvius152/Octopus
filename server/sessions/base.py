@@ -222,6 +222,31 @@ class QueuedPrompt:
     durable_client_input: bool = False
     queued_event: dict[str, Any] | None = field(default=None, repr=False)
 
+    @property
+    def summary(self) -> str:
+        return self.prompt[:1000]
+
+
+@dataclass
+class PendingInput:
+    """Owner's queue projection; execution reloads the durable input by ID."""
+
+    request_id: str
+    source: str
+    summary: str
+    work_id: str | None
+    priority: bool
+    order: int
+    queued_event: dict[str, Any] | None = field(default=None, repr=False)
+
+    @property
+    def started(self) -> bool:
+        return False
+
+    @property
+    def durable_client_input(self) -> bool:
+        return True
+
 
 @dataclass
 class PendingApproval:
@@ -377,7 +402,7 @@ class Session:
     _deletion_task: asyncio.Task | None = field(default=None, repr=False)
     _command_receipts: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict, repr=False)
     _questions: dict[str, PendingQuestion] = field(default_factory=dict, repr=False)
-    _pending_queue: list[QueuedPrompt] = field(default_factory=list, repr=False)
+    _pending_queue: list[PendingInput | QueuedPrompt] = field(default_factory=list, repr=False)
     _dispatch_paused: bool = field(default=False, repr=False)
     _admission_closed: bool = field(default=False, repr=False)
     _archive_reservation: object | None = field(default=None, repr=False)
@@ -421,6 +446,9 @@ class SessionManagerBase:
     # split dropping its class constants.
 
     def _session_owner(self, session: Session) -> SessionOwner:
+        raise NotImplementedError  # provided by a mixin
+
+    def session_owner_failed(self, session_id: str) -> bool:
         raise NotImplementedError  # provided by a mixin
 
     def _require_session_writer(self, session: Session) -> None:

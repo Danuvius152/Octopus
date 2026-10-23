@@ -4,7 +4,7 @@ import type { ClientSubmissionStatus, ClientSubmissionSummary } from "../api";
 import { useSessionStore } from "../stores/sessionStore";
 import { RecoverableInputs } from "./RecoverableInputs";
 
-const execution = { state: "withdrawn" as const, state_version: 2, execution_owner_request_id: "request", recoverable_input: true };
+const execution = { state: "withdrawn" as const, delivery_state: "none" as const, state_version: 2, execution_owner_request_id: "request", recoverable_input: true };
 const item: ClientSubmissionSummary = { client_request_id: "original", request_id: "request", execution, preview: "Saved original", attachment_count: 0 };
 const saved: ClientSubmissionStatus = { session_id: "s", client_request_id: "original", request_id: "request", accepted: true,
   execution, input: { content: "Saved original in full 中文", attachment_ids: [], attachments: [] } };
@@ -37,6 +37,24 @@ it("has no restore action for an execution whose result is unknown", async () =>
   render(<RecoverableInputs sessionId="s" connected disabled={false} onRestore={vi.fn()} />);
   await screen.findByText("Execution result unknown");
   expect(screen.queryByRole("button", { name: "Restore to input" })).toBeNull();
+});
+
+it("reviews the unknown reason and original attachment evidence without restoring", async () => {
+  const detail = { ...saved, message: "Delivery to the model was not acknowledged.",
+    execution: { ...execution, state: "unknown" as const, recoverable_input: false, reason_code: "steer_delivery_unknown" },
+    input: { ...saved.input!, attachment_ids: ["file"], attachments: [{
+      id: "file", filename: "Original evidence.txt", size: 17, mime_type: "text/plain", sha256: "original-digest",
+    }] } };
+  const fetch = vi.fn(async (url: string, _init?: RequestInit) => Response.json(url.endsWith("/original") ? detail
+    : { items: [{ ...item, execution: detail.execution, attachment_count: 1 }] }));
+  vi.stubGlobal("fetch", fetch);
+  const restore = vi.fn();
+  render(<RecoverableInputs sessionId="s" connected disabled={false} onRestore={restore} />);
+  fireEvent.click(await screen.findByRole("button", { name: "Review saved input" }));
+  await screen.findByText("Delivery to the model was not acknowledged.");
+  expect(screen.getByText(/Original evidence.txt/)).toBeVisible();
+  expect(restore).not.toHaveBeenCalled();
+  expect(fetch.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
 });
 
 it("keeps complete input when a required attachment cannot be recovered", async () => {

@@ -248,18 +248,21 @@ def test_non_evidence_source_does_not_hide_readable_summary(store, body):
         store, source="---\ntype: Reference\ntitle: Alpha realtime\n---\n" + body,
         summaries=1,
     )
+    summary = store.read("Summaries/summary-00.md")
     # These queries leave the source unchanged; each body needs one fresh store.
     for intent, view in product(INTENTS, ("compact", "full")):
         result = store.search("realtime", intent=intent, view=view, limit=1)
         assert result["total"] == 1 and result["next_offset"] is None
         hit = result["items"][0]
         assert hit["id"] != alpha["id"] and hit["path"] == "Summaries/summary-00.md"
-        assert hit["revision"] == store.read(hit["id"])["revision"]
+        assert hit["revision"] == summary["revision"]
         section = hit["sections"][0]
         actual = store.read(hit["id"], start=section["start"],
                             length=section["end"] - section["start"],
                             expected_revision=hit["revision"])
         assert "Realtime uses video distillation" in actual["content"]
+    # Lookup does not depend on the three natural-language intents above.
+    for view in ("compact", "full"):
         # Exact lookup can still locate the original, even if it has no evidence.
         lookup = store.search(alpha["id"], intent="lookup", view=view)
         assert lookup["items"][0]["id"] == alpha["id"]
@@ -297,11 +300,12 @@ def test_visible_body_key_note_math_and_code_keep_original_identity(store, body)
         store, source="---\ntype: Reference\ntitle: Alpha realtime\n---\n" + body,
         summaries=1,
     )
+    actual = store.read(alpha["id"], expected_revision=alpha["revision"])
+    assert actual["content"].endswith(body)
     for intent, view in product(INTENTS, ("full", "compact")):
         result = store.search("realtime", intent=intent, view=view)
         assert result["total"] == 1 and result["items"][0]["id"] == alpha["id"]
-        actual = store.read(alpha["id"], expected_revision=result["items"][0]["revision"])
-        assert actual["content"].endswith(body)
+        assert result["items"][0]["revision"] == actual["revision"]
 
 
 @pytest.mark.parametrize("suffix", ["html", "htm"])
@@ -322,24 +326,26 @@ def test_physical_html_stays_readable_without_entering_markdown_navigation(
 
     path = "alpha-realtime." + suffix
     alpha = represented_pair(store, source_path=path, source=body, summaries=1)
+    summary = store.read("Summaries/summary-00.md")
     for intent, view in product(INTENTS, ("full", "compact")):
         result = store.search("realtime", intent=intent, view=view, limit=1)
         assert result["total"] == 1
         hit = result["items"][0]
         assert hit["id"] != alpha["id"]
         assert hit["path"] == "Summaries/summary-00.md"
-        assert hit["revision"] == store.read(hit["id"])["revision"]
+        assert hit["revision"] == summary["revision"]
+    for view in ("full", "compact"):
         assert store.search(alpha["id"], intent="lookup", view=view)["items"] == []
-        # Qualification uses original structure; the evidence text still has the
-        # established extractor's exact code-point coordinates.
-        legacy = HTMLText()
-        legacy.feed(body)
-        read = store.read(alpha["id"], expected_revision=alpha["revision"])
-        assert read["content"] == "".join(legacy.parts).strip()
-        assert read["characters"] == len(read["content"])
-        assert read["metadata"]["html_body_readable"] is usable
-        if usable and "img" in body:
-            assert read["metadata"]["html_media_refs"] == [{"tag": "img", "src": "diagram.png"}]
+    # Physical body/metadata are independent of query intent and view. Read the
+    # exact revision once; every query above still checks its returned identity.
+    legacy = HTMLText()
+    legacy.feed(body)
+    read = store.read(alpha["id"], expected_revision=alpha["revision"])
+    assert read["content"] == "".join(legacy.parts).strip()
+    assert read["characters"] == len(read["content"])
+    assert read["metadata"]["html_body_readable"] is usable
+    if usable and "img" in body:
+        assert read["metadata"]["html_media_refs"] == [{"tag": "img", "src": "diagram.png"}]
 
 
 @pytest.mark.parametrize("legacy_version", ["sections-v4", "sections-v5", "sections-v6"])

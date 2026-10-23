@@ -1,5 +1,6 @@
 """Global test configuration — ensure tests use known default settings."""
 
+import asyncio
 import atexit
 import os
 import shutil
@@ -17,6 +18,30 @@ os.environ["OCTOPUS_AUTH_TOKEN"] = "changeme"
 os.environ["OCTOPUS_DEFAULT_BACKEND"] = "claude-code"
 
 _PROC = Path("/proc")
+
+
+@pytest.fixture
+def short_process_shutdown(monkeypatch):
+    """Exercise real retirement without spending the production grace periods.
+
+    Only request this in tests of cancellation, ownership or recovery. Tests of
+    the default shutdown timing keep the ordinary Harness budgets.
+    """
+    from server.harness import run
+
+    class ShortShutdownAsyncio:
+        def __getattr__(self, name):
+            # Resolve dynamically so each test's spawn/clock hooks still apply.
+            return getattr(asyncio, name)
+
+        async def wait_for(self, future, timeout):
+            # Shorten only the two process-exit grace waits. Pipe drains and
+            # spawn cleanup retain their original deadlines.
+            if timeout == 2.0 and getattr(future, "cr_code", None) is asyncio.subprocess.Process.wait.__code__:
+                timeout = 0.05
+            return await asyncio.wait_for(future, timeout)
+
+    monkeypatch.setattr(run, "asyncio", ShortShutdownAsyncio())
 
 
 @pytest.fixture(autouse=True)

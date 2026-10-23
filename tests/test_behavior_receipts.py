@@ -11,7 +11,7 @@ from tests.test_submission_recovery import _submit_paused
 from tests.test_submission_recovery import offline_harness as offline_harness
 
 
-async def test_submission_reservation_and_receipt_survive_database_reopen(tmp_path, monkeypatch):
+async def test_submission_and_legacy_receipt_survive_database_reopen(tmp_path, monkeypatch):
     path = str(tmp_path / "receipts.db")
     db = Database(path)
     await db.initialize()
@@ -21,7 +21,12 @@ async def test_submission_reservation_and_receipt_survive_database_reopen(tmp_pa
     session = await manager.create_session(agent["id"], "receipt", str(tmp_path), backend="codex")
     first = await _submit_paused(manager, session.id, "once", "accepted")
     unknown_payload = json.dumps({"content": "uncertain", "attachment_ids": [], "wiki_mode": None}, sort_keys=True, separators=(",", ":"))
-    await db.reserve_client_submission(session.id, "uncertain", hashlib.sha256(unknown_payload.encode()).hexdigest(), "reserved-request")
+    # A pre-upgrade reservation has no saved input or acceptance evidence.
+    async with db.transaction(write=True) as tx:
+        await tx.execute(
+            "INSERT INTO client_submissions(session_id,client_id,payload_sha256,request_id) VALUES(?,?,?,?)",
+            (session.id, "uncertain", hashlib.sha256(unknown_payload.encode()).hexdigest(), "reserved-request"),
+        )
     await db.close()
     reopened = Database(path)
     await reopened.initialize()

@@ -538,6 +538,14 @@ class DatabaseBase:
         for table, column, ddl in self._COLUMN_MIGRATIONS:
             await self._add_column(table, column, ddl)
 
+        # Input classification below reads exact terminal identities, including
+        # when upgrading a database whose messages table predates that column.
+        await self._add_column("messages", "terminal_request_id", "ALTER TABLE messages ADD COLUMN terminal_request_id TEXT")
+        await self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS messages_terminal_request "
+            "ON messages(session_id, terminal_request_id) WHERE terminal_request_id IS NOT NULL"
+        )
+
         for column, definition in (
             ("payload", "TEXT"), ("execution_state", "TEXT NOT NULL DEFAULT 'unknown'"),
             ("execution_owner", "TEXT"), ("execution_generation", "TEXT"),
@@ -545,10 +553,48 @@ class DatabaseBase:
             ("reason_code", "TEXT"), ("state_version", "INTEGER NOT NULL DEFAULT 0"),
             ("created_at", "TEXT"), ("updated_at", "TEXT"), ("recovery_of", "TEXT"),
             ("recovered_by", "TEXT"), ("dismissed", "INTEGER NOT NULL DEFAULT 0"),
+            ("delivery_state", "TEXT NOT NULL DEFAULT 'none'"),
         ):
             await self._add_column("client_submissions", column,
                                    f"ALTER TABLE client_submissions ADD COLUMN {column} {definition}")
         await self.conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS client_submission_request ON client_submissions(session_id,request_id)")
+        await self.conn.execute("CREATE INDEX IF NOT EXISTS client_submission_source ON client_submissions(client_id)")
+        # Old admission stages are not executable evidence. Missing payloads
+        # and completed rows without an exact terminal remain review-only.
+        await self.conn.execute(
+            "UPDATE client_submissions SET delivery_state='unknown' "
+            "WHERE reason_code='steer_delivery_unknown' AND delivery_state='none'"
+        )
+        await self.conn.execute(
+            "UPDATE client_submissions SET execution_state=CASE "
+            "WHEN execution_state='rejected' THEN 'withdrawn' "
+            "WHEN payload IS NULL THEN 'unknown' "
+            "WHEN execution_state IN ('reserved','queued') THEN "
+            "CASE WHEN json_extract(receipt,'$.accepted')=1 THEN 'pending' ELSE 'withdrawn' END "
+            "WHEN execution_state='claimed' THEN 'running' "
+            "WHEN delivery_state!='unknown' AND EXISTS (SELECT 1 FROM messages m "
+            "WHERE m.session_id=client_submissions.session_id "
+            "AND m.terminal_request_id=COALESCE(execution_owner,request_id)) THEN 'done' ELSE 'unknown' END, "
+            "reason_code=CASE WHEN execution_state='rejected' THEN 'legacy_rejected' ELSE reason_code END "
+            "WHERE execution_state IN ('reserved','queued','claimed','completed','succeeded','failed','interrupted','rejected')"
+        )
+        # The child owns the only recovery link. Preserve old forward pointers
+        # on upgrade, then leave that retired column out of all runtime reads
+        # and writes. Refused legacy reservations never claimed a successor.
+        await self.conn.execute(
+            "UPDATE client_submissions SET recovery_of=NULL WHERE reason_code='legacy_rejected'"
+        )
+        await self.conn.execute(
+            "UPDATE client_submissions AS child SET recovery_of=(SELECT original.client_id "
+            "FROM client_submissions original WHERE original.session_id=child.session_id "
+            "AND original.recovered_by=child.client_id) WHERE child.recovery_of IS NULL "
+            "AND child.reason_code IS NOT 'legacy_rejected' AND EXISTS (SELECT 1 FROM client_submissions original "
+            "WHERE original.session_id=child.session_id AND original.recovered_by=child.client_id)"
+        )
+        await self.conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS client_submission_recovery ON client_submissions(session_id,recovery_of) "
+            "WHERE recovery_of IS NOT NULL"
+        )
 
         # The split row is authoritative after rotation or account adoption.
         # Preserve a legacy-only secret before retiring the obsolete copy;
@@ -595,11 +641,6 @@ class DatabaseBase:
             await self._add_column(table, column, ddl)
 
         await self._add_column("messages", "runtime_metadata", "ALTER TABLE messages ADD COLUMN runtime_metadata TEXT")
-        await self._add_column("messages", "terminal_request_id", "ALTER TABLE messages ADD COLUMN terminal_request_id TEXT")
-        await self.conn.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS messages_terminal_request "
-            "ON messages(session_id, terminal_request_id) WHERE terminal_request_id IS NOT NULL"
-        )
         await self._guard_message_sequences()
 
         await self._backfill_fork_owners()

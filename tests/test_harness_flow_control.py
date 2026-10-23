@@ -166,7 +166,7 @@ async def test_full_stream_buffer_preserves_terminal_and_end_after_consumption_r
 
 
 @pytest.mark.parametrize("pipe,ignore_term", [("stdout", False), ("stderr", False), ("stdout", True)])
-async def test_stop_retires_a_backpressured_child_without_a_stream_consumer(tmp_path, pipe, ignore_term):
+async def test_stop_retires_a_backpressured_child_without_a_stream_consumer(tmp_path, pipe, ignore_term, short_process_shutdown):
     original_tasks = asyncio.all_tasks()
     script, progress = _writer(tmp_path)
     descriptor = 1

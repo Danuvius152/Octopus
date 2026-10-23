@@ -18,7 +18,7 @@ it("tracks report completion separately from follow-up delivery", () => {
   });
 });
 
-it.each(["native", "without-randomUUID", "without-crypto"])("matches submission receipts in %s browsers", async (mode) => {
+it.each(["native", "without-randomUUID", "without-crypto"])("handles input admission in %s browsers", async (mode) => {
   if (mode === "without-randomUUID") vi.stubGlobal("crypto", { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) });
   if (mode === "without-crypto") vi.stubGlobal("crypto", undefined);
   class Socket {
@@ -40,6 +40,11 @@ it.each(["native", "without-randomUUID", "without-crypto"])("matches submission 
   try {
     const socket = Socket.instances[0];
     const pending = hook.result.current.sendMessage("own-session", "retained input");
+    if (mode === "without-crypto") {
+      expect(await pending).toMatchObject({ accepted: false, code: "secure_randomness_unavailable", message: expect.stringContaining("HTTPS or localhost") });
+      expect(socket.send).not.toHaveBeenCalled();
+      return;
+    }
     const input = JSON.parse(socket.send.mock.calls[0][0]);
     const resolved = vi.fn();
     void pending.then(resolved);
@@ -53,7 +58,7 @@ it.each(["native", "without-randomUUID", "without-crypto"])("matches submission 
     expect(resolved).not.toHaveBeenCalled();
     act(() => socket.onmessage?.({ data: JSON.stringify({ type: "submission", client_request_id: input.client_request_id,
       session_id: "own-session", accepted: false, message: "Conversation closed" }) }));
-    expect(await pending).toEqual({ accepted: false, message: "Conversation closed" });
+    expect(await pending).toEqual({ accepted: false, clientRequestId: input.client_request_id, message: "Conversation closed" });
     expect(socket.send).toHaveBeenCalledTimes(1);
   } finally {
     hook.unmount();

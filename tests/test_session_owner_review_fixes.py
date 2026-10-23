@@ -144,7 +144,7 @@ async def test_saturated_notifications_refuse_submit_before_acceptance_and_keep_
     await asyncio.wait_for(finished.wait(), 2)
     receipt = await manager.start_message(session.id, "Retry the original identity", source="bg", delivery_id="budget-0")
     assert receipt.accepted
-    duplicate = await manager.start_message(session.id, "Do not create another request", source="bg", delivery_id="budget-0")
+    duplicate = await manager.start_message(session.id, "Retry the original identity", source="bg", delivery_id="budget-0")
     assert duplicate.disposition == "duplicate" and duplicate.request_id == receipt.request_id
     assert [row["summary"] for row in manager.dispatch_snapshot(session.id)["items"]] == ["Retry the original identity"]
 

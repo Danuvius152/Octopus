@@ -226,7 +226,7 @@ async def test_recording_failure_preserves_choice_without_reexecution(tmp_path, 
         assert status["accepted"] is True
         assert status["request_id"] == proof["request_id"]
         assert status["input"]["content"] == "Original input 中文"
-        assert status["execution"]["state"] == ("succeeded" if committed else "unknown")
+        assert status["execution"]["state"] == ("done" if committed else "unknown")
         duplicate = await submit_client_message(manager, proof["session_id"], "Original input 中文", [], "original", wiki_mode=None)
         assert duplicate == status
         assert manager.dispatch_snapshot(proof["session_id"])["items"] == []

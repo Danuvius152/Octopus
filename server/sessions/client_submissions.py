@@ -6,7 +6,6 @@ import asyncio
 import hashlib
 import json
 import logging
-import uuid
 from typing import TYPE_CHECKING, Any
 
 from ..attachments import AttachmentUnavailable, validate_message_attachments
@@ -14,8 +13,17 @@ from .runtime_types import QuotaExceeded
 
 if TYPE_CHECKING:
     from . import SessionManager
+    from .base import PendingInput, QueuedPrompt
 
 logger = logging.getLogger(__name__)
+
+
+def input_digest(payload: dict[str, Any]) -> str:
+    """Identity covers the submitted content; attachment bytes are saved too."""
+    value = {key: payload[key] for key in ("content", "attachment_ids", "wiki_mode")}
+    if payload.get("recovery_of_client_id"):
+        value["recovery_of_client_id"] = payload["recovery_of_client_id"]
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 def _files(session_id: str, identifiers: list[str]) -> list[dict[str, Any]]:
@@ -28,20 +36,42 @@ def _files(session_id: str, identifiers: list[str]) -> list[dict[str, Any]]:
     return result
 
 
-async def status_from_row(manager: SessionManager, session_id: str, row: dict[str, Any], *, include_input=True) -> dict[str, Any]:
+async def load_pending_input(manager: SessionManager, session_id: str, pending: PendingInput) -> QueuedPrompt:
+    from ..knowledge import decode_context
+    from .base import QueuedPrompt
+
+    row = await manager.db.get_submission_for_request(session_id, pending.request_id)
+    if row is None or row["execution_state"] != "pending" or row["payload"] is None:
+        raise ValueError("The queued input is no longer pending")
+    payload = row["payload"]
+    context = decode_context(payload.get("knowledge"))
+    if context is None:
+        raise ValueError("The saved input has no valid request context")
+    return QueuedPrompt(
+        payload["content"], payload["attachment_ids"], wiki_mode=payload["wiki_mode"],
+        trusted_request=payload["trusted_request"], knowledge_context=context,
+        source=payload["source"], priority=pending.priority, request_id=row["request_id"],
+        delivery_id=payload["delivery_id"], work_id=payload["work_id"], order=payload["order"],
+        question_session_id=payload["question_session_id"], question_id=payload["question_id"],
+        durable_client_input=True,
+    )
+
+
+def status_from_row(session_id: str, row: dict[str, Any], *, include_input=True) -> dict[str, Any]:
     state = row["execution_state"]
     owner = row["execution_owner"] or row["request_id"]
-    terminal = await manager.db.get_committed_terminal(session_id, owner)
-    if terminal is not None and row["reason_code"] != "steer_delivery_unknown":
-        state = {"success": "succeeded", "failed": "failed", "interrupted": "interrupted"}.get(terminal.get("status"), "unknown")
+    terminal = row["terminal"]
+    if terminal is not None and row["delivery_state"] != "unknown":
+        state = "done"
     receipt = row["receipt"]
     result = {"session_id": session_id, "client_request_id": row["client_id"], "request_id": row["request_id"],
-              **(receipt or {"accepted": state not in {"reserved", "unknown", "withdrawn", "rejected"}})}
+              **(receipt or {"accepted": state in {"pending", "running", "done"}})}
     result["execution"] = {"state": state, "reason_code": row["reason_code"],
                            "state_version": row["state_version"], "updated_at": row["updated_at"],
                            "execution_owner_request_id": owner,
+                           "delivery_state": row["delivery_state"],
                            "recoverable_input": row["payload"] is not None and state == "withdrawn"
-                           and not row["dismissed"] and not row["recovered_by"]}
+                           and not row["dismissed"] and not row["recovered_by"] and row["reason_code"] != "legacy_rejected"}
     if terminal is not None:
         result["outcome"] = terminal
     if row["recovery_of"]:
@@ -50,12 +80,17 @@ async def status_from_row(manager: SessionManager, session_id: str, row: dict[st
         result["recovered_by_client_id"] = row["recovered_by"]
     if state == "unknown":
         result.update(state="unknown", code="execution_unknown" if row["payload"] else "admission_unknown",
-                      message="Execution is unconfirmed. Review the saved input and conversation; this request will not run again automatically.")
+                      message={
+                          "service_restart_execution_unknown": "The service restarted after execution may have begun. Review the input and conversation; it will not run again automatically.",
+                          "steer_delivery_unknown": "Delivery to the active model was not acknowledged. Its result does not confirm whether this input was received; review it before starting new work.",
+                      }.get(row["reason_code"], "Execution is unconfirmed. Review the saved input and conversation; this request will not run again automatically."))
     elif receipt is None and terminal is None and state not in {"withdrawn", "rejected"}:
         result.update(accepted=False, state="unknown", code="admission_unknown",
                       message="Admission is not yet confirmed. Confirm this same submission identity before sending new work.")
     elif state == "withdrawn":
-        result["message"] = "This input was withdrawn before execution. You can restore it and send it again."
+        result["message"] = ("This historical input was refused before admission. Its receipt is read-only."
+                             if row["reason_code"] == "legacy_rejected" else
+                             "This input was withdrawn before execution. You can restore it and send it again.")
     if include_input and row["payload"] is not None:
         payload = row["payload"]
         result["input"] = {"content": payload["content"], "attachment_ids": payload["attachment_ids"],
@@ -65,7 +100,7 @@ async def status_from_row(manager: SessionManager, session_id: str, row: dict[st
 
 async def submission_status(manager: SessionManager, session_id: str, client_id: str) -> dict[str, Any] | None:
     row = await manager.db.get_client_submission(session_id, client_id)
-    return await status_from_row(manager, session_id, row) if row is not None else None
+    return status_from_row(session_id, row) if row is not None else None
 
 
 async def submit_client_message(manager: SessionManager, session_id: str, content: str, attachment_ids: list[str],
@@ -74,50 +109,32 @@ async def submit_client_message(manager: SessionManager, session_id: str, conten
     payload: dict[str, Any] = {"content": content, "attachment_ids": attachment_ids, "wiki_mode": wiki_mode}
     if recovery_of_client_id:
         payload["recovery_of_client_id"] = recovery_of_client_id
-    digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    digest = input_digest(payload)
     base = {"session_id": session_id, "client_request_id": client_id}
     existing = await manager.db.get_client_submission(session_id, client_id)
-    if existing is None:
-        try:
-            files = await asyncio.to_thread(_files, session_id, attachment_ids)
-            payload["attachments"] = files
-            created, row = await manager.db.reserve_client_submission(
-                session_id, client_id, digest, uuid.uuid4().hex, payload=payload, recovery_of=recovery_of_client_id,
-            )
-        except (AttachmentUnavailable, ValueError) as error:
-            return {**base, "accepted": False, "message": str(error), "code": getattr(error, "code", "recovery_unavailable")}
-        except Exception:
-            logger.exception("Input saving is unconfirmed session=%s client=%s", session_id, client_id)
-            return {**base, "accepted": False, "state": "unknown", "code": "admission_unknown",
-                    "message": "Input saving is unconfirmed. Keep your draft and confirm this submission before sending new work."}
-    else:
-        created, row = False, existing
-    base["request_id"] = row["request_id"]
-    if row["payload_sha256"] != digest:
-        return {**base, "accepted": False, "code": "submission_conflict", "message": "This submission identity already belongs to different input."}
-    if not created:
-        return await status_from_row(manager, session_id, row)
+    if existing is not None:
+        if existing["payload_sha256"] != digest:
+            return {**base, "accepted": False, "code": "submission_conflict", "message": "This submission identity already belongs to different input."}
+        return status_from_row(session_id, existing)
     try:
-        try:
-            receipt = await manager.start_message(session_id, content, attachment_ids=attachment_ids,
-                                                  steerable=True, request_id=row["request_id"], durable_client_input=True,
-                                                  **({"wiki_mode": wiki_mode} if wiki_mode else {}))
-            response = {**base, "accepted": receipt.accepted, "disposition": receipt.disposition}
-            if not receipt.accepted:
-                response.update(message="This conversation is closed to new messages. Your message was not accepted.")
-        except (AttachmentUnavailable, QuotaExceeded, ValueError) as error:
-            response = {**base, "accepted": False, "message": str(error)}
-            if getattr(error, "code", None):
-                response["code"] = error.code
-        await manager.db.settle_client_submission(session_id, client_id, row["request_id"], response)
+        receipt = await manager.start_message(
+            session_id, content, attachment_ids=attachment_ids, steerable=True,
+            client_request_id=client_id, recovery_of_client_id=recovery_of_client_id,
+            wiki_mode=wiki_mode,
+        )
+        if not receipt.accepted:
+            return {**base, "accepted": False, "disposition": receipt.disposition,
+                    "message": "This conversation is closed to new messages. Your message was not accepted."}
         result = await submission_status(manager, session_id, client_id)
         assert result is not None
         return result
+    except (AttachmentUnavailable, QuotaExceeded, ValueError) as error:
+        return {**base, "accepted": False, "message": str(error),
+                "code": getattr(error, "code", "admission_refused")}
     except Exception:
-        logger.exception("Client submission admission/receipt is unconfirmed session=%s request=%s", session_id, row["request_id"])
-        status = await submission_status(manager, session_id, client_id)
-        assert status is not None
-        return status
+        logger.exception("Client submission admission is unconfirmed session=%s client=%s", session_id, client_id)
+        return {**base, "accepted": False, "state": "unknown", "code": "admission_unknown",
+                "message": "Input saving is unconfirmed. Keep your draft and confirm this submission before sending new work."}
 
 
 async def claim_input(manager: SessionManager, session_id: str, request_id: str, *, owner: str | None = None) -> bool:
@@ -142,9 +159,7 @@ async def require_retired_writers(manager: SessionManager, session_id: str) -> N
     for row in await manager.db.uncertain_submission_writers(session_id):
         if row["execution_generation"] in manager._retired_dispatch_generations:
             continue
-        owner = row["execution_owner"] or row["request_id"]
-        if (row["reason_code"] != "steer_delivery_unknown"
-                and await manager.db.get_committed_terminal(session_id, owner) is not None):
+        if row["delivery_state"] != "unknown" and row["terminal"] is not None:
             continue
         if not process_group_exited(row["process_group"], row["execution_boot"]):
             raise ValueError("Previous execution has an unknown result and its process exit is unconfirmed. "

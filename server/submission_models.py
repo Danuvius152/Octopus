@@ -2,9 +2,37 @@
 
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 
 from .models import AttachmentMetadata, TurnOutcome
+
+
+class SubmissionConflict(ValueError):
+    code = "submission_conflict"
+
+
+class InputRecoveryUnavailable(ValueError):
+    code = "recovery_unavailable"
+
+
+class ClientSubmissionRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    client_request_id: str = Field(min_length=1, max_length=128)
+    content: str
+    attachment_ids: list[str] = Field(default_factory=list)
+    wiki_mode: Literal["auto", "read", "maintain", "off"] | None = None
+    recovery_of_client_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
+class ClientSubmissionRefusal(BaseModel):
+    session_id: str
+    client_request_id: str
+    accepted: Literal[False] = False
+    message: str
+    code: str | None = None
+    disposition: str | None = None
+    state: Literal["unknown"] | None = None
 
 
 class SavedAttachment(AttachmentMetadata):
@@ -19,7 +47,8 @@ class SubmissionInput(BaseModel):
 
 
 class SubmissionExecution(BaseModel):
-    state: Literal["reserved", "queued", "claimed", "completed", "succeeded", "failed", "interrupted", "withdrawn", "unknown", "rejected"]
+    state: Literal["pending", "running", "done", "withdrawn", "unknown"]
+    delivery_state: Literal["none", "confirmed", "unknown"] = "none"
     reason_code: str | None = None
     state_version: int
     updated_at: str | None = None

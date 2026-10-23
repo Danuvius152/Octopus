@@ -298,7 +298,7 @@ async def test_archive_agent_storage_refusal_keeps_agent_and_session_live(tmp_pa
     assert proof["model"]["pid"] == proof["process_group"] == proof["model"]["process_group"]
     assert (artifacts / "actual-commit-applied").exists() is committed
     if committed:
-        assert status["execution"]["state"] == "interrupted"
+        assert status["execution"]["state"] == "done"
         assert status["outcome"] == proof["selected_outcome"]
         assert [message["content"] for message in messages if message["type"] == "result"] == [proof["selected_outcome"]]
     else:
@@ -313,7 +313,8 @@ async def test_archive_agent_storage_refusal_keeps_agent_and_session_live(tmp_pa
 async def test_archive_agent_retirement_refusal_keeps_agent_and_session_live(tmp_path):
     proof, status, messages, artifacts = await _cold_archive_fault(tmp_path, "retirement")
     assert proof["model"] is None, "This isolated case owns a stand-in Harness resource, not a model PID"
-    assert status["execution"]["state"] == "interrupted"
+    assert status["execution"]["state"] == "done"
+    assert status["outcome"]["status"] == "interrupted"
     assert status["outcome"]["request_id"] == proof["request_id"]
     assert [message["content"] for message in messages if message["type"] == "result"] == [status["outcome"]]
     assert (artifacts / "stop-attempts.jsonl").read_text().splitlines() == ["Backend retirement remains unconfirmed"]

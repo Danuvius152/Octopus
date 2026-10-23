@@ -436,10 +436,8 @@ async def test_cron_schedule_registers_cron_trigger(setup):
 
 
 @pytest.mark.asyncio
-async def test_initialize_deletes_missed_run_at_schedules(setup):
-    """On startup, run_at schedules whose fire time has already passed (missed
-    while the server was down) are deleted from the DB rather than silently
-    dropped by APScheduler."""
+async def test_initialize_retains_and_registers_missed_run_at_schedules(setup):
+    """Overdue one-shots retain their original fire until input admission."""
     mgr, db, runner = setup
     agent = await db.get_system_agent()
 
@@ -464,11 +462,11 @@ async def test_initialize_deletes_missed_run_at_schedules(setup):
     )
     assert len(await db.load_schedules()) == 2
 
-    await runner.initialize()
+    await runner.initialize(paused=True)
 
     remaining = await db.load_schedules()
-    assert [r["id"] for r in remaining] == ["recurring1"]
-    assert runner._scheduler.get_job("missed1") is None
+    assert {r["id"] for r in remaining} == {"missed1", "recurring1"}
+    assert runner._scheduler.get_job("missed1") is not None
     assert runner._scheduler.get_job("recurring1") is not None
 
 
@@ -518,7 +516,7 @@ async def test_run_at_schedule_deleted_after_fire(setup, monkeypatch):
     )
     assert len(await db.load_schedules()) == 1
 
-    # Simulate fire: _fire deletes the row regardless of success.
+    # Successful durable admission consumes the one-shot.
     await runner._fire("once2")
 
     # Row gone from DB.
@@ -533,14 +531,7 @@ async def test_run_at_schedule_deleted_after_fire_with_origin_session(setup, mon
     agent = await db.get_system_agent()
     origin = await mgr.create_session(agent["id"], name="chat")
 
-    started: dict = {}
-
-    async def fake_start(session_id, prompt, *, source, knowledge_context):
-        assert source == "schedule"
-        started["session_id"] = session_id
-        return accepted_receipt()
-
-    monkeypatch.setattr(mgr, "start_message", fake_start)
+    runs = capture_model_runs(mgr, monkeypatch)
 
     await save_schedule(db,
         schedule_id="once3",
@@ -556,7 +547,9 @@ async def test_run_at_schedule_deleted_after_fire_with_origin_session(setup, mon
 
     await runner._fire("once3")
 
-    assert started["session_id"] == origin.id
+    from tests.test_runtime_review_races import wait_dispatch_idle
+    await wait_dispatch_idle(mgr, origin.id)
+    assert [run.session_id for run in runs] == [origin.id]
     # DB row auto-deleted after the one-time fire.
     assert await db.load_schedules() == []
 

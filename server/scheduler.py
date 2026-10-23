@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from apscheduler.executors.asyncio import AsyncIOExecutor
@@ -19,6 +19,7 @@ from .schedule_targets import ScheduleTargetError, resolve_schedule_target
 if TYPE_CHECKING:
     from server.database import Database
     from server.session_manager import SessionManager
+    from server.sessions.submission import SubmissionReceipt
 
 from .monitor import Event as _MonEvent
 from .monitor import record as _mon_record
@@ -53,28 +54,16 @@ class ScheduleRunner:
     async def initialize(self, *, paused: bool = False) -> None:
         if self._closing:
             raise RuntimeError("ScheduleRunner is shutting down")
-        now = datetime.now(UTC)
         for row in await self._db.load_schedules():
             if not await self._target_is_active(row):
                 continue
             if row.get("run_at"):
-                # One-time schedule: if the fire time is already past, it was
-                # missed while the server was down. Delete it rather than
-                # silently dropping or re-firing at startup.
+                # An unconsumed one-shot still owns its original fire. It may
+                # be overdue; registration catches it up after startup opens.
                 try:
-                    run_date = datetime.fromisoformat(row["run_at"])
-                    if run_date.tzinfo is None:
-                        run_date = run_date.replace(tzinfo=UTC)
-                    if run_date <= now:
-                        logger.info(
-                            "Removing missed one-time schedule %s (was due %s)",
-                            row["id"],
-                            row["run_at"],
-                        )
-                        await self._db.delete_schedule(row["id"])
-                        continue
+                    datetime.fromisoformat(row["run_at"])
                 except ValueError:
-                    await self._db.delete_schedule(row["id"])
+                    await self._db.update_schedule(row["id"], enabled=False, invalid_reason="invalid_run_at")
                     continue
             if row["enabled"]:
                 self._add_job(row)
@@ -111,14 +100,17 @@ class ScheduleRunner:
 
         await sweep()
 
-    def _add_job(self, row: dict) -> None:
+    def _add_job(self, row: dict, *, not_before: datetime | None = None) -> None:
         if self._closing:
             raise RuntimeError("ScheduleRunner is shutting down")
         # Recurrence priority: run_at (one-time) > cron > interval.
         common = dict(id=row["id"], args=[row["id"]], replace_existing=True)
         if row.get("run_at"):
             run_date = datetime.fromisoformat(row["run_at"])
-            self._scheduler.add_job(self._fire, DateTrigger(run_date=run_date), **common)
+            if run_date.tzinfo is None:
+                run_date = run_date.replace(tzinfo=UTC)
+            self._scheduler.add_job(self._fire, DateTrigger(run_date=max(run_date, not_before or datetime.now(UTC))),
+                                    misfire_grace_time=None, **common)
         elif row.get("cron"):
             # cron_trigger, not CronTrigger.from_crontab: crontab counts
             # day-of-week from Sunday and APScheduler from Monday
@@ -151,8 +143,8 @@ class ScheduleRunner:
         skip is logged and the schedule keeps its cadence — the next tick tries
         again.
 
-        One-time schedules (`run_at` is set) are deleted from the DB after firing
-        regardless of success — APScheduler already removed the DateTrigger job.
+        A one-shot is removed only by the target/input admission transaction.
+        Returning or losing this callback cannot consume an unaccepted fire.
         """
         if self._closing:
             return
@@ -170,71 +162,49 @@ class ScheduleRunner:
         assert context is not None  # _target_is_active validated this exact definition snapshot.
         wiki_kwargs = {"knowledge_context": context}
 
-        try:
-            if origin_session_id and self._session_mgr.get_session(origin_session_id):
-                if self._backlogged(origin_session_id):
-                    logger.info(
-                        "Schedule %s skipped: its session already has a fire "
-                        "waiting to run",
-                        schedule_id,
-                    )
-                    return
-                try:
-                    # Queue-aware: appends to the live session, waiting its turn if
-                    # the user is mid-conversation rather than failing on a held lock.
-                    receipt = await self._session_mgr.start_message(origin_session_id, body, source="schedule", **wiki_kwargs)
-                    if not receipt.accepted:
-                        logger.info("Schedule %s suppressed: session admission is closed", schedule_id)
-                        return
-                    await self._db.update_schedule(
-                        schedule_id,
-                        last_run_at=now,
-                        last_run_session_id=origin_session_id,
-                    )
-                except ValueError as e:
-                    _mon_record(_MonEvent(kind="schedule_fire", agent_id=agent_id,
-                                         ok=False, error_code="overlap_skip",
-                                         detail={"schedule_id": schedule_id}))
-                    logger.info("Schedule %s skipped: %s", schedule_id, e)
-                except Exception:
-                    logger.exception("Schedule %s failed", schedule_id)
-                return
-
-            if self._previous_fire_running(row):
-                logger.info(
-                    "Schedule %s skipped: the previous run (session %s) is "
-                    "still going",
-                    schedule_id,
-                    (row or {}).get("last_run_session_id"),
-                )
-                return
-
-            session = None
+        if run_at is not None:
+            target = None
             try:
-                session = await self._session_mgr.create_session(
-                    agent_id, origin="schedule"
+                target, receipt = await self._session_mgr.start_one_shot(row, body, context)
+                if not receipt.accepted:
+                    logger.info("Schedule %s retained: session admission is closed", schedule_id)
+                    return
+                if target != origin_session_id:
+                    await self._completion_recorded(schedule_id, target, receipt)
+            except Exception:
+                logger.exception("One-shot %s was not acknowledged; its durable input determines consumption", schedule_id)
+            finally:
+                if target is not None and target != origin_session_id:
+                    await self._session_mgr.auto_archive_scheduled_session(target)
+                if not self._closing and self._scheduler.running:
+                    retained = await self._db.get_schedule_definition(schedule_id)
+                    if retained is not None and retained["enabled"]:
+                        # Presence proves admission did not consume this fire.
+                        # Retry the same source after transient refusal, without
+                        # spinning on a full Owner or manufacturing a new fire.
+                        self._add_job(retained, not_before=datetime.now(UTC) + timedelta(seconds=5))
+            return
+
+        if origin_session_id and self._session_mgr.get_session(origin_session_id):
+            if self._backlogged(origin_session_id):
+                logger.info(
+                    "Schedule %s skipped: its session already has a fire "
+                    "waiting to run",
+                    schedule_id,
                 )
-                _mon_record(_MonEvent(
-                    kind="schedule_fire", agent_id=agent_id, ok=True,
-                    detail={"schedule_id": schedule_id},
-                ))
-                # Recorded BEFORE the turn runs: the overlap guard on the next
-                # tick has to be able to see a fire that is still in flight,
-                # and a fire that crashes mid-turn still leaves a session the
-                # user can open and read.
-                await self._db.update_schedule(
-                    schedule_id, last_run_session_id=session.id
-                )
-                receipt = await self._session_mgr.start_message(session.id, body, source="schedule", **wiki_kwargs)
+                return
+            try:
+                # Queue-aware: appends to the live session, waiting its turn if
+                # the user is mid-conversation rather than failing on a held lock.
+                receipt = await self._session_mgr.start_message(origin_session_id, body, source="schedule", **wiki_kwargs)
                 if not receipt.accepted:
                     logger.info("Schedule %s suppressed: session admission is closed", schedule_id)
                     return
-                completion = await receipt.wait()
-                await self._session_mgr.await_session_execution(session.id)
-                if completion.state != "completed" or completion.recording_state != "committed":
-                    logger.error("Schedule %s result recording is %s (session=%s request=%s)", schedule_id, completion.recording_state, session.id, completion.request_id)
-                    return
-                await self._db.update_schedule(schedule_id, last_run_at=now)
+                await self._db.update_schedule(
+                    schedule_id,
+                    last_run_at=now,
+                    last_run_session_id=origin_session_id,
+                )
             except ValueError as e:
                 _mon_record(_MonEvent(kind="schedule_fire", agent_id=agent_id,
                                      ok=False, error_code="overlap_skip",
@@ -242,12 +212,60 @@ class ScheduleRunner:
                 logger.info("Schedule %s skipped: %s", schedule_id, e)
             except Exception:
                 logger.exception("Schedule %s failed", schedule_id)
-            finally:
-                if session is not None:
-                    await self._session_mgr.auto_archive_scheduled_session(session.id)
+            return
+
+        if self._previous_fire_running(row):
+            logger.info(
+                "Schedule %s skipped: the previous run (session %s) is "
+                "still going",
+                schedule_id,
+                (row or {}).get("last_run_session_id"),
+            )
+            return
+
+        session = None
+        try:
+            session = await self._session_mgr.create_session(
+                agent_id, origin="schedule"
+            )
+            _mon_record(_MonEvent(
+                kind="schedule_fire", agent_id=agent_id, ok=True,
+                detail={"schedule_id": schedule_id},
+            ))
+            # Recorded BEFORE the turn runs: the overlap guard on the next
+            # tick has to be able to see a fire that is still in flight,
+            # and a fire that crashes mid-turn still leaves a session the
+            # user can open and read.
+            await self._db.update_schedule(
+                schedule_id, last_run_session_id=session.id
+            )
+            receipt = await self._session_mgr.start_message(session.id, body, source="schedule", **wiki_kwargs)
+            if not receipt.accepted:
+                logger.info("Schedule %s suppressed: session admission is closed", schedule_id)
+                return
+            if not await self._completion_recorded(schedule_id, session.id, receipt):
+                return
+            await self._db.update_schedule(schedule_id, last_run_at=now)
+        except ValueError as e:
+            _mon_record(_MonEvent(kind="schedule_fire", agent_id=agent_id,
+                                 ok=False, error_code="overlap_skip",
+                                 detail={"schedule_id": schedule_id}))
+            logger.info("Schedule %s skipped: %s", schedule_id, e)
+        except Exception:
+            logger.exception("Schedule %s failed", schedule_id)
         finally:
-            if run_at is not None:
-                await self._db.delete_schedule(schedule_id)
+            if session is not None:
+                await self._session_mgr.auto_archive_scheduled_session(session.id)
+
+    async def _completion_recorded(self, schedule_id: str, session_id: str, receipt: SubmissionReceipt) -> bool:
+        """Use the same original completion and retirement evidence for each mode."""
+        completion = await receipt.wait()
+        await self._session_mgr.await_session_execution(session_id)
+        recorded = completion.state == "completed" and completion.recording_state == "committed"
+        if not recorded:
+            logger.error("Schedule %s completion is %s, recording is %s (session=%s request=%s)",
+                         schedule_id, completion.state, completion.recording_state, session_id, completion.request_id)
+        return recorded
 
     async def _prune_metrics(self) -> None:
         """Drop metrics past the retention window. Best-effort: a pruning

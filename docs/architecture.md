@@ -135,6 +135,7 @@ One install serves several people, each fully isolated (design:
 | `crypto.py` | Encryption at rest: a server-held **master key** wraps each account's data-encryption key (DEK), which Fernet-encrypts that account's secrets. Install-era secrets (before the first account) are keyed by `OCTOPUS_AUTH_TOKEN`. A password only authenticates. |
 | `models.py` | Pydantic request/response models + enums (`SessionStatus`, `MessageRole`, agent/schedule/connector/credential DTOs). |
 | `session_manager.py` | Core turn engine. Owns in-memory `Session` objects, drives each turn through the **Harness**, persists + broadcasts events to WebSocket clients, runs tool-result forwarding, interactive questions, mid-turn interrupt, the per-session message queue, premature-exit auto-respawn, and large-prompt spill. |
+| `sessions/` | SessionOwner serializes mutable execution, question and lifecycle state; managed Harness I/O reports original results. Completion consumers read the plan §3.2 contract. |
 | `harness/` | The single boundary for all model/runtime interaction (see below). Also normalizes **native sub-agents** ([`plans/native-subagents.md`](plans/native-subagents.md)): Claude Code's `system/task_*` events and Codex's `collab_tool_call` items collapse onto one `SubagentUpdate`, keyed on the spawning tool call's id, and `agents.subagents` renders to `--agents` so an Octopus agent can bring its own helpers. |
 | `agent_manager.py` | Agent CRUD (the durable assistant definitions). |
 | `agent_memory.py` | Per-agent native memory provisioning (`<agents_dir>/<id>/memory/`). |
@@ -596,10 +597,16 @@ octopus pull SESSION_ID [--cwd DIR]            # export a session to local JSONL
 
 ## Tests
 
+Verification scope, full-suite criteria, release checks and provider scope live in
+[AGENTS.md](../AGENTS.md#verification); this doc does not keep a
+second policy or test count. The full selections below are command references;
+routine changes select affected checks under AGENTS.md:
+
 ```bash
-.venv/bin/pytest -m "not real"    # 1,313 backend, hermetic (no CLI, no network)
-.venv/bin/pytest -m real          # 34 that drive a live model (needs a signed-in claude / codex)
-cd web && bun run test            # 299 frontend unit (vitest)
-cd web && bun run typecheck       # TypeScript check (tsc -b)
-cd web && bun run test:e2e        # 107 Playwright e2e (67 fast UI-only + 40 real-CLI @llm)
+.venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf"  # hermetic backend
+.venv/bin/pytest -m 'real and (real_codex or codex_bin) and not real_claude and not knowledge_eval'  # live Codex
+cd web && bun run test                                  # frontend unit
+cd web && bun run typecheck                             # TypeScript (tsc -b)
+cd web && bun run test:e2e:fast                         # offline UI bucket
+cd web && bun run test:e2e:llm                          # real-LLM bucket, one worker
 ```

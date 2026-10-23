@@ -18,9 +18,11 @@ fi
 lefthook install
 
 echo "Hooks installed. From now on, commits will run:"
-echo "  - eslint + tsc --noEmit + vitest   (when web TS changes)"
-echo "  - ruff + mypy + pytest -m 'not real'  (when Python changes)"
+echo "  - eslint + typecheck (tsc -b --force) + vitest   (when web TS changes)"
+echo "  - ruff + mypy + full hermetic pytest + architecture advice   (when Python changes)"
 echo "  - contracts.ts drift check   (when routes or pydantic models change)"
+echo "  - docs plans index check   (when plans or their index change)"
 echo
-echo "To run all of them at once, regardless of what changed:"
+echo "During implementation, run focused checks; code commits require full checks (AGENTS.md)."
+echo "For the full commit/integration checks, including the hermetic backend suite:"
 echo "  ./scripts/check.sh            (add --e2e for Playwright)"

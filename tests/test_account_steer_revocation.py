@@ -107,7 +107,7 @@ async def test_disabling_owner_during_steer_git_anchor_prevents_frame_delivery(
                 status_changed.clear()
                 status = await submission_status(session_manager, session.id, "revoked-correction")
                 assert status is not None
-                if status["execution"]["state"] in {"withdrawn", "succeeded", "failed", "interrupted", "unknown"}:
+                if status["execution"]["state"] in {"withdrawn", "done", "unknown"}:
                     return status
                 await status_changed.wait()
 

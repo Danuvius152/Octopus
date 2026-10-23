@@ -13,6 +13,12 @@ from .owner_runtime import ApplyOwner, ReleaseArchive, ReserveFork
 
 
 class OwnershipMixin(SessionManagerBase):
+    def session_owner_failed(self, session_id: str) -> bool:
+        """Read the original owner's permanent failure without installing one."""
+        session = self.sessions.get(session_id)
+        owner = self._session_owners.get(id(session)) if session is not None else None
+        return owner is not None and owner.failed
+
     async def adopt_orphan_sessions(self, user_id: str) -> int:
         """Give every live session with no owner to `user_id`.
 

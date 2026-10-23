@@ -135,7 +135,13 @@ export function RecoverableInputs({ sessionId, connected, disabled, onRestore }:
         : "Review the conversation and saved input before starting new work. It will not run again automatically."}</p>
       <p className="my-2 whitespace-pre-wrap break-words">{item.preview || "Attachment-only input"}</p>
       {item.attachment_count > 0 && <p>{item.attachment_count} required attachment(s)</p>}
-      {details[item.client_request_id]?.input && <pre className="my-2 max-h-40 overflow-auto whitespace-pre-wrap break-words">{details[item.client_request_id].input?.content}</pre>}
+      {details[item.client_request_id] && <div className="my-2">
+        {details[item.client_request_id].message && <p>{details[item.client_request_id].message}</p>}
+        <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-words">{details[item.client_request_id].input?.content}</pre>
+        {details[item.client_request_id].input?.attachments.map((file) => <p key={file.id}>
+          {file.filename} · {file.size} bytes
+        </p>)}
+      </div>}
       <div className="flex flex-wrap gap-2">
         <Button size="sm" variant="outline" disabled={!!busy} onClick={() => void action(item, "review")}>Review saved input</Button>
         {item.execution.recoverable_input && <Button size="sm" variant="outline" disabled={disabled || !!busy || !connected}

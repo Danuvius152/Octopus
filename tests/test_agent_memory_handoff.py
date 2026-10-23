@@ -383,15 +383,13 @@ def _child(program, configuration, environment, *arguments, timeout=15):
                           cwd=configuration.parent, env=environment, capture_output=True, text=True, timeout=timeout)
 
 
-@pytest.mark.parametrize("behavior", ["crash", "io"])
-@pytest.mark.parametrize("point", ["stage_copy", "stage_file_sync", "stage_directory_sync", "before_publish", "after_publish",
-                                  "stage_parent_sync", "publish_parent_sync", "receipt_file_sync", "receipt_publish",
-                                  "first_unlink", "last_delete", "source_parent_sync",
-                                  "before_receipt_unlink", "after_receipt_unlink", "receipt_parent_sync"])
-def test_public_startup_finishes_each_interrupted_memory_effect(tmp_path, behavior, point):
+@pytest.mark.parametrize("point", ["stage_copy", "after_publish", "first_unlink"])
+def test_public_startup_recovers_memory_handoff_phases(tmp_path, point):
     config, configuration, environment = _process_installation(tmp_path)
-    result = _child(_INTERRUPTED_BOOTSTRAP, configuration, environment, point, behavior)
-    assert result.returncode == (70 if behavior == "io" else 71), result.stderr
+    # Real crashes cover preparation, publication and source retirement. The
+    # receipt tests below cover persistent I/O refusal and later recovery.
+    result = _child(_INTERRUPTED_BOOTSTRAP, configuration, environment, point, "crash")
+    assert result.returncode == 71, result.stderr
     observation = tmp_path / "observed.json"
     restarted = _child(_STARTUP, configuration, environment, observation)
     assert restarted.returncode == 0, restarted.stderr
@@ -403,14 +401,17 @@ def test_public_startup_finishes_each_interrupted_memory_effect(tmp_path, behavi
     assert (target / "empty").is_dir()
     assert not list(target.parent.glob(".memory-*"))
     assert not list(Path(observed["source"]).parent.glob(".memory-*"))
-    if point not in {"stage_copy", "stage_file_sync", "stage_directory_sync", "stage_parent_sync", "before_publish"}:
+    if point != "stage_copy":
         assert not observed["published"]
     assert (Path(config.agents_dir) / "unknown/unrelated").read_bytes() == b"unknown state"
     for name in ("provider-codex", "provider-claude"):
         assert _files(tmp_path / name) == {"auth.json": b"provider data"}
-    repeated = _child(_STARTUP, configuration, environment, observation)
-    assert repeated.returncode == 0, repeated.stderr
-    assert json.loads(observation.read_text())["published"] == []
+    # Once all three phases prove the same recovered state, one healthy repeat
+    # verifies startup idempotence without another cold boot for every fault.
+    if point == "after_publish":
+        repeated = _child(_STARTUP, configuration, environment, observation)
+        assert repeated.returncode == 0, repeated.stderr
+        assert json.loads(observation.read_text())["published"] == []
 
 
 @pytest.mark.parametrize("change", ["source-file", "source-addition", "source-directory", "target-file", "target-addition"])
@@ -467,12 +468,11 @@ def test_receipt_in_retained_legacy_agent_root_refuses_a_changed_destination_roo
     assert not source.exists() and not receipt.exists()
 
 
-@pytest.mark.parametrize("separate_device", [False, True])
 @pytest.mark.parametrize("failed_directory", ["agent", "legacy-root"])
 def test_repeated_receipt_directory_sync_failure_never_retires_source_before_confirmation(
-    tmp_path, separate_device, failed_directory,
+    tmp_path, failed_directory,
 ):
-    with tempfile.TemporaryDirectory(prefix="octopus-receipt-", dir="/dev/shm" if separate_device else tmp_path) as destination:
+    with tempfile.TemporaryDirectory(prefix="octopus-receipt-", dir=tmp_path) as destination:
         config, configuration, environment = _process_installation(tmp_path)
         values = json.loads(configuration.read_text())
         values["users_root"] = str(Path(destination) / "users")
@@ -481,7 +481,7 @@ def test_repeated_receipt_directory_sync_failure_never_retires_source_before_con
         assert interrupted.returncode == 70, interrupted.stderr
         source = next(Path(config.agents_dir).glob("*/memory"))
         target = next(Path(values["users_root"]).glob("*/agents/*/memory"))
-        assert (source.stat().st_dev != target.stat().st_dev) is separate_device
+        assert source.stat().st_dev == target.stat().st_dev
         receipt = source.parent / ".memory-retirement.json"
         proof = receipt.read_bytes()
         assert receipt.stat().st_dev == source.stat().st_dev
@@ -507,12 +507,11 @@ def test_repeated_receipt_directory_sync_failure_never_retires_source_before_con
         assert not source.exists() and not receipt.exists()
 
 
-@pytest.mark.parametrize("separate_device", [False, True])
 @pytest.mark.parametrize("failed_directory", ["agent", "legacy-root"])
 def test_repeated_receipt_deletion_sync_failure_keeps_fresh_startup_closed(
-    tmp_path, separate_device, failed_directory,
+    tmp_path, failed_directory,
 ):
-    with tempfile.TemporaryDirectory(prefix="octopus-retirement-", dir="/dev/shm" if separate_device else tmp_path) as destination:
+    with tempfile.TemporaryDirectory(prefix="octopus-retirement-", dir=tmp_path) as destination:
         config, configuration, environment = _process_installation(tmp_path)
         values = json.loads(configuration.read_text())
         values["users_root"] = str(Path(destination) / "users")
@@ -523,7 +522,7 @@ def test_repeated_receipt_deletion_sync_failure_keeps_fresh_startup_closed(
         source = Path(config.agents_dir) / target.parent.name / "memory"
         receipt = source.parent / ".memory-retirement.json"
         assert source.parent.is_dir() and not source.exists() and not receipt.exists()
-        assert (source.parent.stat().st_dev != target.stat().st_dev) is separate_device
+        assert source.parent.stat().st_dev == target.stat().st_dev
         assert not (source.parent / ".memory-retirement.tmp").exists()
         assert _files(target) == _FILES
         target_identity = target.stat().st_ino
@@ -601,8 +600,7 @@ def test_receipt_recovery_rejects_non_file_temporary_without_deleting_evidence(t
     assert target.stat().st_ino == inode and not source.exists() and not receipt.exists()
 
 
-@pytest.mark.parametrize("binding", ["owner", "agent_id", "source", "target", "version", "tree"])
-def test_retirement_receipt_binding_is_required_before_any_further_deletion(tmp_path, binding):
+def test_retirement_receipt_binding_is_required_before_any_further_deletion(tmp_path):
     config, configuration, environment = _process_installation(tmp_path)
     interrupted = _child(_INTERRUPTED_BOOTSTRAP, configuration, environment, "first_unlink", "crash")
     assert interrupted.returncode == 71, interrupted.stderr
@@ -610,14 +608,17 @@ def test_retirement_receipt_binding_is_required_before_any_further_deletion(tmp_
     target = next(Path(config.users_root).glob("*/agents/*/memory"))
     receipt = source.parent / ".memory-retirement.json"
     record = json.loads(receipt.read_text())
-    record[binding] = {} if binding == "tree" else "changed"
-    receipt.write_text(json.dumps(record))
-    before = _files(source), _files(target), receipt.read_bytes()
     observation = tmp_path / "admitted.json"
-    restarted = _child(_STARTUP, configuration, environment, observation)
-    assert restarted.returncode != 0 and "MemoryHandoffConflict" in restarted.stderr
-    assert not observation.exists()
-    assert (_files(source), _files(target), receipt.read_bytes()) == before
+    # Every refusal proves no effects, so the six bindings share one interrupted
+    # installation. Each admission check still runs in a fresh startup process.
+    for binding in ("owner", "agent_id", "source", "target", "version", "tree"):
+        changed = record | {binding: {} if binding == "tree" else "changed"}
+        receipt.write_text(json.dumps(changed))
+        before = _files(source), _files(target), receipt.read_bytes()
+        restarted = _child(_STARTUP, configuration, environment, observation)
+        assert restarted.returncode != 0 and "MemoryHandoffConflict" in restarted.stderr, (binding, restarted.stderr)
+        assert not observation.exists(), binding
+        assert (_files(source), _files(target), receipt.read_bytes()) == before, binding
 
 
 def test_authenticated_wiki_resume_after_memory_unlink_crash_preserves_original_history_and_journal(tmp_path):

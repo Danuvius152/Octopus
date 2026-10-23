@@ -26,7 +26,12 @@ from ..session_manager import ForkError, fork_info_fields
 from ..sessions import SessionManager
 from ..sessions.lifecycle import LifecycleAdmissionError
 from ..sessions.runtime_types import QuotaExceeded
-from ..submission_models import ClientSubmissionStatus, SubmissionRecoveryPage
+from ..submission_models import (
+    ClientSubmissionRefusal,
+    ClientSubmissionRequest,
+    ClientSubmissionStatus,
+    SubmissionRecoveryPage,
+)
 from ..wiki.contracts import JobCard
 
 router = APIRouter(prefix="/api/sessions", tags=["sessions"])
@@ -341,7 +346,7 @@ async def import_session(
         app_id=s.app_id,
         **_fork_fields(s),
         messages=messages,
-        pending_queue=[qp.prompt for qp in s._pending_queue],
+        pending_queue=[qp.summary for qp in s._pending_queue],
         dispatch_state=DispatchState(**session_manager.dispatch_snapshot(s.id)),
         pending_questions=[
             PendingQuestionInfo(
@@ -378,6 +383,22 @@ async def wiki_jobs(
                                                   job_id=job_id, vault_id=vault_id)
 
 
+@router.post("/{session_id}/submissions", response_model=ClientSubmissionStatus | ClientSubmissionRefusal,
+             response_model_exclude_none=True)
+async def submit_input(session_manager: SessionMgr, session_id: str, request: ClientSubmissionRequest,
+                       user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    from ..sessions.client_submissions import submit_client_message
+    from ..wiki.tasks import explicit_mode
+
+    _own_session(session_manager, session_id, user_id)
+    if not request.content.strip() and not request.attachment_ids:
+        raise HTTPException(422, "Supply message content or attachments")
+    return await submit_client_message(
+        session_manager, session_id, request.content, request.attachment_ids, request.client_request_id,
+        wiki_mode=explicit_mode(request.content, request.wiki_mode), recovery_of_client_id=request.recovery_of_client_id,
+    )
+
+
 @router.get("/{session_id}/submissions", response_model=SubmissionRecoveryPage)
 async def get_recoverable_inputs(session_manager: SessionMgr, session_id: str,
                                 before: int | None = Query(None, gt=0), limit: int = Query(20, ge=1, le=100),
@@ -388,9 +409,7 @@ async def get_recoverable_inputs(session_manager: SessionMgr, session_id: str,
     rows, cursor = await session_manager.db.list_recoverable_submissions(session_id, before=before, limit=limit)
     items = []
     for row in rows:
-        status = await status_from_row(session_manager, session_id, row, include_input=False)
-        if status["execution"]["state"] not in {"unknown", "withdrawn"}:
-            continue
+        status = status_from_row(session_id, row, include_input=False)
         items.append({"client_request_id": row["client_id"], "request_id": row["request_id"],
                       "execution": status["execution"], "preview": row["payload"]["content"][:200],
                       "attachment_count": len(row["payload"]["attachment_ids"])})
@@ -498,7 +517,7 @@ async def get_session(
             app_id=s.app_id,
             **_fork_fields(s),
             messages=messages,
-            pending_queue=[qp.prompt for qp in s._pending_queue],
+            pending_queue=[qp.summary for qp in s._pending_queue],
             active_attempt={"request_id": s._run.request.request_id, "attempt_id": s._run.question_attempt_id}
             if s._run.request and s._run.question_attempt_id else None,
             dispatch_state=DispatchState(**session_manager.dispatch_snapshot(s.id)),

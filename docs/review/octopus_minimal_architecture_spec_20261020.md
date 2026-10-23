@@ -1,9 +1,22 @@
 # Octopus 最小机制架构改造：GPT 可执行实施规范
 
-> Status: proposed — 实现合同已收敛，代码尚未修改。\
+> **2026-10-22 后续范围修订：** 用户要求先修现有架构中的bug，暂停票22引出的交互
+> app-server与完整跨turn原生交付。Codex沿用exec，Claude沿用stream-json/idle；
+> 本轮receipt与以后追加的会话消息分开。普通委托完成后保留会话。本文§5.6/§5.7及
+> T10/T17已按此缩定合同修订；不把旧RPC实验或未实现目标算作通过。当前本地基线7ee4ac9，
+> 52/53已有独立验收；下列5d99/85b5记载是历史核对时点。
+
+> Status: in-progress — 总设计与剩余目标；已有实现和验收范围以执行计划、票据为准。\
 > 日期：2026-10-20。目标：用更少的状态、写入者和恢复路径，得到可以解释、可以验证的正确系统。\
-> 已核远端与本地基线：`Danuvius152/Octopus@5d99de373921affd27fe307e5770ea397d4f04d6`；本轮只读 `git ls-remote` 确认远端 HEAD 仍为该提交。\
+> 2026-10-20 历史基线：`Danuvius152/Octopus@5d99de373921affd27fe307e5770ea397d4f04d6`；当时只读 `git ls-remote` 核对远端。2026-10-22 文档核对的本地 HEAD 为 `85b5b3c`，本次没有重查远端或验证部署。\
 > 输入：用户附件 `architecture-optimization-20261020.md`、此前 code review 与 fail-stop 决策讨论、上述版本源码。附件包含未随本次提供的 CR-03 暂存改动；其新增恢复实现必须在执行时核对，不能当作本次已复现的代码事实。
+
+> **2026-10-22 统一裁决：** 按[开发指南](octopus-development-guide-20261022.md)区分
+> 提交、通知、未知结果与资源退役。Saved inputs Dismiss 保留持久隐藏语义，不承担放行。
+> 受管启动只证明其清理范围内上一代已退役；同代执行仍由原 Owner 和精确资源引用收束。
+> 只有接纳与实际 dispatch 均接管这些责任并通过验证，才删除受管旧代的历史 PGID 阻塞。
+> standalone 保持 §3.3 的保守范围，不新增历史 PID 清场。旧代退出不消除 unknown。
+> 本次统一文档，不声明这些剩余目标已经实现或部署。
 
 ## 0. 直接交给执行 GPT 的任务
 
@@ -23,7 +36,7 @@
 每个会话只有一个状态写入者；Wiki 保留必要 journal/receipt，取消在线存储补偿。
 不新增通用 Repository、Event Bus、Queue Manager、状态机依赖或进程恢复数据库。
 
-unknown 表示历史结果不能裁定，不得用进程退出、没有回执或用户点“忽略”消除它。
+unknown 表示历史结果不能裁定，不得用进程退出、没有回执或用户点“忽略”消除它；历史结果不确定性与当前写入资格分开，保留同代 Owner 的退休约束，不把 unknown 改成未执行/成功/失败。
 启动恢复不能自动重跑未知模型执行。正常取消、慢 I/O 和迟到回报仍必须正确处理。
 跨数据库/文件的业务协议不能按字符串搜索 unconfirmed 后批量删除。
 
@@ -66,7 +79,7 @@ rg -n 'synchronous=|_defer_commit|_maybe_flush|add_close_hook' server
 | actor 内顺序等待 spawn/写帧/stop 即可 | 不采纳 | 慢 I/O 会挡住 Interrupt/Answer；这些操作由受管子任务执行 |
 | systemd、进程登记表、PDEATHSIG、killpg 扫描一起使用 | 不采纳 | 本次生产 profile 只使用 systemd 归属与启动检查；不叠加执行表或 PDEATHSIG |
 | boot 身份不可读时“宁可多杀一次” | 不采纳 | 不向不能证明归属的历史 PID/PGID 发信号 |
-| dismiss 过滤掉 uncertain writer 即可解锁 | 不采纳 | 隐藏 UI 提示与终止执行是不同事实；解锁依据由统一生命周期提供 |
+| dismiss 过滤掉 uncertain writer 即可解锁 | 不采纳，也不是过渡方案 | 隐藏只改变可见性；启动拥有旧代证明，同代由原 Owner 收束，用户点击不承担退出证明 |
 | 没有 Wiki applied 回执就可以自动 retry | 不采纳 | 缺回执不能证明未执行；保持结果未知，不自动再调用模型 |
 | 任意一条 applied 回执即可把 item/job 标 done | 不采纳 | 可能仅完成 ingest 或部分修改；须核验原执行与实际操作覆盖 |
 | Wiki items 立即改为两三张表 | 本轮不采纳 | 保留现有 JSON 聚合，使用有限的类型模型和唯一编解码/结算入口 |
@@ -114,7 +127,7 @@ flowchart TD
 4. **旧执行停止后才允许新执行。** 整代重启靠 supervisor，正常取消/切换靠当前 owner 持有资源直到退役确认。
 5. **致命状态单向。** 本代 `healthy → fatal` 后不重新接单，不尝试在线恢复为 healthy。
 6. **Wiki 写入有真实版本和来源依据。** 原文、身份、当前授权、revision 及变更证据持续成立。
-7. **结果来自事实。** 模型文字、收到通知、进程退出、用户 dismiss，都不能替代终态或产出核验。
+7. **结果来自事实。** 模型文字、收到通知、进程退出或任何用户操作，都不能替代终态或产出核验。
 8. **恢复可以再次中断。** 启动恢复只消费已持久事实、修复派生状态；重复启动不重复外部动作。
 
 这八条覆盖数据正确性、资源生命周期和真实工作流。不要为减少字段数而把任意两条混成同一个状态。
@@ -284,9 +297,10 @@ Wiki 的 PRAGMA/fatal 接线至少覆盖 `Store.connect()`、`EventInbox.connect
 | `state` | `pending / running / done / withdrawn / unknown` |
 | `execution_request_id` | 若使用 steer，关联实际承载此次输入的执行；普通输入关联自身 |
 | 必要的 delivery 证据 | 保存 frame/operation 身份与是否得到可靠确认；不使用 reason 字符串偷偷改状态 |
-| `dismissed`、新输入的 `recovery_of` | 历史卡片处置及新工作来源；`recovered_by` 从反向关联推导，不双写两份链接 |
+| 新输入的 `recovery_of` | 新工作来源；`recovered_by` 从反向关联推导，不双写两份链接 |
 | 原有时间与诊断字段 | 显示和追踪，不存第二份派生 success/failed |
 
+`dismissed` 保留为用户持久隐藏提示的处置，不属于五态执行事实，也不是退役证据。先提交处置，再通知可用的原 Owner；通知失败不撤销提交、不复活失败 Owner。新准入不以是否隐藏历史提示作判断。
 成功/失败/中断的业务结果从精确终态关联投影。既有 `messages` 是转录/结果记录，输入表负责 accepted 及未执行正文；不要在三个表再各放一份完整“当前请求状态”。
 
 | 提交点 | 同一主库事务的内容 | 提交后才允许 |
@@ -315,7 +329,7 @@ Wiki 的 PRAGMA/fatal 接线至少覆盖 `Store.connect()`、`EventInbox.connect
 
 一次“恢复正文/重新执行”动作复用 Submit 的稳定幂等键；新输入写入 `recovery_of`，该关联与新输入在同一事务提交。每个原输入只允许一个直接恢复后继（用唯一约束表达），后续再恢复沿该后继继续；双击或响应丢失重试返回同一后继，同键不同内容冲突。新的执行身份在这一次动作内稳定，不能每次重试重新生成；不增加 recovery 表或在线补写。
 
-在该事务中先读取原输入，校验当前 owner、预期会话及可恢复的 withdrawn/unknown 状态，再返回已有后继或创建新行。唯一约束不是授权：不能引用他人输入、抢占其恢复后继，或通过唯一冲突泄露他人记录。新请求按当前权限重新接纳。
+在该事务中先读取原输入，校验当前 owner、预期会话及可恢复的 withdrawn 状态，再返回已有后继或创建新行。unknown 不提供一键恢复重跑；用户核对已有效果后可以显式发起新工作，原 unknown 保留。唯一约束不是授权：不能引用他人输入、抢占其恢复后继，或通过唯一冲突泄露他人记录。新请求按当前权限重新接纳。
 
 旧数据迁移单独处理：
 
@@ -323,7 +337,7 @@ Wiki 的 PRAGMA/fatal 接线至少覆盖 `Store.connect()`、`EventInbox.connect
 - 旧版已保存的明确拒绝保留原回执及其兼容投影，不进入新 pending 派发或恢复链，不为凑五态生造 unknown；保留旧历史不增加在线拒绝 writer。
 - 有准确终态则复原其结果；缺失执行引用/完整正文时保留 `legacy_unknown` 诊断，不能补造正文。
 - 旧 `steer_delivery_unknown` 等 reason 特判迁入显式 state/投递证据，不在 SQL/Python 两处继续暗中覆盖终态。
-- 不因 dismiss、无 PGID、boot 改变或者整代已清理，把历史 unknown 改成“确定未执行”。
+- 不因旧 dismissed、无 PGID、boot 改变或者整代已清理，把历史 unknown 改成“确定未执行”。
 
 ### 5.3 单一 owner 的具体形状
 
@@ -368,36 +382,66 @@ HTTP/WS waiter 取消只结束等待，不能取消 owner 已接管的事务/命
 
 调用线程、MCP 与 WikiTask 引用同一份不可变 context 及精确 run 绑定；新的 run 创建新 context 和新授权。不要让工具处理器为了读取 context 反向等待一个正在等待该工具的 actor。
 
+按实际通道提供能力：Codex exec运行中新输入排队；Claude仅在活动请求支持的范围内
+steer；AskUserQuestion Answer沿原问题通道，不强制统一成stdin或交互RPC。
+下一请求可以先入队，但必须在安装新knowledge context/WikiTask/授权之前撤旧lease、
+join原held进程及捕获资源，再创建新进程/lease并resume历史。旧idle/Stop不能改绑新请求；
+原临时Wiki grant按原合同关闭，不能为尾部延权。退役CLI不等于关闭独立work。
+
 ### 5.5 接口与恢复 UI
 
 - HTTP 与 WS 共用同一 Pydantic 输入模型、Submit 路径和统一状态投影。路由做认证/owner 校验，owner 做准入，DB 做事务；不保留三份不一致的拒绝逻辑。
 - 新合同的输入行存在且提交成功才是 accepted；旧拒绝回执仍按历史拒绝投影。明确拒绝后的再次提交必须由用户主动发起。客户端断线时继续按原 id 查询；不能把超时当明确 rejected 后自动换 ID 重发。
-- 恢复列表在同一个 SELECT 中 JOIN 精确终态，按单条查询相同规则形成最终状态投影；基于该投影完成 owner、dismissed、可见状态及 cursor 过滤，最后取 `limit+1`。单页查询数量是常数，不逐行补查或在路由二次过滤。
+- 恢复列表在同一个 SELECT 中 JOIN 精确终态，按单条查询相同规则形成最终状态投影；基于该投影完成 owner、可见状态及 cursor 过滤，最后取 `limit+1`。单页查询数量是常数，不逐行补查或在路由二次过滤。`dismissed` 仅控制提示可见性，不作为准入。
 - 降序且使用 `< before` 时，`next_cursor` 取实际返回页的最后一行；第 `limit+1` 行仅用于判断 has_more，无后页则 cursor 为 null。它是当前状态的 keyset 分页，不承诺跨 HTTP 请求的冻结快照；状态变化后刷新第一页。
-- dismiss 只隐藏历史卡片。资源门关闭时仍必须有独立可见的服务/清理状态，不能让“卡片消失但输入永远被拒绝”。
+- 历史 unknown 保留正文/输出/原因；用户可 Review、Dismiss，withdrawn 可 Restore。受管启动已经证明退出的旧代记录不再因缺失 PGID 永久阻塞；同代仍可写的执行继续由原 Owner 收束。隐藏后真实执行阻塞仍有独立说明；证明不足不放行冲突执行。
+- Stop 暂停待处理队列；用户通过 Resume processing 明确恢复，或发送新指令优先处理而保留旧积压暂停。资源确认退役只解除相应资源限制，不自动解除用户暂停；Resume 也不能绕过权限、配额及同代资源退休检查。控制提示 Dismiss 只关闭前端提示，历史 unknown 不因这些操作自动重跑。
 - withdrawn 提供恢复正文；unknown 显示已有输出与原因，用户可明确发起新的工作。提交响应不明时按原键显示“正在核对”；已确认提交但 GET 刷新失败则保留最后确认事实并显示刷新延迟，有限退避重试 GET。成功取得所需状态/版本后才清除 dirty；两者都不是新的持久 execution state，也不触发自动 POST。
+
+2026-10-22 源码核对：Stop 的 accepted 确认会在前端自动移除；Saved inputs Dismiss
+及历史 writer 检查仍在。保留 Dismiss 的正确提交/通知合同；票53负责旧代准入接管，
+验证前不删除仍承担责任的保护，验证后也不删除同代精确退休约束。
+当前 dispatch 快照固定返回 `recording_failure=None`；前端残留的 Retry saving 分支和
+`resume_queue=false` 不代表当前 Owner 仍支持在线补写恢复，不据此扩充“放行”合同。
 
 ### 5.6 归档、异步回传和 one-shot
 
-复用已有 work/request、delegation、Research、bg 关联，不新增一套 WorkChain Repository。owner 只有在待输入、活动 run、问题、已登记异步回传与后端退役均结束时才完成自动归档。回合 idle 不能替代整条工作的结束。最后一个返回或 retirement 完成事件必须触发一次归档重评，修复“终态回调早于 driver 释放后永不归档”。[C6]
+复用已有work/request、delegation、Research、bg关联。普通委托本轮完成、回传和资源退休
+不自动归档conversation；正常terminal归档及启动按delegation origin扫档必须同时修正。
+会话在重启后仍可访问/追问；人工追问是新human request，不重发旧caller回报；parent
+显式follow-up沿原CAS建立新round/work，保留conversation、关系和权限限制。
+
+显式Archive和既有schedule临时会话策略保留：先有合法归档意图，Owner再等待输入、
+问题、独立返回及真实资源收束，最后事件触发该意图的重评。资源释放本身不创造归档意图。
+不批量unarchive，不改origin，不机械删除setup失败清理；不以保留会话或退休CLI为由
+close_work/cancel_work。已打开视图、输入能力及委托卡片入口保持，侧栏尊重过滤偏好。
 
 一次性调度使用稳定 `(schedule_id, scheduled_for)` 来源键，与目标 Session/输入创建或绑定在同一主库事务内完成。人类 backlog 可以延期，不能先删除 schedule 再发现未接纳。历史 fire 直接复用统一输入记录及其来源信息，不另造功能重复的调度请求账本；需要保留的调度定义快照存入该来源记录。已执行/unknown 不因重启产生第二个 fire 身份。[C5]
 
-### 5.7 首个 result 与整个请求结束分开
+### 5.7 当前调用、迟到会话消息与资源退休分开
 
-当前 Harness 支持主 result 后原生 subagent/cron 继续回报。不能为撤销旧凭据而在首条 result 后立即杀掉进程。复用现有 `_Attempt.result` 保存主结果候选、`_Settlement` 保存唯一终态，不新增第二套完成账本。[C6]
+本期沿用Codex exec与Claude stream-json。内容项完成不等于调用结束；Owner根据本轮
+合法result/turn终态、已接收输出收尾和原事务事实，只结算一次receipt。无终态EOF、
+协议错误、取消或异常保留partial与准确原因；退出码0、最后正文和静默不能独立证明成功。
 
-首个 result 可以保存并展示主输出，但在仍依赖该物理 Harness/原 binding 的原生工作结束前，不填最终 outcome、不调用 `record_terminal`/占据终态唯一键、不完成 `RequestCompletion`、不发布 `terminal=true/done`。owner 在收束期继续消费原生回报，保持原绑定；新 Submit 排队，Interrupt/Answer 仍可处理。
+Codex仅排空本次调用有定义边界的已产生输出并退役进程，不承诺父调用结束后的未来原生
+尾部，不自动启动报告/exec-resume补齐。Claude本轮result可以结束逻辑流和receipt，
+原held进程仍由原Owner持有并在现有回收窗口内尽力接收idle。receipt不是物理进程已退出
+的证明，也不证明所有原生目标成功；已知活动、失败或中断事实不能伪装成完成。
 
-原生 subagent 的 completed 不等于其父 agent 的 follow-up 报告已完成。继续消费相应父回合的文本、工具调用及最终协议边界，不能凭子任务计数瞬间为零或一段静默判断结束。`sessions/events.py` 的 `_subagents` 是有容量淘汰的 UI 投影，不能用它为空证明所有执行结束；owner 持有的活动原生执行引用不能因卡片容量被淘汰。只等待仍归本 run 的已登记原生工作，不引入后台定时猜测。
+idle只追加CLI自然产生且实际到达的会话消息/原生状态，使用捕获的backend、lease、
+request/attempt/work；完整消息按既有身份保存，迟到delta不覆盖已完成正文。它不调用
+模型、不接纳新用户输入、不重开旧terminal，也不补入已返回App响应或旧委托回报。
+下一请求、Stop、reaper或重启可以结束窗口；历史resume不承诺恢复运行中的原生助手。
 
-主结果和相应原生尾部回合结束后，先在 scope 捕获/调用登记的同一短同步边界关闭新工具准入并撤 lease，再 join 已捕获的 tool/stdin I/O，最后 stop/join 后端并唯一结算。竞争调用必须要么被拒绝，要么已属于原 owner 的待 join 集合；不能先看到在途数为零，稍后才撤权。
+Stop在活动调用和仅held资源时均可定位原对象，旧request定向Stop不转而停止新请求。
+UI根据真实资源提供控制，不把旧request改回running。撤权/退休沿现有捕获边界关闭新登记
+并join已捕获操作，未确认退出不放行冲突执行；不新增尾部无限等待或计时器体系。
 
-相应修改 `HarnessRun` 在 `parser.end_of_stream` 后清 `_tool_context`、调用 `_close_stream` 解绑的路径：provider 首个 result 只结束该协议回合，不能提前关掉原生尾部事件与原绑定。最终退役才关闭物理流/任务绑定。对前端和所有 result/error 订阅者一起检查：只有已提交且 `terminal=true` 的事件才清 streaming/active attempt、发送 App SSE done 或触发 delegation/应用完成；主候选仍可展示。基线 WebSocket handler 未区分该标记，单改 owner 不足以实现此合同。[C23]、[C24]
-
-收束期取消要保留主输出，终态体现中断；不能先锁定成功再忽略取消。原生 cron 只有收到该 provider 已验证的取消/关闭协议事实，或用户 Interrupt 后精确资源退役完成，才算结束；UI 应解释为何仍在收束，不按静默时间强杀以伪造完成。
-
-这里**不等待整条跨会话 work 的 delegation/Research/bg 回传才结束本 run**。这些已有独立执行身份与 `OwnedTaskContext`，结果作为后续输入接纳；归档按 §5.6 等待它们即可。结束 parent run 不等于 `close_work(work_id)`，不能撤掉独立子执行继续工作和回传所需的归属。否则 owner 等待只能由自己下一 run 消费的回传，会造成自我阻塞。
+需要完整helper成果的当前调用应在真实协议支持范围内等待并汇总；提示词只能引导，不能
+保证模型一定等待。可靠跨请求执行/返回沿已有bg、Research、named delegation和稳定来源
+身份处理；它们不延长或复活父receipt，也不因旧CLI退休被close_work。取消未知不自动重放。
+现有独立controller更新的短时app-server继续先关闭再exec，不属于本期暂停的交互迁移。
 
 ## 6. Wiki：保留跨资源证据，去掉在线猜测和状态副本
 
@@ -598,7 +642,7 @@ CR-20 单列 100/400/1,000 小节的单页、完整分页与 no_change，先验�
 | CR-01 | `auth.py` 与 MCP/App token 的公共认证入口复用 live owner 可用性检查 | 账户禁用后旧 token 不能继续调用；不同账户不越权；无需新 auth epoch 框架 |
 | CR-02 | 按2026-10-21用户更新保留详细本地运行诊断，保留异常栈、stderr、协议上下文及provider/request/耗时/退出码；仅处理实际凭据 | 错误原因与调用上下文仍可排查，实际token/密钥/凭据不原样输出；不一概删除prompt、argv或任意异常链，不新增日志框架 |
 | CR-03 | §5 的 durable 完整输入与恢复投影 | accepted 后崩溃仍能显示原文；staged 版本的分页/过滤/幂等另按实际实现核对 |
-| CR-04～06 | §5.6 的完整工作结束与后端退役 | Research 回传前不归档；held backend 先退役；最后释放事件会重评归档 |
+| CR-04～06 | §5.6 的普通委托保留与合法归档收束 | 普通委托完成/重启仍可访问；显式或schedule归档等待独立返回与真实退休，最后事件只重评已有意图 |
 | CR-07 | §5.6 的 one-shot fire 接纳事务 | 人类 backlog 不丢一次性任务，同一 fire 不重复执行 |
 | CR-08 | `WikiHistory.restore()` 读取 blob 后校验实际 bytes 的 hash，并使用同一份已验证 bytes | blob 被篡改时拒绝覆盖；校验后不能再次读未经校验的文件用于写入 |
 | CR-09 | maintenance health 按实际 eligible 范围评估，贯通 status、selection/review、checked maintain 与 worker admission | 无关坏 tmp/asset 不阻挡健康目标；与目标关联的来源链、身份或共享账本损坏仍阻挡 |
@@ -687,7 +731,7 @@ CR-14 的补 GET 必须覆盖不在首列表页的 job、旧 vault 持久卡片�
 | T07 | fatal 反复启动失败；检查失败；正常发布 drain | 频率限制生效且有诊断，未就绪不接单；正常发布不按 fatal 强杀正常在途工作 |
 | T08 | spawn/写帧迟到或卡住时发送 Interrupt/Answer/Close | owner 能接收控制，Interrupt 不堵在 stdin 后；迟到资源被退役；Answer 未交付不报已交付 |
 | T09 | owner 意外退出或 reply Future 已取消 | 无无人消费邮箱/孤儿资源；已接纳工作继续收尾，不能因回送失败丢终态 |
-| T10 | 主 result、child completed、稍后的 parent report/result 分开到达；期间取消 | 主输出可见，前端/RequestCompletion 不提前结束；尾部工具与报告保留；整体终态只结算一次，取消不被预先成功吞掉 |
+| T10 | 内容项先结束、本轮随后终态；Claude receipt后idle报告与held Stop | 本轮输出不截断、receipt一次；idle只追加原来源会话消息，旧App/委托回报不变；held真实退休，不承诺Codex调用后原生全树汇总 |
 
 T05～T07 必须在隔离数据与已授权测试 unit 上做真实验证；禁止在用户生产服务中随意注入 kill。fake supervisor 只能证明应用调用顺序，不能证明操作系统已经结束旧执行。
 
@@ -701,7 +745,7 @@ T05～T07 必须在隔离数据与已授权测试 unit 上做真实验证；禁�
 | T14 | 旧 token/工具回报到达下一请求、账户禁用、grant 撤销 | 已退役 run bearer 永久拒绝且读不到新 context；账户禁用期间各入口拒绝；grant 按当前有效性校验；新请求新 bearer |
 | T15 | 同 session 同合同的两个连续请求，provider resume，以及同一 STREAM_JSON run 的 steer | 第二个请求仍新进程/新 lease，旧 bearer 拒绝；历史连续；追加帧仍工作；记录 spawn/首字成本 |
 | T16 | schedule 遇人类 backlog；Research/delegation/bg 延迟返回 | one-shot 不丢且不重复；独立异步回传能创建后续输入；不形成 owner 自等死锁 |
-| T17 | 自动归档遇 held backend、最后一个回传/driver 释放 | writer 与完整 work 结束后归档；最后事件触发重评，无永久遗留会话 |
+| T17 | 普通委托完成/重启、人工追问/parent follow-up、合法归档遇held/独立返回 | 普通会话保持可访问；两种继续不重发旧回报；显式或schedule归档意图等待真实收束，资源退出不自行归档 |
 | T18 | 多个 hidden/terminal/unknown 交错分页，页面间状态变化 | 先最终投影再过滤，页面无 N+1/路由二次删行；cursor 不跳过 lookahead，正确刷新第一页 |
 
 ### 10.3 Wiki、App 与 prompt
@@ -762,7 +806,7 @@ bun run build
 | P1 执行归属与 fatal | 现有部署脚本、`cli.py`、`main.py`、进程启动根与存储入口 | 明确 profile、unit/检查器/安装锁；一个不可返回的 fatal 出口；启动前统一门禁 | T03～07；是删除跨启动补偿的前提 |
 | P2 主库事务 | `db/base.py`、`db/sessions.py`、实际各 DB writer | 单连接完整事务；取消 deferred SQL；同库原子操作；FULL/EXTRA 的实际连接配置；删除独立回读与补写 | T01～03；依赖 P1，所有 writer 一次接通 |
 | P3 完整输入与协议 | `db/client_submissions.py`、`sessions/client_submissions.py`、HTTP/WS/types | 一份完整 ledger、接纳/claim/结算、恢复后继、正确列表分页；所有来源稳定身份 | T11～13、T18、T28；依赖 P2，迁移与前端一起完成 |
-| P4 会话 owner 与 Harness | Session 各模块、`HarnessRun._handle_line/_close_stream`、knowledge/MCP 绑定、WS/result 消费者 | 唯一状态 writer、受管 I/O、原生尾部完整请求结束、精确退役、新 token 新进程、同 run steer、归档与 one-shot；前后端一起接线 | T08～17；依赖 P2/P3；移除旧锁/回调 writer |
+| P4 会话 owner 与 Harness | Session各模块、Harness、knowledge/MCP绑定、WS/result消费者 | 唯一writer、受管I/O、本轮receipt与idle/held分离、先退休后新绑定、实际通道steer、普通委托保留与合法归档、one-shot | 修订T08～17；依赖按叶子票接口裁决，不引入新宿主 |
 | P5 Wiki 生命周期与内容合同 | Wiki tasks/jobs/history/observer、curation/source/links/format、membership trigger | typed JSON、一次恢复和取消 owner、保留 journal/outbox、删补偿；CR-08～11/17～19、进度写入及移动边界 | T19～24、T28～31、T34/T36；依赖 P1/P4；CR-18 完整定点修复可前置；不加 Wiki 表 |
 | P6 Prompt 与确定的效率问题 | workflow/prompts、harness/assembly、raw_blocks/revise、检索/导入路径 | 静态 bundle、实际工具说明、persona 入口、CR-20、减少重复扫描、预算与 controller 成本测量 | T15、T26～27、T32；与 P5 可并行，但必须使用最终 binding/能力合同 |
 | P7 边界缺陷与可操作 UI | auth、App Wiki adapter/proxy、Wiki client/card/detail | CR-01/02/12/13/14 完整分支；输入/取消、精确卡片同步及任务详情/输出/重新准入入口 | T14、T25、T33/T35；基础修复可提前，联调依赖 P3/P5 |

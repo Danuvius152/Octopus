@@ -24,7 +24,7 @@ from tests.test_delegation_restart_security import wait_live_scope
 
 
 @pytest.fixture
-async def work_runtime(monkeypatch, tmp_path):
+async def work_runtime(monkeypatch, tmp_path, short_process_shutdown):
     database = Database(":memory:")
     await database.initialize()
     monkeypatch.setattr(deps, "_user_manager", UserManager(database))

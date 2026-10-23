@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Any, Literal
 
 from ..models import TurnOutcome
 
@@ -39,3 +39,19 @@ class SubmissionReceipt:
 
     async def wait(self) -> RequestCompletion:
         return await asyncio.shield(self._completion)
+
+
+def receipt_for_input(row: dict[str, Any], future: asyncio.Future[RequestCompletion] | None = None) -> SubmissionReceipt:
+    """Observe durable admission without creating an Owner or dispatching work."""
+    request_id = row["request_id"]
+    if future is None:
+        terminal = row["terminal"] if row["delivery_state"] != "unknown" else None
+        future = asyncio.get_running_loop().create_future()
+        future.set_result(RequestCompletion(
+            request_id, row["execution_owner"] or request_id,
+            "completed" if terminal is not None else "withdrawn" if row["execution_state"] == "withdrawn" else "unavailable",
+            outcome=TurnOutcome(**terminal) if terminal is not None else None,
+            recording_state="committed" if terminal is not None else "none", reason=row["reason_code"],
+            notification_state="unavailable",
+        ))
+    return SubmissionReceipt("duplicate" if row["receipt"] and row["receipt"]["accepted"] else "closed", request_id, future)

@@ -1,7 +1,6 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
-import { useCallback, useEffect, useRef, useState, type SetStateAction } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type SetStateAction } from "react";
 import { useSessionStore, type AttachmentMetadata } from "../stores/sessionStore";
-import { newSubmissionId } from "../lib/submission";
 
 export const MAX_ATTACHMENTS_PER_MESSAGE = 10;
 const MAX_FILE_BYTES = 25 * 1024 * 1024;
@@ -25,6 +24,9 @@ function uploadState(file: File, ownerSessionId: string | null, generation: numb
 
 /** A File is the draft; an upload ID belongs to one session and attempt. */
 export function useDraftAttachments(activeSessionId: string | null) {
+  // These handles identify Files only within this draft, never wire requests.
+  const scope = useId();
+  const sequence = useRef(0);
   const [draft, setDraft] = useState<{ owner: string | null; attachments: PendingAttachment[]; rejected: RejectedFile[] }>(
     { owner: activeSessionId, attachments: [], rejected: [] });
   if (draft.owner !== activeSessionId) {
@@ -85,18 +87,19 @@ export function useDraftAttachments(activeSessionId: string | null) {
   }, []);
 
   const addFiles = useCallback((files: File[]) => {
+    const incoming = files.map((file) => ({ uid: `${scope}-${++sequence.current}`, file }));
     setDraft((current) => {
       if (current.owner === null) return current;
       const remaining = Math.max(0, MAX_ATTACHMENTS_PER_MESSAGE - current.attachments.length);
       return { ...current, rejected: [...current.rejected, ...files.slice(remaining).map((file) => ({
         name: file.name, reason: `At most ${MAX_ATTACHMENTS_PER_MESSAGE} attachments per message`,
       }))], attachments: [
-        ...current.attachments, ...files.slice(0, remaining).map((file): PendingAttachment => ({
-          uid: newSubmissionId(), file, ...uploadState(file, current.owner, 1),
+        ...current.attachments, ...incoming.slice(0, remaining).map(({ uid, file }): PendingAttachment => ({
+          uid, file, ...uploadState(file, current.owner, 1),
         })),
       ] };
     });
-  }, []);
+  }, [scope]);
   const removeAttachment = useCallback((uid: string) => {
     setAttachments((current) => current.filter((file) => file.uid !== uid));
   }, [setAttachments]);

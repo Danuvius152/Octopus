@@ -113,7 +113,7 @@ async def background(runtime):
 
 
 @pytest.fixture
-async def runtime(monkeypatch, tmp_path):
+async def runtime(monkeypatch, tmp_path, short_process_shutdown):
     monkeypatch.setattr(settings, "users_root", str(tmp_path / "users"))
     monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "legacy-agents"))
     database = Database(":memory:")
@@ -396,7 +396,7 @@ async def test_closing_old_work_retires_its_held_backend_while_new_input_is_clai
 
     monkeypatch.setattr(backend, "stop", observed_stop)
     entered, release = gate_sql(
-        monkeypatch, database, lambda sql: sql.startswith("UPDATE client_submissions SET execution_state='claimed'"),
+        monkeypatch, database, lambda sql: sql.startswith("UPDATE client_submissions SET execution_state='running'"),
     )
     submitting = asyncio.create_task(submit_client_message(
         manager, session.id, "Continue with independent human input", [], "next-held-work", wiki_mode=None,
@@ -419,7 +419,7 @@ async def test_closing_old_work_retires_its_held_backend_while_new_input_is_clai
     await wait_dispatch_idle(manager, session.id)
     assert int(pid_file.read_text()) != old_pid
     status = await submission_status(manager, session.id, "next-held-work")
-    assert status is not None and status["execution"]["state"] == "succeeded"
+    assert status is not None and status["execution"]["state"] == "done"
 
 
 async def test_bootstrap_retires_held_process_and_resumes_transcript_under_new_owner(runtime, monkeypatch, tmp_path):

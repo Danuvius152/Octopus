@@ -35,6 +35,7 @@ from ..knowledge import (
     receive_return,
 )
 from ..mcp_identity import McpScope, work_is_open
+from ..sessions.runtime_types import SessionOwnerUnavailable
 from ..workspace import paths_for
 from .orchestrator import ResearchLimits, ResearchProgress, run_research
 
@@ -308,37 +309,51 @@ class ResearchManager:
         """Deliver the report into the session as a turn (the bg-delivery path).
         Idempotent + tracked separately from completion (Vera review)."""
         assert self.db is not None and self.session_mgr is not None
-        row = await self.db.get_research_job(job_id)
-        if row and row.get("injection_status") == "delivered":
-            return
-        session = self.session_mgr.get_session(session_id)
-        owned = decode_owned(row.get("knowledge_context")) if row else None
-        work_id = owned.return_binding.work_id if owned else None
-        context = receive_return(
-            owned, session_id=session_id, user_id=session.user_id if session else None,
-            work_id=work_id,
-        )
-        if (row is None or row["session_id"] != session_id or row["status"] != "completed"
-                or session is None or context is None):
-            await self._settle_delivery(job_id, session_id,
-                error="delivery suppressed: original request contract is missing, closed or mismatched")
-            return
         prompt = (
             f"[deep-research:{job_id}] Research complete for: {question}\n\n"
             f"{report.report}"
         )
-        try:
-            receipt = await self.session_mgr.start_message(
-                session_id, prompt, source="research", delivery_id=f"research:{job_id}",
-                work_id=work_id, knowledge_context=context,
-            )
-            if not receipt.accepted:
+        while True:
+            row = await self.db.get_research_job(job_id)
+            if row and row.get("injection_status") == "delivered":
+                return
+            existing = await self.session_mgr.source_receipt("research", f"research:{job_id}", session_id=session_id)
+            if existing is not None:
+                receipt = existing[1]
+                break
+            if self.session_mgr.session_owner_failed(session_id):
+                await self._settle_delivery(job_id, session_id, error="delivery suppressed: destination owner is unavailable")
+                return
+            if self._closing or self.session_mgr._admission_closed:
                 await self._settle_delivery(job_id, session_id, error="delivery suppressed: session admission is closed")
                 return
-        except Exception as e:  # noqa: BLE001 — parent may be gone; tolerate
-            logger.warning("research %s: report injection failed: %s", job_id, e)
-            await self._settle_delivery(job_id, session_id, error=f"delivery failed: {e}")
-            return
+            session = self.session_mgr.get_session(session_id)
+            owned = decode_owned(row.get("knowledge_context")) if row else None
+            work_id = owned.return_binding.work_id if owned else None
+            context = receive_return(
+                owned, session_id=session_id, user_id=session.user_id if session else None,
+                work_id=work_id,
+            )
+            if (row is None or row["session_id"] != session_id or row["status"] != "completed"
+                    or session is None or context is None):
+                await self._settle_delivery(job_id, session_id,
+                    error="delivery suppressed: original request contract is missing, closed or mismatched")
+                return
+            try:
+                receipt = await self.session_mgr.start_message(
+                    session_id, prompt, source="research", delivery_id=f"research:{job_id}",
+                    work_id=work_id, knowledge_context=context,
+                )
+                if not receipt.accepted:
+                    if self.session_mgr._admission_closed:
+                        continue  # Confirm admission before recording a closed destination.
+                    await self._settle_delivery(job_id, session_id, error="delivery suppressed: session admission is closed")
+                    return
+                break
+            except Exception:
+                logger.exception("research %s: admission acknowledgment pending; retrying the same report", job_id)
+            if not self._closing:
+                await asyncio.sleep(1)
         self._delivery_jobs[receipt.request_id] = (job_id, session_id)
         current = self.session_mgr.get_session(session_id)
         processing = current and current._run.request and current._run.request.request_id == receipt.request_id
@@ -388,10 +403,13 @@ class ResearchManager:
         if error:
             row = await self.db.get_research_job(job_id)
             location = (row or {}).get("report_path") or "the research job record"
-            await self.session_mgr.retain_result_notice(
-                session_id, f"research:{job_id}",
-                f"Research {job_id}: report retained as material at {location}.\n{error}. No automatic follow-up was started.",
-            )
+            try:
+                await self.session_mgr.retain_result_notice(
+                    session_id, f"research:{job_id}",
+                    f"Research {job_id}: report retained as material at {location}.\n{error}. No automatic follow-up was started.",
+                )
+            except SessionOwnerUnavailable:
+                logger.warning("Research %s delivery unavailable; report retained at %s: %s", job_id, location, error)
         await self._broadcast({
             "type": "research_delivery", "session_id": session_id, "research_id": job_id,
             "injection_status": status, "error": error,

@@ -79,7 +79,7 @@ _ORCHESTRATION_DRAIN_SECONDS = 5.0
 # Callback type the manager invokes when a task reaches a terminal state.
 # Wired up by main.py lifespan; lets bg_tasks stay decoupled from
 # session_manager / WS layer for testability.
-DeliveryCallback = Callable[["BgTaskRecord"], Awaitable[None]]
+DeliveryCallback = Callable[["BgTaskRecord"], Awaitable[bool | None]]
 BroadcastCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
@@ -835,11 +835,18 @@ class BgTaskManager:
             except Exception:
                 logger.exception("bg_completed broadcast failed")
 
-        if self._deliver_cb:
+        # The original task still owns its completed result until the callback
+        # acknowledges durable admission or a definitive closed destination.
+        # Retry only delivery under the same task ID; never rerun the command.
+        while self._deliver_cb:
             try:
                 await self._deliver_cb(rt.record)
+                return
             except Exception:
-                logger.exception("bg delivery callback failed for %s", rt.record.id)
+                logger.exception("bg delivery acknowledgment pending for %s", rt.record.id)
+            if self._shutting_down:
+                return
+            await asyncio.sleep(1)
 
     async def _terminate_proc(self, rt: _RunningTask, *, reason: str) -> bool:
         """SIGTERM the whole process group; 5s grace; SIGKILL if needed.

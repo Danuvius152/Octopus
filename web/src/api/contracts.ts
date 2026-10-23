@@ -637,7 +637,8 @@ export interface paths {
         /** Get Recoverable Inputs */
         get: operations["get_recoverable_inputs_api_sessions__session_id__submissions_get"];
         put?: never;
-        post?: never;
+        /** Submit Input */
+        post: operations["submit_input_api_sessions__session_id__submissions_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -3454,6 +3455,40 @@ export interface components {
             /** Work Id */
             work_id?: string | null;
         };
+        /** ClientSubmissionRefusal */
+        ClientSubmissionRefusal: {
+            /** Session Id */
+            session_id: string;
+            /** Client Request Id */
+            client_request_id: string;
+            /**
+             * Accepted
+             * @default false
+             * @constant
+             */
+            accepted: false;
+            /** Message */
+            message: string;
+            /** Code */
+            code?: string | null;
+            /** Disposition */
+            disposition?: string | null;
+            /** State */
+            state?: "unknown" | null;
+        };
+        /** ClientSubmissionRequest */
+        ClientSubmissionRequest: {
+            /** Client Request Id */
+            client_request_id: string;
+            /** Content */
+            content: string;
+            /** Attachment Ids */
+            attachment_ids?: string[];
+            /** Wiki Mode */
+            wiki_mode?: ("auto" | "read" | "maintain" | "off") | null;
+            /** Recovery Of Client Id */
+            recovery_of_client_id?: string | null;
+        };
         /** ClientSubmissionStatus */
         ClientSubmissionStatus: {
             /** Session Id */
@@ -5255,7 +5290,13 @@ export interface components {
              * State
              * @enum {string}
              */
-            state: "reserved" | "queued" | "claimed" | "completed" | "succeeded" | "failed" | "interrupted" | "withdrawn" | "unknown" | "rejected";
+            state: "pending" | "running" | "done" | "withdrawn" | "unknown";
+            /**
+             * Delivery State
+             * @default none
+             * @enum {string}
+             */
+            delivery_state: "none" | "confirmed" | "unknown";
             /** Reason Code */
             reason_code?: string | null;
             /** State Version */
@@ -7006,6 +7047,43 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["SubmissionRecoveryPage"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    submit_input_api_sessions__session_id__submissions_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ClientSubmissionRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientSubmissionStatus"] | components["schemas"]["ClientSubmissionRefusal"];
                 };
             };
             /** @description Validation Error */

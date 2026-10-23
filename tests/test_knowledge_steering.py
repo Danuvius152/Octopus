@@ -148,17 +148,20 @@ async def test_steered_input_and_knowledge_are_independently_committed_before_fr
 
 
 @pytest.mark.parametrize("committed_before_error", [False, True])
-async def test_unconfirmed_inline_input_stops_the_process_before_a_frame(tmp_path, committed_before_error):
+@pytest.mark.parametrize("stage", ["admission", "recording"])
+async def test_unconfirmed_inline_input_stops_the_process_before_a_frame(tmp_path, committed_before_error, stage):
     proof = tmp_path / "commit-proof.json"
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "-p", "no:cacheprovider", "-q", str(Path(__file__).resolve()),
          "-o", "python_functions=_unconfirmed_inline_commit_child"],
         cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=15,
         env={**os.environ, "OCTOPUS_TEST_INLINE_COMMIT_PROOF": str(proof),
-             "OCTOPUS_TEST_INLINE_COMMIT_MODE": str(int(committed_before_error)), "PYTHONDONTWRITEBYTECODE": "1"},
+             "OCTOPUS_TEST_INLINE_COMMIT_MODE": str(int(committed_before_error)),
+             "OCTOPUS_TEST_INLINE_COMMIT_STAGE": stage, "PYTHONDONTWRITEBYTECODE": "1"},
     )
     assert result.returncode == 70, result.stdout + result.stderr
     evidence = json.loads(proof.read_text())
+    assert evidence["stage"] == stage
     assert not proof.with_suffix(".frame").exists()
     reader = Database(evidence["database"])
     await reader.initialize()
@@ -166,7 +169,12 @@ async def test_unconfirmed_inline_input_stops_the_process_before_a_frame(tmp_pat
         rows = await reader.load_messages(evidence["session_id"])
         assert any(row["content"] == "Initial comparison" for row in rows)
         corrections = [row for row in rows if row["content"] == "Use the added evidence before answering."]
-        assert len(corrections) == int(committed_before_error)
+        saved = await reader.get_submission_for_request(evidence["session_id"], "original-inline-input")
+        assert (saved is not None) is (stage == "recording" or committed_before_error)
+        if saved:
+            assert saved["payload"]["content"] == "Use the added evidence before answering."
+            assert saved["receipt"]["accepted"]
+        assert len(corrections) == int(stage == "recording" and committed_before_error)
         if corrections:
             assert corrections[0]["tool_input"]["request_context"]["request_id"] == "original-inline-input"
     finally:
@@ -180,20 +188,30 @@ async def _unconfirmed_inline_commit_child(steering, monkeypatch):
     await asyncio.wait_for(env.started.get(), 2)
     proof = Path(os.environ["OCTOPUS_TEST_INLINE_COMMIT_PROOF"])
     committed_before_error = os.environ["OCTOPUS_TEST_INLINE_COMMIT_MODE"] == "1"
+    stage = os.environ["OCTOPUS_TEST_INLINE_COMMIT_STAGE"]
     env.control.frame_marker = proof.with_suffix(".frame")
     commit = env.db.conn.commit
     before = env.db.conn.total_changes
+    armed = stage == "admission"
+    record = env.db.record_request
+
+    async def recording(*, request_id, **message):
+        nonlocal armed
+        armed = request_id == "original-inline-input"
+        return await record(request_id=request_id, **message)
 
     async def failed_commit():
-        if env.db.conn.total_changes == before:
+        if not armed or env.db.conn.total_changes == before:
             return await commit()
         if committed_before_error:
             await commit()
-        proof.write_text(json.dumps({"database": env.database_path, "session_id": env.session.id}))
+        proof.write_text(json.dumps({"database": env.database_path, "session_id": env.session.id, "stage": stage}))
         raise OSError("steered input commit is unconfirmed")
 
     correction = "Use the added evidence before answering."
     monkeypatch.setattr(env.db.conn, "commit", failed_commit)
+    if stage == "recording":
+        monkeypatch.setattr(env.db, "record_request", recording)
     receipt = await env.manager.start_message(env.session.id, correction, steerable=True, request_id="original-inline-input")
     await asyncio.wait_for(receipt.wait(), 5)
     raise AssertionError("An unconfirmed input commit returned to the caller")

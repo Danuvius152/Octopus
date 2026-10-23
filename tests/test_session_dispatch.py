@@ -421,11 +421,15 @@ async def test_accepted_receipt_does_not_wait_for_notification(dispatch):
             await release.wait()
 
     manager.on_broadcast("blocked-admission", blocked)
-    receipt = await asyncio.wait_for(manager.start_message(session.id, "fast"), .2)
-    assert receipt.disposition == "accepted"
-    await asyncio.wait_for(entered.wait(), .2)
-    assert manager.dispatch_snapshot(session.id)["active_request_id"] == receipt.request_id
-    release.set()
+    try:
+        receipt = await asyncio.wait_for(manager.start_message(session.id, "fast"), .2)
+        assert receipt.disposition == "accepted"
+        await asyncio.wait_for(entered.wait(), .2)
+        saved = await manager.db.get_submission_for_request(session.id, receipt.request_id)
+        assert saved["receipt"]["accepted"] is True
+        assert saved["execution_state"] == "pending"
+    finally:
+        release.set()
     assert (await asyncio.wait_for(receipt.wait(), 2)).outcome.status == "success"
 
 

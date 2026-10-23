@@ -153,6 +153,8 @@ async def test_stop_delivers_one_interrupted_result_without_success(runtime, mon
     {"message": "provider unavailable", "codex_error_info": "server_overloaded"},
 ])
 async def test_capacity_failure_exhausts_two_retries_and_preserves_reason(runtime, monkeypatch, error):
+    # This checks the retry count and final reason, not the backoff duration.
+    monkeypatch.setattr(runtime[0], "_TRANSIENT_RETRY_BASE_DELAY", .01)
     prompts = scripted_cli(monkeypatch, [[{"type": "turn.failed", "error": error}]])
     live, history = await drive(runtime)
     final = [e for e in live if e["type"] == "result"]

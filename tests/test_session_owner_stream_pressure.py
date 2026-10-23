@@ -64,7 +64,7 @@ async def _pipe_plateau(progress: Path, pid: int) -> tuple[list[dict], str]:
 
 
 async def test_active_stdout_backpressure_refuses_submit_and_preserves_the_original_prefix(
-    tmp_path, monkeypatch,
+    tmp_path, monkeypatch, short_process_shutdown,
 ):
     script = tmp_path / "continuous_stdout.py"
     progress = tmp_path / "stdout-writes.jsonl"
@@ -247,7 +247,7 @@ async def test_active_stdout_backpressure_refuses_submit_and_preserves_the_origi
             request_id="pressure-retry-request", delivery_id="pressure-retry-delivery",
         )
         duplicate = await manager.start_message(
-            session.id, "No second acceptance", source="bg",
+            session.id, "Retry after the original prefix drains", source="bg",
             request_id="pressure-retry-request", delivery_id="pressure-retry-delivery",
         )
         assert retry.disposition == "accepted" and duplicate.disposition == "duplicate"

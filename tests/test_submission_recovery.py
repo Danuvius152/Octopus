@@ -158,9 +158,10 @@ async def test_startup_retirement_does_not_cover_later_unknown_inputs_even_after
     try:
         await manager.interrupt(session_id)
         assert manager.dispatch_snapshot(session_id)["paused"]
-        created, current = await db.reserve_client_submission(
+        created, current = await db.admit_client_submission(
             session_id, "current", "current-digest", "current-request",
             payload={"content": "Current generation input", "attachment_ids": [], "attachments": [], "wiki_mode": None},
+            receipt={"accepted": True, "disposition": "accepted"},
         )
         assert created
         snapshot = manager.dispatch_snapshot(session_id)
@@ -234,7 +235,7 @@ async def test_input_persistence_failure_never_opens_dispatch(tmp_path, monkeypa
     async def fail(*args, **kwargs):
         raise OSError("disk full")
 
-    monkeypatch.setattr(db, "reserve_client_submission", fail)
+    monkeypatch.setattr(db, "admit_client_submission", fail)
     try:
         reply = await submit_client_message(manager, session.id, "Must not execute", [], "unsaved", wiki_mode=None)
         assert reply["accepted"] is False and reply["state"] == "unknown"
@@ -333,7 +334,7 @@ async def test_real_dispatch_withdraws_second_input_without_erasing_first_histor
     await manager.start_message(session.id, "held first input")
     await asyncio.wait_for(starts.get(), 5)
     second = await submit_client_message(manager, session.id, "Second input must survive", [], "second", wiki_mode=None)
-    assert second["execution"]["state"] == "queued"
+    assert second["execution"]["state"] == "pending"
     await manager.drain_turns()
     status = await submission_status(manager, session.id, "second")
     assert status["execution"]["state"] == "withdrawn"
@@ -350,7 +351,7 @@ async def test_browser_result_status_uses_committed_terminal(runtime):
     await wait_dispatch_idle(manager, session.id)
     await manager.drain_turns()
     status = await submission_status(manager, session.id, "finished")
-    assert status["execution"]["state"] == "succeeded"
+    assert status["execution"]["state"] == "done"
     assert status["outcome"]["request_id"] == reply["request_id"]
     assert status["execution"]["recoverable_input"] is False
     assert not (await db.list_recoverable_submissions(session.id))[0]
@@ -363,7 +364,7 @@ async def test_lost_claim_commit_ack_never_starts_a_model_and_retains_input(tmp_
     await db.initialize()
     try:
         original = await db.get_client_submission(evidence["session_id"], "confirm")
-        assert original["execution_state"] == ("claimed" if committed_before_error else "queued")
+        assert original["execution_state"] == ("running" if committed_before_error else "pending")
         assert original["request_id"] == evidence["request_id"]
         assert original["payload"]["content"] == "Retain responsibility 中文\nKeep the exact input."
         manager = SessionManager()
@@ -453,7 +454,7 @@ async def test_legacy_submission_migration_preserves_receipt_without_inventing_i
 
 async def test_close_waits_for_the_owned_submission_completion(runtime, monkeypatch):
     manager, db, session, _, starts, _ = runtime
-    complete = db.complete_client_submission
+    complete = db.record_terminal
     start = manager.start_message
     committed, release, notified = asyncio.Event(), asyncio.Event(), asyncio.Event()
     attempts = 0
@@ -478,12 +479,12 @@ async def test_close_waits_for_the_owned_submission_completion(runtime, monkeypa
 
     manager.on_broadcast("completion-close-prefix", observe)
     monkeypatch.setattr(manager, "start_message", capture_receipt)
-    monkeypatch.setattr(db, "complete_client_submission", acknowledge_after_release)
+    monkeypatch.setattr(db, "record_terminal", acknowledge_after_release)
     reply = await submit_client_message(manager, session.id, "Keep responsibility", [], "recorder", wiki_mode=None)
     await asyncio.wait_for(committed.wait(), 5)
-    assert notified.is_set()
+    assert not notified.is_set()
     stored = await db.get_client_submission(session.id, "recorder")
-    assert stored["execution_state"] == "completed"
+    assert stored["execution_state"] == "done"
     assert stored["request_id"] == reply["request_id"]
     waiting = asyncio.create_task(receipts[0].wait())
     closing = asyncio.create_task(db.close())
@@ -557,7 +558,7 @@ async def test_submission_commit_failure_stops_the_process_and_restart_reads_act
         assert row["payload"]["content"] == "Retain responsibility 中文\nKeep the exact input."
         completed = operation == "completion" and committed_before_error
         uncertain_delivery = operation == "delivery" and committed_before_error
-        assert row["execution_state"] == ("completed" if completed else "claimed")
+        assert row["execution_state"] == ("done" if completed else "running")
         assert row["reason_code"] == ("steer_delivery_unknown" if uncertain_delivery else None)
 
         restored = SessionManager()
@@ -569,7 +570,7 @@ async def test_submission_commit_failure_stops_the_process_and_restart_reads_act
         assert status["request_id"] == evidence["request_id"]
         assert status["input"] == {"content": "Retain responsibility 中文\nKeep the exact input.",
                                    "attachment_ids": [], "attachments": [], "wiki_mode": None}
-        assert status["execution"]["state"] == ("completed" if completed else "unknown")
+        assert status["execution"]["state"] == ("done" if completed else "unknown")
         assert status["execution"]["execution_owner_request_id"] == evidence["request_id"]
         assert status["execution"]["recoverable_input"] is False
         expected_reason = "steer_delivery_unknown" if uncertain_delivery else "service_restart_execution_unknown"
@@ -579,7 +580,11 @@ async def test_submission_commit_failure_stops_the_process_and_restart_reads_act
         if not completed:
             with pytest.raises(ValueError, match="process exit is unconfirmed"):
                 await restored.start_message(evidence["session_id"], "Another writer")
-        assert await db.load_messages(evidence["session_id"]) == []
+        messages = await db.load_messages(evidence["session_id"])
+        assert len(messages) == int(completed)
+        if completed:
+            assert status["outcome"]["request_id"] == evidence["request_id"]
+            assert status["outcome"]["status"] == "success"
     finally:
         await db.close()
 
@@ -615,7 +620,10 @@ async def _submission_commit_failure_child(tmp_path, monkeypatch):
     elif operation == "delivery":
         await db.set_steer_delivery(session.id, request, confirmed=False)
     else:
-        await db.complete_client_submission(session.id, request, owner=request, state="completed")
+        await db.record_terminal(
+            request_id=request, session_id=session.id, seq=0, role="system", type="result",
+            content={"request_id": request, "status": "success"}, created_at="2026-10-23T00:00:00Z",
+        )
     proof.with_suffix(".returned").touch()
     raise AssertionError("An unconfirmed submission commit returned to the caller")
 

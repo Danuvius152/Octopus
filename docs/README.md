@@ -19,7 +19,7 @@ uncommitted unless the user requests a commit; it does not trigger deployment.
 
 本机默认使用 Codex，Claude 当前不可用。发布与审阅应明确标注真实模型验证
 仅覆盖 Codex，Claude 实机测试未执行；具体门禁见
-[AGENTS.md](../AGENTS.md#local-codex-validation)，环境见
+[AGENTS.md](../AGENTS.md#verification)，环境见
 [local-wsl.md](local-wsl.md#本机测试)。
 
 Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验收已完成（2026-10-17）。开发过程、当前合同和证据集中在总结；Sapphire、SmartReader 等后续功能单列未来计划。
@@ -28,7 +28,6 @@ Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验
 **[2026-10-17 缺陷修复交接](plans/wiki-bug-remediation-20261017.md)**。
 
 - **[共享 Wiki 开发过程总结](plans/wiki-development-summary.md)** — 本期已完成；实际交付、当前合同、证据边界与开发方法。
-- **[接管前后框架行为核查（2026-10-19 更新）](review/before-takeover-behavior-review-20261018.md)** — 对照 `203f7f3` 的当前问题清单；置顶 Codex 重复控制指令，删除已修复和过时条目，保留适用边界与验收要求。
 - **[共享 Wiki 未来计划](plans/wiki-future-plan.md)** — Sapphire、SmartReader、共享能力及有触发条件的后续工作。
 - **[user-guide.md](user-guide.md)** — practical instructions for this local
   WSL + Codex installation: startup, agents, and phone access with the
@@ -42,11 +41,12 @@ Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验
   GitHub / Gmail / custom OAuth connectors entirely from the browser.
 - **[agent-prompts.md](agent-prompts.md)** — copyable One-line role and System
   prompt configurations for Octo, Vera, and Weber on the Codex harness.
-- **[pika-toolkit-analysis.md](pika-toolkit-analysis.md)** — design analysis of
-  the local Pika skill suite and practical uses for AI study and Weber's
-  Obsidian knowledge workflow.
+- **[knowledge-requests.md](knowledge-requests.md)** — trusted request contract and
+  async work ownership in `server/knowledge.py`.
 - **[backup-and-migrate.md](backup-and-migrate.md)** — persistent state, CLI
   transcripts and configuration to include in a backup or migration.
+- **[迁移机制审查（2026-10-23）](review/migration-scope-and-portability-20261023.md)** —
+  取消旧版兼容的范围、当前备份风险，以及账户和数据跨机器搬迁的修改建议；尚未实施。
 
 ## Design records — [`plans/`](plans/)
 
@@ -63,7 +63,7 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | Plan | Status | What |
 |---|---|---|
 | [Multi-tenancy, second pass: Connectors, Schedules, Harness](plans/multi-tenancy-gaps.md) | in-progress | Proposal: close the gaps a read-only review found where accounts can reach each other's work through the Manage surfaces, and make each class of gap structurally impossible. |
-| [Octopus 最小机制架构：执行计划](plans/minimal-architecture-execution-20261020.md) | in-progress | 票20及文档已验收，本轮停止；后续实施和完整发布等待用户恢复。 |
+| [Octopus 最小机制架构：执行计划](plans/minimal-architecture-execution-20261020.md) | in-progress | 现有CLI下修复输入与Wiki缺陷；22/23/24/28/31/42/43整体暂停。 |
 | [Rotating the installation access token](plans/token-rotation.md) | in-progress | Migrating token rotation to the minimal architecture contract; candidate verification and review remain open. |
 | [/fork — duplicate a session onto a copied working directory](plans/session-fork.md) | shipped | Duplicate a session onto an independent full copy of its working directory. |
 | [Agent Collaboration — Tech Plan (agent-to-agent delegation)](plans/agent-collaboration.md) | shipped | Agent-to-agent delegation — the `mcp__ask_agent__*` tools, one hop, replies injected as follow-up turns. Reverses the "no A2A" carve-out in `agent-refactor.md` §40-41. |
@@ -96,6 +96,7 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | [运行日志缺陷修复：设计访谈与行为契约](plans/runtime-log-repair-20261013.md) | shipped | Q12 修复及本地 Codex 验收已完成；Stop 暂停内存积压、人工纠偏优先、明确恢复；保留主要框架，Q11 持久队列不实施。 |
 | [P1 问题整改：CR-03 输入恢复](plans/p1-remediation-20261020.md) | superseded by minimal-architecture-execution-20261020.md | CR-03 暂存实现并入最小机制架构计划，以下保留原范围决定与历史验收，不再作为单独发布入口。 |
 | [Codex performance in Monitor](plans/codex-performance-monitor.md) | completed | effective output TPS implemented and validated for local Codex; client windows, model grouping and passive collection. |
+| [DeepSeek Harness 作为第三个 backend：实施计划](plans/deepseek-harness-backend.md) | proposed | 以 API key + `dsh --profile headless` 接入 DeepSeek Harness（DSH），复用现有 harness 边界；先交付单轮/事件/MCP/resume，账号登录与 SDK 长驻模式留在后续。 |
 | [共享 Wiki：未来计划与应用协同](plans/wiki-future-plan.md) | proposed | Sapphire、SmartReader 与条件性扩展的统一计划；保留未完成合同，不把本文当作开发或生产写入授权。 |
 | [运行时接口修补：接管、记录与调用身份](plans/runtime-interface-repair.md) | completed | Q13–Q30 中已确认实施的修补全部通过本机验收；按 Q31 合并 main 并上线 `01c16a6` 独立服务快照，已验证并清理两个旧 release；Q25 脱敏未纳入。 |
 
@@ -113,8 +114,10 @@ post-mortem on a tricky pipeline. Cited from code where relevant.
 - **[cli-system-prompt-notes.md](cli-system-prompt-notes.md)** — observed
   system-prompt behavior.
 - **[post-mortems/](post-mortems/)** — incident write-ups (kept here because
-  code/tests cite them inline). Currently
-  [`2026-05-18-bg-pipeline-hardening.md`](post-mortems/2026-05-18-bg-pipeline-hardening.md):
-  post-mortem on four `mcp__bg__run` → model-turn pipeline bugs. Note: the
-  `server/backends/*` paths it cites predate the harness refactor — that code
-  now lives under `server/harness/`.
+  code/tests cite them inline).
+  - [`2026-05-18-bg-pipeline-hardening.md`](post-mortems/2026-05-18-bg-pipeline-hardening.md):
+    post-mortem on four `mcp__bg__run` → model-turn pipeline bugs.
+  - [`2026-10-21-session-owner-scope-creep.md`](post-mortems/2026-10-21-session-owner-scope-creep.md):
+    SessionOwner 合并交付的范围失控——切在实现入口、共同接口未收敛、测试未触发目标故障。
+  Note: the `server/backends/*` paths in the 2026-05-18 doc predate the harness
+  refactor — that code now lives under `server/harness/`.

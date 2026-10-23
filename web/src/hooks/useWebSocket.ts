@@ -764,7 +764,13 @@ export function useWebSocket() {
       }
       if (wikiMode) payload.wiki_mode = wikiMode;
       if (recoveryOfClientId) payload.recovery_of_client_id = recoveryOfClientId;
-      const clientRequestId = submissionId || newSubmissionId();
+      let clientRequestId: string;
+      try {
+        clientRequestId = submissionId || newSubmissionId();
+      } catch (error) {
+        return Promise.resolve({ accepted: false, code: "secure_randomness_unavailable",
+          message: error instanceof Error ? error.message : "Secure randomness is unavailable." });
+      }
       payload.client_request_id = clientRequestId;
       if (wsRef.current?.readyState !== WebSocket.OPEN) {
         return Promise.resolve({ accepted: false, code: "not_sent", message: "Disconnected. Your message was not sent." });
@@ -776,7 +782,7 @@ export function useWebSocket() {
         }, 30_000);
         submissions.current.set(clientRequestId, { sessionId, finish: (reply) => {
           clearTimeout(timeout);
-          finish(reply.state === "unknown" ? { ...reply, clientRequestId } : reply);
+          finish({ ...reply, clientRequestId });
         } });
         try {
           if (!send(payload)) throw new Error("Disconnected");
@@ -790,10 +796,18 @@ export function useWebSocket() {
     [send]
   );
 
-  const sendCommand = useCallback((data: Record<string, unknown>) => {
-    const id = newSubmissionId();
+  const sendCommand = useCallback((data: Record<string, unknown>): Promise<SubmissionReply> => {
     const sessionId = String(data.session_id);
     const operation = String(data.type);
+    let id: string;
+    try {
+      id = newSubmissionId();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Secure randomness is unavailable.";
+      // A local failed notice has no wire identity and cannot be replayed.
+      getState().setControlCommand({ id: `unsent:${sessionId}:${operation}`, sessionId, operation, state: "failed", message });
+      return Promise.resolve({ accepted: false, code: "secure_randomness_unavailable", message });
+    }
     const generation = getState().accountGeneration;
     const update = (state: "pending" | "accepted" | "failed" | "unknown", message?: string) => {
       if (getState().accountGeneration !== generation) return;

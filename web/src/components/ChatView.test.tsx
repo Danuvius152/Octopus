@@ -85,6 +85,20 @@ function setup(send?: Parameters<typeof ChatView>[0]["sendMessage"]) {
   };
 }
 
+it("keeps the draft and explains why it cannot send without secure randomness", async () => {
+  vi.stubGlobal("crypto", undefined);
+  try {
+    const { input, send, sendMessage } = setup();
+    fireEvent.change(input, { target: { value: "Keep this input" } });
+    await act(async () => fireEvent.click(send));
+    expect(screen.getByRole("alert")).toHaveTextContent(/secure randomness/i);
+    expect(input).toHaveValue("Keep this input");
+    expect(sendMessage).not.toHaveBeenCalled();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
 it("preserves a new selection made immediately after slash completion", () => {
   const frames: FrameRequestCallback[] = [];
   vi.stubGlobal("requestAnimationFrame", (callback: FrameRequestCallback) => frames.push(callback));
@@ -107,8 +121,8 @@ it("preserves a new selection made immediately after slash completion", () => {
   }
 });
 
-it.each(["without-randomUUID", "without-crypto"])("submits and restores rejected drafts %s", async (mode) => {
-  vi.stubGlobal("crypto", mode === "without-crypto" ? undefined : { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) });
+it("submits and restores rejected drafts with secure bytes when randomUUID is absent", async () => {
+  vi.stubGlobal("crypto", { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) });
   try {
     const sendMessage = vi.fn(async () => ({ accepted: false, message: "Session not found" }));
     render(<ChatView sendMessage={sendMessage} interrupt={vi.fn()}

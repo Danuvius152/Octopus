@@ -293,31 +293,32 @@ async def test_sapphire_history_capture_delete_and_absent_path_restore(client, a
     assert current["revision"] == restored["revision"]
 
 
-@pytest.mark.parametrize("path", [
-    "Other/assets/project.md", "Library/assets/project.txt", "Library/assets/project.html",
-    "Library/tmp/assets/project.md", "Library/assets/TEMP/project.MD",
-    "Library/static/assets/project.md", "Library/assets/node_modules/project.md",
-    "Codex Skills/assets/SKILL.md", "Library/Codex Skills/assets/SKILL.md",
-    "Library/assets/file.pdf",
-])
-async def test_other_assets_remain_unmaintainable_and_batch_excluded(client, asset_notes, path):
+async def test_other_assets_remain_unmaintainable_and_batch_excluded(client, asset_notes):
     root, _, jobs = asset_notes
-    target = root / path
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(ORIGINAL)
-    document = await read(client, path)
-    assert document["kind"] == "asset"
-    submitted = await client.post("/api/wiki/maintain", headers=HEADERS, json={"idempotency_key": "excluded", "paths": [path]})
-    assert submitted.status_code == 422, submitted.text
-    for modern in (True, False):
-        organized = await client.post("/api/wiki/organize", headers=HEADERS, json=organize_body(document, modern))
-        assert organized.status_code == 422, organized.text
-    batch = await client.post("/api/wiki/read_many", headers=HEADERS, json={"items": [{"doc": document["id"]}]})
-    assert batch.status_code == 200, batch.text
-    assert batch.json()["items"][0]["status"] == "excluded"
-    assert not batch.json()["ranges"]
-    assert not WikiHistory(jobs.store).capture_external([path])
-    assert target.read_text() == ORIGINAL
+    # Each rejection has no write effect; exercise every path against one vault.
+    for path in [
+        "Other/assets/project.md", "Library/assets/project.txt", "Library/assets/project.html",
+        "Library/tmp/assets/project.md", "Library/assets/TEMP/project.MD",
+        "Library/static/assets/project.md", "Library/assets/node_modules/project.md",
+        "Codex Skills/assets/SKILL.md", "Library/Codex Skills/assets/SKILL.md",
+        "Library/assets/file.pdf",
+    ]:
+        target = root / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(ORIGINAL)
+        document = await read(client, path)
+        assert document["kind"] == "asset"
+        submitted = await client.post("/api/wiki/maintain", headers=HEADERS, json={"idempotency_key": "excluded", "paths": [path]})
+        assert submitted.status_code == 422, (path, submitted.text)
+        for modern in (True, False):
+            organized = await client.post("/api/wiki/organize", headers=HEADERS, json=organize_body(document, modern))
+            assert organized.status_code == 422, (path, organized.text)
+        batch = await client.post("/api/wiki/read_many", headers=HEADERS, json={"items": [{"doc": document["id"]}]})
+        assert batch.status_code == 200, batch.text
+        assert batch.json()["items"][0]["status"] == "excluded"
+        assert not batch.json()["ranges"]
+        assert not WikiHistory(jobs.store).capture_external([path])
+        assert target.read_text() == ORIGINAL
 
 
 async def test_asset_new_page_targets_and_media_stay_excluded(client, asset_notes):

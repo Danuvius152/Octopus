@@ -140,6 +140,8 @@ async def test_the_session_manager_drains_its_turns_when_the_db_closes(tmp_path,
 
 @pytest.mark.asyncio
 async def test_shutdown_keeps_database_open_until_terminal_writer_finishes(tmp_path, monkeypatch):
+    # Both registered close hooks must use a short budget for the blocked writer.
+    monkeypatch.setattr("server.sessions.ownership._BACKEND_RETIRE_TIMEOUT", .05)
     db = Database(str(tmp_path / "shutdown.db"))
     await db.initialize()
     manager = SessionManager()

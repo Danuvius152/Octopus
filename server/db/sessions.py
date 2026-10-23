@@ -30,6 +30,16 @@ _DELEGATION_RELATION = (
 )
 
 
+async def insert_session(tx: Transaction, record: dict[str, Any]) -> None:
+    """Insert a prepared session within its owning admission transaction."""
+    columns = ("id", "name", "working_dir", "created_at", "claude_session_id", "credential_id",
+               "agent_id", "origin", "backend", "parent_session_id", "delegation_request", "app_id", "user_id")
+    await tx.execute(
+        f"INSERT INTO sessions ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+        tuple(record.get(column) for column in columns),
+    )
+
+
 class SessionsMixin(DatabaseBase):
 
     async def get_session_binding(self, session_id: str) -> dict[str, Any] | None:
@@ -124,28 +134,12 @@ class SessionsMixin(DatabaseBase):
         app_id: str | None = None,
     ) -> None:
         async with self.transaction(write=True) as tx:
-            await tx.execute(
-                "INSERT INTO sessions "
-                "(id, name, working_dir, created_at, claude_session_id, "
-                " credential_id, agent_id, origin, backend, "
-                " parent_session_id, delegation_request, app_id, user_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    session_id,
-                    name,
-                    working_dir,
-                    created_at,
-                    claude_session_id,
-                    credential_id,
-                    agent_id,
-                    origin,
-                    backend,
-                    parent_session_id,
-                    delegation_request,
-                    app_id,
-                    user_id,
-                ),
-            )
+            await insert_session(tx, dict(
+                id=session_id, name=name, working_dir=working_dir, created_at=created_at,
+                claude_session_id=claude_session_id, credential_id=credential_id, agent_id=agent_id,
+                origin=origin, backend=backend, parent_session_id=parent_session_id,
+                delegation_request=delegation_request, app_id=app_id, user_id=user_id,
+            ))
 
     async def delete_session(self, session_id: str) -> None:
         async with self.transaction(write=True) as tx:
@@ -508,6 +502,15 @@ class SessionsMixin(DatabaseBase):
                     raise ValueError("terminal record conflict")
             else:
                 await self._append_message(tx, **message, terminal_request_id=request_id)
+            # This request's ordinary input and terminal are one committed
+            # fact. Notification and resource retirement cannot split them.
+            await tx.execute(
+                "UPDATE client_submissions SET execution_state='done',execution_owner=?,"
+                "reason_code=NULL,state_version=state_version+1,updated_at=? "
+                "WHERE session_id=? AND request_id=? AND execution_state IN ('pending','running') "
+                "AND (execution_owner IS NULL OR execution_owner=?)",
+                (request_id, message["created_at"], session_id, request_id, request_id),
+            )
 
     async def get_session_owner(self, session_id: str) -> str | None:
         """Resolve an event's owner even after its session leaves the live map."""

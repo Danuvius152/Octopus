@@ -28,7 +28,7 @@ class Boot:
 
 
 @pytest.fixture
-async def runtime(tmp_path, monkeypatch):
+async def runtime(tmp_path, monkeypatch, short_process_shutdown):
     starts = asyncio.Queue()
     boots = []
 

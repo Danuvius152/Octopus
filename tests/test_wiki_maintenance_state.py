@@ -690,10 +690,13 @@ def malformed_cursors(cursor):
     return [base64.urlsafe_b64encode(json.dumps(value).encode()).decode() for value in variants]
 
 
-@pytest.mark.parametrize("variant", range(7))
-async def test_malformed_cursor_is_422_at_normal_http_boundary(client, tmp_path, variant):
+async def test_malformed_cursor_is_422_at_normal_http_boundary(client, tmp_path):
     await prepare(client, tmp_path, {"Library/a.md": "# A\n", "Library/b.md": "# B\n"})
     first = await state(client, limit=1)
-    rejected = await client.get("/api/wiki/maintenance-status", headers=api.HEADERS,
-                                params={"limit": 1, "cursor": malformed_cursors(first["next_cursor"])[variant]})
-    assert rejected.status_code == 422, rejected.text
+    for cursor in malformed_cursors(first["next_cursor"]):
+        rejected = await client.get("/api/wiki/maintenance-status", headers=api.HEADERS,
+                                    params={"limit": 1, "cursor": cursor})
+        assert rejected.status_code == 422, (cursor, rejected.text)
+    # Rejections must leave the original observation and continuation usable.
+    continued = await state(client, limit=1, cursor=first["next_cursor"])
+    assert continued["items"][0]["current"]["id"] != first["items"][0]["current"]["id"]
