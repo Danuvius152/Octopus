@@ -12,7 +12,6 @@ import time
 from dataclasses import replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import httpx
 import pytest
@@ -667,8 +666,7 @@ async def test_unretired_websocket_transport_error_remains_logged(runtime, caplo
     assert len(errors) == 1 and errors[0].message == "WebSocket error"
 
 
-@pytest.mark.parametrize("operation", ["answer_question", "approve_tool", "deny_tool"])
-async def test_websocket_cannot_resolve_another_accounts_question_or_approval(runtime, monkeypatch, operation):
+async def test_websocket_cannot_resolve_another_accounts_question(runtime, monkeypatch):
     manager, database, session, _, _, _ = runtime
     users = UserManager(database)
     monkeypatch.setattr(deps, "_user_manager", users)
@@ -676,14 +674,11 @@ async def test_websocket_cannot_resolve_another_accounts_question_or_approval(ru
     foreign = await users.create_user(username="second", password="password2")
     token = await users.issue_token(foreign["id"])
     question = await manager.create_pending_question(session.id, [{"question": "Private choice", "options": [{"label": "A"}]}])
-    approve, deny = AsyncMock(return_value=False), AsyncMock(return_value=False)
-    monkeypatch.setattr(manager, "approve_tool", approve)
-    monkeypatch.setattr(manager, "deny_tool", deny)
     incoming, outgoing, task = await connect_ws(manager, token)
     try:
-        payload = {"type": operation, "session_id": session.id, "question_id": question, "tool_use_id": "private-approval", "answers": [{"question": "Private choice", "selected": ["A"]}]}
-        if operation == "answer_question":
-            payload.update(client_command_id="foreign-answer", request_id=None, attempt_id=None)
+        payload = {"type": "answer_question", "session_id": session.id, "question_id": question,
+                   "answers": [{"question": "Private choice", "selected": ["A"]}],
+                   "client_command_id": "foreign-answer", "request_id": None, "attempt_id": None}
         await incoming.put({"type": "websocket.receive", "text": json.dumps(payload)})
         await incoming.put({"type": "websocket.receive", "text": "bad json"})
         async with asyncio.timeout(5):
@@ -692,8 +687,6 @@ async def test_websocket_cannot_resolve_another_accounts_question_or_approval(ru
                 if response["type"] == "websocket.send" and json.loads(response["text"]).get("message") == "Invalid JSON":
                     break
         assert manager.has_pending_question(session.id, question)
-        approve.assert_not_awaited()
-        deny.assert_not_awaited()
     finally:
         await disconnect_ws(incoming, task)
 

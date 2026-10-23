@@ -238,56 +238,6 @@ async def test_idle_stop_and_specific_question_commands_reject_stale_scope(runti
             await manager.await_session_execution(session.id, timeout=2)
 
 
-@pytest.mark.parametrize("operation", ["approve_tool", "deny_tool"])
-async def test_legacy_approval_commands_reject_and_replay_receipts(runtime, tmp_path, operation, monkeypatch):
-    manager, db = runtime
-    agent = await db.get_system_agent()
-    session = await manager.create_session(agent["id"], "legacy approval", str(tmp_path), backend="codex")
-    starts = hold_model_runs(manager, monkeypatch)
-    active = None
-    async with connection(manager, settings.auth_token) as client:
-        async def send(payload, kind):
-            await client[0].put({"type": "websocket.receive", "text": json.dumps(payload)})
-            return await receipt_frame(client[1], kind)
-
-        legacy = {"type": operation, "session_id": session.id, "tool_use_id": "old-tool"}
-        rejection = await send(legacy, "error")
-        assert rejection["message"] == "No pending approval found"
-
-        payload = {**legacy, "client_command_id": "old-command", "request_id": None, "attempt_id": None}
-        first = await send(payload, "command_receipt")
-        assert first["accepted"] is False and first["code"] == "stale_command"
-        try:
-            active, _scope = await start_held_request(manager, session.id, "later request")
-            running = await asyncio.wait_for(starts.get(), 2)
-            assert await send(payload, "command_receipt") == first
-            conflict = await send({**payload, "tool_use_id": "different-tool"}, "command_receipt")
-            assert conflict["accepted"] is False and conflict["code"] == "command_conflict"
-            assert not running.stopped.is_set()
-        finally:
-            await manager.interrupt(session.id)
-            if active is not None:
-                await asyncio.wait_for(active.wait(), 2)
-            await manager.await_session_execution(session.id, timeout=2)
-
-
-@pytest.mark.parametrize("operation", ["approve_tool", "deny_tool"])
-async def test_legacy_approval_receipts_reject_foreign_and_missing_sessions(runtime, tmp_path, operation):
-    manager, db = runtime
-    agent = await db.get_system_agent()
-    session = await manager.create_session(agent["id"], "private approval", str(tmp_path), backend="codex")
-    session.user_id = "different-account"
-    async with connection(manager, settings.auth_token) as client:
-        for session_id in (session.id, "missing-session"):
-            await client[0].put({"type": "websocket.receive", "text": json.dumps({
-                "type": operation, "session_id": session_id, "tool_use_id": "old-tool",
-                "client_command_id": "foreign-command", "request_id": None, "attempt_id": None,
-            })})
-            rejection = await receipt_frame(client[1], "command_receipt")
-            assert rejection["accepted"] is False and rejection["code"] == "not_found"
-    assert session._command_receipts == {}
-
-
 @pytest.mark.parametrize("mode", [None, "read", "maintain"])
 async def test_agent_bearer_cannot_enter_human_websocket(runtime, monkeypatch, tmp_path, mode):
     from server.mcp_identity import mint, register_run, revoke_run

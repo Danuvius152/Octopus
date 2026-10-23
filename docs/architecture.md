@@ -274,7 +274,7 @@ with either `{"path"}` or `{"message"}`. On `path`, the client opens
 fires. The agent is **never** instructed to open the viewer on
 its own: it can't tell whether anyone is at the screen.
 
-### Questions & tool approval
+### Questions and historical tool records
 
 The `mcp__ask__user` MCP tool POSTs questions to
 `/api/sessions/{id}/questions`; SessionManager broadcasts a `question_request`
@@ -282,11 +282,11 @@ The `mcp__ask__user` MCP tool POSTs questions to
 answer, which is delivered back to the model. An unanswered question
 auto-answers after `ask_user_question_timeout_seconds` so headless
 scheduled sessions never wedge. Normal CLI turns bypass native tool approvals;
-agents confirm sensitive actions through `ask`/connector confirms. Legacy WS
-approval commands are rejected, with command receipts retained for clients that
-send command identities. Historical tool approval requests remain readable as
-static records, without Allow/Deny actions. `PendingApproval` remains a public
-Python compatibility type, but sessions do not hold an approval lifecycle.
+agents confirm sensitive actions through `ask`/connector confirms. Unsupported
+WS actions receive the generic refusal; controls with command identities retain
+the usual authorization, replay and conflict rules. Historical tool approval
+requests remain readable from saved messages as static records, without actions
+or a live approval lifecycle.
 
 ### Cross-turn background work
 
@@ -338,8 +338,6 @@ A backend without web tools simply returns an "unavailable" message.
 {"type":"send_message","session_id":"…","client_request_id":"…","content":"…","attachment_ids":[]}
 {"type":"interrupt","session_id":"…","client_command_id":"…","request_id":"…","attempt_id":"…","generation":"…","revision":0}
 {"type":"answer_question","session_id":"…","client_command_id":"…","request_id":"…","attempt_id":"…","question_id":"…","answers":[…]}
-{"type":"approve_tool","session_id":"…","tool_use_id":"…"}
-{"type":"deny_tool","session_id":"…","tool_use_id":"…","reason":"…"}
 ```
 
 Input and command IDs are nonempty strings of at most 128 characters. Retry the
@@ -360,7 +358,7 @@ correlated `submission` or `command_receipt`, including refusals.
 {"type":"submission","session_id":"…","client_request_id":"…","accepted":true,"request_id":"…"}
 {"type":"command_receipt","session_id":"…","client_command_id":"…","operation":"interrupt|answer_question","accepted":true}
 {"type":"result","session_id":"…","cost":0.03,"turns":2,"duration_ms":5000,"is_error":false}
-{"type":"status","session_id":"…","status":"idle|running|waiting_approval"}
+{"type":"status","session_id":"…","status":"idle|running"}
 {"type":"error","session_id":"…","message":"…"}
 {"type":"queued|dequeued","session_id":"…"}
 {"type":"session_archived|session_unarchived","session_id":"…"}

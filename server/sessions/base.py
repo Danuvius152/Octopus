@@ -249,23 +249,6 @@ class PendingInput:
 
 
 @dataclass
-class PendingApproval:
-    """Legacy public import retained for integrations.
-
-    Sessions no longer create or hold tool approvals. Legacy WS approval
-    commands are rejected; human confirmation uses AskUserQuestion.
-    """
-
-    tool_name: str
-    tool_input: dict[str, Any]
-    tool_use_id: str
-    future: asyncio.Future
-    request_id: str | None = None
-    attempt_id: str | None = None
-    tool_call_id: str | None = None
-
-
-@dataclass
 class PendingQuestion:
     """One question's form, answer delivery and publication lifetime.
 

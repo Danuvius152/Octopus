@@ -60,7 +60,6 @@ export function sidebarAgents(
     if (!s.agent_id || s.origin === "app") continue;
     if (
       s.status === "running" ||
-      s.status === "waiting_approval" ||
       (state.pendingQuestions[s.id]?.length ?? 0) > 0
     ) {
       needsYou.add(s.agent_id);

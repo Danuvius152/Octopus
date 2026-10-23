@@ -111,9 +111,3 @@ class QuestionsMixin(SessionManagerBase):
         result = await self._question_owner(session).call_question(CloseQuestion(question_id, reason))
         assert isinstance(result, bool)
         return result
-
-    async def approve_tool(self, session_id: str, tool_use_id: str) -> bool:
-        return False
-
-    async def deny_tool(self, session_id: str, tool_use_id: str, reason: str = "") -> bool:
-        return False

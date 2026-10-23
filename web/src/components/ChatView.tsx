@@ -643,7 +643,7 @@ export function ChatView({
     // /reset command — escape hatch for wedged sessions. Calls the
     // server's force-reset endpoint, which cancels the active task,
     // releases the lock, kills the backend subprocess, and clears any
-    // pending questions/approvals. Use when interrupt failed or the
+    // pending questions. Use when interrupt failed or the
     // session is stuck in "Running" forever.
     if (trimmed.toLowerCase() === "/reset") {
       setInput("");
@@ -1164,14 +1164,6 @@ export function ChatView({
         <span className={`${base} status-running inline-flex items-center gap-1.5 text-primary`}>
           <span className="inline-block size-1.5 rounded-full bg-primary animate-pulse" />
           running
-        </span>
-      );
-    }
-    if (status === "waiting_approval") {
-      return (
-        <span className={`${base} status-waiting_approval inline-flex items-center gap-1.5 text-warn-foreground`}>
-          <span className="inline-block size-1.5 rounded-full bg-warn" />
-          waiting
         </span>
       );
     }

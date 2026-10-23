@@ -39,14 +39,13 @@ describe("sidebarAgents", () => {
     expect(rows).toEqual({ pinned: [], present: [] });
   });
 
-  it("present while running, waiting, asking, or owning the open session", () => {
-    const agents = ["run", "wait", "ask", "open", "idle", "app"].map((id) =>
+  it("present while running, asking, or owning the open session", () => {
+    const agents = ["run", "ask", "open", "idle", "app"].map((id) =>
       agent({ id, pinned: false })
     );
     const rows = sidebarAgents(agents, {
       sessions: [
         session({ id: "1", agent_id: "run", status: "running" }),
-        session({ id: "2", agent_id: "wait", status: "waiting_approval" }),
         session({ id: "3", agent_id: "ask" }),
         session({ id: "4", agent_id: "open" }),
         session({ id: "5", agent_id: "idle" }),
@@ -55,7 +54,7 @@ describe("sidebarAgents", () => {
       activeSessionId: "4",
       pendingQuestions: { "3": [{ question_id: "q", questions: [] }] },
     });
-    expect(rows.present.map((a) => a.id)).toEqual(["run", "wait", "ask", "open"]);
+    expect(rows.present.map((a) => a.id)).toEqual(["run", "ask", "open"]);
   });
 
   it("a pinned agent is never also present", () => {

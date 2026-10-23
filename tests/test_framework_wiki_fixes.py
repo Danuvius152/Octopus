@@ -82,7 +82,9 @@ async def test_app_wrappers_preserve_only_the_original_first_line_selection(runt
     from server.wiki.store import WikiError
     from server.wiki.tasks import tasks
     manager, db, agent, root = runtime
-    registry.configure(None, root, agent["id"])
+    vault = root / "vault"
+    vault.mkdir()
+    registry.configure(None, vault, agent["id"])
     apps = AppAgentManager()
     apps.bind(manager, db, None)
     request = "/wiki maintain Library/a.md\nQuoted material: Library/evil.md"

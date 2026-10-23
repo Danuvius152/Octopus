@@ -5,8 +5,8 @@
 // rule is unit-testable without mounting ChatView.
 
 /**
- * True when a session can't be forked right now: a turn is running / waiting on
- * approval (status !== "idle"), a message is queued, or an AskUserQuestion is
+ * True when a session can't be forked right now: it isn't confirmed idle,
+ * a message is queued, or an AskUserQuestion is
  * open. Mirrors the backend idle-guard in SessionManager.duplicate_session.
  */
 export function isSessionBusy(

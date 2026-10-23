@@ -2,7 +2,7 @@
 
 `SessionManager` was one 4,017-line class with 84 methods carrying at least
 eight separable responsibilities — driving a turn, forking, session lifecycle,
-credential resolution, the held-process pool, questions and approvals, failure
+credential resolution, the held-process pool, questions, failure
 presentation, and event conversion. It is now one file per responsibility
 (docs/plans/polish-2026-09.md §3 A1).
 
@@ -24,7 +24,6 @@ from .base import (
     _REAPER_INTERVAL_SECONDS,
     ActiveRun,
     ForkError,
-    PendingApproval,
     PendingQuestion,
     QueuedPrompt,
     Session,
@@ -82,7 +81,6 @@ __all__ = [
 
     "ActiveRun",
     "ForkError",
-    "PendingApproval",
     "PendingQuestion",
     "QueuedPrompt",
     "Session",

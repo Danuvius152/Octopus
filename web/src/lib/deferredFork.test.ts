@@ -9,9 +9,8 @@ describe("isSessionBusy", () => {
     expect(isSessionBusy("idle", 0, 0)).toBe(false);
   });
 
-  it("is true while a turn is running or waiting on approval", () => {
+  it("is true while a turn is running", () => {
     expect(isSessionBusy("running", 0, 0)).toBe(true);
-    expect(isSessionBusy("waiting_approval", 0, 0)).toBe(true);
   });
 
   it("is true when messages are still queued (fork waits for full drain)", () => {

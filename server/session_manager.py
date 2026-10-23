@@ -18,7 +18,6 @@ from .sessions import (
     _REAPER_INTERVAL_SECONDS,
     ActiveRun,
     ForkError,
-    PendingApproval,
     PendingQuestion,
     QueuedPrompt,
     Session,
@@ -42,7 +41,6 @@ __all__ = [
 
     "ActiveRun",
     "ForkError",
-    "PendingApproval",
     "PendingQuestion",
     "QueuedPrompt",
     "Session",

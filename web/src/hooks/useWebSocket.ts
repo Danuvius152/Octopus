@@ -41,8 +41,7 @@ const getState = () => useSessionStore.getState();
  * subsequently-broadcast event with `seq <= baseline` is already in
  * the snapshot and must be dropped to avoid double-rendering.
  *
- * Events without `seq` (status / queued / dequeued /
- * tool_approval_request) are ephemeral and always applied.
+ * Events without `seq` (such as status) are ephemeral and always applied.
  *
  * Exported only so the unit tests can exercise the guard directly;
  * call sites (handleWsMessage) consume it internally.
@@ -202,16 +201,6 @@ export function handleWsMessage(data: Record<string, unknown>) {
         content: data.output as string,
         tool_use_id: data.tool_use_id as string,
         is_error: data.is_error as boolean,
-      });
-      break;
-
-    case "tool_approval_request":
-      addMessage(sessionId, {
-        role: "tool",
-        type: "tool_approval_request",
-        tool_name: data.tool_name as string,
-        tool_input: data.tool_input as Record<string, unknown>,
-        tool_use_id: data.tool_use_id as string,
       });
       break;
 

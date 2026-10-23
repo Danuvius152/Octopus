@@ -45,7 +45,9 @@ async def _process_owned_command(manager: SessionManager, session: Any, data: di
     current = session._run.request
     request_id = current.request_id if current else None
     attempt_id = session._run.question_attempt_id
-    if manager.get_session(sid) is not session or "request_id" not in data or "attempt_id" not in data:
+    if operation not in ("interrupt", "answer_question"):
+        result = {**response, "code": "invalid_command", "message": "Unsupported command"}
+    elif manager.get_session(sid) is not session or "request_id" not in data or "attempt_id" not in data:
         result = stale
     elif operation == "interrupt":
         snapshot = manager.dispatch_snapshot(sid)
@@ -56,7 +58,7 @@ async def _process_owned_command(manager: SessionManager, session: Any, data: di
         else:
             await manager.interrupt(sid)
             result = {**response, "accepted": True}
-    elif operation == "answer_question":
+    else:
         pending = session._questions.get(data.get("question_id")) if isinstance(data.get("question_id"), str) else None
         if pending is not None and pending.state != "pending":
             pending = None
@@ -75,11 +77,6 @@ async def _process_owned_command(manager: SessionManager, session: Any, data: di
             else:
                 ok = await manager._session_owners[id(session)].questions.handle(AnswerQuestion(pending.question_id, answers))
                 result = {**response, "accepted": True} if ok else stale
-    elif operation in {"approve_tool", "deny_tool"}:
-        # Retain receipts and replay/conflict semantics for old clients.
-        result = stale
-    else:
-        result = {**response, "code": "invalid_command", "message": "Unsupported command"}
     session._command_receipts[command_id] = (digest, result)
     while len(session._command_receipts) > 256:
         session._command_receipts.pop(next(iter(session._command_receipts)))

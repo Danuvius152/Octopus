@@ -468,8 +468,6 @@ export function SidebarAgents() {
                     className={`status-dot status-${s.status} inline-block size-[7px] shrink-0 rounded-full ${
                       s.status === "running"
                         ? "bg-success animate-pulse"
-                        : s.status === "waiting_approval"
-                        ? "bg-warn"
                         : "bg-gray-500"
                     }`}
                   />

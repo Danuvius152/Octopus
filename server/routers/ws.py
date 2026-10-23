@@ -129,41 +129,8 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                     except QuotaExceeded as exc:
                         delivery.offer({"type": "error", "session_id": session_id, "message": str(exc)})
 
-            elif msg_type == "approve_tool":
-                session_id = data.get("session_id")
-                tool_use_id = data.get("tool_use_id")
-                session = session_manager.get_session(session_id) if session_id else None
-                if session is not None and session.user_id == user_id and tool_use_id:
-                    ok = await session_manager.approve_tool(session_id, tool_use_id)
-                    if not ok:
-                        delivery.offer(
-                            {
-                                "type": "error",
-                                "session_id": session_id,
-                                "message": "No pending approval found",
-                            }
-                        )
-
-            elif msg_type == "deny_tool":
-                session_id = data.get("session_id")
-                tool_use_id = data.get("tool_use_id")
-                reason = data.get("reason", "")
-                session = session_manager.get_session(session_id) if session_id else None
-                if session is not None and session.user_id == user_id and tool_use_id:
-                    ok = await session_manager.deny_tool(
-                        session_id, tool_use_id, reason
-                    )
-                    if not ok:
-                        delivery.offer(
-                            {
-                                "type": "error",
-                                "session_id": session_id,
-                                "message": "No pending approval found",
-                            }
-                        )
-
             else:
-                logger.debug("Ignoring unknown client message type: %s", msg_type)
+                delivery.offer({"type": "error", "message": "Unsupported client message type"}, session_scoped=False)
 
     except WebSocketDisconnect:
         logger.info("WebSocket client disconnected")

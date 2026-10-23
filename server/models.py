@@ -11,7 +11,6 @@ from .config import settings
 class SessionStatus(str, Enum):
     idle = "idle"
     running = "running"
-    waiting_approval = "waiting_approval"
 
 
 class BackendKind(str, Enum):
@@ -326,15 +325,6 @@ class SessionDetail(SessionInfo):
     # baseline so any subsequently-broadcast event with seq <=
     # next_message_seq-1 is treated as already applied.
     next_message_seq: int = 0
-
-
-# WebSocket protocol messages (client -> server)
-
-class WsToolDecision(BaseModel):
-    type: str  # "approve_tool" or "deny_tool"
-    session_id: str
-    tool_use_id: str
-    reason: str | None = None
 
 
 # Schedules

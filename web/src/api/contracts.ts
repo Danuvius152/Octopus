@@ -5241,7 +5241,7 @@ export interface components {
          * SessionStatus
          * @enum {string}
          */
-        SessionStatus: "idle" | "running" | "waiting_approval";
+        SessionStatus: "idle" | "running";
         /**
          * SessionUpdate
          * @description Fields a live session can be repointed at after creation.

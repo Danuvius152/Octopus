@@ -1,6 +1,6 @@
 import { useSessionStore } from "../stores/sessionStore";
 
-const labels: Record<string, string> = { interrupt: "Stop", answer_question: "Answer", approve_tool: "Allow tool", deny_tool: "Deny tool" };
+const labels: Record<string, string> = { interrupt: "Stop", answer_question: "Answer" };
 
 export function CommandNotices({ sessionId }: { sessionId: string }) {
   const commands = useSessionStore((s) => s.controlCommands);

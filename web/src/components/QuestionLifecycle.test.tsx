@@ -38,10 +38,13 @@ function renderChat() {
   </VirtuosoMockContext.Provider>);
 }
 
-it("keeps legacy approval events readable after history reload without live actions or status", async () => {
-  handleWsMessage({
-    type: "tool_approval_request", session_id: sid, tool_name: "Write", tool_use_id: "legacy-tool",
-    tool_input: { file_path: "/tmp/history.txt", content: "Earlier approval input" },
+it("keeps persisted approval history readable after reload without live actions or status", async () => {
+  applyTranscript(sid, {
+    messages: [{
+      role: "tool", type: "tool_approval_request", seq: 1, tool_name: "Write", tool_use_id: "legacy-tool",
+      tool_input: { file_path: "/tmp/history.txt", content: "Earlier approval input" },
+    }],
+    next_message_seq: 2,
   });
   expect(useSessionStore.getState().sessions[0].status).toBe("running");
   renderChat();
@@ -50,7 +53,7 @@ it("keeps legacy approval events readable after history reload without live acti
   expect(screen.queryByRole("button", { name: "Allow" })).toBeNull();
   expect(screen.queryByRole("button", { name: "Deny" })).toBeNull();
   const history = useSessionStore.getState().messages[sid];
-  act(() => applyTranscript(sid, { messages: history, next_message_seq: 1 }));
+  act(() => applyTranscript(sid, { messages: history, next_message_seq: 2 }));
   expect(await screen.findByText(/Historical tool approval request/)).toBeTruthy();
   expect(screen.getByText(/Earlier approval input/)).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Allow" })).toBeNull();
