@@ -5,7 +5,6 @@ from urllib.parse import quote
 
 import pytest
 
-from server.wiki import raw_blocks
 from server.wiki.contracts import PatchRevision
 from server.wiki.curation import WikiCuration
 from server.wiki.history import WikiHistory
@@ -41,7 +40,8 @@ def organize(store, *, modern=False, **fields):
 
 
 def patch(store, edits, **metadata):
-    document, _, parts = raw_blocks.load(store, "Library/note.md")
+    document = WikiCuration(store).blocks("Library/note.md")
+    parts = document["blocks"]
     changes = []
     for before, after in edits:
         part = next(part for part in parts if before in part["content"])

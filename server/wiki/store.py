@@ -15,13 +15,16 @@ import weakref
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ..service_health import ServiceHealth
 from . import catalog, portable_metadata, search_index, source_bindings, storage, uids
 from . import format as document_format
 from .extract import HTML_BODY_VERSION, SUPPORTED, extract
 from .formats import MARKDOWN_QUERY_CONTRACT, MARKDOWN_SQL
+
+if TYPE_CHECKING:
+    from .raw_blocks import RawCoordinates
 
 
 class WikiError(Exception):
@@ -122,6 +125,9 @@ class WikiStore:
         self._events_released = True
         self._recovery = recovery
         self._schema_ready = False
+        # One immutable raw coordinate map for the last-read revision. No text,
+        # parser tokens, document authority or read coverage survives here.
+        self._raw_coordinates: tuple[str, RawCoordinates] | None = None
         self.root = root.resolve()
         self.state = state
         self.vault_id = vault_id

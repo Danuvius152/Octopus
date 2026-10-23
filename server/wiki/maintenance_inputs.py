@@ -9,7 +9,7 @@ import uuid
 
 from . import job_items, protocols
 
-VERSION = "maintenance-inputs-v7"
+VERSION = "maintenance-inputs-v8"
 PREFIX = "maintenance_input_"
 TABLES = {
     "maintenance_input_state": """CREATE TABLE maintenance_input_state(
@@ -140,26 +140,8 @@ def _mark_docs(selection):
         """
 
 
-def _refresh_jobs(selection):
-    """Run inside the ledger mutation TX; old membership is invalidated first."""
+def _invalidate_jobs(selection):
     return _mark_docs(f"SELECT doc_id FROM maintenance_job_members WHERE job_id IN ({selection})") + f"""
-        DELETE FROM maintenance_job_members WHERE job_id IN ({selection});
-        INSERT OR IGNORE INTO maintenance_job_members
-            SELECT j.id,json_extract(i.value,'$.doc') FROM jobs j,json_each(j.items) i
-            WHERE j.id IN ({selection}) AND json_type(i.value,'$.doc')='text';
-        INSERT OR IGNORE INTO maintenance_job_members
-            SELECT r.job_id,r.item_doc FROM operation_receipts r JOIN jobs j ON j.id=r.job_id
-            WHERE r.job_id IN ({selection}) AND r.item_doc IS NOT NULL;
-        INSERT OR IGNORE INTO maintenance_job_members
-            SELECT r.job_id,r.doc_id FROM operation_receipts r JOIN jobs j ON j.id=r.job_id
-            WHERE r.job_id IN ({selection});
-        INSERT OR IGNORE INTO maintenance_job_members
-            SELECT p.job_id,p.source_doc FROM job_publications p JOIN jobs j ON j.id=p.job_id
-            WHERE p.job_id IN ({selection});
-        INSERT OR IGNORE INTO maintenance_job_members
-            SELECT p.job_id,r.document_id FROM job_publications p
-            JOIN jobs j ON j.id=p.job_id JOIN change_retention r ON r.change_id=p.change_id
-            WHERE p.job_id IN ({selection});
         INSERT INTO maintenance_job_dirty
             SELECT j.id,s.generation FROM jobs j CROSS JOIN maintenance_input_state s
             WHERE j.id IN ({selection})
@@ -168,6 +150,27 @@ def _refresh_jobs(selection):
             (SELECT 1 FROM jobs WHERE id=maintenance_job_items.job_id);
         DELETE FROM maintenance_job_dirty WHERE job_id IN ({selection}) AND NOT EXISTS
             (SELECT 1 FROM jobs WHERE id=maintenance_job_dirty.job_id);
+    """
+
+
+def _refresh_jobs(selection):
+    """Invalidate both sides of real relationship changes, writing only deltas."""
+    members = f"""SELECT j.id AS job_id,json_extract(i.value,'$.doc') AS doc_id
+            FROM jobs j,json_each(j.items) i
+            WHERE j.id IN ({selection}) AND json_type(i.value,'$.doc')='text'
+        UNION SELECT r.job_id,r.item_doc FROM operation_receipts r JOIN jobs j ON j.id=r.job_id
+            WHERE r.job_id IN ({selection}) AND r.item_doc IS NOT NULL
+        UNION SELECT r.job_id,r.doc_id FROM operation_receipts r JOIN jobs j ON j.id=r.job_id
+            WHERE r.job_id IN ({selection})
+        UNION SELECT p.job_id,p.source_doc FROM job_publications p JOIN jobs j ON j.id=p.job_id
+            WHERE p.job_id IN ({selection})
+        UNION SELECT p.job_id,r.document_id FROM job_publications p
+            JOIN jobs j ON j.id=p.job_id JOIN change_retention r ON r.change_id=p.change_id
+            WHERE p.job_id IN ({selection})"""
+    return _invalidate_jobs(selection) + f"""
+        DELETE FROM maintenance_job_members WHERE job_id IN ({selection})
+            AND (job_id,doc_id) NOT IN ({members});
+        INSERT OR IGNORE INTO maintenance_job_members {members};
     """ + _mark_docs(f"SELECT doc_id FROM maintenance_job_members WHERE job_id IN ({selection})")
 
 
@@ -195,13 +198,18 @@ def triggers(with_jobs):
     bump = "UPDATE maintenance_input_state SET generation=generation+1 WHERE singleton=1;"
     writer_check = """SELECT CASE WHEN (SELECT recursive_triggers FROM pragma_recursive_triggers)=0
         THEN RAISE(ABORT,'maintenance inputs require recursive triggers') END;"""
+    member_change = "old.id IS NOT new.id OR " + " IS NOT ".join(
+        f"(SELECT json_group_array(json_extract(value,'$.doc')) FROM json_each({side}.items))"
+        for side in ("old", "new"))
 
-    def add(table, action, body, *, before=False, columns=()):
+    def add(table, action, body, *, before=False, columns=(), condition=None):
         name = PREFIX + table + "_" + action.lower() + ("_check" if before else "")
         # REPLACE deletes conflicting rows before the final INSERT/UPDATE.
         # With recursive triggers disabled, those implicit deletes are invisible.
         # ABORT also rolls them back when a direct writer violates this protocol.
-        changed = " WHEN " + " OR ".join(f"old.{column} IS NOT new.{column}" for column in columns) if action == "UPDATE" and columns else ""
+        changes = " OR ".join(f"old.{column} IS NOT new.{column}" for column in columns) if action == "UPDATE" else ""
+        predicate = " AND ".join(f"({part})" for part in (changes, condition) if part)
+        changed = " WHEN " + predicate if predicate else ""
         result[name] = f"CREATE TRIGGER {name} {'BEFORE' if before else 'AFTER'} {action} ON {table}{changed} BEGIN {writer_check}{body} END"
 
     for action in ("INSERT", "UPDATE", "DELETE"):
@@ -252,7 +260,15 @@ def triggers(with_jobs):
             if action != "DELETE":
                 add("jobs", action, _input_check("new.items"), before=True)
             jobs = " UNION ".join(f"SELECT {side}.id" for side in sides)
-            add("jobs", action, bump + _refresh_jobs(jobs))
+            add("jobs", action, bump + (_invalidate_jobs(jobs) if action == "UPDATE" else _refresh_jobs(jobs)),
+                columns=("id", "payload", "status", "items", "error", "session_id"),
+                condition=f"NOT ({member_change})" if action == "UPDATE" else None)
+    if with_jobs:
+        # Progress changes item state, not its document relationships. Keep the
+        # ordinary invalidation/version path; traverse relation sources only
+        # when the item identities actually change. Both triggers share the TX.
+        name = PREFIX + "jobs_update_members"
+        result[name] = f"CREATE TRIGGER {name} AFTER UPDATE ON jobs WHEN {member_change} BEGIN {writer_check}{bump}" + _refresh_jobs("SELECT old.id UNION SELECT new.id") + " END"
     return result
 
 

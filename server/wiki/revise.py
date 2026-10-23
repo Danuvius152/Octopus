@@ -30,7 +30,7 @@ def revise(curation, body, actor, task):
 
     store = curation.store
     with curation.history.locked():
-        document, text, parts = raw_blocks.load(store, body.doc, body.expected_revision)
+        document, text = raw_blocks.snapshot(store, body.doc, body.expected_revision)
         path = document["path"]
         require_markdown_maintenance(path)
         tasks.require_path(task, store, path)
@@ -60,6 +60,9 @@ def revise(curation, body, actor, task):
                 refs[matched[0]]["revision"] = check.revision
                 refs[matched[0]]["location"] = check.location
         else:
+            current = raw_blocks.coordinates(store, document, text)
+            document["raw_body_start"] = current.body_start
+            parts = [raw_blocks.project(document, text, part) for part in current.blocks]
             by_locator = {part["locator"]: part for part in parts}
             intervals = []
             corrected_ranges: dict[str, list[tuple[int, int]]] = {}

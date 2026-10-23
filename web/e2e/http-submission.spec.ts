@@ -4,7 +4,8 @@ const API = "http://localhost:8765/api";
 const headers = { Authorization: "Bearer changeme" };
 
 for (const noCrypto of [false, true]) {
-  test(`submits over insecure HTTP${noCrypto ? " without Web Crypto" : ""} and keeps the rejected draft`, async ({ page, request }) => {
+  test(noCrypto ? "keeps the draft without submitting when Web Crypto is unavailable"
+    : "submits over insecure HTTP and keeps the rejected draft", async ({ page, request }) => {
     const origin = "http://192.0.2.10:5174";
     // Serve the actual application at an insecure, non-loopback origin. All
     // network traffic stays on the isolated Playwright servers.
@@ -41,10 +42,15 @@ for (const noCrypto of [false, true]) {
       const input = page.locator(".chat-input-bar textarea");
       await input.fill("keep my HTTP draft");
       await page.getByRole("button", { name: "Send message" }).click();
-      await expect(page.getByRole("alert")).toContainText("Session not found");
-      expect(submissions).toHaveLength(1);
-      expect(submissions[0].client_request_id).toEqual(expect.any(String));
-      await page.getByRole("button", { name: "Restore draft" }).click();
+      if (noCrypto) {
+        await expect(page.getByRole("alert")).toContainText("Secure randomness is unavailable");
+        expect(submissions).toHaveLength(0);
+      } else {
+        await expect(page.getByRole("alert")).toContainText("Session not found");
+        expect(submissions).toHaveLength(1);
+        expect(submissions[0].client_request_id).toEqual(expect.any(String));
+        await page.getByRole("button", { name: "Restore draft" }).click();
+      }
       await expect(input).toHaveValue("keep my HTTP draft");
       await expect(page.locator(".agent-list-header")).toBeVisible();
     } finally {

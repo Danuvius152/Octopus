@@ -1,5 +1,6 @@
 """Version-bound UTF-8 source coordinates, distinct from extracted offsets."""
 
+from dataclasses import dataclass
 from pathlib import Path
 
 from . import format
@@ -7,26 +8,57 @@ from .extract import blocks
 from .store import WikiError, revision
 
 
-def load(store, doc, expected_revision=None):
-    document = store.read(doc, length=1, expected_revision=expected_revision)
+@dataclass(frozen=True)
+class RawBlock:
+    index: int
+    start: int
+    end: int
+    digest: str
+    title: str
+    role: str
+
+
+@dataclass(frozen=True)
+class RawCoordinates:
+    body_start: int
+    blocks: tuple[RawBlock, ...]
+
+
+def snapshot(store, doc, expected_revision=None):
+    document, raw = store.read_snapshot(doc, length=1, expected_revision=expected_revision)
     if Path(document["path"]).suffix.lower() not in {".md", ".markdown", ".txt"}:
         raise WikiError("Raw block editing supports UTF-8 Markdown/text, not extracted HTML", 422)
-    raw = store.path(document["path"]).read_bytes()
-    if revision(raw) != document["revision"]:
-        raise WikiError("Document changed; read current raw blocks", 409)
     try:
         text = raw.decode("utf-8")
     except UnicodeError as exc:
         raise WikiError("Original encoding requires review", 422) from exc
+    return document, text
+
+
+def coordinates(store, document, text):
+    cached = store._raw_coordinates
+    if cached is not None and cached[0] == document["revision"]:
+        return cached[1]
     parsed = format.parse(text)
-    document["raw_body_start"] = parsed.body_start
+    sections = iter(parsed.sections)
+    section = next(sections, None)
     result, offset = [], 0
     for index, part in enumerate(blocks(text)):
-        digest = revision(part.encode())
-        section = next((section for section in parsed.sections if section["start"] <= offset < section["end"]), {})
-        result.append({"id": str(index), "locator": f"{document['id']}:{document['revision']}:{index}:{digest}", "content": part, "sha256": digest, "start": offset, "end": offset + len(part), "characters": len(part), "title": section.get("title", ""), "role": "metadata" if offset < parsed.body_start else section.get("role", "body")})
+        while section is not None and section["end"] <= offset:
+            section = next(sections, None)
+        selected = section if section is not None and section["start"] <= offset else {}
+        result.append(RawBlock(index, offset, offset + len(part), revision(part.encode()),
+                               selected.get("title", ""), "metadata" if offset < parsed.body_start else selected.get("role", "body")))
         offset += len(part)
-    return document, text, result
+    current = RawCoordinates(parsed.body_start, tuple(result))
+    store._raw_coordinates = document["revision"], current
+    return current
+
+
+def project(document, text, part):
+    return {"id": str(part.index), "locator": f"{document['id']}:{document['revision']}:{part.index}:{part.digest}",
+            "content": text[part.start:part.end], "sha256": part.digest, "start": part.start, "end": part.end,
+            "characters": part.end - part.start, "title": part.title, "role": part.role}
 
 
 def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget_chars=None, offset=0, limit=None, start=None, task=None):
@@ -37,14 +69,15 @@ def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget
     if start is not None and (start < 0 or view != "full"):
         raise WikiError("Raw start requires a nonnegative full-content position", 422)
     with curation.history.locked():
-        document, text, parts = load(curation.store, doc, expected_revision)
+        document, text = snapshot(curation.store, doc, expected_revision)
+        parts = coordinates(curation.store, document, text).blocks
         if ids is not None:
             requested = set(ids)
-            if requested - {part["id"] for part in parts}:
+            if requested - {str(part.index) for part in parts}:
                 raise WikiError("Raw block not found in current revision", 404)
-            parts = [part for part in parts if part["id"] in requested]
+            parts = tuple(part for part in parts if str(part.index) in requested)
         count = len(parts)
-        selected = parts[offset:offset + limit] if limit is not None else parts[offset:]
+        selected = [project(document, text, part) for part in (parts[offset:offset + limit] if limit is not None else parts[offset:])]
         if task is not None or start is not None:
             from .model_response import fit_prefix, presentation
 
