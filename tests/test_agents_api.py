@@ -66,9 +66,8 @@ async def test_default_agent_present(client):
     assert system[0]["name"] == "Octo"
     # Default built-in MCP set: ask (user questions) + bg (cross-turn
     # shell) + ask_agent (delegate to another agent —
-    # agent-collaboration.md §5.1). ask_agent landed alongside the
-    # collaboration feature; the migration backfills it into any
-    # pre-existing agent rows too.
+    # agent-collaboration.md §5.1). These are creation defaults; saved
+    # agent configurations remain under the user's control.
     assert system[0]["mcp_servers"] == ["ask", "bg", "ask_agent", "research", "schedule"]
 
 

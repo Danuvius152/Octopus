@@ -45,7 +45,6 @@ class TestLedger:
         }
         assert expected <= versions
         assert "index:idx_sessions_forked_from" in versions
-        assert "backfill:builtin_mcp_servers_v3" in versions
 
     async def test_a_fresh_database_stamps_without_altering(self, db):
         """On a fresh DB every column already exists (CREATE TABLE made them),

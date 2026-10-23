@@ -179,7 +179,7 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
 
 - **Agent-initiated**: a new built-in MCP server `mcp__research__deep_research
   (question)` added to the default per-agent MCP set (alongside ask/bg/
-  ask_agent; migration backfills existing agents). It's a thin HTTP shim to a
+  ask_agent; defaults apply only when creating an agent). It's a thin HTTP shim to a
   `/api/sessions/{sid}/research` route, same env-injection pattern as bg/
   ask_agent. Returns immediately with `research_id`; the model's turn ends
   cleanly (no hang). This keeps invocation model-agnostic — the agent just

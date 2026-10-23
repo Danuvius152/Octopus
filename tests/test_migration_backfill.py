@@ -95,10 +95,7 @@ async def test_backfill_from_old_schema(tmp_path):
         assert len(system) == 1
         default = system[0]
         assert default["name"] == "Octo"
-        # The built-in backfill (agent-collaboration.md §5.1 ask_agent;
-        # native-deep-research.md §7 research; schedule-tool.md §4 schedule)
-        # runs alongside the other
-        # migrations and appends to every existing agent's mcp_servers list.
+        # A newly created agent receives the current creation defaults.
         assert default["mcp_servers"] == [
             "ask",
             "bg",

@@ -138,10 +138,9 @@ an agent.
 
 `schedule` joins `ask`, `bg`, `ask_agent` and `research` in the default
 per-agent MCP set, in the `CREATE TABLE` default for new databases, in the
-UI's `BUILTIN_MCP` list for newly created agents, and in the startup
-backfill that adds new built-ins to agents that already exist. A capability
-every agent should have is not a per-agent setting anyone should have to
-find.
+UI's `BUILTIN_MCP` list for newly created agents. Existing agents keep their
+saved tool choices across startup and upgrades; users enable additional tools
+explicitly in their agent configuration.
 
 ## 8. Tests
 

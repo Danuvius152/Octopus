@@ -698,17 +698,6 @@ class DatabaseBase:
         )
         await self._stamp("index:idx_sessions_forked_from")
 
-        # Backfill default built-in MCP servers into every existing agent as new
-        # ones land (`ask_agent` — agent-collaboration.md §5.1; `research` —
-        # native-deep-research.md §7; `schedule` — schedule-tool.md §4). The
-        # CREATE TABLE default only reaches brand-new rows on fresh databases;
-        # pre-existing rows already hold a value and need this catch-up.
-        # Set-membership makes re-running a no-op.
-        await self._backfill_builtin_mcp_servers(
-            ("ask_agent", "research", "schedule")
-        )
-        await self._stamp("backfill:builtin_mcp_servers_v3")
-
         # The Telegram bridge was removed (2026-09-25). Octopus is usable from a
         # phone browser directly, which is what the bridge existed to provide;
         # the "an agent can be @-mentioned on a platform that has bots" idea
@@ -819,29 +808,6 @@ class DatabaseBase:
                 """
             )
             await self._stamp(f"backfill:{table}_pin_order")
-
-    async def _backfill_builtin_mcp_servers(self, names: tuple[str, ...]) -> None:
-        cursor = await self.conn.execute("SELECT id, mcp_servers FROM agents")
-        rows = list(await cursor.fetchall())
-        for agent_id, raw in rows:
-            try:
-                current = json.loads(raw) if raw else []
-            except json.JSONDecodeError:
-                # A corrupted blob is left alone — manual rescue from
-                # SQLite is safer than guessing what the user meant.
-                continue
-            if not isinstance(current, list):
-                continue
-            added = False
-            for name in names:
-                if name not in current:
-                    current.append(name)
-                    added = True
-            if added:
-                await self.conn.execute(
-                    "UPDATE agents SET mcp_servers = ? WHERE id = ?",
-                    (json.dumps(current), agent_id),
-                )
 
     async def _migrate_schedule_recurrence(self) -> None:
         """Schedules gained cron/timezone/recurrence_label and `interval_seconds`
@@ -988,22 +954,6 @@ class DatabaseBase:
             )
         else:
             default_id = row[0]
-            # One-time rename of the auto-created system agent from its old
-            # 'Default' name to 'Octo'. Guarded on the exact old name so a
-            # user-renamed system agent is left alone; try/except so it no-ops
-            # if an agent named 'Octo' already exists (unique-name index).
-            try:
-                await self.conn.execute(
-                    "UPDATE agents SET name = 'Octo' "
-                    "WHERE id = ? AND name = 'Default'",
-                    (default_id,),
-                )
-            except sqlite3.IntegrityError:
-                # An agent already holds the name 'Octo' (unique-name index).
-                # Leave the system agent's old name rather than fail the boot.
-                logger.info(
-                    "system agent kept its old name: 'Octo' is already taken"
-                )
 
         # 3. Backfill sessions → Default Agent. (origin defaults to 'user'.)
         await self.conn.execute(

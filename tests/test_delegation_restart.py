@@ -120,6 +120,9 @@ async def test_malformed_future_snapshot_is_rejected_without_starting_work(runti
     )
     await asyncio.wait_for(starts.get(), 5)
     await wait_finished(current.manager, rec)
+    # Completion can still be recording its relay receipt. Corrupt a settled
+    # snapshot, rather than racing a legitimate compare-and-set writer.
+    await current.delegations.confirm_recording()
     before = await current.database.load_delegation_state(
         rec.delegation_id, parent_session_id=current.parent_id, user_id=None,
     )
