@@ -11,6 +11,7 @@ import {
 import { join, dirname } from "path";
 import { tmpdir } from "os";
 import { fileURLToPath } from "url";
+import { systemAgentId } from "./system-agent";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -263,7 +264,7 @@ test.describe("Handoff & Pull CLI @llm", () => {
         Authorization: `Bearer ${TOKEN}`,
         "Content-Type": "application/json",
       },
-      data: { name: "Pull No Claude ID" },
+      data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${TOKEN}` }), name: "Pull No Claude ID" },
     });
     expect(createRes.ok()).toBeTruthy();
     const created = await createRes.json();
@@ -476,7 +477,7 @@ test.describe("Handoff & Pull CLI @llm", () => {
           Authorization: `Bearer ${TOKEN}`,
           "Content-Type": "application/json",
         },
-        data: { name },
+        data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${TOKEN}` }), name },
       });
       const created = await createRes.json();
       createdIds.push(created.id);

@@ -2020,9 +2020,7 @@ export interface paths {
         put?: never;
         /**
          * Create Schedule
-         * @description Create a schedule. Prefer `agent_id`; `session_id` is accepted for one
-         *     release and resolved to the session's owning agent (agent-refactor.md
-         *     §5.4).
+         * @description Create for an explicit agent, with an optional execution target.
          */
         post: operations["create_schedule_api_schedules_post"];
         delete?: never;
@@ -3788,6 +3786,29 @@ export interface components {
             /** Expires At Epoch */
             expires_at_epoch: number;
         };
+        /** CreateAgentScheduleRequest */
+        CreateAgentScheduleRequest: {
+            /** Wiki Mode */
+            wiki_mode?: ("auto" | "read" | "maintain" | "off") | null;
+            /** Name */
+            name: string;
+            /** Prompt */
+            prompt: string;
+            /** Interval Seconds */
+            interval_seconds: number;
+            /** Session Id */
+            session_id?: string | null;
+        };
+        /** CreateAgentSessionRequest */
+        CreateAgentSessionRequest: {
+            /** Name */
+            name?: string | null;
+            /** Working Dir */
+            working_dir?: string | null;
+            /** Credential Id */
+            credential_id?: string | null;
+            backend?: components["schemas"]["BackendKind"] | null;
+        };
         /** CreateCredentialRequest */
         CreateCredentialRequest: {
             backend: components["schemas"]["BackendKind"];
@@ -3832,10 +3853,10 @@ export interface components {
             prompt: string;
             /** Interval Seconds */
             interval_seconds: number;
-            /** Agent Id */
-            agent_id?: string | null;
             /** Session Id */
             session_id?: string | null;
+            /** Agent Id */
+            agent_id: string;
         };
         /** CreateSessionRequest */
         CreateSessionRequest: {
@@ -3845,9 +3866,9 @@ export interface components {
             working_dir?: string | null;
             /** Credential Id */
             credential_id?: string | null;
-            /** Agent Id */
-            agent_id?: string | null;
             backend?: components["schemas"]["BackendKind"] | null;
+            /** Agent Id */
+            agent_id: string;
         };
         /**
          * CreationRequest
@@ -6089,7 +6110,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateSessionRequest"];
+                "application/json": components["schemas"]["CreateAgentSessionRequest"];
             };
         };
         responses: {
@@ -6159,7 +6180,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["CreateScheduleRequest"];
+                "application/json": components["schemas"]["CreateAgentScheduleRequest"];
             };
         };
         responses: {

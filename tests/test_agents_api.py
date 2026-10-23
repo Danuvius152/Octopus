@@ -626,17 +626,6 @@ async def test_create_session_under_agent_inherits_agent_id(client):
 
 
 @pytest.mark.asyncio
-async def test_session_create_defaults_to_default_agent(client):
-    """POST /api/sessions without agent_id falls back to the Default Agent
-    (one-release compat)."""
-    resp = await client.post("/api/sessions", json={"name": "x"}, headers=HEADERS)
-    assert resp.status_code == 201
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
-    default = next(a for a in agents if a["is_system"])
-    assert resp.json()["agent_id"] == default["id"]
-
-
-@pytest.mark.asyncio
 async def test_session_create_unknown_agent_404(client):
     """404, not the 400 this used to answer.
 

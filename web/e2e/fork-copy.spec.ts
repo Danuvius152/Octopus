@@ -2,6 +2,7 @@ import { test, expect, type Page, type APIRequestContext } from "@playwright/tes
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
+import { systemAgentId } from "./system-agent";
 
 // Pure-UI e2e for the /fork copy-dir duplicate (session-fork.md). No real
 // LLM turn: we import a parent session pointing at a SMALL temp working dir,
@@ -144,7 +145,7 @@ async function createSessionWithDir(
 ): Promise<{ id: string }> {
   const res = await request.post(`${API}/sessions`, {
     headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-    data: { name, working_dir: workingDir },
+    data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name, working_dir: workingDir },
   });
   expect(res.ok()).toBeTruthy();
   return res.json();

@@ -348,7 +348,9 @@ async def test_agent_reasoning_update_validates_inherited_session_model(client):
 
 @pytest.mark.asyncio
 async def test_invocation_rejects_unavailable_inherited_speed_before_spawning(client, monkeypatch):
-    response = await client.post("/api/sessions", headers=HEADERS, json={"backend": "codex"})
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
+    response = await client.post("/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "backend": "codex"})
     session = session_manager.get_session(response.json()["id"])
     assert (await client.patch(
         f"/api/sessions/{session.id}", headers=HEADERS, json={"model": "model-b"},
@@ -371,7 +373,9 @@ async def test_invocation_rejects_unavailable_inherited_speed_before_spawning(cl
 
 @pytest.mark.asyncio
 async def test_speed_survives_archive_replacement_restore_and_fork(client):
-    response = await client.post("/api/sessions", headers=HEADERS, json={"backend": "codex"})
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
+    response = await client.post("/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "backend": "codex"})
     sid = response.json()["id"]
     assert (await client.patch(f"/api/sessions/{sid}", headers=HEADERS, json={"service_tier": "fast"})).status_code == 200
     old = session_manager.get_session(sid)

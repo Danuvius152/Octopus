@@ -1,4 +1,5 @@
 import { expect, test, type Page, type WebSocketRoute } from "@playwright/test";
+import { systemAgentId } from "./system-agent";
 
 /** Deterministic HTTP/WS boundary script. Queue execution is covered by the
  * real driver in test_session_dispatch.py; this checks the browser contract
@@ -124,7 +125,7 @@ test("real idle Stop and Resume synchronize dispatch pause across browser client
   const api = "http://localhost:8765/api";
   const headers = { Authorization: "Bearer changeme" };
   const created = await request.post(`${api}/sessions`, {
-    headers, data: { name: `Idle remote dispatch ${Date.now()}`, working_dir: "/tmp", backend: "codex" },
+    headers, data: { agent_id: await systemAgentId(request, `${api}/sessions`, headers), name: `Idle remote dispatch ${Date.now()}`, working_dir: "/tmp", backend: "codex" },
   });
   expect(created.ok()).toBeTruthy();
   const session = await created.json();

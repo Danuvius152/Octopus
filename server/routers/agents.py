@@ -13,8 +13,8 @@ from ..models import (
     AgentCreate,
     AgentRead,
     AgentUpdate,
-    CreateScheduleRequest,
-    CreateSessionRequest,
+    CreateAgentScheduleRequest,
+    CreateAgentSessionRequest,
     PinOrderRequest,
     ScheduleFromTextRequest,
     ScheduleInfo,
@@ -298,7 +298,7 @@ async def list_agent_sessions(session_manager: SessionMgr, agent_id: str, user_i
 )
 async def create_agent_session(
     session_manager: SessionMgr,
-    agent_id: str, req: CreateSessionRequest, user_id: ScopeUser = None, _: str = Depends(verify_token)
+    agent_id: str, req: CreateAgentSessionRequest, user_id: ScopeUser = None, _: str = Depends(verify_token)
 ):
     """Preferred path to start a session — the agent comes from the URL, so
     the body's `agent_id` (if any) is ignored."""
@@ -349,7 +349,7 @@ async def list_agent_schedules(agent_id: str, user_id: ScopeUser = None, _: str 
 async def create_agent_schedule(
     request: Request,
     session_manager: SessionMgr,
-    agent_id: str, req: CreateScheduleRequest, user_id: ScopeUser = None, _: str = Depends(verify_token)
+    agent_id: str, req: CreateAgentScheduleRequest, user_id: ScopeUser = None, _: str = Depends(verify_token)
 ):
     from ..knowledge import derive
     from .schedules import (

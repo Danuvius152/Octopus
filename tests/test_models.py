@@ -8,19 +8,20 @@ from server.models import (
 
 
 def test_create_session_request_defaults():
-    req = CreateSessionRequest()
+    req = CreateSessionRequest(agent_id="owner")
     # name now defaults to None — the route resolves a generated label from
-    # the owning agent (agent-refactor.md §5.2). agent_id is optional on the
-    # wire (Default-Agent fallback) for one release.
+    # the owning agent (agent-refactor.md §5.2).
     assert req.name is None
     assert req.working_dir is None
-    assert req.agent_id is None
+    assert req.backend is None
+    assert req.agent_id == "owner"
 
 
 def test_create_session_request_custom():
-    req = CreateSessionRequest(name="My Session", working_dir="/tmp")
+    req = CreateSessionRequest(agent_id="owner", name="My Session", working_dir="/tmp")
     assert req.name == "My Session"
     assert req.working_dir == "/tmp"
+    assert req.agent_id == "owner"
 
 
 def test_session_info():

@@ -70,8 +70,10 @@ async def test_a_short_transcript_arrives_whole(client):
 
 @pytest.mark.asyncio
 async def test_an_empty_transcript_has_no_cursor(client):
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     resp = await client.post(
-        "/api/sessions", json={"name": "Empty"}, headers=HEADERS
+        "/api/sessions", json={"agent_id": agent["id"], "name": "Empty"}, headers=HEADERS
     )
     sid = resp.json()["id"]
     data = (await client.get(f"/api/sessions/{sid}", headers=HEADERS)).json()

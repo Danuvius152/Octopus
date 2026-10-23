@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { systemAgentId } from "./system-agent";
 
 const TOKEN = "changeme";
 const API = "http://localhost:8765/api/sessions";
@@ -263,7 +264,7 @@ test.describe("Touch affordances", () => {
     for (const name of ["Touch Chosen", "Touch Other"]) {
       const created = await request.post(API, {
         headers,
-        data: { name, working_dir: "/tmp" },
+        data: { agent_id: await systemAgentId(request, API, headers), name, working_dir: "/tmp" },
       });
       expect(created.ok()).toBeTruthy();
     }
@@ -356,7 +357,7 @@ test.describe("Responsive Layout", () => {
         Authorization: `Bearer ${TOKEN}`,
         "Content-Type": "application/json",
       },
-      data: { name: "Mobile Drawer", working_dir: "/tmp" },
+      data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${TOKEN}` }), name: "Mobile Drawer", working_dir: "/tmp" },
     });
     expect(created.ok()).toBeTruthy();
 
@@ -394,7 +395,7 @@ test.describe("Responsive Layout", () => {
         Authorization: `Bearer ${TOKEN}`,
         "Content-Type": "application/json",
       },
-      data: { name: "Mobile Viewport", working_dir: "/tmp" },
+      data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${TOKEN}` }), name: "Mobile Viewport", working_dir: "/tmp" },
     });
     expect(created.ok()).toBeTruthy();
 

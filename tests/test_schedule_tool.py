@@ -47,7 +47,9 @@ async def client():
 
 
 async def _session(client) -> str:
-    resp = await client.post("/api/sessions", json={"name": "s"}, headers=HEADERS)
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
+    resp = await client.post("/api/sessions", json={"agent_id": agent["id"], "name": "s"}, headers=HEADERS)
     assert resp.status_code == 201
     return resp.json()["id"]
 

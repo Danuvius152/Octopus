@@ -319,23 +319,12 @@ async def create_schedule(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    """Create a schedule. Prefer `agent_id`; `session_id` is accepted for one
-    release and resolved to the session's owning agent (agent-refactor.md
-    §5.4)."""
+    """Create for an explicit agent, with an optional execution target."""
     edit, human = schedule_edit(request, session_manager, req.prompt, user_id=user_id,
                             selected=req.wiki_mode, session_id=req.session_id)
     context = derive(edit, req.prompt, selected=req.wiki_mode).execution
 
     agent_id = req.agent_id
-    if agent_id is None and req.session_id:
-        session = session_manager.get_session(req.session_id, user_id)
-        if session is None:
-            raise HTTPException(status_code=404, detail="Session not found")
-        agent_id = session.agent_id
-    if not agent_id:
-        raise HTTPException(
-            status_code=400, detail="agent_id (or legacy session_id) is required"
-        )
     if await session_manager.db.get_agent(agent_id, user_id) is None:
         raise HTTPException(status_code=404, detail="Agent not found")
 

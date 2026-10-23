@@ -35,8 +35,10 @@ async def client():
 
 
 async def _create_session(client):
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     resp = await client.post(
-        "/api/sessions", json={"name": "test"}, headers=HEADERS
+        "/api/sessions", json={"agent_id": agent["id"], "name": "test"}, headers=HEADERS
     )
     assert resp.status_code == 201
     return resp.json()["id"]
@@ -52,9 +54,12 @@ async def test_list_schedules_empty(client):
 @pytest.mark.asyncio
 async def test_create_schedule(client):
     session_id = await _create_session(client)
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     resp = await client.post(
         "/api/schedules",
         json={
+            "agent_id": agent["id"],
             "session_id": session_id,
             "name": "daily check",
             "prompt": "check status",
@@ -68,8 +73,7 @@ async def test_create_schedule(client):
     assert data["prompt"] == "check status"
     assert data["interval_seconds"] == 60
     assert data["enabled"] is True
-    # Schedules are agent-scoped now: the legacy session_id resolved to the
-    # session's owning agent (agent-refactor.md §5.4).
+    # The explicit owner must match the target session's owning agent.
     sess = (await client.get(f"/api/sessions/{session_id}", headers=HEADERS)).json()
     assert data["agent_id"] == sess["agent_id"]
     # The originating session is remembered so fires append into it.
@@ -78,9 +82,12 @@ async def test_create_schedule(client):
 
 @pytest.mark.asyncio
 async def test_create_schedule_invalid_session(client):
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     resp = await client.post(
         "/api/schedules",
         json={
+            "agent_id": agent["id"],
             "session_id": "nonexistent",
             "name": "test",
             "prompt": "hello",
@@ -94,9 +101,12 @@ async def test_create_schedule_invalid_session(client):
 @pytest.mark.asyncio
 async def test_create_schedule_interval_too_short(client):
     session_id = await _create_session(client)
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     resp = await client.post(
         "/api/schedules",
         json={
+            "agent_id": agent["id"],
             "session_id": session_id,
             "name": "test",
             "prompt": "hello",
@@ -110,9 +120,12 @@ async def test_create_schedule_interval_too_short(client):
 @pytest.mark.asyncio
 async def test_list_schedules_after_create(client):
     session_id = await _create_session(client)
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     await client.post(
         "/api/schedules",
         json={
+            "agent_id": agent["id"],
             "session_id": session_id,
             "name": "sched1",
             "prompt": "hi",
@@ -130,9 +143,12 @@ async def test_list_schedules_after_create(client):
 @pytest.mark.asyncio
 async def test_update_schedule(client):
     session_id = await _create_session(client)
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create_resp = await client.post(
         "/api/schedules",
         json={
+            "agent_id": agent["id"],
             "session_id": session_id,
             "name": "original",
             "prompt": "hi",
@@ -166,9 +182,12 @@ async def test_update_schedule_not_found(client):
 @pytest.mark.asyncio
 async def test_delete_schedule(client):
     session_id = await _create_session(client)
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create_resp = await client.post(
         "/api/schedules",
         json={
+            "agent_id": agent["id"],
             "session_id": session_id,
             "name": "to_delete",
             "prompt": "hi",

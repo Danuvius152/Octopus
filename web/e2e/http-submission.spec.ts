@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { systemAgentId } from "./system-agent";
 
 const API = "http://localhost:8765/api";
 const headers = { Authorization: "Bearer changeme" };
@@ -23,7 +24,7 @@ for (const noCrypto of [false, true]) {
           client_request_id: data.client_request_id, accepted: false, message: "Session not found" }));
       });
     });
-    const response = await request.post(`${API}/sessions`, { headers, data: { name: `HTTP draft ${noCrypto}`, working_dir: "/tmp" } });
+    const response = await request.post(`${API}/sessions`, { headers, data: { agent_id: await systemAgentId(request, `${API}/sessions`, headers), name: `HTTP draft ${noCrypto}`, working_dir: "/tmp" } });
     expect(response.ok()).toBeTruthy();
     const session = await response.json();
     try {

@@ -25,6 +25,7 @@
  */
 
 import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
+import { systemAgentId } from "./system-agent";
 
 const TOKEN = "changeme";
 const SERVER_URL = "http://localhost:8765";
@@ -151,7 +152,7 @@ test.describe("Agent-to-agent delegation @llm", () => {
         Authorization: `Bearer ${TOKEN}`,
         "Content-Type": "application/json",
       },
-      data: { name: "Delegation E2E", working_dir: "/tmp" },
+      data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Delegation E2E", working_dir: "/tmp" },
     });
     expect(sessRes.ok()).toBeTruthy();
 

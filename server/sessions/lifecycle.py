@@ -498,13 +498,9 @@ class LifecycleMixin(SessionManagerBase):
         # origin but starts with no claude_session_id (fresh conversation).
         new = successor
         if new is None:
-            agent_id = old.agent_id
-            if agent_id is None and self.db:
-                sys_agent = await self.db.get_system_agent()
-                agent_id = sys_agent["id"] if sys_agent else None
             # Replacement belongs to this already registered lifecycle command.
             new = await self._create_session(
-                agent_id=agent_id, name=old.name, working_dir=old.working_dir,
+                agent_id=old.agent_id, name=old.name, working_dir=old.working_dir,
                 credential_id=old.credential_id, origin=old.origin, backend=old.backend,
             )
             new.model, new.reasoning_effort, new.service_tier = old.model, old.reasoning_effort, old.service_tier

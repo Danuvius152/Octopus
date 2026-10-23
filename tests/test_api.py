@@ -60,10 +60,12 @@ async def test_list_sessions_empty(client):
 
 @pytest.mark.asyncio
 async def test_create_session(client):
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     resp = await client.post(
         "/api/sessions",
         headers=HEADERS,
-        json={"name": "Test Session", "working_dir": "/tmp"},
+        json={"agent_id": agent["id"], "name": "Test Session", "working_dir": "/tmp"},
     )
     assert resp.status_code == 201
     data = resp.json()
@@ -76,10 +78,12 @@ async def test_create_session(client):
 @pytest.mark.asyncio
 async def test_get_session(client):
     # Create first
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create_resp = await client.post(
         "/api/sessions",
         headers=HEADERS,
-        json={"name": "Get Me"},
+        json={"agent_id": agent["id"], "name": "Get Me"},
     )
     sid = create_resp.json()["id"]
 
@@ -100,10 +104,12 @@ async def test_get_session_not_found(client):
 
 @pytest.mark.asyncio
 async def test_delete_session(client):
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create_resp = await client.post(
         "/api/sessions",
         headers=HEADERS,
-        json={"name": "Delete Me"},
+        json={"agent_id": agent["id"], "name": "Delete Me"},
     )
     sid = create_resp.json()["id"]
 
@@ -126,10 +132,12 @@ async def test_archive_session(client):
     """POST /api/sessions/{id}/archive returns a fresh SessionInfo with the
     same name/working_dir, the old session disappears from the list,
     and the new id is different."""
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create_resp = await client.post(
         "/api/sessions",
         headers=HEADERS,
-        json={"name": "Archive Me", "working_dir": "/tmp/archived"},
+        json={"agent_id": agent["id"], "name": "Archive Me", "working_dir": "/tmp/archived"},
     )
     old_id = create_resp.json()["id"]
 
@@ -184,8 +192,10 @@ async def test_archive_session_not_found(client):
 
 @pytest.mark.asyncio
 async def test_create_session_defaults_backend_to_claude_code(client):
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     resp = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "Default Backend"}
+        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Default Backend"}
     )
     assert resp.status_code == 201
     assert resp.json()["backend"] == "claude-code"
@@ -193,8 +203,10 @@ async def test_create_session_defaults_backend_to_claude_code(client):
 
 @pytest.mark.asyncio
 async def test_create_session_with_codex_backend(client):
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     resp = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "Cx", "backend": "codex"}
+        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Cx", "backend": "codex"}
     )
     assert resp.status_code == 201
     assert resp.json()["backend"] == "codex"
@@ -218,10 +230,12 @@ async def test_create_session_rejects_credential_backend_mismatch(client):
         secret_encrypted=enc,
         created_at=datetime.now(UTC).isoformat(),
     )
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     resp = await client.post(
         "/api/sessions",
         headers=HEADERS,
-        json={"name": "Bad", "backend": "codex", "credential_id": "c-cc"},
+        json={"agent_id": agent["id"], "name": "Bad", "backend": "codex", "credential_id": "c-cc"},
     )
     assert resp.status_code == 400
 
@@ -248,14 +262,16 @@ async def test_session_info_reports_the_steering_capability(client):
     # An unknown backend must not claim a capability it can't honour.
     assert _can_steer("nonsense-backend") is False
 
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     res = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "Steerable"}
+        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Steerable"}
     )
     assert res.status_code == 201
     assert res.json()["can_steer"] is True
 
     cx = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "Cx", "backend": "codex"}
+        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Cx", "backend": "codex"}
     )
     assert cx.status_code == 201
     assert cx.json()["can_steer"] is False
@@ -289,10 +305,12 @@ async def test_archive_session_without_replacement(client):
     """`?replace=false` — the sidebar's archive button (sidebar-pins.md §6):
     the session is put away, nothing takes its place, and its history can
     still be read and restored. A soft delete, not a restart."""
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create_resp = await client.post(
         "/api/sessions",
         headers=HEADERS,
-        json={"name": "Put Away", "working_dir": "/tmp/put-away"},
+        json={"agent_id": agent["id"], "name": "Put Away", "working_dir": "/tmp/put-away"},
     )
     old_id = create_resp.json()["id"]
     before = {s["id"] for s in (await client.get("/api/sessions", headers=HEADERS)).json()}
@@ -326,7 +344,9 @@ async def test_answer_long_poll_timeout_is_not_recorded_as_an_error(client, monk
 
     events = []
     monkeypatch.setattr(main, "_mon_record", events.append)
-    created = await client.post("/api/sessions", headers=HEADERS, json={"name": "Asker"})
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
+    created = await client.post("/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Asker"})
     sid = created.json()["id"]
     question = await client.post(
         f"/api/sessions/{sid}/questions", headers=HEADERS,

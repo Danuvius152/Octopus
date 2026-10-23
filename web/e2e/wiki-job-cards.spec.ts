@@ -1,4 +1,5 @@
 import { expect, test, type WebSocketRoute } from "@playwright/test";
+import { systemAgentId } from "./system-agent";
 
 const API = "http://localhost:8765/api";
 const headers = { Authorization: "Bearer changeme" };
@@ -6,7 +7,7 @@ const headers = { Authorization: "Bearer changeme" };
 test("Wiki cards persist, cancel their displayed attempt, and catch up after reconnect", async ({ page, context, request }) => {
   test.setTimeout(60_000);
   const created = await request.post(`${API}/sessions`, {
-    headers, data: { name: "Persistent Wiki cards", working_dir: "/tmp" },
+    headers, data: { agent_id: await systemAgentId(request, `${API}/sessions`, headers), name: "Persistent Wiki cards", working_dir: "/tmp" },
   });
   expect(created.ok()).toBeTruthy();
   const session = await created.json();

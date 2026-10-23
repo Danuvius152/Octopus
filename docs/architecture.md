@@ -71,6 +71,13 @@ its MCP/tool set, tool allow/deny policy, and enabled connectors. Agents **own**
 their Sessions and Schedules. A protected **Default Agent**
 ("Octo", `is_system=1`) always exists.
 
+Global session and schedule creation requires an explicit, authorized
+`agent_id`. Agent-scoped URLs supply that identity themselves; their request
+bodies contain the creation values. A schedule's optional `session_id` selects
+an execution target belonging to that agent. MCP schedules take their owner
+from the authenticated current session. CLI handoff/import keeps its account
+scoped selection of the protected agent.
+
 The chat header and `/model` offer independent session overrides for model and
 reasoning effort. Both inherit agent defaults when cleared, apply on the next
 logical turn, and retain the conversation's resume id. Model metadata comes
@@ -387,8 +394,9 @@ POST               /api/auth/rotate                      # rotate the install to
 GET/POST           /api/agents
 GET/PATCH/DELETE   /api/agents/{id}
 POST               /api/agents/{id}/archive
-GET                /api/agents/{id}/sessions
-GET                /api/agents/{id}/schedules
+GET/POST           /api/agents/{id}/sessions
+GET/POST           /api/agents/{id}/schedules
+POST               /api/agents/{id}/schedules/from_text
 GET/POST/.../DELETE/api/agents/{id}/connectors        # per-agent enablement
 
 # Sessions + per-session sub-resources

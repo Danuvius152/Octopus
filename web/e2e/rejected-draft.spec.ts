@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { systemAgentId } from "./system-agent";
 
 const API = "http://localhost:8765/api";
 const headers = { Authorization: "Bearer changeme" };
@@ -15,7 +16,7 @@ test("a rejected draft survives archive and restores its text and attachment to 
         client_request_id: data.client_request_id, accepted: false, message: "This conversation is closed to new messages." }));
     });
   });
-  const firstResponse = await request.post(`${API}/sessions`, { headers, data: { name: "Rejected draft original", working_dir: "/tmp" } });
+  const firstResponse = await request.post(`${API}/sessions`, { headers, data: { agent_id: await systemAgentId(request, `${API}/sessions`, headers), name: "Rejected draft original", working_dir: "/tmp" } });
   expect(firstResponse.ok()).toBeTruthy();
   const first = await firstResponse.json();
   let nextId: string | undefined;
@@ -74,6 +75,7 @@ test("session-owned uploads preserve the complete draft across conversations", a
   const sessions = [];
   for (const suffix of ["A", "B"]) {
     const response = await request.post(`${API}/sessions`, { headers, data: {
+      agent_id: await systemAgentId(request, `${API}/sessions`, headers),
       name: `Attachment ownership ${suffix}`, working_dir: "/tmp", backend: "codex",
     } });
     expect(response.ok()).toBeTruthy();

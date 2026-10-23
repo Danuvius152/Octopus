@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { systemAgentId } from "./system-agent";
 
 const API = "http://localhost:8765/api";
 const headers = { Authorization: "Bearer changeme" };
@@ -23,7 +24,7 @@ for (const width of [1280, 390]) {
         });
       });
       const created = await request.post(`${API}/sessions`, {
-        headers, data: { name: `Shared Wiki Composer ${width}`, working_dir: "/tmp" },
+        headers, data: { agent_id: await systemAgentId(request, `${API}/sessions`, headers), name: `Shared Wiki Composer ${width}`, working_dir: "/tmp" },
       });
       expect(created.ok()).toBeTruthy();
       const session = await created.json();

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
+import { systemAgentId } from "./system-agent";
 
 const TOKEN = "changeme";
 const SERVER_URL = "http://localhost:8765";
@@ -111,7 +112,7 @@ async function createSessionApi(
 ): Promise<{ id: string }> {
   const res = await request.post(`${API}/sessions`, {
     headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-    data: { name, working_dir: "/tmp" },
+    data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name, working_dir: "/tmp" },
   });
   expect(res.ok()).toBeTruthy();
   return res.json();
@@ -922,7 +923,7 @@ test.describe("Session credential picker", () => {
 
     const made = await request.post(`${API}/sessions`, {
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-      data: { name: "Credential Swap", working_dir: "/tmp", credential_id: oldId },
+      data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Credential Swap", working_dir: "/tmp", credential_id: oldId },
     });
     expect(made.ok()).toBeTruthy();
     const sessionId = (await made.json()).id as string;
@@ -1109,6 +1110,7 @@ test.describe("Real CLI end-to-end @llm", () => {
         "Content-Type": "application/json",
       },
       data: {
+        agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }),
         name: "Bad Cred Session",
         working_dir: "/tmp",
         credential_id: credId,
@@ -2121,7 +2123,7 @@ test.describe("Native sub-agents @llm", () => {
           Authorization: `Bearer ${TOKEN}`,
           "Content-Type": "application/json",
         },
-        data: { name: "Subagent E2E", working_dir: wd },
+        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Subagent E2E", working_dir: wd },
       });
       expect(sessRes.ok()).toBeTruthy();
 
@@ -2195,7 +2197,7 @@ test.describe("Cross-turn bg tasks @llm", () => {
           Authorization: `Bearer ${TOKEN}`,
           "Content-Type": "application/json",
         },
-        data: { name: "Bg Run E2E", working_dir: wd },
+        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Bg Run E2E", working_dir: wd },
       });
       expect(sessRes.ok()).toBeTruthy();
 
@@ -2269,7 +2271,7 @@ test.describe("Cross-turn bg tasks @llm", () => {
           Authorization: `Bearer ${TOKEN}`,
           "Content-Type": "application/json",
         },
-        data: { name: "Bg Idle Watchdog", working_dir: wd },
+        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Bg Idle Watchdog", working_dir: wd },
       });
       expect(sessRes.ok()).toBeTruthy();
 
@@ -2370,7 +2372,7 @@ test.describe("Bg-task pipeline hardening @llm", () => {
           Authorization: `Bearer ${TOKEN}`,
           "Content-Type": "application/json",
         },
-        data: { name: "Bg Spill Pipeline", working_dir: wd },
+        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Bg Spill Pipeline", working_dir: wd },
       });
       expect(sessRes.ok()).toBeTruthy();
 
@@ -2450,7 +2452,7 @@ test.describe("File viewer (/showme) @llm", () => {
           Authorization: `Bearer ${TOKEN}`,
           "Content-Type": "application/json",
         },
-        data: { name: "Viewer Showme Test", working_dir: wd },
+        data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Viewer Showme Test", working_dir: wd },
       });
       expect(sessRes.ok()).toBeTruthy();
 

@@ -18,18 +18,17 @@ class BackendKind(str, Enum):
     codex = "codex"
 
 
-class CreateSessionRequest(BaseModel):
+class CreateAgentSessionRequest(BaseModel):
     name: str | None = None
     working_dir: str | None = None
     credential_id: str | None = None
-    # Owning agent. Required by the API (a session is a conversation with an
-    # agent), but left optional on the wire for exactly one release: when
-    # omitted the route falls back to the Default Agent. See
-    # docs/plans/agent-refactor.md §5.4.
-    agent_id: str | None = None
     # Which AI backend drives this session (codex-backend.md §4.1). None =
     # inherit the owning agent's default backend (resolved in the route).
     backend: BackendKind | None = None
+
+
+class CreateSessionRequest(CreateAgentSessionRequest):
+    agent_id: str = Field(min_length=1)
 
 
 class SessionUpdate(BaseModel):
@@ -364,18 +363,18 @@ class ScheduleInfo(BaseModel):
     next_run_at: str | None = None
 
 
-class CreateScheduleRequest(BaseModel):
+class CreateAgentScheduleRequest(BaseModel):
     wiki_mode: Literal["auto", "read", "maintain", "off"] | None = None
 
     name: str
     prompt: str
     interval_seconds: int = Field(ge=60)
-    # Agent-scoped routes (`/api/agents/{id}/schedules`) take the agent from
-    # the path; these are for the standalone `/api/schedules` route. Provide
-    # exactly one — `agent_id` directly, or `session_id` (legacy compat,
-    # resolved to the session's agent for one release).
-    agent_id: str | None = None
+    # Optional execution target; ownership comes from the authorized agent.
     session_id: str | None = None
+
+
+class CreateScheduleRequest(CreateAgentScheduleRequest):
+    agent_id: str = Field(min_length=1)
 
 
 class ScheduleFromTextRequest(BaseModel):

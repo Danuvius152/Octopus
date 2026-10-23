@@ -8,6 +8,7 @@ import {
   E2E_ACCOUNTS_STATE_DIR,
   E2E_ACCOUNTS_WEB_PORT,
 } from "../playwright.config";
+import { systemAgentId } from "./system-agent";
 
 /**
  * A real turn, in an install that has accounts (multi-tenancy.md §5–§7).
@@ -70,13 +71,13 @@ test.describe("A real turn under an account @llm", () => {
 
     const outside = await request.post(`${API}/sessions`, {
       headers: { Authorization: `Bearer ${token}` },
-      data: { name: "Outside", working_dir: "/etc" },
+      data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${token}` }), name: "Outside", working_dir: "/etc" },
     });
     expect(outside.status(), await outside.text()).toBe(400);
 
     const created = await request.post(`${API}/sessions`, {
       headers: { Authorization: `Bearer ${token}` },
-      data: { name: "Account Bg Run", working_dir: wd },
+      data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${token}` }), name: "Account Bg Run", working_dir: wd },
     });
     expect(created.ok(), await created.text()).toBeTruthy();
 

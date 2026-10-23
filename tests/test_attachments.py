@@ -178,8 +178,10 @@ def test_delete_session_attachments_wipes_dir(attachments_root):
 
 @pytest.mark.asyncio
 async def test_upload_and_download_roundtrip(client):
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "U"}
+        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "U"}
     )
     sid = create.json()["id"]
 
@@ -211,8 +213,10 @@ async def test_upload_and_download_roundtrip(client):
 
 @pytest.mark.asyncio
 async def test_upload_requires_auth(client):
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "Auth"}
+        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Auth"}
     )
     sid = create.json()["id"]
     files = {"file": ("x.txt", b"x", "text/plain")}
@@ -231,8 +235,10 @@ async def test_upload_unknown_session_404(client):
 
 @pytest.mark.asyncio
 async def test_download_missing_404(client):
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "M"}
+        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "M"}
     )
     sid = create.json()["id"]
     resp = await client.get(
@@ -243,8 +249,10 @@ async def test_download_missing_404(client):
 
 @pytest.mark.asyncio
 async def test_download_wrong_token_401(client):
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "WT"}
+        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "WT"}
     )
     sid = create.json()["id"]
     files = {"file": ("x.txt", b"x", "text/plain")}
@@ -264,8 +272,10 @@ async def test_download_wrong_token_401(client):
 
 @pytest.mark.asyncio
 async def test_delete_session_cleans_up_attachments(client, attachments_root):
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "Cleanup"}
+        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Cleanup"}
     )
     sid = create.json()["id"]
     files = {"file": ("a.txt", b"hi", "text/plain")}
@@ -293,8 +303,10 @@ async def test_send_message_prepends_attachment_header(
 
     An offline Python child captures the actual input frame.
     """
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "P", "backend": "codex"}
+        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "P", "backend": "codex"}
     )
     sid = create.json()["id"]
     files = {"file": ("notes.txt", b"hello", "text/plain")}
@@ -323,8 +335,10 @@ async def test_send_message_prepends_attachment_header(
 @pytest.mark.asyncio
 async def test_send_message_no_attachments_unchanged(client, runtime_input):
     """No attachments → no `<attachments>` block, prompt is verbatim."""
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "Plain", "backend": "codex"}
+        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Plain", "backend": "codex"}
     )
     sid = create.json()["id"]
 
@@ -338,8 +352,10 @@ async def test_send_message_missing_attachment_id_rejects_complete_input(
     client, attachments_root, runtime_input,
 ):
     """Execution rechecks the files and records a recoverable failure."""
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "Drop", "backend": "codex"}
+        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Drop", "backend": "codex"}
     )
     sid = create.json()["id"]
 
@@ -381,8 +397,10 @@ async def test_user_message_persists_attachments_metadata(
     """After a turn with attachments, the DB row for the user message
     carries the metadata so the chat history can re-render the chips on
     reload."""
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "Persist", "backend": "codex"}
+        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Persist", "backend": "codex"}
     )
     sid = create.json()["id"]
     files = {"file": ("doc.md", b"x", "text/markdown")}
@@ -407,8 +425,10 @@ async def test_user_message_persists_attachments_metadata(
 @pytest.mark.asyncio
 async def test_start_message_caps_attachment_count(client):
     """Too many attachments → ValueError surfacing as a WS error."""
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"name": "Cap"}
+        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Cap"}
     )
     sid = create.json()["id"]
     too_many = [f"id{i}" for i in range(50)]

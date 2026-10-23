@@ -243,23 +243,17 @@ async def create_session(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    # A session is owned by an agent. agent_id is required, but for exactly
-    # one release we fall back to the Default Agent when the client omits it
-    # (agent-refactor.md §5.4).
     agent_id = req.agent_id
-    if agent_id is None:
-        sys_agent = await session_manager.db.get_system_agent(user_id)
-        agent_id = sys_agent["id"] if sys_agent else None
     # Inherit the owning agent's default backend when none is pinned. Scoped,
     # because a session takes its owner from its agent: an agent id belonging to
     # somebody else would otherwise create a session in their account.
-    agent = await session_manager.db.get_agent(agent_id, user_id) if agent_id else None
-    if agent_id is not None and agent is None:
+    agent = await session_manager.db.get_agent(agent_id, user_id)
+    if agent is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
     backend = (
         req.backend.value
         if req.backend is not None
-        else (agent.get("backend") if agent else None) or settings.default_backend
+        else agent.get("backend") or settings.default_backend
     )
     await _check_credential_backend(session_manager, req.credential_id, backend)
     try:

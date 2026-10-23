@@ -51,6 +51,12 @@ async def test_app_cancel_uses_the_original_job_and_rejects_stale_target_without
     assert accepted.json()["id"] == original["id"]
     assert jobs.get(original["id"])["status"] == "cancelled"
     assert jobs.get(other["id"])["status"] == "queued"
+    verified = await client.post(f"/apps/parameters/wiki/jobs/{original['id']}/verify", headers=headers,
+                                 json={"expected_attempt": original["attempt"],
+                                       "expected_vault_id": jobs.registration["vault_id"]})
+    assert verified.status_code == 200, verified.text
+    assert verified.json()["id"] == original["id"]
+    assert verified.json()["settlement_phase"] == "confirmed"
     retried = await client.post(f"/apps/parameters/wiki/jobs/{original['id']}/retry", headers=headers,
                                 json={"expected_vault_id": jobs.registration["vault_id"]})
     assert retried.status_code == 200 and retried.json()["id"] == original["id"], retried.text
