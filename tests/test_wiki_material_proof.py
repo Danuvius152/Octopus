@@ -396,12 +396,13 @@ def test_many_generated_metadata_updates_do_not_grow_a_parallel_source_copy(hist
                                          "curator", "adapt", frontmatter_patch=PROFILE)
     doc = history.store.read("Library/note.md")
     initial = state_for(history.store, doc["id"])
+    current_revision = doc["revision"]
     for count in range(20):
-        current = history.store.read(doc["id"])
-        trace = material_proof.Trace(history.store.path(current["path"]).read_text())
+        trace = material_proof.Trace(history.store.path(doc["path"]).read_text())
         trace.metadata(format.patch(trace.text, tags=[f"iteration-{count}"]))
-        history.write_locked(current["path"], trace.raw, current["revision"], "curator", "metadata",
-                             origin_builder=trace.transition())
+        result = history.write_locked(doc["path"], trace.raw, current_revision, "curator", "metadata",
+                                      origin_builder=trace.transition())
+        current_revision = result["revision"]
     state = state_for(history.store, doc["id"])
     assert len(state["proof"]["pieces"]) == len(initial["proof"]["pieces"])
     assert material_proof.reconstruct(state, doc["id"], history.store.path(doc["path"]).read_bytes()) == raw

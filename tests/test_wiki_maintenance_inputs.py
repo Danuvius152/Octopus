@@ -2,6 +2,7 @@
 
 import json
 import sqlite3
+from itertools import product
 
 import pytest
 
@@ -107,19 +108,29 @@ def test_normalizer_cannot_publish_an_old_map_over_a_new_job_token(prepared):
     assert members(jobs.store, job) == {docs["b"]["id"]}
 
 
-@pytest.mark.parametrize("value,exact", [(True, 1), (1, 0), ("true", 0), (None, 0)])
-@pytest.mark.parametrize("failure,truth", [({}, 0), ({"opaque": "private"}, 1), ([], 0), ("failure", 1)])
-def test_normalization_preserves_exact_true_and_python_failure_truth(prepared, value, exact, failure, truth):
+def test_normalization_preserves_exact_true_and_python_failure_truth(prepared):
     jobs, docs = prepared
-    enqueue(jobs, docs["a"], index_complete=value, recording_failure=failure,
-            index_recovery=failure, output_revision={"bad_type": True}, receipt_id=failure)
+    expected = {}
+    # All sixteen independent row conversions share the same indexed documents.
+    for index, ((value, exact), (failure, truth)) in enumerate(product(
+        [(True, 1), (1, 0), ("true", 0), (None, 0)],
+        [({}, 0), ({"opaque": "private"}, 1), ([], 0), ("failure", 1)],
+    )):
+        job = enqueue(jobs, docs["a"], key=f"truth-{index}", index_complete=value,
+                      recording_failure=failure, index_recovery=failure,
+                      output_revision={"bad_type": True}, receipt_id=failure)
+        expected[job["id"]] = exact, truth
     assert inputs.normalize(jobs.store, [docs["a"]["id"]])
     with jobs.store.connect() as db:
-        row = dict(db.execute("SELECT * FROM maintenance_job_items").fetchone())
-    assert row["index_complete"] == exact
-    assert row["recording_failure"] == row["index_recovery"] == row["receipt_required"] == truth
-    assert row["output_revision_valid"] == 0
-    assert "private" not in json.dumps(row)
+        rows = [dict(row) for row in db.execute("SELECT * FROM maintenance_job_items")]
+    assert len(rows) == len(expected) == 16
+    assert {row["job_id"] for row in rows} == expected.keys()
+    for row in rows:
+        exact, truth = expected[row["job_id"]]
+        assert row["index_complete"] == exact, row
+        assert row["recording_failure"] == row["index_recovery"] == row["receipt_required"] == truth, row
+        assert row["output_revision_valid"] == 0, row
+        assert "private" not in json.dumps(row), row
 
 
 def test_receipt_retarget_invalidates_old_and_new_exact_outputs_without_path_lookup(prepared):

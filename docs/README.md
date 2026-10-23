@@ -63,7 +63,6 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | Plan | Status | What |
 |---|---|---|
 | [Multi-tenancy, second pass: Connectors, Schedules, Harness](plans/multi-tenancy-gaps.md) | in-progress | Proposal: close the gaps a read-only review found where accounts can reach each other's work through the Manage surfaces, and make each class of gap structurally impossible. |
-| [Octopus 最小机制架构：执行计划](plans/minimal-architecture-execution-20261020.md) | in-progress | 现有CLI下修复输入与Wiki缺陷；22/23/24/28/31/42/43整体暂停。 |
 | [Rotating the installation access token](plans/token-rotation.md) | in-progress | Migrating token rotation to the minimal architecture contract; candidate verification and review remain open. |
 | [/fork — duplicate a session onto a copied working directory](plans/session-fork.md) | shipped | Duplicate a session onto an independent full copy of its working directory. |
 | [Agent Collaboration — Tech Plan (agent-to-agent delegation)](plans/agent-collaboration.md) | shipped | Agent-to-agent delegation — the `mcp__ask_agent__*` tools, one hop, replies injected as follow-up turns. Reverses the "no A2A" carve-out in `agent-refactor.md` §40-41. |
@@ -81,6 +80,7 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | [Multi-tenancy (`user-1.0`)](plans/multi-tenancy.md) | shipped | one site, many users: the label becomes a username, the token becomes a password, and every user gets their own directory, rows and keys. |
 | [Native sub-agents, surfaced](plans/native-subagents.md) | shipped | The CLIs' own sub-agents surfaced as one event and one card — including the ones that finish after the turn that started them. |
 | [Octopus on a phone](plans/mobile.md) | shipped | Octopus on a phone — the drawer that puts itself away, 16px fields, touch targets, and safe-area insets. |
+| [Octopus 最小机制架构：执行计划](plans/minimal-architecture-execution-20261020.md) | shipped | 本期39项已交付；七张暂停票的目标、依赖与恢复条件保留在§10。 |
 | [Octopus-native deep research](plans/native-deep-research.md) | shipped | Octopus-orchestrated deep research: scoped fan-out of web-search sub-turns, adversarially verified, then synthesized. |
 | [Polish pass, September 2026](plans/polish-2026-09.md) | shipped | The September 2026 polish pass: size debt, migration safety, the MCP sidecar footprint, gates, docs, and monitoring. All eleven items in §10 landed; the changes and four defects are recorded in docs/2026-09-25-polish-pass.md. |
 | [Scheduled runs: what a fire is, and what stops it stacking](plans/scheduled-runs.md) | shipped | What a scheduled fire is: the overlap guard, the `[scheduled:…]` marker, and the link from "last run" to the run. |

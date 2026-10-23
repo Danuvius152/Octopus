@@ -517,8 +517,7 @@ def test_unresolved_relations_keep_independent_summary_identities(store):
     assert {item["path"] for item in result["items"]} == {"summary-0.md", "summary-1.md"}
 
 
-@pytest.mark.parametrize("intent", INTENTS)
-def test_sources_related_and_independent_concept_synthesis_are_not_merged_or_demoted(store, intent):
+def test_sources_related_and_independent_concept_synthesis_are_not_merged_or_demoted(store):
     represented_pair(store)
     write_note(store, "beta.md", "# Beta\nRealtime uses a calibrated Rig. [[alpha]]\n")
     write_note(
@@ -533,17 +532,18 @@ def test_sources_related_and_independent_concept_synthesis_are_not_merged_or_dem
         "## 相关笔记\n[[alpha]] [[beta]]\n",
     )
     store.refresh()
-    result = store.search("realtime", intent=intent)
-    assert result["total"] == 4
-    assert {item["path"] for item in result["items"]} == {
-        "alpha.md", "beta.md", "comparison.md", "concept.md",
-    }
     lexical = {item["id"]: item for item in store.search("realtime", intent="lookup")["items"]}
-    for hit in result["items"]:
-        assert hit["score"] == lexical[hit["id"]]["score"]
-    if intent == "question":
-        # Independent synthesis/concept evidence retains its ordinary rank.
-        assert result["items"][0]["path"] in {"concept.md", "comparison.md"}
+    for intent in INTENTS:
+        result = store.search("realtime", intent=intent)
+        assert result["total"] == 4, intent
+        assert {item["path"] for item in result["items"]} == {
+            "alpha.md", "beta.md", "comparison.md", "concept.md",
+        }, intent
+        for hit in result["items"]:
+            assert hit["score"] == lexical[hit["id"]]["score"], intent
+        if intent == "question":
+            # Independent synthesis/concept evidence retains its ordinary rank.
+            assert result["items"][0]["path"] in {"concept.md", "comparison.md"}
 
 
 def test_chains_and_cycles_use_direct_groups_without_recursive_closure(store):
