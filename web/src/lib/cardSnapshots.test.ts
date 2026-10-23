@@ -8,12 +8,13 @@ it("retains a newer subagent result across an older detail response", () => {
   const store = useSessionStore.getState();
   const running = { tool_call_id: "call", task_id: "child", status: "running", name: "Worker" } as SubagentRun;
   store.upsertSubagent("s", running);
-  const before = useSessionStore.getState().subagents.s;
+  const before = useSessionStore.getState();
   store.upsertSubagent("s", { ...running, status: "completed", summary: "new answer" });
-  applySessionSnapshot("s", { messages: [], subagents: [running] }, undefined, before);
+  const dispatch = { generation: "cards", revision: 0, paused: false, active_request_id: null, items: [] };
+  applySessionSnapshot("s", { messages: [], subagents: [running], dispatch_state: dispatch }, before);
   expect(useSessionStore.getState().subagents.s.call.summary).toBe("new answer");
-  const nextStart = useSessionStore.getState().subagents.s;
-  applySessionSnapshot("s", { messages: [], subagents: [{ ...running, summary: "new round" }] }, undefined, nextStart);
+  const nextStart = useSessionStore.getState();
+  applySessionSnapshot("s", { messages: [], subagents: [{ ...running, summary: "new round" }], dispatch_state: dispatch }, nextStart);
   expect(useSessionStore.getState().subagents.s.call.status).toBe("running");
 });
 

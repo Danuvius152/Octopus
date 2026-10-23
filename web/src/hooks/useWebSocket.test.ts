@@ -79,7 +79,7 @@ describe("archive replacement settings", () => {
   beforeEach(() => {
     useSessionStore.setState({
       sessions: [old], archivedSessions: [], activeSessionId: old.id,
-      messages: {}, pendingQueue: {}, pendingQuestions: {},
+      messages: {}, dispatchUnavailable: {}, pendingQuestions: {},
     });
   });
 
@@ -123,13 +123,23 @@ describe("archive replacement settings", () => {
 });
 
 it("applies the nested server dispatch frame for an idle Stop and a remote Resume", () => {
-  useSessionStore.setState({ dispatchStates: {}, dispatchGeneration: null, retiredDispatchGenerations: [], pendingQueue: {} });
+  useSessionStore.setState({ dispatchStates: {}, dispatchGeneration: null, retiredDispatchGenerations: [], dispatchUnavailable: {} });
   const paused = { generation: "server-wire", revision: 1, paused: true, active_request_id: null, items: [] };
   handleWsMessage({ type: "dispatch_state", session_id: "idle-stop", dispatch_state: paused });
   expect(useSessionStore.getState().dispatchStates["idle-stop"]).toEqual(paused);
   const resumed = { ...paused, revision: 2, paused: false };
   handleWsMessage({ type: "dispatch_state", session_id: "idle-stop", dispatch_state: resumed });
   expect(useSessionStore.getState().dispatchStates["idle-stop"]).toEqual(resumed);
+});
+
+it("loads the replacement session's actual queue after an archive broadcast", async () => {
+  useSessionStore.setState({ token: "archive-test", activeSessionId: "archived-old", dispatchStates: {}, dispatchUnavailable: {},
+    sessions: [{ id: "archived-old", name: "Archived" } as SessionInfo] });
+  const dispatch = { generation: "archive-service", revision: 0, paused: false, active_request_id: null, items: [] };
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ id: "archive-replacement", messages: [], dispatch_state: dispatch })));
+  handleWsMessage({ type: "session_archived", old_session_id: "archived-old", new_session_id: "archive-replacement" });
+  await vi.waitFor(() => expect(useSessionStore.getState().dispatchStates["archive-replacement"]).toEqual(dispatch));
+  vi.unstubAllGlobals();
 });
 
 it("ignores a superseded socket's close and open after a new bearer connects", () => {
@@ -161,7 +171,7 @@ it("ignores a superseded socket's close and open after a new bearer connects", (
 });
 
 it("uses authoritative queue snapshots and rejects duplicate or older revisions", () => {
-  useSessionStore.setState({ pendingQueue: {} });
+  useSessionStore.setState({ dispatchUnavailable: {} });
   const snapshot = {
     generation: "service-a", revision: 3, paused: true, active_request_id: null,
     items: [{ request_id: "bg-1", source: "bg", summary: "completed command", priority: false }],

@@ -8,6 +8,7 @@ import { applySessionSnapshot } from "../lib/hydrateSession";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 
 const sid = "question-lifecycle";
+const emptyDispatch = { generation: "service-a", revision: 0, paused: false, items: [], active_request_id: null };
 const question = { question: "Proceed?", options: [{ label: "Yes" }, { label: "No" }] };
 const requested = {
   type: "question_request", session_id: sid, seq: 1, question_id: "q1",
@@ -21,7 +22,7 @@ const closed = {
 beforeEach(() => useSessionStore.setState({
   activeSessionId: sid,
   sessions: [{ id: sid, name: "Question", working_dir: "/tmp", created_at: "2026-10-13", status: "running" } as SessionInfo],
-  agents: [], messages: {}, lastAppliedSeq: {}, pendingQuestions: {}, pendingQueue: {}, closedQuestionIds: {},
+  agents: [], messages: {}, lastAppliedSeq: {}, pendingQuestions: {}, dispatchUnavailable: {}, closedQuestionIds: {},
   streamingText: {}, pendingForks: {}, credentials: [], backendModels: {},
   dispatchGeneration: null, retiredDispatchGenerations: [], dispatchStates: {},
 }));
@@ -91,7 +92,7 @@ it("keeps an already closed question closed when an old pending snapshot arrives
       dispatch_state: dispatch, next_message_seq: 2,
       messages: [{ role: "assistant", type: "question_request", seq: 1, tool_use_id: "q1", tool_input: { questions: [question] } }],
       pending_questions: [{ question_id: "q1", questions: [question] }],
-    }, "service-a");
+    });
     handleWsMessage({ ...requested, seq: undefined });
   });
   expect(screen.queryByRole("button", { name: "Submit" })).toBeNull();
@@ -105,6 +106,7 @@ it("closes a form when history records its resolution before the pending snapsho
   expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
   act(() => {
     applySessionSnapshot(sid, {
+      dispatch_state: emptyDispatch,
       next_message_seq: 3,
       messages: [
         { role: "assistant", type: "question_request", seq: 1, tool_use_id: "q1", tool_input: { questions: [question] } },
@@ -176,6 +178,7 @@ it("retains the newer live form while keeping a resolved question out of an olde
   });
   expect(await screen.findByRole("button", { name: "Submit" })).toBeTruthy();
   act(() => applySessionSnapshot(sid, {
+    dispatch_state: emptyDispatch,
     next_message_seq: 2,
     messages: [{ role: "assistant", type: "question_request", seq: 1,
       tool_use_id: "q1", tool_input: { questions: [question] } }],
@@ -196,7 +199,7 @@ it("clears live questions on a service generation change and rejects the retired
   act(() => applySessionSnapshot(sid, {
     dispatch_state: { ...dispatch, generation: "service-b" },
     next_message_seq: 1, messages: [], pending_questions: [],
-  }, "service-a"));
+  }));
   expect(screen.queryByRole("button", { name: "Submit" })).toBeNull();
   expect(useSessionStore.getState().pendingQuestions[sid]).toBeUndefined();
   act(() => handleWsMessage({ ...requested, seq: 3, question_id: "q2" }));
@@ -204,7 +207,7 @@ it("clears live questions on a service generation change and rejects the retired
   act(() => {
     expect(applySessionSnapshot(sid, {
       dispatch_state: dispatch, next_message_seq: 5, messages: [], pending_questions: [],
-    }, "service-a")).toBe(false);
+    })).toBe(false);
   });
   expect(screen.getByRole("button", { name: "Submit" })).toBeTruthy();
   expect(useSessionStore.getState().pendingQuestions[sid][0].question_id).toBe("q2");

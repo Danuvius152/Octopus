@@ -84,7 +84,8 @@ it("keeps live card completions across delayed reconnect responses and accepts a
     emit({ type: "research_completed", research_id: "research", verified: 2 });
   });
   const finish = async (status: string) => act(async () => {
-    waiting.get("/api/sessions/s")!(Response.json({ messages: [], subagents: [
+    waiting.get("/api/sessions/s")!(Response.json({ messages: [],
+      dispatch_state: { generation: "g", revision: 1, active_request_id: "r", paused: false, items: [] }, subagents: [
       { task_id: "child", tool_call_id: "call", status, summary: "snapshot" },
     ] }));
     waiting.get("/api/sessions/s/bg-tasks")!(Response.json([{ id: "bg", status }]));

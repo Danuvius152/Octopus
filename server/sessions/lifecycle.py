@@ -698,7 +698,6 @@ class LifecycleMixin(SessionManagerBase):
             ),
             archived=True,
             messages=messages,
-            pending_queue=[],
             pending_questions=[],
             oldest_loaded_seq=oldest,
             has_more_messages=await self.db.has_messages_before(session_id, oldest),

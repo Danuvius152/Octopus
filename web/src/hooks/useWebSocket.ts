@@ -551,8 +551,8 @@ export function handleWsMessage(data: Record<string, unknown>) {
         store.setActiveSessionId(newId);
         if (newId) {
           store.setMessages(newId, []);
-          store.setPendingQueue(newId, []);
           store.setPendingQuestions(newId, []);
+          void loadSessionSnapshot(newId, store).catch(() => {});
         }
       }
       break;

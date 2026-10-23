@@ -16,7 +16,7 @@ beforeEach(() => {
   useSessionStore.setState({
     token: "",
     activeSessionId: session.id, sessions: [session], agents: [],
-    messages: {}, streamingText: {}, pendingQueue: {}, pendingQuestions: {},
+    messages: {}, streamingText: {}, dispatchUnavailable: {}, pendingQuestions: {},
     dispatchStates: {}, dispatchGeneration: null, retiredDispatchGenerations: [],
     pendingForks: {}, credentials: [], backendModels: {},
   });

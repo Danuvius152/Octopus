@@ -52,7 +52,7 @@ test("Stop keeps returns paused through correction and reconnect until explicit 
       messages: phase === "corrected" || phase === "resumed" ? messages : [],
       next_message_seq: phase === "corrected" || phase === "resumed" ? 4 : 0,
       oldest_loaded_seq: 0, has_more_messages: false, pending_questions: [], subagents: [],
-      pending_queue: ["Compatibility text must not replace the authoritative queue"], dispatch_state: snapshots[phase],
+      dispatch_state: snapshots[phase],
     };
     else if (path.endsWith("/dispatch/resume")) {
       expect(route.request().method()).toBe("POST");

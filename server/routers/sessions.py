@@ -346,7 +346,6 @@ async def import_session(
         app_id=s.app_id,
         **_fork_fields(s),
         messages=messages,
-        pending_queue=[qp.summary for qp in s._pending_queue],
         dispatch_state=DispatchState(**session_manager.dispatch_snapshot(s.id)),
         pending_questions=[
             PendingQuestionInfo(
@@ -517,7 +516,6 @@ async def get_session(
             app_id=s.app_id,
             **_fork_fields(s),
             messages=messages,
-            pending_queue=[qp.summary for qp in s._pending_queue],
             active_attempt={"request_id": s._run.request.request_id, "attempt_id": s._run.question_attempt_id}
             if s._run.request and s._run.question_attempt_id else None,
             dispatch_state=DispatchState(**session_manager.dispatch_snapshot(s.id)),

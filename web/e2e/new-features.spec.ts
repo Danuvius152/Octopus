@@ -1201,7 +1201,7 @@ test.describe("Real CLI end-to-end @llm", () => {
 //   1. (regression) selecting a session that has a live AskUserQuestion
 //      must show the interactive form, not the greyed "already answered"
 //      summary. The earlier bug was that SessionList.selectSession
-//      fetched messages + pending_queue but skipped pending_questions, so
+//      fetched messages but skipped pending_questions, so
 //      the form never rendered after a session switch.
 //   2. (regression) interrupting a session that's blocked on
 //      AskUserQuestion must return the UI to idle quickly. The earlier

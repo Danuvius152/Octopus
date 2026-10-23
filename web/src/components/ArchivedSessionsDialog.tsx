@@ -14,6 +14,7 @@ import {
   DialogTitle,
 } from "./ui/dialog";
 import { loadSessionAndBgSnapshots } from "../lib/hydrateSession";
+import { selectSession } from "../lib/selectSession";
 
 const API_URL = window.location.origin;
 
@@ -85,8 +86,7 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
         // landed in the live list.
         setSessions([...sessions.filter((x) => x.id !== revived.id), revived]);
         setArchived(archived.filter((x) => x.id !== s.id));
-        setActiveAgentId(revived.agent_id ?? null);
-        setActiveSessionId(revived.id);
+        await selectSession(revived.id, revived.agent_id);
         onOpenChange(false);
       }
     } catch {

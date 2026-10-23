@@ -29,7 +29,7 @@ it("captures detail state before fetch and keeps newer WS rows, questions and su
   handleWsMessage({ type: "question_request", session_id: "s", seq: 2, question_id: "q", questions: [] });
   useSessionStore.getState().upsertSubagent("s", { ...running, status: "completed", summary: "new result" });
   response.resolve(json({ messages: [{ role: "user", type: "text", content: "old", seq: 0 }],
-    next_message_seq: 1, pending_questions: [], subagents: [running] }));
+    dispatch_state: dispatch("service"), next_message_seq: 1, pending_questions: [], subagents: [running] }));
   await loaded;
   const state = useSessionStore.getState();
   expect(state.messages.s.map((m) => m.seq)).toEqual([0, 1, 2]);
@@ -68,11 +68,27 @@ it.each(["detail", "background"])("rejects a %s response after an account switch
   await rejection;
   expect(useSessionStore.getState().messages.s).toBeUndefined();
   expect(useSessionStore.getState().bgTasks.s).toBeUndefined();
+  expect(useSessionStore.getState().dispatchUnavailable.s).toBeUndefined();
+});
+
+it("rejects a late archived body after a different session changes service generation", async () => {
+  useSessionStore.getState().applyDispatchState("other", dispatch("old"));
+  const response = deferred();
+  vi.stubGlobal("fetch", vi.fn(() => response.promise));
+  const loaded = loadSessionSnapshot("archived");
+  handleWsMessage({ type: "dispatch_state", session_id: "other", dispatch_state: dispatch("new") });
+  response.resolve(json({ archived: true, dispatch_state: null,
+    messages: [{ role: "user", type: "text", seq: 0, content: "old body" }],
+    pending_questions: [{ question_id: "old-question", questions: [] }],
+  }));
+  expect(await loaded).toBeNull();
+  expect(useSessionStore.getState().messages.archived).toBeUndefined();
+  expect(useSessionStore.getState().pendingQuestions.archived).toBeUndefined();
 });
 
 it.each(["hydrate", "select"])("%s adopts detail in the same account as the transcript", async (entry) => {
   vi.stubGlobal("fetch", vi.fn(async (url: string) => json(url.endsWith("bg-tasks") ? [] : {
-    id: "private", name: "Private old account", messages: [],
+    id: "private", name: "Private old account", messages: [], dispatch_state: dispatch("service"),
   })));
   const unsubscribe = useSessionStore.subscribe((state, previous) => {
     if (state.messages.private && !previous.messages.private) {
@@ -99,7 +115,7 @@ it("starts selection requests together, waits for both and adopts detail before 
   expect(fetcher).toHaveBeenCalledTimes(2);
   expect(useSessionStore.getState().activeSessionId).toBe("selected");
   expect(useSessionStore.getState().activeAgentId).toBe("agent");
-  detail.resolve(json({ id: "selected", name: "Child", messages: [], pending_queue: [] }));
+  detail.resolve(json({ id: "selected", name: "Child", messages: [], dispatch_state: dispatch("service") }));
   await Promise.resolve();
   expect(useSessionStore.getState().sessions).toEqual([]);
   // A malformed bg body still leaves the accepted detail in the sidebar.
@@ -115,13 +131,23 @@ it("keeps paired request failure atomic and leaves archived detail out of the li
   vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("bg-tasks") ? background.promise : detail.promise));
   const loaded = loadSessionAndBgSnapshots("archived");
   const rejection = expect(loaded).rejects.toThrow("offline");
-  detail.resolve(json({ id: "archived", messages: [], pending_queue: [] }));
+  detail.resolve(json({ id: "archived", archived: true, messages: [], dispatch_state: null }));
   background.reject(new Error("offline"));
   await rejection;
   expect(useSessionStore.getState().messages.archived).toBeUndefined();
 
-  vi.stubGlobal("fetch", vi.fn(async (url: string) => json(url.endsWith("bg-tasks") ? [] : { id: "archived", messages: [] })));
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => json(url.endsWith("bg-tasks") ? [] : { id: "archived", archived: true, messages: [], dispatch_state: null })));
   await loadSessionAndBgSnapshots("archived");
   expect(useSessionStore.getState().messages.archived).toEqual([]);
   expect(useSessionStore.getState().sessions).toEqual([]);
+});
+
+it("routes a selected archived detail to read-only history and its owning agent", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => json(url.endsWith("bg-tasks") ? [] : {
+    id: "archived", agent_id: "archive-owner", archived: true, messages: [], dispatch_state: null,
+  })));
+  await selectSession("archived");
+  expect(useSessionStore.getState().sessions).toEqual([]);
+  expect(useSessionStore.getState().archivedSessions).toEqual([expect.objectContaining({ id: "archived" })]);
+  expect(useSessionStore.getState().activeAgentId).toBe("archive-owner");
 });

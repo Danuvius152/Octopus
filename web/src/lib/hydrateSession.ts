@@ -11,7 +11,6 @@ const API = window.location.origin;
 const DETAIL_ONLY_FIELDS = [
   "messages",
   "active_attempt",
-  "pending_queue",
   "dispatch_state",
   "pending_questions",
   "subagents",
@@ -49,9 +48,9 @@ type SnapshotStart = ReturnType<typeof useSessionStore.getState>;
 type OnDetail = (detail: Record<string, unknown>) => void;
 
 async function applyDetailResponse(sessionId: string, res: Response, start: SnapshotStart, onDetail?: OnDetail) {
-  if (!res.ok) return null;
+  if (!res.ok) throw new Error(`Could not load session state (HTTP ${res.status}).`);
   const data: Record<string, unknown> = await res.json();
-  if (!applySessionSnapshot(sessionId, data, start.dispatchGeneration, start.subagents[sessionId] || {})) return null;
+  if (!applySessionSnapshot(sessionId, data, start)) return null;
   // Adopt detail in this same synchronous step, before an account change
   // can clear the applied transcript and start a new sidebar list.
   onDetail?.(data);
@@ -67,10 +66,15 @@ async function applyBgResponse(sessionId: string, res: Response, start: Snapshot
 /** Capture the merge baseline before starting this detail request. Callers
  * with an earlier operation identity can pass that original store snapshot. */
 export async function loadSessionSnapshot(sessionId: string, start = useSessionStore.getState(), onDetail?: OnDetail) {
-  const res = await fetch(`${API}/api/sessions/${sessionId}`, {
-    headers: { Authorization: `Bearer ${start.token}` },
-  });
-  return applyDetailResponse(sessionId, res, start, onDetail);
+  try {
+    const res = await fetch(`${API}/api/sessions/${sessionId}`, {
+      headers: { Authorization: `Bearer ${start.token}` },
+    });
+    return await applyDetailResponse(sessionId, res, start, onDetail);
+  } catch (error) {
+    useSessionStore.getState().setDispatchUnavailable(sessionId, true, start);
+    throw error;
+  }
 }
 
 /** Background cards merge against the live records observed before fetch. */
@@ -88,39 +92,52 @@ export async function loadSessionAndBgSnapshots(
   onDetail?: OnDetail,
 ) {
   const headers = { Authorization: `Bearer ${start.token}` };
-  const [detailRes, bgRes] = await Promise.all([
-    fetch(`${API}/api/sessions/${sessionId}`, { headers }),
-    fetch(`${API}/api/sessions/${sessionId}/bg-tasks`, { headers }),
-  ]);
-  const detail = await applyDetailResponse(sessionId, detailRes, start, onDetail);
-  await applyBgResponse(sessionId, bgRes, start);
-  return detail;
+  try {
+    const [detailRes, bgRes] = await Promise.all([
+      fetch(`${API}/api/sessions/${sessionId}`, { headers }),
+      fetch(`${API}/api/sessions/${sessionId}/bg-tasks`, { headers }),
+    ]);
+    const detail = await applyDetailResponse(sessionId, detailRes, start, onDetail);
+    await applyBgResponse(sessionId, bgRes, start);
+    return detail;
+  } catch (error) {
+    useSessionStore.getState().setDispatchUnavailable(sessionId, true, start);
+    throw error;
+  }
 }
 
 /** One queue-state path for selection, archived viewing and reconnect. */
-export function applyDispatchSnapshot(
-  sessionId: string, detail: Record<string, unknown>, expectedGeneration?: string | null,
+function applyDispatchSnapshot(
+  sessionId: string, detail: Record<string, unknown>, start: SnapshotStart,
 ): boolean {
   const store = useSessionStore.getState();
-  if (detail.dispatch_state) {
+  if (start.accountGeneration !== store.accountGeneration) return false;
+  if (detail && detail.dispatch_state) {
     const snapshot = readDispatchState(detail.dispatch_state);
-    if (!snapshot || store.retiredDispatchGenerations.includes(snapshot.generation) ||
-        (expectedGeneration !== undefined && expectedGeneration !== store.dispatchGeneration &&
-         snapshot.generation !== store.dispatchGeneration)) return false;
-    store.applyDispatchState(sessionId, detail.dispatch_state, expectedGeneration);
+    const raw = detail.dispatch_state as { generation?: unknown };
+    if (typeof raw.generation === "string" && store.retiredDispatchGenerations.includes(raw.generation)) return false;
+    if (!snapshot) {
+      store.setDispatchUnavailable(sessionId, true, start);
+      return false;
+    }
+    if (start.dispatchGeneration !== store.dispatchGeneration && snapshot.generation !== store.dispatchGeneration) return false;
+    store.applyDispatchState(sessionId, snapshot, start);
   } else {
-    if (expectedGeneration !== undefined && expectedGeneration !== store.dispatchGeneration) return false;
-    if (!store.dispatchStates[sessionId]) store.setPendingQueue(sessionId, (detail.pending_queue as string[]) || []);
+    if (start.dispatchGeneration !== store.dispatchGeneration) return false;
+    if (!detail || detail.archived !== true) {
+      store.setDispatchUnavailable(sessionId, true, start);
+      return false;
+    }
+    store.setDispatchUnavailable(sessionId, false, start);
   }
   return true;
 }
 
 /** Reject a retired service before any part of its detail can be rehydrated. */
 export function applySessionSnapshot(
-  sessionId: string, detail: Record<string, unknown>, expectedGeneration?: string | null,
-  baselineSubagents?: Record<string, SubagentRun>,
+  sessionId: string, detail: Record<string, unknown>, start = useSessionStore.getState(),
 ): boolean {
-  if (!applyDispatchSnapshot(sessionId, detail, expectedGeneration)) return false;
+  if (!applyDispatchSnapshot(sessionId, detail, start)) return false;
   applyTranscript(sessionId, detail);
   const store = useSessionStore.getState();
   const active = detail.active_attempt as { request_id?: unknown; attempt_id?: unknown } | undefined;
@@ -142,7 +159,7 @@ export function applySessionSnapshot(
   const pending = new Map([...(detail.pending_questions as PendingQuestion[] || []), ...newerPending]
     .map((question) => [question.question_id, question]));
   store.setPendingQuestions(sessionId, [...pending.values()]);
-  store.setSubagents(sessionId, (detail.subagents as SubagentRun[]) || [], baselineSubagents);
+  store.setSubagents(sessionId, (detail.subagents as SubagentRun[]) || [], start.subagents[sessionId] || {});
   return true;
 }
 
@@ -150,6 +167,15 @@ export function applySessionSnapshot(
  * hydrate or the reconnect refetch may have won the race). */
 export function addSessionInfo(info: SessionInfo): void {
   const store = useSessionStore.getState();
+  if (info.archived) {
+    if (!store.archivedSessions.some((s) => s.id === info.id)) {
+      store.setArchivedSessions([...store.archivedSessions, info]);
+    }
+    if (store.sessions.some((s) => s.id === info.id)) {
+      store.setSessions(store.sessions.filter((s) => s.id !== info.id));
+    }
+    return;
+  }
   if (store.sessions.some((s) => s.id === info.id)) return;
   store.setSessions([...store.sessions, info]);
 }

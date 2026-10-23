@@ -50,6 +50,7 @@ import { Button } from "./ui/button";
 import { isSessionBusy } from "../lib/deferredFork";
 import { loadOlderMessages } from "../lib/transcript";
 import { loadSessionSnapshot } from "../lib/hydrateSession";
+import { selectSession } from "../lib/selectSession";
 import type { WikiMessageMode } from "../lib/wikiComposer";
 import { newSubmissionId, type SubmissionReply } from "../lib/submission";
 import { MAX_ATTACHMENTS_PER_MESSAGE, useDraftAttachments, type PendingAttachment } from "../hooks/useDraftAttachments";
@@ -165,8 +166,8 @@ export function ChatView({
     setRestoredInput({ sessionId: activeSessionId, clientId: saved.client_request_id });
     textareaRef.current?.focus();
   }, [activeSessionId, input, pendingAttachments, isArchived, transcriptDamaged, addFiles]);
-  const pendingQueueMap = useSessionStore((s) => s.pendingQueue);
   const dispatchStates = useSessionStore((s) => s.dispatchStates);
+  const dispatchUnavailable = useSessionStore((s) => s.dispatchUnavailable);
   const dispatchPaused = activeSessionId ? dispatchStates[activeSessionId]?.paused ?? false : false;
   const savingBlocked = activeSessionId ? Boolean(dispatchStates[activeSessionId]?.recording_failure) : false;
   const pendingQuestionsMap = useSessionStore((s) => s.pendingQuestions);
@@ -660,7 +661,6 @@ export function ChatView({
         // bar drops out of any "waiting on answer" UI immediately.
         const store = useSessionStore.getState();
         store.setPendingQuestions(activeSessionId, []);
-        store.setPendingQueue(activeSessionId, []);
         // A reset is a recovery action — drop any deferred /fork for this
         // session so it doesn't fire once the reset lands it back at idle.
         store.clearPendingFork(activeSessionId);
@@ -704,10 +704,10 @@ export function ChatView({
         store.setSessions(next);
         store.setActiveSessionId(fresh.id);
         store.setMessages(fresh.id, []);
-        store.setPendingQueue(fresh.id, []);
         store.setPendingQuestions(fresh.id, []);
+        await loadSessionSnapshot(fresh.id, store);
       } catch {
-        // best-effort — failure leaves the user in the original session
+        // A selected replacement exposes any snapshot acquisition failure.
       }
       return;
     }
@@ -796,9 +796,10 @@ export function ChatView({
       const store = useSessionStore.getState();
       const sid = activeSessionId;
       const label = trimmed.slice("/fork".length).trim() || undefined;
-      const busy = isSessionBusy(
+      const unknown = !dispatchStates[sid] || dispatchUnavailable[sid];
+      const busy = unknown || Boolean(dispatchStates[sid]?.recording_failure) || isSessionBusy(
         activeSession?.status,
-        dispatchStates[sid]?.items.length ?? pendingQueueMap[sid]?.length ?? 0,
+        dispatchStates[sid]?.items.length ?? 0,
         pendingQuestionsMap[sid]?.length ?? 0,
         dispatchStates[sid]?.paused ?? false,
       );
@@ -806,7 +807,9 @@ export function ChatView({
       store.addMessage(sid, {
         role: "system",
         type: "notice",
-        content: dispatchStates[sid]?.paused
+        content: unknown
+          ? "⑂ Fork queued — waiting for current processing state."
+          : dispatchStates[sid]?.paused
           ? "⑂ Fork queued — it will run after processing resumes and this session is idle."
           : busy
           ? "⑂ Fork queued — it'll run when this session goes idle."
@@ -1196,10 +1199,7 @@ export function ChatView({
   );
   const openParent = () => {
     if (!parentSession) return;
-    const store = useSessionStore.getState();
-    if (parentSession.agent_id)
-      store.setActiveAgentId(parentSession.agent_id);
-    store.setActiveSessionId(parentSession.id);
+    void selectSession(parentSession.id, parentSession.agent_id);
   };
 
   const header = (
@@ -1266,10 +1266,7 @@ export function ChatView({
   );
   const openForkParent = () => {
     if (!forkParentSession) return;
-    const store = useSessionStore.getState();
-    if (forkParentSession.agent_id)
-      store.setActiveAgentId(forkParentSession.agent_id);
-    store.setActiveSessionId(forkParentSession.id);
+    void selectSession(forkParentSession.id, forkParentSession.agent_id);
   };
 
   // A fork was just created: add it to the store, switch to it (the prefilled
@@ -1419,9 +1416,10 @@ export function ChatView({
         clearForkBackoff(sid);
         continue;
       }
+      if (!dispatchStates[sid] || dispatchUnavailable[sid] || dispatchStates[sid].recording_failure) continue;
       const busy = isSessionBusy(
         sess.status,
-        dispatchStates[sid]?.items.length ?? pendingQueueMap[sid]?.length ?? 0,
+        dispatchStates[sid]?.items.length ?? 0,
         pendingQuestionsMap[sid]?.length ?? 0,
         dispatchStates[sid]?.paused ?? false,
       );
@@ -1469,7 +1467,7 @@ export function ChatView({
         .finally(() => forksInFlight.current.delete(sid));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pendingForksMap, sessions, pendingQueueMap, pendingQuestionsMap, dispatchStates, forkRetryTick]);
+  }, [pendingForksMap, sessions, pendingQuestionsMap, dispatchStates, dispatchUnavailable, forkRetryTick]);
 
   // Clear any outstanding fork-retry timers on unmount.
   useEffect(() => {
@@ -1706,7 +1704,7 @@ export function ChatView({
         </div>
       )}
 
-      {activeSessionId && <DispatchQueue key={activeSessionId} sessionId={activeSessionId} readOnly={isArchived || transcriptDamaged} />}
+      {activeSessionId && <DispatchQueue key={activeSessionId} sessionId={activeSessionId} archived={isArchived} readOnly={isArchived || transcriptDamaged} />}
       {activeSessionId && <CommandNotices sessionId={activeSessionId} />}
 
       {activeSessionId && <RecoverableInputs key={`recovery-${activeSessionId}`} sessionId={activeSessionId} connected={connected}

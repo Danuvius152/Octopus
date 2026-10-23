@@ -1,4 +1,5 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
+import { selectSession } from "../lib/selectSession";
 /**
  * Inline card rendered next to a `mcp__ask_agent__ask` tool_use. The
  * tool_use itself shows the model's call shape (target agent name,
@@ -67,9 +68,6 @@ export function AgentDelegationRequestCard({
 }) {
   const token = useSessionStore((s) => s.token);
   const setDelegations = useSessionStore((s) => s.setDelegations);
-  const setActiveSessionId = useSessionStore((s) => s.setActiveSessionId);
-  const setActiveAgentId = useSessionStore((s) => s.setActiveAgentId);
-  const sessions = useSessionStore((s) => s.sessions);
   const messages = useSessionStore((s) => s.messages[sessionId]);
   const projection = useMemo(() => projectToolCall(message, messages), [message, messages]);
   const receipt = projection.receipt?.kind === "delegation" ? projection.receipt : undefined;
@@ -118,43 +116,7 @@ export function AgentDelegationRequestCard({
 
   const openChild = async () => {
     if (!delegationId) return;
-    let child = sessions.find((s) => s.id === delegationId);
-    if (!child) {
-      // After DelegationManager auto-archives the child on terminal
-      // delivery, the child is no longer in the live `sessions`
-      // list. Fetch it (the GET /sessions/{id} route returns
-      // archived rows too) and slot it into the right store map so
-      // the chat view can render either as live or read-only.
-      const url = `${window.location.origin}/api/sessions/${encodeURIComponent(
-        delegationId
-      )}`;
-      try {
-        const r = await fetch(url, {
-          headers: { Authorization: `Bearer ${token}` },
-        });
-        if (r.ok) {
-          const detail = await r.json();
-          const store = useSessionStore.getState();
-          if (detail.archived) {
-            const existing = store.archivedSessions;
-            if (!existing.some((s) => s.id === detail.id)) {
-              store.setArchivedSessions([...existing, detail]);
-            }
-          } else {
-            const existing = store.sessions;
-            if (!existing.some((s) => s.id === detail.id)) {
-              store.setSessions([...existing, detail]);
-            }
-          }
-          child = detail;
-        }
-      } catch {
-        // Best-effort — fall through to the navigation, which will
-        // land on the chat-empty state if the session really is gone.
-      }
-    }
-    if (child?.agent_id) setActiveAgentId(child.agent_id);
-    setActiveSessionId(delegationId);
+    await selectSession(delegationId);
   };
 
   const cancel = async () => {

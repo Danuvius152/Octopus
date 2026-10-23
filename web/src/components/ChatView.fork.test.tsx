@@ -29,7 +29,8 @@ beforeEach(() => useSessionStore.setState({
   sessions: [parent], archivedSessions: [], agents: [], credentials: [], backendModels: {},
   messages: {}, streamingText: {}, lastAppliedSeq: {}, oldestSeq: {}, hasMoreMessages: {}, wikiJobs: {},
   pendingQuestions: {}, closedQuestionIds: {}, subagents: {},
-  pendingQueue: {}, pendingForks: {}, dispatchStates: {}, dispatchGeneration: null, retiredDispatchGenerations: [],
+  dispatchUnavailable: {}, pendingForks: {}, dispatchStates: { parent: dispatch("old-service") },
+  dispatchGeneration: "old-service", retiredDispatchGenerations: [],
 }));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
@@ -91,7 +92,7 @@ it.each(["rewind", "duplicate"])("%s loads a paged snapshot without overwriting 
   expect(useSessionStore.getState().messages[child.id][0].seq).toBe(199);
 });
 
-it.each(["rewind", "duplicate"])("%s passes captured null and rejects a previously unseen old service", async (mode) => {
+it.each(["rewind", "duplicate"])("%s rejects an old service response after a newer service arrives", async (mode) => {
   let finish!: (response: Response) => void;
   mockSessionFetch((url: string) => {
     if (url.endsWith("/duplicate")) return Promise.resolve(new Response(JSON.stringify(child)));
@@ -124,4 +125,16 @@ it("a deferred background duplicate keeps focus and never fetches child detail",
   expect(fetcher).toHaveBeenCalledTimes(1);
   expect(fetcher.mock.calls[0][0]).toContain("/parent/duplicate");
   expect(useSessionStore.getState().messages.parent.some((row) => String(row.content).includes("Fork ready"))).toBe(true);
+});
+
+it.each(["missing", "unavailable"])("waits for a confirmed queue before forking when state is %s", async (kind) => {
+  if (kind === "missing") useSessionStore.setState({ dispatchStates: {} });
+  else useSessionStore.getState().setDispatchUnavailable(parent.id, true);
+  const fetcher = mockSessionFetch(async (url: string) => Response.json(url.endsWith("/duplicate") ? child : detail()));
+  mount();
+  await act(async () => launch("duplicate"));
+  expect(fetcher).not.toHaveBeenCalled();
+  expect(useSessionStore.getState().pendingForks.parent).toBeDefined();
+  act(() => handleWsMessage({ type: "dispatch_state", session_id: parent.id, dispatch_state: dispatch("old-service") }));
+  await waitFor(() => expect(fetcher).toHaveBeenCalledWith(expect.stringContaining("/parent/duplicate")));
 });

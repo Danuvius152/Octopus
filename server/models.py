@@ -317,7 +317,6 @@ class SessionDetail(SessionInfo):
     # fields are how it asks for the rest (`GET …/messages?before_seq=`).
     oldest_loaded_seq: int | None = None
     has_more_messages: bool = False
-    pending_queue: list[str] = []
     dispatch_state: DispatchState | None = None
     pending_questions: list[PendingQuestionInfo] = []
     # Sub-agents still on screen for this session (native-subagents.md §4).

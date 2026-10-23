@@ -10,7 +10,7 @@ const snapshot = (generation = "service-a", revision = 2, paused = true) => ({
 
 beforeEach(() => useSessionStore.setState({
   token: "test-token", sessions: [], messages: {}, dispatchStates: {}, dispatchGeneration: null,
-  retiredDispatchGenerations: [], pendingQueue: {}, lastAppliedSeq: {},
+  retiredDispatchGenerations: [], dispatchUnavailable: {}, lastAppliedSeq: {},
   pendingQuestions: {},
 }));
 afterEach(() => vi.unstubAllGlobals());
@@ -18,7 +18,7 @@ afterEach(() => vi.unstubAllGlobals());
 it("loads dispatch pause on selection and keeps a newer live snapshot", async () => {
   vi.stubGlobal("fetch", vi.fn(async (url: string) => new Response(JSON.stringify(
     url.endsWith("/bg-tasks") ? [] : {
-      id: "selected", messages: [], pending_queue: ["legacy"], dispatch_state: snapshot(),
+      id: "selected", messages: [], dispatch_state: snapshot(),
     }
   ))));
   await selectSession("selected");
@@ -35,7 +35,6 @@ it("accepts a restarted service and rejects a delayed retired service across ses
   handleWsMessage({ type: "dispatch_state", session_id: "other", dispatch_state: snapshot("service-a", 100) });
   expect(useSessionStore.getState().dispatchStates.selected.paused).toBe(false);
   expect(useSessionStore.getState().dispatchStates.other).toBeUndefined();
-  expect(useSessionStore.getState().pendingQueue.selected).toBeUndefined();
 });
 
 it("ignores an older-instance HTTP response that finishes after a fresh websocket", async () => {

@@ -3,23 +3,20 @@ import { useState } from "react";
 import { useSessionStore } from "../stores/sessionStore";
 import { Button } from "./ui/button";
 
-const EMPTY_QUEUE: string[] = [];
 const SOURCE_LABELS: Record<string, string> = {
   human: "You", bg: "Background task", delegation: "Agent", research: "Research",
   schedule: "Schedule", app: "App",
 };
 
 /** Render the server's queue order and change the gate only on explicit Resume. */
-export function DispatchQueue({ sessionId, readOnly = false }: {
-  sessionId: string; readOnly?: boolean;
+export function DispatchQueue({ sessionId, readOnly = false, archived = false }: {
+  sessionId: string; readOnly?: boolean; archived?: boolean;
 }) {
   const snapshot = useSessionStore((s) => s.dispatchStates[sessionId]);
-  const legacy = useSessionStore((s) => s.pendingQueue[sessionId]) ?? EMPTY_QUEUE;
+  const unavailable = useSessionStore((s) => s.dispatchUnavailable[sessionId]);
   const [resuming, setResuming] = useState(false);
   const [error, setError] = useState("");
-  const items = snapshot?.items ?? legacy.map((summary, index) => ({
-    request_id: `legacy-${index}`, source: "", summary, priority: false,
-  }));
+  const items = snapshot?.items ?? [];
   const paused = snapshot?.paused ?? false;
   const savingBlocked = Boolean(snapshot?.recording_failure);
 
@@ -33,7 +30,7 @@ export function DispatchQueue({ sessionId, readOnly = false }: {
       });
       const data = await response.json();
       if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : "Could not resume processing.");
-      store.applyDispatchState(sessionId, data, store.dispatchGeneration);
+      store.applyDispatchState(sessionId, data, store);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : "Could not resume processing.");
     } finally {
@@ -41,9 +38,12 @@ export function DispatchQueue({ sessionId, readOnly = false }: {
     }
   };
 
-  if (!savingBlocked && !paused && items.length === 0) return null;
+  if (archived) return null;
+  if (!snapshot && !unavailable) return <p role="status" className="px-4 py-2 text-xs text-muted-foreground">Loading queue state…</p>;
+  if (!unavailable && !savingBlocked && !paused && items.length === 0) return null;
   return <div className="queue-list shrink-0 border-t border-border bg-muted/30 px-4 py-2 text-xs space-y-1"
     aria-label="Queued messages">
+    {unavailable && <p role="alert" className="text-destructive">Queue state unavailable. Current processing state could not be confirmed.</p>}
     {savingBlocked && <p role="alert" className="recording-failure text-destructive">
       Result saving failed or is unconfirmed. Automatic processing is blocked until the saved result is verified.
     </p>}

@@ -148,6 +148,8 @@ export interface Identity {
   is_admin: boolean;
 }
 
+type DispatchReadStart = Pick<SessionStore, "accountGeneration" | "dispatchGeneration" | "dispatchStates">;
+
 interface SessionStore {
   activeAttempts: Record<string, { request_id: string; attempt_id: string }>;
   setActiveAttempt: (sessionId: string, attempt: { request_id: string; attempt_id: string } | null) => void;
@@ -302,17 +304,16 @@ interface SessionStore {
   setSubagents: (sessionId: string, runs: SubagentRun[], baseline?: Record<string, SubagentRun>) => void;
 
   dispatchStates: Record<string, DispatchState>;
+  dispatchUnavailable: Record<string, boolean>;
+  setDispatchUnavailable: (sessionId: string, unavailable: boolean,
+    start?: DispatchReadStart) => void;
   wikiJobs: Record<string, WikiJobCard[]>;
   wikiJobDirty: Record<string, Record<string, Pick<WikiJobCard, "job_id" | "vault_id" | "state_version">>>;
   invalidateWikiJob: (sessionId: string, target: Pick<WikiJobCard, "job_id" | "vault_id" | "state_version">) => void;
   mergeWikiJobs: (sessionId: string, cards: WikiJobCard[]) => void;
   dispatchGeneration: string | null;
   retiredDispatchGenerations: string[];
-  applyDispatchState: (sessionId: string, state: unknown, expectedGeneration?: string | null) => boolean;
-  // Compatibility for older servers. Current queue state is replaced from
-  // the authoritative dispatch snapshot, never inferred from queue events.
-  pendingQueue: Record<string, string[]>;
-  setPendingQueue: (sessionId: string, queue: string[]) => void;
+  applyDispatchState: (sessionId: string, state: unknown, start?: DispatchReadStart) => boolean;
 
   // Deferred /fork requests (session-fork.md). When `/fork` is typed
   // while a session is busy, we record the intent here instead of erroring;
@@ -800,45 +801,52 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       wikiJobDirty: { ...state.wikiJobDirty, [sessionId]: dirty } };
   }),
   dispatchStates: {},
+  dispatchUnavailable: {},
+  setDispatchUnavailable: (sessionId, unavailable, start) => set((s) => {
+    if (start && (start.accountGeneration !== s.accountGeneration ||
+        start.dispatchGeneration !== s.dispatchGeneration ||
+        start.dispatchStates[sessionId] !== s.dispatchStates[sessionId])) return s;
+    const errors = { ...s.dispatchUnavailable };
+    if (unavailable) errors[sessionId] = true;
+    else delete errors[sessionId];
+    return { dispatchUnavailable: errors };
+  }),
   dispatchGeneration: null,
   retiredDispatchGenerations: [],
-  applyDispatchState: (sessionId, value, expectedGeneration) => {
+  applyDispatchState: (sessionId, value, start) => {
     const snapshot = readDispatchState(value);
-    if (!snapshot) return false;
+    if (!snapshot) {
+      const generation = value && typeof value === "object" && "generation" in value ? value.generation : null;
+      if (typeof generation === "string" && get().retiredDispatchGenerations.includes(generation)) return false;
+      get().setDispatchUnavailable(sessionId, true, start);
+      return false;
+    }
     let applied = false;
     set((s) => {
+      if (start && start.accountGeneration !== s.accountGeneration) return s;
       if (s.retiredDispatchGenerations.includes(snapshot.generation)) return s;
-      if (expectedGeneration !== undefined && expectedGeneration !== s.dispatchGeneration &&
+      if (start && start.dispatchGeneration !== s.dispatchGeneration &&
           snapshot.generation !== s.dispatchGeneration) return s;
       const changed = s.dispatchGeneration !== null && s.dispatchGeneration !== snapshot.generation;
       const previous = changed ? undefined : s.dispatchStates[sessionId];
-      if (previous && snapshot.revision <= previous.revision) return s;
-      let pendingQueue: Record<string, string[]> = changed ? {} : s.pendingQueue;
-      if (Object.hasOwn(pendingQueue, sessionId)) {
-        pendingQueue = { ...pendingQueue };
-        delete pendingQueue[sessionId];
-      }
+      if (previous && snapshot.revision < previous.revision) return s;
+      const errors = { ...(changed ? {} : s.dispatchUnavailable) };
+      delete errors[sessionId];
       applied = true;
       return {
         dispatchGeneration: snapshot.generation,
         ...(changed ? { closedQuestionIds: {}, pendingQuestions: {} } : {}),
         retiredDispatchGenerations: changed
           ? [...s.retiredDispatchGenerations, s.dispatchGeneration!] : s.retiredDispatchGenerations,
-        dispatchStates: { ...(changed ? {} : s.dispatchStates), [sessionId]: snapshot },
-        pendingQueue,
+        // An equal revision confirms the existing content and invalidates
+        // older reads, including failures waiting to mark it unavailable.
+        dispatchStates: { ...(changed ? {} : s.dispatchStates),
+          [sessionId]: previous?.revision === snapshot.revision ? { ...previous } : snapshot },
+        dispatchUnavailable: errors,
       };
     });
     return applied;
   },
-  pendingQueue: {},
-  setPendingQueue: (sessionId, queue) =>
-    set((s) => {
-      if (s.dispatchStates[sessionId]) return s;
-      const next = { ...s.pendingQueue };
-      if (queue.length === 0) delete next[sessionId];
-      else next[sessionId] = queue;
-      return { pendingQueue: next };
-    }),
 
   pendingForks: {},
   setPendingFork: (sessionId, label) =>

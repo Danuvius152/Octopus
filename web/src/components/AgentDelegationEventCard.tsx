@@ -1,4 +1,5 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
+import { selectSession } from "../lib/selectSession";
 /**
  * Renders one of the three turn-injection artifacts a delegation can
  * produce, parsed from the user-message text the backend's
@@ -126,8 +127,6 @@ export function AgentDelegationEventCard({
   const archivedSessions = useSessionStore((s) => s.archivedSessions);
   const setSessions = useSessionStore((s) => s.setSessions);
   const setArchivedSessions = useSessionStore((s) => s.setArchivedSessions);
-  const setActiveSessionId = useSessionStore((s) => s.setActiveSessionId);
-  const setActiveAgentId = useSessionStore((s) => s.setActiveAgentId);
   const token = useSessionStore((s) => s.token);
   // Resolve from BOTH stores: after DelegationManager auto-archives
   // the child on terminal delivery, the row lives in archivedSessions
@@ -187,8 +186,7 @@ export function AgentDelegationEventCard({
 
   const openChild = () => {
     if (!childSession) return;
-    if (childSession.agent_id) setActiveAgentId(childSession.agent_id);
-    setActiveSessionId(childSession.id);
+    void selectSession(childSession.id, childSession.agent_id);
   };
 
   const headerText = (

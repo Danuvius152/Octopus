@@ -5145,11 +5145,6 @@ export interface components {
              * @default false
              */
             has_more_messages: boolean;
-            /**
-             * Pending Queue
-             * @default []
-             */
-            pending_queue: string[];
             dispatch_state?: components["schemas"]["DispatchState"] | null;
             /**
              * Pending Questions
