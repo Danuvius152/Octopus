@@ -34,7 +34,7 @@ describe("loadIdentity", () => {
     expect(useSessionStore.getState().identity).toEqual(identity);
   });
 
-  it("clears account data on identity loss and preserves a verified token rotation", () => {
+  it("clears account data on identity loss and preserves a verified bearer replacement", () => {
     const store = useSessionStore.getState();
     store.setIdentity({ label: "A", user_id: "a", is_admin: true });
     store.setActiveSessionId("private-a");

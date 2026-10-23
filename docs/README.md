@@ -63,7 +63,6 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | Plan | Status | What |
 |---|---|---|
 | [Multi-tenancy, second pass: Connectors, Schedules, Harness](plans/multi-tenancy-gaps.md) | in-progress | Proposal: close the gaps a read-only review found where accounts can reach each other's work through the Manage surfaces, and make each class of gap structurally impossible. |
-| [Rotating the installation access token](plans/token-rotation.md) | in-progress | Migrating token rotation to the minimal architecture contract; candidate verification and review remain open. |
 | [/fork — duplicate a session onto a copied working directory](plans/session-fork.md) | shipped | Duplicate a session onto an independent full copy of its working directory. |
 | [Agent Collaboration — Tech Plan (agent-to-agent delegation)](plans/agent-collaboration.md) | shipped | Agent-to-agent delegation — the `mcp__ask_agent__*` tools, one hop, replies injected as follow-up turns. Reverses the "no A2A" carve-out in `agent-refactor.md` §40-41. |
 | [Agent Memory — Tech Plan (native, agent-written, per-agent)](plans/memory.md) | shipped | Per-agent native memory: one markdown directory per agent, shared by both harnesses. |
@@ -97,6 +96,7 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | [P1 问题整改：CR-03 输入恢复](plans/p1-remediation-20261020.md) | superseded by minimal-architecture-execution-20261020.md | CR-03 暂存实现并入最小机制架构计划，以下保留原范围决定与历史验收，不再作为单独发布入口。 |
 | [Codex performance in Monitor](plans/codex-performance-monitor.md) | completed | effective output TPS implemented and validated for local Codex; client windows, model grouping and passive collection. |
 | [DeepSeek Harness 作为第三个 backend：实施计划](plans/deepseek-harness-backend.md) | proposed | 以 API key + `dsh --profile headless` 接入 DeepSeek Harness（DSH），复用现有 harness 边界；先交付单轮/事件/MCP/resume，账号登录与 SDK 长驻模式留在后续。 |
+| [Rotating the installation access token](plans/token-rotation.md) | retired | Installation-token rotation and recovery are removed; current account authentication remains. |
 | [共享 Wiki：未来计划与应用协同](plans/wiki-future-plan.md) | proposed | Sapphire、SmartReader 与条件性扩展的统一计划；保留未完成合同，不把本文当作开发或生产写入授权。 |
 | [运行时接口修补：接管、记录与调用身份](plans/runtime-interface-repair.md) | completed | Q13–Q30 中已确认实施的修补全部通过本机验收；按 Q31 合并 main 并上线 `01c16a6` 独立服务快照，已验证并清理两个旧 release；Q25 脱敏未纳入。 |
 

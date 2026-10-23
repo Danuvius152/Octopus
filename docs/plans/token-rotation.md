@@ -1,5 +1,20 @@
 # Rotating the installation access token
 
+> **Status:** retired — Installation-token rotation and recovery are removed; current account authentication remains.
+>
+> The Settings control, `/api/auth/rotate`, WebSocket handoff and automatic
+> recovery have been removed. Account login, password changes, bearer
+> revocation, account DEKs and master-key MCP signatures remain.
+>
+> **Retained evidence:** startup reports the safe diagnostic type
+> `UnfinishedTokenRotation` if any old intent remains, including one committed
+> only in WAL. Preserve the original database, WAL and environment files; settle
+> the original operation with the version that owns the protocol below before
+> starting this version. Payloads are neither interpreted nor deleted here.
+>
+> The planning decisions and protocol below are a historical record of the
+> pre-retirement implementation. They do not describe currently callable APIs.
+
 > **Status:** in-progress — Migrating token rotation to the minimal architecture contract; candidate verification and review remain open.
 >
 > The existing feature is being migrated under the

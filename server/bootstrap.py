@@ -29,8 +29,7 @@ from .workspace import paths_for
 
 logger = logging.getLogger(__name__)
 
-# The same three tables `token_rotation` re-keys, for the same reason: they are
-# every ciphertext the key protects.
+# Account-owned ciphertexts transferred by the existing first-account handoff.
 _SECRET_COLUMNS = (
     ("credential_secrets", "credential_id", "secret_encrypted"),
     ("connector_installation_secrets", "installation_id", "secret_encrypted"),

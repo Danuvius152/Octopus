@@ -279,31 +279,6 @@ describe("shouldApplyWsEvent", () => {
   });
 });
 
-/** Token rotation over the socket (token-rotation.md §3).
- *
- * The rotation itself is one server-side operation; what the client owes the
- * user is to carry on when it's handed a new token, and to ask for one when
- * it isn't.
- */
-describe("auth_token_rotated", () => {
-  beforeEach(() => {
-    useSessionStore.getState().setToken("old-token-1234");
-  });
-
-  it("takes the new token so an open tab keeps working", () => {
-    handleWsMessage({ type: "auth_token_rotated", token: "a-stronger-token" });
-    expect(useSessionStore.getState().token).toBe("a-stronger-token");
-    expect(localStorage.getItem("octopus_token")).toBe("a-stronger-token");
-  });
-
-  it("signs this client out when the rotation revoked the others", () => {
-    // No token in the event means the old one leaked: everyone else proves
-    // they have the new one.
-    handleWsMessage({ type: "auth_token_rotated", token: null });
-    expect(useSessionStore.getState().token).toBe("");
-  });
-});
-
 /** An agent setting a schedule for itself (schedule-tool.md §6).
  *
  * The server says only that the list moved; the client refetches. Without

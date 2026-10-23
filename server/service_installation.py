@@ -507,7 +507,7 @@ def configure_service(config: Settings, *, unit: str, manager: Literal["user", "
 
         token = dotenv_values(active_environment, interpolate=False).get("OCTOPUS_AUTH_TOKEN")
         if token != config.auth_token:
-            raise InstallationError("Setup token differs from the active service; use token rotation for changes and supply its current token to setup")
+            raise InstallationError("Setup token differs from the active service; supply its current token to setup")
     paths = _paths(config)
     profile = ServiceProfile(unit=unit, manager=manager, paths=paths, host=config.host, port=config.port, enable_tunnel=config.enable_tunnel)
     owner = InstallationOwner(config)

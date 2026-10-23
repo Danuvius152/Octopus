@@ -257,7 +257,10 @@ os.link=observe_link
 marker.with_suffix('.requested').touch()
 try: result=registry.configure(None,root,'curator')
 except WikiError as error:
-    assert error.status==503
+    # The first process can be opening its committed Store while this
+    # registration checks the same range. Its nonblocking claim may reject us.
+    assert error.status==503 or (error.status==409 and
+        str(error).startswith('An overlapping resource claim is in progress;'))
     result=registry.config(None)
 marker.write_text(json.dumps(result))
 registry.close()

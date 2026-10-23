@@ -141,15 +141,6 @@ export function handleWsMessage(data: Record<string, unknown>) {
       void refreshSchedules();
       break;
 
-    // The token was rotated from another tab (or this one). A new token means
-    // this client carries on; none means the rotation revoked other clients,
-    // so this one has to sign in again (token-rotation.md §3).
-    case "auth_token_rotated": {
-      const next = data.token as string | null | undefined;
-      getState().setToken(typeof next === "string" && next ? next : "", { sameAccount: true });
-      break;
-    }
-
     case "assistant_text":
       addMessage(sessionId, {
         role: "assistant",
@@ -666,11 +657,8 @@ export function useWebSocket() {
         }
         controls.current.clear();
         getState().setConnected(false);
-        // 4001 is the server saying this token is not accepted (it was
-        // rotated while we were away, or revoked). Reconnecting every three
-        // seconds behind a "Disconnected" badge tells the user nothing and
-        // can never recover — ask for the new token instead
-        // (token-rotation.md §3).
+        // A revoked or disabled account must authenticate again; reconnecting
+        // with the same rejected bearer cannot recover this connection.
         if (event.code === 4001) {
           getState().setToken("");
           return;

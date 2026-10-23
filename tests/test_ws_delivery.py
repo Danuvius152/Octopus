@@ -389,23 +389,7 @@ async def test_queued_account_frame_rechecks_live_authority(runtime, monkeypatch
         assert client[1].empty()
 
 
-async def test_trusted_legacy_rotation_updates_queued_writer_before_handoff(runtime, monkeypatch):
-    manager, _ = runtime
-    release = asyncio.Event()
-    async with connection(manager, settings.auth_token, release=release) as client:
-        await manager._broadcast({"type": "schedules_changed", "marker": "in-flight"})
-        await asyncio.wait_for(client[3].wait(), 1)
-        await manager._broadcast({"type": "schedules_changed", "marker": "queued"})
-        monkeypatch.setattr(settings, "auth_token", "replacement-install-token")
-        await manager._broadcast({"type": "auth_token_rotated", "token": settings.auth_token})
-        release.set()
-        assert (await frame(client[1]))["marker"] == "in-flight"
-        assert (await frame(client[1]))["marker"] == "queued"
-        assert await frame(client[1]) == {"type": "auth_token_rotated", "token": settings.auth_token}
-        assert not client[2].done()
-
-
-async def test_account_adoption_cannot_receive_queued_ownerless_data_or_rotation(runtime, monkeypatch):
+async def test_account_adoption_cannot_receive_queued_ownerless_data(runtime, monkeypatch):
     manager, db = runtime
     release = asyncio.Event()
     async with connection(manager, settings.auth_token, release=release) as client:
@@ -416,8 +400,7 @@ async def test_account_adoption_cannot_receive_queued_ownerless_data_or_rotation
         users = UserManager(db)
         monkeypatch.setattr(deps, "_user_manager", users)
         await users.create_user(username="firstowner", password="password1")
-        monkeypatch.setattr(settings, "auth_token", "new-install-token")
-        await manager._broadcast({"type": "auth_token_rotated", "token": settings.auth_token})
+        await manager._broadcast({"type": "schedules_changed"})
         release.set()
         assert (await frame(client[1]))["marker"] == "in-flight"
         closed = await asyncio.wait_for(client[1].get(), 1)

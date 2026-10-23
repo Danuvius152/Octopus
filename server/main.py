@@ -93,12 +93,11 @@ async def lifespan(app: FastAPI):
         from .wiki.registry import registry as wiki_registry
         wiki_registry.bind_health(service_health)
         try:
+            await db.reject_unfinished_token_rotation()
             master_key()
-        except (OSError, ValueError) as error:
+        except BaseException as error:
             service_health.fail(error)
         await db.initialize()
-        from .token_rotation import recover_auth_token
-        await recover_auth_token(db)
         from .memory_handoff import handoff_agent_memory
         async with db._bootstrap_lock:
             await handoff_agent_memory(db)

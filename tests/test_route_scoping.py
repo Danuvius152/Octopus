@@ -65,10 +65,6 @@ UNSCOPED_BY_DESIGN: dict[tuple[str, str], str] = {
         "creates the first account; authenticated with the install's own token, "
         "which is the only credential that exists at that moment"
     ),
-    ("POST", "/api/auth/rotate"): (
-        "rotates the install token, which exists only before accounts do "
-        "(token-rotation.md)"
-    ),
     ("GET", "/api/connectors/catalog"): (
         "what this install can connect to: the kinds and whether each has an "
         "OAuth client registered. Install-level and the same for everybody"

@@ -8,6 +8,7 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import aiosqlite
@@ -18,6 +19,12 @@ from .schema import _DEFAULT_MCP_SERVERS_JSON, _SCHEMA
 from .transaction import Transaction
 
 logger = logging.getLogger(__name__)
+
+
+class UnfinishedTokenRotation(RuntimeError):
+    """Retained installation intent requires settlement by its original version."""
+
+
 def _load_json_list(raw: Any) -> list[Any]:
     """A JSON-list column as a list, whatever shape the column is in.
 
@@ -415,6 +422,28 @@ class DatabaseBase:
                 self._write_owner = None
                 self._write_lock.release()
 
+    async def reject_unfinished_token_rotation(self) -> None:
+        if self._db_path == ":memory:":
+            return
+        path = Path(self._db_path)
+        try:
+            path.stat()
+        except FileNotFoundError:
+            return
+        # Read the real committed state, including an ownerless WAL, before
+        # opening a writer or preparing any storage. Never interpret the intent.
+        async with aiosqlite.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as retained:
+            await retained.execute("PRAGMA query_only=ON")
+            await retained.execute("BEGIN")
+            async with retained.execute(
+                "SELECT 1 FROM sqlite_schema WHERE name='token_rotation_intent'",
+            ) as cursor:
+                exists = await cursor.fetchone()
+            if exists:
+                async with retained.execute("SELECT 1 FROM token_rotation_intent LIMIT 1") as cursor:
+                    if await cursor.fetchone():
+                        raise UnfinishedTokenRotation()
+
     async def initialize(self, *, timeout: float = 15.0) -> None:
         """Own startup SQL under one deadline, before any public operation."""
         self.health.require_healthy()
@@ -424,6 +453,7 @@ class DatabaseBase:
             async with self._write_lock:
                 self._write_owner = asyncio.current_task()
                 try:
+                    await self.reject_unfinished_token_rotation()
                     self._conn = await aiosqlite.connect(self._db_path)
                     mode = await self.conn.execute("PRAGMA journal_mode=WAL")
                     mode_value = await mode.fetchone()

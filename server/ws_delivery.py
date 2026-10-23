@@ -17,7 +17,6 @@ from typing import TYPE_CHECKING
 from fastapi import WebSocket, WebSocketDisconnect
 
 from . import deps
-from .config import settings
 
 if TYPE_CHECKING:
     from .sessions import SessionManager
@@ -33,10 +32,9 @@ _connections: set[SocketDelivery] = set()
 
 @dataclass(frozen=True)
 class _Frame:
-    text: str | None
+    text: str
     size: int
     session_id: str | None
-    revoke: bool = False
 
 
 class SocketDelivery:
@@ -58,7 +56,6 @@ class SocketDelivery:
         self._last_activity: float | None = None
         self._writer: asyncio.Task | None = None
         self._writer_started = False
-        self._revocation_pending = False
 
     def start(self) -> None:
         _connections.add(self)
@@ -66,46 +63,23 @@ class SocketDelivery:
 
     def offer(self, message: dict, *, session_scoped: bool = True) -> None:
         """Bounded, synchronous admission; never awaits a socket or database."""
-        if self._closing or self._revocation_pending:
+        if self._closing:
             return
-        auth_only = False
-        revoke = False
-        if message.get("type") == "auth_token_rotated":
-            if self.principal.credential_kind != "legacy":
-                # Install credentials do not replace an account/MCP bearer,
-                # but this control boundary still validates its live authority.
-                auth_only = True
-            elif message.get("token") is None:
-                # Revocation does not authorize old queued application frames.
-                # Deliver only the explicit notice, then close; adoption is
-                # checked again by the writer and cannot use this exception.
-                self._revocation_pending = revoke = True
-                for frame in self._queue:
-                    self._pending_frames -= 1
-                    self._pending_bytes -= frame.size
-                self._queue.clear()
-            # The bus is a trusted server boundary. Adopted accounts never get
-            # this exception, and the writer still validates the era before send.
-            elif isinstance(message.get("token"), str) and message["token"] == settings.auth_token:
-                self.token = message["token"]
-            else:
-                self.request_close(4001, "Unauthorized")
-                return
         try:
-            text = None if auth_only else json.dumps(
+            text = json.dumps(
                 message, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
             )
         except (TypeError, ValueError):
             logger.exception("WebSocket frame could not be encoded")
             self.request_close(1011, "Reconnect to synchronize")
             return
-        size = len(text.encode("utf-8")) if text is not None else 0
+        size = len(text.encode("utf-8"))
         if (self._pending_frames + 1 > MAX_PENDING_FRAMES
                 or self._pending_bytes + size > MAX_PENDING_BYTES):
-            self.request_close(4001 if revoke else 1013, "Unauthorized" if revoke else "Reconnect to synchronize")
+            self.request_close(1013, "Reconnect to synchronize")
             return
         sid = (message.get("session_id") or message.get("old_session_id")) if session_scoped else None
-        self._queue.append(_Frame(text, size, sid if isinstance(sid, str) else None, revoke))
+        self._queue.append(_Frame(text, size, sid if isinstance(sid, str) else None))
         self._pending_frames += 1
         self._pending_bytes += size
         self._wake.set()
@@ -179,18 +153,11 @@ class SocketDelivery:
                 await self._wake.wait()
                 while self._queue and not self._closing:
                     frame = self._queue.popleft()
-                    if frame.revoke:
-                        if await deps.accounts_exist():
-                            self.request_close(4001, "Unauthorized")
-                            return
-                    elif not await self.authorized(frame.session_id):
+                    if not await self.authorized(frame.session_id):
                         return
-                    if frame.text is not None:
-                        await asyncio.wait_for(self.ws.send_text(frame.text), SEND_TIMEOUT_SECONDS)
+                    await asyncio.wait_for(self.ws.send_text(frame.text), SEND_TIMEOUT_SECONDS)
                     self._pending_frames -= 1
                     self._pending_bytes -= frame.size
-                    if frame.revoke:
-                        self.request_close(4001, "Unauthorized")
                 self._wake.clear()
         except asyncio.CancelledError:
             pass  # The connection owner interrupted an in-flight send.

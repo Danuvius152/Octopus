@@ -158,14 +158,13 @@ root; use the PATH setup under Conventions.
 - `server/fork_helpers.py` — Pure helpers for session tree-rewind (`/rewind`): git-anchor capture at turn-start, side-effect classification over parent rows, safe-revert preflight + git-stash execution. Backend-agnostic and side-effect-contained.
 - `server/research/` — Native deep research orchestration (`docs/plans/native-deep-research.md`): `ResearchManager` (async job lifecycle, phase pipeline, concurrency cap, cancel + reap), `orchestrator` (scope → search → dedup → verify → synthesize phases), `leaf` (throwaway `HarnessRun` sub-turns for web-search leaves and `run_oneshot` for reasoning leaves), `schemas` (JSON schemas for scope/findings/synthesis). Agent-invoked via `mcp__research__deep_research`; user-invoked via `/research <question>`. Result injected as a follow-up turn; a `ResearchCard` tracks progress in the UI.
 - `server/mcp_servers/research.py` — MCP namespace exposing `mcp__research__deep_research(question)` to agents; thin HTTP shim to `/api/sessions/{sid}/research`. Returns `research_id` immediately so the model's turn ends cleanly.
-- `docs/plans/token-rotation.md` — the install-era `OCTOPUS_AUTH_TOKEN` is both
-  the credential clients send and the Fernet key for unowned (NULL-owner)
-  secrets. Owned secrets use the master key → per-account DEK
-  ([crypto.py](server/crypto.py); see [architecture.md](docs/architecture.md)'s
-  `crypto.py` row). Rotation re-keys only the install-era set, rewrites the env
-  files, swaps the live setting and retires processes carrying the old token.
-  A password change re-encrypts nothing, and dropping a DEK crypto-shreds that
-  account. No restart, nothing to edit by hand.
+- `server/crypto.py` — the master key wraps per-account DEKs; owned secrets use their
+  account's DEK. A password change re-encrypts nothing, and dropping a DEK
+  crypto-shreds that account.
+- `docs/plans/token-rotation.md` — installation-token rotation is retired.
+  If startup reports `UnfinishedTokenRotation`, preserve the retained database,
+  WAL and environment files and use the documented original-version settlement
+  procedure before retrying startup.
 - `docs/plans/scheduled-runs.md` — What a scheduled fire is: the overlap
   guard that stops a slow schedule stacking runs, the `[scheduled:…]` marker
   that tells an agent nobody is waiting to answer questions, and

@@ -3,7 +3,6 @@
 import json
 import os
 import socket
-import sqlite3
 import subprocess
 import sys
 import time
@@ -169,84 +168,6 @@ def test_a_second_real_unit_cannot_enter_the_owned_installation(tmp_path):
             systemctl("reset-failed", contender, check=False)
             path.unlink(missing_ok=True)
             systemctl("daemon-reload")
-
-
-@pytest.mark.parametrize("old_token", ["ordinary-token-20261020", "literal-${OCTOPUS_PORT}-20261020"])
-def test_rotated_token_survives_the_generated_units_actual_environment(tmp_path, old_token):
-    from server.service_installation import environment_path
-
-    new_token = "rotated-generated-unit-20261020"
-    with isolated_unit(tmp_path, configuration={"auth_token": old_token},
-                       inherited_environment={"OCTOPUS_AUTH_TOKEN": "overridden-parent-token"}) as (unit, config, _):
-        wait_for(lambda: ready(config))
-        previous = properties(unit)["MainPID"]
-        created = request(config, "/api/credentials", {
-            "backend": "claude-code", "label": "Rotation source", "secret": "retained-credential",
-        })
-        result = request(config, "/api/auth/rotate", {"new_token": new_token})
-        assert result["reencrypted"]["credential_secrets"] == 1
-        assert properties(unit)["MainPID"] == previous
-        assert f"OCTOPUS_AUTH_TOKEN={new_token}" in environment_path(config).read_text()
-        with pytest.raises(urllib.error.HTTPError) as retired:
-            request(config, "/api/credentials")
-        assert retired.value.code == 401
-        config.auth_token = new_token
-        assert any(row["id"] == created["id"] for row in request(config, "/api/credentials"))
-        systemctl("restart", unit)
-        wait_for(lambda: properties(unit)["MainPID"] not in {"0", previous} and ready(config))
-        assert any(row["id"] == created["id"] for row in request(config, "/api/credentials"))
-
-
-def test_rotation_refuses_a_loaded_later_environment_file_before_effects(tmp_path):
-    from server.service_installation import environment_path
-
-    with isolated_unit(tmp_path) as (unit, config, project):
-        wait_for(lambda: ready(config))
-        active = environment_path(config)
-        original = active.read_bytes()
-        additional = project / "later.env"
-        additional.write_text(f"OCTOPUS_AUTH_TOKEN={config.auth_token}\n")
-        directory = Path(os.environ["XDG_RUNTIME_DIR"]) / "systemd/user" / (unit + ".d")
-        directory.mkdir()
-        dropin = directory / "rotation-source.conf"
-        dropin.write_text(f"[Service]\nEnvironmentFile={additional}\n")
-        try:
-            systemctl("daemon-reload")
-            with pytest.raises(urllib.error.HTTPError) as refused:
-                request(config, "/api/auth/rotate", {"new_token": "refused-later-source-20261020"})
-            assert refused.value.code == 409
-            assert active.read_bytes() == original
-            assert request(config, "/api/agents")
-        finally:
-            dropin.unlink()
-            directory.rmdir()
-            systemctl("daemon-reload")
-
-
-def test_rotation_refuses_an_inherited_case_alias_before_effects(tmp_path):
-    from server.service_installation import environment_path
-
-    token = "case-alias-unit-old-20261020"
-    with isolated_unit(tmp_path, configuration={"auth_token": token},
-                       inherited_environment={"octopus_auth_token": token}) as (unit, config, _):
-        wait_for(lambda: ready(config))
-        active = environment_path(config)
-        original, previous = active.read_bytes(), properties(unit)["MainPID"]
-        created = request(config, "/api/credentials", {
-            "backend": "claude-code", "label": "Case alias source", "secret": "retained-credential",
-        })
-        with sqlite3.connect(Path(config.db_path).as_uri() + "?mode=ro", uri=True) as stored:
-            ciphertext = stored.execute("SELECT secret_encrypted FROM credential_secrets WHERE credential_id=?", (created["id"],)).fetchone()[0]
-        with pytest.raises(urllib.error.HTTPError) as refused:
-            request(config, "/api/auth/rotate", {"new_token": "refused-case-alias-20261020"})
-        assert refused.value.code == 409
-        assert active.read_bytes() == original and properties(unit)["MainPID"] == previous
-        with sqlite3.connect(Path(config.db_path).as_uri() + "?mode=ro", uri=True) as stored:
-            assert stored.execute("SELECT id FROM token_rotation_intent").fetchall() == []
-            assert stored.execute("SELECT secret_encrypted FROM credential_secrets WHERE credential_id=?", (created["id"],)).fetchone()[0] == ciphertext
-        systemctl("restart", unit)
-        wait_for(lambda: properties(unit)["MainPID"] not in {"0", previous} and ready(config))
-        assert any(row["id"] == created["id"] for row in request(config, "/api/credentials"))
 
 
 def test_optional_configuration_can_be_cleared_without_republishing_the_unit(tmp_path):

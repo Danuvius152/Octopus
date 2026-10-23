@@ -2571,31 +2571,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/auth/rotate": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /**
-         * Rotate Token
-         * @description Change the access token everywhere it lives.
-         *
-         *     Authenticated with the **old** token — which is exactly who is allowed to
-         *     do this — and, unless `revoke_other_clients` is set, the new token is
-         *     broadcast to clients already holding the old one so open tabs carry on
-         *     without a re-login (§3).
-         */
-        post: operations["rotate_token_api_auth_rotate_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/connectors/catalog": {
         parameters: {
             query?: never;
@@ -5519,34 +5494,6 @@ export interface components {
         ToggleAgentConnectorRequest: {
             /** Enabled */
             enabled: boolean;
-        };
-        /**
-         * TokenRotateRequest
-         * @description Change the access token (token-rotation.md).
-         */
-        TokenRotateRequest: {
-            /** New Token */
-            new_token: string;
-            /**
-             * Revoke Other Clients
-             * @default false
-             */
-            revoke_other_clients: boolean;
-        };
-        /** TokenRotateResponse */
-        TokenRotateResponse: {
-            /**
-             * Env Files
-             * @default []
-             */
-            env_files: string[];
-            /**
-             * Reencrypted
-             * @default {}
-             */
-            reencrypted: {
-                [key: string]: number;
-            };
         };
         /** ToolReceipt */
         ToolReceipt: {
@@ -11090,39 +11037,6 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["UserInfo"];
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    rotate_token_api_auth_rotate_post: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["TokenRotateRequest"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["TokenRotateResponse"];
                 };
             };
             /** @description Validation Error */

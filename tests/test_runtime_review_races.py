@@ -27,7 +27,6 @@ from server.delegations import DelegationError, DelegationManager
 from server.deps import get_session_manager, scope_user_id
 from server.harness import get_harness
 from server.mcp_identity import mint, scope_is_live, verify
-from server.routers import auth as auth_router
 from server.routers.sessions import router as sessions_router
 from server.routers.ws import router as ws_router
 from server.sessions import SessionManager
@@ -573,7 +572,7 @@ async def test_archived_background_result_keeps_adopted_owner(background, runtim
     assert owner_events[-1]["task_id"] == record.id
 
 
-@pytest.mark.parametrize("boundary", ["incoming", "broadcast", "rotation_notice"])
+@pytest.mark.parametrize("boundary", ["incoming", "broadcast", "unscoped_notice"])
 async def test_connected_ownerless_websocket_retires_on_account_transition(runtime, monkeypatch, boundary):
     manager, database, session, _, _, _ = runtime
     users = UserManager(database)
@@ -587,45 +586,9 @@ async def test_connected_ownerless_websocket_retires_on_account_transition(runti
         elif boundary == "broadcast":
             await manager._broadcast({"type": "assistant_text", "session_id": session.id, "content": "synthetic private output"}, user_id=account["id"])
         else:
-            await manager._broadcast({"type": "auth_token_rotated", "token": settings.auth_token})
+            await manager._broadcast({"type": "schedules_changed"})
         frame = await asyncio.wait_for(outgoing.get(), 5)
         assert frame["type"] == "websocket.close" and frame["code"] == 4001
-    finally:
-        await disconnect_ws(incoming, task)
-
-
-@pytest.mark.parametrize("revoke", [False, True])
-async def test_connected_legacy_websocket_receives_actual_token_rotation_handoff(runtime, monkeypatch, tmp_path, revoke):
-    manager, database, _, _, _, _ = runtime
-    monkeypatch.setattr(settings, "auth_token", settings.auth_token)
-    # This standalone fixture restarts from its selected env file, without a
-    # parent token overriding that file on the next Settings load.
-    for name in tuple(os.environ):
-        if name.lower() == "octopus_auth_token":
-            monkeypatch.delenv(name)
-    monkeypatch.setattr(deps, "_user_manager", UserManager(database))
-    monkeypatch.setattr(auth_router, "_db", database)
-    env = tmp_path / "rotation.env"
-    env.write_text(f"OCTOPUS_AUTH_TOKEN={settings.auth_token}\n")
-    monkeypatch.setenv("OCTOPUS_ENV_FILE", str(env))
-    old, replacement = settings.auth_token, "review-rotated-token-0123456789"
-    incoming, outgoing, task = await connect_ws(manager, old)
-    app = FastAPI()
-    app.include_router(auth_router.router)
-    app.dependency_overrides[get_session_manager] = lambda: manager
-    try:
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            response = await client.post("/api/auth/rotate", headers={"Authorization": f"Bearer {old}"}, json={"new_token": replacement, "revoke_other_clients": revoke})
-        assert response.status_code == 200, response.text
-        frame = await asyncio.wait_for(outgoing.get(), 5)
-        assert frame["type"] == "websocket.send"
-        assert json.loads(frame["text"]) == {"type": "auth_token_rotated", "token": None if revoke else replacement}
-        await incoming.put({"type": "websocket.receive", "text": "bad json"})
-        next_frame = await asyncio.wait_for(outgoing.get(), 5)
-        if revoke:
-            assert next_frame["type"] == "websocket.close" and next_frame["code"] == 4001
-        else:
-            assert json.loads(next_frame["text"])["message"] == "Invalid JSON"
     finally:
         await disconnect_ws(incoming, task)
 

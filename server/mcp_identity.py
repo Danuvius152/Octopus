@@ -12,8 +12,8 @@ backend and be impossible on the other, which is exactly the kind of
 capability difference `server/harness/` exists to keep out of feature code.
 
 The shape follows `applications.app_scope_token`: derived rather than stored,
-so there is no new secret to persist, back up or leak, and rotating
-`OCTOPUS_AUTH_TOKEN` rotates every scope with it (token-rotation.md).
+and signed by the installation master key. Each call still verifies its current
+session, account and run authority independently of account bearer changes.
 """
 
 from __future__ import annotations

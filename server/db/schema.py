@@ -19,12 +19,6 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     applied_at TEXT NOT NULL
 );
 
--- Files can precede the rekey only while this encrypted intent remains.
-CREATE TABLE IF NOT EXISTS token_rotation_intent (
-    id INTEGER PRIMARY KEY CHECK (id = 1),
-    encrypted_payload TEXT NOT NULL
-);
-
 -- Agents are the durable definition of an assistant (agent-refactor.md §4.1):
 -- identity + system prompt + model + credential + built-in MCP set + tool
 -- policy. They OWN sessions and schedules. Memory (the
