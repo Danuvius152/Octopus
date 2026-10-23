@@ -143,17 +143,23 @@ test("real idle Stop and Resume synchronize dispatch pause across browser client
   try {
     await openSession(page);
     await openSession(observer);
-    await page.evaluate((sessionId: string) => new Promise<void>((resolve, reject) => {
+    const current = await request.get(`${api}/sessions/${session.id}`, { headers });
+    expect(current.ok()).toBeTruthy();
+    const snapshot = (await current.json()).dispatch_state;
+    expect(snapshot.active_request_id).toBeNull();
+    await page.evaluate(({ sessionId, snapshot }) => new Promise<void>((resolve, reject) => {
       const socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws?token=changeme`);
       const probe = { socket, frames: [] as Record<string, unknown>[] };
       (window as unknown as { dispatchProbe: typeof probe }).dispatchProbe = probe;
       socket.onmessage = (event) => probe.frames.push(JSON.parse(event.data));
       socket.onerror = () => reject(new Error("Dispatch probe connection failed"));
       socket.onopen = () => {
-        socket.send(JSON.stringify({ type: "interrupt", session_id: sessionId }));
+        socket.send(JSON.stringify({ type: "interrupt", session_id: sessionId,
+          client_command_id: crypto.randomUUID(), request_id: null, attempt_id: null,
+          generation: snapshot.generation, revision: snapshot.revision }));
         resolve();
       };
-    }), session.id);
+    }), { sessionId: session.id, snapshot });
     await expect(page.getByText("Paused · 0 pending")).toBeVisible();
     await expect(observer.getByText("Paused · 0 pending")).toBeVisible();
     const readPause = async () => {

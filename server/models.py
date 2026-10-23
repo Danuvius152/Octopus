@@ -330,17 +330,6 @@ class SessionDetail(SessionInfo):
 
 # WebSocket protocol messages (client -> server)
 
-class WsSendMessage(BaseModel):
-    type: str = "send_message"
-    session_id: str
-    content: str
-    # IDs of attachments previously uploaded via
-    # `POST /api/sessions/{id}/attachments`. The session manager resolves
-    # them to absolute disk paths and prepends a `<attachments>` block to
-    # the prompt so the agent can `Read` them.
-    attachment_ids: list[str] = []
-
-
 class WsToolDecision(BaseModel):
     type: str  # "approve_tool" or "deny_tool"
     session_id: str

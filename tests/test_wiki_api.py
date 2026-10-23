@@ -1088,6 +1088,9 @@ async def test_worker_only_organizes_assigned_notes_and_rejects_writing_related_
             async def stop(self):
                 pass
 
+            async def interrupt(self):
+                await self.stop()
+
             async def stream(self):
                 found = next(
                     item
@@ -1166,7 +1169,9 @@ async def test_worker_only_organizes_assigned_notes_and_rejects_writing_related_
         )
         assert response.status_code == 200, response.text
         job_id = response.json()["id"]
-        async with asyncio.timeout(5):
+        # File, index and history work stay real; this checks authority and
+        # coverage rather than completion latency under full-suite contention.
+        async with asyncio.timeout(20):
             while True:
                 job = (
                     await client.get(f"/api/wiki/jobs/{job_id}", headers=HEADERS)

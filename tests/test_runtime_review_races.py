@@ -646,7 +646,10 @@ async def test_outbound_retirement_during_incoming_request_is_normal_disconnect(
     manager.on_broadcast("claim-during-ws-request", create_account_during_delivery)
     incoming, outgoing, task = await connect_ws(manager, settings.auth_token)
     try:
-        await incoming.put({"type": "websocket.receive", "text": json.dumps({"type": "send_message", "session_id": session.id, "content": "A pre-claim request"})})
+        await incoming.put({"type": "websocket.receive", "text": json.dumps({
+            "type": "send_message", "session_id": session.id, "content": "A pre-claim request",
+            "client_request_id": "pre-claim-request",
+        })})
         frame = await asyncio.wait_for(outgoing.get(), 5)
         assert frame["type"] == "websocket.close" and frame["code"] == 4001
         await asyncio.wait_for(task, 5)
@@ -679,6 +682,8 @@ async def test_websocket_cannot_resolve_another_accounts_question_or_approval(ru
     incoming, outgoing, task = await connect_ws(manager, token)
     try:
         payload = {"type": operation, "session_id": session.id, "question_id": question, "tool_use_id": "private-approval", "answers": [{"question": "Private choice", "selected": ["A"]}]}
+        if operation == "answer_question":
+            payload.update(client_command_id="foreign-answer", request_id=None, attempt_id=None)
         await incoming.put({"type": "websocket.receive", "text": json.dumps(payload)})
         await incoming.put({"type": "websocket.receive", "text": "bad json"})
         async with asyncio.timeout(5):

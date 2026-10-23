@@ -335,12 +335,19 @@ A backend without web tools simply returns an "unavailable" message.
 **Client → Server**
 
 ```json
-{"type":"send_message","session_id":"…","content":"…","attachment_ids":[]}
-{"type":"interrupt","session_id":"…"}
-{"type":"answer_question","session_id":"…","question_id":"…","answers":[…]}
+{"type":"send_message","session_id":"…","client_request_id":"…","content":"…","attachment_ids":[]}
+{"type":"interrupt","session_id":"…","client_command_id":"…","request_id":"…","attempt_id":"…","generation":"…","revision":0}
+{"type":"answer_question","session_id":"…","client_command_id":"…","request_id":"…","attempt_id":"…","question_id":"…","answers":[…]}
 {"type":"approve_tool","session_id":"…","tool_use_id":"…"}
 {"type":"deny_tool","session_id":"…","tool_use_id":"…","reason":"…"}
 ```
+
+Input and command IDs are nonempty strings of at most 128 characters. Retry the
+same input with the same ID and content; a new ID represents new input. Controls
+target the current request and attempt. An idle Stop supplies explicit `null`
+for both targets and the current dispatch generation/revision. Answers must cover
+every question. Invalid identities receive `error`; valid identities retain their
+correlated `submission` or `command_receipt`, including refusals.
 
 **Server → Client**
 
@@ -349,7 +356,9 @@ A backend without web tools simply returns an "unavailable" message.
 {"type":"assistant_text","session_id":"…","content":"…"}
 {"type":"tool_use","session_id":"…","tool":"Bash","input":{…},"tool_use_id":"…"}
 {"type":"tool_result","session_id":"…","tool_use_id":"…","output":"…","is_error":false}
-{"type":"question_request","session_id":"…","question_id":"…","questions":[…]}
+{"type":"question_request","session_id":"…","request_id":"…","attempt_id":"…","question_id":"…","questions":[…]}
+{"type":"submission","session_id":"…","client_request_id":"…","accepted":true,"request_id":"…"}
+{"type":"command_receipt","session_id":"…","client_command_id":"…","operation":"interrupt|answer_question","accepted":true}
 {"type":"result","session_id":"…","cost":0.03,"turns":2,"duration_ms":5000,"is_error":false}
 {"type":"status","session_id":"…","status":"idle|running|waiting_approval"}
 {"type":"error","session_id":"…","message":"…"}

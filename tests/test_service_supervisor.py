@@ -353,7 +353,7 @@ async def interrupted_spawn(*args,**kwargs):
     with sqlite3.connect(settings.db_path) as db:
         row=db.execute("SELECT session_id,request_id,execution_state,process_group,execution_generation "
                        "FROM client_submissions WHERE client_id='original'").fetchone()
-    assert row is not None and row[2]=='claimed' and row[3] is None, row
+    assert row is not None and row[2]=='running' and row[3] is None, row
     (root/'loss.json').write_text(json.dumps(row))
     if 'WINDOW'=='late_spawn':
         while not (root/'release').exists(): await asyncio.sleep(.01)
@@ -383,7 +383,7 @@ def test_managed_restart_retires_claim_without_a_recorded_process_group(tmp_path
         loss = project / "loss.json"
         wait_for(lambda: loss.exists())
         evidence = json.loads(loss.read_text())
-        assert evidence[0] == session["id"] and evidence[2:4] == ["claimed", None]
+        assert evidence[0] == session["id"] and evidence[2:4] == ["running", None]
         assert (project / "spawned").exists() is (window == "before_registration")
         old_pid = int((project / "spawned").read_text()) if window == "before_registration" else None
         wait_for(lambda: properties(unit)["MainPID"] not in {"0", previous} and ready(config))
@@ -414,8 +414,13 @@ def test_managed_startup_proof_does_not_release_a_current_generations_late_spawn
         original = submit_message(config, session["id"], "original effects", "original")
         wait_for(lambda: (project / "loss.json").exists())
         pid = int((project / "spawned").read_text())
+        current = request(config, f"/api/sessions/{session['id']}")
+        dispatch = current["dispatch_state"]
         with connect(f"ws://127.0.0.1:{config.port}/ws?token={config.auth_token}") as connection:
-            connection.send(json.dumps({"type": "interrupt", "session_id": session["id"]}))
+            connection.send(json.dumps({"type": "interrupt", "session_id": session["id"],
+                                        "client_command_id": "stop-late-spawn", "request_id": dispatch["active_request_id"],
+                                        "attempt_id": (current.get("active_attempt") or {}).get("attempt_id"),
+                                        "generation": dispatch["generation"], "revision": dispatch["revision"]}))
             while True:
                 event = json.loads(connection.recv(timeout=3))
                 if event.get("type") == "dispatch_state" and event["dispatch_state"]["paused"]:
