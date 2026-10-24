@@ -80,8 +80,8 @@ def admit(*, session_id: str, request_id: str, user_id: str | None,
 
 def _requested_mode(prompt: str, selected: str | None) -> str | None:
     # A verified control is stronger than command syntax in the task body.
-    if selected in {"auto", "read", "maintain", "off"}:
-        return "read" if selected == "off" else selected
+    if selected in {"auto", "read", "maintain"}:
+        return selected
     if selected is not None:
         raise ValueError("Unknown knowledge request mode")
     return explicit_mode(prompt)

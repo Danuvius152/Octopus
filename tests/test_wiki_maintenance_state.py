@@ -474,12 +474,11 @@ async def test_normal_weber_mcp_can_observe_and_enqueue_but_not_write_or_reuse_e
     assert (vault / "Library/journal.md").read_bytes() == original
 
 
-@pytest.mark.parametrize("mode", ["read", "off"])
-async def test_read_only_turn_observation_cannot_authorize_maintenance(client, tmp_path, mode):
+async def test_read_only_turn_observation_cannot_authorize_maintenance(client, tmp_path):
     from server.wiki.tasks import explicit_mode
 
     await prepare(client, tmp_path)
-    async with entry(client, mode=explicit_mode("/wiki维护", mode)) as (headers, _):
+    async with entry(client, mode=explicit_mode("/wiki维护", "read")) as (headers, _):
         observed = (await state(client, "Library/journal.md", headers=headers))["items"][0]
         assert observed["actionable"]
         assert (await client.post("/api/wiki/maintain", headers=headers, json=submission(observed))).status_code == 403

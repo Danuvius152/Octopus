@@ -46,7 +46,7 @@ async def test_current_format_is_prepared_once_and_reopen_preserves_owned_facts(
                          "reason_code='steer_delivery_unknown',delivery_state='unknown'")
     await database.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (2,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (3,)
         assert reader.execute("SELECT name FROM sqlite_schema WHERE name='schema_migrations'").fetchall() == []
         original_rows = reader.execute("SELECT * FROM sessions").fetchall()
         original_messages = reader.execute("SELECT * FROM messages").fetchall()
@@ -81,7 +81,7 @@ async def test_current_format_is_prepared_once_and_reopen_preserves_owned_facts(
                 ("CREATE", "ALTER", "DROP", "INSERT", "UPDATE", "DELETE", "PRAGMA USER_VERSION="),
             )]
         with closing(sqlite3.connect(path)) as reader:
-            assert reader.execute("PRAGMA user_version").fetchone() == (2,)
+            assert reader.execute("PRAGMA user_version").fetchone() == (3,)
             assert reader.execute("SELECT * FROM sessions").fetchall() == original_rows
             assert reader.execute("SELECT * FROM messages").fetchall() == original_messages
             assert reader.execute("SELECT * FROM agents").fetchall() == original_agents
@@ -112,7 +112,7 @@ async def test_unsupported_owned_format_is_refused_without_writes(tmp_path, monk
         if damage in ("future_version", "future_version_wal"):
             writer.execute("PRAGMA user_version=1000000")
         elif damage == "unknown_structure":
-            writer.execute("PRAGMA user_version=2")
+            writer.execute("PRAGMA user_version=3")
             writer.execute("CREATE TABLE future_business(id TEXT PRIMARY KEY, original BLOB)")
             writer.execute("INSERT INTO future_business VALUES('original', ?)", (b"unknown durable fact\x00\xff",))
         else:
@@ -123,7 +123,7 @@ async def test_unsupported_owned_format_is_refused_without_writes(tmp_path, monk
     wal = Path(str(path) + "-wal")
     original_wal = wal.read_bytes() if wal.exists() else None
     if damage == "future_version_wal":
-        assert int.from_bytes(original[60:64], "big") == 2
+        assert int.from_bytes(original[60:64], "big") == 3
         assert original_wal is not None and len(original_wal) > 32
     directories = {child.relative_to(tmp_path) for child in tmp_path.rglob("*") if child.is_dir()}
     admitted = tmp_path / "admitted"
@@ -223,7 +223,7 @@ asyncio.run(main())
     assert proof.read_text() == failure
     with closing(sqlite3.connect(path)) as reader:
         committed = failure == "commit_ack"
-        assert reader.execute("PRAGMA user_version").fetchone() == (2 if committed else 0,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (3 if committed else 0,)
         tables = {row[0] for row in reader.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
         if baseline == "empty" and not committed:
             assert tables == set()
@@ -237,7 +237,7 @@ asyncio.run(main())
         assert (await reopened.load_messages("saved"))[0]["content"] == "Original input before interruption"
     await reopened.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (2,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (3,)
         assert reader.execute("SELECT name FROM sqlite_schema WHERE name='schema_migrations'").fetchall() == []
 
 
@@ -355,7 +355,7 @@ async def test_complete_historical_sequence_guards_survive_format_preparation(tm
     finally:
         await database.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (2,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (3,)
         assert reader.execute("SELECT id,session_id,seq,content FROM messages WHERE seq=5 ORDER BY id").fetchall() == original
         assert {row[0] for row in reader.execute("SELECT name FROM sqlite_schema WHERE type='trigger'")} == {
             "messages_sequence_insert", "messages_sequence_update",

@@ -278,8 +278,6 @@ def compose_system_prompt(
         out = f"{out}\n\n{render_memory_blurb(memory_dir)}"
     if fork_note:
         out = f"{out}\n\n{fork_note}"
-    if wiki_mode == "off":
-        wiki_mode = "read"
     if wiki_capability and wiki_mode is None:
         out += "\n\nLocal Wiki is not configured or is unavailable for this account; no Wiki tools are available in this turn."
     if wiki_mode in {"auto", "read", "maintain"}:

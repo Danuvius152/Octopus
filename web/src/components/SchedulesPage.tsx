@@ -13,7 +13,7 @@ function ScheduleKnowledgeControl({ schedule }: { schedule: Schedule }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const missing = schedule.invalid_reason === "knowledge_contract_missing";
-  const mode = missing ? "" : schedule.wiki_mode === "off" ? "read" : schedule.wiki_mode ?? "auto";
+  const mode = missing ? "" : schedule.wiki_mode ?? "auto";
 
   const change = async (wikiMode: string) => {
     setSaving(true);

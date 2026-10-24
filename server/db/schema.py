@@ -15,7 +15,7 @@ from ..sqlite_schema import definition as _schema_definition
 from ..sqlite_schema import statements as _statements
 from .transaction import Transaction
 
-CURRENT_VERSION = 2
+CURRENT_VERSION = 3
 _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
 
 
@@ -53,7 +53,7 @@ def _definition(kind: str, sql: str) -> tuple:
 
 def _validate_layout(version: int, rows: Sequence[tuple[str, str, str]]) -> bool:
     """Return whether this is new empty storage; otherwise require a full format."""
-    if version not in (0, 1, CURRENT_VERSION):
+    if version not in (0, 1, 2, CURRENT_VERSION):
         raise UnsupportedMainStorage()
     if not rows:
         if version == 0:
@@ -121,6 +121,31 @@ UNION ALL SELECT 1 FROM client_submissions original
 LIMIT 1
 """
 
+_SCHEDULE_MODES = """
+SELECT schedule.id, schedule.knowledge_context, agent.id, agent.user_id
+FROM schedules schedule LEFT JOIN agents agent ON agent.id=schedule.agent_id
+WHERE schedule.wiki_mode='off'
+"""
+
+
+def _validate_schedule_modes(version: int, rows: Sequence[tuple]) -> list[str]:
+    """Authorize only the finite projection change, never a new request."""
+    from ..knowledge import decode_context
+
+    if version == CURRENT_VERSION and rows:
+        raise UnsupportedMainStorage()
+    missing = []
+    for schedule_id, raw, agent_id, user_id in rows:
+        context = decode_context(raw)
+        if context is None:
+            missing.append(schedule_id)
+        elif (context.mode != "read" or context.maintenance.may_submit
+              or agent_id is None or context.origin.user_id != user_id):
+            # The origin is a source request, not the current execution target.
+            # Contradictory authority cannot be repaired by changing its bytes.
+            raise UnsupportedMainStorage()
+    return missing
+
 
 def require_supported_main_format(db_path: str) -> None:
     """Inspect one consistent committed snapshot, including its real WAL."""
@@ -142,6 +167,8 @@ def require_supported_main_format(db_path: str) -> None:
         elif not new and version == 1:
             if reader.execute(_UNSUPPORTED_RETIRED_DATA).fetchone():
                 raise UnsupportedMainStorage()
+        if not new:
+            _validate_schedule_modes(version, reader.execute(_SCHEDULE_MODES).fetchall())
 
 
 async def prepare_main_storage(tx: Transaction) -> None:
@@ -152,22 +179,34 @@ async def prepare_main_storage(tx: Transaction) -> None:
     if new:
         for statement in _statements(_SCHEMA):
             await tx.execute(statement)
-    elif version == CURRENT_VERSION:
-        return
     else:
+        rotation_table = any(name == "token_rotation_intent" for _, name, _ in rows)
         if version == 0:
             if await tx.fetch_one(_UNSUPPORTED_BASELINE_DATA):
                 raise UnsupportedMainStorage()
-            if any(name == "token_rotation_intent" for _, name, _ in rows):
+            if rotation_table:
                 if await tx.fetch_one("SELECT 1 FROM token_rotation_intent LIMIT 1"):
                     raise UnsupportedMainStorage()
+        elif version == 1 and await tx.fetch_one(_UNSUPPORTED_RETIRED_DATA):
+            raise UnsupportedMainStorage()
+        missing = _validate_schedule_modes(version, await tx.fetch_all(_SCHEDULE_MODES))
+        if version == CURRENT_VERSION:
+            return
+        if version == 0:
+            if rotation_table:
                 await tx.execute("DROP TABLE token_rotation_intent")
             await tx.execute("DROP TABLE schema_migrations")
             _validate_layout(1, await tx.fetch_all(_CATALOG))
-        elif await tx.fetch_one(_UNSUPPORTED_RETIRED_DATA):
-            raise UnsupportedMainStorage()
-        await tx.execute("ALTER TABLE backend_credentials DROP COLUMN secret_encrypted")
-        await tx.execute("ALTER TABLE client_submissions DROP COLUMN recovered_by")
+        if version in (0, 1):
+            await tx.execute("ALTER TABLE backend_credentials DROP COLUMN secret_encrypted")
+            await tx.execute("ALTER TABLE client_submissions DROP COLUMN recovered_by")
+        await tx.execute("UPDATE schedules SET wiki_mode='read' WHERE wiki_mode='off'")
+        for schedule_id in missing:
+            await tx.execute(
+                "UPDATE schedules SET invalid_reason=CASE WHEN enabled=0 AND invalid_reason IS NOT NULL "
+                "THEN invalid_reason ELSE 'knowledge_contract_missing' END, enabled=0 WHERE id=?",
+                (schedule_id,),
+            )
     _validate_layout(CURRENT_VERSION, await tx.fetch_all(_CATALOG))
     await tx.execute(f"PRAGMA user_version={CURRENT_VERSION}")
 

@@ -594,7 +594,7 @@ async def test_submission_commit_failure_stops_the_process_and_restart_reads_act
         assert status["client_request_id"] == "confirm"
         assert status["request_id"] == evidence["request_id"]
         assert status["input"] == {"content": "Retain responsibility 中文\nKeep the exact input.",
-                                   "attachment_ids": [], "attachments": [], "wiki_mode": None}
+                                   "attachment_ids": [], "attachments": [], "wiki_mode": "auto"}
         assert status["execution"]["state"] == ("done" if completed else "unknown")
         assert status["execution"]["execution_owner_request_id"] == evidence["request_id"]
         assert status["execution"]["recoverable_input"] is False

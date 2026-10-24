@@ -18,7 +18,9 @@
 
 模型编辑总是继承调用方的具体来源要求，不以 payload 是否含正文区分。fire 也在同一写入屏障内取得已提交的定义快照，随即释放屏障；已回滚的修改不会成为一次执行的依据，后续合法编辑也不回溯影响已接纳的 fire。
 
-旧结果没有合同或版本未知时，仅保留输出、报告和可见交付状态；不据正文补造 read/auto 请求。计划缺少合同会保留并停用，`invalid_reason=knowledge_contract_missing`；经认证的人类可在计划页面查看原消息，明确选择 Wiki 维护控制（API 的 `wiki_mode`：auto/read/maintain/off）重新授权，再另行恢复运行。模型不能靠改正文或省略字段恢复权限。已捕获的 fire 使用自己的定义快照，计划后续编辑或删除不会改变该次执行。
+旧结果没有合同或版本未知时，仅保留输出、报告和可见交付状态；不据正文补造 read/auto 请求。计划缺少合同会保留并停用，`invalid_reason=knowledge_contract_missing`；经认证的人类可在计划页面查看原消息，明确选择 Wiki 维护控制（API 的 `wiki_mode`：auto/read/maintain）重新授权，再另行恢复运行。模型不能靠改正文或省略字段恢复权限。已捕获的 fire 使用自己的定义快照，计划后续编辑或删除不会改变该次执行。
+
+新的 API、MCP 与界面控制只接受 `auto`、`read`、`maintain`；携带 `wiki_mode=off` 的新 POST 返回 422，在接管对话、任务或执行前拒绝。仅旧计划的模式展示列 `wiki_mode=off` 在所属存储升级中归一为 `read`；执行合同保持原字节，运行消费其中已有的 canonical `read`。缺少或无法验证的合同保留原文并停用，不从正文或旧控制重建权限。已受理客户端输入的原始 payload、payload_sha256 与 client_id 保持不变；确认同一 ID 的受理状态使用现有鉴权保护的 `GET /api/sessions/{session_id}/submissions/{client_id}`，不重新 POST 旧 `off`，也不将它改成 `read` 后重算 hash 并冒称原输入。
 
 Research 的报告完成与后续交付分别保存和广播。交付被抑制时，聊天保留去重的材料通知和原因；卡片展示未交付状态，重新加载仍能查到报告位置和原因。
 

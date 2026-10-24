@@ -157,6 +157,156 @@ it("keeps a rejected Wiki draft and protects subsequent editing during restorati
   expect(sendMessage).toHaveBeenCalledTimes(1);
 });
 
+it("retains an unconfirmed draft after a missing receipt and confirms the original identity without resending", async () => {
+  useSessionStore.setState({ token: "confirmation-account" });
+  let reads = 0;
+  const statusUrl = `${window.location.origin}/api/sessions/${session.id}/submissions/uncertain-client`;
+  const request = vi.fn(async (url: string) => {
+    if (url === statusUrl) {
+      reads += 1;
+      if (reads === 1) return Response.json({ detail: "Submission not found" }, { status: 404 });
+      return Response.json({ session_id: session.id, client_request_id: "uncertain-client", request_id: "original-request",
+        accepted: true, execution: { state: "running", state_version: 1, execution_owner_request_id: "original-request",
+          delivery_state: "none", recoverable_input: false } });
+    }
+    if (url.includes("/wiki-jobs")) return Response.json([]);
+    return Response.json({ items: [], next_cursor: null });
+  });
+  vi.stubGlobal("fetch", request);
+  try {
+    const { input, send, sendMessage } = setup(async () => ({
+      accepted: false, state: "unknown", clientRequestId: "uncertain-client", message: "Admission unconfirmed",
+    }));
+    fireEvent.change(input, { target: { value: "Keep the original input" } });
+    await act(async () => fireEvent.click(send));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry admission confirmation" })));
+    expect(request).toHaveBeenCalledWith(statusUrl, {
+      method: "GET", headers: { Authorization: "Bearer confirmation-account" },
+    });
+    expect(screen.getByRole("button", { name: "Restore draft" })).toBeDisabled();
+    expect(screen.getByText("Keep the original input")).toBeInTheDocument();
+    expect(screen.getByText(/Admission is still unconfirmed.*\(404\)/)).toBeInTheDocument();
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry admission confirmation" })));
+    expect(reads).toBe(2);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Restore draft" })).not.toBeInTheDocument();
+    expect(screen.queryByText("Keep the original input")).not.toBeInTheDocument();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("keeps an unknown execution through a failed status read and restores only a confirmed withdrawn input", async () => {
+  useSessionStore.setState({ token: "confirmation-account" });
+  let reads = 0;
+  const statusUrl = `${window.location.origin}/api/sessions/${session.id}/submissions/uncertain-client`;
+  const request = vi.fn(async (url: string) => {
+    if (url === statusUrl) {
+      reads += 1;
+      if (reads === 2) throw new TypeError("Network unavailable");
+      const unknown = reads === 1;
+      return Response.json({ session_id: session.id, client_request_id: "uncertain-client", request_id: "original-request",
+        accepted: true, message: unknown ? "Execution outcome remains unknown" : "Withdrawn before execution; input can be restored",
+        execution: { state: unknown ? "unknown" : "withdrawn", state_version: reads,
+          execution_owner_request_id: "original-request", delivery_state: "none", recoverable_input: !unknown } });
+    }
+    if (url.includes("/wiki-jobs")) return Response.json([]);
+    return Response.json({ items: [], next_cursor: null });
+  });
+  vi.stubGlobal("fetch", request);
+  try {
+    let submissions = 0;
+    const { input, send, sendMessage } = setup(async () => ++submissions === 1
+      ? { accepted: false, state: "unknown", clientRequestId: "uncertain-client", message: "Admission unconfirmed" }
+      : { accepted: true });
+    fireEvent.change(input, { target: { value: "Review before retrying" } });
+    await act(async () => fireEvent.click(send));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry admission confirmation" })));
+    expect(screen.getByText("Execution outcome remains unknown")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restore draft" })).toBeDisabled();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry admission confirmation" })));
+    expect(screen.getByText(/Admission is still unconfirmed.*Network unavailable/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restore draft" })).toBeDisabled();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry admission confirmation" })));
+    expect(reads).toBe(3);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("Withdrawn before execution; input can be restored")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "Retry admission confirmation" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Restore draft" }));
+    expect(input).toHaveValue("Review before retrying");
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    fireEvent.change(input, { target: { value: "Reviewed recovery input" } });
+    await act(async () => fireEvent.click(send));
+    expect(sendMessage).toHaveBeenLastCalledWith(session.id, "Reviewed recovery input", undefined, undefined, undefined, "uncertain-client");
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("can read admission status while the WebSocket is disconnected", async () => {
+  useSessionStore.setState({ token: "confirmation-account" });
+  const statusUrl = `${window.location.origin}/api/sessions/${session.id}/submissions/uncertain-client`;
+  const request = vi.fn(async (url: string) => {
+    if (url === statusUrl) return Response.json({ session_id: session.id, client_request_id: "uncertain-client", request_id: "original-request",
+      accepted: true, execution: { state: "done", state_version: 2, execution_owner_request_id: "original-request",
+        delivery_state: "confirmed", recoverable_input: false } });
+    if (url.includes("/wiki-jobs")) return Response.json([]);
+    return Response.json({ items: [], next_cursor: null });
+  });
+  vi.stubGlobal("fetch", request);
+  try {
+    const sendMessage = vi.fn(async () => ({ accepted: false, state: "unknown" as const,
+      clientRequestId: "uncertain-client", message: "Admission unconfirmed" }));
+    const props = { sendMessage, interrupt: vi.fn(), answerQuestion: vi.fn(), onToggleSidebar: vi.fn(), onOpenSchedules: vi.fn() };
+    const view = render(<ChatView {...props} connected />);
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "Retain this input" } });
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Send message" })));
+    view.rerender(<ChatView {...props} connected={false} />);
+    expect(screen.getByRole("button", { name: "Retry admission confirmation" })).not.toBeDisabled();
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry admission confirmation" })));
+    expect(request).toHaveBeenCalledWith(statusUrl, {
+      method: "GET", headers: { Authorization: "Bearer confirmation-account" },
+    });
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(screen.queryByText("Retain this input")).not.toBeInTheDocument();
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
+it("keeps a withdrawn receipt read-only when the server does not allow input recovery", async () => {
+  useSessionStore.setState({ token: "confirmation-account" });
+  const statusUrl = `${window.location.origin}/api/sessions/${session.id}/submissions/uncertain-client`;
+  const request = vi.fn(async (url: string) => {
+    if (url === statusUrl) return Response.json({ session_id: session.id, client_request_id: "uncertain-client", request_id: "original-request",
+      accepted: true, message: "This historical receipt is read-only",
+      execution: { state: "withdrawn", state_version: 2, execution_owner_request_id: "original-request",
+        delivery_state: "none", recoverable_input: false } });
+    if (url.includes("/wiki-jobs")) return Response.json([]);
+    return Response.json({ items: [], next_cursor: null });
+  });
+  vi.stubGlobal("fetch", request);
+  try {
+    const { input, send, sendMessage } = setup(async () => ({
+      accepted: false, state: "unknown", clientRequestId: "uncertain-client", message: "Admission unconfirmed",
+    }));
+    fireEvent.change(input, { target: { value: "Retain the read-only input" } });
+    await act(async () => fireEvent.click(send));
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry admission confirmation" })));
+    expect(screen.getByText("This historical receipt is read-only")).toBeInTheDocument();
+    expect(screen.getByText("Retain the read-only input")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Restore draft" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "Restore draft" }));
+    expect(input).toHaveValue("");
+    await act(async () => fireEvent.click(screen.getByRole("button", { name: "Retry admission confirmation" })));
+    expect(request.mock.calls.filter(([url]) => url === statusUrl)).toHaveLength(2);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+  } finally {
+    vi.unstubAllGlobals();
+  }
+});
+
 describe("shared Wiki without a composer switch", () => {
   it.each(["请结合共享知识解释这个问题", ...commandCases.map(({ message }) => message)])(
     "sends the original request without an implicit Wiki mode: %s", (message) => {

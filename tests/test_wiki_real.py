@@ -93,7 +93,7 @@ async def test_codex_resumed_turn_replaces_previous_wiki_off_instruction(tmp_pat
         with monkeypatch.context() as legacy:
             legacy.setattr(assembly, "compose_system_prompt", lambda *args, **kwargs:
                 "Wiki is explicitly disabled for this turn; do not access the vault or delegate around this restriction.")
-            first = await manager.start_message(session.id, "Only reply MODE-OFF-ACK; do not use any tools.", wiki_mode="off")
+            first = await manager.start_message(session.id, "Only reply MODE-OFF-ACK; do not use any tools.", wiki_mode="read")
             assert (await asyncio.wait_for(first.wait(), 120)).outcome.status == "success"
         native_id = session.claude_session_id
         cutoff = len(await db.load_messages(session.id))

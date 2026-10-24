@@ -18,9 +18,14 @@ from tests.fake_run import FakeRunBase
 client = wiki_api.client
 
 
-@pytest.mark.parametrize("selected,expected", [(None, "auto"), ("off", "read"), ("read", "read"), ("maintain", "maintain")])
+@pytest.mark.parametrize("selected,expected,restore_old", [
+    (None, "auto", False), ("auto", "auto", False), ("read", "read", False),
+    ("maintain", "maintain", False), (None, "read", True),
+])
 @pytest.mark.parametrize("actor", ["reader", "curator"])
-async def test_all_turns_can_query_and_legacy_off_only_disables_maintenance(client, tmp_path, monkeypatch, selected, expected, actor):
+async def test_current_modes_and_restored_off_keep_lookup_and_enforce_maintenance_limits(
+    client, tmp_path, monkeypatch, selected, expected, restore_old, actor,
+):
     vault = tmp_path / "vault"
     (vault / "Library").mkdir(parents=True)
     note = vault / "Library/note.md"
@@ -111,6 +116,10 @@ async def test_all_turns_can_query_and_legacy_off_only_disables_maintenance(clie
     monkeypatch.setattr(get_harness("codex"), "create_run", create)
     kwargs = {"wiki_mode": selected} if selected is not None else {}
     prompt = "/wiki maintain Library/note.md\nUse our knowledge" if selected == "maintain" else "Use our knowledge to answer this question"
+    if restore_old:
+        from tests.test_wiki_mode_protocol import historical_read_input
+        await historical_read_input(manager, session)
+        kwargs.update(client_request_id="restored-off", recovery_of_client_id="old-client")
     receipt = await manager.start_message(session.id, prompt, **kwargs)
     completion = await receipt.wait()
     assert completion.outcome.status == "success", completion.outcome
@@ -123,15 +132,15 @@ async def test_all_turns_can_query_and_legacy_off_only_disables_maintenance(clie
         assert expired.status_code == 403
 
 
-def test_unregistered_wiki_does_not_claim_available_tools_and_legacy_off_is_read_only():
+def test_unregistered_wiki_does_not_claim_available_tools_and_read_keeps_lookup():
     from server.harness.assembly import compose_system_prompt
     from server.wiki.workflow import BOOTSTRAP, guide
 
     missing = compose_system_prompt(None, "", [], wiki_capability=True)
     assert "unavailable" in missing
     assert guide("access") not in missing and guide("query-v2") not in missing
-    legacy = compose_system_prompt(None, "", [], wiki_capability=True, wiki_mode="off")
-    assert BOOTSTRAP in legacy and guide("query-v2") not in legacy
+    read = compose_system_prompt(None, "", [], wiki_capability=True, wiki_mode="read")
+    assert BOOTSTRAP in read and guide("query-v2") not in read
 
 
 async def test_native_job_navigation_avoids_embedding_large_payload_in_command(client, tmp_path):

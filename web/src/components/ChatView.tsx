@@ -111,7 +111,7 @@ export function ChatView({
     id: string; sessionId: string; text: string; attachments: PendingAttachment[];
     reason: string;
     recoveryOfClientId?: string;
-    uncertain?: { id: string; content: string; attachmentIds?: string[]; recoveryOfClientId?: string };
+    uncertain?: { id: string };
     confirming?: boolean;
   }[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
@@ -599,10 +599,7 @@ export function ChatView({
         if (!reply.accepted || reply.execution?.state === "withdrawn" || reply.state === "unknown") setRejectedDrafts((drafts) => [...drafts, {
           ...draft, reason: reply.message || "Your message was not accepted.",
           ...(reply.execution?.state === "withdrawn" && reply.clientRequestId ? { recoveryOfClientId: reply.clientRequestId } : {}),
-          ...(reply.state === "unknown" && reply.clientRequestId ? { uncertain: {
-            id: reply.clientRequestId, content, attachmentIds: readyAttachmentIds.length ? readyAttachmentIds : undefined,
-            recoveryOfClientId: draft.recoveryOfClientId,
-          } } : {}),
+          ...(reply.state === "unknown" && reply.clientRequestId ? { uncertain: { id: reply.clientRequestId } } : {}),
         }]);
         else if (reply.requestId && draft.attachments.length) {
           const result = useSessionStore.getState().messages[draft.sessionId]?.find((message) => message.outcome?.request_id === reply.requestId);
@@ -619,14 +616,25 @@ export function ChatView({
     setRejectedDrafts((drafts) => drafts.map((item) => item.id === draft.id ? { ...item, confirming: true } : item));
     const original = draft.uncertain;
     try {
-      const reply = await sendMessage(draft.sessionId, original.content, original.attachmentIds, undefined, original.id, original.recoveryOfClientId);
-      if (!reply) return;
-      setRejectedDrafts((drafts) => reply.accepted && reply.state !== "unknown" && reply.execution?.state !== "withdrawn" ? drafts.filter((item) => item.id !== draft.id) : drafts.map((item) => item.id === draft.id
-        ? { ...item, confirming: false, reason: reply.message || "Admission confirmation failed.",
-          ...(reply.execution?.state === "withdrawn" ? { recoveryOfClientId: original.id } : {}),
-          uncertain: reply.state === "unknown" || reply.code === "not_sent" ? original : undefined } : item));
-    } catch {
-      setRejectedDrafts((drafts) => drafts.map((item) => item.id === draft.id ? { ...item, confirming: false } : item));
+      const token = useSessionStore.getState().token;
+      const response = await fetch(`${window.location.origin}/api/sessions/${encodeURIComponent(draft.sessionId)}/submissions/${encodeURIComponent(original.id)}`, {
+        method: "GET", headers: { Authorization: `Bearer ${token}` },
+      });
+      if (!response.ok) throw new Error(`Status lookup failed (${response.status}).`);
+      const reply = await response.json() as ClientSubmissionStatus;
+      const unknown = reply.state === "unknown" || reply.execution.state === "unknown";
+      const withdrawn = reply.execution.state === "withdrawn";
+      const recoverable = withdrawn && !unknown && reply.execution.recoverable_input;
+      setRejectedDrafts((drafts) => reply.accepted && !unknown && !withdrawn ? drafts.filter((item) => item.id !== draft.id) : drafts.map((item) => item.id === draft.id
+        ? { ...item, confirming: false, reason: reply.message || (recoverable
+          ? "This input was withdrawn before execution. You can restore it and send it again."
+          : withdrawn ? "This input is read-only and cannot be restored. The saved draft and original request ID were kept."
+          : "Admission is still unconfirmed. Check the conversation before sending again."),
+          ...(recoverable ? { recoveryOfClientId: original.id } : {}),
+          uncertain: recoverable ? undefined : original } : item));
+    } catch (error) {
+      setRejectedDrafts((drafts) => drafts.map((item) => item.id === draft.id ? { ...item, confirming: false,
+        reason: `Admission is still unconfirmed. ${error instanceof Error ? error.message : "Try again."} The saved draft and original request ID were kept. Check the conversation before sending again.` } : item));
     }
   };
 
@@ -1553,7 +1561,7 @@ export function ChatView({
                   }}>Download {attachment.file.name}</button></p>)}
               </details>
               {draft.uncertain && <Button size="sm" variant="outline" className="mt-2"
-                disabled={draft.confirming || !connected}
+                disabled={draft.confirming}
                 onClick={() => void confirmSubmission(draft)}>{draft.confirming ? "Confirming…" : "Retry admission confirmation"}</Button>}
               <Button size="sm" variant="outline" className="mt-2"
                 disabled={Boolean(draft.uncertain) || !activeSessionId || isArchived || input.length > 0 || pendingAttachments.length > 0}

@@ -1525,7 +1525,7 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
     monkeypatch.setattr(harness, "create_run", create)
     import asyncio
 
-    for prompt, mode in [("明确查询", "read"), ("普通任务", None), ("关闭本轮", "off")]:
+    for prompt, mode in [("明确查询", "read"), ("普通任务", None), ("只读本轮", "read")]:
         receipt = await session_manager.start_message(session.id, prompt, wiki_mode=mode)
         assert receipt.accepted
         assert (await asyncio.wait_for(receipt.wait(), 5)).outcome.status == "success"

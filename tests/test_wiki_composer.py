@@ -20,8 +20,8 @@ def test_wiki_command_cases(case):
 
 
 @pytest.mark.parametrize("case", CASES)
-def test_legacy_off_cancels_maintenance_and_keeps_shared_lookup(case):
-    assert explicit_mode(case["message"], "off") == "read"
+def test_read_cancels_maintenance_and_keeps_shared_lookup(case):
+    assert explicit_mode(case["message"], "read") == "read"
 
 
 async def submit_composer(runtime, monkeypatch, tmp_path, message, selection):
@@ -47,16 +47,16 @@ async def submit_composer(runtime, monkeypatch, tmp_path, message, selection):
 
 async def test_websocket_cancelled_maintenance_keeps_shared_lookup(runtime, monkeypatch, tmp_path):
     message = "/wiki /wiki maintain 的用法是什么？"
-    accepted = await submit_composer(runtime, monkeypatch, tmp_path, message, 'off')
+    accepted = await submit_composer(runtime, monkeypatch, tmp_path, message, 'read')
     assert accepted['content'] == message and accepted['wiki_mode'] == 'read'
 
 
 @pytest.mark.parametrize("command", ["/wiki维护", "/wiki 维护"])
-@pytest.mark.parametrize("selection", [None, "off", "read"])
+@pytest.mark.parametrize("selection", [None, "auto", "read"])
 async def test_websocket_chinese_maintenance_uses_trusted_intent_and_respects_cancellation(
     runtime, monkeypatch, tmp_path, command, selection,
 ):
     message = command + " Library/projects/current.md"
     accepted = await submit_composer(runtime, monkeypatch, tmp_path, message, selection)
     assert accepted['content'] == message
-    assert accepted['wiki_mode'] == ('maintain' if selection is None else 'read')
+    assert accepted['wiki_mode'] == ('read' if selection == 'read' else 'maintain')

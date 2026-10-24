@@ -12,6 +12,7 @@ from ..attachments import AttachmentUnavailable, validate_message_attachments
 from .runtime_types import QuotaExceeded
 
 if TYPE_CHECKING:
+    from ..knowledge import KnowledgeContext
     from . import SessionManager
     from .base import PendingInput, QueuedPrompt
 
@@ -26,6 +27,23 @@ def input_digest(payload: dict[str, Any]) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
+def saved_context(session_id: str, row: dict[str, Any]) -> KnowledgeContext | None:
+    """Read the committed execution contract without reinterpreting raw controls."""
+    from ..knowledge import decode_context
+
+    payload = row["payload"]
+    context = decode_context(payload.get("knowledge")) if payload else None
+    if (context is None or context.trusted_request != payload.get("trusted_request")
+            or context.mode == "read" and context.maintenance.may_submit):
+        return None
+    # Owned background work retains its original caller's origin; a direct
+    # human input owns its new origin rather than borrowing another request.
+    if payload.get("source") == "human" and (
+            context.origin.session_id != session_id or context.origin.request_id != row["request_id"]):
+        return None
+    return context
+
+
 def _files(session_id: str, identifiers: list[str]) -> list[dict[str, Any]]:
     result = []
     for record in validate_message_attachments(session_id, identifiers):
@@ -37,18 +55,18 @@ def _files(session_id: str, identifiers: list[str]) -> list[dict[str, Any]]:
 
 
 async def load_pending_input(manager: SessionManager, session_id: str, pending: PendingInput) -> QueuedPrompt:
-    from ..knowledge import decode_context
     from .base import QueuedPrompt
 
     row = await manager.db.get_submission_for_request(session_id, pending.request_id)
     if row is None or row["execution_state"] != "pending" or row["payload"] is None:
         raise ValueError("The queued input is no longer pending")
     payload = row["payload"]
-    context = decode_context(payload.get("knowledge"))
-    if context is None:
+    context = saved_context(session_id, row)
+    session = manager.get_session(session_id)
+    if context is None or session is None or context.origin.user_id != session.user_id:
         raise ValueError("The saved input has no valid request context")
     return QueuedPrompt(
-        payload["content"], payload["attachment_ids"], wiki_mode=payload["wiki_mode"],
+        payload["content"], payload["attachment_ids"], wiki_mode=context.mode,
         trusted_request=payload["trusted_request"], knowledge_context=context,
         source=payload["source"], priority=pending.priority, request_id=row["request_id"],
         delivery_id=payload["delivery_id"], work_id=payload["work_id"], order=payload["order"],
@@ -58,6 +76,7 @@ async def load_pending_input(manager: SessionManager, session_id: str, pending: 
 
 
 def status_from_row(session_id: str, row: dict[str, Any], *, include_input=True) -> dict[str, Any]:
+    context = saved_context(session_id, row)
     state = row["execution_state"]
     owner = row["execution_owner"] or row["request_id"]
     terminal = row["terminal"]
@@ -70,7 +89,7 @@ def status_from_row(session_id: str, row: dict[str, Any], *, include_input=True)
                            "state_version": row["state_version"], "updated_at": row["updated_at"],
                            "execution_owner_request_id": owner,
                            "delivery_state": row["delivery_state"],
-                           "recoverable_input": row["payload"] is not None and state == "withdrawn"
+                           "recoverable_input": context is not None and state == "withdrawn"
                            and not row["dismissed"] and not row["recovered_by"] and row["reason_code"] != "legacy_rejected"}
     if terminal is not None:
         result["outcome"] = terminal
@@ -90,11 +109,13 @@ def status_from_row(session_id: str, row: dict[str, Any], *, include_input=True)
     elif state == "withdrawn":
         result["message"] = ("This historical input was refused before admission. Its receipt is read-only."
                              if row["reason_code"] == "legacy_rejected" else
+                             "This retained input has no verifiable request context. Review the original record; it cannot be recovered."
+                             if context is None else
                              "This input was withdrawn before execution. You can restore it and send it again.")
     if include_input and row["payload"] is not None:
         payload = row["payload"]
         result["input"] = {"content": payload["content"], "attachment_ids": payload["attachment_ids"],
-                           "attachments": payload.get("attachments", []), "wiki_mode": payload["wiki_mode"]}
+                           "attachments": payload.get("attachments", []), "wiki_mode": context.mode if context else None}
     return result
 
 

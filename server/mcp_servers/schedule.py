@@ -32,7 +32,7 @@ from __future__ import annotations
 import logging
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 if str(_REPO_ROOT) not in sys.path:
@@ -120,7 +120,7 @@ def create_schedule(
     run_at: str | None = None,
     timezone: str | None = None,
     in_session: bool = True,
-    wiki_mode: str | None = None,
+    wiki_mode: Literal["auto", "read", "maintain"] | None = None,
 ) -> str:
     """Schedule a task for yourself — a prompt Octopus will send you later,
     once or on a repeat, whether or not anyone is at the keyboard.
@@ -163,7 +163,7 @@ def create_schedule(
             the user sees it where the schedule was set up. False — each fire
             gets its own throwaway session; use it for noisy background
             routines that shouldn't fill up the chat.
-        wiki_mode: Optional maintenance restriction (auto/read/maintain/off).
+        wiki_mode: Optional maintenance restriction (auto/read/maintain).
             Inherits this request's limits even when omitted; it cannot add
             permission. Source requirements are preserved separately.
 
@@ -254,7 +254,7 @@ def update_schedule(
     run_at: str | None = None,
     timezone: str | None = None,
     enabled: bool | None = None,
-    wiki_mode: str | None = None,
+    wiki_mode: Literal["auto", "read", "maintain"] | None = None,
 ) -> str:
     """Change one of your schedules: pause or resume it, re-word what it
     runs, or move when it runs.
@@ -277,9 +277,10 @@ def update_schedule(
         run_at: New ISO datetime, turning it into a one-time schedule.
         timezone: New IANA timezone for the cron / one-time run.
         enabled: False to pause, True to resume.
-        wiki_mode: Optional restriction for future fires. Omission retains the
-            saved control. Agent edits can only narrow the saved and current
-            request limits; changing the prompt never grants permission.
+        wiki_mode: Optional restriction (auto/read/maintain) for future fires.
+            Omission retains the saved control. Agent edits can only narrow the
+            saved and current request limits; changing the prompt never grants
+            permission.
 
     Returns:
         The schedule as it now stands, including its next fire time.

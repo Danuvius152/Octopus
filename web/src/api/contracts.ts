@@ -3055,7 +3055,7 @@ export interface components {
             /** Prompt */
             prompt: string;
             /** Wiki Mode */
-            wiki_mode?: ("auto" | "read" | "maintain" | "off") | null;
+            wiki_mode?: ("auto" | "read" | "maintain") | null;
             /** Name */
             name?: string | null;
             /** Cron */
@@ -3173,7 +3173,7 @@ export interface components {
             /** Message */
             message: string;
             /** Wiki Mode */
-            wiki_mode?: ("read" | "maintain" | "off") | null;
+            wiki_mode?: ("auto" | "read" | "maintain") | null;
             /** Context */
             context?: string | null;
             /** Agent */
@@ -3440,7 +3440,7 @@ export interface components {
             /** Attachment Ids */
             attachment_ids?: string[];
             /** Wiki Mode */
-            wiki_mode?: ("auto" | "read" | "maintain" | "off") | null;
+            wiki_mode?: ("auto" | "read" | "maintain") | null;
             /** Recovery Of Client Id */
             recovery_of_client_id?: string | null;
         };
@@ -3695,7 +3695,7 @@ export interface components {
         /** CreateAgentScheduleRequest */
         CreateAgentScheduleRequest: {
             /** Wiki Mode */
-            wiki_mode?: ("auto" | "read" | "maintain" | "off") | null;
+            wiki_mode?: ("auto" | "read" | "maintain") | null;
             /** Name */
             name: string;
             /** Prompt */
@@ -3752,7 +3752,7 @@ export interface components {
         /** CreateScheduleRequest */
         CreateScheduleRequest: {
             /** Wiki Mode */
-            wiki_mode?: ("auto" | "read" | "maintain" | "off") | null;
+            wiki_mode?: ("auto" | "read" | "maintain") | null;
             /** Name */
             name: string;
             /** Prompt */
@@ -4840,7 +4840,7 @@ export interface components {
          */
         ScheduleFromTextRequest: {
             /** Wiki Mode */
-            wiki_mode?: ("auto" | "read" | "maintain" | "off") | null;
+            wiki_mode?: ("auto" | "read" | "maintain") | null;
             /** Text */
             text: string;
             /** Timezone */
@@ -4859,7 +4859,7 @@ export interface components {
             /** Agent Id */
             agent_id?: string | null;
             /** Wiki Mode */
-            wiki_mode?: ("auto" | "read" | "maintain" | "off") | null;
+            wiki_mode?: ("auto" | "read" | "maintain") | null;
             /** Name */
             name: string;
             /** Prompt */
@@ -5417,7 +5417,7 @@ export interface components {
             /** Attachments */
             attachments: components["schemas"]["SavedAttachment"][];
             /** Wiki Mode */
-            wiki_mode?: string | null;
+            wiki_mode?: ("auto" | "read" | "maintain") | null;
         };
         /** SubmissionRecoveryPage */
         SubmissionRecoveryPage: {
@@ -5524,7 +5524,7 @@ export interface components {
          */
         UpdateScheduleRequest: {
             /** Wiki Mode */
-            wiki_mode?: ("auto" | "read" | "maintain" | "off") | null;
+            wiki_mode?: ("auto" | "read" | "maintain") | null;
             /** Name */
             name?: string | null;
             /** Prompt */

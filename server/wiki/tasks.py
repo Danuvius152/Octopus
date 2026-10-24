@@ -89,8 +89,6 @@ class WikiTasks:
 
     def mode_for(self, session, requested: str | None, *, request_id=None) -> str | None:
         """Default registered accounts to autonomous use; retain explicit restrictions."""
-        if requested == "off":
-            return "read"  # Legacy clients may disable maintenance, never shared lookup.
         if requested in {"read", "maintain"}:
             return requested
         if requested not in {None, "auto"}:
@@ -374,9 +372,11 @@ def command_prompt(message: str, mode: str | None) -> str:
 
 def explicit_mode(message: str, selected: str | None = None) -> str | None:
     """Only call at trusted input boundaries, never on app context/reports."""
-    # Cancelling maintenance must win over command text. Shared lookup is
-    # always available; old clients' off value now means read-only.
-    if selected in {"off", "read"}:
+    if selected is not None and selected not in ("auto", "read", "maintain"):
+        raise ValueError("Unknown knowledge request mode")
+    # Read-only control wins over command text. Preserve the existing command
+    # interpretation of auto at public adapters and the original input digest.
+    if selected == "read":
         return "read"
     mode, _ = wiki_command(message)
     if mode:

@@ -38,7 +38,12 @@ from .base import (
     _augment_prompt_with_attachments,
     logger,
 )
-from .client_submissions import claim_input, load_pending_input, require_retired_writers
+from .client_submissions import (
+    claim_input,
+    load_pending_input,
+    require_retired_writers,
+    saved_context,
+)
 from .commands import CorrelatedControl, _process_owned_command
 from .owner_questions import (
     BeginQuestionAttempt,
@@ -584,6 +589,18 @@ class OwnerRuntime:
         )
         if request.knowledge_context.origin.user_id != session.user_id:
             raise ValueError("Request knowledge belongs to another account")
+        if command.recovery_of:
+            from ..submission_models import InputRecoveryUnavailable
+
+            original = await manager.db.get_client_submission(session.id, command.recovery_of) if manager.db else None
+            context = saved_context(session.id, original) if original else None
+            if context is None or context.origin.user_id != session.user_id:
+                raise InputRecoveryUnavailable("The original input has no verifiable request context; it cannot be recovered.")
+            limits = request.knowledge_context.maintenance.restrict(context.maintenance)
+            request.knowledge_context = replace(
+                request.knowledge_context, maintenance=limits,
+                mode=request.knowledge_context.mode if limits.may_submit else "read",
+            )
         request.wiki_mode = request.knowledge_context.mode
         request.trusted_request = request.knowledge_context.trusted_request
         request.priority = session._dispatch_paused and request.source == "human"

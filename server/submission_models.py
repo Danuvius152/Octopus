@@ -21,7 +21,7 @@ class ClientSubmissionRequest(BaseModel):
     client_request_id: str = Field(min_length=1, max_length=128)
     content: str
     attachment_ids: list[str] = Field(default_factory=list)
-    wiki_mode: Literal["auto", "read", "maintain", "off"] | None = None
+    wiki_mode: Literal["auto", "read", "maintain"] | None = None
     recovery_of_client_id: str | None = Field(default=None, min_length=1, max_length=128)
 
 
@@ -43,7 +43,7 @@ class SubmissionInput(BaseModel):
     content: str
     attachment_ids: list[str]
     attachments: list[SavedAttachment]
-    wiki_mode: str | None = None
+    wiki_mode: Literal["auto", "read", "maintain"] | None = None
 
 
 class SubmissionExecution(BaseModel):
