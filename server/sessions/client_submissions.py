@@ -90,7 +90,7 @@ def status_from_row(session_id: str, row: dict[str, Any], *, include_input=True)
                            "execution_owner_request_id": owner,
                            "delivery_state": row["delivery_state"],
                            "recoverable_input": context is not None and state == "withdrawn"
-                           and not row["dismissed"] and not row["recovered_by"] and row["reason_code"] != "legacy_rejected"}
+                           and not row["dismissed"] and not row["recovered_by"]}
     if terminal is not None:
         result["outcome"] = terminal
     if row["recovery_of"]:
@@ -107,9 +107,7 @@ def status_from_row(session_id: str, row: dict[str, Any], *, include_input=True)
         result.update(accepted=False, state="unknown", code="admission_unknown",
                       message="Admission is not yet confirmed. Confirm this same submission identity before sending new work.")
     elif state == "withdrawn":
-        result["message"] = ("This historical input was refused before admission. Its receipt is read-only."
-                             if row["reason_code"] == "legacy_rejected" else
-                             "This retained input has no verifiable request context. Review the original record; it cannot be recovered."
+        result["message"] = ("This retained input has no verifiable request context. Review the original record; it cannot be recovered."
                              if context is None else
                              "This input was withdrawn before execution. You can restore it and send it again.")
     if include_input and row["payload"] is not None:

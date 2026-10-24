@@ -35,6 +35,7 @@ async def main(configuration, phase):
     from server.database import Database
     from server.knowledge import encode, for_account
     from server.session_manager import session_manager
+    from server.sessions.client_submissions import input_digest
     from server.users import UserManager
     from server.wiki import maintenance_inputs
     from server.wiki.history import WikiHistory
@@ -122,13 +123,18 @@ async def main(configuration, phase):
                 ("successor", "pending", payload, accepted, "original", None, None),
                 ("bg:bg:stable", "pending", payload | {"source": "bg", "delivery_id": "bg:stable"}, accepted, None, None, None),
             ):
+                digest_payload = body or payload
                 if body is not None:
+                    if recovery_of:
+                        body = body | {"recovery_of_client_id": recovery_of}
+                    digest_payload = body
                     body = json.dumps(body | {"knowledge": encode(for_account(
                         session_id="legacy", request_id=identity, user_id=user["id"], prompt=body["content"],
                     ))})
                 connection.execute("INSERT INTO client_submissions(session_id,client_id,payload_sha256,request_id,payload,receipt,"
-                                   "execution_state,recovery_of,reason_code,execution_generation) VALUES('legacy',?,'retained-digest',?,?,?,?,?,?,?)",
-                                   (identity, identity, body, receipt, state, recovery_of, reason, generation))
+                                   "execution_state,recovery_of,reason_code,execution_generation) VALUES('legacy',?,?,?,?,?,?,?,?,?)",
+                                   (identity, input_digest(digest_payload), identity,
+                                    body, receipt, state, recovery_of, reason, generation))
         connection.close()
         write_unversioned_baseline(Path(settings.db_path))
         owner.close()
@@ -168,7 +174,8 @@ async def main(configuration, phase):
         assert {row[0] for row in connection.execute("SELECT doc_id FROM maintenance_job_members WHERE job_id='old-job'")} == {current["id"]}
         assert connection.execute("SELECT count(*) FROM operation_receipts WHERE job_id='old-job'").fetchone()[0] == 1
     states = {}
-    for identity, expected in {"staged": "withdrawn", "refused": "withdrawn", "empty-receipt": "withdrawn",
+    assert await db.get_client_submission("legacy", "refused") is None
+    for identity, expected in {"staged": "withdrawn", "empty-receipt": "withdrawn",
                                "missing": "unknown", "unknown": "unknown", "started": "unknown", "exact": "done",
                                "original": "withdrawn", "successor": "withdrawn"}.items():
         row = await db.get_client_submission("legacy", identity)

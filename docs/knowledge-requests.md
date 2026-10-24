@@ -18,9 +18,15 @@
 
 模型编辑总是继承调用方的具体来源要求，不以 payload 是否含正文区分。fire 也在同一写入屏障内取得已提交的定义快照，随即释放屏障；已回滚的修改不会成为一次执行的依据，后续合法编辑也不回溯影响已接纳的 fire。
 
-旧结果没有合同或版本未知时，仅保留输出、报告和可见交付状态；不据正文补造 read/auto 请求。计划缺少合同会保留并停用，`invalid_reason=knowledge_contract_missing`；经认证的人类可在计划页面查看原消息，明确选择 Wiki 维护控制（API 的 `wiki_mode`：auto/read/maintain）重新授权，再另行恢复运行。模型不能靠改正文或省略字段恢复权限。已捕获的 fire 使用自己的定义快照，计划后续编辑或删除不会改变该次执行。
+旧结果没有合同或版本未知时，保留仍有当前职责的输出、报告和可见交付状态；不据正文补造 read/auto 请求。现有计划定义缺少合同会保留并停用，`invalid_reason=knowledge_contract_missing`；经认证的人类可在计划页面查看原消息，明确选择 Wiki 维护控制（API 的 `wiki_mode`：auto/read/maintain）重新授权，再另行恢复运行。模型不能靠改正文或省略字段恢复权限。已捕获的 fire 使用自己的定义快照，计划后续编辑或删除不会改变该次执行。
 
-新的 API、MCP 与界面控制只接受 `auto`、`read`、`maintain`；携带 `wiki_mode=off` 的新 POST 返回 422，在接管对话、任务或执行前拒绝。仅旧计划的模式展示列 `wiki_mode=off` 在所属存储升级中归一为 `read`；执行合同保持原字节，运行消费其中已有的 canonical `read`。缺少或无法验证的合同保留原文并停用，不从正文或旧控制重建权限。已受理客户端输入的原始 payload、payload_sha256 与 client_id 保持不变；确认同一 ID 的受理状态使用现有鉴权保护的 `GET /api/sessions/{session_id}/submissions/{client_id}`，不重新 POST 旧 `off`，也不将它改成 `read` 后重算 hash 并冒称原输入。
+新的 API、MCP 与界面控制只接受 `auto`、`read`、`maintain`；携带 `wiki_mode=off` 的新 POST 返回 422，在接管对话、任务或执行前拒绝。旧计划的模式展示列 `wiki_mode=off` 在所属存储升级中归一为 `read`；执行合同不改写，运行消费其中已有的 canonical `read`。缺少或无法验证的计划合同保留并停用，不从正文或旧控制重建权限。
+
+主库当前格式为4。完整旧格式0／1／2／3在同一准备事务中完成必要结构演进、旧计划展示列归一及退役请求清退，再写入版本4。旧 `legacy_rejected` 或 human/off 原始记录仅在核验和必要收束阶段受保护；核验完成后删除，不永久保留原 payload、hash 或回执，也不把 `off` 改成 `read` 重算 hash 冒称原请求。明确拒绝或已接纳但未执行的记录须核对真实回执、无执行及实际引用的事实；已执行记录须匹配精确合法终态、确定投递和原 writer 退出证明，confirmed inline 还须核对同 generation 的原执行 owner。未知、矛盾或活跃事实使整个升级拒绝并保留旧版本，交回原 owner 完成实际效果核验及收束后重试；不等待新版 SessionManager 恢复、不跳过旧行后写版本4。
+
+启动只读检查和写事务内核验复用同一规则。受管启动由既有 InstallationOwner 提供 `previous_writers_retired`；独立打开仅采用原 boot／process-group 的保守退出证明。旧 human 通知责任在冷启动边界随退役协议退出，不声称取得了历史通知 ACK，不新增墓碑、档案或 ACK 账本。当前消息、结果、来源证明及当前后继保留；独立 source 回注仍按自己的身份和合同完成交付，不依赖已清退的 human 原文。
+
+当前三态受理的原始 payload、payload_sha256 与 client_id 仍保持不变；鉴权 `GET /api/sessions/{session_id}/submissions/{client_id}`、同ID去重、恢复权限上限及唯一后继继续有效。它们不再为已清退的旧请求提供永久确认或恢复；旧身份查询缺失也不能证明从未受理，客户端不得据此自动重发。
 
 Research 的报告完成与后续交付分别保存和广播。交付被抑制时，聊天保留去重的材料通知和原因；卡片展示未交付状态，重新加载仍能查到报告位置和原因。
 

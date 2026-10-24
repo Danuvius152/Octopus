@@ -1,4 +1,4 @@
-"""Finite mode preparation changes schedule projections, never input facts."""
+"""Finite mode preparation preserves current inputs and their execution facts."""
 
 from __future__ import annotations
 
@@ -66,13 +66,14 @@ async def _historical_database(tmp_path: Path, *, version: int = 2, source: str 
         context = json.dumps(context, ensure_ascii=False, indent=2) + "\n"
         await database.save_schedule(
             "old-off", agent["id"], "Original reminder", "/wiki maintain Library/Original.md", STAMP,
-            interval_seconds=3600, origin_session_id="execution-target", wiki_mode="off", knowledge_context=context,
+            interval_seconds=3600, origin_session_id="execution-target",
+            wiki_mode="off" if version < 3 else "read", knowledge_context=context,
         )
         source_contract = decode_context(json.dumps(source_context))
         assert source_contract is not None
         source_payload = {
             "content": source_context["value"]["trusted_request"], "attachment_ids": [], "attachments": [],
-            "wiki_mode": "off", "knowledge": encode(source_contract),
+            "wiki_mode": "read", "knowledge": encode(source_contract),
             "trusted_request": source_context["value"]["trusted_request"], "work_id": "original-work", "source": "human",
         }
         recovered_context = json.loads(json.dumps(source_context))
@@ -131,7 +132,7 @@ async def _historical_database(tmp_path: Path, *, version: int = 2, source: str 
     return path, original
 
 
-@pytest.mark.parametrize("version", [0, 1, 2])
+@pytest.mark.parametrize("version", [0, 1, 2, 3])
 @pytest.mark.parametrize("source", ["session", "definition"])
 async def test_supported_formats_prepare_read_projection_without_rewriting_original_facts(tmp_path, monkeypatch, version, source):
     path, original = await _historical_database(tmp_path, version=version, source=source)
@@ -150,7 +151,7 @@ async def test_supported_formats_prepare_read_projection_without_rewriting_origi
     finally:
         await database.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (3,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (4,)
     original["schedules"][0]["wiki_mode"] = "read"
     assert _facts(path) == original
     statements = []
@@ -171,13 +172,13 @@ async def test_supported_formats_prepare_read_projection_without_rewriting_origi
     assert _facts(path) == original
 
 
-async def test_empty_storage_and_current_reopen_share_format_three_without_repreparing(tmp_path, monkeypatch):
+async def test_empty_storage_and_current_reopen_share_format_four_without_repreparing(tmp_path, monkeypatch):
     path = tmp_path / "empty.db"
     database = Database(str(path))
     await database.initialize()
     await database.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (3,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (4,)
     before = _facts(path)
     statements = []
     connect = aiosqlite.Connection._connect
@@ -230,7 +231,7 @@ async def test_missing_contracts_are_preserved_and_disabled_without_manufacturin
     assert _facts(path) == original
 
 
-@pytest.mark.parametrize("version", [0, 1, 2, 3])
+@pytest.mark.parametrize("version", [0, 1, 2, 3, 4])
 @pytest.mark.parametrize("contradiction", ["auto", "maintain", "submit_limit", "foreign_owner", "missing_agent"])
 async def test_contradictory_off_contract_is_refused_before_reads_can_open_a_writer_or_preparation_can_write(
     tmp_path, version, contradiction,
@@ -244,7 +245,7 @@ async def test_contradictory_off_contract_is_refused_before_reads_can_open_a_wri
     elif contradiction == "foreign_owner":
         context["value"]["origin"]["user_id"] = "another-account"
     with closing(sqlite3.connect(path)) as writer:
-        writer.execute("UPDATE schedules SET knowledge_context=?", (json.dumps(context),))
+        writer.execute("UPDATE schedules SET wiki_mode='off',knowledge_context=?", (json.dumps(context),))
         if contradiction == "missing_agent":
             writer.execute("UPDATE schedules SET agent_id=NULL")
         writer.commit()
@@ -270,8 +271,12 @@ async def test_contradictory_off_contract_is_refused_before_reads_can_open_a_wri
     assert path.read_bytes() == original_bytes
 
 
-async def test_current_format_rejects_a_retained_off_instead_of_repeating_preparation(tmp_path):
-    path, _ = await _historical_database(tmp_path, version=3)
+@pytest.mark.parametrize("version", [3, 4])
+async def test_prepared_formats_reject_a_retained_off_instead_of_repeating_preparation(tmp_path, version):
+    path, _ = await _historical_database(tmp_path, version=version)
+    with closing(sqlite3.connect(path)) as writer:
+        writer.execute("UPDATE schedules SET wiki_mode='off'")
+        writer.commit()
     original_bytes = path.read_bytes()
     with pytest.raises(UnsupportedMainStorage):
         await Database(str(path)).inspect()

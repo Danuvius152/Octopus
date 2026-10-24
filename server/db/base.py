@@ -285,14 +285,15 @@ class DatabaseBase:
                     if await cursor.fetchone():
                         raise UnfinishedTokenRotation()
 
-    async def inspect(self) -> None:
+    async def inspect(self, *, previous_writers_retired: bool = False) -> None:
         """Check retained storage before creating a key or opening its writer."""
         self.health.require_healthy()
         await self.reject_unfinished_token_rotation()
         await asyncio.to_thread(require_account_database, self._db_path)
-        await asyncio.to_thread(require_supported_main_format, self._db_path)
+        await asyncio.to_thread(require_supported_main_format, self._db_path,
+                                previous_writers_retired=previous_writers_retired)
 
-    async def initialize(self, *, timeout: float = 15.0) -> None:
+    async def initialize(self, *, timeout: float = 15.0, previous_writers_retired: bool = False) -> None:
         """Own startup SQL under one deadline, before any public operation."""
         self.health.require_healthy()
         if self._conn is not None or self._closed:
@@ -302,7 +303,7 @@ class DatabaseBase:
             async with self._write_lock:
                 self._write_owner = asyncio.current_task()
                 try:
-                    await self.inspect()
+                    await self.inspect(previous_writers_retired=previous_writers_retired)
                     self._conn = await aiosqlite.connect(self._db_path)
                     mode = await self.conn.execute("PRAGMA journal_mode=WAL")
                     mode_value = await mode.fetchone()
@@ -319,7 +320,7 @@ class DatabaseBase:
                     await durability.close()
                     tx = Transaction(self.conn, self.health, deadline)
                     await tx.execute("BEGIN IMMEDIATE")
-                    await prepare_main_storage(tx)
+                    await prepare_main_storage(tx, previous_writers_retired=previous_writers_retired)
                     await tx.finish()
                     await tx._wait(self.conn.commit())
                     if tx.cancelled is not None:

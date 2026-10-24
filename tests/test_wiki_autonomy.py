@@ -18,13 +18,13 @@ from tests.fake_run import FakeRunBase
 client = wiki_api.client
 
 
-@pytest.mark.parametrize("selected,expected,restore_old", [
+@pytest.mark.parametrize("selected,expected,recover_read", [
     (None, "auto", False), ("auto", "auto", False), ("read", "read", False),
     ("maintain", "maintain", False), (None, "read", True),
 ])
 @pytest.mark.parametrize("actor", ["reader", "curator"])
-async def test_current_modes_and_restored_off_keep_lookup_and_enforce_maintenance_limits(
-    client, tmp_path, monkeypatch, selected, expected, restore_old, actor,
+async def test_current_modes_and_recovered_read_keep_lookup_and_enforce_maintenance_limits(
+    client, tmp_path, monkeypatch, selected, expected, recover_read, actor,
 ):
     vault = tmp_path / "vault"
     (vault / "Library").mkdir(parents=True)
@@ -116,10 +116,10 @@ async def test_current_modes_and_restored_off_keep_lookup_and_enforce_maintenanc
     monkeypatch.setattr(get_harness("codex"), "create_run", create)
     kwargs = {"wiki_mode": selected} if selected is not None else {}
     prompt = "/wiki maintain Library/note.md\nUse our knowledge" if selected == "maintain" else "Use our knowledge to answer this question"
-    if restore_old:
-        from tests.test_wiki_mode_protocol import historical_read_input
-        await historical_read_input(manager, session)
-        kwargs.update(client_request_id="restored-off", recovery_of_client_id="old-client")
+    if recover_read:
+        from tests.test_wiki_mode_protocol import accepted_read_input
+        await accepted_read_input(manager, session)
+        kwargs.update(client_request_id="recovered-read", recovery_of_client_id="old-client")
     receipt = await manager.start_message(session.id, prompt, **kwargs)
     completion = await receipt.wait()
     assert completion.outcome.status == "success", completion.outcome

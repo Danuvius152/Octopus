@@ -1,4 +1,4 @@
-"""New controls are current modes; saved accepted identities remain original."""
+"""Current Wiki controls preserve accepted identities and recovery ceilings."""
 
 import asyncio
 import json
@@ -16,8 +16,8 @@ from tests.test_ws_delivery import runtime as runtime
 client = api.client
 
 
-async def historical_read_input(manager, session, *, raw_mode="off", damage=None):
-    """An already accepted input keeps the exact original control and digest."""
+async def accepted_read_input(manager, session, *, damage=None):
+    """An accepted current read input keeps its original payload and digest."""
     context = admit(session_id=session.id, request_id="old-request", user_id=session.user_id,
                     prompt="Original read-only request", selected="read")
     if damage == "missing":
@@ -31,7 +31,7 @@ async def historical_read_input(manager, session, *, raw_mode="off", damage=None
     else:
         knowledge = encode(context)
     payload = {"content": "Original read-only request", "attachment_ids": [], "attachments": [],
-               "wiki_mode": raw_mode, "knowledge": knowledge, "trusted_request": context.trusted_request,
+               "wiki_mode": "read", "knowledge": knowledge, "trusted_request": context.trusted_request,
                "source": "human", "delivery_id": None, "work_id": "old-work", "order": 1,
                "question_session_id": None, "question_id": None, "priority": False}
     await manager.db.admit_client_submission(
@@ -46,13 +46,12 @@ async def historical_read_input(manager, session, *, raw_mode="off", damage=None
                                   "WHERE session_id=? AND client_id='old-client'", (session.id,))
 
 
-@pytest.mark.parametrize("raw_mode", ["off", "read"])
 @pytest.mark.parametrize(("content", "selected"), [
     ("A new ordinary question", None), ("/wiki maintain Reorganize everything", None),
     ("Reorganize everything", "maintain"),
 ])
-async def test_restoring_historical_read_input_keeps_its_ceiling_and_original_identity(
-    client, tmp_path, monkeypatch, content, selected, raw_mode,
+async def test_restoring_current_read_input_keeps_its_ceiling_and_original_identity(
+    client, tmp_path, monkeypatch, content, selected,
 ):
     manager = api.session_manager
     vault = tmp_path / "vault"
@@ -60,7 +59,7 @@ async def test_restoring_historical_read_input_keeps_its_ceiling_and_original_id
     await api.configure(client, vault)
     agent = await manager.db.get_system_agent()
     session = await manager.create_session(agent["id"], "Restore original", str(tmp_path), backend="codex")
-    original = await historical_read_input(manager, session, raw_mode=raw_mode)
+    original = await accepted_read_input(manager, session)
     observed = []
 
     class Run(FakeRunBase):
@@ -87,14 +86,11 @@ async def test_restoring_historical_read_input_keeps_its_ceiling_and_original_id
         retry = await client.post(f"/api/sessions/{session.id}/submissions", json={
             "client_request_id": "old-client", "content": "Original read-only request", "wiki_mode": "read",
         })
-        if raw_mode == "off":
-            assert retry.json()["code"] == "submission_conflict"
-            old_post = await client.post(f"/api/sessions/{session.id}/submissions", json={
-                "client_request_id": "old-client", "content": "Original read-only request", "wiki_mode": "off",
-            })
-            assert old_post.status_code == 422
-        else:
-            assert retry.json()["request_id"] == "old-request"
+        assert retry.json()["request_id"] == "old-request"
+        conflict = await client.post(f"/api/sessions/{session.id}/submissions", json={
+            "client_request_id": "old-client", "content": "Original read-only request", "wiki_mode": "maintain",
+        })
+        assert conflict.json()["code"] == "submission_conflict"
         assert manager.dispatch_snapshot(session.id) == before and observed == []
         request = {"client_request_id": "restored-client", "content": content,
                    "recovery_of_client_id": "old-client"}
@@ -125,7 +121,7 @@ async def test_restoring_historical_read_input_keeps_its_ceiling_and_original_id
             assert await tx.fetch_one("SELECT payload,payload_sha256,receipt,request_id FROM client_submissions "
                                       "WHERE session_id=? AND client_id='old-client'", (session.id,)) == original
         assert confirmed.json()["input"]["wiki_mode"] == "read"
-        assert json.loads(original[0])["wiki_mode"] == raw_mode
+        assert json.loads(original[0])["wiki_mode"] == "read"
     finally:
         await manager.stop_all_held_processes()
 
@@ -135,7 +131,7 @@ async def test_unverifiable_original_context_cannot_be_recovered(client, tmp_pat
     manager = api.session_manager
     agent = await manager.db.get_system_agent()
     session = await manager.create_session(agent["id"], "Retain unavailable input", str(tmp_path), backend="codex")
-    original = await historical_read_input(manager, session, damage=damage)
+    original = await accepted_read_input(manager, session, damage=damage)
     launches = []
     monkeypatch.setattr(get_harness("codex"), "create_run", lambda config: launches.append(config))
     before = manager.dispatch_snapshot(session.id)
@@ -158,7 +154,7 @@ async def test_concurrent_recovery_of_read_only_input_has_one_new_owner(client, 
     manager = api.session_manager
     agent = await manager.db.get_system_agent()
     session = await manager.create_session(agent["id"], "One recovery", str(tmp_path), backend="codex")
-    await historical_read_input(manager, session)
+    await accepted_read_input(manager, session)
     contexts = []
     entered, release = asyncio.Event(), asyncio.Event()
 
@@ -190,7 +186,7 @@ async def test_concurrent_recovery_of_read_only_input_has_one_new_owner(client, 
         assert contexts[0].maintenance.may_submit is False
         old = await manager.db.get_client_submission(session.id, "old-client")
         assert old["recovered_by"] == accepted[0]["client_request_id"]
-        assert old["payload"]["wiki_mode"] == "off"
+        assert old["payload"]["wiki_mode"] == "read"
     finally:
         release.set()
         await manager.stop_all_held_processes()
@@ -262,7 +258,7 @@ async def test_websocket_restoration_keeps_the_original_read_ceiling(
     manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "Restore via WebSocket", str(tmp_path), backend="codex")
-    original = await historical_read_input(manager, session)
+    original = await accepted_read_input(manager, session)
     starts = hold_model_runs(manager, monkeypatch)
     async with connection(manager, bearer) as browser:
         payload = {"type": "send_message", "session_id": session.id,

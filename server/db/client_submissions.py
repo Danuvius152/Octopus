@@ -97,7 +97,7 @@ class ClientSubmissionsMixin(DatabaseBase):
                 original = await self._get_client_submission(tx, session_id, recovery_of)
                 if (original is None or original["payload"] is None
                         or original["execution_state"] != "withdrawn" or original["dismissed"]
-                        or original["terminal"] is not None or original["reason_code"] == "legacy_rejected"):
+                        or original["terminal"] is not None):
                     raise InputRecoveryUnavailable("This input is not available for recovery. Review its current status.")
                 if original["recovered_by"]:
                     raise InputRecoveryUnavailable("This input has already been resubmitted. Review the new request.")
@@ -202,7 +202,7 @@ class ClientSubmissionsMixin(DatabaseBase):
             cursor = await tx.execute(
                 _SELECT.replace("SELECT ", "SELECT i.rowid,", 1) +
                 "WHERE i.session_id=? AND i.payload IS NOT NULL AND i.execution_state IN ('withdrawn','unknown') "
-                "AND (i.delivery_state='unknown' OR m.id IS NULL) AND i.reason_code IS NOT 'legacy_rejected' "
+                "AND (i.delivery_state='unknown' OR m.id IS NULL) "
                 "AND i.dismissed=0 AND successor.client_id IS NULL AND (? IS NULL OR i.rowid<?) ORDER BY i.rowid DESC LIMIT ?",
                 (session_id, before, before, limit + 1),
             )

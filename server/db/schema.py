@@ -6,6 +6,7 @@ storage; preparation runs under Database's original writer transaction.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Sequence
 from contextlib import closing
@@ -15,7 +16,7 @@ from ..sqlite_schema import definition as _schema_definition
 from ..sqlite_schema import statements as _statements
 from .transaction import Transaction
 
-CURRENT_VERSION = 3
+CURRENT_VERSION = 4
 _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
 
 
@@ -53,7 +54,7 @@ def _definition(kind: str, sql: str) -> tuple:
 
 def _validate_layout(version: int, rows: Sequence[tuple[str, str, str]]) -> bool:
     """Return whether this is new empty storage; otherwise require a full format."""
-    if version not in (0, 1, 2, CURRENT_VERSION):
+    if version not in (0, 1, 2, 3, CURRENT_VERSION):
         raise UnsupportedMainStorage()
     if not rows:
         if version == 0:
@@ -132,7 +133,7 @@ def _validate_schedule_modes(version: int, rows: Sequence[tuple]) -> list[str]:
     """Authorize only the finite projection change, never a new request."""
     from ..knowledge import decode_context
 
-    if version == CURRENT_VERSION and rows:
+    if version >= 3 and rows:
         raise UnsupportedMainStorage()
     missing = []
     for schedule_id, raw, agent_id, user_id in rows:
@@ -147,7 +148,111 @@ def _validate_schedule_modes(version: int, rows: Sequence[tuple]) -> list[str]:
     return missing
 
 
-def require_supported_main_format(db_path: str) -> None:
+_RETIRED_INPUTS = """
+WITH knowledge_contracts(raw,source_session,source_client) AS MATERIALIZED (
+ SELECT knowledge_context,NULL,NULL FROM bg_tasks
+ UNION ALL SELECT knowledge_context,NULL,NULL FROM research_jobs
+ UNION ALL SELECT knowledge_context,NULL,NULL FROM schedules
+ UNION ALL SELECT CASE WHEN json_valid(delegation_state)
+   THEN json_extract(delegation_state,'$.knowledge_context') END,NULL,NULL FROM sessions
+ UNION ALL SELECT CASE WHEN json_valid(tool_input)
+   THEN json_extract(tool_input,'$.request_context.knowledge') END,NULL,NULL FROM messages
+ UNION ALL SELECT CASE WHEN json_valid(payload)
+   THEN json_extract(payload,'$.knowledge') END,session_id,client_id FROM client_submissions
+)
+SELECT i.session_id,i.client_id,i.request_id,i.receipt,i.payload,i.execution_state,
+ i.execution_owner,i.execution_generation,i.execution_boot,i.process_group,
+ i.delivery_state,i.reason_code,i.recovery_of,
+ EXISTS(SELECT 1 FROM messages m WHERE m.session_id=i.session_id AND (
+   m.terminal_request_id=i.request_id OR CASE WHEN json_valid(m.tool_input) THEN
+   json_extract(m.tool_input,'$.request_context.request_id')=i.request_id OR
+   json_extract(m.tool_input,'$.attempt_context.request_id')=i.request_id ELSE 0 END OR
+   CASE WHEN json_valid(m.runtime_metadata)
+     THEN json_extract(m.runtime_metadata,'$.request_id')=i.request_id ELSE 0 END)),
+ EXISTS(SELECT 1 FROM client_submissions other WHERE other.session_id=i.session_id
+   AND other.execution_owner=i.request_id AND other.client_id!=i.client_id),
+ EXISTS(SELECT 1 FROM client_submissions child WHERE child.session_id=i.session_id
+   AND child.recovery_of=i.client_id),
+ EXISTS(SELECT 1 FROM knowledge_contracts c
+   WHERE (c.source_client IS NULL OR c.source_session!=i.session_id OR c.source_client!=i.client_id)
+   AND CASE WHEN json_valid(c.raw) THEN
+     (json_extract(c.raw,'$.value.origin.session_id')=i.session_id AND
+      json_extract(c.raw,'$.value.origin.request_id')=i.request_id) OR
+     (json_extract(c.raw,'$.value.execution.origin.session_id')=i.session_id AND
+      json_extract(c.raw,'$.value.execution.origin.request_id')=i.request_id) OR
+     (json_extract(c.raw,'$.value.return_binding.reference.session_id')=i.session_id AND
+      json_extract(c.raw,'$.value.return_binding.reference.request_id')=i.request_id) OR
+     (json_extract(c.raw,'$.value.return_binding.context.origin.session_id')=i.session_id AND
+      json_extract(c.raw,'$.value.return_binding.context.origin.request_id')=i.request_id)
+   ELSE 0 END)
+ OR EXISTS(SELECT 1 FROM sessions s WHERE s.id=i.session_id AND CASE WHEN json_valid(s.delegation_state)
+   THEN json_extract(s.delegation_state,'$.deferred_request_id')=i.request_id ELSE 0 END)
+ OR EXISTS(SELECT 1 FROM wiki_job_notifications n WHERE n.kind IN ('chat','schedule')
+   AND n.target=i.session_id AND n.request_id=i.request_id),
+ (SELECT m.content FROM messages m WHERE m.session_id=i.session_id
+   AND m.terminal_request_id=COALESCE(i.execution_owner,i.request_id)),
+ EXISTS(SELECT 1 FROM client_submissions original WHERE original.session_id=i.session_id
+   AND original.request_id=i.execution_owner AND original.execution_owner=original.request_id
+   AND original.execution_state='done' AND original.delivery_state!='unknown'
+   AND original.execution_generation=i.execution_generation
+   AND CASE WHEN json_valid(original.receipt) THEN json_type(original.receipt,'$.accepted')='true' ELSE 0 END)
+FROM client_submissions i
+WHERE i.reason_code='legacy_rejected' OR CASE WHEN json_valid(i.payload)
+ THEN json_extract(i.payload,'$.wiki_mode')='off' ELSE 0 END
+"""
+
+
+def _retired_inputs(version: int, rows: Sequence[tuple], *, previous_writers_retired: bool) -> list[tuple[str, str]]:
+    """Authorize the finite retirement; unresolved evidence blocks the whole step."""
+    if rows and version == CURRENT_VERSION:
+        raise UnsupportedMainStorage("Retired requests remain in the current format")
+    retired = []
+    for row in rows:
+        (session_id, client_id, request_id, raw_receipt, raw_payload, state,
+         owner, generation, boot, group, delivery, reason, recovery_of,
+         messages, dependents, child, sources, raw_terminal, shared_owner) = row
+        try:
+            receipt = json.loads(raw_receipt)
+            payload = json.loads(raw_payload) if raw_payload is not None else None
+        except (ValueError, TypeError):
+            raise UnsupportedMainStorage("Retired request evidence is incomplete") from None
+        if (not isinstance(receipt, dict) or type(receipt.get("accepted")) is not bool
+                or receipt.get("request_id", request_id) != request_id
+                or receipt.get("session_id", session_id) != session_id
+                or receipt.get("client_request_id", client_id) != client_id
+                or payload is not None and (not isinstance(payload, dict) or payload.get("source") not in (None, "human"))
+                or reason != "legacy_rejected" and (not isinstance(payload, dict) or payload.get("source") != "human")):
+            raise UnsupportedMainStorage("Retired request evidence is incomplete")
+        refused = receipt["accepted"] is False
+        unstarted = (state in {"pending", "withdrawn"} and delivery == "none"
+                     and owner in (None, request_id) and generation is None and boot is None and group is None
+                     and not messages and not dependents and not sources)
+        if refused:
+            settled = (unstarted and state == "withdrawn" and owner is None and recovery_of is None and not child
+                       and receipt.get("disposition", "rejected") == "rejected")
+        else:
+            from ..execution_identity import process_group_exited
+            from ..models import TurnOutcome
+
+            try:
+                terminal = TurnOutcome.model_validate_json(raw_terminal) if raw_terminal is not None else None
+            except ValueError:
+                terminal = None
+            completed = (state == "done" and owner is not None and delivery in {"none", "confirmed"}
+                         and terminal is not None and terminal.request_id == owner
+                         and terminal.recording_integrity == "complete"
+                         and (owner == request_id or delivery == "confirmed" and shared_owner)
+                         and (previous_writers_retired or process_group_exited(group, boot)))
+            settled = (reason != "legacy_rejected" and isinstance(payload, dict) and payload.get("source") == "human"
+                       and receipt.get("disposition", "accepted") in ("accepted", "steered", "duplicate")
+                       and (unstarted or completed))
+        if not settled:
+            raise UnsupportedMainStorage("Retired requests require settlement by their original owner")
+        retired.append((session_id, client_id))
+    return retired
+
+
+def require_supported_main_format(db_path: str, *, previous_writers_retired: bool = False) -> None:
     """Inspect one consistent committed snapshot, including its real WAL."""
     path = persistent_database_file(db_path)
     if path is None:
@@ -169,9 +274,11 @@ def require_supported_main_format(db_path: str) -> None:
                 raise UnsupportedMainStorage()
         if not new:
             _validate_schedule_modes(version, reader.execute(_SCHEDULE_MODES).fetchall())
+            _retired_inputs(version, reader.execute(_RETIRED_INPUTS).fetchall(),
+                            previous_writers_retired=previous_writers_retired)
 
 
-async def prepare_main_storage(tx: Transaction) -> None:
+async def prepare_main_storage(tx: Transaction, *, previous_writers_retired: bool = False) -> None:
     """Recheck under the original writer transaction; never commit here."""
     version = (await tx.fetch_one("PRAGMA user_version"))[0]
     rows = await tx.fetch_all(_CATALOG)
@@ -190,6 +297,8 @@ async def prepare_main_storage(tx: Transaction) -> None:
         elif version == 1 and await tx.fetch_one(_UNSUPPORTED_RETIRED_DATA):
             raise UnsupportedMainStorage()
         missing = _validate_schedule_modes(version, await tx.fetch_all(_SCHEDULE_MODES))
+        retired = _retired_inputs(version, await tx.fetch_all(_RETIRED_INPUTS),
+                                  previous_writers_retired=previous_writers_retired)
         if version == CURRENT_VERSION:
             return
         if version == 0:
@@ -207,6 +316,8 @@ async def prepare_main_storage(tx: Transaction) -> None:
                 "THEN invalid_reason ELSE 'knowledge_contract_missing' END, enabled=0 WHERE id=?",
                 (schedule_id,),
             )
+        for session_id, client_id in retired:
+            await tx.execute("DELETE FROM client_submissions WHERE session_id=? AND client_id=?", (session_id, client_id))
     _validate_layout(CURRENT_VERSION, await tx.fetch_all(_CATALOG))
     await tx.execute(f"PRAGMA user_version={CURRENT_VERSION}")
 

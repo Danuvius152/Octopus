@@ -58,9 +58,10 @@ async def seed(path, version):
         write_unversioned_baseline(path)
     elif version == 1:
         write_version_one_baseline(path)
-    elif version == 2:
+    elif version in (2, 3):
         with closing(sqlite3.connect(path)) as writer:
-            writer.execute("PRAGMA user_version=2")
+            writer.execute(f"PRAGMA user_version={version}")
+            writer.commit()
     return owner, bearer, key, ciphertext
 
 
@@ -78,7 +79,7 @@ def facts(path):
         return result
 
 
-@pytest.mark.parametrize("version,duplicate", [(0, False), (1, False), (1, True), (2, False), (3, False)])
+@pytest.mark.parametrize("version,duplicate", [(0, False), (1, False), (1, True), (2, False), (3, False), (4, False)])
 async def test_upgrade_and_current_startup_preserve_dek_rows_and_derived_http_relationships(tmp_path, monkeypatch, version, duplicate):
     path = tmp_path / "owned.db"
     owner, bearer, key, ciphertext = await seed(path, version)
@@ -99,7 +100,7 @@ async def test_upgrade_and_current_startup_preserve_dek_rows_and_derived_http_re
         assert stored["secret_encrypted"] == ciphertext and stored["user_id"] == owner["id"]
         assert decrypt(stored["secret_encrypted"], key) == "original-api-key"
         async with database.transaction(write=False) as tx:
-            assert await tx.fetch_one("PRAGMA user_version") == (3,)
+            assert await tx.fetch_one("PRAGMA user_version") == (4,)
             assert "secret_encrypted" not in {row[1] for row in await tx.fetch_all("PRAGMA table_info(backend_credentials)")}
             assert "recovered_by" not in {row[1] for row in await tx.fetch_all("PRAGMA table_info(client_submissions)")}
         manager = SessionManager()
@@ -275,7 +276,7 @@ asyncio.run(Database(sys.argv[1]).initialize())
     assert proof.read_text() == phase
     committed = phase == "commit_ack"
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (3 if committed else version,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (4 if committed else version,)
         assert ("secret_encrypted" in {row[1] for row in reader.execute("PRAGMA table_info(backend_credentials)")}) == (not committed)
         assert ("recovered_by" in {row[1] for row in reader.execute("PRAGMA table_info(client_submissions)")}) == (not committed)
         assert bool(reader.execute("SELECT 1 FROM sqlite_schema WHERE name='schema_migrations'").fetchone()) == (version == 0 and not committed)

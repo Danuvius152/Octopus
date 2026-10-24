@@ -20,7 +20,7 @@ from tests.test_service_runtime import installation_settings
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize("baseline", ["empty", "complete_v0", "complete_v1", "owned_v0", "owned_v1"])
+@pytest.mark.parametrize("baseline", ["empty", "complete_v0", "complete_v1", "owned_v0", "owned_v1", "owned_v2", "owned_v3"])
 async def test_current_format_is_prepared_once_and_reopen_preserves_owned_facts(tmp_path, monkeypatch, baseline):
     path = tmp_path / "main.db"
     if baseline in ("complete_v0", "complete_v1"):
@@ -46,7 +46,7 @@ async def test_current_format_is_prepared_once_and_reopen_preserves_owned_facts(
                          "reason_code='steer_delivery_unknown',delivery_state='unknown'")
     await database.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (3,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (4,)
         assert reader.execute("SELECT name FROM sqlite_schema WHERE name='schema_migrations'").fetchall() == []
         original_rows = reader.execute("SELECT * FROM sessions").fetchall()
         original_messages = reader.execute("SELECT * FROM messages").fetchall()
@@ -55,6 +55,10 @@ async def test_current_format_is_prepared_once_and_reopen_preserves_owned_facts(
         write_unversioned_baseline(path)
     elif baseline == "owned_v1":
         write_version_one_baseline(path)
+    elif baseline in ("owned_v2", "owned_v3"):
+        with closing(sqlite3.connect(path)) as writer:
+            writer.execute(f"PRAGMA user_version={baseline[-1]}")
+            writer.commit()
     statements = []
     connect = aiosqlite.Connection._connect
 
@@ -76,12 +80,12 @@ async def test_current_format_is_prepared_once_and_reopen_preserves_owned_facts(
             "unknown", "steer_delivery_unknown", "unknown",
         )
         await reopened.close()
-        if opening or baseline not in ("owned_v0", "owned_v1"):
+        if opening or not baseline.startswith("owned_v"):
             assert not [sql for sql in statements if sql.lstrip().upper().startswith(
                 ("CREATE", "ALTER", "DROP", "INSERT", "UPDATE", "DELETE", "PRAGMA USER_VERSION="),
             )]
         with closing(sqlite3.connect(path)) as reader:
-            assert reader.execute("PRAGMA user_version").fetchone() == (3,)
+            assert reader.execute("PRAGMA user_version").fetchone() == (4,)
             assert reader.execute("SELECT * FROM sessions").fetchall() == original_rows
             assert reader.execute("SELECT * FROM messages").fetchall() == original_messages
             assert reader.execute("SELECT * FROM agents").fetchall() == original_agents
@@ -110,9 +114,9 @@ async def test_unsupported_owned_format_is_refused_without_writes(tmp_path, monk
         keeper.execute("SELECT 1 FROM sessions").fetchall()
     with closing(sqlite3.connect(path)) as writer:
         if damage in ("future_version", "future_version_wal"):
-            writer.execute("PRAGMA user_version=1000000")
+            writer.execute("PRAGMA user_version=999")
         elif damage == "unknown_structure":
-            writer.execute("PRAGMA user_version=3")
+            writer.execute("PRAGMA user_version=4")
             writer.execute("CREATE TABLE future_business(id TEXT PRIMARY KEY, original BLOB)")
             writer.execute("INSERT INTO future_business VALUES('original', ?)", (b"unknown durable fact\x00\xff",))
         else:
@@ -123,7 +127,7 @@ async def test_unsupported_owned_format_is_refused_without_writes(tmp_path, monk
     wal = Path(str(path) + "-wal")
     original_wal = wal.read_bytes() if wal.exists() else None
     if damage == "future_version_wal":
-        assert int.from_bytes(original[60:64], "big") == 3
+        assert int.from_bytes(original[60:64], "big") == 4
         assert original_wal is not None and len(original_wal) > 32
     directories = {child.relative_to(tmp_path) for child in tmp_path.rglob("*") if child.is_dir()}
     admitted = tmp_path / "admitted"
@@ -223,7 +227,7 @@ asyncio.run(main())
     assert proof.read_text() == failure
     with closing(sqlite3.connect(path)) as reader:
         committed = failure == "commit_ack"
-        assert reader.execute("PRAGMA user_version").fetchone() == (3 if committed else 0,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (4 if committed else 0,)
         tables = {row[0] for row in reader.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
         if baseline == "empty" and not committed:
             assert tables == set()
@@ -237,7 +241,7 @@ asyncio.run(main())
         assert (await reopened.load_messages("saved"))[0]["content"] == "Original input before interruption"
     await reopened.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (3,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (4,)
         assert reader.execute("SELECT name FROM sqlite_schema WHERE name='schema_migrations'").fetchall() == []
 
 
@@ -320,7 +324,7 @@ asyncio.run(Database(sys.argv[1]).initialize())
     assert path.read_bytes() == original
 
 
-@pytest.mark.parametrize("version", [0, 1, 2])
+@pytest.mark.parametrize("version", [0, 1, 2, 3])
 async def test_complete_historical_sequence_guards_survive_format_preparation(tmp_path, version):
     path = tmp_path / "historical.db"
     database = Database(str(path))
@@ -334,6 +338,8 @@ async def test_complete_historical_sequence_guards_survive_format_preparation(tm
     elif version == 1:
         write_version_one_baseline(path)
     with closing(sqlite3.connect(path)) as writer:
+        if version in (2, 3):
+            writer.execute(f"PRAGMA user_version={version}")
         writer.execute("DROP INDEX messages_unique_sequence")
         writer.execute("INSERT INTO messages(session_id,seq,role,type,content) VALUES('history',5,'assistant','text',?)",
                        (json.dumps("Second historical row"),))
@@ -355,7 +361,7 @@ async def test_complete_historical_sequence_guards_survive_format_preparation(tm
     finally:
         await database.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (3,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (4,)
         assert reader.execute("SELECT id,session_id,seq,content FROM messages WHERE seq=5 ORDER BY id").fetchall() == original
         assert {row[0] for row in reader.execute("SELECT name FROM sqlite_schema WHERE type='trigger'")} == {
             "messages_sequence_insert", "messages_sequence_update",
