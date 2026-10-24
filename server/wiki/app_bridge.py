@@ -118,6 +118,8 @@ class AppMutation:
 
             def record_conflict():
                 with self.history.under_existing_lock(self.handle, self.lease):
+                    if self.before is not None:
+                        self._require_journal()
                     return self.history.record(
                         relative,
                         path.read_bytes() if path.is_file() else None,
@@ -138,13 +140,13 @@ class AppMutation:
     def _journal_changes(self):
         self._require_journal()
         self.history.finish_external(self.before)
+        self._require_journal()
         with file_effect(self.history.store.health):
             self.journal.unlink(missing_ok=True)
             sync_directory(self.journal.parent)
 
     def _require_journal(self):
-        if not self.journal.is_file() or json.loads(self.journal.read_text()).get("id") != self.before["id"]:
-            raise WikiError("The original application mutation intent changed; retained without replacement", 409)
+        self.history.read_external(expected=self.before)
 
     async def receipt(self, payload):
         async with self._finish_lock:
@@ -157,12 +159,13 @@ class AppMutation:
             return
 
         def remember():
-            self._require_journal()
-            trash_id = payload.get("id")
-            if isinstance(trash_id, str) and re.fullmatch(r"[a-f0-9]{32}", trash_id):
-                self.before["trash_id"] = trash_id
-                with file_effect(self.history.store.health):
-                    atomic(self.journal, json.dumps(self.before).encode())
+            with self.history.under_existing_lock(self.handle, self.lease):
+                self._require_journal()
+                trash_id = payload.get("id")
+                if isinstance(trash_id, str) and re.fullmatch(r"[a-f0-9]{32}", trash_id):
+                    self.before["trash_id"] = trash_id
+                    with file_effect(self.history.store.health):
+                        atomic(self.journal, json.dumps(self.before).encode())
 
         await complete_cleanup(asyncio.to_thread(remember))
 

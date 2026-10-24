@@ -2062,6 +2062,7 @@ async def test_note_move_preserves_identity_ownership_and_source_relations(
     client, tmp_path, move
 ):
     import json
+    import uuid
 
     from server.wiki.history import WikiHistory, atomic
     from server.wiki.registry import registry
@@ -2114,16 +2115,21 @@ async def test_note_move_preserves_identity_ownership_and_source_relations(
     if move == "rename":
         (vault / "Library/a.md").rename(vault / "Library/b.md")
     else:
-        before = history.inventory()
-        atomic(
-            store.state / "external-change.json",
-            json.dumps(
-                {"before": before, "actor": "app:sapphire", "reason": "rename"}
-            ).encode(),
-        )
-        (vault / "Library/b.md").write_bytes((vault / "Library/a.md").read_bytes())
-        (vault / "Library/a.md").unlink()
-        history.recover()
+        with history.locked():
+            paths = ["Library/a.md", "Library/b.md"]
+            entry = {
+                "version": 2,
+                "id": uuid.uuid4().hex,
+                "source_binding_protocol": 1,
+                "before": history.capture_external(paths),
+                "paths": paths,
+                "actor": "app:sapphire",
+                "reason": "rename",
+            }
+            atomic(store.state / "external-change.json", json.dumps(entry).encode())
+            (vault / "Library/b.md").write_bytes((vault / "Library/a.md").read_bytes())
+            (vault / "Library/a.md").unlink()
+            history.recover()
     moved = (
         await client.get("/api/wiki/read", params={"doc": first["id"]}, headers=client.headers)
     ).json()

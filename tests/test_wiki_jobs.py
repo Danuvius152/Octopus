@@ -13,7 +13,7 @@ import pytest
 
 from server.mcp_identity import mint, verify
 from server.wiki.curation import WikiCuration
-from server.wiki.history import WikiHistory
+from server.wiki.history import WikiHistory, atomic
 from server.wiki.jobs import WikiJobs, WikiWorker
 from server.wiki.store import WikiError
 from tests import test_wiki_api as wiki_api
@@ -217,9 +217,15 @@ async def test_new_page_recovery_checks_assigned_input_revision_separately_from_
 def sapphire_delete(history, path):
     with history.locked():
         before = history.capture_external([path])
+        journal = history.state / "external-change.json"
+        entry = {"version": 2, "source_binding_protocol": 1, "id": uuid.uuid4().hex,
+                 "before": before, "paths": [path], "actor": "human", "reason": "delete",
+                 "trash_root": str(history.state / "trash")}
+        atomic(journal, json.dumps(entry).encode())
         history.store.path(path).unlink()
-        history.finish_external({"id": uuid.uuid4().hex, "before": before, "paths": [path],
-                                 "actor": "human", "reason": "delete", "trash_root": str(history.state / "trash")})
+        history.finish_external(entry)
+        history.recover()
+        assert not journal.exists()
         history.store.refresh()
 
 

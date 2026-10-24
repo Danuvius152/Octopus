@@ -297,24 +297,10 @@ class WikiHistory:
             with self.locked():
                 return self.recover()
         external = self.state / "external-change.json"
-        if external.exists():
-            entry = json.loads(external.read_text())
-            if entry.get("version") != 2:
-                entry = self.legacy_external_entry(
-                    {
-                        path: digest
-                        for path, digest in entry["before"].items()
-                        if history_text(path)
-                    },
-                    self.inventory(),
-                    entry["actor"],
-                    entry["reason"] + "; recovered external mutation",
-                )
-                # Persist stable source identities and claims before moving
-                # anything. Every subsequent replay uses the same change IDs.
-                with file_effect(self.store.health):
-                    atomic(external, json.dumps(entry).encode())
+        if external.exists() or external.is_symlink():
+            entry = self.read_external()
             self.finish_external(entry)
+            self.read_external(expected=entry)
             with file_effect(self.store.health):
                 external.unlink()
                 sync_directory(self.state)
@@ -335,101 +321,60 @@ class WikiHistory:
                 else "conflict",
             )
 
-    def record_external(self, before, after, actor, reason):
-        with self.locked():
-            self.finish_external(self.legacy_external_entry(before, after, actor, reason))
-
-    def legacy_deleted_reservation(self, db, identity, path, digest):
-        """Recognize an identity created solely by the old deletion-half record."""
-        if identity["file_key"] or identity["origin"] is not None:
-            return False
-        doc_id = identity["id"]
-        if (
-            db.execute("SELECT 1 FROM documents WHERE id=?", (doc_id,)).fetchone()
-            or db.execute("SELECT 1 FROM uid_aliases WHERE doc_id=?", (doc_id,)).fetchone()
-            or db.execute("SELECT 1 FROM operation_receipts WHERE doc_id=?", (doc_id,)).fetchone()
-        ):
-            return False
-        changes = db.execute(
-            """SELECT c.path,c.before_hash,c.after_hash,c.status FROM changes c
-            JOIN change_retention r ON r.change_id=c.id WHERE r.document_id=?""",
-            (doc_id,),
-        ).fetchall()
-        return bool(changes) and all(
-            (row["path"], row["before_hash"], row["after_hash"], row["status"])
-            == (path, digest, None, "applied")
-            for row in changes
-        )
-
-    def legacy_move_source(self, db, old, new, digest, identities):
-        source, target = identities.get(old), identities.get(new)
-        if source is None:
-            return target
-        reserved = self.legacy_deleted_reservation(db, source, old, digest)
-        if target is None or target["id"] == source["id"]:
-            if not reserved:
-                return source
-        else:
-            actual_key = self.store.file_key(self.store.path(new).stat())
-            # A real source inode still identifies an unrecorded move, including
-            # an unindexed edit. A stale destination binding cannot override it.
-            if source["file_key"] and source["file_key"].split(":")[:2] == actual_key.split(":")[:2]:
-                return source
-            # The old handler can reserve the now absent source path after the
-            # real identity has already moved. Keep that verified current target;
-            # preserve the reservation's history without moving or merging it.
-            if reserved and target["file_key"] == actual_key and db.execute(
-                "SELECT 1 FROM documents WHERE id=? AND path=?", (target["id"], new),
-            ).fetchone():
-                return target
-        raise WikiError(
-            f"Ambiguous external move identity for {old} -> {new}; journal and identities retained", 409,
-        )
-
-    def legacy_external_entry(self, before, after, actor, reason):
-        """Upgrade legacy inventories, including an already partly applied move.
-
-        An absent old path is not an explicit absence of origin state. A unique
-        exact move may already have transferred its identity to the new path.
-        Capture that binding once; finish_external then owns replay and indexing.
-        """
-        removed, added = set(before) - set(after), set(after) - set(before)
-        moves = {}
-        for old in sorted(removed):
-            candidates = [new for new in added if after[new] == before[old]]
-            if len(candidates) == 1 and sum(digest == before[old] for digest in before.values()) == 1:
-                moves[old] = candidates[0]
-        captured = {}
-        with self.store.connect() as db:
-            ownership = {
-                row["path"]: dict(row)
-                for row in db.execute("SELECT * FROM managed_notes")
-            }
-            source_states = {
-                row["path"]: dict(row) | {"origin": origins.get(db, row["id"])}
-                for row in db.execute("SELECT id,path,file_key FROM document_identities WHERE path IS NOT NULL")
-            }
-            for path, digest in before.items():
-                raw = (self.blobs / digest).read_bytes()
-                moved_to = moves.get(path)
-                binding = self.legacy_move_source(db, path, moved_to, digest, source_states) if moved_to else source_states.get(path)
-                identity, origin = (binding["id"], binding["origin"]) if binding else (None, None)
-                if identity is None:
-                    identity = uuid.uuid4().hex
-                    db.execute(
-                        "INSERT INTO document_identities VALUES(?,?,?)", (identity, path, ""),
-                    )
-                managed = ownership.get(binding["path"] if binding else path)
-                captured[path] = {
-                    "hash": digest, "content": base64.b64encode(raw).decode(),
-                    "document_id": identity,
-                    "management": managed | {"path": path} if managed else None,
-                    "origin_state": origins.preimage(origin, identity, digest),
-                }
-        return {
-            "version": 2, "id": uuid.uuid4().hex, "before": captured,
-            "paths": sorted(set(before) | set(after)), "actor": actor, "reason": reason,
-        }
+    def read_external(self, *, expected=None):
+        """Read the current intent under its original vault owner, without repair."""
+        journal = self.state / "external-change.json"
+        if journal.is_symlink():
+            raise WikiError("Unsupported external mutation format; original intent requires settlement", 503)
+        if not journal.is_file():
+            raise WikiError("The original application mutation intent changed; retained without replacement", 409)
+        with file_effect(self.store.health):
+            try:
+                entry = json.loads(journal.read_bytes())
+                valid = (isinstance(entry, dict) and type(entry.get("version")) is int and entry["version"] == 2
+                         and type(entry.get("source_binding_protocol")) is int and entry["source_binding_protocol"] == 1
+                         and all(isinstance(entry.get(key), str) and entry[key] for key in ("id", "actor", "reason"))
+                         and isinstance(entry.get("before"), dict)
+                         and "paths" in entry and (entry["paths"] is None or isinstance(entry["paths"], list)))
+                if not valid:
+                    raise ValueError
+                if entry["reason"] == "delete" and (
+                    not isinstance(entry.get("trash_root"), str) or not entry["trash_root"]
+                ):
+                    raise ValueError
+                restored = entry.get("restored")
+                if restored is not None:
+                    if not isinstance(restored, dict) or not isinstance(restored.get("path"), str):
+                        raise ValueError
+                    identity = restored.get("document_id")
+                    if identity is not None and (not isinstance(identity, str) or not identity):
+                        raise ValueError
+                    if identity is not None and (
+                        not isinstance(entry.get("trash_id"), str) or not entry["trash_id"]
+                    ):
+                        raise ValueError
+                for relative in (*entry["before"], *(entry["paths"] or []), *([restored["path"]] if restored is not None else [])):
+                    if not isinstance(relative, str) or not history_text(relative):
+                        raise ValueError
+                    self.store.path(relative)
+                if entry["paths"] is not None and not set(entry["before"]) <= set(entry["paths"]):
+                    raise ValueError
+                required = {"hash", "content", "document_id", "management", "origin_state", "source_plan"}
+                for old in entry["before"].values():
+                    if (not isinstance(old, dict) or not required <= old.keys()
+                            or not isinstance(old["content"], str)
+                            or not isinstance(old["document_id"], str) or not old["document_id"]
+                            or any(old[key] is not None and not isinstance(old[key], dict)
+                                   for key in ("management", "origin_state", "source_plan"))
+                            or revision(base64.b64decode(old["content"], validate=True)) != old["hash"]):
+                        raise ValueError
+                if "source_policies" in entry and not isinstance(entry["source_policies"], dict):
+                    raise ValueError
+            except (ValueError, TypeError, WikiError):
+                raise WikiError("Unsupported external mutation format; original intent requires settlement", 503) from None
+        if expected is not None and entry != expected:
+            raise WikiError("The original application mutation intent changed; retained without replacement", 409)
+        return entry
 
     def write(self, relative, raw, expected_revision, actor, reason):
         with self.locked():
@@ -765,11 +710,15 @@ class WikiHistory:
         return result
 
     def finish_external(self, entry):
-        # Older persisted journals can contain claims for bytes edited before
-        # capture. Recheck at consumption as well as at new capture boundaries.
+        with self.locked():
+            self.read_external(expected=entry)
+            return self._finish_external(entry)
+
+    def _finish_external(self, entry):
+        # Recheck claims at consumption as well as at capture boundaries.
         before = {
             path: old | {"origin_state": origins.preimage(
-                old.get("origin_state"), old["document_id"], old["hash"],
+                old["origin_state"], old["document_id"], old["hash"],
             )}
             for path, old in entry["before"].items()
         }
@@ -813,7 +762,7 @@ class WikiHistory:
                 and sum(v["hash"] == before[old]["hash"] for v in before.values()) == 1
             ):
                 moves.append((old, candidates[0]))
-        # A verified legacy rename can be implemented as copy/unlink. Preserve
+        # A verified journal rename can be implemented as copy/unlink. Preserve
         # that one transition in event order; do not discard unrelated deletes
         # or a later replacement of its destination.
         restored = entry.get("restored")
@@ -822,8 +771,7 @@ class WikiHistory:
             policies = {}
             for relative in after:
                 if relative in before and before[relative]["hash"] == revision(after[relative]) and not (restored and restored["path"] == relative):
-                    # Legacy journals inventory the whole vault. A note that
-                    # did not change keeps its exact current observation;
+                    # An unchanged note keeps its exact current observation;
                     # recovering another file cannot replace its source proof.
                     continue
                 old_path = next((old for old, new in moves if new == relative), relative)
@@ -832,17 +780,17 @@ class WikiHistory:
                     prior = json.loads(raw_plan) if isinstance(raw_plan, str) else raw_plan
                     mode = "selected"
                 elif old_path in before:
-                    prior = before[old_path].get("source_plan")
+                    prior = before[old_path]["source_plan"]
                     mode = "continuation"
                 else:
                     prior = None
-                    mode = "fresh" if entry.get("source_binding_protocol") == 1 else "unknown"
+                    mode = "fresh"
                 policies[relative] = {"mode": mode, "prior": prior, "context": entry["id"] + ":external:" + relative}
+            self.read_external(expected=entry)
             entry["source_policies"] = policies
             journal = self.state / "external-change.json"
-            if journal.is_file() and json.loads(journal.read_text()).get("id") == entry["id"]:
-                with file_effect(self.store.health):
-                    atomic(journal, json.dumps(entry).encode())
+            with file_effect(self.store.health):
+                atomic(journal, json.dumps(entry).encode())
         self.store.synchronize(
             dirty=False, removed_paths=set(before) - set(after),
             journal_moves=[(old, new, before[old]["document_id"]) for old, new in moves],
@@ -985,12 +933,6 @@ class WikiHistory:
             elif raw is not None:
                 with self.store.connect() as db:
                     self.store._index(db, relative, raw=raw)
-
-    def inventory(self):
-        return {
-            relative: self.blob(self.store.path(relative).read_bytes())
-            for relative in self.text_paths()
-        }
 
     def snapshot(self, reason):
         raise WikiError(

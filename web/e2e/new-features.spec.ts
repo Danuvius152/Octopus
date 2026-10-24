@@ -2566,7 +2566,8 @@ test.describe("Message timestamps", () => {
         const b = (node as Element).getBoundingClientRect();
         const intersects =
           t.left < b.right && b.left < t.right && t.top < b.bottom && b.top < t.bottom;
-        if (intersects && t.top <= b.top + Math.max(1, stroke) && t.bottom > b.top) {
+        // A borderless fill has its geometric edge, with no painted stroke.
+        if (intersects && t.top <= b.top + stroke && t.bottom > b.top) {
           offenders.push((node as Element).className.toString().slice(0, 40));
         }
       });

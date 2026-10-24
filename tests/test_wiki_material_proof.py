@@ -370,11 +370,16 @@ def test_category_move_retains_map_but_same_path_replacement_does_not_inherit_it
     current = store.read("Library/note.md")
     new = "Library/Other/note.md"
     store.path(new).parent.mkdir()
+    journal = history.state / "external-change.json"
     with history.locked():
         before = history.capture_external([current["path"], new])
+        entry = {"version": 2, "source_binding_protocol": 1, "id": uuid.uuid4().hex, "before": before,
+                 "paths": [current["path"], new], "actor": "human", "reason": "move"}
+        history_module.atomic(journal, json.dumps(entry).encode())
         store.path(current["path"]).rename(store.path(new))
-        history.finish_external({"id": uuid.uuid4().hex, "before": before,
-                                 "paths": [current["path"], new], "actor": "human", "reason": "move"})
+        history.finish_external(entry)
+        history.recover()
+        assert not journal.exists()
         store.refresh()
         assert materials.find(store, raw)["id"] == current["id"]
     moved = store.read(current["id"])

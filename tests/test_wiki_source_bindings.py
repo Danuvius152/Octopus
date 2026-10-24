@@ -291,62 +291,91 @@ def test_missing_durable_source_table_is_rejected_and_not_recreated(history, mis
         assert db.execute("SELECT 1 FROM sqlite_schema WHERE name='wiki_edges'").fetchone() is None
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_trash_restore_preserves_exact_captured_source_or_durable_unknown(history, tmp_path, legacy):
+@pytest.mark.parametrize("missing_source_plan", [False, True])
+def test_trash_restore_preserves_exact_captured_source_or_durable_unknown(history, tmp_path, missing_source_plan):
     a, consumer, raw, _ = setup_replacement(history)
     archive = tmp_path / "trash" / "saved"
     archive.mkdir(parents=True)
     (archive / "info.json").write_text(json.dumps({"path": "consumer.md"}))
+    journal = history.state / "external-change.json"
     with history.locked():
         before = history.capture_external(["consumer.md"])
-        history.store.path("consumer.md").rename(archive / "file")
-        history.finish_external({
-            "version": 2, "id": uuid.uuid4().hex, "before": before,
+        deletion = {
+            "version": 2, "source_binding_protocol": 1, "id": uuid.uuid4().hex, "before": before,
             "paths": ["consumer.md"], "actor": "human", "reason": "delete",
             "trash_root": str(archive.parent),
-        })
+        }
+        history_module.atomic(journal, json.dumps(deletion).encode())
+        history.store.path("consumer.md").rename(archive / "file")
+        history.finish_external(deletion)
+        history.recover()
+        assert not journal.exists()
         with history.store.connect() as db:
-            if legacy:
+            if missing_source_plan:
                 db.execute("UPDATE app_trash SET source_plan=NULL")
             restored = dict(db.execute("SELECT * FROM app_trash WHERE trash_id='saved'").fetchone())
-        journal = history.state / "external-change.json"
-        journal.write_text(json.dumps({
-            "version": 2, "id": uuid.uuid4().hex, "before": {},
+        history_module.atomic(journal, json.dumps({
+            "version": 2, "source_binding_protocol": 1, "id": uuid.uuid4().hex, "before": {},
             "paths": ["consumer.md"], "actor": "human", "reason": "trash/restore",
             "restored": restored, "trash_id": "saved",
-        }))
+        }).encode())
         (archive / "file").rename(history.store.path("consumer.md"))
     history.recover()
     assert not journal.exists()
     assert history.store.path("consumer.md").read_bytes() == raw
     assert history.store.read("consumer.md")["id"] == consumer["id"]
     restored_ref = dependency(history.store)
-    assert restored_ref["doc"] == (None if legacy else a["id"])
-    assert restored_ref["status"] == ("unknown" if legacy else "indexed")
+    assert restored_ref["doc"] == (None if missing_source_plan else a["id"])
+    assert restored_ref["status"] == ("unknown" if missing_source_plan else "indexed")
 
 
-def test_external_legacy_unknown_policy_is_persisted_before_first_index_and_replayed(history, monkeypatch):
-    _, consumer, _, _ = setup_replacement(history)
+def test_external_restore_without_source_plan_persists_selected_policy_before_first_index_and_replays(history, monkeypatch):
+    _, consumer, raw, _ = setup_replacement(history)
     journal = history.state / "external-change.json"
-    journal.write_text(json.dumps({
-        "version": 2, "id": uuid.uuid4().hex, "before": {},
-        "paths": ["consumer.md"], "actor": "human", "reason": "legacy restore",
-    }))
+    with history.locked():
+        entry = {
+            "version": 2, "source_binding_protocol": 1, "id": uuid.uuid4().hex,
+            "before": history.capture_external(["consumer.md"]),
+            "paths": ["consumer.md"], "actor": "human", "reason": "trash/restore",
+            "restored": {"path": "consumer.md", "document_id": consumer["id"], "source_plan": None},
+            "trash_id": "without-source-plan",
+        }
+        history_module.atomic(journal, json.dumps(entry).encode())
+    policy = {"mode": "selected", "prior": None, "context": entry["id"] + ":external:consumer.md"}
+    synchronize = history.store.synchronize
+    indexed = []
+
+    def index_with_durable_policy(*args, **kwargs):
+        if kwargs.get("source_plans") is not None:
+            assert json.loads(journal.read_text())["source_policies"] == {"consumer.md": policy}
+            assert kwargs["source_plans"] == {"consumer.md": policy}
+            indexed.append(True)
+        return synchronize(*args, **kwargs)
 
     def interrupted(*args, **kwargs):
+        assert indexed == [True]
         raise RuntimeError("crash after first external index")
 
     with monkeypatch.context() as patch:
+        patch.setattr(history.store, "synchronize", index_with_durable_policy)
         patch.setattr(history, "record", interrupted)
         with pytest.raises(RuntimeError, match="crash after first external index"):
             history.recover()
-    assert json.loads(journal.read_text())["source_policies"]["consumer.md"]["mode"] == "unknown"
-    assert head(history.store, consumer["id"])["entries"][0]["policy"] == "unknown"
+    assert json.loads(journal.read_text())["source_policies"] == {"consumer.md": policy}
+    first_indexed = head(history.store, consumer["id"])
+    assert first_indexed["entries"][0]["policy"] == "unknown"
     current = reopen(history.store)
     try:
         WikiHistory(current).recover()
+        assert current.path("consumer.md").read_bytes() == raw
         assert dependency(current)["doc"] is None
         assert dependency(current)["status"] == "unknown"
+        change_id = uuid.uuid5(uuid.NAMESPACE_URL, f"{entry['id']}:consumer.md").hex
+        with current.connect() as db:
+            assert source_bindings.observation(db, first_indexed["id"]) == first_indexed
+            replayed = source_bindings.change_plan(db, change_id, "after")
+            assert replayed == source_bindings.current(db, consumer["id"])
+            assert replayed["entries"][0]["policy"] == "unknown"
         assert not journal.exists()
     finally:
         current.close()
@@ -451,32 +480,23 @@ print(json.dumps({'observations':observations}))
     assert {path.relative_to(store.root): path.read_bytes() for path in store.root.rglob("*.md")} == bodies
 
 
-def test_legacy_vault_inventory_preserves_proof_for_an_unchanged_related_note(history):
+def test_vault_wide_external_move_preserves_proof_for_an_unchanged_related_note(history):
     a, consumer, raw, _ = setup_replacement(history)
     history.write("unrelated.md", b"# Unrelated\nOther evidence.\n", None, "human", "create")
     saved = head(history.store, consumer["id"])
     journal = history.state / "external-change.json"
-    before = history.inventory()
-    journal.write_text(json.dumps({"before": before, "actor": "app:sapphire", "reason": "rename"}))
-    history.store.path("unrelated.md").rename(history.store.path("renamed.md"))
+    with history.locked():
+        before = history.capture_external()
+        history_module.atomic(journal, json.dumps({
+            "version": 2, "source_binding_protocol": 1, "id": uuid.uuid4().hex,
+            "before": before, "paths": None, "actor": "app:sapphire", "reason": "rename",
+        }).encode())
+        history.store.path("unrelated.md").rename(history.store.path("renamed.md"))
     history.recover()
     assert not journal.exists()
     assert history.store.path("consumer.md").read_bytes() == raw
     assert dependency(history.store)["doc"] == a["id"]
     assert head(history.store, consumer["id"]) == saved
-
-
-def test_legacy_inventory_does_not_promote_a_changed_note_from_current_path(history):
-    a, consumer, raw, _ = setup_replacement(history)
-    journal = history.state / "external-change.json"
-    before = history.inventory()
-    journal.write_text(json.dumps({"before": before, "actor": "app:sapphire", "reason": "legacy edit"}))
-    history.store.path("consumer.md").write_bytes(raw.replace(b"L1", b"L2"))
-    history.recover()
-    assert dependency(history.store)["doc"] is None
-    assert dependency(history.store)["status"] == "unknown"
-    assert history.store.read("a.md")["id"] != a["id"]
-    assert head(history.store, consumer["id"])["entries"][0]["policy"] == "unknown"
 
 
 def test_external_restore_uses_selected_observation_even_when_live_bytes_are_identical(history):
@@ -495,12 +515,12 @@ def test_external_restore_uses_selected_observation_even_when_live_bytes_are_ide
     assert proved["entries"][0]["policy"] == "bound"
     before = history.capture_external(["consumer.md"])
     journal = history.state / "external-change.json"
-    journal.write_text(json.dumps({
-        "version": 2, "id": uuid.uuid4().hex, "before": before,
+    history_module.atomic(journal, json.dumps({
+        "version": 2, "source_binding_protocol": 1, "id": uuid.uuid4().hex, "before": before,
         "paths": ["consumer.md"], "actor": "human", "reason": "trash/restore",
         "restored": {"path": "consumer.md", "document_id": consumer["id"],
                      "source_plan": json.dumps(selected)}, "trash_id": "same-bytes",
-    }))
+    }).encode())
     history.recover()
     assert not journal.exists()
     assert history.store.path("consumer.md").read_bytes() == raw

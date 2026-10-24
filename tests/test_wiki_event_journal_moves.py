@@ -1,6 +1,7 @@
 """Trusted copy/unlink journal moves retain identity without hiding deletion."""
 
 import json
+import uuid
 
 import pytest
 
@@ -11,9 +12,19 @@ from tests import test_wiki_event_identity as event_identity
 store = event_identity.store
 
 
-def legacy_journal(history):
+def external_journal(history, paths):
     journal = history.state / "external-change.json"
-    atomic(journal, json.dumps({"version": 1, "before": history.inventory(), "actor": "app:sapphire", "reason": "rename"}).encode())
+    with history.locked():
+        entry = {
+            "version": 2,
+            "id": uuid.uuid4().hex,
+            "source_binding_protocol": 1,
+            "before": history.capture_external(paths),
+            "paths": paths,
+            "actor": "app:sapphire",
+            "reason": "rename",
+        }
+        atomic(journal, json.dumps(entry).encode())
     return journal
 
 
@@ -21,7 +32,7 @@ def test_verified_copy_unlink_move_preserves_only_its_source_identity(store):
     source = event_identity.note(store, "Library/a.md")
     unrelated = event_identity.note(store, "Library/unrelated.md", b"# Unrelated\n")
     history = WikiHistory(store)
-    journal = legacy_journal(history)
+    journal = external_journal(history, [source["path"], "Library/b.md"])
     source_path = store.path(source["path"])
     target = store.root / "Library/b.md"
     target.write_bytes(source_path.read_bytes())
@@ -41,7 +52,7 @@ def test_verified_copy_unlink_move_preserves_only_its_source_identity(store):
 def test_journal_cannot_assign_old_identity_to_an_ambiguous_same_hash_copy(store, tmp_path, ambiguity):
     source = event_identity.note(store, "Library/a.md")
     history = WikiHistory(store)
-    journal = legacy_journal(history)
+    journal = external_journal(history, [source["path"], "Library/b.md"])
     path = store.path(source["path"])
     target = store.root / "Library/b.md"
     raw = path.read_bytes()
@@ -69,7 +80,7 @@ def test_journal_cannot_assign_old_identity_to_an_ambiguous_same_hash_copy(store
 def test_matched_kernel_rename_does_not_resurrect_a_later_target_replacement(store):
     source = event_identity.note(store, "Library/a.md")
     history = WikiHistory(store)
-    journal = legacy_journal(history)
+    journal = external_journal(history, [source["path"], "Library/b.md"])
     path = store.path(source["path"])
     raw = path.read_bytes()
     target = store.root / "Library/b.md"

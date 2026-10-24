@@ -177,28 +177,20 @@ def test_external_journal_move_preserves_origin_in_either_path_sort_order(histor
     doc, state, raw, _ = opaque_origin(history)
     with history.locked():
         before = history.capture_external(["note.md", destination])
-        history.store.path("note.md").rename(history.store.path(destination))
-        entry = {"id": uuid.uuid4().hex, "before": before, "paths": ["note.md", destination],
+        entry = {"version": 2, "source_binding_protocol": 1,
+                 "id": uuid.uuid4().hex, "before": before, "paths": ["note.md", destination],
                  "actor": "human", "reason": "rename"}
+        journal = external_journal(history, entry)
+        history.store.path("note.md").rename(history.store.path(destination))
         history.finish_external(entry)
         history.finish_external(entry)  # deterministic journal replay
+        history.recover()
     assert history.store.read(doc["id"])["path"] == destination
     assert history.store.path(destination).read_bytes() == raw
     assert current_origin(history, doc["id"]) == state
+    assert not journal.exists()
     with history.store.connect() as db:
         assert db.execute("SELECT count(*) FROM changes WHERE reason='rename'").fetchone()[0] == 2
-
-
-def test_legacy_external_exact_move_preserves_current_origin(history):
-    doc, state, raw, _ = opaque_origin(history)
-    with history.locked():
-        before = history.inventory()
-        history.store.path("note.md").rename(history.store.path("renamed.md"))
-        history.record_external(before, history.inventory(), "human", "legacy rename")
-        history.record_external(before, history.inventory(), "human", "legacy rename")
-    assert history.store.read(doc["id"])["path"] == "renamed.md"
-    assert history.store.path("renamed.md").read_bytes() == raw
-    assert current_origin(history, doc["id"]) == state
 
 
 def external_journal(history, entry):
@@ -210,14 +202,16 @@ def external_journal(history, entry):
 def test_trash_restore_cannot_take_an_identity_active_at_another_path(history):
     doc, state, raw, _ = opaque_origin(history, "elsewhere.md")
     returned = b"A returned file with a stale trash receipt.\n"
-    history.store.path("note.md").write_bytes(returned)
-    entry = {
-        "version": 2, "id": uuid.uuid4().hex, "before": {},
-        "paths": ["note.md"], "actor": "human", "reason": "trash/restore",
-        "restored": {"path": "note.md", "document_id": doc["id"]},
-        "trash_id": "stale",
-    }
-    journal = external_journal(history, entry)
+    with history.locked():
+        entry = {
+            "version": 2, "source_binding_protocol": 1,
+            "id": uuid.uuid4().hex, "before": history.capture_external(["note.md"]),
+            "paths": ["note.md"], "actor": "human", "reason": "trash/restore",
+            "restored": {"path": "note.md", "document_id": doc["id"]},
+            "trash_id": "stale",
+        }
+        journal = external_journal(history, entry)
+        history.store.path("note.md").write_bytes(returned)
     with pytest.raises(WikiError, match="Restored document identity changed"):
         history.recover()
     assert journal.exists()
@@ -247,45 +241,26 @@ def test_external_capture_binds_unobserved_preimage_without_certifying_it(histor
 
 
 @pytest.mark.parametrize("destination", ["a-moved.md", "z-moved.md"])
-def test_legacy_journal_of_unobserved_edit_and_move_preserves_invalid_payload(history, destination):
-    doc, state, raw, _ = opaque_origin(history)
-    edited = raw + b"Unindexed human edit before a legacy operation.\n"
-    history.store.path("note.md").write_bytes(edited)
-    with history.locked():
-        before = history.inventory()
-        history.store.path("note.md").rename(history.store.path(destination))
-        external_journal(history, {"version": 1, "before": before,
-                                   "actor": "human", "reason": "legacy rename"})
-    history.recover()
-    history.write("unrelated.md", b"New work.", None, "human", "create")
-    current = current_origin(history, doc["id"])
-    assert current["status"] == "invalid" and current["revision"] == revision(edited)
-    assert current["proof"] == state["proof"]
-    assert history.store.read(doc["id"])["path"] == destination
-    assert history.store.path(destination).read_bytes() == edited
-
-
-@pytest.mark.parametrize("destination", ["a-moved.md", "z-moved.md"])
-@pytest.mark.parametrize("old_journal", [False, True])
+@pytest.mark.parametrize("stale_claim", [False, True])
 def test_unobserved_human_edit_then_move_recovers_without_blocking_other_writes(
-    history, destination, old_journal,
+    history, destination, stale_claim,
 ):
     doc, state, raw, _ = opaque_origin(history)
     edited = raw + b"An ordinary human correction.\n"
     history.store.path("note.md").write_bytes(edited)
     with history.locked():
         before = history.capture_external(["note.md", destination])
-        if old_journal:
+        if stale_claim:
             before["note.md"]["origin_state"] = state
-        entry = {"version": 2, "id": uuid.uuid4().hex, "before": before,
+        entry = {"version": 2, "source_binding_protocol": 1,
+                 "id": uuid.uuid4().hex, "before": before,
                  "paths": ["note.md", destination], "actor": "human", "reason": "rename"}
         external_journal(history, entry)
         history.store.path("note.md").rename(history.store.path(destination))
     history.recover()
     history.write("unrelated.md", b"An unrelated write remains possible.", None, "human", "create")
     with history.locked():
-        history.finish_external(entry)
-        history.finish_external(entry)
+        history.recover()
     current = current_origin(history, doc["id"])
     assert current["status"] == "invalid" and current["revision"] == revision(edited)
     assert current["proof"] == state["proof"]
@@ -297,9 +272,9 @@ def test_unobserved_human_edit_then_move_recovers_without_blocking_other_writes(
         assert len(rows) == 2 and {row[0] for row in rows} == {doc["id"]}
 
 
-@pytest.mark.parametrize("old_trash", [False, True])
+@pytest.mark.parametrize("stale_claim", [False, True])
 def test_unobserved_human_edit_then_trash_restore_retains_bytes_and_invalid_payload(
-    history, tmp_path, old_trash,
+    history, tmp_path, stale_claim,
 ):
     doc, state, raw, _ = opaque_origin(history)
     edited = raw + b"A human edit before deletion.\n"
@@ -310,18 +285,22 @@ def test_unobserved_human_edit_then_trash_restore_retains_bytes_and_invalid_payl
     (archive / "info.json").write_text(json.dumps({"path": "note.md"}))
     with history.locked():
         before = history.capture_external(["note.md"])
-        if old_trash:
+        if stale_claim:
             before["note.md"]["origin_state"] = state
-        deletion = {"version": 2, "id": uuid.uuid4().hex, "before": before,
+        deletion = {"version": 2, "source_binding_protocol": 1,
+                    "id": uuid.uuid4().hex, "before": before,
                     "paths": ["note.md"], "actor": "human", "reason": "delete",
                     "trash_root": str(trash_root)}
+        journal = external_journal(history, deletion)
         history.store.path("note.md").rename(archive / "file")
-        history.finish_external(deletion)
+        history.recover()
+        assert not journal.exists()
         with history.store.connect() as db:
-            if old_trash:
+            if stale_claim:
                 db.execute("UPDATE app_trash SET origin_state=?", (json.dumps(state),))
             restored = dict(db.execute("SELECT * FROM app_trash WHERE trash_id='saved'").fetchone())
-        entry = {"version": 2, "id": uuid.uuid4().hex, "before": {},
+        entry = {"version": 2, "source_binding_protocol": 1,
+                 "id": uuid.uuid4().hex, "before": history.capture_external(["note.md"]),
                  "paths": ["note.md"], "actor": "human", "reason": "trash/restore",
                  "restored": restored, "trash_id": "saved"}
         external_journal(history, entry)
@@ -329,13 +308,13 @@ def test_unobserved_human_edit_then_trash_restore_retains_bytes_and_invalid_payl
     history.recover()
     history.write("unrelated.md", b"Available after trash restore.", None, "human", "create")
     with history.locked():
-        history.finish_external(entry)
-        history.finish_external(entry)
+        history.recover()
     current = current_origin(history, doc["id"])
     assert current["status"] == "invalid" and current["revision"] == revision(edited)
     assert current["proof"] == state["proof"]
     assert history.store.read("note.md")["id"] == doc["id"]
     assert history.store.path("note.md").read_bytes() == edited
+    assert not journal.exists()
     with history.store.connect() as db:
         assert db.execute("SELECT count(*) FROM app_trash").fetchone()[0] == 0
         assert db.execute("SELECT count(*) FROM changes WHERE reason='trash/restore'").fetchone()[0] == 1
@@ -343,16 +322,21 @@ def test_unobserved_human_edit_then_trash_restore_retains_bytes_and_invalid_payl
 
 @pytest.mark.parametrize("destination", ["a-moved.md", "z-moved.md"])
 @pytest.mark.parametrize("window", ["identity", "first_record", "before_unlink"])
-def test_legacy_journal_upgrade_replays_stable_origin_and_change_identity(
+def test_current_journal_replays_stable_origin_and_change_identity(
     history, monkeypatch, destination, window,
 ):
     doc, state, raw, _ = opaque_origin(history)
     with history.locked():
-        before = history.inventory()
+        before = history.capture_external(["note.md", destination])
+        entry = {"version": 2, "source_binding_protocol": 1,
+                 "id": uuid.uuid4().hex, "before": before,
+                 "paths": ["note.md", destination], "actor": "human", "reason": "rename"}
+        journal = external_journal(history, entry)
         history.store.path("note.md").rename(history.store.path(destination))
-        journal = external_journal(history, {
-            "version": 1, "before": before, "actor": "human", "reason": "legacy rename",
-        })
+    expected_changes = {
+        uuid.uuid5(uuid.NAMESPACE_URL, f"{entry['id']}:{path}").hex
+        for path in ("note.md", destination)
+    }
     move, record, unlink = history.store.move_identity, history.record, type(journal).unlink
     injected = False
 
@@ -360,7 +344,7 @@ def test_legacy_journal_upgrade_replays_stable_origin_and_change_identity(
         nonlocal injected
         if not injected:
             injected = True
-            raise RuntimeError("legacy recovery crash")
+            raise RuntimeError("external recovery crash")
 
     def move_then_crash(*args, **kwargs):
         move(*args, **kwargs)
@@ -383,242 +367,31 @@ def test_legacy_journal_upgrade_replays_stable_origin_and_change_identity(
             patch.setattr(history, "record", record_then_crash)
         else:
             patch.setattr(type(journal), "unlink", crash_before_unlink)
-        with pytest.raises(RuntimeError, match="legacy recovery crash"):
+        with pytest.raises(RuntimeError, match="external recovery crash"):
             history.recover()
-    assert json.loads(journal.read_text())["version"] == 2
+    saved = json.loads(journal.read_text())
+    assert saved["id"] == entry["id"] and saved["before"] == before
+    with history.store.connect() as db:
+        committed_changes = {
+            row[0] for row in db.execute("SELECT id FROM changes WHERE reason='rename'")
+        }
+    assert committed_changes <= expected_changes
+    assert len(committed_changes) == {"identity": 0, "first_record": 1, "before_unlink": 2}[window]
     history.recover()
     history.write("unrelated.md", b"Recovery no longer blocks writes.", None, "human", "create")
     with history.locked():
         history.recover()
     assert current_origin(history, doc["id"]) == state
-    assert history.store.read(doc["id"])["path"] == destination
+    for reference in (doc["id"], doc["metadata"]["uid"]):
+        read = history.store.read(reference)
+        assert read["id"] == doc["id"] and read["path"] == destination
+        assert read["metadata"]["uid"] == doc["metadata"]["uid"]
     assert history.store.path(destination).read_bytes() == raw
     assert not journal.exists()
     with history.store.connect() as db:
-        rows = db.execute("SELECT r.document_id FROM changes c JOIN change_retention r ON r.change_id=c.id WHERE reason LIKE 'legacy rename%'").fetchall()
-        assert len(rows) == 2 and {row[0] for row in rows} == {doc["id"]}
-
-
-@pytest.mark.parametrize("destination", ["a-moved.md", "z-moved.md"])
-@pytest.mark.parametrize("committed", ["identity", "first_record", "complete"])
-def test_preexisting_partly_committed_legacy_journal_preserves_current_payload(
-    history, destination, committed,
-):
-    doc, state, raw, _ = opaque_origin(history)
-    with history.locked():
-        before = history.inventory()
-        history.store.path("note.md").rename(history.store.path(destination))
-        history.store.move_identity("note.md", destination)
-        if committed != "identity":
-            paths = sorted(["note.md", destination])
-            for relative in paths if committed == "complete" else paths[:1]:
-                removed = relative == "note.md"
-                history.record(
-                    relative, raw if removed else None, None if removed else raw,
-                    "human", "legacy rename; recovered external mutation", "applied",
-                    document_id=doc["id"], before_origin=state if removed else None,
-                    origin_state=origins.UNCHANGED if removed else state,
-                )
-        external_journal(history, {"version": 1, "before": before,
-                                   "actor": "human", "reason": "legacy rename"})
-    history.recover()
-    history.write("unrelated.md", b"New work.", None, "human", "create")
-    with history.locked():
-        history.recover()
-    assert current_origin(history, doc["id"]) == state
-    assert history.store.read(doc["id"])["path"] == destination
-    assert history.store.path(destination).read_bytes() == raw
-    assert not (history.state / "external-change.json").exists()
-    with history.store.connect() as db:
-        rows = db.execute("SELECT r.document_id FROM changes c JOIN change_retention r ON r.change_id=c.id WHERE reason LIKE 'legacy rename%'").fetchall()
-        assert {row[0] for row in rows} == {doc["id"]}
-
-
-def legacy_reserved_move(history, monkeypatch, destination, window):
-    """3b60 recorded each path without document_id or origin-state support."""
-    doc, state, raw, _ = opaque_origin(history)
-    with history.locked():
-        before = history.inventory()
-        history.store.path("note.md").rename(history.store.path(destination))
-        history.store.move_identity("note.md", destination)
-        with monkeypatch.context() as legacy:
-            legacy.setattr(origins, "record", lambda *args, **kwargs: None)
-            legacy.setattr(origins, "apply", lambda *args, **kwargs: None)
-            for relative in sorted(["note.md", destination]):
-                removed = relative == "note.md"
-                history.record(
-                    relative, raw if removed else None, None if removed else raw,
-                    "human", "legacy rename; recovered external mutation", "applied",
-                )
-                if removed and window == "deletion":
-                    break
-        external_journal(history, {"version": 1, "before": before,
-                                   "actor": "human", "reason": "legacy rename"})
-        with history.store.connect() as db:
-            reserved = db.execute("SELECT id,file_key FROM document_identities WHERE path='note.md'").fetchone()
-            assert reserved[0] != doc["id"] and reserved[1] == ""
-            assert db.execute("SELECT id FROM document_identities WHERE path=?", (destination,)).fetchone()[0] == doc["id"]
-    return doc, state, raw, reserved[0]
-
-
-@pytest.mark.parametrize("schema_version", [12, 13])
-@pytest.mark.parametrize("destination", ["a-moved.md", "z-moved.md"])
-@pytest.mark.parametrize("window", ["deletion", "complete"])
-def test_legacy_deleted_path_reservation_cannot_replace_the_real_moved_identity(
-    history, monkeypatch, schema_version, destination, window,
-):
-    doc, state, raw, reserved_id = legacy_reserved_move(history, monkeypatch, destination, window)
-    upgraded = None
-    active = history
-    if schema_version == 12:
-        history.store.close()
-        with sqlite3.connect(history.store.db_path) as db:
-            db.row_factory = sqlite3.Row
-            db.execute("BEGIN IMMEDIATE")
-            use_supported_baseline12(db)
-        upgraded = WikiStore(history.store.root, history.store.state, history.store.vault_id)
-        active = WikiHistory(upgraded)
-    try:
-        active.recover()
-        active.write("unrelated.md", b"New work after legacy recovery.", None, "human", "create")
-        with active.locked():
-            active.recover()
-        with active.store.connect() as db:
-            assert db.execute("SELECT id FROM document_identities WHERE path=?", (destination,)).fetchone()[0] == doc["id"]
-            assert db.execute("SELECT path FROM document_identities WHERE id=?", (reserved_id,)).fetchone()[0] is None
-            # Keep the old handler's history rather than rewriting its ownership.
-            assert db.execute("SELECT count(*) FROM change_retention WHERE document_id=?", (reserved_id,)).fetchone()[0] == 1
-            for relative in ("note.md", destination):
-                rows = db.execute("SELECT r.document_id FROM changes c JOIN change_retention r ON r.change_id=c.id WHERE c.path=? AND c.reason LIKE 'legacy rename%' ORDER BY c.rowid DESC LIMIT 1", (relative,)).fetchall()
-                assert rows and rows[0][0] == doc["id"]
-        for reference in (doc["id"], doc["metadata"]["uid"]):
-            read = active.store.read(reference)
-            assert read["id"] == doc["id"] and read["path"] == destination
-            assert read["metadata"]["uid"] == doc["metadata"]["uid"]
-        assert active.store.path(destination).read_bytes() == raw
-        assert current_origin(active, doc["id"]) == state
-        assert not (active.state / "external-change.json").exists()
-    finally:
-        if upgraded:
-            upgraded.close()
-
-
-@pytest.mark.parametrize("destination", ["a-moved.md", "z-moved.md"])
-@pytest.mark.parametrize("window", ["upgraded_journal", "first_record"])
-def test_upgraded_legacy_journal_keeps_selected_identity_across_another_crash(
-    history, monkeypatch, destination, window,
-):
-    import server.wiki.history as history_module
-
-    doc, state, raw, reserved_id = legacy_reserved_move(history, monkeypatch, destination, "deletion")
-    journal = history.state / "external-change.json"
-    original_atomic, record = history_module.atomic, history.record
-    with history.store.connect() as db:
-        previous_changes = db.execute("SELECT count(*) FROM changes WHERE reason LIKE 'legacy rename%'").fetchone()[0]
-
-    def after_upgrade(path, content, **kwargs):
-        original_atomic(path, content, **kwargs)
-        if path == journal:
-            raise RuntimeError("crash after upgrading journal")
-
-    def after_record(*args, **kwargs):
-        record(*args, **kwargs)
-        raise RuntimeError("crash after committing a recovery record")
-
-    with monkeypatch.context() as interruption:
-        if window == "upgraded_journal":
-            interruption.setattr(history_module, "atomic", after_upgrade)
-        else:
-            interruption.setattr(history, "record", after_record)
-        with pytest.raises(RuntimeError, match="crash after"):
-            history.recover()
-    saved = json.loads(journal.read_text())
-    assert saved["version"] == 2 and saved["before"]["note.md"]["document_id"] == doc["id"]
-    history.recover()
-    history.write("unrelated.md", b"Recovery remains usable.", None, "human", "create")
-    assert history.store.read(doc["metadata"]["uid"])["id"] == doc["id"]
-    assert history.store.read(doc["id"])["path"] == destination
-    assert current_origin(history, doc["id"]) == state
-    assert history.store.path(destination).read_bytes() == raw
-    assert not journal.exists()
-    with history.store.connect() as db:
-        assert db.execute("SELECT path FROM document_identities WHERE id=?", (reserved_id,)).fetchone()[0] is None
-        assert db.execute("SELECT count(*) FROM changes WHERE reason LIKE 'legacy rename%'").fetchone()[0] == previous_changes + 2
-
-
-@pytest.mark.parametrize("destination", ["a-moved.md", "z-moved.md"])
-@pytest.mark.parametrize("unverified", ["missing_target", "changed_target_key", "reserved_has_uid", "reserved_has_origin"])
-def test_legacy_reservation_recovery_requires_verified_ownership(
-    history, monkeypatch, destination, unverified,
-):
-    doc, state, raw, reserved_id = legacy_reserved_move(history, monkeypatch, destination, "complete")
-    with history.store.connect() as db:
-        if unverified == "missing_target":
-            db.execute("UPDATE document_identities SET path=NULL WHERE id=?", (doc["id"],))
-            db.execute("DELETE FROM documents WHERE id=?", (doc["id"],))
-        elif unverified == "changed_target_key":
-            db.execute("UPDATE document_identities SET file_key='0:0:0' WHERE id=?", (doc["id"],))
-        elif unverified == "reserved_has_uid":
-            db.execute("INSERT INTO uid_aliases VALUES(?,?)", ('urn:uuid:' + str(uuid.uuid4()), reserved_id))
-        else:
-            origins.put(db, reserved_id, state | {"doc_id": reserved_id})
-        identities = [tuple(row) for row in db.execute("SELECT * FROM document_identities ORDER BY id")]
-        states = [tuple(row) for row in db.execute("SELECT * FROM material_origins ORDER BY doc_id")]
-    journal = history.state / "external-change.json"
-    saved = journal.read_bytes()
-    with pytest.raises(WikiError, match="Ambiguous external move identity"):
-        history.recover()
-    assert journal.read_bytes() == saved
-    assert history.store.path(destination).read_bytes() == raw
-    with history.store.connect() as db:
-        assert [tuple(row) for row in db.execute("SELECT * FROM document_identities ORDER BY id")] == identities
-        assert [tuple(row) for row in db.execute("SELECT * FROM material_origins ORDER BY doc_id")] == states
-
-
-@pytest.mark.parametrize("destination", ["a-moved.md", "z-moved.md"])
-def test_legacy_move_does_not_merge_competing_real_identities_by_content(history, destination):
-    doc, state, raw, _ = opaque_origin(history)
-    with history.locked():
-        before = history.inventory()
-        # A copied target has its own observed identity; the old logical binding
-        # refers to another inode, so exact content alone cannot establish a move.
-        history.store.path(destination).write_bytes(raw)
-        with history.store.connect() as db:
-            target = history.store._index(db, destination)
-            source_key = db.execute("SELECT file_key FROM document_identities WHERE id=?", (doc["id"],)).fetchone()[0]
-        history.store.path("note.md").unlink()
-        entry = {"version": 1, "before": before, "actor": "human", "reason": "legacy rename"}
-        journal = external_journal(history, entry)
-    with pytest.raises(WikiError, match="Ambiguous external move identity") as error:
-        history.recover()
-    assert error.value.status == 409
-    assert json.loads(journal.read_text()) == entry
-    assert history.store.path(destination).read_bytes() == raw
-    with history.store.connect() as db:
-        assert db.execute("SELECT id FROM document_identities WHERE path=?", (destination,)).fetchone()[0] == target["id"]
-        assert db.execute("SELECT file_key FROM document_identities WHERE id=?", (doc["id"],)).fetchone()[0] == source_key
-    assert current_origin(history, doc["id"]) == state
-
-
-@pytest.mark.parametrize("destination", ["a-moved.md", "z-moved.md"])
-def test_legacy_move_preserves_verified_source_over_a_stale_target_binding(history, destination):
-    doc, state, raw, _ = opaque_origin(history)
-    stale = history.write(destination, b"An unrelated previously deleted document.", None, "human", "create")
-    stale_id = history.store.read(destination)["id"]
-    history.store.path(destination).unlink()
-    with history.locked():
-        before = history.inventory()
-        history.store.path("note.md").rename(history.store.path(destination))
-        external_journal(history, {"version": 1, "before": before,
-                                   "actor": "human", "reason": "legacy rename"})
-    history.recover()
-    history.write("unrelated.md", b"New work.", None, "human", "create")
-    assert history.store.read(doc["id"])["path"] == destination
-    assert history.store.path(destination).read_bytes() == raw
-    assert current_origin(history, doc["id"]) == state
-    with history.store.connect() as db:
-        assert db.execute("SELECT path FROM document_identities WHERE id=?", (stale_id,)).fetchone()[0] is None
-        assert db.execute("SELECT document_id FROM change_retention WHERE change_id=?", (stale["change_id"],)).fetchone()[0] == stale_id
+        rows = db.execute("SELECT c.id,r.document_id FROM changes c JOIN change_retention r ON r.change_id=c.id WHERE reason='rename'").fetchall()
+        assert len(rows) == 2 and {row[0] for row in rows} == expected_changes
+        assert {row[1] for row in rows} == {doc["id"]}
 
 
 def test_current_origin_survives_derived_rebuild_and_history_expiration(history):
