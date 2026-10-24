@@ -73,7 +73,7 @@ async def test_unsupported_wiki_format_in_real_wal_is_refused_before_a_writer(re
             writer.execute("INSERT INTO future_business VALUES(?)", (b"Original unknown fact\x00\xff",))
         else:
             writer.execute("DELETE FROM wiki_schema")
-            writer.execute("INSERT INTO wiki_schema VALUES(?,'original-retained-time')", (14 if damage == "future_version" else 11,))
+            writer.execute("INSERT INTO wiki_schema VALUES(?,'original-retained-time')", (15 if damage == "future_version" else 11,))
         writer.commit()
         assert path.read_bytes() == baseline_main
         original_wal = wal.read_bytes()

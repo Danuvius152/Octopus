@@ -42,7 +42,6 @@ async def main(configuration, phase):
     from server.wiki.jobs import WikiJobs
     from server.wiki.registry import registry
     from tests.main_storage import write_unversioned_baseline
-    from tests.wiki_baseline import use_supported_baseline12
 
     owner = InstallationOwner(settings)
     owner.acquire()
@@ -86,18 +85,17 @@ async def main(configuration, phase):
         effect = history.write("Library/note.md", applied, first["revision"], "human", "applied before migration")
         note = store.read("Library/note.md")
         WikiJobs(user["id"])
-        legacy_item = {"doc": note["id"], "path": note["path"], "revision": first["revision"],
-                       "status": "attention", "output": note["path"], "output_revision": effect["revision"],
-                       "recording_failure": {"attempt": 1, "session_id": "legacy", "request_id": "exact", "opaque": ["keep", 7]},
-                       "execution_unknown": {"original": True}}
-        raw_items = json.dumps([legacy_item])
+        current_item = {"version": 1, "doc": note["id"], "path": note["path"], "revision": first["revision"],
+                        "status": "unknown", "output": note["path"], "output_revision": effect["revision"],
+                        "worker_request": {"attempt": 1, "session_id": "legacy", "request_id": "exact",
+                                           "work_id": "wiki-exact", "phase": "unknown", "opaque": ["keep", 7]}}
+        raw_items = json.dumps([current_item])
         with store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            use_supported_baseline12(connection)
             connection.execute("""INSERT INTO jobs(id,request_key,payload_hash,payload,status,items,error,session_id,created_at,updated_at)
                                   VALUES('old-job','old-key','old-hash','{}','completed_with_attention',?,NULL,'legacy','old','old')""", (raw_items,))
             connection.execute("INSERT INTO job_requests VALUES('old-key','old-hash','old-job')")
-            connection.execute("INSERT INTO operation_receipts VALUES('old-receipt','old-job',?,?,?,?,?,'patch','Original effect',?,'old','{}')",
+            connection.execute("INSERT INTO operation_receipts(id,job_id,item_doc,doc_id,path,input_revision,output_revision,operation,reason,change_id,created_at,details) VALUES('old-receipt','old-job',?,?,?,?,?,'patch','Original effect',?,'old','{}')",
                                (note["id"], note["id"], note["path"], first["revision"], effect["revision"], effect["change_id"]))
             connection.execute("UPDATE maintenance_input_state SET version='maintenance-inputs-v7'")
         (root / "seed.json").write_text(json.dumps({"note": note, "source": source, "raw_items": raw_items,
@@ -164,7 +162,7 @@ async def main(configuration, phase):
     assert current["metadata"]["source_refs"][0]["doc"] == seed["source"]["id"]
     job = jobs.get("old-job")
     assert job["items"][0]["status"] == "unknown"
-    assert job["items"][0]["legacy_evidence"]["recording_failure"]["opaque"] == ["keep", 7]
+    assert job["items"][0]["worker_request"]["opaque"] == ["keep", 7]
     assert job["receipts"][0]["id"] == "old-receipt"
     assert job["receipts"][0]["change_id"] == seed["effect"]["change_id"]
     assert seed["effect"]["change_id"] in {item["id"] for item in WikiHistory(store).history(current["path"])["items"]}

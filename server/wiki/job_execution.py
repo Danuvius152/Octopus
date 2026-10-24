@@ -178,6 +178,36 @@ async def cancel_requests(manager, references):
     await join_retirement(*operations)
 
 
+def require_retired(store, job, *, manager=None):
+    """Use the original live and durable retirement facts, never job status."""
+    from .jobs import WikiWorker, worker
+    from .tasks import tasks
+
+    if ((str(store.state.resolve()), job["id"]) in WikiWorker.executing
+            or any(assignment["job_id"] == job["id"] for assignment in list(tasks.assignments.values()))
+            or any(task.job_id == job["id"] for task in list(tasks.active.values()))):
+        raise WikiError("The previous maintenance assignment has not retired", 409)
+    manager = manager or worker.manager
+    references = job_items.references(job.get("items", []))
+    sessions = {ref["session_id"] for ref in references if ref.get("session_id")}
+    if job["session_id"]:
+        sessions.add(job["session_id"])
+    for session_id in sessions:
+        session = manager.get_session(session_id) if manager else None
+        exact = {ref["request_id"] for ref in references if ref.get("session_id") == session_id and ref.get("request_id")}
+        active = ([*session._pending_queue, *([session._run.request] if session._run.request else [])]
+                  if session is not None else [])
+        if session is not None and (any(not exact or request.request_id in exact for request in active)
+                                    or session._run.retirements):
+            raise WikiError("The previous maintenance execution has not retired", 409)
+    for reference in references:
+        if reference.get("retired") or reference.get("phase") == "rejected":
+            continue
+        session = manager.get_session(reference.get("session_id")) if manager and reference.get("session_id") else None
+        if session is None:
+            raise WikiError("Original execution retirement is not proven; inspect the retained evidence", 409)
+
+
 def reconcile_cancelled_effects(jobs, captured, *, manager):
     """Verify accepted effects and repair derived indexing, with no new work.
 

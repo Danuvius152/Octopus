@@ -60,7 +60,7 @@ def members(store, job):
 
 
 def receipt(db, job, source, target):
-    db.execute("INSERT INTO operation_receipts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+    db.execute("INSERT INTO operation_receipts(id,job_id,item_doc,doc_id,path,input_revision,output_revision,operation,reason,change_id,created_at,details) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
                ("receipt", job["id"], source["id"], target["id"], target["path"], source["revision"],
                 target["revision"], "no_change", "test", None, "now", "{}"))
 
@@ -108,27 +108,30 @@ def test_normalizer_cannot_publish_an_old_map_over_a_new_job_token(prepared):
     assert members(jobs.store, job) == {docs["b"]["id"]}
 
 
-def test_normalization_preserves_exact_true_and_python_failure_truth(prepared):
+def test_normalization_preserves_exact_true_current_state_and_receipt_truth(prepared):
     jobs, docs = prepared
     expected = {}
     # All sixteen independent row conversions share the same indexed documents.
-    for index, ((value, exact), (failure, truth)) in enumerate(product(
+    for index, ((value, exact), (state, phase, recording, recovery, receipt_id, required)) in enumerate(product(
         [(True, 1), (1, 0), ("true", 0), (None, 0)],
-        [({}, 0), ({"opaque": "private"}, 1), ([], 0), ("failure", 1)],
+        [("done", "settled", 0, 0, {}, 0), ("pending", "accepted", 1, 0, {"opaque": "private"}, 1),
+         ("unknown", "unknown", 1, 1, [], 0), ("verifying", "settled", 0, 1, "receipt", 1)],
     )):
         job = enqueue(jobs, docs["a"], key=f"truth-{index}", index_complete=value,
-                      recording_failure=failure, index_recovery=failure,
-                      output_revision={"bad_type": True}, receipt_id=failure)
-        expected[job["id"]] = exact, truth
+                      status=state, worker_request={"phase": phase},
+                      output_revision={"bad_type": True}, receipt_id=receipt_id)
+        expected[job["id"]] = exact, recording, recovery, required
     assert inputs.normalize(jobs.store, [docs["a"]["id"]])
     with jobs.store.connect() as db:
         rows = [dict(row) for row in db.execute("SELECT * FROM maintenance_job_items")]
     assert len(rows) == len(expected) == 16
     assert {row["job_id"] for row in rows} == expected.keys()
     for row in rows:
-        exact, truth = expected[row["job_id"]]
+        exact, recording, recovery, required = expected[row["job_id"]]
         assert row["index_complete"] == exact, row
-        assert row["recording_failure"] == row["index_recovery"] == row["receipt_required"] == truth, row
+        assert row["recording_failure"] == recording, row
+        assert row["index_recovery"] == recovery, row
+        assert row["receipt_required"] == required, row
         assert row["output_revision_valid"] == 0, row
         assert "private" not in json.dumps(row), row
 

@@ -1,4 +1,4 @@
-"""Versioned job evidence survives batches, old JSON and later attempts."""
+"""Current job evidence survives batches and later attempts; old input refuses."""
 
 import json
 
@@ -11,7 +11,20 @@ from tests.test_wiki_jobs import client as client
 from tests.test_wiki_jobs import jobs as jobs
 
 
-async def test_batches_keep_original_references_and_decode_old_evidence(jobs):
+@pytest.mark.parametrize("old", [
+    {"status": "pending"},
+    {"version": True, "status": "pending"},
+    {"version": 1, "status": "pending", "worker_request": {"request_id": "original"}},
+    *[{"version": 1, "status": "pending", field: False} for field in (
+        "recording_failure", "recording_recovery", "execution_unknown", "index_recovery", "cancelled_before_admission",
+    )],
+])
+def test_current_reader_rejects_retired_encoding_without_reinterpreting_it(old):
+    with pytest.raises(WikiError):
+        job_items.decode(json.dumps([{"doc": "original"} | old]))
+
+
+async def test_batches_keep_original_references_and_opaque_evidence(jobs):
     paths = [f"Library/{number}.md" for number in range(4)]
     for path in paths:
         WikiHistory(jobs.store).write(path, b"# Original\nKeep this claim.\n", None, "human", "create")
@@ -30,14 +43,13 @@ async def test_batches_keep_original_references_and_decode_old_evidence(jobs):
         "first-request", "first-request", "first-request", "second-request",
     ]
     assert all(item["version"] == 1 for item in current["items"])
-    legacy = current["items"][3] | {
-        "recording_failure": second | {"phase": "unknown", "vendor_fact": {"offset": 17}},
-        "execution_unknown": {"original": ["retained", 23]},
-        "status": "attention",
+    current_item = current["items"][3] | {
+        "worker_request": second | {"phase": "unknown", "vendor_fact": {"offset": 17}},
+        "legacy_evidence": {"execution_unknown": {"original": ["retained", 23]}},
+        "status": "unknown",
     }
-    legacy.pop("version")
     with jobs.store.connect() as db:
-        db.execute("UPDATE jobs SET items=? WHERE id=?", (json.dumps([legacy]), job["id"]))
+        db.execute("UPDATE jobs SET items=? WHERE id=?", (json.dumps([current_item]), job["id"]))
     item = jobs.get(job["id"])["items"][0]
     assert item["status"] == "unknown"
     assert item["legacy_evidence"]["execution_unknown"] == {"original": ["retained", 23]}
@@ -55,33 +67,20 @@ async def test_batches_keep_original_references_and_decode_old_evidence(jobs):
     assert jobs.get(job["id"])["state_version"] == before["state_version"]
 
 
-def test_conflicting_legacy_reference_is_retained_without_replacing_current_execution():
+def test_opaque_historical_evidence_does_not_replace_current_execution():
     current = {"attempt": 2, "session_id": "current", "request_id": "current-request", "phase": "accepted"}
     old = {"attempt": 1, "session_id": "old", "request_id": "old-request", "recording_state": "unconfirmed"}
     item = job_items.decode(json.dumps([{
-        "doc": "original", "status": "pending", "worker_request": current, "recording_failure": old,
+        "version": 1, "doc": "original", "status": "pending", "worker_request": current,
+        "legacy_evidence": {"recording_failure": old},
     }]))[0]
     assert item["worker_request"] == current
     assert item["legacy_evidence"]["recording_failure"] == old
-    assert item["previous_worker_requests"][0]["request_id"] == "old-request"
-    assert item["status"] in {"unknown", "attention"}
+    assert "previous_worker_requests" not in item
+    assert item["status"] == "pending"
 
 
 @pytest.mark.parametrize("corrupt", [{"worker_request": []}, {"previous_worker_requests": {}}, {"status": "typo"}])
 def test_malformed_current_items_are_rejected_at_the_json_boundary(corrupt):
     with pytest.raises(WikiError, match="malformed"):
         job_items.decode(json.dumps([{"doc": "original", "status": "pending", "version": 1} | corrupt]))
-
-
-def test_legacy_running_item_remains_unknown_with_its_original_evidence():
-    item = job_items.decode('[{"doc":"original","status":"running","vendor":{"offset":7}}]')[0]
-    assert item["status"] == "unknown"
-    assert item["legacy_evidence"]["status"] == "running"
-    assert item["vendor"] == {"offset": 7}
-
-
-def test_legacy_retention_item_without_status_preserves_unknown_evidence():
-    item = job_items.decode('[{"revision":"original","change_id":"original-change"}]')[0]
-    assert item["status"] == "unknown"
-    assert item["revision"] == "original" and item["change_id"] == "original-change"
-    assert item["legacy_evidence"]["status"] is None

@@ -95,7 +95,7 @@ def collection_barrier_measurements(prepared, monkeypatch, counts):
     inserted = 0
     for count in counts:
         with connect() as db:
-            item = {"doc": outside["id"], "path": outside["path"],
+            item = {"version": 1, "doc": outside["id"], "path": outside["path"],
                     "revision": outside["revision"], "status": "pending"}
             db.executemany("INSERT INTO jobs(id,request_key,payload_hash,payload,status,items,error,session_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)", [
                 (f"outside-{number}", f"outside-key-{number}", "synthetic-fixture", "{}", "queued",

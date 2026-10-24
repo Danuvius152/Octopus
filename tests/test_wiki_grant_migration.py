@@ -9,7 +9,6 @@ from server.wiki.jobs import WikiJobs
 from server.wiki.registry import registry
 from server.wiki.store import WikiError
 from tests import test_wiki_api as wiki_api
-from tests.wiki_baseline import use_supported_baseline12
 
 client = wiki_api.client
 
@@ -26,9 +25,10 @@ async def test_readmission_retains_original_recording_reference_for_its_document
     job = jobs.maintain("recording-readmission", "", "Review these exact notes",
                         ["Library/a.md", "Library/b.md"], None, [], "human")
     items = job["items"]
-    reference = {"session_id": "original-session", "request_id": "original-request", "recording_state": "unconfirmed"}
+    reference = {"session_id": "original-session", "request_id": "original-request", "recording_state": "unconfirmed",
+                 "attempt": job["attempt"], "phase": "unknown", "work_id": "wiki-original-request"}
     first = next(item for item in items if item["path"] == "Library/a.md")
-    first.update(status="attention", recording_failure=reference)
+    first.update(status="attention", worker_request=reference)
     jobs.update(job["id"], status="interrupted", items=items, session_id=None)
     WikiHistory(jobs.store).write(first["path"], b"# A\nHuman revision after interruption.\n",
                                   first["revision"], "human", "save")
@@ -49,21 +49,12 @@ async def test_readmission_retains_original_recording_reference_for_its_document
     assert accepted.status_code == 200, accepted.text
     current = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     by_path = {item["path"]: item for item in accepted.json()["items"]}
-    assert by_path[first["path"]]["legacy_evidence"]["recording_failure"] == reference
+    assert {key: by_path[first["path"]]["worker_request"][key] for key in reference} == reference
     assert by_path[first["path"]]["worker_request"]["retired"] is True
     assert by_path[first["path"]]["revision"] == observed["revision"] != first["revision"]
     assert "recording_failure" not in by_path["Library/b.md"]
     assert {item["doc"] for item in by_path.values()} == {item["doc"] for item in items}
     assert scope_facts(current.store) == original_scope
-
-
-def supported_version(store, version):
-    if version == 12:
-        registry.close()
-        with sqlite3.connect(store.db_path) as db:
-            db.row_factory = sqlite3.Row
-            db.execute("BEGIN IMMEDIATE")
-            use_supported_baseline12(db)
 
 
 def stopped_job(user_id, root, document, *, creation=None):
@@ -75,9 +66,8 @@ def stopped_job(user_id, root, document, *, creation=None):
     return job
 
 
-@pytest.mark.parametrize("version", [12, 13])
 @pytest.mark.parametrize("path", ["Library/note.md", "Library/assets/project/notes.md"])
-async def test_supported_queued_work_keeps_exact_grant_and_original_request(client, tmp_path, path, version):
+async def test_current_queued_work_keeps_exact_grant_and_original_request_after_reopen(client, tmp_path, path):
     root = tmp_path / "vault"
     (root / path).parent.mkdir(parents=True)
     (root / path).write_text("# Original\n\nKeep this argument.\n")
@@ -89,7 +79,7 @@ async def test_supported_queued_work_keeps_exact_grant_and_original_request(clie
     with jobs.store.connect() as db:
         raw = tuple(db.execute("SELECT payload,items FROM jobs WHERE id=?", (original["id"],)).fetchone())
         grant = tuple(db.execute("SELECT * FROM wiki_job_grants WHERE job_id=?", (original["id"],)).fetchone())
-    supported_version(jobs.store, version)
+    registry.close()
     current = WikiJobs(owner)
     job = current.get(original["id"])
     assert job["status"] == "queued" and job["items"] == original["items"]
@@ -104,7 +94,7 @@ async def test_supported_queued_work_keeps_exact_grant_and_original_request(clie
 
 
 @pytest.mark.parametrize("existing", [False, True])
-async def test_supported_material_keeps_finite_reservation_or_exact_input_identity(client, tmp_path, existing):
+async def test_current_material_keeps_finite_reservation_or_exact_input_identity_after_reopen(client, tmp_path, existing):
     root = tmp_path / "vault"
     (root / "Library").mkdir(parents=True)
     material = "# Material\n\nPreserve these exact submitted bytes.\n"
@@ -115,7 +105,7 @@ async def test_supported_material_keeps_finite_reservation_or_exact_input_identi
     jobs = WikiJobs(owner)
     document = jobs.store.read("Library/material.md") if existing else None
     job = jobs.maintain("retained-material", material, "Preserve submitted material", [], None, [], "human")
-    supported_version(jobs.store, 12)
+    registry.close()
     current = WikiJobs(owner)
     retained = current.get(job["id"])
     assert retained["grant"] == job["grant"]
@@ -143,7 +133,7 @@ async def test_completed_retained_rows_do_not_gain_new_authority(client, tmp_pat
         db.execute("""INSERT INTO jobs(id,request_key,payload_hash,payload,status,items,created_at,updated_at)
                       VALUES('completed-original','completed-original','hash',?,'completed','[]','original-time','original-time')""", (raw,))
         db.execute("INSERT INTO job_requests VALUES('completed-original','hash','completed-original')")
-    supported_version(jobs.store, 12)
+    registry.close()
     current = WikiJobs(owner)
     job = current.get("completed-original")
     assert job["status"] == "completed" and job["grant"] is None and job["error"] is None

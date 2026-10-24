@@ -234,7 +234,9 @@ async def test_unsettled_publications_block_regeneration_without_recovery_side_e
     _, job = await settle(client, jobs, config, operation="organize")
     store = registry.store((await api.session_manager.db.get_system_agent())["user_id"])
     if failure == "recording":
-        job["items"][0]["recording_failure"] = {"session_id": "not-committed", "request_id": "original"}
+        job["items"][0].update(status="unknown", worker_request={
+            "session_id": "not-committed", "request_id": "original", "phase": "unknown",
+        })
         jobs.update(job["id"], status="cancelled", items=job["items"])
     else:
         with store.connect() as db:
@@ -631,20 +633,15 @@ async def test_final_item_read_cannot_rebind_a_checked_observation(client, tmp_p
 
 
 @pytest.mark.parametrize("job_status", ["interrupted", "failed"])
-@pytest.mark.parametrize("item_status", ["pending", "running"])
+@pytest.mark.parametrize("item_status", ["pending", "unknown"])
 @pytest.mark.parametrize("newer_input", [False, True])
 async def test_unreceipted_unfinished_work_blocks_another_actor(client, tmp_path, job_status, item_status, newer_input):
     from server.wiki.store import WikiError
 
     vault, config, jobs = await prepare(client, tmp_path)
-    retained = jobs.maintain("legacy-retained", "", "Review selected note", ["Library/journal.md"], None, [], "earlier-actor")
+    retained = jobs.maintain("retained-unfinished", "", "Review selected note", ["Library/journal.md"], None, [], "earlier-actor")
     retained["items"][0]["status"] = item_status
-    # Historical items had an unversioned running flag. Use their actual JSON
-    # representation; the current codec never writes that obsolete state.
-    retained["items"][0].pop("version", None)
-    with jobs.store.connect() as db:
-        db.execute("UPDATE jobs SET status=?,items=? WHERE id=?",
-                   (job_status, json.dumps(retained["items"]), retained["id"]))
+    jobs.update(retained["id"], status=job_status, items=retained["items"])
     if newer_input:
         (vault / "Library/journal.md").write_text("# Journal\n\nLater human words.\n")
         assert (await current_read(client, "Library/journal.md")).status_code == 200
@@ -659,7 +656,7 @@ async def test_unreceipted_unfinished_work_blocks_another_actor(client, tmp_path
         assert len(jobs.list()["items"]) == 1
     if job_status == "interrupted":
         jobs.recover_jobs()
-    if job_status == "interrupted" or item_status == "running":
+    if job_status == "interrupted" or item_status == "unknown":
         unknown = jobs.get(retained["id"])
         assert unknown["status"] == job_status and unknown["items"][0]["status"] == "unknown"
         original = (vault / "Library/journal.md").read_bytes()

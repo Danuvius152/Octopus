@@ -3,7 +3,9 @@ import type { WikiJobCard, WikiJobDetail, WikiJobOutput } from "../api";
 import { controlWikiJob, loadWikiJobDetail, loadWikiJobOutput } from "../lib/wikiJobs";
 import { useSessionStore } from "../stores/sessionStore";
 
-export function WikiJobDetails({ card, sessionId, close }: { card: WikiJobCard; sessionId: string; close: () => void }) {
+export function WikiJobDetails({ card, sessionId, close, setUnavailable }: {
+  card: WikiJobCard; sessionId: string; close: () => void; setUnavailable: (value: boolean) => void;
+}) {
   const [attempt, setAttempt] = useState(card.attempt);
   const [detail, setDetail] = useState<WikiJobDetail | null>(null);
   const [output, setOutput] = useState<WikiJobOutput | null>(null);
@@ -25,17 +27,21 @@ export function WikiJobDetails({ card, sessionId, close }: { card: WikiJobCard; 
     setDetail(null);
     setBusy(false);
     void loadWikiJobDetail({ job_id, vault_id }, attempt).then((value) => {
-      if (active) { setDetail(value); setError(""); }
+      if (active) {
+        if (value === null) setUnavailable(true);
+        else { setDetail(value); setError(""); }
+      }
     }).catch((failure) => { if (active) setError(String(failure.message)); });
     return () => { active = false; reads.current++; };
-  }, [job_id, vault_id, attempt, token, generation, refresh]);
+  }, [job_id, vault_id, attempt, token, generation, refresh, setUnavailable]);
 
   const more = async () => {
     if (!detail || detail.next_offset === null) return;
     setBusy(true);
     try {
       const page = await loadWikiJobDetail(card, attempt, detail.next_offset);
-      setDetail({ ...page, items: [...detail.items, ...page.items], outputs: [...detail.outputs, ...page.outputs] });
+      if (page === null) setUnavailable(true);
+      else setDetail({ ...page, items: [...detail.items, ...page.items], outputs: [...detail.outputs, ...page.outputs] });
     } catch (failure) { setError(failure instanceof Error ? failure.message : "Could not load task details."); }
     finally { setBusy(false); }
   };

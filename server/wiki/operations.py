@@ -71,7 +71,9 @@ def record(db, *, doc_id, path, before, after, operation, reason, publication=No
             details |= {"input_source_doc": publication["source_doc"], "input_source_revision": publication["input_revision"]}
         if publication.get("reservation_id"):
             details["creation_reservation_id"] = publication["reservation_id"]
-    db.execute("INSERT INTO operation_receipts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
+    db.execute("""INSERT INTO operation_receipts(
+        id,job_id,item_doc,doc_id,path,input_revision,output_revision,operation,reason,change_id,created_at,details)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""", (
         identifier, publication["job_id"] if publication else None,
         (publication["source_doc"] or doc_id) if publication and not publication.get("supporting_navigation") else None, doc_id, path,
         before, after, operation, reason, change_id, datetime.now(UTC).isoformat(), json.dumps(details, ensure_ascii=False),

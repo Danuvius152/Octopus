@@ -14,7 +14,6 @@ import pytest
 from server.wiki import origins, schema
 from server.wiki.history import WikiHistory, atomic
 from server.wiki.store import WikiError, WikiStore, revision
-from tests.wiki_baseline import use_supported_baseline12
 
 
 @pytest.fixture
@@ -423,16 +422,13 @@ def test_private_origin_state_never_appears_in_document_or_public_history(histor
     assert current_origin(history, doc["id"])["proof"] == state["proof"]
 
 
-@pytest.mark.parametrize("version", [12, 13])
-def test_supported_reopen_preserves_rows_without_synthesizing_origin_proofs(history, version):
+def test_current_reopen_preserves_rows_without_synthesizing_origin_proofs(history):
     history.write("note.md", b"legacy material", None, "human", "create")
     store = history.store
     store.close()
     with sqlite3.connect(store.db_path) as db:
         db.row_factory = sqlite3.Row
         db.execute("BEGIN IMMEDIATE")
-        if version == 12:
-            use_supported_baseline12(db)
         tables = ["documents", "document_identities", "changes", "change_management", "change_retention", "operation_receipts",
                   "material_origins", "change_material_origins"]
         before = {t: list(map(tuple, db.execute("SELECT * FROM " + t))) for t in tables}

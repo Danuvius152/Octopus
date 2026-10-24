@@ -91,7 +91,7 @@ async def test_retirement_check_preserves_exact_request_scope(client, tmp_path, 
     manager = SessionManager()
     session = Session(id="original-session", name="worker", working_dir=str(tmp_path), user_id=owner)
     manager.sessions[session.id] = session
-    job["items"][0]["worker_request"] = {"session_id": session.id, "request_id": "original-worker"}
+    job["items"][0]["worker_request"] = {"session_id": session.id, "request_id": "original-worker", "phase": "unknown"}
     job = jobs.update(job["id"], session_id=session.id, items=job["items"])
     request = QueuedPrompt(prompt="Retain this instruction", attachment_ids=[], request_id=request_id)
     if location == "current":

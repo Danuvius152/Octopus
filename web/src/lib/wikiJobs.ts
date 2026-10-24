@@ -114,25 +114,34 @@ export async function controlWikiJob(sessionId: string, card: WikiJobCard, actio
 
 type JobIdentity = Pick<WikiJobCard, "job_id" | "vault_id">;
 
+class WikiJobReadError extends Error {
+  readonly status: number;
+  constructor(message: string, status: number) { super(message); this.status = status; }
+}
+
 async function readJob<T>(card: JobIdentity, suffix: string, query: URLSearchParams): Promise<T> {
   const { token, dispatchGeneration } = useSessionStore.getState();
   const response = await fetch(`${API}/api/wiki/jobs/${encodeURIComponent(card.job_id)}/${suffix}?${query}`, {
     headers: { Authorization: `Bearer ${token}` },
   });
-  if (!response.ok) {
-    const failure = await response.json().catch(() => null);
-    throw new Error(typeof failure?.detail === "string" ? failure.detail : `Could not read Wiki task (HTTP ${response.status}).`);
-  }
-  const data: T = await response.json();
+  const data = response.ok ? await response.json() : await response.json().catch(() => null);
   const current = useSessionStore.getState();
   if (current.token !== token || current.dispatchGeneration !== dispatchGeneration) throw new Error("Account or service changed. Reopen the task details.");
-  return data;
+  if (!response.ok) {
+    throw new WikiJobReadError(typeof data?.detail === "string" ? data.detail : `Could not read Wiki task (HTTP ${response.status}).`, response.status);
+  }
+  return data as T;
 }
 
-export async function loadWikiJobDetail(card: JobIdentity, attempt: number, offset = 0): Promise<WikiJobDetail> {
-  const detail = await readJob<WikiJobDetail>(card, "details", new URLSearchParams({ attempt: String(attempt), offset: String(offset) }));
-  if (detail.job_id !== card.job_id || detail.vault_id !== card.vault_id || detail.attempt !== attempt) throw new Error("Wiki task detail identity changed.");
-  return detail;
+export async function loadWikiJobDetail(card: JobIdentity, attempt: number, offset = 0): Promise<WikiJobDetail | null> {
+  try {
+    const detail = await readJob<WikiJobDetail>(card, "details", new URLSearchParams({ attempt: String(attempt), offset: String(offset) }));
+    if (detail.job_id !== card.job_id || detail.vault_id !== card.vault_id || detail.attempt !== attempt) throw new Error("Wiki task detail identity changed.");
+    return detail;
+  } catch (failure) {
+    if (failure instanceof WikiJobReadError && failure.status === 404) return null;
+    throw failure;
+  }
 }
 
 export function loadWikiJobOutput(card: WikiJobCard, attempt: number, receipt: string, view: "history" | "current", start = 0, revision?: string): Promise<WikiJobOutput> {

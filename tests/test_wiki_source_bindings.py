@@ -13,7 +13,6 @@ from server.wiki import history as history_module
 from server.wiki import source_bindings
 from server.wiki.history import WikiHistory
 from server.wiki.store import WikiError, WikiStore
-from tests.wiki_baseline import use_supported_baseline12
 
 
 @pytest.fixture
@@ -381,7 +380,7 @@ def test_external_restore_without_source_plan_persists_selected_policy_before_fi
         current.close()
 
 
-def test_legacy_prepared_after_without_exact_source_plan_stays_unknown(history):
+def test_prepared_after_without_exact_source_plan_stays_unknown(history):
     _, consumer, raw, _ = setup_replacement(history)
     proposed = raw + b"An applied pre-upgrade edit.\n"
     with history.locked():
@@ -391,9 +390,7 @@ def test_legacy_prepared_after_without_exact_source_plan_stays_unknown(history):
     with sqlite3.connect(history.store.db_path) as db:
         db.row_factory = sqlite3.Row
         db.execute("BEGIN IMMEDIATE")
-        use_supported_baseline12(db)
-        # This is an old prepared record inside a complete supported ledger.
-        # Its absent exact source plan remains a current recovery obligation.
+        # A missing exact source plan remains a current recovery obligation.
         db.execute("DELETE FROM change_source_bindings WHERE change_id=?", (receipt["id"],))
         assert db.execute("SELECT 1 FROM change_source_bindings WHERE change_id=?", (receipt["id"],)).fetchone() is None
     current = WikiStore(history.store.root, history.store.state, history.store.vault_id, health=history.store.health)

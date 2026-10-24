@@ -30,7 +30,7 @@ async def test_no_jobs_baseline_repairs_known_projection_without_inventing_durab
     body_bytes = (root / "source.md").read_bytes()
     with closing(WikiStore(root, state, registration["vault_id"], defer_recovery=True)) as store:
         with store.connect() as db:
-            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == 13
+            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == 14
             after = facts(db)
             for name, rows in original.items():
                 expected = sorted([*rows, ("maintenance_jobs", 1)], key=repr) if name == "wiki_protocols" else rows

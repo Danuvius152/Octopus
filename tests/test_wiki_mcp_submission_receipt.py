@@ -20,7 +20,7 @@ def job_result(status="queued", *, items=None, error=None):
         "created_at": "2026-10-17T00:00:00+00:00",
         "updated_at": "2026-10-17T00:00:01+00:00",
         "payload": {"material": "private source", "scope": "full scope"},
-        "items": items if items is not None else [{"status": "pending"}],
+        "items": items if items is not None else [{"version": 1, "status": "pending"}],
         "receipts": [{"details": {"content": "full durable evidence"}}],
         "error": error,
     }
@@ -61,7 +61,7 @@ def test_submission_receipt_does_not_echo_source_or_scope(monkeypatch, size):
     ("failed", "failed"), ("cancelled", "pending"),
 ])
 def test_submission_preserves_actual_status_and_bounded_error(monkeypatch, status, item_status):
-    result = job_result(status, items=[{"status": item_status}], error="故障🙂" * 1000)
+    result = job_result(status, items=[{"version": 1, "status": item_status}], error="故障🙂" * 1000)
     result["request_key"] = "长键🙂" * 1000
     monkeypatch.setattr(wiki, "call", lambda *args, **kwargs: result)
     receipt = wiki.maintain("submitted-alias")
@@ -85,7 +85,7 @@ def test_submission_errors_pass_through_unchanged(monkeypatch, status):
 
 def test_only_explicit_reused_items_have_bounded_locations(monkeypatch):
     items = [{
-        "status": "done", "reused": True, "doc": str(index),
+        "version": 1, "status": "done", "reused": True, "doc": str(index),
         "output": "Library/" + "路径🙂" * 10000,
         "output_revision": "a" * 64,
         "material": "never echo", "scope": "never echo",
@@ -100,7 +100,7 @@ def test_only_explicit_reused_items_have_bounded_locations(monkeypatch):
         "doc": "0", "output": items[0]["output"][:512], "output_revision": "a" * 64,
     }
     assert len(json.dumps(receipt, ensure_ascii=False).encode()) < 16000
-    items[:] = [{"status": "done", "reused": "inferred", "output": "Library/not-reused.md"}]
+    items[:] = [{"version": 1, "status": "done", "reused": "inferred", "output": "Library/not-reused.md"}]
     assert "reused_count" not in wiki.maintain("request")
 
 

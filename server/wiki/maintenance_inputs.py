@@ -9,7 +9,7 @@ import uuid
 
 from . import job_items, protocols
 
-VERSION = "maintenance-inputs-v8"
+VERSION = "maintenance-inputs-v9"
 PREFIX = "maintenance_input_"
 TABLES = {
     "maintenance_input_state": """CREATE TABLE maintenance_input_state(
@@ -79,8 +79,15 @@ def _shape(db, table):
 
 
 def validate_jobs(db):
-    columns = JOB_COLUMNS + (("attempt_errors", "TEXT", 1, "'{}'", 0, 0),)
-    if _shape(db, "jobs") != columns or _shape(db, "job_requests") != REQUEST_COLUMNS:
+    previous = JOB_COLUMNS + (("attempt_errors", "TEXT", 1, "'{}'", 0, 0),)
+    columns = (("id", "TEXT", 1, None, 0, 0), *previous[1:],
+               ("admission_sequence", "INTEGER", 0, None, 1, 0))
+    actual = _shape(db, "jobs")
+    if actual != columns:
+        version = db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0]
+        if version not in (12, 13) or actual != previous:
+            raise unavailable("job ledger is missing or incompatible")
+    if _shape(db, "job_requests") != REQUEST_COLUMNS:
         raise unavailable("job ledger is missing or incompatible")
     unique_request = any(row[2] and not row[4] and
                          [column[2] for column in db.execute("SELECT * FROM pragma_index_info(?)", (row[1],))] == ["request_key"]
@@ -135,6 +142,9 @@ def _invalidate_jobs(selection):
             (SELECT 1 FROM jobs WHERE id=maintenance_job_items.job_id);
         DELETE FROM maintenance_job_dirty WHERE job_id IN ({selection}) AND NOT EXISTS
             (SELECT 1 FROM jobs WHERE id=maintenance_job_dirty.job_id);
+        UPDATE operation_receipts SET item_match_sequence=NULL
+            WHERE job_id IN ({selection}) AND item_match_sequence IS NOT NULL
+            AND NOT EXISTS(SELECT 1 FROM jobs WHERE id=operation_receipts.job_id);
     """
 
 
@@ -160,6 +170,9 @@ def _refresh_jobs(selection):
 
 
 def _input_check(value):
+    states = ",".join(repr(state) for state in sorted(job_items.ITEM_STATES))
+    phases = ",".join(repr(phase) for phase in sorted(job_items.EXECUTION_PHASES))
+    retired = " OR ".join(f"json_type(i.value,'$.{field}') IS NOT NULL" for field in job_items.LEGACY_FIELDS)
     return f"""SELECT CASE WHEN json_valid({value})=0 THEN
         RAISE(ABORT,'maintenance job membership requires valid JSON') END;
         SELECT CASE WHEN json_type({value})<>'array' THEN
@@ -168,6 +181,21 @@ def _input_check(value):
             CASE WHEN i.type<>'object' THEN 1 ELSE
             coalesce(json_type(i.value,'$.doc') NOT IN ('text','null'),0) END)
         THEN RAISE(ABORT,'maintenance job membership requires object items and exact identities') END;
+        SELECT CASE WHEN EXISTS(SELECT 1 FROM json_each({value}) i WHERE
+            coalesce(json_type(i.value,'$.version')<>'integer',1)
+            OR json_extract(i.value,'$.version')<>1
+            OR coalesce(json_extract(i.value,'$.status') NOT IN ({states}),1)
+            OR ({retired})
+            OR coalesce(json_type(i.value,'$.legacy_evidence')<>'object',0)
+            OR CASE WHEN json_type(i.value,'$.worker_request') IS NULL THEN 0
+                WHEN json_type(i.value,'$.worker_request')<>'object' THEN 1
+                ELSE coalesce(json_extract(i.value,'$.worker_request.phase') NOT IN ({phases}),1) END
+            OR CASE WHEN json_type(i.value,'$.previous_worker_requests') IS NULL THEN 0
+                WHEN json_type(i.value,'$.previous_worker_requests')<>'array' THEN 1
+                ELSE EXISTS(SELECT 1 FROM json_each(i.value,'$.previous_worker_requests') r WHERE
+                    CASE WHEN r.type<>'object' THEN 1
+                    ELSE coalesce(json_extract(r.value,'$.phase') NOT IN ({phases}),1) END) END)
+        THEN RAISE(ABORT,'maintenance job membership requires the current item protocol') END;
         SELECT CASE WHEN EXISTS(SELECT 1 FROM json_tree({value})
         WHERE key IS NOT NULL GROUP BY parent,key HAVING count(*)>1)
         THEN RAISE(ABORT,'maintenance job membership contains duplicate keys') END;"""
@@ -221,7 +249,11 @@ def triggers(with_jobs):
 
         receipt_docs = " UNION ".join(f"SELECT {side}.{column} AS doc_id" for side in sides for column in ("doc_id", "item_doc"))
         receipt_jobs = " UNION ".join(f"SELECT {side}.job_id" for side in sides)
-        add("operation_receipts", action, bump + _mark_docs(receipt_docs) + (_refresh_jobs(receipt_jobs) if with_jobs else ""))
+        revoke = ("UPDATE operation_receipts SET item_match_sequence=NULL WHERE id=new.id AND item_match_sequence IS NOT NULL;"
+                  if action != "DELETE" else "")
+        add("operation_receipts", action, revoke + bump + _mark_docs(receipt_docs) + (_refresh_jobs(receipt_jobs) if with_jobs else ""),
+            columns=("id", "job_id", "item_doc", "doc_id", "path", "input_revision", "output_revision",
+                     "operation", "reason", "change_id", "created_at", "details"))
 
         for table in ("changes", "change_retention", "change_proposals", "job_publications"):
             column = "id" if table == "changes" else "change_id"
@@ -254,6 +286,10 @@ def triggers(with_jobs):
         # when the item identities actually change. Both triggers share the TX.
         name = PREFIX + "jobs_update_members"
         result[name] = f"CREATE TRIGGER {name} AFTER UPDATE ON jobs WHEN {member_change} BEGIN {writer_check}{bump}" + _refresh_jobs("SELECT old.id UNION SELECT new.id") + " END"
+    result[PREFIX + "receipt_item_match"] = f"""CREATE TRIGGER {PREFIX}receipt_item_match
+        AFTER UPDATE OF item_match_sequence ON operation_receipts
+        WHEN old.item_match_sequence IS NOT new.item_match_sequence BEGIN {writer_check}{bump}""" + _mark_docs(
+            "SELECT old.doc_id AS doc_id UNION SELECT new.doc_id UNION SELECT old.item_doc UNION SELECT new.item_doc") + " END"
     return result
 
 
@@ -357,7 +393,7 @@ def capture_jobs(db, doc_ids=None):
             return {"nonce": nonce, "jobs": []}
         condition = " WHERE j.id IN (SELECT job_id FROM maintenance_job_members WHERE doc_id IN (" + ",".join("?" for _ in doc_ids) + "))"
         parameters = tuple(doc_ids)
-    rows = db.execute("""SELECT j.rowid AS sequence,j.id,j.status,j.items,d.cause_generation
+    rows = db.execute("""SELECT j.admission_sequence AS sequence,j.id,j.status,j.items,d.cause_generation
                          FROM maintenance_job_dirty d JOIN jobs j ON j.id=d.job_id""" + condition, parameters).fetchall()
     captured = []
     for row in rows:
@@ -378,6 +414,19 @@ def state(db):
     return dict(db.execute("SELECT * FROM maintenance_input_state WHERE singleton=1").fetchone())
 
 
+def _match_receipts(db, job):
+    """Persist exact item matching; applied/indexed/bound remain separate facts."""
+    rows = db.execute("""SELECT r.id,r.item_match_sequence,CASE WHEN EXISTS(
+        SELECT 1 FROM maintenance_job_items i WHERE i.job_id=r.job_id AND i.item_doc=r.item_doc
+        AND i.status='done' AND i.index_complete=1 AND i.recording_failure=0 AND i.index_recovery=0
+        AND i.output_revision_valid=1 AND i.output_path IS r.path AND i.output_revision IS r.output_revision
+        AND (i.receipt_required=0 OR i.receipt_id IS NOT NULL AND i.receipt_id=r.id)
+        AND (r.change_id IS NULL OR r.change_id='' OR i.output_change_id IS r.change_id))
+        THEN ? END AS matched FROM operation_receipts r WHERE r.job_id=?""", (job["sequence"], job["job_id"]))
+    changes = [(row["matched"], row["id"]) for row in rows if row["matched"] != row["item_match_sequence"]]
+    db.executemany("UPDATE operation_receipts SET item_match_sequence=? WHERE id=?", changes)
+
+
 def publish_jobs(db, captured):
     """Caller owns BEGIN IMMEDIATE; newer job tokens and document dirt survive."""
     if not db.in_transaction:
@@ -392,6 +441,7 @@ def publish_jobs(db, captured):
     for job in captured["jobs"]:
         db.execute("DELETE FROM maintenance_job_items WHERE job_id=?", (job["job_id"],))
         db.executemany("INSERT INTO maintenance_job_items VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", job["items"])
+        _match_receipts(db, job)
         db.execute("DELETE FROM maintenance_job_dirty WHERE job_id=? AND cause_generation=?", (job["job_id"], job["token"]))
     return True
 

@@ -13,7 +13,6 @@ from server.service_health import ServiceHealth
 from server.wiki import schema, storage
 from server.wiki.history import WikiHistory
 from server.wiki.store import WikiError, WikiStore
-from tests.wiki_baseline import use_supported_baseline12
 
 
 @pytest.fixture
@@ -57,11 +56,9 @@ def snapshot(store):
         return {name: [tuple(row) for row in db.execute('SELECT * FROM "' + name + '"')] for name in names}
 
 
-def seed_pending(database, version):
+def seed_pending(database):
     with database.connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        if version == 12:
-            use_supported_baseline12(db)
         db.execute("UPDATE filesystem_state SET received_seq=1,applied_seq=0")
         db.execute("INSERT INTO filesystem_inbox VALUES(1,'batch','epoch','generation','{\"ordered\":[\"delete\"]}',"
                    "'immutable-hash','pending','old-time')")
@@ -87,8 +84,16 @@ def test_selection_schema_does_not_reference_an_uninitialized_job_ledger(without
                    (json.dumps(review),))
         with pytest.raises(sqlite3.IntegrityError, match="matching job and observation"):
             db.execute("INSERT INTO job_selection_evidence VALUES('unknown','selection',0,'doc','key','time')")
-        assert WikiJobs.initialize_ledger(db)
+        selections = list(map(tuple, db.execute("SELECT * FROM maintenance_selections")))
+        items = list(map(tuple, db.execute("SELECT * FROM maintenance_selection_items")))
+    # The storage owner prepares the whole old layout before business owners
+    # can use the current receipt and job representations.
+    schema.initialize(without_jobs)
+    with without_jobs.connect() as db:
+        db.execute("BEGIN IMMEDIATE")
         maintenance_selections.require(db)
+        assert list(map(tuple, db.execute("SELECT * FROM maintenance_selections"))) == selections
+        assert list(map(tuple, db.execute("SELECT * FROM maintenance_selection_items"))) == items
         assert db.execute("SELECT name FROM sqlite_master WHERE name='maintenance_evidence_job_owner'").fetchone()
         with pytest.raises(sqlite3.IntegrityError, match="matching job"):
             db.execute("INSERT INTO job_selection_evidence VALUES('unknown','selection',0,'doc','key','time')")
@@ -131,10 +136,9 @@ def test_missing_initialized_selection_job_guard_is_not_recreated(database):
     assert snapshot(database) == before
 
 
-@pytest.mark.parametrize("version", [12, 13])
 @pytest.mark.parametrize("missing", ["filesystem_state", "filesystem_inbox"])
-def test_initialized_schema_does_not_rebuild_a_lost_event_ledger(database, missing, version):
-    seed_pending(database, version)
+def test_initialized_schema_does_not_rebuild_a_lost_event_ledger(database, missing):
+    seed_pending(database)
     with database.connect() as db:
         db.execute("DROP TABLE " + missing)
     before = snapshot(database)
@@ -146,10 +150,9 @@ def test_initialized_schema_does_not_rebuild_a_lost_event_ledger(database, missi
     assert database.db_path.read_bytes() == retained
 
 
-@pytest.mark.parametrize("version", [12, 13])
 @pytest.mark.parametrize("broken", ["column", "generated", "unique", "singleton", "status"])
-def test_incompatible_existing_event_shape_is_retained_and_rejected(database, version, broken):
-    seed_pending(database, version)
+def test_incompatible_existing_event_shape_is_retained_and_rejected(database, broken):
+    seed_pending(database)
     with database.connect() as db:
         if broken == "column":
             db.execute("ALTER TABLE filesystem_inbox RENAME COLUMN payload_hash TO other_hash")
@@ -175,9 +178,8 @@ def test_incompatible_existing_event_shape_is_retained_and_rejected(database, ve
     assert database.db_path.read_bytes() == retained
 
 
-@pytest.mark.parametrize("version", [12, 13])
-def test_derived_search_repair_preserves_pending_events_and_old_durable_rows(database, version):
-    seed_pending(database, version)
+def test_derived_search_repair_preserves_pending_events_and_durable_rows(database):
+    seed_pending(database)
     with database.connect() as db:
         db.execute("DROP TABLE search_fts")
     before = snapshot(database)
@@ -191,9 +193,9 @@ def test_derived_search_repair_preserves_pending_events_and_old_durable_rows(dat
     assert snapshot(database) == after
 
 
-@pytest.mark.parametrize("version", [8, 11, 14])
+@pytest.mark.parametrize("version", [8, 11, 15])
 def test_unsupported_format_retains_pending_events_without_backfill(database, version):
-    seed_pending(database, 13)
+    seed_pending(database)
     with database.connect() as db:
         db.execute("DELETE FROM wiki_schema")
         db.execute("INSERT INTO wiki_schema VALUES(?,'original-time')", (version,))

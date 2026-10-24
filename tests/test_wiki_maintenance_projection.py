@@ -81,7 +81,7 @@ def test_multiple_inputs_for_one_output_do_not_hide_failed_work(prepared):
     jobs.update(job["id"], status="completed_with_attention", items=job["items"])
     with jobs.store.connect() as db:
         receipt(db, job, docs["a"], docs["b"])
-        db.execute("""INSERT INTO operation_receipts
+        db.execute("""INSERT INTO operation_receipts(id,job_id,item_doc,doc_id,path,input_revision,output_revision,operation,reason,change_id,created_at,details)
                       SELECT 'second',job_id,?,doc_id,path,?,output_revision,operation,reason,change_id,created_at,details
                       FROM operation_receipts WHERE id='receipt'""", (docs["c"]["id"], docs["c"]["revision"]))
     jobs.store.path(docs["b"]["path"]).write_text("# B\nA later human version.\n")

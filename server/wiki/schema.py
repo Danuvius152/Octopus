@@ -1,5 +1,6 @@
 """Inspect and prepare supported Wiki formats; derived data has no authority."""
 
+import json
 import re
 import sqlite3
 from contextlib import closing
@@ -8,7 +9,7 @@ from datetime import UTC, datetime
 
 from ..sqlite_schema import definition
 
-VERSION = 13
+VERSION = 14
 
 _CATALOG = "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*'"
 
@@ -32,7 +33,7 @@ def _catalog(db):
     return result
 
 
-def _reference(with_jobs):
+def _reference(with_jobs, *, previous=False):
     from . import maintenance_inputs, schema_ddl
 
     with closing(sqlite3.connect(":memory:")) as reference:
@@ -83,6 +84,12 @@ def _reference(with_jobs):
                 sql = sections.execute("SELECT sql FROM sqlite_schema WHERE name='search_sections'").fetchone()[0]
                 section_layouts.add(("search_sections", definition("table", sql), _columns(sections, "search_sections")))
         replaceable["table", "search_sections"] = frozenset(section_layouts)
+    if previous:
+        with closing(sqlite3.connect(":memory:")) as earlier:
+            for name, sql in schema_ddl.PREVIOUS_TABLES.items():
+                if name != "jobs" or with_jobs:
+                    earlier.execute(sql)
+            catalog.update(_catalog(earlier))
     return catalog, protocols, repairable, replaceable
 
 
@@ -96,20 +103,21 @@ def inspect(db):
         maintenance_selections,
         protocols,
         recovery_state,
+        schema_ddl,
         source_bindings,
     )
     from .store import WikiError
 
     try:
         version = db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0]
-        if version not in (12, VERSION) or version > VERSION:
+        if version not in (12, 13, VERSION) or version > VERSION:
             raise WikiError("Wiki format has no supported preparation path; durable state retained", 503)
         protocols.require(db, "registration")
         markers = dict(db.execute("SELECT name,version FROM wiki_protocols"))
         with_jobs = "maintenance_jobs" in markers
-        if version == VERSION and not with_jobs:
+        if version >= 13 and not with_jobs:
             raise WikiError("Current Wiki format requires its complete job authority; durable state retained", 503)
-        expected, expected_markers, repairable, replaceable = _reference(with_jobs)
+        expected, expected_markers, repairable, replaceable = _reference(with_jobs, previous=version < VERSION)
         if version == 12:
             # A directly created, unpublished Store predates config publication.
             # Registered readers separately require this lifecycle receipt.
@@ -123,6 +131,10 @@ def inspect(db):
         if actual.keys() - expected.keys():
             raise WikiError("Wiki format contains an unsupported structure or protocol; durable state retained", 503)
         for key, value in expected.items():
+            if version < VERSION and key[0] == "trigger" and key[1] in schema_ddl.PREVIOUS_EVENTS:
+                if key not in actual or actual[key][0] != value[0] or not job_events.previous_definition(key[1], actual[key][1]):
+                    raise WikiError("Wiki previous event protocol is incompatible; durable state retained", 503)
+                continue
             if key not in actual:
                 if key not in repairable:
                     raise WikiError("Wiki format is incomplete or incompatible; durable state retained", 503)
@@ -237,10 +249,85 @@ def _repair(db, owners):
     maintenance_inputs.initialize(db)
 
 
-def initialize(store):
-    """Commit complete creation or the finite 12→13 step, then publish nothing."""
-    from . import schema_ddl
+def _convert_job_items(db):
+    """The preparation owner has suspended the job representation triggers."""
+    from . import job_history, job_items
+
+    changes = []
+    for row in db.execute("SELECT id,items FROM jobs"):
+        current = job_items.encode(job_history.previous_items(row["items"]))
+        original = json.dumps(json.loads(row["items"]), ensure_ascii=False, allow_nan=False)
+        if current != original:
+            changes.append((current, row["id"]))
+    if changes:
+        db.executemany("UPDATE jobs SET items=? WHERE id=?", changes)
+
+
+def _order_jobs(db):
+    """Copy the complete old admission order before removing any history."""
     from .jobs import WikiJobs
+    from .store import WikiError
+
+    columns = ",".join('"' + row[1] + '"' for row in db.execute("PRAGMA table_info(jobs)"))
+    original = "SELECT rowid," + columns + " FROM jobs"
+    following = "SELECT admission_sequence," + columns + " FROM prepared_jobs"
+    db.execute(WikiJobs.LEDGER_DDL.replace('CREATE TABLE "jobs"', "CREATE TABLE prepared_jobs", 1))
+    db.execute("INSERT INTO prepared_jobs(admission_sequence," + columns + ") " + original)
+    same = (db.execute(original + " EXCEPT " + following + " LIMIT 1").fetchone() is None
+            and db.execute(following + " EXCEPT " + original + " LIMIT 1").fetchone() is None)
+    highest = db.execute("SELECT coalesce(max(rowid),0) FROM jobs").fetchone()[0]
+    watermark = db.execute("SELECT coalesce((SELECT seq FROM sqlite_sequence WHERE name='prepared_jobs'),0)").fetchone()[0]
+    if not same or watermark < highest:
+        raise WikiError("Wiki admission order preparation did not preserve its facts; durable state retained", 503)
+    db.execute("DROP TABLE jobs")
+    db.execute("ALTER TABLE prepared_jobs RENAME TO jobs")
+
+
+def _prepare_current(db, admitted, *, store):
+    """One finite authority handoff; event rows and receipt rowids stay put."""
+    from . import (
+        grants,
+        job_events,
+        job_history,
+        maintenance_inputs,
+        maintenance_selections,
+        schema_ddl,
+    )
+    from .jobs import WikiJobs
+
+    original_old = job_history.old_jobs(db) if admitted.with_jobs else set()
+    maintenance_inputs.discard_derived(db)
+    db.execute("ALTER TABLE operation_receipts ADD COLUMN " + schema_ddl.ITEM_MATCH_COLUMN)
+    if admitted.with_jobs:
+        events = job_events.job_triggers()
+        dependent = grants.JOB_TRIGGER | maintenance_selections.JOB_TRIGGER | {
+            name: events[name] for name in (
+                "wiki_job_state_owner", "wiki_job_subscriber_owner", "wiki_job_insert_state",
+                "wiki_job_update_state", "wiki_job_state_emit_insert", "wiki_job_state_emit_update")}
+        for name in dependent:
+            db.execute('DROP TRIGGER "' + name + '"')
+        _order_jobs(db)
+        _convert_job_items(db)
+        for declaration in dependent.values():
+            db.execute(declaration)
+    else:
+        # Format12's no-reference admission already proved no job authority or
+        # job-specific facts exist. Create the actual target layout directly.
+        WikiJobs.initialize_ledger(db)
+    if db.execute("SELECT 1 FROM wiki_protocols WHERE name='registration_config'").fetchone() is None:
+        db.execute("INSERT INTO wiki_protocols VALUES('registration_config',1)")
+    _repair(db, admitted.repairs | {"maintenance"})
+    captured = maintenance_inputs.capture_jobs(db)
+    if not maintenance_inputs.publish_jobs(db, captured):
+        from .store import WikiError
+
+        raise WikiError("Wiki item proof preparation changed; durable state retained", 503)
+    job_history.retire(db, store, original_old)
+
+
+def initialize(store):
+    """Commit complete creation or finite preparation, then publish nothing."""
+    from . import schema_ddl
     from .store import WikiError
 
     with store.connect() as db:
@@ -253,13 +340,11 @@ def initialize(store):
             db.execute("INSERT INTO wiki_schema VALUES(?,?)", (VERSION, datetime.now(UTC).isoformat()))
         else:
             admitted = inspect(db)
-            _repair(db, admitted.repairs)
-            if admitted.version == 12:
-                if not admitted.with_jobs:
-                    WikiJobs.initialize_ledger(db)
-                if db.execute("SELECT 1 FROM wiki_protocols WHERE name='registration_config'").fetchone() is None:
-                    db.execute("INSERT INTO wiki_protocols VALUES('registration_config',1)")
+            if admitted.version < VERSION:
+                _prepare_current(db, admitted, store=store)
                 db.execute("INSERT INTO wiki_schema VALUES(?,?)", (VERSION, datetime.now(UTC).isoformat()))
+            else:
+                _repair(db, admitted.repairs)
         prepared = inspect(db)
         if prepared.version != VERSION or prepared.repairs:
             raise WikiError("Wiki preparation did not establish the complete current format; durable state retained", 503)

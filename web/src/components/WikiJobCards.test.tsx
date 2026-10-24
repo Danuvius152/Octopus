@@ -22,6 +22,41 @@ it("shows persisted completed outputs after a chat is reopened", () => {
   expect(screen.queryByText("Retry unfinished work")).toBeNull();
 });
 
+it("keeps the original card read-only when task details are no longer available", async () => {
+  const card = wikiJob({ status: "completed", outcome_count: 12, outcome_refs_truncated: true,
+    outcome_refs: [{ doc_id: "document", path: "Library/note.md", revision: "a".repeat(64) }],
+  });
+  useSessionStore.getState().mergeWikiJobs("original", [card]);
+  const fetcher = vi.fn(async (url: string, _init?: RequestInit) => String(url).includes("/details")
+    ? Response.json({ detail: "Wiki job not found" }, { status: 404 }) : Response.json([card]));
+  vi.stubGlobal("fetch", fetcher);
+  render(<WikiJobCards sessionId="original" />);
+  fireEvent.click(screen.getByRole("button", { name: "Task details" }));
+  await screen.findByText("Task details are unavailable. The saved summary remains here.");
+  expect(screen.getByText(/Wiki maintenance · Completed/)).toBeTruthy();
+  expect(screen.getByText(/Library\/note.md/)).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Task details" })).toBeNull();
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.queryByText("Additional outputs are retained in the Wiki task details.")).toBeNull();
+  expect(screen.queryByText("Verify saved result and index")).toBeNull();
+  expect(screen.queryByText("Continue unfinished work")).toBeNull();
+  expect(fetcher.mock.calls.every(([, init]) => !init?.method || init.method === "GET")).toBe(true);
+});
+
+it.each([403, 503])("does not treat HTTP %s as missing task details", async (status) => {
+  const card = wikiJob({ status: "completed" });
+  useSessionStore.getState().mergeWikiJobs("original", [card]);
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => String(url).includes("/details")
+    ? Response.json({ detail: "Cannot read this task" }, { status }) : Response.json([card])));
+  render(<WikiJobCards sessionId="original" />);
+  fireEvent.click(screen.getByRole("button", { name: "Task details" }));
+  expect((await screen.findByRole("alert")).textContent).toBe("Cannot read this task");
+  expect(screen.queryByText("Task details are unavailable. The saved summary remains here.")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Close details" }));
+  expect(screen.getByRole("button", { name: "Task details" })).toBeTruthy();
+});
+
 it.each(["pending", "attention", "unconfirmed"] as const)("keeps retry closed while cancellation is %s", (phase) => {
   useSessionStore.getState().mergeWikiJobs("original", [wikiJob({ status: "cancelled", settlement_phase: phase })]);
   render(<WikiJobCards sessionId="original" />);

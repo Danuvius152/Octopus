@@ -37,7 +37,7 @@ def projection_state(store):
 
 
 def replace_receipt(db, job, source, output):
-    db.execute("""INSERT OR REPLACE INTO operation_receipts
+    db.execute("""INSERT OR REPLACE INTO operation_receipts(id,job_id,item_doc,doc_id,path,input_revision,output_revision,operation,reason,change_id,created_at,details)
                   VALUES('receipt',?,?,?,?,?,?,'no_change','replacement',NULL,'later','{}')""",
                (job["id"], source["id"], output["id"], output["path"],
                 source["revision"], output["revision"]))
@@ -94,7 +94,7 @@ def test_review_request_key_replacement_removes_old_job_members(prepared, operat
         key = db.execute("SELECT request_key FROM jobs WHERE id=?", (first["id"],)).fetchone()[0]
         control = tuple(db.execute("SELECT state_version,attempt FROM wiki_job_state WHERE job_id=?", (second["id"],)).fetchone())
         if operation == "insert":
-            db.execute("""INSERT OR REPLACE INTO jobs
+            db.execute("""INSERT OR REPLACE INTO jobs(id,request_key,payload_hash,payload,status,items,error,session_id,created_at,updated_at,attempt_errors)
                           SELECT id,?,payload_hash,payload,status,items,error,session_id,created_at,updated_at,attempt_errors
                           FROM jobs WHERE id=?""", (key, second["id"]))
         else:
@@ -132,7 +132,7 @@ def test_review_direct_writer_without_recursive_triggers_fails_atomically(prepar
             if operation == "receipt_replace":
                 replace_receipt(db, second, docs["c"], docs["a"])
             elif operation == "job_replace":
-                db.execute("""INSERT OR REPLACE INTO jobs
+                db.execute("""INSERT OR REPLACE INTO jobs(id,request_key,payload_hash,payload,status,items,error,session_id,created_at,updated_at,attempt_errors)
                               SELECT ?,request_key,payload_hash,payload,status,items,error,session_id,created_at,updated_at,attempt_errors
                               FROM jobs WHERE id=?""", ("replacement", first["id"]))
             elif operation == "job_update":
@@ -154,7 +154,7 @@ def test_review_all_product_writers_enable_recursive_triggers(prepared):
             assert db.execute("PRAGMA recursive_triggers").fetchone()[0] == 1
 
 
-@pytest.mark.parametrize("change", [{"recording_failure": "failed"}, {"index_complete": False}])
+@pytest.mark.parametrize("change", [{"status": "unknown"}, {"index_complete": False}])
 def test_review_capture_before_normalization_cannot_publish_after_it(prepared, change):
     jobs, docs = prepared
     job = enqueue(jobs, docs["a"], status="done", index_complete=True)

@@ -67,12 +67,7 @@ class WikiJobs:
         if maintenance_inputs.jobs_initialized(db):
             job_events.require(db)
             return False
-        db.execute("""CREATE TABLE jobs (
-          id TEXT PRIMARY KEY,request_key TEXT UNIQUE NOT NULL,payload_hash TEXT NOT NULL,
-          payload TEXT NOT NULL,status TEXT NOT NULL,items TEXT NOT NULL,error TEXT,
-          session_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
-          attempt_errors TEXT NOT NULL DEFAULT '{}'
-        )""")
+        db.execute(WikiJobs.LEDGER_DDL)
         db.execute("""CREATE TABLE job_requests (
           request_key TEXT PRIMARY KEY,request_hash TEXT NOT NULL,job_id TEXT NOT NULL
         )""")
@@ -82,6 +77,14 @@ class WikiJobs:
         maintenance_inputs.initialize(db)
         job_events.attach_jobs(db)
         return True
+
+    LEDGER_DDL = """CREATE TABLE "jobs" (
+          id TEXT UNIQUE NOT NULL,request_key TEXT UNIQUE NOT NULL,payload_hash TEXT NOT NULL,
+          payload TEXT NOT NULL,status TEXT NOT NULL,items TEXT NOT NULL,error TEXT,
+          session_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
+          attempt_errors TEXT NOT NULL DEFAULT '{}',
+          admission_sequence INTEGER PRIMARY KEY AUTOINCREMENT
+        )"""
 
 
     @staticmethod
@@ -761,31 +764,7 @@ class WikiJobs:
 
     def require_retired(self, job, *, manager=None):
         """A terminal database row cannot stand in for execution retirement."""
-        from .tasks import tasks
-
-        if ((str(self.store.state.resolve()), job["id"]) in WikiWorker.executing
-                or any(assignment["job_id"] == job["id"] for assignment in list(tasks.assignments.values()))
-                or any(task.job_id == job["id"] for task in list(tasks.active.values()))):
-            raise WikiError("The previous maintenance assignment has not retired", 409)
-        manager = manager or worker.manager
-        references = job_items.references(job.get("items", []))
-        sessions = {ref["session_id"] for ref in references if ref.get("session_id")}
-        if job["session_id"]:
-            sessions.add(job["session_id"])
-        for session_id in sessions:
-            session = manager.get_session(session_id) if manager else None
-            exact = {ref["request_id"] for ref in references if ref.get("session_id") == session_id and ref.get("request_id")}
-            active = ([*session._pending_queue, *([session._run.request] if session._run.request else [])]
-                      if session is not None else [])
-            if session is not None and (any(not exact or request.request_id in exact for request in active)
-                                        or session._run.retirements):
-                raise WikiError("The previous maintenance execution has not retired", 409)
-        for reference in references:
-            if reference.get("retired") or reference.get("phase") == "rejected":
-                continue
-            session = manager.get_session(reference.get("session_id")) if manager and reference.get("session_id") else None
-            if session is None:
-                raise WikiError("Original execution retirement is not proven; inspect the retained evidence", 409)
+        job_execution.require_retired(self.store, job, manager=manager)
 
     def readmit(self, job_id, paths, creation=None, *, expected_attempt=None, expected_vault_id=None, operation_id=None):
         """Owner-only re-admission preserves the old job, key, payload and receipts."""

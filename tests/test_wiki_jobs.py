@@ -199,7 +199,7 @@ async def test_new_page_recovery_checks_assigned_input_revision_separately_from_
         db.execute("INSERT INTO job_publications VALUES(?,?,?,?,?,?,1)", (
             job["id"], source["id"], source["revision"], creation["change_id"], output["path"], output["revision"],
         ))
-        db.execute("INSERT INTO operation_receipts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
+        db.execute("INSERT INTO operation_receipts(id,job_id,item_doc,doc_id,path,input_revision,output_revision,operation,reason,change_id,created_at,details) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
             uuid.uuid4().hex, job["id"], source["id"], output["id"], output["path"], None,
             output["revision"], "publish", "historical output fixture", creation["change_id"], datetime.now(UTC).isoformat(),
             json.dumps({"input_source_doc": source["id"], "input_source_revision": source["revision"]}),
@@ -937,7 +937,7 @@ async def test_job_cancel_targets_captured_wiki_request_and_preserves_human_corr
     await manager.interrupt(session.id)
     original = await manager.start_message(session.id, "Wiki queued work", source="wiki")
     jobs.update(job["id"], status="running", session_id=session.id, items=[{
-        "status": "pending", "worker_request": {"session_id": session.id, "request_id": original.request_id},
+        "status": "pending", "worker_request": {"session_id": session.id, "request_id": original.request_id, "phase": "unknown"},
     }])
     correction = await manager.start_message(session.id, "human correction")
     try:

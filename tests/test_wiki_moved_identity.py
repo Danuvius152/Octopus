@@ -81,7 +81,7 @@ async def test_historical_separate_output_settles_both_original_identities_after
         db.execute("INSERT INTO job_publications VALUES(?,?,?,?,?,?,1)", (
             job["id"], source["id"], source["revision"], created["change_id"], output_path, output["revision"],
         ))
-        db.execute("INSERT INTO operation_receipts VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
+        db.execute("INSERT INTO operation_receipts(id,job_id,item_doc,doc_id,path,input_revision,output_revision,operation,reason,change_id,created_at,details) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", (
             receipt_id, job["id"], source["id"], output["id"], output_path, None, output["revision"],
             "publish", "historical publication", created["change_id"], datetime.now(UTC).isoformat(),
             json.dumps({"input_source_doc": source["id"], "input_source_revision": source["revision"]}),

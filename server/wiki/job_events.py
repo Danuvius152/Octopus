@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from ..sqlite_schema import definition
 from . import job_items, maintenance_inputs, protocols
 from .store import WikiError
 
@@ -82,6 +83,14 @@ def canonical(sql):
 
 def unavailable():
     return WikiError("Wiki job notification ledger is missing or incompatible; durable state retained", 503)
+
+
+def previous_definition(name, tokens):
+    """Finite 12/13 admission compares trusted definitions, never executes them."""
+    from .schema_ddl import PREVIOUS_EVENTS
+
+    encoded = json.dumps(tokens, ensure_ascii=False, separators=(",", ":")).encode()
+    return name in PREVIOUS_EVENTS and hashlib.sha256(encoded).hexdigest() == PREVIOUS_EVENTS[name]
 
 
 def _emit(job):
@@ -213,7 +222,20 @@ def require(db):
     with_jobs = maintenance_inputs.jobs_initialized(db)
     expected = TABLES | INDEXES | TRIGGERS | (job_triggers() if with_jobs else {})
     actual = dict(db.execute("SELECT name,sql FROM sqlite_master"))
-    if any(canonical(actual.get(name)) != canonical(sql) for name, sql in expected.items()):
+    version = db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0]
+    previous = with_jobs and version in (12, 13) and not any(row[1] == "admission_sequence" for row in db.execute("PRAGMA table_info(jobs)"))
+
+    def matches(name, sql):
+        from .schema_ddl import PREVIOUS_EVENTS
+
+        if previous and name in PREVIOUS_EVENTS:
+            try:
+                return previous_definition(name, definition("trigger", actual.get(name) or ""))
+            except ValueError:
+                return False
+        return canonical(actual.get(name)) == canonical(sql)
+
+    if any(not matches(name, sql) for name, sql in expected.items()):
         raise unavailable()
     installed = {name for name in actual if name in job_triggers()}
     if installed != (set(job_triggers()) if with_jobs else set()):

@@ -24,11 +24,32 @@ FACTS = ("document_identities", "documents", "managed_notes", "material_origins"
 
 def facts(db):
     present = {row[0] for row in db.execute("SELECT name FROM sqlite_schema WHERE type='table'")}
-    return {name: sorted(map(tuple, db.execute('SELECT * FROM "' + name + '"')), key=repr)
-            for name in FACTS if name in present}
+    result = {}
+    for name in FACTS:
+        if name in present:
+            columns = [row[1] for row in db.execute(f'PRAGMA table_info("{name}")')
+                       if row[1] not in {"admission_sequence", "item_match_sequence"}]
+            selected = ",".join('"' + column + '"' for column in columns)
+            result[name] = sorted(map(tuple, db.execute(f'SELECT {selected} FROM "{name}"')), key=repr)
+    return result
 
 
-def retained_baseline(root, state, registration, owner, *, with_jobs):
+def prepared_facts(original, *, initialized_jobs=False):
+    result = dict(original)
+    if "jobs" in result:
+        result["jobs"] = []
+        for row in original["jobs"]:
+            values = list(row)
+            # This independent baseline has one pending item, no legacy flags
+            # and an unknown extension. Preparation only appends its version.
+            values[5] = json.dumps([item | {"version": 1} for item in json.loads(values[5])], ensure_ascii=False)
+            result["jobs"].append(tuple(values))
+    if initialized_jobs:
+        result["wiki_protocols"] = sorted([*result["wiki_protocols"], ("maintenance_jobs", 1)], key=repr)
+    return result
+
+
+def retained_baseline(root, state, registration, owner, *, with_jobs, version=12):
     path = state / "index.sqlite3"
     with closing(sqlite3.connect(path)) as original:
         identity = original.execute("SELECT * FROM document_identities WHERE path='source.md'").fetchone()
@@ -39,6 +60,9 @@ def retained_baseline(root, state, registration, owner, *, with_jobs):
         db.row_factory = sqlite3.Row
         db.executescript((Path(__file__).parent / "fixtures" / fixture).read_text())
         db.execute("PRAGMA recursive_triggers=ON")
+        if version == 13:
+            assert with_jobs
+            db.execute("INSERT INTO wiki_schema VALUES(13,'original-format-13')")
         db.execute("INSERT INTO filesystem_state(singleton,protocol,root,vault_id) VALUES(1,1,?,?)",
                    (str(root), registration["vault_id"]))
         db.execute("INSERT INTO document_identities VALUES(?,?,?)", identity)
@@ -51,7 +75,7 @@ def retained_baseline(root, state, registration, owner, *, with_jobs):
                                  'queued',?,'original-time','original-time')""", (items,))
             db.execute("INSERT INTO job_requests VALUES('original-request','original-digest','original-job')")
             db.execute("INSERT INTO wiki_job_controls VALUES('original-job','original-control','original-control-digest')")
-            db.execute("""INSERT INTO operation_receipts VALUES('original-receipt','original-job',?,?,
+            db.execute("""INSERT INTO operation_receipts(id,job_id,item_doc,doc_id,path,input_revision,output_revision,operation,reason,change_id,created_at,details) VALUES('original-receipt','original-job',?,?,
                           'source.md',?,?,'no_change','保留原始理由',NULL,'original-time','{}')""",
                        (document[0], document[0], document[2], document[2]))
             db.execute("""INSERT INTO wiki_job_subscribers VALUES('original-subscriber','original-job',?,
@@ -62,11 +86,12 @@ def retained_baseline(root, state, registration, owner, *, with_jobs):
     temporary.replace(path)
 
 
-@pytest.mark.parametrize("origin", ["new", "12_without_jobs", "12_with_jobs"])
+@pytest.mark.parametrize("origin", ["new", "12_without_jobs", "12_with_jobs", "13_with_jobs"])
 async def test_new_and_supported_owned_formats_share_the_complete_current_contract(registered_account, origin):
     root, state, registration, owner = registered_account
     if origin != "new":
-        retained_baseline(root, state, registration, owner, with_jobs=origin == "12_with_jobs")
+        retained_baseline(root, state, registration, owner, with_jobs=origin != "12_without_jobs",
+                          version=13 if origin == "13_with_jobs" else 12)
     path = state / "index.sqlite3"
     with closing(sqlite3.connect(path)) as db:
         before = facts(db)
@@ -76,22 +101,21 @@ async def test_new_and_supported_owned_formats_share_the_complete_current_contra
     with closing(WikiStore(root, state, registration["vault_id"], defer_recovery=True)) as store:
         jobs = WikiJobs(owner, store=store, registration=registration)
         with store.connect() as db:
-            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == 13
+            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == 14
             if origin == "new":
-                assert [row[0] for row in db.execute("SELECT version FROM wiki_schema")] == [13]
+                assert [row[0] for row in db.execute("SELECT version FROM wiki_schema")] == [14]
             else:
-                assert list(map(tuple, db.execute("SELECT * FROM wiki_schema WHERE version<>13 ORDER BY version"))) == versions
+                assert list(map(tuple, db.execute("SELECT * FROM wiki_schema WHERE version<>14 ORDER BY version"))) == versions
             after = facts(db)
-            for name, rows in before.items():
-                if name == "wiki_protocols" and origin == "12_without_jobs":
-                    assert after[name] == sorted([*rows, ("maintenance_jobs", 1)], key=repr)
-                else:
-                    assert after[name] == rows
+            for name, rows in prepared_facts(before, initialized_jobs=origin == "12_without_jobs").items():
+                assert after[name] == rows
+            if origin in {"12_with_jobs", "13_with_jobs"}:
+                assert db.execute("SELECT admission_sequence FROM jobs WHERE id='original-job'").fetchone()[0] == 1
             assert maintenance_inputs.require(db)
             grants.require(db)
             job_events.require(db)
         assert protocols.registration_preflight(state, complete=True)["vault_id"] == registration["vault_id"]
-        if origin == "12_with_jobs":
+        if origin in {"12_with_jobs", "13_with_jobs"}:
             assert jobs.get("original-job")["request_key"] == "original-request"
         current = store.read("source.md")
         requester = job_events.Requester(owner, "human", "format-browser", "format-request", "format-client")
@@ -146,7 +170,7 @@ async def test_healthy_current_reopen_does_not_run_bootstrap_or_change_nonce(reg
             assert list(map(tuple, db.execute("SELECT * FROM wiki_schema"))) == original_versions
 
 
-@pytest.mark.parametrize("origin", ["new", "12_without_jobs", "12_with_jobs"])
+@pytest.mark.parametrize("origin", ["new", "12_without_jobs", "12_with_jobs", "13_with_jobs"])
 @pytest.mark.parametrize("phase", ["during_prepare", "before_version", "commit_ack"])
 async def test_preparation_crash_exposes_only_a_complete_old_or_current_format(registered_account, tmp_path, origin, phase):
     root, state, registration, owner = registered_account
@@ -156,7 +180,8 @@ async def test_preparation_crash_exposes_only_a_complete_old_or_current_format(r
         original = None
         versions = []
     else:
-        retained_baseline(root, state, registration, owner, with_jobs=origin == "12_with_jobs")
+        retained_baseline(root, state, registration, owner, with_jobs=origin != "12_without_jobs",
+                          version=13 if origin == "13_with_jobs" else 12)
         with closing(sqlite3.connect(state / "index.sqlite3")) as db:
             original, versions = facts(db), list(db.execute("SELECT * FROM wiki_schema ORDER BY version"))
     path = state / "index.sqlite3"
@@ -185,7 +210,8 @@ class FaultConnection(sqlite3.Connection):
         if phase=='before_version' and version:stop()
         result=super().execute(sql,*args,**kwargs)
         during=(normalized.startswith('CREATE TABLE APP_TRASH') if origin=='new' else
-                normalized.startswith('CREATE TABLE JOBS') if origin=='12_without_jobs' else version)
+                normalized.startswith('CREATE TABLE "JOBS"') if origin=='12_without_jobs' else
+                normalized.startswith('INSERT INTO PREPARED_JOBS'))
         if phase=='during_prepare' and during:stop()
         return result
     def commit(self):
@@ -218,25 +244,23 @@ admitted.touch()
         if origin == "new" and phase != "commit_ack":
             assert db.execute("SELECT count(*) FROM sqlite_schema").fetchone()[0] == 0
         else:
-            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == (13 if phase == "commit_ack" else 12)
+            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == (14 if phase == "commit_ack" else
+                                                                                     13 if origin == "13_with_jobs" else 12)
             if original is not None:
                 after = facts(db)
-                for name, rows in original.items():
-                    expected = sorted([*rows, ("maintenance_jobs", 1)], key=repr) if (
-                        phase == "commit_ack" and origin == "12_without_jobs" and name == "wiki_protocols") else rows
-                    assert after[name] == expected
-                assert list(db.execute("SELECT * FROM wiki_schema WHERE version<>13 ORDER BY version")) == versions
+                expected = prepared_facts(original, initialized_jobs=origin == "12_without_jobs") if phase == "commit_ack" else original
+                for name, rows in expected.items():
+                    assert after[name] == rows
+                assert list(db.execute("SELECT * FROM wiki_schema WHERE version<>14 ORDER BY version")) == versions
     if origin == "new":
         from server.service_health import ServiceHealth
 
         WikiStore.create_database(root, state, registration["vault_id"], path, health=ServiceHealth())
     with closing(WikiStore(root, state, registration["vault_id"], defer_recovery=True)) as reopened:
         with reopened.connect() as db:
-            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == 13
+            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == 14
             if original is not None:
                 after = facts(db)
-                for name, rows in original.items():
-                    expected = sorted([*rows, ("maintenance_jobs", 1)], key=repr) if (
-                        origin == "12_without_jobs" and name == "wiki_protocols") else rows
-                    assert after[name] == expected
+                for name, rows in prepared_facts(original, initialized_jobs=origin == "12_without_jobs").items():
+                    assert after[name] == rows
     assert (root / "source.md").read_bytes() == body

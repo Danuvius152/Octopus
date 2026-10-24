@@ -1,11 +1,12 @@
 import { test, expect, type Page } from "@playwright/test";
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 
 // Full-stack Codex proof: the backend selector appears when codex is
 // available, a Codex session is created through the UI, and a real codex
 // turn streams back. Auto-skips when codex isn't installed/logged-in on the
 // host running the e2e backend (codex-backend.md §6 / Phase E).
 
-const TOKEN = "changeme";
+const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api";
 const OWNED = new Set(["Codex E2E"]);
 
@@ -52,8 +53,7 @@ test("create a Codex session via the UI and get a real response @llm", async ({
   );
 
   await page.goto("/");
-  await page.locator('input[type="password"]').fill(TOKEN);
-  await page.locator("button.btn-login").click();
+  await enterAccountCredentials(page);
   await expect(page.locator(".agent-list-header")).toBeVisible();
 
   // The inline create row keeps the engine + working-dir overrides one click
@@ -65,7 +65,6 @@ test("create a Codex session via the UI and get a real response @llm", async ({
   await page
     .locator('.session-create input[placeholder="Session name"]')
     .fill("Codex E2E");
-  await page.locator(".session-working-dir").fill("/tmp");
   await page.locator("button.btn-create").click();
   await expect(page.locator(".chat-header .crumb-current")).toHaveText("Codex E2E");
 
@@ -77,6 +76,11 @@ test("create a Codex session via the UI and get a real response @llm", async ({
   ).json();
   const sess = sessions.find((s: { name: string }) => s.name === "Codex E2E");
   expect(sess.backend).toBe("codex");
+  const settings = await request.patch(`${API}/sessions/${sess.id}`, {
+    headers: { Authorization: `Bearer ${TOKEN}` }, data: { reasoning_effort: "low" },
+  });
+  expect(settings.ok()).toBeTruthy();
+  expect((await settings.json()).reasoning_effort).toBe("low");
 
   // Send a message and get a real Codex response.
   const input = page.locator(".chat-input-bar textarea");

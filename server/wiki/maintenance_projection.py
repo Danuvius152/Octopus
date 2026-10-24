@@ -57,7 +57,7 @@ class Batch:
         self.documents = {row["id"]: dict(row) for row in db.execute("""SELECT d.id,d.path,d.revision
             FROM maintenance_requested_documents wanted JOIN documents d ON d.id=wanted.doc_id""")
                           if is_markdown_maintenance(row["path"])}
-        self.receipts = [dict(row) for row in db.execute("""SELECT r.rowid AS sequence,r.id,r.job_id,r.item_doc,r.doc_id,
+        self.receipts = [dict(row) for row in db.execute("""SELECT r.rowid AS sequence,r.id,r.job_id,r.item_doc,r.doc_id,r.item_match_sequence,
             r.path,r.input_revision,r.output_revision,r.operation,r.change_id,c.status AS change_status,
             coalesce(p.indexed,CASE WHEN reservation.state='bound' THEN 1 END) AS indexed
             FROM maintenance_requested_documents wanted CROSS JOIN operation_receipts r
@@ -87,7 +87,7 @@ class Batch:
             related = """SELECT m.job_id FROM maintenance_requested_documents wanted
                          JOIN maintenance_job_members m ON m.doc_id=wanted.doc_id"""
             self.jobs = {row["id"]: dict(row) for row in db.execute(
-                "SELECT j.rowid AS sequence,j.id,j.status FROM jobs j WHERE j.id IN (" + related + ")")}
+                "SELECT j.admission_sequence AS sequence,j.id,j.status FROM jobs j WHERE j.id IN (" + related + ")")}
             # Only this batch's direct inputs and exact receipt/publication
             # inputs can affect its summaries. Loading every item of a shared
             # job here repeats that whole job once per intersecting batch.
@@ -102,30 +102,17 @@ class Batch:
                 FROM maintenance_requested_inputs wanted CROSS JOIN maintenance_job_items i
                 ON i.item_doc=wanted.item_doc AND i.job_id=wanted.job_id""")]
         self.items_by_doc, self.items_by_job_doc = defaultdict(list), defaultdict(list)
-        ordinary, changes = set(), set()
         for item in self.items:
             self.items_by_doc[item["item_doc"]].append(item)
             self.items_by_job_doc[item["job_id"], item["item_doc"]].append(item)
-            if (item["status"] != "done" or not item["index_complete"] or item["recording_failure"]
-                    or item["index_recovery"] or not item["output_revision_valid"]
-                    or item["receipt_required"] and item["receipt_id"] is None):
-                continue
-            receipt_key = item["receipt_id"] if item["receipt_required"] else None
-            key = (item["job_id"], item["item_doc"], item["output_path"], item["output_revision"], receipt_key)
-            ordinary.add(key)
-            changes.add((*key, item["output_change_id"]))
         self.accepted = defaultdict(list)
         for receipt in self.receipts:
-            if receipt["operation"] not in MAINTENANCE_OPERATIONS or receipt["job_id"] not in self.jobs:
+            if receipt["operation"] not in MAINTENANCE_OPERATIONS or receipt["item_match_sequence"] is None:
                 continue
             change = receipt["change_id"]
             if change and (receipt["change_status"] != "applied" or receipt["indexed"] != 1):
                 continue
-            prefix = (receipt["job_id"], receipt["item_doc"], receipt["path"], receipt["output_revision"])
-            keys = [(*prefix, identifier, change) if change else (*prefix, identifier)
-                    for identifier in (None, receipt["id"])]
-            if any(key in (changes if change else ordinary) for key in keys):
-                self.accepted[receipt["doc_id"]].append(receipt)
+            self.accepted[receipt["doc_id"]].append(receipt)
         for values in self.accepted.values():
             values.sort(key=lambda row: row["sequence"], reverse=True)
         self.dependencies = maintenance_dependencies.read(db, self.documents)
@@ -136,7 +123,7 @@ class Batch:
             for item in self.items_by_job_doc.get(key, ()):
                 items[item["job_id"], item["ordinal"]] = item
         ordered = sorted(items.values(), key=lambda item: (-self.jobs[item["job_id"]]["sequence"], item["ordinal"]))
-        cutoff = self.jobs[baseline["job_id"]]["sequence"] if baseline else 0
+        cutoff = baseline["item_match_sequence"] if baseline else 0
         result = []
         for item in ordered:
             job = self.jobs[item["job_id"]]

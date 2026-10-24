@@ -183,7 +183,7 @@ def test_prepared_write_and_active_job_receipts_survive_cleanup(history):
                 "active",
                 "running",
                 json.dumps(
-                    [{"revision": revision(b"pending"), "change_id": prepared["id"]}]
+                    [{"version": 1, "status": "pending", "revision": revision(b"pending"), "change_id": prepared["id"]}]
                 ),
                 json.dumps(
                     {"request": {"created_changes": {"note.md": receipt["change_id"]}}}

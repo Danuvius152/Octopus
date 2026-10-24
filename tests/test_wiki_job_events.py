@@ -1,6 +1,7 @@
 """A job change and its observable version must commit as one durable fact."""
 
 import json
+import sqlite3
 
 import pytest
 
@@ -19,17 +20,34 @@ def enqueue(jobs, key="event-contract"):
     return jobs.maintain(key, "", "Review existing note", ["Library/note.md"], None, [], "human")
 
 
-@pytest.mark.parametrize("legacy", [
-    {"recording_failure": {"attempt": 1, "session_id": "old", "request_id": "original"}},
-    {"recording_failure": "1"}, {"index_recovery": True}, {"recording_recovery": "true"},
-    {"execution_unknown": [1]}, {"execution_unknown": []}, {"status": "running"}, {"status": None},
-    {"recording_failure": {"attempt": 1, "session_id": "old", "request_id": "original"},
-     "worker_request": {"attempt": 2, "session_id": "new", "request_id": "replacement", "phase": "settled"}},
+@pytest.mark.parametrize("invalid", [
+    {"version": None}, {"version": True}, {"version": 1.0}, {"status": "running"},
+    {"worker_request": {"request_id": "original"}},
+    {"previous_worker_requests": [{"phase": "invalid"}]},
+    {"recording_failure": False}, {"index_recovery": None},
 ])
-async def test_legacy_notification_projection_matches_codec_without_rewriting_jobs(jobs, legacy):
+async def test_current_direct_writer_rejects_noncurrent_items_before_events(jobs, invalid):
     job = enqueue(jobs)
-    item = job["items"][0] | legacy
-    item.pop("version")
+    with jobs.store.connect() as db:
+        original = tuple(db.execute("SELECT items FROM jobs WHERE id=?", (job["id"],)).fetchone())
+        events = list(map(tuple, db.execute("SELECT * FROM wiki_job_outbox ORDER BY rowid")))
+        with pytest.raises(sqlite3.IntegrityError):
+            db.execute("UPDATE jobs SET items=? WHERE id=?", (json.dumps([job["items"][0] | invalid]), job["id"]))
+        assert tuple(db.execute("SELECT items FROM jobs WHERE id=?", (job["id"],)).fetchone()) == original
+        assert list(map(tuple, db.execute("SELECT * FROM wiki_job_outbox ORDER BY rowid"))) == events
+    assert jobs.get(job["id"])["state_version"] == job["state_version"]
+
+
+@pytest.mark.parametrize("state,phase", [
+    ("pending", None), ("pending", "prepared"), ("pending", "accepted"),
+    ("unknown", "unknown"), ("verifying", "settled"), ("attention", "rejected"),
+    ("done", "settled"), ("failed", "settled"), ("excluded", "rejected"),
+])
+async def test_current_notification_projection_matches_reader_without_rewriting_jobs(jobs, state, phase):
+    job = enqueue(jobs)
+    item = job["items"][0] | {"status": state}
+    if phase is not None:
+        item["worker_request"] = {"attempt": 1, "session_id": "original-session", "request_id": "original", "phase": phase}
     raw = json.dumps([item])
     with jobs.store.connect() as db:
         db.execute("UPDATE jobs SET items=? WHERE id=?", (raw, job["id"]))
@@ -53,7 +71,7 @@ async def test_item_progress_changes_version_even_while_job_remains_running(jobs
     running = jobs.update(job["id"], status="running")
     assert running["attempt"] == 1
     assert running["state_version"] == job["state_version"] + 1
-    running["items"][0]["index_recovery"] = True
+    running["items"][0]["status"] = "verifying"
     progressed = jobs.update(job["id"], items=running["items"])
     assert progressed["status"] == "running"
     assert progressed["attempt"] == running["attempt"]
@@ -97,7 +115,7 @@ async def test_receipt_becomes_observable_without_faking_item_completion(jobs):
     job = enqueue(jobs)
     item = job["items"][0]
     with jobs.store.connect() as db:
-        db.execute("""INSERT INTO operation_receipts VALUES(
+        db.execute("""INSERT INTO operation_receipts(id,job_id,item_doc,doc_id,path,input_revision,output_revision,operation,reason,change_id,created_at,details) VALUES(
             'event-receipt',?,?,?,?,?,?,'no_change','Verified current bytes',NULL,'time','{}')""",
                    (job["id"], item["doc"], item["doc"], item["path"], item["revision"], item["revision"]))
     observed = jobs.get(job["id"])

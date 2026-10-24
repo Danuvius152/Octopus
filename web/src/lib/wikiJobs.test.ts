@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { waitFor } from "@testing-library/react";
-import { controlWikiJob, reconcileWikiJobs, refreshWikiJobs } from "./wikiJobs";
+import { controlWikiJob, loadWikiJobDetail, reconcileWikiJobs, refreshWikiJobs } from "./wikiJobs";
 import { wikiJob } from "./wikiJobs.fixture";
 import { useSessionStore } from "../stores/sessionStore";
 import { handleWsMessage } from "../hooks/useWebSocket";
@@ -10,6 +10,15 @@ beforeEach(() => useSessionStore.setState({
   dispatchStates: {}, retiredDispatchGenerations: [], messages: {}, lastAppliedSeq: { original: 9 },
 }));
 afterEach(() => vi.unstubAllGlobals());
+
+it("does not classify an old service's 404 as a missing task in the new service", async () => {
+  let finish!: (response: Response) => void;
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { finish = resolve; })));
+  const pending = loadWikiJobDetail(wikiJob(), 1);
+  useSessionStore.setState({ dispatchGeneration: "service-b" });
+  finish(Response.json({ detail: "Wiki job not found" }, { status: 404 }));
+  await expect(pending).rejects.toThrow("Account or service changed");
+});
 
 it("never replaces a newer completed version with a delayed running snapshot", () => {
   useSessionStore.getState().mergeWikiJobs("original", [wikiJob({ state_version: 5, status: "completed" })]);

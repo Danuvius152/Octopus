@@ -38,7 +38,7 @@ def detail(jobs, job_id, *, attempt=None, offset=0, limit=30):
     attempts.update(ref["attempt"] for ref in job_items.references(job["items"]) if isinstance(ref.get("attempt"), int))
     attempts.update(value for receipt in job["receipts"] if isinstance(value := receipt_attempt(receipt), int))
     if selected not in attempts:
-        raise WikiError("Maintenance attempt not found", 404)
+        raise WikiError("Maintenance attempt changed; refresh the task details", 409)
     items = []
     error = (job["error"] if selected == job["attempt"] and job["error"] is not None
              else job["attempt_errors"].get(str(selected)))
