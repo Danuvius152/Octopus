@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pytest
 
 from server.crypto import decrypt, encrypt
 from server.database import Database
 from tests.accounts import create_account
-from tests.main_storage import write_unversioned_baseline, write_version_one_baseline
 
 # ---------------------------------------------------------------------------
 # crypto
@@ -158,8 +156,7 @@ async def test_updating_the_authoritative_secret_preserves_metadata(db):
     }
 
 
-@pytest.mark.parametrize("version", [0, 1])
-async def test_supported_upgrade_preserves_split_ciphertexts_and_account_ownership(tmp_path, version):
+async def test_current_reopen_preserves_split_ciphertexts_and_account_ownership(tmp_path):
     path = tmp_path / "legacy.db"
     seed = Database(str(path))
     await seed.initialize()
@@ -169,10 +166,6 @@ async def test_supported_upgrade_preserves_split_ciphertexts_and_account_ownersh
     await seed.save_credential("original", "codex", "Personal", "api_key", original, "t", user_id=owner["id"])
     await seed.save_credential("rotated", "codex", "Personal", "api_key", current, "t", user_id=owner["id"])
     await seed.close()
-    if version == 0:
-        write_unversioned_baseline(Path(path))
-    else:
-        write_version_one_baseline(Path(path))
 
     for _ in range(2):
         upgraded = Database(str(path))

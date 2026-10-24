@@ -6,11 +6,12 @@
 > recovery have been removed. Account login, password changes, bearer
 > revocation, account DEKs and master-key MCP signatures remain.
 >
-> **Retained evidence:** startup reports the safe diagnostic type
-> `UnfinishedTokenRotation` if any old intent remains, including one committed
-> only in WAL. Preserve the original database, WAL and environment files; settle
-> the original operation with the version that owns the protocol below before
-> starting this version. Payloads are neither interpreted nor deleted here.
+> **Retained evidence:** an old-format database is rejected by the current
+> format marker before keys or writers. Full retained-layout checking belongs
+> to publication; application startup no longer scans the retired intent table.
+> Preserve the original database, WAL and environment files and settle unresolved
+> operations with their original owner before a finite publication handoff.
+> Payloads are neither interpreted nor deleted by current startup.
 >
 > The planning decisions and protocol below are a historical record of the
 > pre-retirement implementation. They do not describe currently callable APIs.

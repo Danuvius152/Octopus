@@ -10,16 +10,12 @@ from typing import Any
 
 import aiosqlite
 
-from ..account_baseline import persistent_database_file, require_account_database
+from ..account_baseline import require_account_database
 from ..service_health import ServiceHealth
-from .schema import prepare_main_storage, require_supported_main_format
+from .schema import initialize_main_storage, require_current_main_format
 from .transaction import Transaction
 
 logger = logging.getLogger(__name__)
-
-
-class UnfinishedTokenRotation(RuntimeError):
-    """Retained installation intent requires settlement by its original version."""
 
 
 def _load_json_list(raw: Any) -> list[Any]:
@@ -267,33 +263,13 @@ class DatabaseBase:
                 self._write_owner = None
                 self._write_lock.release()
 
-    async def reject_unfinished_token_rotation(self) -> None:
-        path = await asyncio.to_thread(persistent_database_file, self._db_path)
-        if path is None:
-            return
-        # Read the real committed state, including an ownerless WAL, before
-        # opening a writer or preparing any storage. Never interpret the intent.
-        async with aiosqlite.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as retained:
-            await retained.execute("PRAGMA query_only=ON")
-            await retained.execute("BEGIN")
-            async with retained.execute(
-                "SELECT 1 FROM sqlite_schema WHERE name='token_rotation_intent'",
-            ) as cursor:
-                exists = await cursor.fetchone()
-            if exists:
-                async with retained.execute("SELECT 1 FROM token_rotation_intent LIMIT 1") as cursor:
-                    if await cursor.fetchone():
-                        raise UnfinishedTokenRotation()
-
-    async def inspect(self, *, previous_writers_retired: bool = False) -> None:
+    async def inspect(self) -> None:
         """Check retained storage before creating a key or opening its writer."""
         self.health.require_healthy()
-        await self.reject_unfinished_token_rotation()
+        await asyncio.to_thread(require_current_main_format, self._db_path)
         await asyncio.to_thread(require_account_database, self._db_path)
-        await asyncio.to_thread(require_supported_main_format, self._db_path,
-                                previous_writers_retired=previous_writers_retired)
 
-    async def initialize(self, *, timeout: float = 15.0, previous_writers_retired: bool = False) -> None:
+    async def initialize(self, *, timeout: float = 15.0) -> None:
         """Own startup SQL under one deadline, before any public operation."""
         self.health.require_healthy()
         if self._conn is not None or self._closed:
@@ -303,7 +279,7 @@ class DatabaseBase:
             async with self._write_lock:
                 self._write_owner = asyncio.current_task()
                 try:
-                    await self.inspect(previous_writers_retired=previous_writers_retired)
+                    await self.inspect()
                     self._conn = await aiosqlite.connect(self._db_path)
                     mode = await self.conn.execute("PRAGMA journal_mode=WAL")
                     mode_value = await mode.fetchone()
@@ -320,7 +296,7 @@ class DatabaseBase:
                     await durability.close()
                     tx = Transaction(self.conn, self.health, deadline)
                     await tx.execute("BEGIN IMMEDIATE")
-                    await prepare_main_storage(tx, previous_writers_retired=previous_writers_retired)
+                    await initialize_main_storage(tx)
                     await tx.finish()
                     await tx._wait(self.conn.commit())
                     if tx.cancelled is not None:

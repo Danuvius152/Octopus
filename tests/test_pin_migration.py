@@ -1,4 +1,4 @@
-"""Saved sidebar choices survive the supported upgrade and repeated startup."""
+"""Saved sidebar choices survive repeated current-format startup."""
 
 from pathlib import Path
 
@@ -6,10 +6,9 @@ import pytest
 
 from server.database import Database
 from tests.accounts import create_account
-from tests.main_storage import write_unversioned_baseline, write_version_one_baseline
 
 
-async def _seed(path: Path, version: int) -> tuple[str, str]:
+async def _seed(path: Path) -> tuple[str, str]:
     db = Database(str(path))
     await db.initialize()
     owner, _ = await create_account(db)
@@ -27,10 +26,6 @@ async def _seed(path: Path, version: int) -> tuple[str, str]:
                                    created_at=created, updated_at=created, user_id=owner["id"])
     await db.reorder_application_pins(["app1", "app2"])
     await db.close()
-    if version == 0:
-        write_unversioned_baseline(path)
-    elif version == 1:
-        write_version_one_baseline(path)
     return owner["id"], default["id"]
 
 
@@ -42,10 +37,9 @@ def _order(rows: list[dict]) -> list[tuple[str, bool, int]]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", [0, 1, 2])
-async def test_existing_sidebar_order_and_ownership_survive_repeated_open(tmp_path, version):
+async def test_existing_sidebar_order_and_ownership_survive_repeated_open(tmp_path):
     path = tmp_path / "pins.db"
-    owner, default = await _seed(path, version)
+    owner, default = await _seed(path)
 
     for _ in range(2):  # the second boot must change nothing
         db = Database(str(path))
@@ -66,10 +60,9 @@ async def test_existing_sidebar_order_and_ownership_survive_repeated_open(tmp_pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", [0, 1, 2])
-async def test_new_pinned_rows_append_after_the_saved_positions(tmp_path, version):
+async def test_new_pinned_rows_append_after_the_saved_positions(tmp_path):
     path = tmp_path / "pins.db"
-    owner, _ = await _seed(path, version)
+    owner, _ = await _seed(path)
     db = Database(str(path))
     await db.initialize()
     await db.save_agent(

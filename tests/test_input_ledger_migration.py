@@ -1,19 +1,15 @@
-"""Current input facts survive format preparation and runtime classification."""
+"""Current input facts survive restart and runtime classification."""
 
 import json
 import sqlite3
 from contextlib import closing
 
-import pytest
-
 from server.database import Database
 from server.sessions.client_submissions import input_digest
 from tests.accounts import create_account
-from tests.main_storage import write_unversioned_baseline, write_version_one_baseline
 
 
-@pytest.mark.parametrize("version", [0, 1, 2, 3])
-async def test_current_stages_and_child_recovery_authority_survive_repeated_open(tmp_path, version):
+async def test_current_stages_and_child_recovery_authority_survive_repeated_open(tmp_path):
     path = tmp_path / "legacy-inputs.db"
     db = Database(str(path))
     await db.initialize()
@@ -29,7 +25,6 @@ async def test_current_stages_and_child_recovery_authority_survive_repeated_open
         for identity, state, body, receipt, recovery_of, reason, generation in (
             ("source", "withdrawn", payload, accepted, None, None, None),
             ("child", "pending", payload, accepted, "source", None, None),
-            ("refused-recovery", "withdrawn", payload, '{"accepted":false,"disposition":"rejected"}', None, "legacy_rejected", None),
             ("missing", "unknown", None, accepted, None, None, None),
             ("started", "running", payload, accepted, None, None, "original-generation"),
             ("unproven-result", "unknown", payload, accepted, None, None, None),
@@ -44,25 +39,17 @@ async def test_current_stages_and_child_recovery_authority_survive_repeated_open
                 (identity, input_digest(original_payload or submitted), identity,
                  body, receipt, state, recovery_of, reason, generation),
             )
-        if version in (2, 3):
-            stored.execute(f"PRAGMA user_version={version}")
         stored.commit()
         original = stored.execute("SELECT client_id,payload,receipt,execution_state,recovery_of,execution_generation,payload_sha256 "
-                                  "FROM client_submissions WHERE client_id!='refused-recovery' ORDER BY client_id").fetchall()
-    if version == 0:
-        write_unversioned_baseline(path)
-    elif version == 1:
-        write_version_one_baseline(path)
+                                  "FROM client_submissions ORDER BY client_id").fetchall()
     for _ in range(2):
         reopened = Database(str(path))
         await reopened.initialize()
         try:
             source = await reopened.get_client_submission("legacy", "source")
             child = await reopened.get_client_submission("legacy", "child")
-            refused = await reopened.get_client_submission("legacy", "refused-recovery")
             assert source["recovered_by"] == "child" and child["recovery_of"] == "source"
             assert child["execution_state"] == "pending" and child["receipt"]["accepted"]
-            assert refused is None
             assert (await reopened.get_client_submission("legacy", "missing"))["execution_state"] == "unknown"
             assert (await reopened.get_client_submission("legacy", "started"))["execution_state"] == "running"
             assert (await reopened.get_client_submission("legacy", "unproven-result"))["execution_state"] == "unknown"

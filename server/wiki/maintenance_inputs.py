@@ -79,14 +79,11 @@ def _shape(db, table):
 
 
 def validate_jobs(db):
-    previous = JOB_COLUMNS + (("attempt_errors", "TEXT", 1, "'{}'", 0, 0),)
-    columns = (("id", "TEXT", 1, None, 0, 0), *previous[1:],
+    columns = (("id", "TEXT", 1, None, 0, 0), *JOB_COLUMNS[1:],
+               ("attempt_errors", "TEXT", 1, "'{}'", 0, 0),
                ("admission_sequence", "INTEGER", 0, None, 1, 0))
-    actual = _shape(db, "jobs")
-    if actual != columns:
-        version = db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0]
-        if version not in (12, 13) or actual != previous:
-            raise unavailable("job ledger is missing or incompatible")
+    if _shape(db, "jobs") != columns:
+        raise unavailable("job ledger is missing or incompatible")
     if _shape(db, "job_requests") != REQUEST_COLUMNS:
         raise unavailable("job ledger is missing or incompatible")
     unique_request = any(row[2] and not row[4] and
@@ -172,7 +169,7 @@ def _refresh_jobs(selection):
 def _input_check(value):
     states = ",".join(repr(state) for state in sorted(job_items.ITEM_STATES))
     phases = ",".join(repr(phase) for phase in sorted(job_items.EXECUTION_PHASES))
-    retired = " OR ".join(f"json_type(i.value,'$.{field}') IS NOT NULL" for field in job_items.LEGACY_FIELDS)
+    retired = " OR ".join(f"json_type(i.value,'$.{field}') IS NOT NULL" for field in job_items.RETIRED_FIELDS)
     return f"""SELECT CASE WHEN json_valid({value})=0 THEN
         RAISE(ABORT,'maintenance job membership requires valid JSON') END;
         SELECT CASE WHEN json_type({value})<>'array' THEN
@@ -186,7 +183,6 @@ def _input_check(value):
             OR json_extract(i.value,'$.version')<>1
             OR coalesce(json_extract(i.value,'$.status') NOT IN ({states}),1)
             OR ({retired})
-            OR coalesce(json_type(i.value,'$.legacy_evidence')<>'object',0)
             OR CASE WHEN json_type(i.value,'$.worker_request') IS NULL THEN 0
                 WHEN json_type(i.value,'$.worker_request')<>'object' THEN 1
                 ELSE coalesce(json_extract(i.value,'$.worker_request.phase') NOT IN ({phases}),1) END

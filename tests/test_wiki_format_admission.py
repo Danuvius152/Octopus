@@ -46,7 +46,7 @@ async def registered_account(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("entry", ["preflight", "store", "create", "registry"])
-@pytest.mark.parametrize("damage", ["future_version", "unsupported_version", "unknown_structure"])
+@pytest.mark.parametrize("damage", ["future_version", "previous_version", "unmarked"])
 async def test_unsupported_wiki_format_in_real_wal_is_refused_before_a_writer(registered_account, monkeypatch, entry, damage):
     root, state, registered, owner = registered_account
     path = state / "index.sqlite3"
@@ -68,12 +68,7 @@ async def test_unsupported_wiki_format_in_real_wal_is_refused_before_a_writer(re
         assert writer.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
         writer.execute("PRAGMA wal_autocheckpoint=0")
         baseline_main = path.read_bytes()
-        if damage == "unknown_structure":
-            writer.execute("CREATE TABLE future_business(original BLOB NOT NULL)")
-            writer.execute("INSERT INTO future_business VALUES(?)", (b"Original unknown fact\x00\xff",))
-        else:
-            writer.execute("DELETE FROM wiki_schema")
-            writer.execute("INSERT INTO wiki_schema VALUES(?,'original-retained-time')", (15 if damage == "future_version" else 11,))
+        writer.execute(f"PRAGMA user_version={999 if damage == 'future_version' else 14 if damage == 'previous_version' else 0}")
         writer.commit()
         assert path.read_bytes() == baseline_main
         original_wal = wal.read_bytes()
@@ -100,32 +95,15 @@ async def test_unsupported_wiki_format_in_real_wal_is_refused_before_a_writer(re
             registry.close()
 
 
-@pytest.mark.parametrize("entry", ["preflight", "store", "registry"])
-async def test_unknown_current_wiki_structure_is_retained_and_refused(registered_account, entry):
-    root, state, registered, owner = registered_account
+async def test_publication_refuses_unknown_current_wiki_structure_without_changing_it(registered_account):
+    from server.storage_verification import verify_storage
+
+    root, state, _, _ = registered_account
     path = state / "index.sqlite3"
-    with closing(sqlite3.connect(path)) as writer:
-        writer.execute("CREATE TABLE future_business(original BLOB NOT NULL)")
-        writer.execute("INSERT INTO future_business VALUES(?)", (b"Unknown original durable fact\x00\xff",))
-        writer.commit()
-    original_database = path.read_bytes()
-    original_config = (state / "config.json").read_bytes()
-    original_body = (root / "source.md").read_bytes()
-    candidate = None
-    registry = WikiRegistry()
-    try:
-        with pytest.raises(WikiError) as refused:
-            if entry == "preflight":
-                protocols.registration_preflight(state, complete=True)
-            elif entry == "store":
-                candidate = WikiStore(root, state, registered["vault_id"], defer_recovery=True)
-            else:
-                registry.store(owner)
-        assert refused.value.status == 503
-        assert path.read_bytes() == original_database
-        assert (state / "config.json").read_bytes() == original_config
-        assert (root / "source.md").read_bytes() == original_body
-    finally:
-        if candidate is not None:
-            candidate.close()
-        registry.close()
+    with closing(sqlite3.connect(path)) as db:
+        db.execute("CREATE TABLE future_business(original BLOB NOT NULL)")
+        db.execute("INSERT INTO future_business VALUES(?)", (b"Original durable fact\x00\xff",))
+    before = {p: p.read_bytes() for p in (path, state / "config.json", root / "source.md")}
+    with pytest.raises(RuntimeError, match="incompatible structure"):
+        verify_storage(settings)
+    assert {p: p.read_bytes() for p in before} == before

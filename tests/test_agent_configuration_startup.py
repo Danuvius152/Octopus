@@ -1,19 +1,16 @@
-"""Saved agent choices survive startup and supported storage upgrades."""
+"""Saved agent choices survive current-format startup."""
 
-from pathlib import Path
 
 import pytest
 
 from server.agent_manager import AgentManager
 from server.database import Database
 from server.users import UserManager
-from tests.main_storage import write_unversioned_baseline
 
 
 @pytest.mark.parametrize("name", ["Default", "My assistant"])
 @pytest.mark.parametrize("tools", [[], ["bg", "ask"]])
-@pytest.mark.parametrize("upgrade", [False, True], ids=["current", "supported-v0"])
-async def test_startup_preserves_saved_agent_configuration(tmp_path, name, tools, upgrade):
+async def test_startup_preserves_saved_agent_configuration(tmp_path, name, tools):
     path = str(tmp_path / "agents.db")
     db = Database(path)
     await db.initialize()
@@ -42,8 +39,6 @@ async def test_startup_preserves_saved_agent_configuration(tmp_path, name, tools
     finally:
         await db.close()
 
-    if upgrade:
-        write_unversioned_baseline(Path(path))
 
     for _ in range(2):
         db = Database(path)

@@ -41,7 +41,6 @@ async def main(configuration, phase):
     from server.wiki.history import WikiHistory
     from server.wiki.jobs import WikiJobs
     from server.wiki.registry import registry
-    from tests.main_storage import write_unversioned_baseline
 
     owner = InstallationOwner(settings)
     owner.acquire()
@@ -111,7 +110,6 @@ async def main(configuration, phase):
         with sqlite3.connect(settings.db_path) as connection:
             for identity, state, body, receipt, recovery_of, reason, generation in (
                 ("staged", "pending", payload, accepted, None, None, None),
-                ("refused", "withdrawn", payload, '{"accepted":false}', None, "legacy_rejected", None),
                 ("empty-receipt", "withdrawn", payload, '{}', None, None, None),
                 ("missing", "unknown", None, accepted, None, None, None),
                 ("unknown", "unknown", payload, accepted, None, None, "unknown-generation"),
@@ -134,7 +132,6 @@ async def main(configuration, phase):
                                    (identity, input_digest(digest_payload), identity,
                                     body, receipt, state, recovery_of, reason, generation))
         connection.close()
-        write_unversioned_baseline(Path(settings.db_path))
         owner.close()
         return
 

@@ -95,6 +95,7 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | [运行日志缺陷修复：设计访谈与行为契约](plans/runtime-log-repair-20261013.md) | shipped | Q12 修复及本地 Codex 验收已完成；Stop 暂停内存积压、人工纠偏优先、明确恢复；保留主要框架，Q11 持久队列不实施。 |
 | [P1 问题整改：CR-03 输入恢复](plans/p1-remediation-20261020.md) | superseded by minimal-architecture-execution-20261020.md | CR-03 暂存实现并入最小机制架构计划，以下保留原范围决定与历史验收，不再作为单独发布入口。 |
 | [Codex performance in Monitor](plans/codex-performance-monitor.md) | completed | effective output TPS implemented and validated for local Codex; client windows, model grouping and passive collection. |
+| [Current storage and publication handoff](plans/current-storage-format.md) | implemented | Validation and release handoff are tracked separately from production deployment. |
 | [DeepSeek Harness 作为第三个 backend：实施计划](plans/deepseek-harness-backend.md) | proposed | 以 API key + `dsh --profile headless` 接入 DeepSeek Harness（DSH），复用现有 harness 边界；先交付单轮/事件/MCP/resume，账号登录与 SDK 长驻模式留在后续。 |
 | [Rotating the installation access token](plans/token-rotation.md) | retired | Installation-token rotation and recovery are removed; current account authentication remains. |
 | [共享 Wiki：未来计划与应用协同](plans/wiki-future-plan.md) | proposed | Sapphire、SmartReader 与条件性扩展的统一计划；保留未完成合同，不把本文当作开发或生产写入授权。 |

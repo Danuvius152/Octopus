@@ -1,7 +1,7 @@
 """The versioned JSON boundary for job items and their original executions.
 
-Items stay in the existing jobs column. Unknown historical fields and replaced
-flags remain evidence, never a second authority for dispatch or settlement.
+Items stay in the existing jobs column. Original execution references retain
+their identity across retries; retired item encodings are rejected.
 """
 
 import copy
@@ -31,11 +31,10 @@ class JobItem(TypedDict, total=False):
     revision: str
     worker_request: ExecutionRef
     previous_worker_requests: list[ExecutionRef]
-    legacy_evidence: dict[str, Any]
 
 
-LEGACY_FIELDS = ("recording_failure", "recording_recovery", "execution_unknown",
-                 "index_recovery", "cancelled_before_admission")
+RETIRED_FIELDS = ("legacy_evidence", "recording_failure", "recording_recovery", "execution_unknown",
+                  "index_recovery", "cancelled_before_admission")
 ITEM_STATES = {"pending", "verifying", "unknown", "done", "attention", "failed", "excluded"}
 EXECUTION_PHASES = {"prepared", "accepted", "rejected", "unknown", "settled"}
 
@@ -49,8 +48,7 @@ def normalize(value):
     if type(item.get("version")) is not int or item["version"] != 1:
         raise WikiError("Wiki job item version is unsupported; durable evidence retained", 503)
     if (item.get("status") not in ITEM_STATES
-            or any(key in item for key in LEGACY_FIELDS)
-            or not isinstance(item.get("legacy_evidence", {}), dict)
+            or any(key in item for key in RETIRED_FIELDS)
             or not isinstance(item.get("previous_worker_requests", []), list)
             or any(not isinstance(ref, dict) for ref in item.get("previous_worker_requests", []))
             or "worker_request" in item and not isinstance(item["worker_request"], dict)):

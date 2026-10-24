@@ -10,7 +10,6 @@ from server.scheduler import ScheduleRunner
 from server.session_manager import SessionManager
 from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
-from tests.main_storage import write_unversioned_baseline, write_version_one_baseline
 from tests.submission import accepted_receipt
 
 
@@ -655,8 +654,7 @@ async def test_run_at_column_roundtrip():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", [0, 1, 2])
-async def test_saved_recurrence_definitions_survive_supported_upgrade_and_reopen(tmp_path, version):
+async def test_saved_recurrence_definitions_survive_reopen(tmp_path):
     path = tmp_path / "recurrences.db"
     db = Database(str(path))
     await db.initialize()
@@ -671,10 +669,6 @@ async def test_saved_recurrence_definitions_survive_supported_upgrade_and_reopen
                             prompt="Preserve this exact request", created_at="t", **recurrence)
     expected = await db.load_schedules()
     await db.close()
-    if version == 0:
-        write_unversioned_baseline(path)
-    elif version == 1:
-        write_version_one_baseline(path)
     for _ in range(2):
         db = Database(str(path))
         await db.initialize()

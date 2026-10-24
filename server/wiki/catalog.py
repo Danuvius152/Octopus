@@ -30,7 +30,7 @@ def initialize(db):
     db.execute("""CREATE TABLE IF NOT EXISTS catalog_state(
         singleton INTEGER PRIMARY KEY CHECK(singleton=1),version TEXT NOT NULL,pending INTEGER NOT NULL)""")
     state = db.execute("SELECT version FROM catalog_state WHERE singleton=1").fetchone()
-    changed = names_missing or uid_missing or not {"wiki_edge_lookups", "catalog_dirty", "catalog_state"}.issubset(available) or state is None or state[0] != VERSION
+    changed = names_missing or uid_missing or not {"wiki_edges", "wiki_edge_lookups", "catalog_dirty", "catalog_state"}.issubset(available) or state is None or state[0] != VERSION
     if changed:
         db.execute("INSERT OR REPLACE INTO catalog_state VALUES(1,?,1)", (VERSION,))
         db.execute("INSERT OR IGNORE INTO catalog_dirty SELECT id FROM documents")

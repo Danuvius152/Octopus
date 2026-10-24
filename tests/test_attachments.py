@@ -30,7 +30,6 @@ from server.main import app
 from server.session_manager import session_manager
 from server.users import UserManager
 from server.workspace import paths_for
-from tests.main_storage import write_unversioned_baseline
 
 
 @pytest.fixture
@@ -452,12 +451,12 @@ async def test_start_message_caps_attachment_count(client, account_user_id):
 
 
 # ---------------------------------------------------------------------------
-# Supported storage upgrade — nullable attachments retain their original meaning
+# Current storage reopening — nullable attachments retain their original meaning
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_supported_upgrade_preserves_messages_without_attachments(tmp_path):
+async def test_current_reopen_preserves_messages_without_attachments(tmp_path):
     """A retained NULL attachment list stays empty without rewriting the body."""
     db_path = tmp_path / "legacy.db"
     seed = Database(str(db_path))
@@ -469,7 +468,6 @@ async def test_supported_upgrade_preserves_messages_without_attachments(tmp_path
                             agent_id=agent["id"], user_id=owner["id"])
     await seed.append_message("legacy", 0, "user", "text", "hi")
     await seed.close()
-    write_unversioned_baseline(db_path)
 
     db = Database(str(db_path))
     await db.initialize()

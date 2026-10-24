@@ -438,7 +438,7 @@ def test_current_reopen_preserves_rows_without_synthesizing_origin_proofs(histor
         try:
             assert upgraded.read("note.md")["content"] == "legacy material"
             with upgraded.connect() as db:
-                assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == schema.VERSION
+                assert db.execute("PRAGMA user_version").fetchone()[0] == schema.VERSION
                 assert before == {t: [tuple(r) for r in db.execute("SELECT * FROM " + t)] for t in tables}
                 assert db.execute("SELECT count(*) FROM material_origins").fetchone()[0] == 0
                 assert all(value is None or json.loads(value) is None
@@ -457,16 +457,21 @@ def test_invalid_private_json_is_retained_and_reported(history):
 
 
 @pytest.mark.parametrize("missing", ["material_origins", "change_material_origins"])
-def test_lost_durable_origin_table_is_reported_not_rebuilt_empty(history, missing):
+def test_publication_reports_lost_origin_authority_without_rebuilding_it(history, missing):
+    from server.storage_verification import verify_wiki
+
     doc, _, raw, _ = opaque_origin(history)
     store = history.store
     store.close()
     with sqlite3.connect(store.db_path) as db:
         db.execute("DROP TABLE " + missing)
     before = store.db_path.read_bytes()
-    with pytest.raises(WikiError, match="retained") as error:
-        WikiStore(store.root, store.state, store.vault_id, health=store.health)
-    assert error.value.status == 503
+    with sqlite3.connect(store.db_path.as_uri() + '?mode=ro', uri=True) as db:
+        db.row_factory = sqlite3.Row
+        db.execute('PRAGMA query_only=ON')
+        db.execute('BEGIN')
+        with pytest.raises(RuntimeError, match='current durable structure'):
+            verify_wiki(db, {'root': str(store.root), 'vault_id': store.vault_id})
     assert store.path("note.md").read_bytes() == raw
     assert store.db_path.read_bytes() == before
     with sqlite3.connect(store.db_path) as db:

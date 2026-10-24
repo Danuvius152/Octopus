@@ -12,7 +12,6 @@ import pytest
 
 from server.database import Database
 from tests.accounts import create_account
-from tests.main_storage import write_unversioned_baseline
 
 CREATED_AT = "2026-10-19T12:00:00+00:00"
 CONTEXT = '{"version":1,"return_binding":{"request_id":"parent-read"}}'
@@ -222,7 +221,7 @@ async def test_request_waits_for_its_original_commit_acknowledgement(database, m
         await reader.close()
 
 
-async def test_supported_upgrade_preserves_missing_contracts_and_does_not_replay(tmp_path):
+async def test_current_reopen_preserves_missing_contracts_and_does_not_replay(tmp_path):
     path = str(tmp_path / "legacy.db")
     legacy = Database(path)
     await legacy.initialize()
@@ -239,7 +238,6 @@ async def test_supported_upgrade_preserves_missing_contracts_and_does_not_replay
         )
     finally:
         await legacy.close()
-    write_unversioned_baseline(Path(path))
 
     upgraded = Database(path)
     await upgraded.initialize()

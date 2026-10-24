@@ -97,12 +97,12 @@ async def lifespan(app: FastAPI):
         from .wiki.registry import registry as wiki_registry
         wiki_registry.bind_health(service_health)
         try:
-            await db.inspect(previous_writers_retired=installation.profile is not None)
+            await db.inspect()
             await asyncio.to_thread(require_account_installation, settings)
             master_key()
         except BaseException as error:
             service_health.fail(error)
-        await db.initialize(previous_writers_retired=installation.profile is not None)
+        await db.initialize()
         from .wiki.app_bridge import reopen as reopen_wiki_app_writers
         reopen_wiki_app_writers()
         started.add("sessions")

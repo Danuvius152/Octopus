@@ -5,18 +5,19 @@ from contextlib import closing
 
 import pytest
 
-from server.wiki import recovery_state
+from server.config import settings
+from server.storage_verification import verify_storage
+from server.wiki import recovery_state, schema
 from server.wiki.recovery import Metadata
 from server.wiki.registry import WikiRegistry
-from server.wiki.store import WikiError, WikiStore
+from server.wiki.store import WikiError
 from tests.test_wiki_format_admission import registered_account as registered_account
-from tests.test_wiki_format_preparation import facts, retained_baseline
 from tests.test_wiki_job_event_migration import baseline as baseline
+from tests.wiki_current_storage import facts
 
 
-async def test_supported12_uncertain_metadata_is_available_without_opening_an_ordinary_store(registered_account, monkeypatch):
+async def test_current_uncertain_metadata_is_available_without_opening_an_ordinary_store(registered_account, monkeypatch):
     root, state, registration, owner = registered_account
-    retained_baseline(root, state, registration, owner, with_jobs=True)
     path = state / "index.sqlite3"
     with closing(sqlite3.connect(path)) as db:
         db.execute("UPDATE filesystem_state SET uncertain='Original unresolved filesystem reception'")
@@ -35,7 +36,7 @@ async def test_supported12_uncertain_metadata_is_available_without_opening_an_or
         assert snapshot["vault_id"] == registration["vault_id"]
         assert path.read_bytes() == original_bytes and (state / "config.json").read_bytes() == config_bytes
         with closing(sqlite3.connect(path)) as db:
-            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == 12
+            assert db.execute("PRAGMA user_version").fetchone()[0] == schema.VERSION
             assert facts(db) == original
     finally:
         registry.close()
@@ -56,9 +57,8 @@ async def test_index_repair_does_not_recreate_lost_recovery_facts(baseline, loss
             db.execute("DROP TABLE " + loss)
         db.commit()
     original_bytes = path.read_bytes()
-    with pytest.raises(WikiError) as failed:
-        WikiStore(root, state, registration["vault_id"], defer_recovery=True)
-    assert failed.value.status == 503
+    with pytest.raises((WikiError, RuntimeError)):
+        verify_storage(settings)
     assert path.read_bytes() == original_bytes
     with closing(sqlite3.connect(path)) as db:
         assert list(db.execute("SELECT * FROM jobs ORDER BY id")) == original_jobs

@@ -1037,7 +1037,7 @@ class WikiJobs:
     def retain_item_result(item):
         if reference := item.get("worker_request"):
             reference.setdefault("item_result", {key: value for key, value in item.items()
-                                                  if key not in {"worker_request", "previous_worker_requests", "legacy_evidence"}})
+                                                  if key not in {"worker_request", "previous_worker_requests"}})
 
     async def verify(self, job_id, manager, *, expected_attempt=None, expected_vault_id=None, operation_id=None):
         """Reconcile the captured effects and indexes without admitting model work."""

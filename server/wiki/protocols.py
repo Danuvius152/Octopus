@@ -70,9 +70,9 @@ def registration_preflight(state, *, health=None, complete=False):
     try:
         with storage.connect(path, health if health is not None else ServiceHealth(), write=False) as db:
             db.execute("BEGIN")
-            from .schema import inspect
+            from .schema import require_current_format
 
-            inspect(db)
+            require_current_format(db)
             if complete or (state / "config.json").exists():
                 require(db, "registration_config")
             binding = db.execute("SELECT root,vault_id FROM filesystem_state WHERE singleton=1").fetchone()

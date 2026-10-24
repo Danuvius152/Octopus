@@ -159,7 +159,7 @@ def sections(text: str, title: str, *, parsed: document_format.DocumentFormat | 
     return result or [{"title": title, "start": parsed.body_start, "end": parsed.body_start, "section_role": "body", "readable_body": False}]
 
 
-def initialize(db) -> None:
+def initialize(db) -> bool:
     expected = {"search_documents", "search_sections", "search_fts"}
     existing = {
         row[0]
@@ -195,10 +195,12 @@ def initialize(db) -> None:
       AFTER DELETE ON documents BEGIN
       DELETE FROM search_sections WHERE doc_id=old.id;
       DELETE FROM search_documents WHERE doc_id=old.id; END""")
-    if incomplete or db.execute("SELECT 1 FROM search_documents WHERE version<>? LIMIT 1", (VERSION,)).fetchone():
+    changed = incomplete or db.execute("SELECT 1 FROM search_documents WHERE version<>? LIMIT 1", (VERSION,)).fetchone() is not None
+    if changed:
         db.execute("DELETE FROM search_sections")
         db.execute("DELETE FROM search_fts")
         db.execute("DELETE FROM search_documents")
+    return changed
 
 
 def current(db, row) -> bool:

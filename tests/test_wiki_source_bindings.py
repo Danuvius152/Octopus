@@ -260,8 +260,7 @@ def test_unsupported_source_format_is_retained_without_promoting_derived_edges(h
     with sqlite3.connect(store.db_path) as db:
         db.execute("PRAGMA recursive_triggers=ON")
         db.execute("DELETE FROM wiki_edges WHERE source_doc=? AND ordinal=1", (consumer["id"],))
-        db.execute("DELETE FROM wiki_schema")
-        db.execute("INSERT INTO wiki_schema VALUES(9,'original-time')")
+        db.execute("PRAGMA user_version=14")
     retained = store.db_path.read_bytes()
     bodies = {p.relative_to(store.root): p.read_bytes() for p in store.root.rglob("*.md")}
     for _ in range(2):
@@ -273,7 +272,9 @@ def test_unsupported_source_format_is_retained_without_promoting_derived_edges(h
 
 
 @pytest.mark.parametrize("missing", list(source_bindings.TABLES))
-def test_missing_durable_source_table_is_rejected_and_not_recreated(history, missing):
+def test_publication_rejects_missing_source_authority_without_recreating_it(history, missing):
+    from server.storage_verification import verify_wiki
+
     setup_replacement(history)
     history.store.close()
     with sqlite3.connect(history.store.db_path) as db:
@@ -281,9 +282,12 @@ def test_missing_durable_source_table_is_rejected_and_not_recreated(history, mis
         db.execute("DROP TABLE wiki_edges")
         before = list(db.iterdump())
     retained = history.store.db_path.read_bytes()
-    with pytest.raises(WikiError, match="retained") as error:
-        WikiStore(history.store.root, history.store.state, history.store.vault_id)
-    assert error.value.status == 503
+    with sqlite3.connect(history.store.db_path.as_uri() + '?mode=ro', uri=True) as db:
+        db.row_factory = sqlite3.Row
+        db.execute('PRAGMA query_only=ON')
+        db.execute('BEGIN')
+        with pytest.raises(RuntimeError, match='current durable structure'):
+            verify_wiki(db, {'root': str(history.store.root), 'vault_id': history.store.vault_id})
     assert history.store.db_path.read_bytes() == retained
     with sqlite3.connect(history.store.db_path) as db:
         assert list(db.iterdump()) == before

@@ -11,7 +11,6 @@ import pytest
 
 from server.database import Database
 from tests.accounts import create_account
-from tests.main_storage import write_unversioned_baseline
 
 STAMP = "2026-10-14T00:00:00+00:00"
 
@@ -223,10 +222,9 @@ async def test_ordinary_session_cannot_gain_delegation_authority(db, owner):
     assert await db.load_delegation_states() == []
 
 
-async def test_supported_upgrade_keeps_roundless_conversations_and_new_round_authority(db, tmp_path, owner):
+async def test_current_reopen_keeps_roundless_conversations_and_new_round_authority(db, tmp_path, owner):
     old_child, parent, _agent = await _save_conversation(db, owner=owner)
     await db.close()
-    write_unversioned_baseline(tmp_path / "delegations.db")
     reopened = Database(str(tmp_path / "delegations.db"))
     await reopened.initialize()
     try:

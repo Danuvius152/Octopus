@@ -1,18 +1,15 @@
 """Opening supported storage never guesses or changes a fork's account."""
 
-from pathlib import Path
 
 import pytest
 
 from server.database import Database
 from server.session_manager import SessionManager
 from tests.accounts import create_account
-from tests.main_storage import write_unversioned_baseline, write_version_one_baseline
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", [0, 1, 2])
-async def test_current_fork_owners_and_ambiguous_relationships_survive_repeated_open(tmp_path, version):
+async def test_current_fork_owners_and_ambiguous_relationships_survive_repeated_open(tmp_path):
     path = str(tmp_path / "sessions.db")
     db = Database(path)
     await db.initialize()
@@ -59,10 +56,6 @@ async def test_current_fork_owners_and_ambiguous_relationships_survive_repeated_
     before = {r["id"]: r for r in await db.load_sessions(include_archived=True)}
     messages = await db.load_messages("child")
     await db.close()
-    if version == 0:
-        write_unversioned_baseline(Path(path))
-    elif version == 1:
-        write_version_one_baseline(Path(path))
 
     db = Database(path)
     try:

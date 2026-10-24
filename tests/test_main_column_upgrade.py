@@ -1,10 +1,6 @@
-"""Supported column retirement preserves current facts and refuses unknown copies."""
+"""Current startup preserves account keys, credentials and recovery relationships."""
 
-import json
-import os
 import sqlite3
-import subprocess
-import sys
 from contextlib import closing
 from pathlib import Path
 
@@ -14,20 +10,17 @@ from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
 from server import deps
-from server.config import settings
 from server.crypto import decrypt, encrypt
 from server.database import Database
 from server.routers import auth, credentials, sessions
 from server.sessions import SessionManager
 from server.users import UserManager
 from tests.accounts import create_account
-from tests.main_storage import write_unversioned_baseline, write_version_one_baseline
-from tests.test_service_runtime import installation_settings
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-async def seed(path, version):
+async def seed(path):
     database = Database(str(path))
     try:
         await database.initialize()
@@ -54,14 +47,6 @@ async def seed(path, version):
                              "reason_code='service_restart_execution_unknown' WHERE client_id='unknown'")
     finally:
         await database.close()
-    if version == 0:
-        write_unversioned_baseline(path)
-    elif version == 1:
-        write_version_one_baseline(path)
-    elif version in (2, 3):
-        with closing(sqlite3.connect(path)) as writer:
-            writer.execute(f"PRAGMA user_version={version}")
-            writer.commit()
     return owner, bearer, key, ciphertext
 
 
@@ -79,16 +64,9 @@ def facts(path):
         return result
 
 
-@pytest.mark.parametrize("version,duplicate", [(0, False), (1, False), (1, True), (2, False), (3, False), (4, False)])
-async def test_upgrade_and_current_startup_preserve_dek_rows_and_derived_http_relationships(tmp_path, monkeypatch, version, duplicate):
+async def test_current_startup_preserve_dek_rows_and_derived_http_relationships(tmp_path, monkeypatch):
     path = tmp_path / "owned.db"
-    owner, bearer, key, ciphertext = await seed(path, version)
-    if duplicate:
-        with closing(sqlite3.connect(path)) as writer:
-            writer.execute("UPDATE backend_credentials SET secret_encrypted=? WHERE id='saved'", (ciphertext,))
-            writer.execute("UPDATE client_submissions SET recovered_by='child' WHERE client_id='source'")
-            writer.execute("UPDATE client_submissions SET recovered_by='grandchild' WHERE client_id='child'")
-            writer.commit()
+    owner, bearer, key, ciphertext = await seed(path)
     original = facts(path)
     database = Database(str(path))
     await database.initialize()
@@ -164,132 +142,3 @@ async def test_upgrade_and_current_startup_preserve_dek_rows_and_derived_http_re
     assert not [sql for sql in statements if sql.lstrip().upper().startswith(
         ("CREATE", "ALTER", "DROP", "INSERT", "UPDATE", "DELETE", "PRAGMA USER_VERSION="),
     )]
-
-
-@pytest.mark.parametrize("entry", ["database", "service"])
-@pytest.mark.parametrize("damage", ["missing_split", "different_copy", "same_plaintext", "forward_only",
-                                  "wrong_successor", "cross_session", "version_zero_identical_copy"])
-async def test_unproven_retirement_is_refused_before_keys_or_writes_including_real_wal(tmp_path, monkeypatch, request, entry, damage):
-    config, configuration = installation_settings(tmp_path)
-    for name, value in json.loads(configuration.read_text()).items():
-        monkeypatch.setattr(settings, name, value)
-    monkeypatch.setattr(settings, "master_key", "column-retirement-fixture-master")
-    path = Path(config.db_path)
-    _, _, key, ciphertext = await seed(path, 0 if damage == "version_zero_identical_copy" else 1)
-    keeper = sqlite3.connect(path)
-    request.addfinalizer(keeper.close)
-    keeper.execute("PRAGMA journal_mode=WAL")
-    keeper.execute("BEGIN")
-    keeper.execute("SELECT id FROM backend_credentials").fetchall()
-    with closing(sqlite3.connect(path)) as writer:
-        writer.execute("PRAGMA wal_autocheckpoint=0")
-        if damage in ("missing_split", "different_copy", "same_plaintext", "version_zero_identical_copy"):
-            copy = encrypt("original-api-key" if damage == "same_plaintext" else "other-api-key", key)
-            if damage in ("missing_split", "version_zero_identical_copy"):
-                copy = ciphertext
-            if damage == "same_plaintext":
-                assert copy != ciphertext and decrypt(copy, key) == decrypt(ciphertext, key)
-            writer.execute("UPDATE backend_credentials SET secret_encrypted=? WHERE id='saved'", (copy,))
-            if damage == "missing_split":
-                writer.execute("DELETE FROM credential_secrets WHERE credential_id='saved'")
-        else:
-            successor = {"forward_only": "child", "wrong_successor": "grandchild", "cross_session": "foreign-child"}[damage]
-            writer.execute("UPDATE client_submissions SET recovered_by=? WHERE client_id='source'", (successor,))
-            if damage == "forward_only":
-                writer.execute("UPDATE client_submissions SET recovery_of=NULL WHERE client_id='child'")
-            elif damage == "cross_session":
-                writer.execute("INSERT INTO client_submissions(session_id,client_id,payload_sha256,request_id,recovery_of) "
-                               "VALUES('other','foreign-child','foreign-digest','foreign-request','source')")
-        writer.commit()
-    wal = Path(str(path) + "-wal")
-    before, original_wal = path.read_bytes(), wal.read_bytes()
-    assert len(original_wal) > 32
-    original = facts(path)
-    directories = {p.relative_to(tmp_path) for p in tmp_path.rglob("*") if p.is_dir()}
-    admitted = tmp_path / "admitted"
-    result = subprocess.run([sys.executable, "-c", """
-import asyncio,json,sys
-from pathlib import Path
-from server.config import settings
-for name,value in json.loads(Path(sys.argv[1]).read_text()).items():setattr(settings,name,value)
-settings.master_key=''
-from server.database import Database
-async def main():
-    if sys.argv[2]=='database':
-        database=Database(settings.db_path)
-        await database.initialize()
-        Path(sys.argv[3]).touch()
-        await database.close()
-    else:
-        from server.main import app
-        async with app.router.lifespan_context(app):Path(sys.argv[3]).touch()
-asyncio.run(main())
-""", str(configuration), entry, str(admitted)], cwd=ROOT, capture_output=True, text=True, timeout=15,
-        env=dict(os.environ, OCTOPUS_ENV_FILE=str(tmp_path / "no-project.env"),
-                 CODEX_HOME=str(tmp_path / "provider-codex"), CLAUDE_CONFIG_DIR=str(tmp_path / "provider-claude")))
-    assert result.returncode == 70, result.stdout + result.stderr
-    assert not admitted.exists() and not Path(config.master_key_file).exists()
-    assert path.read_bytes() == before and wal.read_bytes() == original_wal
-    assert facts(path) == original
-    assert {p.relative_to(tmp_path) for p in tmp_path.rglob("*") if p.is_dir()} == directories
-
-
-@pytest.mark.parametrize("version", [0, 1])
-@pytest.mark.parametrize("phase", ["between_drops", "before_version", "commit_ack"])
-async def test_column_retirement_crash_keeps_the_complete_old_or_new_format(tmp_path, version, phase):
-    path = tmp_path / "interrupted.db"
-    owner, _, key, ciphertext = await seed(path, version)
-    original = facts(path)
-    proof = tmp_path / "fault-reached"
-    result = subprocess.run([sys.executable, "-c", """
-import asyncio,os,sys
-from pathlib import Path
-import aiosqlite
-from aiosqlite.context import contextmanager
-from server.database import Database
-connect=aiosqlite.Connection._connect
-phase=sys.argv[2]
-async def fault_connection(connection):
-    await connect(connection)
-    execute,commit=connection.execute,connection.commit
-    def stop():
-        Path(sys.argv[3]).write_text(phase)
-        os._exit(71)
-    @contextmanager
-    async def fault_execute(sql,parameters=()):
-        normalized=sql.strip().upper()
-        if phase=='before_version' and normalized.startswith('PRAGMA USER_VERSION='):stop()
-        cursor=await execute(sql,parameters)
-        if phase=='between_drops' and normalized=='ALTER TABLE BACKEND_CREDENTIALS DROP COLUMN SECRET_ENCRYPTED':stop()
-        return cursor
-    async def fault_commit():
-        await commit()
-        if phase=='commit_ack':
-            Path(sys.argv[3]).write_text(phase)
-            raise OSError('Actual commit succeeded; acknowledgment unavailable')
-    connection.execute,connection.commit=fault_execute,fault_commit
-    return connection
-aiosqlite.Connection._connect=fault_connection
-asyncio.run(Database(sys.argv[1]).initialize())
-""", str(path), phase, str(proof)], cwd=ROOT, capture_output=True, text=True, timeout=15)
-    assert result.returncode == (70 if phase == "commit_ack" else 71), result.stdout + result.stderr
-    assert proof.read_text() == phase
-    committed = phase == "commit_ack"
-    with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (4 if committed else version,)
-        assert ("secret_encrypted" in {row[1] for row in reader.execute("PRAGMA table_info(backend_credentials)")}) == (not committed)
-        assert ("recovered_by" in {row[1] for row in reader.execute("PRAGMA table_info(client_submissions)")}) == (not committed)
-        assert bool(reader.execute("SELECT 1 FROM sqlite_schema WHERE name='schema_migrations'").fetchone()) == (version == 0 and not committed)
-    assert facts(path) == original
-    reopened = Database(str(path))
-    await reopened.initialize()
-    try:
-        assert facts(path) == original
-        assert (await reopened.get_credential("saved"))["secret_encrypted"] == ciphertext
-        assert await UserManager(reopened).data_key_for(owner["id"]) == key
-        assert decrypt(ciphertext, key) == "original-api-key"
-        source = await reopened.get_client_submission("original", "source")
-        assert source["recovered_by"] == "child" and source["payload"]["content"] == "Original input 原文 source"
-        assert (await reopened.get_client_submission("original", "unknown"))["execution_generation"] == "original-generation"
-    finally:
-        await reopened.close()

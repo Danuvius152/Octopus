@@ -309,8 +309,7 @@ def test_prebaseline_registration_is_refused_without_reminting_or_rewriting(regi
         path.write_text(json.dumps({key: value for key, value in config.items() if not key.startswith("registration_")}))
     else:
         with sqlite3.connect(store.db_path) as db:
-            db.execute("DELETE FROM wiki_schema")
-            db.execute("INSERT INTO wiki_schema VALUES(11,'retained-original-time')")
+            db.execute("PRAGMA user_version=14")
     database_bytes, config_bytes = store.db_path.read_bytes(), path.read_bytes()
     body_bytes = store.path("note.md").read_bytes()
     for entry in (lambda: registry.store(None), lambda: registry.configure(None, store.root, config["curator_agent_id"], config["app_id"])):

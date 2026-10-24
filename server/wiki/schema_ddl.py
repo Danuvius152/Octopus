@@ -2,27 +2,6 @@
 
 from ..sqlite_schema import statements
 
-PREVIOUS_TABLES = {
-    "jobs": """CREATE TABLE jobs (
-          id TEXT PRIMARY KEY,request_key TEXT UNIQUE NOT NULL,payload_hash TEXT NOT NULL,
-          payload TEXT NOT NULL,status TEXT NOT NULL,items TEXT NOT NULL,error TEXT,
-          session_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL,
-          attempt_errors TEXT NOT NULL DEFAULT '{}'
-        )""",
-    "operation_receipts": """CREATE TABLE operation_receipts(
-                id TEXT PRIMARY KEY,job_id TEXT,item_doc TEXT,doc_id TEXT NOT NULL,
-                path TEXT NOT NULL,input_revision TEXT,output_revision TEXT,
-                operation TEXT NOT NULL,reason TEXT NOT NULL,change_id TEXT,
-                created_at TEXT NOT NULL,details TEXT NOT NULL)""",
-}
-
-# Exact parser-normalized declarations of the two 12/13 emitters. Admission
-# verifies these before replacement; no executable old projection is retained.
-PREVIOUS_EVENTS = {
-    "wiki_job_state_emit_insert": "cf25175087233b46cdabefa69d01069e8fb5f663abe5aa4459c1e8527e157fd3",
-    "wiki_job_state_emit_update": "812f0ed59754542bf750837076f7e6336610356d33273fbb2103703b65f992d6",
-}
-
 ITEM_MATCH_COLUMN = "item_match_sequence INTEGER CHECK(item_match_sequence IS NULL OR typeof(item_match_sequence)='integer')"
 
 _CORE_SCHEMA = """
@@ -95,8 +74,6 @@ CREATE TABLE uid_aliases(uid TEXT PRIMARY KEY,doc_id TEXT NOT NULL);
 
 CREATE TABLE watch_directories(path TEXT PRIMARY KEY);
 
-CREATE TABLE wiki_schema(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL);
-
 CREATE INDEX filesystem_inbox_pending ON filesystem_inbox(seq) WHERE status='pending';
 
 CREATE INDEX job_publication_source ON job_publications(job_id,source_doc);
@@ -127,7 +104,7 @@ CREATE TRIGGER wiki_origin_update AFTER UPDATE ON material_origins
 """
 
 
-def create(db, *, with_jobs: bool = True) -> None:
+def create(db) -> None:
     """Create a private empty format; no files or retained rows are consulted."""
     from . import (
         catalog,
@@ -163,5 +140,4 @@ def create(db, *, with_jobs: bool = True) -> None:
     job_events.initialize(db)
     recovery_state.initialize(db)
     job_controls.initialize(db)
-    if with_jobs:
-        WikiJobs.initialize_ledger(db)
+    WikiJobs.initialize_ledger(db)

@@ -161,10 +161,11 @@ root; use the PATH setup under Conventions.
 - `server/crypto.py` — the master key wraps per-account DEKs; owned secrets use their
   account's DEK. A password change re-encrypts nothing, and dropping a DEK
   crypto-shreds that account.
-- `docs/plans/token-rotation.md` — installation-token rotation is retired.
-  If startup reports `UnfinishedTokenRotation`, preserve the retained database,
-  WAL and environment files and use the documented original-version settlement
-  procedure before retrying startup.
+- Storage changes and publication handoff: read
+  `docs/plans/current-storage-format.md`. Startup matches one current marker;
+  publication owns complete verification and any finite conversion before start.
+  Preserve retained databases and WAL on mismatch. Installation-token rotation
+  remains retired; its historical protocol is in `docs/plans/token-rotation.md`.
 - `docs/plans/scheduled-runs.md` — What a scheduled fire is: the overlap
   guard that stops a slow schedule stacking runs, the `[scheduled:…]` marker
   that tells an agent nobody is waiting to answer questions, and

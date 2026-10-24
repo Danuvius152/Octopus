@@ -68,17 +68,17 @@ class Metadata:
     @contextlib.contextmanager
     def connect(self, *, write=False):
         from . import protocols
-        from .schema import inspect, validate_filesystem_ledger
+        from .schema import require_current_format, validate_filesystem_ledger
 
         try:
             if write:
                 with storage.connect(self.db_path, self.health, write=False) as retained:
                     retained.execute("BEGIN")
-                    inspect(retained)
+                    require_current_format(retained)
                     protocols.require(retained, "registration_config")
             with storage.connect(self.db_path, self.health, write=write) as db:
                 db.execute("BEGIN IMMEDIATE" if write else "BEGIN")
-                inspect(db)
+                require_current_format(db)
                 protocols.require(db, "registration_config")
                 validate_filesystem_ledger(db)
                 ledger.require(db)

@@ -52,7 +52,6 @@ from server.users import UserManager
 from tests.accounts import create_account
 from tests.completion_models import CompletionModels
 from tests.fake_run import FakeRunBase
-from tests.main_storage import write_unversioned_baseline
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -1317,7 +1316,7 @@ def test_missing_entrypoint_does_not_throw(tmp_path):
     assert discover_icon_src(d, "index.html") == "icon.svg"
 
 
-async def test_supported_upgrade_preserves_a_missing_discovered_icon(tmp_path):
+async def test_current_reopen_preserves_a_missing_discovered_icon(tmp_path):
     """Opening a complete baseline keeps the original app and nullable icon."""
     db_file = str(tmp_path / "old.db")
     seed = Database(db_file)
@@ -1328,7 +1327,6 @@ async def test_supported_upgrade_preserves_a_missing_discovered_icon(tmp_path):
                                 updated_at="t", user_id=owner["id"])
     expected = await seed.get_application("a1", owner["id"])
     await seed.close()
-    write_unversioned_baseline(Path(db_file))
 
     db = Database(db_file)
     await db.initialize()

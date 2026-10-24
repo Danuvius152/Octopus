@@ -58,7 +58,7 @@ def _require_account_database(db_path: str) -> bool:
             reader.execute("BEGIN")
             tables = {row[0] for row in reader.execute(
                 "SELECT name FROM sqlite_schema WHERE type='table' "
-                "AND name NOT GLOB 'sqlite_*' AND name!='schema_migrations'"
+                "AND name NOT GLOB 'sqlite_*'"
             )}
             if "users" in tables and reader.execute("SELECT 1 FROM users LIMIT 1").fetchone():
                 return True

@@ -12,13 +12,12 @@ from server.wiki.maintenance_state import status
 from server.wiki.retention import collect
 from server.wiki.store import WikiStore, revision
 from tests.test_wiki_format_admission import registered_account as registered_account
-from tests.test_wiki_job_history_retirement import ARTICLE_PATH
-from tests.test_wiki_retirement_boundaries import old_history as old_history
-from tests.test_wiki_retirement_eligibility import insert_job, original_execution
+from tests.wiki_current_storage import ARTICLE_PATH, insert_job, original_execution
+from tests.wiki_current_storage import current_history as current_history
 
 
-async def test_bound_creation_proof_survives_retirement_without_fabricated_publication(old_history):
-    root, state, registration, owner, articles = old_history
+async def test_bound_creation_proof_survives_reopen_without_fabricated_publication(current_history):
+    root, state, registration, owner, articles = current_history
     article = articles[0]
     identifier, change = "original-bound-creation", "original-creation-change"
     reference = original_execution(identifier)
@@ -55,7 +54,7 @@ async def test_bound_creation_proof_survives_retirement_without_fabricated_publi
         item.update(kind="creation", reservation_id=reserved["reservation_id"], input_revision=None,
                     output_change_id=change, operation="publish")
         db.execute("UPDATE jobs SET items=? WHERE id=?", (json.dumps([item]), identifier))
-        preserved = {table: list(map(tuple, db.execute(f"SELECT * FROM {table} ORDER BY rowid")))
+        preserved = {table: list(map(tuple, db.execute("SELECT " + ",".join(row[1] for row in db.execute(f"PRAGMA table_info({table})") if row[1] != "item_match_sequence") + f" FROM {table} ORDER BY rowid")))
                      for table in ("wiki_path_reservations", "changes", "change_retention", "operation_receipts")}
         assert not db.execute("SELECT 1 FROM job_publications WHERE job_id=?", (identifier,)).fetchone()
         db.commit()
@@ -72,7 +71,7 @@ async def test_bound_creation_proof_survives_retirement_without_fabricated_publi
             assert observed["baseline"]["operation"] == "publish"
             assert observed["status"] == "unchanged"
             with current.connect() as db:
-                assert db.execute("SELECT id FROM jobs WHERE id=?", (identifier,)).fetchone() is None
+                assert db.execute("SELECT id FROM jobs WHERE id=?", (identifier,)).fetchone()[0] == identifier
                 assert not db.execute("SELECT 1 FROM job_publications WHERE job_id=?", (identifier,)).fetchone()
                 for table, rows in preserved.items():
                     columns = [row[1] for row in db.execute(f"PRAGMA table_info({table})") if row[1] != "item_match_sequence"]
@@ -81,8 +80,8 @@ async def test_bound_creation_proof_survives_retirement_without_fabricated_publi
     assert (root / ARTICLE_PATH).read_bytes() == body
 
 
-async def test_recent_no_change_output_remains_a_blob_root_after_task_retirement(old_history):
-    root, state, registration, _, articles = old_history
+async def test_recent_no_change_output_remains_a_blob_root_after_reopen(current_history):
+    root, state, registration, _, articles = current_history
     identifier = "recent-no-change"
     original = (root / ARTICLE_PATH).read_bytes()
     digest = revision(original)
@@ -103,7 +102,7 @@ async def test_recent_no_change_output_remains_a_blob_root_after_task_retirement
     with closing(WikiStore(root, state, registration["vault_id"], defer_recovery=True)) as current:
         assert current.read(ARTICLE_PATH)["revision"] != digest
         with current.connect() as db:
-            assert db.execute("SELECT 1 FROM jobs WHERE id=?", (identifier,)).fetchone() is None
+            assert db.execute("SELECT 1 FROM jobs WHERE id=?", (identifier,)).fetchone() is not None
             assert db.execute("SELECT job_id FROM operation_receipts WHERE id=?", ("receipt-" + identifier,)).fetchone()[0] == identifier
         result = collect(WikiHistory(current))
         assert result["removed_objects"] >= 1

@@ -1,19 +1,12 @@
-"""The current main-database format and its finite preparation path.
-
-Format is owned by SQLite user_version. Inspection never repairs retained
-storage; preparation runs under Database's original writer transaction.
-"""
+"""One current main-database format, initialized only for genuinely empty storage."""
 
 from __future__ import annotations
 
-import json
 import sqlite3
-from collections.abc import Sequence
 from contextlib import closing
 
 from ..account_baseline import persistent_database_file
-from ..sqlite_schema import definition as _schema_definition
-from ..sqlite_schema import statements as _statements
+from ..sqlite_schema import statements
 from .transaction import Transaction
 
 CURRENT_VERSION = 4
@@ -21,305 +14,39 @@ _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
 
 
 class UnsupportedMainStorage(RuntimeError):
-    """Retained storage has no supported preparation path; contains no payload."""
+    """Storage does not match this program; publication must prepare it first."""
 
 
-_CATALOG = "SELECT type,name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*'"
-_LEDGER_SCHEMA = "CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
-_PREVIOUS_COLUMNS = (
-    "ALTER TABLE backend_credentials ADD COLUMN secret_encrypted TEXT NOT NULL",
-    "ALTER TABLE client_submissions ADD COLUMN recovered_by TEXT",
-)
-_MESSAGE_GUARDS = """
-CREATE TRIGGER messages_sequence_insert
-BEFORE INSERT ON messages
-WHEN EXISTS(SELECT 1 FROM messages WHERE session_id = NEW.session_id AND seq = NEW.seq)
-BEGIN SELECT RAISE(ABORT, 'duplicate message sequence'); END;
-CREATE TRIGGER messages_sequence_update
-BEFORE UPDATE OF session_id, seq ON messages
-WHEN (NEW.session_id != OLD.session_id OR NEW.seq != OLD.seq)
-  AND EXISTS(SELECT 1 FROM messages WHERE session_id = NEW.session_id
-             AND seq = NEW.seq AND id != OLD.id)
-BEGIN SELECT RAISE(ABORT, 'duplicate message sequence'); END;
-"""
+_NONEMPTY = "SELECT 1 FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' LIMIT 1"
 
 
-def _definition(kind: str, sql: str) -> tuple:
-    """Main storage deliberately accepts equivalent physical column orders."""
-    try:
-        return _schema_definition(kind, sql)
-    except ValueError:
-        raise UnsupportedMainStorage() from None
-
-
-def _validate_layout(version: int, rows: Sequence[tuple[str, str, str]]) -> bool:
-    """Return whether this is new empty storage; otherwise require a full format."""
-    if version not in (0, 1, 2, 3, CURRENT_VERSION):
-        raise UnsupportedMainStorage()
-    if not rows:
-        if version == 0:
-            return True
-        raise UnsupportedMainStorage()
-    actual = {(kind, name): _definition(kind, sql) for kind, name, sql in rows}
-    # The private in-memory catalog compiles the single current DDL authority;
-    # it never creates or prepares a retained file and is never a version cache.
-    with closing(sqlite3.connect(":memory:")) as reference:
-        for statement in _statements(_SCHEMA):
-            reference.execute(statement)
-        if version in (0, 1):
-            for statement in _PREVIOUS_COLUMNS:
-                reference.execute(statement)
-        expected = {(kind, name): _definition(kind, sql) for kind, name, sql in reference.execute(_CATALOG)}
-        if any(("trigger", name) in actual for name in ("messages_sequence_insert", "messages_sequence_update")):
-            if ("index", "messages_unique_sequence") not in actual:
-                del expected["index", "messages_unique_sequence"]
-            for statement in _statements(_MESSAGE_GUARDS):
-                reference.execute(statement)
-            expected.update({(kind, name): _definition(kind, sql)
-                             for kind, name, sql in reference.execute(_CATALOG) if kind == "trigger"})
-    if version == 0:
-        expected["table", "schema_migrations"] = _definition("table", _LEDGER_SCHEMA)
-        # The retired intent carries no supported interpretation. Presence is
-        # allowed only for this finite upgrade and emptiness is checked below.
-        actual.pop(("table", "token_rotation_intent"), None)
-    if actual != expected:
-        raise UnsupportedMainStorage()
-    return False
-
-
-# These are admission predicates for the one supported unversioned baseline,
-# not conversions. Format 1 has its own, narrower duplicate-retirement proof.
-_UNSUPPORTED_BASELINE_DATA = """
-SELECT 1 FROM backend_credentials WHERE secret_encrypted != ''
-UNION ALL SELECT 1 FROM client_submissions
- WHERE execution_state NOT IN ('pending','running','done','withdrawn','unknown')
-    OR (reason_code='steer_delivery_unknown' AND delivery_state='none')
-    OR (reason_code='legacy_rejected' AND recovery_of IS NOT NULL)
-UNION ALL SELECT 1 FROM client_submissions original
- WHERE recovered_by IS NOT NULL AND NOT EXISTS (
-   SELECT 1 FROM client_submissions child WHERE child.session_id=original.session_id
-    AND child.client_id=original.recovered_by AND child.recovery_of=original.client_id)
-UNION ALL SELECT 1 FROM sessions fork
- LEFT JOIN sessions parent ON parent.id=fork.forked_from_session_id
- LEFT JOIN agents agent ON agent.id=fork.agent_id
- WHERE fork.origin='fork' AND fork.user_id IS NULL AND (
-   (parent.user_id IS NOT NULL AND (agent.user_id IS NULL OR agent.user_id=parent.user_id))
-   OR (parent.id IS NULL AND agent.user_id IS NOT NULL))
-UNION ALL SELECT 1 FROM agents WHERE pin_order IS NULL
-UNION ALL SELECT 1 FROM applications WHERE pin_order IS NULL
-LIMIT 1
-"""
-
-_UNSUPPORTED_RETIRED_DATA = """
-SELECT 1 FROM backend_credentials original
- WHERE original.secret_encrypted != '' AND NOT EXISTS (
-   SELECT 1 FROM credential_secrets secret WHERE secret.credential_id=original.id
-    AND secret.secret_encrypted=original.secret_encrypted)
-UNION ALL SELECT 1 FROM client_submissions original
- WHERE original.recovered_by IS NOT NULL AND NOT EXISTS (
-   SELECT 1 FROM client_submissions child WHERE child.session_id=original.session_id
-    AND child.client_id=original.recovered_by AND child.recovery_of=original.client_id)
-LIMIT 1
-"""
-
-_SCHEDULE_MODES = """
-SELECT schedule.id, schedule.knowledge_context, agent.id, agent.user_id
-FROM schedules schedule LEFT JOIN agents agent ON agent.id=schedule.agent_id
-WHERE schedule.wiki_mode='off'
-"""
-
-
-def _validate_schedule_modes(version: int, rows: Sequence[tuple]) -> list[str]:
-    """Authorize only the finite projection change, never a new request."""
-    from ..knowledge import decode_context
-
-    if version >= 3 and rows:
-        raise UnsupportedMainStorage()
-    missing = []
-    for schedule_id, raw, agent_id, user_id in rows:
-        context = decode_context(raw)
-        if context is None:
-            missing.append(schedule_id)
-        elif (context.mode != "read" or context.maintenance.may_submit
-              or agent_id is None or context.origin.user_id != user_id):
-            # The origin is a source request, not the current execution target.
-            # Contradictory authority cannot be repaired by changing its bytes.
-            raise UnsupportedMainStorage()
-    return missing
-
-
-_RETIRED_INPUTS = """
-WITH knowledge_contracts(raw,source_session,source_client) AS MATERIALIZED (
- SELECT knowledge_context,NULL,NULL FROM bg_tasks
- UNION ALL SELECT knowledge_context,NULL,NULL FROM research_jobs
- UNION ALL SELECT knowledge_context,NULL,NULL FROM schedules
- UNION ALL SELECT CASE WHEN json_valid(delegation_state)
-   THEN json_extract(delegation_state,'$.knowledge_context') END,NULL,NULL FROM sessions
- UNION ALL SELECT CASE WHEN json_valid(tool_input)
-   THEN json_extract(tool_input,'$.request_context.knowledge') END,NULL,NULL FROM messages
- UNION ALL SELECT CASE WHEN json_valid(payload)
-   THEN json_extract(payload,'$.knowledge') END,session_id,client_id FROM client_submissions
-)
-SELECT i.session_id,i.client_id,i.request_id,i.receipt,i.payload,i.execution_state,
- i.execution_owner,i.execution_generation,i.execution_boot,i.process_group,
- i.delivery_state,i.reason_code,i.recovery_of,
- EXISTS(SELECT 1 FROM messages m WHERE m.session_id=i.session_id AND (
-   m.terminal_request_id=i.request_id OR CASE WHEN json_valid(m.tool_input) THEN
-   json_extract(m.tool_input,'$.request_context.request_id')=i.request_id OR
-   json_extract(m.tool_input,'$.attempt_context.request_id')=i.request_id ELSE 0 END OR
-   CASE WHEN json_valid(m.runtime_metadata)
-     THEN json_extract(m.runtime_metadata,'$.request_id')=i.request_id ELSE 0 END)),
- EXISTS(SELECT 1 FROM client_submissions other WHERE other.session_id=i.session_id
-   AND other.execution_owner=i.request_id AND other.client_id!=i.client_id),
- EXISTS(SELECT 1 FROM client_submissions child WHERE child.session_id=i.session_id
-   AND child.recovery_of=i.client_id),
- EXISTS(SELECT 1 FROM knowledge_contracts c
-   WHERE (c.source_client IS NULL OR c.source_session!=i.session_id OR c.source_client!=i.client_id)
-   AND CASE WHEN json_valid(c.raw) THEN
-     (json_extract(c.raw,'$.value.origin.session_id')=i.session_id AND
-      json_extract(c.raw,'$.value.origin.request_id')=i.request_id) OR
-     (json_extract(c.raw,'$.value.execution.origin.session_id')=i.session_id AND
-      json_extract(c.raw,'$.value.execution.origin.request_id')=i.request_id) OR
-     (json_extract(c.raw,'$.value.return_binding.reference.session_id')=i.session_id AND
-      json_extract(c.raw,'$.value.return_binding.reference.request_id')=i.request_id) OR
-     (json_extract(c.raw,'$.value.return_binding.context.origin.session_id')=i.session_id AND
-      json_extract(c.raw,'$.value.return_binding.context.origin.request_id')=i.request_id)
-   ELSE 0 END)
- OR EXISTS(SELECT 1 FROM sessions s WHERE s.id=i.session_id AND CASE WHEN json_valid(s.delegation_state)
-   THEN json_extract(s.delegation_state,'$.deferred_request_id')=i.request_id ELSE 0 END)
- OR EXISTS(SELECT 1 FROM wiki_job_notifications n WHERE n.kind IN ('chat','schedule')
-   AND n.target=i.session_id AND n.request_id=i.request_id),
- (SELECT m.content FROM messages m WHERE m.session_id=i.session_id
-   AND m.terminal_request_id=COALESCE(i.execution_owner,i.request_id)),
- EXISTS(SELECT 1 FROM client_submissions original WHERE original.session_id=i.session_id
-   AND original.request_id=i.execution_owner AND original.execution_owner=original.request_id
-   AND original.execution_state='done' AND original.delivery_state!='unknown'
-   AND original.execution_generation=i.execution_generation
-   AND CASE WHEN json_valid(original.receipt) THEN json_type(original.receipt,'$.accepted')='true' ELSE 0 END)
-FROM client_submissions i
-WHERE i.reason_code='legacy_rejected' OR CASE WHEN json_valid(i.payload)
- THEN json_extract(i.payload,'$.wiki_mode')='off' ELSE 0 END
-"""
-
-
-def _retired_inputs(version: int, rows: Sequence[tuple], *, previous_writers_retired: bool) -> list[tuple[str, str]]:
-    """Authorize the finite retirement; unresolved evidence blocks the whole step."""
-    if rows and version == CURRENT_VERSION:
-        raise UnsupportedMainStorage("Retired requests remain in the current format")
-    retired = []
-    for row in rows:
-        (session_id, client_id, request_id, raw_receipt, raw_payload, state,
-         owner, generation, boot, group, delivery, reason, recovery_of,
-         messages, dependents, child, sources, raw_terminal, shared_owner) = row
-        try:
-            receipt = json.loads(raw_receipt)
-            payload = json.loads(raw_payload) if raw_payload is not None else None
-        except (ValueError, TypeError):
-            raise UnsupportedMainStorage("Retired request evidence is incomplete") from None
-        if (not isinstance(receipt, dict) or type(receipt.get("accepted")) is not bool
-                or receipt.get("request_id", request_id) != request_id
-                or receipt.get("session_id", session_id) != session_id
-                or receipt.get("client_request_id", client_id) != client_id
-                or payload is not None and (not isinstance(payload, dict) or payload.get("source") not in (None, "human"))
-                or reason != "legacy_rejected" and (not isinstance(payload, dict) or payload.get("source") != "human")):
-            raise UnsupportedMainStorage("Retired request evidence is incomplete")
-        refused = receipt["accepted"] is False
-        unstarted = (state in {"pending", "withdrawn"} and delivery == "none"
-                     and owner in (None, request_id) and generation is None and boot is None and group is None
-                     and not messages and not dependents and not sources)
-        if refused:
-            settled = (unstarted and state == "withdrawn" and owner is None and recovery_of is None and not child
-                       and receipt.get("disposition", "rejected") == "rejected")
-        else:
-            from ..execution_identity import process_group_exited
-            from ..models import TurnOutcome
-
-            try:
-                terminal = TurnOutcome.model_validate_json(raw_terminal) if raw_terminal is not None else None
-            except ValueError:
-                terminal = None
-            completed = (state == "done" and owner is not None and delivery in {"none", "confirmed"}
-                         and terminal is not None and terminal.request_id == owner
-                         and terminal.recording_integrity == "complete"
-                         and (owner == request_id or delivery == "confirmed" and shared_owner)
-                         and (previous_writers_retired or process_group_exited(group, boot)))
-            settled = (reason != "legacy_rejected" and isinstance(payload, dict) and payload.get("source") == "human"
-                       and receipt.get("disposition", "accepted") in ("accepted", "steered", "duplicate")
-                       and (unstarted or completed))
-        if not settled:
-            raise UnsupportedMainStorage("Retired requests require settlement by their original owner")
-        retired.append((session_id, client_id))
-    return retired
-
-
-def require_supported_main_format(db_path: str, *, previous_writers_retired: bool = False) -> None:
-    """Inspect one consistent committed snapshot, including its real WAL."""
+def require_current_main_format(db_path: str) -> None:
+    """Match the committed marker, including real WAL, before opening a writer."""
     path = persistent_database_file(db_path)
     if path is None:
         return
-    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as reader:
-        reader.execute("PRAGMA query_only=ON")
-        reader.execute("BEGIN")
-        version = reader.execute("PRAGMA user_version").fetchone()[0]
-        rows = reader.execute(_CATALOG).fetchall()
-        new = _validate_layout(version, rows)
-        if not new and version == 0:
-            if reader.execute(_UNSUPPORTED_BASELINE_DATA).fetchone():
-                raise UnsupportedMainStorage()
-            if any(name == "token_rotation_intent" for _, name, _ in rows):
-                if reader.execute("SELECT 1 FROM token_rotation_intent LIMIT 1").fetchone():
-                    raise UnsupportedMainStorage()
-        elif not new and version == 1:
-            if reader.execute(_UNSUPPORTED_RETIRED_DATA).fetchone():
-                raise UnsupportedMainStorage()
-        if not new:
-            _validate_schedule_modes(version, reader.execute(_SCHEDULE_MODES).fetchall())
-            _retired_inputs(version, reader.execute(_RETIRED_INPUTS).fetchall(),
-                            previous_writers_retired=previous_writers_retired)
-
-
-async def prepare_main_storage(tx: Transaction, *, previous_writers_retired: bool = False) -> None:
-    """Recheck under the original writer transaction; never commit here."""
-    version = (await tx.fetch_one("PRAGMA user_version"))[0]
-    rows = await tx.fetch_all(_CATALOG)
-    new = _validate_layout(version, rows)
-    if new:
-        for statement in _statements(_SCHEMA):
-            await tx.execute(statement)
-    else:
-        rotation_table = any(name == "token_rotation_intent" for _, name, _ in rows)
-        if version == 0:
-            if await tx.fetch_one(_UNSUPPORTED_BASELINE_DATA):
-                raise UnsupportedMainStorage()
-            if rotation_table:
-                if await tx.fetch_one("SELECT 1 FROM token_rotation_intent LIMIT 1"):
-                    raise UnsupportedMainStorage()
-        elif version == 1 and await tx.fetch_one(_UNSUPPORTED_RETIRED_DATA):
-            raise UnsupportedMainStorage()
-        missing = _validate_schedule_modes(version, await tx.fetch_all(_SCHEDULE_MODES))
-        retired = _retired_inputs(version, await tx.fetch_all(_RETIRED_INPUTS),
-                                  previous_writers_retired=previous_writers_retired)
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
+        db.execute("PRAGMA query_only=ON")
+        db.execute("BEGIN")
+        version = db.execute("PRAGMA user_version").fetchone()[0]
         if version == CURRENT_VERSION:
             return
-        if version == 0:
-            if rotation_table:
-                await tx.execute("DROP TABLE token_rotation_intent")
-            await tx.execute("DROP TABLE schema_migrations")
-            _validate_layout(1, await tx.fetch_all(_CATALOG))
-        if version in (0, 1):
-            await tx.execute("ALTER TABLE backend_credentials DROP COLUMN secret_encrypted")
-            await tx.execute("ALTER TABLE client_submissions DROP COLUMN recovered_by")
-        await tx.execute("UPDATE schedules SET wiki_mode='read' WHERE wiki_mode='off'")
-        for schedule_id in missing:
-            await tx.execute(
-                "UPDATE schedules SET invalid_reason=CASE WHEN enabled=0 AND invalid_reason IS NOT NULL "
-                "THEN invalid_reason ELSE 'knowledge_contract_missing' END, enabled=0 WHERE id=?",
-                (schedule_id,),
-            )
-        for session_id, client_id in retired:
-            await tx.execute("DELETE FROM client_submissions WHERE session_id=? AND client_id=?", (session_id, client_id))
-    _validate_layout(CURRENT_VERSION, await tx.fetch_all(_CATALOG))
+        if version == 0 and db.execute(_NONEMPTY).fetchone() is None:
+            return
+        raise UnsupportedMainStorage()
+
+
+async def initialize_main_storage(tx: Transaction) -> None:
+    """Recheck under the writer transaction and create only an empty database."""
+    version = (await tx.fetch_one("PRAGMA user_version"))[0]
+    if version == CURRENT_VERSION:
+        return
+    if version != 0 or await tx.fetch_one(_NONEMPTY) is not None:
+        raise UnsupportedMainStorage()
+    for statement in statements(_SCHEMA):
+        await tx.execute(statement)
     await tx.execute(f"PRAGMA user_version={CURRENT_VERSION}")
+
 
 _SCHEMA = """
 -- Complete current main format. Credentials and input recovery retain only

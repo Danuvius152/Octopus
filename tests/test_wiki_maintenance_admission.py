@@ -2,7 +2,7 @@
 
 import asyncio
 import sqlite3
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import replace
 from datetime import datetime, timedelta
 from uuid import uuid4
@@ -10,7 +10,7 @@ from uuid import uuid4
 import pytest
 
 from server import mcp_identity
-from server.wiki import maintenance_admission, maintenance_selections, schema
+from server.wiki import maintenance_admission, maintenance_selections
 from server.wiki.jobs import worker
 from server.wiki.store import WikiError
 from server.wiki.tasks import tasks
@@ -360,7 +360,9 @@ async def test_expired_cleanup_keeps_accepted_full_evidence_and_removes_only_una
 
 
 @pytest.mark.parametrize("missing", ["maintenance_selections", "maintenance_selection_items", "job_selection_evidence", "marker"])
-async def test_missing_initialized_selection_ledger_fails_before_disposable_cache_repair(client, tmp_path, missing):
+async def test_publication_rejects_missing_selection_authority_before_disposable_cache_repair(client, tmp_path, missing):
+    from server.storage_verification import verify_wiki
+
     _, _, jobs = await prepare(client, tmp_path, FILES)
     with jobs.store.connect() as db:
         db.execute("DROP TABLE search_documents")
@@ -368,9 +370,10 @@ async def test_missing_initialized_selection_ledger_fails_before_disposable_cach
             db.execute("DELETE FROM wiki_protocols WHERE name='maintenance_selections'")
         else:
             db.execute("DROP TABLE " + missing)
-    with pytest.raises(WikiError) as unavailable:
-        schema.initialize(jobs.store)
-    assert unavailable.value.status == 503
+    with closing(sqlite3.connect(jobs.store.db_path.as_uri() + "?mode=ro", uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        with pytest.raises(RuntimeError, match="current durable structure|incompatible structure or protocol"):
+            verify_wiki(db, {"root": str(jobs.store.root), "vault_id": jobs.store.vault_id})
     with jobs.store.connect() as db:
         assert db.execute("SELECT count(*) FROM documents").fetchone()[0] == 3
         assert not db.execute("SELECT 1 FROM sqlite_master WHERE name='search_documents'").fetchone()

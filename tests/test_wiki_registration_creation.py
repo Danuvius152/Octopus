@@ -42,9 +42,9 @@ def test_retained_registration_never_repairs_an_incomplete_or_mismatched_ledger(
         with sqlite3.connect(path) as db:
             db.execute("PRAGMA recursive_triggers=ON")
             if damage == "missing_schema":
-                db.execute("DROP TABLE wiki_schema")
+                db.execute("PRAGMA user_version=0")
             elif damage == "future_schema":
-                db.execute("INSERT INTO wiki_schema VALUES(999,'future')")
+                db.execute("PRAGMA user_version=999")
             elif damage == "root":
                 db.execute("UPDATE filesystem_state SET root='/another-vault'")
             else:
@@ -72,7 +72,7 @@ def stop_before_link(source,destination,*args,**kwargs):
     if Path(destination)==state/'index.sqlite3':
         with sqlite3.connect(Path(source).as_uri()+'?mode=ro',uri=True) as db:
             proof={'binding':db.execute('SELECT root,vault_id FROM filesystem_state').fetchone(),
-                'schema':db.execute('SELECT max(version) FROM wiki_schema').fetchone()[0]}
+                'schema':db.execute('PRAGMA user_version').fetchone()[0]}
         marker.write_text(json.dumps(proof))
         os._exit(71)
     return link(source,destination,*args,**kwargs)
@@ -184,7 +184,7 @@ def test_initial_database_schema_uses_the_confirmed_extra_connection(tmp_path):
 connect=sqlite3.connect
 class InspectConnection(sqlite3.Connection):
     def execute(self,sql,*args,**kwargs):
-        if getattr(self,'file_writer',False) and ' '.join(sql.split()).startswith('CREATE TABLE wiki_schema'):
+        if getattr(self,'file_writer',False) and ' '.join(sql.split()).startswith('CREATE TABLE app_trash'):
             assert super().execute('PRAGMA synchronous').fetchone()[0]==3
             marker.touch()
         return super().execute(sql,*args,**kwargs)

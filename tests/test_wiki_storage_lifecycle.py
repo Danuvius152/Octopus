@@ -186,7 +186,7 @@ class FaultyConnection(sqlite3.Connection):
         if fault=='pragma_mismatch' and sql=='PRAGMA synchronous=EXTRA':
             marker.with_suffix('.fault-started').touch()
             return super().execute('PRAGMA synchronous=NORMAL')
-        if fault=='metadata_sql' and sql.startswith('SELECT max(version)'): broken()
+        if fault=='metadata_sql' and sql=='PRAGMA user_version': broken()
         if fault=='access_sql' and sql.startswith('SELECT * FROM filesystem_recoveries'): broken()
         if fault=='worker_sql' and sql=='SELECT physical_fault': broken()
         return super().execute(sql,*args,**kwargs)

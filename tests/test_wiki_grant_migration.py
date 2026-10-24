@@ -1,13 +1,13 @@
 """Retained supported work keeps its identity and provable finite authority."""
 
 import sqlite3
+from contextlib import closing
 
 import pytest
 
-from server.wiki import grants, schema
+from server.wiki import grants
 from server.wiki.jobs import WikiJobs
 from server.wiki.registry import registry
-from server.wiki.store import WikiError
 from tests import test_wiki_api as wiki_api
 
 client = wiki_api.client
@@ -240,7 +240,9 @@ async def test_readmission_cannot_be_forged_by_a_model_or_used_to_replace_prior_
 
 
 @pytest.mark.parametrize("missing", [*grants.TABLES, "marker"])
-async def test_lost_grant_authority_is_not_rebuilt_with_search_cache(client, tmp_path, missing):
+async def test_publication_rejects_lost_grant_authority_without_rebuilding_search_cache(client, tmp_path, missing):
+    from server.storage_verification import verify_wiki
+
     root = tmp_path / "vault"
     root.mkdir()
     await wiki_api.configure(client, root)
@@ -253,9 +255,10 @@ async def test_lost_grant_authority_is_not_rebuilt_with_search_cache(client, tmp
             db.execute("DELETE FROM wiki_protocols WHERE name='wiki_grants'")
         else:
             db.execute("DROP TABLE " + missing)
-    with pytest.raises(WikiError) as error:
-        schema.initialize(store)
-    assert error.value.status == 503
+    with closing(sqlite3.connect(store.db_path.as_uri() + "?mode=ro", uri=True)) as db:
+        db.row_factory = sqlite3.Row
+        with pytest.raises(RuntimeError, match="current durable structure|incompatible structure or protocol"):
+            verify_wiki(db, {"root": str(store.root), "vault_id": store.vault_id})
     with store.connect() as db:
         assert db.execute("SELECT id FROM jobs").fetchone()[0] == job["id"]
         assert db.execute("SELECT 1 FROM sqlite_master WHERE name='search_documents'").fetchone() is None

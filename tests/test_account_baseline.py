@@ -17,7 +17,7 @@ from tests.test_service_runtime import installation_settings
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def refuse_start(configuration, entry, tmp_path):
+def refuse_start(configuration, entry, tmp_path, cause="RetainedLegacyInstallation"):
     admitted = tmp_path / "admitted"
     with tempfile.TemporaryDirectory(prefix="octopus-baseline-", dir="/var/tmp") as directory:
         journal = str(Path(directory) / "journal")
@@ -48,7 +48,7 @@ asyncio.run(start())
                 capture_output=True, text=True, timeout=15)
             assert result.returncode == 70, result.stderr
             diagnostic = receiver.recv(8192).decode()
-            assert "OCTOPUS_CAUSE=RetainedLegacyInstallation" in diagnostic
+            assert f"OCTOPUS_CAUSE={cause}" in diagnostic
             assert "original ciphertext" not in diagnostic and "retained-setup-proof" not in diagnostic
     assert not admitted.exists()
 
@@ -81,7 +81,7 @@ os._exit(0)
         assert Path(str(database) + "-wal").stat().st_size > 0
     retained = {path: path.read_bytes() for path in (database, environment, Path(str(database) + "-wal"))
                 if path.exists()}
-    refuse_start(configuration, entry, tmp_path)
+    refuse_start(configuration, entry, tmp_path, cause="UnsupportedMainStorage")
     assert not Path(config.master_key_file).exists()
     assert not Path(config.users_root).exists()
     assert {path: path.read_bytes() for path in retained} == retained

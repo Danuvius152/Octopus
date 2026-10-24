@@ -9,6 +9,7 @@ from .store import WikiError, asset_reason, revision
 
 
 def initialize(db):
+    missing = db.execute("SELECT 1 FROM sqlite_schema WHERE name='raw_materials'").fetchone() is None
     db.execute("""CREATE TABLE IF NOT EXISTS raw_materials (
       doc_id TEXT PRIMARY KEY,path TEXT NOT NULL,revision TEXT NOT NULL,
       original_hash TEXT NOT NULL,ownership TEXT NOT NULL
@@ -19,6 +20,7 @@ def initialize(db):
     db.execute("""CREATE TRIGGER IF NOT EXISTS raw_material_delete
       AFTER DELETE ON documents BEGIN
       DELETE FROM raw_materials WHERE doc_id=old.id; END""")
+    return missing
 
 
 def original(raw, owned):
