@@ -345,9 +345,10 @@ under 60 chars.
 
 ### 5.4 Database
 
-Three new tables (additive migration in `server/database.py`,
-matching the existing ALTER-in-`_apply_migrations` pattern at
-`server/database.py:149-196`):
+The original rollout added three tables through the then-current additive
+migration path. The SQL below records that design; current main storage declares
+the complete format in `server/db/schema.py` and prepares supported versions
+atomically, without the old `_apply_migrations` chain:
 
 ```sql
 CREATE TABLE IF NOT EXISTS connector_installations (

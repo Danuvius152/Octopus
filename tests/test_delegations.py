@@ -146,15 +146,21 @@ async def _model_scope(dm, rec):
 
 
 # ---------------------------------------------------------------------------
-# Schema migration
+# Persisted delegation identity
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_schema_has_new_columns(db):
-    cols = {row[1] for row in await db._column_info("sessions")}
-    assert "parent_session_id" in cols
-    assert "delegation_request" in cols
+async def test_delegation_identity_round_trips_through_storage(db):
+    agent = await db.get_system_agent()
+    owner = agent["user_id"]
+    await db.save_session("identity-parent", "Parent", "/tmp", "time", agent_id=agent["id"], user_id=owner)
+    await db.save_session("identity-child", "Child", "/tmp", "time", agent_id=agent["id"], user_id=owner,
+                          parent_session_id="identity-parent", origin="delegation", delegation_request="Original request")
+    child = next(row for row in await db.load_sessions(user_id=owner) if row["id"] == "identity-child")
+    assert child["parent_session_id"] == "identity-parent"
+    assert child["delegation_request"] == "Original request"
+    assert child["user_id"] == owner
 
 
 @pytest.mark.asyncio

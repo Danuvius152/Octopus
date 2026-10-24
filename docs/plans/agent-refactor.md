@@ -2,6 +2,11 @@
 
 > **Status:** shipped — First-class Agents: the durable definition that owns sessions, schedules and memory.
 
+> **Storage update, 2026-10-24:** the migration/backfill rollout below is historical.
+> Current main storage validates one complete baseline and uses atomic, versioned
+> preparation; it does not create an installation agent or repair old schedule,
+> bridge or owner relationships on every boot. See [current storage](../architecture.md).
+
 Reference design: vm0 (`~/vm0`), which cleanly splits **Agent (definition) ↔ Session (continuation) ↔ Run (execution)**. Octopus today only has `Session`. We adopt vm0's split *partially* (YAGNI), with a path to the full split later.
 
 ## 0. Why this exists, and the shape of this refactor

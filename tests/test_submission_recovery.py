@@ -17,6 +17,7 @@ from server.sessions import SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
 from server.users import UserManager
 from tests.accounts import create_account
+from tests.main_storage import write_unversioned_baseline
 
 
 @pytest.fixture(autouse=True)
@@ -437,7 +438,8 @@ async def test_recovery_attachments_are_bound_to_saved_bytes_and_owner(tmp_path,
             await db.close()
 
 
-async def test_legacy_submission_migration_preserves_receipt_without_inventing_input(tmp_path):
+@pytest.mark.parametrize("version", [0, 1])
+async def test_supported_format_preserves_a_receipt_without_inventing_missing_input(tmp_path, version):
     import sqlite3
 
     path = str(tmp_path / "legacy.db")
@@ -450,9 +452,11 @@ async def test_legacy_submission_migration_preserves_receipt_without_inventing_i
     session = await manager.create_session(agent["id"], "legacy", str(tmp_path), backend="codex")
     await db.close()
     with sqlite3.connect(path) as legacy:
-        legacy.execute("DROP TABLE client_submissions")
-        legacy.execute("CREATE TABLE client_submissions(session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,client_id TEXT NOT NULL,payload_sha256 TEXT NOT NULL,request_id TEXT NOT NULL,receipt TEXT,PRIMARY KEY(session_id,client_id))")
-        legacy.execute("INSERT INTO client_submissions VALUES(?,?,?,?,?)", (session.id, "legacy", "digest", "legacy-request", '{"accepted":true,"disposition":"accepted"}'))
+        legacy.execute("INSERT INTO client_submissions(session_id,client_id,payload_sha256,request_id,receipt,execution_state) "
+                       "VALUES(?,?,?,?,?,'unknown')", (session.id, "legacy", "digest", "legacy-request", '{"accepted":true,"disposition":"accepted"}'))
+    legacy.close()
+    if version == 0:
+        write_unversioned_baseline(Path(path))
     reopened = Database(path)
     await reopened.initialize()
     deps.set_user_manager(UserManager(reopened))

@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import sqlite3
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 
 from server.crypto import decrypt, encrypt
 from server.database import Database
 from tests.accounts import create_account
+from tests.main_storage import write_unversioned_baseline
 
 # ---------------------------------------------------------------------------
 # crypto
@@ -150,55 +152,39 @@ async def test_load_prefers_split_secret_over_legacy_column(db):
         "UPDATE credential_secrets SET secret_encrypted = ? WHERE credential_id = ?",
         (fresh, "c-rot"),
     )
+    await db.conn.execute("UPDATE backend_credentials SET secret_encrypted=? WHERE id='c-rot'",
+                          (encrypt("stale placeholder", "retired key"),))
     await db.conn.commit()
     row = await db.get_credential("c-rot")
     assert decrypt(row["secret_encrypted"], "k") == "second"
 
 
-async def test_upgrade_preserves_legacy_only_secrets_and_retires_stale_copies(tmp_path):
+async def test_supported_upgrade_preserves_split_ciphertexts_and_account_ownership(tmp_path):
     path = tmp_path / "legacy.db"
     seed = Database(str(path))
     await seed.initialize()
     owner, _ = await create_account(seed)
-    await seed.close()
-    original = encrypt("legacy only", "original key")
-    stale = encrypt("obsolete value", "retired key")
+    original = encrypt("original value", "original key")
     current = encrypt("rotated value", "current key")
-    with sqlite3.connect(path) as stored:
-        stored.executescript("""
-            DROP TABLE credential_secrets;
-            DROP TABLE backend_credentials;
-            CREATE TABLE backend_credentials (
-                id TEXT PRIMARY KEY, backend TEXT NOT NULL, label TEXT NOT NULL,
-                auth_type TEXT NOT NULL, secret_encrypted TEXT NOT NULL,
-                created_at TEXT NOT NULL, user_id TEXT
-            );
-            CREATE TABLE credential_secrets (
-                credential_id TEXT PRIMARY KEY, secret_encrypted TEXT NOT NULL,
-                FOREIGN KEY (credential_id) REFERENCES backend_credentials(id)
-            );
-        """)
-        stored.executemany(
-            "INSERT INTO backend_credentials VALUES (?, 'codex', 'Personal', 'api_key', ?, 't', ?)",
-            [("legacy", original, owner["id"]), ("rotated", stale, owner["id"])],
-        )
-        stored.execute("INSERT INTO credential_secrets VALUES ('rotated', ?)", (current,))
+    await seed.save_credential("original", "codex", "Personal", "api_key", original, "t", user_id=owner["id"])
+    await seed.save_credential("rotated", "codex", "Personal", "api_key", current, "t", user_id=owner["id"])
+    await seed.close()
+    write_unversioned_baseline(Path(path))
 
     for _ in range(2):
         upgraded = Database(str(path))
         await upgraded.initialize()
         try:
-            legacy = await upgraded.get_credential("legacy")
+            legacy = await upgraded.get_credential("original")
             rotated = await upgraded.get_credential("rotated")
             assert legacy["user_id"] == rotated["user_id"] == owner["id"]
-            assert decrypt(legacy["secret_encrypted"], "original key") == "legacy only"
+            assert decrypt(legacy["secret_encrypted"], "original key") == "original value"
             assert decrypt(rotated["secret_encrypted"], "current key") == "rotated value"
         finally:
             await upgraded.close()
 
         with sqlite3.connect(path) as stored:
             dump = "\n".join(stored.iterdump())
-        assert stale not in dump
         assert dump.count(original) == 1
         assert dump.count(current) == 1
 

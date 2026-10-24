@@ -2,6 +2,7 @@
 
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -28,9 +29,17 @@ def test_owned_storage_recovery_can_be_interrupted_again_without_replaying_effec
     note = root / "vault" / seed["note"]["path"]
     applied = note.read_bytes()
     run("input", 71)
+    first_recovery = json.loads((root / "input-recovery.json").read_text())
+    assert first_recovery == {"generations": ["started-generation", "unknown-generation"],
+                              "states": {"staged": "withdrawn", "started": "unknown", "unknown": "unknown",
+                                         "exact": "done", "successor": "withdrawn"}}
+    with sqlite3.connect(config.db_path) as reader:
+        assert reader.execute("PRAGMA user_version").fetchone() == (1,)
+    reader.close()
     run("wiki", 72)
     assert note.read_bytes() == applied
     run("input", 71)
+    assert json.loads((root / "input-recovery.json").read_text()) == first_recovery
     # A later user version is outside both databases. Another recovery exit
     # must preserve it, together with the original unknown execution evidence.
     later = applied + b"\nLater human condition during recovery.\n"

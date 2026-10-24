@@ -52,6 +52,7 @@ from server.users import UserManager
 from tests.accounts import create_account
 from tests.completion_models import CompletionModels
 from tests.fake_run import FakeRunBase
+from tests.main_storage import write_unversioned_baseline
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -1316,40 +1317,25 @@ def test_missing_entrypoint_does_not_throw(tmp_path):
     assert discover_icon_src(d, "index.html") == "icon.svg"
 
 
-async def test_existing_database_migrates_to_icon_src(tmp_path):
-    """An existing deployment gains the column on the next start, and its rows
-    survive untouched — nullable with no default, so a row simply has no
-    discovered icon until its next build.
-
-    The "old" database is built by running the real schema and then dropping
-    the column, rather than pasting a hand-written copy of last release's
-    schema: a hand-written one drifts, and a drifted one tests nothing.
-    """
+async def test_supported_upgrade_preserves_a_missing_discovered_icon(tmp_path):
+    """Opening a complete baseline keeps the original app and nullable icon."""
     db_file = str(tmp_path / "old.db")
     seed = Database(db_file)
     await seed.initialize()
     owner, _ = await create_account(seed, extra_roots=[tmp_path])
-    await seed._conn.execute(
-        "INSERT INTO applications (id, name, app_dir, entrypoint, status,"
-        " created_at, updated_at, user_id) VALUES"
-        " ('a1', 'Legacy', '/tmp/legacy', 'index.html', 'ready', 't', 't', ?)",
-        (owner["id"],),
-    )
-    await seed._conn.commit()
-    await seed._conn.execute("ALTER TABLE applications DROP COLUMN icon_src")
-    await seed._conn.commit()
-    cur = await seed._conn.execute("PRAGMA table_info(applications)")
-    assert "icon_src" not in [r[1] for r in await cur.fetchall()]
+    await seed.save_application(app_id="a1", name="Legacy", app_dir="/tmp/legacy",
+                                entrypoint="index.html", status="ready", created_at="t",
+                                updated_at="t", user_id=owner["id"])
+    expected = await seed.get_application("a1", owner["id"])
     await seed.close()
+    write_unversioned_baseline(Path(db_file))
 
-    # Restart against that database: the migration runs.
     db = Database(db_file)
     await db.initialize()
     try:
-        cur = await db._conn.execute("PRAGMA table_info(applications)")
-        assert "icon_src" in [r[1] for r in await cur.fetchall()]
         row = await db.get_application("a1")
         assert row is not None
+        assert row == expected
         assert row["user_id"] == owner["id"]
         assert row["name"] == "Legacy"    # the old row survived
         assert row["icon_src"] is None    # and simply has no icon yet

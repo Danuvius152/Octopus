@@ -10,6 +10,7 @@ from server.scheduler import ScheduleRunner
 from server.session_manager import SessionManager
 from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
+from tests.main_storage import write_unversioned_baseline
 from tests.submission import accepted_receipt
 
 
@@ -654,119 +655,35 @@ async def test_run_at_column_roundtrip():
 
 
 @pytest.mark.asyncio
-async def test_migrate_schedule_recurrence_from_legacy_shape():
-    """The in-place migration rebuilds a pre-recurrence schedules table
-    (NOT NULL interval, no cron column), preserving existing interval rows."""
-    db = Database(":memory:")
+@pytest.mark.parametrize("version", [0, 1])
+async def test_saved_recurrence_definitions_survive_supported_upgrade_and_reopen(tmp_path, version):
+    path = tmp_path / "recurrences.db"
+    db = Database(str(path))
     await db.initialize()
-    await create_account(db)
-    try:
-        agent = await db.get_system_agent()
-        conn = db._conn
-        # Recreate the legacy schema + a legacy interval schedule.
-        await conn.executescript(
-            """
-            DROP TABLE schedules;
-            CREATE TABLE schedules (
-                id TEXT PRIMARY KEY,
-                agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
-                name TEXT NOT NULL,
-                prompt TEXT NOT NULL,
-                interval_seconds INTEGER NOT NULL,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                last_run_at TEXT
-            );
-            """
-        )
-        await conn.execute(
-            "INSERT INTO schedules (id, agent_id, name, prompt, interval_seconds, "
-            "enabled, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
-            ("leg1", agent["id"], "legacy", "do it", 120, "t"),
-        )
-        await conn.commit()
-        assert not await db._has_column("schedules", "cron")
+    owner, _ = await create_account(db)
+    agent = await db.get_system_agent(owner["id"])
+    for identity, recurrence in (
+        ("interval", {"interval_seconds": 120}),
+        ("cron", {"cron": "0 6 * * *", "timezone": "UTC", "recurrence_label": "Every day at 6 AM"}),
+        ("once", {"run_at": "2030-01-15T09:00:00+00:00", "recurrence_label": "Once"}),
+    ):
+        await save_schedule(db, schedule_id=identity, agent_id=agent["id"], name=identity,
+                            prompt="Preserve this exact request", created_at="t", **recurrence)
+    expected = await db.load_schedules()
+    await db.close()
+    if version == 0:
+        write_unversioned_baseline(path)
+    for _ in range(2):
+        db = Database(str(path))
+        await db.initialize()
+        try:
+            assert await db.load_schedules() == expected
+            interval = await db.get_schedule_definition("interval")
+            assert interval["interval_seconds"] == 120 and interval["cron"] is None and interval["run_at"] is None
+            assert (await db.get_agent(agent["id"]))["user_id"] == owner["id"]
+        finally:
+            await db.close()
 
-        await db._migrate_schedule_recurrence()
-        await db._migrate_schedule_run_at()
-
-        assert await db._has_column("schedules", "cron")
-        rows = await db.load_schedules()
-        assert len(rows) == 1
-        assert rows[0]["id"] == "leg1"
-        assert rows[0]["interval_seconds"] == 120
-        assert rows[0]["cron"] is None
-        assert rows[0]["recurrence_label"] is None
-        assert rows[0]["run_at"] is None
-
-        # A cron schedule can now be inserted (interval_seconds nullable).
-        await save_schedule(db,
-            schedule_id="cron2",
-            agent_id=agent["id"],
-            name="n",
-            prompt="p",
-            created_at="t",
-            cron="0 6 * * *",
-            timezone="UTC",
-            recurrence_label="Every day at 6 AM",
-        )
-        # Idempotent: re-running the migration is a no-op.
-        await db._migrate_schedule_recurrence()
-        assert len(await db.load_schedules()) == 2
-    finally:
-        await db.close()
-
-
-@pytest.mark.asyncio
-async def test_migrate_schedule_run_at_from_legacy_shape():
-    """_migrate_schedule_run_at adds run_at to a pre-existing table that lacks
-    it, preserving existing rows, and is idempotent on re-run."""
-    db = Database(":memory:")
-    await db.initialize()
-    await create_account(db)
-    try:
-        agent = await db.get_system_agent()
-        conn = db._conn
-        # Simulate a pre-run_at table by dropping and recreating without run_at.
-        await conn.executescript(
-            """
-            DROP TABLE schedules;
-            CREATE TABLE schedules (
-                id TEXT PRIMARY KEY,
-                agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
-                origin_session_id TEXT,
-                name TEXT NOT NULL,
-                prompt TEXT NOT NULL,
-                interval_seconds INTEGER,
-                cron TEXT,
-                timezone TEXT,
-                recurrence_label TEXT,
-                enabled INTEGER NOT NULL DEFAULT 1,
-                created_at TEXT NOT NULL,
-                last_run_at TEXT
-            );
-            """
-        )
-        await conn.execute(
-            "INSERT INTO schedules (id, agent_id, name, prompt, interval_seconds, "
-            "enabled, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)",
-            ("old1", agent["id"], "old", "do it", 120, "t"),
-        )
-        await conn.commit()
-        assert not await db._has_column("schedules", "run_at")
-
-        await db._migrate_schedule_run_at()
-
-        assert await db._has_column("schedules", "run_at")
-        rows = await db.load_schedules()
-        assert len(rows) == 1
-        assert rows[0]["run_at"] is None
-
-        # Idempotent.
-        await db._migrate_schedule_run_at()
-        assert await db._has_column("schedules", "run_at")
-    finally:
-        await db.close()
 
 
 # ---------------------------------------------------------------- overlap

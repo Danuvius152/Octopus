@@ -1,48 +1,34 @@
-"""The sidebar-pins migration (sidebar-pins.md §4) on a database that predates it.
+"""Saved sidebar choices survive the supported upgrade and repeated startup."""
 
-Every agent and application that existed before pins must come out pinned, in
-the order the sidebar already showed them — the Default Agent first, then by
-creation — so the first boot on the new schema changes nothing the user sees.
-Run twice to prove the backfill is idempotent.
-"""
+from pathlib import Path
 
 import pytest
 
 from server.database import Database
 from tests.accounts import create_account
+from tests.main_storage import write_unversioned_baseline
 
 
-async def _seed(path: str) -> tuple[str, str]:
-    db = Database(path)
+async def _seed(path: Path, version: int) -> tuple[str, str]:
+    db = Database(str(path))
     await db.initialize()
     owner, _ = await create_account(db)
     default = await db.get_system_agent(owner["id"])
-    conn = db.conn
-    # Inserted out of creation order, with the Default Agent created last, so
-    # the backfill has to sort rather than trust rowid.
-    await conn.execute("UPDATE agents SET created_at='2026-04-01', updated_at='2026-04-01' WHERE id=?", (default["id"],))
-    for agent_id, name, created, is_system, archived in (
-        ("b", "Beta", "2026-02-01", 0, 0),
-        ("a", "Alpha", "2026-01-01", 0, 0),
-        ("z", "Zed", "2026-03-01", 0, 1),
+    # Creation order, insertion order and the user's chosen order differ.
+    for agent_id, name, created in (
+        ("b", "Beta", "2026-02-01"), ("a", "Alpha", "2026-01-01"), ("z", "Zed", "2026-03-01"),
     ):
-        await conn.execute(
-            "INSERT INTO agents (id, name, is_system, archived, created_at, "
-            "updated_at, user_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (agent_id, name, is_system, archived, created, created, owner["id"]),
-        )
+        await db.save_agent(agent_id=agent_id, name=name, created_at=created,
+                             updated_at=created, user_id=owner["id"])
+    await db.reorder_agent_pins([default["id"], "a", "b", "z"])
+    await db.archive_agent("z")
     for app_id, created in (("app2", "2026-02-01"), ("app1", "2026-01-01")):
-        await conn.execute(
-            "INSERT INTO applications (id, name, app_dir, created_at, "
-            "updated_at, user_id) VALUES (?, ?, '/tmp/x', ?, ?, ?)",
-            (app_id, app_id, created, created, owner["id"]),
-        )
-    # Keep account ownership while recreating precisely the missing columns.
-    for table in ("agents", "applications"):
-        for column in ("pinned", "pin_order"):
-            await conn.execute(f"ALTER TABLE {table} DROP COLUMN {column}")
-    await conn.commit()
+        await db.save_application(app_id=app_id, name=app_id, app_dir="/tmp/x",
+                                   created_at=created, updated_at=created, user_id=owner["id"])
+    await db.reorder_application_pins(["app1", "app2"])
     await db.close()
+    if version == 0:
+        write_unversioned_baseline(path)
     return owner["id"], default["id"]
 
 
@@ -54,12 +40,13 @@ def _order(rows: list[dict]) -> list[tuple[str, bool, int]]:
 
 
 @pytest.mark.asyncio
-async def test_existing_rows_come_out_pinned_in_sidebar_order(tmp_path):
-    path = str(tmp_path / "pre-pins.db")
-    owner, default = await _seed(path)
+@pytest.mark.parametrize("version", [0, 1])
+async def test_existing_sidebar_order_and_ownership_survive_repeated_open(tmp_path, version):
+    path = tmp_path / "pins.db"
+    owner, default = await _seed(path, version)
 
     for _ in range(2):  # the second boot must change nothing
-        db = Database(path)
+        db = Database(str(path))
         await db.initialize()
         agents = await db.load_agents(include_archived=True, user_id=owner)
         apps = await db.load_applications(include_archived=True, user_id=owner)
@@ -73,13 +60,15 @@ async def test_existing_rows_come_out_pinned_in_sidebar_order(tmp_path):
         ]
         assert _order(apps) == [("app1", True, 1), ("app2", True, 2)]
         assert all(row["user_id"] == owner for row in [*agents, *apps])
+        assert next(row for row in agents if row["id"] == "z")["archived"]
 
 
 @pytest.mark.asyncio
-async def test_rows_written_after_the_migration_append(tmp_path):
-    path = str(tmp_path / "pre-pins.db")
-    owner, _ = await _seed(path)
-    db = Database(path)
+@pytest.mark.parametrize("version", [0, 1])
+async def test_new_pinned_rows_append_after_the_saved_positions(tmp_path, version):
+    path = tmp_path / "pins.db"
+    owner, _ = await _seed(path, version)
+    db = Database(str(path))
     await db.initialize()
     await db.save_agent(
         agent_id="new", name="New", created_at="2026-05-01", updated_at="2026-05-01", user_id=owner,

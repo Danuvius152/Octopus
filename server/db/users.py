@@ -52,7 +52,7 @@ class UsersMixin(DatabaseBase):
         """Fresh schema records are allowed; retained business rows are not."""
         tables = await tx.fetch_all(
             "SELECT name FROM sqlite_schema WHERE type='table' "
-            "AND name NOT LIKE 'sqlite_%' AND name!='schema_migrations'"
+            "AND name NOT GLOB 'sqlite_*'"
         )
         for (name,) in tables:
             quoted = name.replace('"', '""')

@@ -1,17 +1,18 @@
 """Saved agent choices survive startup and supported storage upgrades."""
 
-import sqlite3
+from pathlib import Path
 
 import pytest
 
 from server.agent_manager import AgentManager
 from server.database import Database
 from server.users import UserManager
+from tests.main_storage import write_unversioned_baseline
 
 
 @pytest.mark.parametrize("name", ["Default", "My assistant"])
 @pytest.mark.parametrize("tools", [[], ["bg", "ask"]])
-@pytest.mark.parametrize("upgrade", [False, True], ids=["current", "additive-upgrade"])
+@pytest.mark.parametrize("upgrade", [False, True], ids=["current", "supported-v0"])
 async def test_startup_preserves_saved_agent_configuration(tmp_path, name, tools, upgrade):
     path = str(tmp_path / "agents.db")
     db = Database(path)
@@ -42,10 +43,7 @@ async def test_startup_preserves_saved_agent_configuration(tmp_path, name, tools
         await db.close()
 
     if upgrade:
-        # A real supported additive upgrade, alongside saved account settings.
-        with sqlite3.connect(path) as connection:
-            connection.execute("ALTER TABLE sessions DROP COLUMN delegation_state")
-            connection.execute("DELETE FROM schema_migrations WHERE version='column:sessions.delegation_state'")
+        write_unversioned_baseline(Path(path))
 
     for _ in range(2):
         db = Database(path)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import copy
-import sqlite3
 import subprocess
 import sys
 from pathlib import Path
@@ -13,6 +12,7 @@ import pytest
 
 from server.database import Database
 from tests.accounts import create_account
+from tests.main_storage import write_unversioned_baseline
 
 CREATED_AT = "2026-10-19T12:00:00+00:00"
 CONTEXT = '{"version":1,"return_binding":{"request_id":"parent-read"}}'
@@ -222,7 +222,7 @@ async def test_request_waits_for_its_original_commit_acknowledgement(database, m
         await reader.close()
 
 
-async def test_additive_migration_preserves_legacy_rows_and_does_not_replay(tmp_path):
+async def test_supported_upgrade_preserves_missing_contracts_and_does_not_replay(tmp_path):
     path = str(tmp_path / "legacy.db")
     legacy = Database(path)
     await legacy.initialize()
@@ -239,11 +239,7 @@ async def test_additive_migration_preserves_legacy_rows_and_does_not_replay(tmp_
         )
     finally:
         await legacy.close()
-    # Emulate the former on-disk schema at the storage boundary. Verification
-    # below uses only the public Database readers and startup settlement API.
-    with sqlite3.connect(path) as disk:
-        for table in ("bg_tasks", "research_jobs", "schedules"):
-            disk.execute(f"ALTER TABLE {table} DROP COLUMN knowledge_context")
+    write_unversioned_baseline(Path(path))
 
     upgraded = Database(path)
     await upgraded.initialize()

@@ -101,6 +101,10 @@ Claude/Codex credential badges.
 
 ## 4. Data model changes
 
+The migration instructions in this section record the original backend rollout.
+These columns are now part of the complete main format; current startup uses
+versioned preparation rather than the retired `_apply_migrations` chain.
+
 ### 4.1 New column `sessions.backend`
 
 Make a session's backend explicit and durable, not inferred from its

@@ -97,7 +97,7 @@ async def lifespan(app: FastAPI):
         from .wiki.registry import registry as wiki_registry
         wiki_registry.bind_health(service_health)
         try:
-            await db.reject_unfinished_token_rotation()
+            await db.inspect()
             await asyncio.to_thread(require_account_installation, settings)
             master_key()
         except BaseException as error:

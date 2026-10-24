@@ -1,13 +1,18 @@
-"""Legacy admission evidence is readable without inventing executable input."""
+"""Current input facts survive format preparation and runtime classification."""
 
 import json
 import sqlite3
+from contextlib import closing
+
+import pytest
 
 from server.database import Database
 from tests.accounts import create_account
+from tests.main_storage import write_unversioned_baseline
 
 
-async def test_legacy_stages_and_forward_recovery_links_survive_repeated_open(tmp_path):
+@pytest.mark.parametrize("version", [0, 1])
+async def test_current_stages_and_child_recovery_authority_survive_repeated_open(tmp_path, version):
     path = tmp_path / "legacy-inputs.db"
     db = Database(str(path))
     await db.initialize()
@@ -18,22 +23,25 @@ async def test_legacy_stages_and_forward_recovery_links_survive_repeated_open(tm
     await db.close()
     payload = json.dumps({"content": "Original content", "attachment_ids": [], "attachments": [], "wiki_mode": None})
     accepted = '{"accepted":true,"disposition":"accepted"}'
-    with sqlite3.connect(path) as legacy:
-        legacy.execute("DROP INDEX messages_terminal_request")
-        legacy.execute("ALTER TABLE messages DROP COLUMN terminal_request_id")
-        for identity, state, body, receipt, recovery_of, recovered_by in (
-            ("source", "withdrawn", payload, accepted, None, "child"),
-            ("child", "queued", payload, accepted, None, None),
-            ("refused-recovery", "rejected", payload, '{"accepted":false}', "source", None),
-            ("missing", "queued", None, accepted, None, None),
-            ("started", "claimed", payload, accepted, None, None),
-            ("unproven-result", "completed", payload, accepted, None, None),
+    with closing(sqlite3.connect(path)) as stored:
+        for identity, state, body, receipt, recovery_of, reason, generation in (
+            ("source", "withdrawn", payload, accepted, None, None, None),
+            ("child", "pending", payload, accepted, "source", None, None),
+            ("refused-recovery", "withdrawn", payload, '{"accepted":false}', None, "legacy_rejected", None),
+            ("missing", "unknown", None, accepted, None, None, None),
+            ("started", "running", payload, accepted, None, None, "original-generation"),
+            ("unproven-result", "unknown", payload, accepted, None, None, None),
         ):
-            legacy.execute(
+            stored.execute(
                 "INSERT INTO client_submissions(session_id,client_id,payload_sha256,request_id,payload,receipt,"
-                "execution_state,recovery_of,recovered_by) VALUES('legacy',?,?,?,?,?,?,?,?)",
-                (identity, "digest", identity, body, receipt, state, recovery_of, recovered_by),
+                "execution_state,recovery_of,reason_code,execution_generation) VALUES('legacy',?,?,?,?,?,?,?,?,?)",
+                (identity, "digest", identity, body, receipt, state, recovery_of, reason, generation),
             )
+        stored.commit()
+        original = stored.execute("SELECT client_id,payload,receipt,execution_state,recovery_of,recovered_by,execution_generation "
+                                  "FROM client_submissions ORDER BY client_id").fetchall()
+    if version == 0:
+        write_unversioned_baseline(path)
     for _ in range(2):
         reopened = Database(str(path))
         await reopened.initialize()
@@ -48,5 +56,22 @@ async def test_legacy_stages_and_forward_recovery_links_survive_repeated_open(tm
             assert (await reopened.get_client_submission("legacy", "missing"))["execution_state"] == "unknown"
             assert (await reopened.get_client_submission("legacy", "started"))["execution_state"] == "running"
             assert (await reopened.get_client_submission("legacy", "unproven-result"))["execution_state"] == "unknown"
+            assert (await reopened.get_session_binding("legacy"))["user_id"] == owner["id"]
+            async with reopened.transaction(write=False) as tx:
+                assert await tx.fetch_all("SELECT client_id,payload,receipt,execution_state,recovery_of,recovered_by,execution_generation "
+                                          "FROM client_submissions ORDER BY client_id") == original
         finally:
             await reopened.close()
+    current = Database(str(path))
+    await current.initialize()
+    try:
+        assert await current.recover_client_submissions() == frozenset({"original-generation"})
+        assert (await current.get_client_submission("legacy", "child"))["execution_state"] == "withdrawn"
+        started = await current.get_client_submission("legacy", "started")
+        assert started["execution_state"] == "unknown" and started["execution_generation"] == "original-generation"
+        assert started["payload"]["content"] == "Original content"
+        assert (await current.get_client_submission("legacy", "source"))["recovered_by"] == "child"
+        await current.recover_client_submissions()
+        assert await current.get_client_submission("legacy", "started") == started
+    finally:
+        await current.close()

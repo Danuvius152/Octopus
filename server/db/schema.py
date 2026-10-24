@@ -1,29 +1,212 @@
-"""The database schema, as one DDL script.
+"""The current main-database format and its finite preparation path.
 
-Split out of the 2,600-line `database.py` (docs/plans/polish-2026-09.md §3 A4)
-so the shape of the data is readable on its own, without scrolling past the
-hundred methods that operate on it. `Database.initialize` executes this, then
-runs the migrations in `migrations.py` to bring an older file up to it.
+Format is owned by SQLite user_version. Inspection never repairs retained
+storage; preparation runs under Database's original writer transaction.
 """
 
 from __future__ import annotations
 
-import json
+import re
+import sqlite3
+from collections.abc import Iterator, Sequence
+from contextlib import closing
 
+from ..account_baseline import persistent_database_file
+from .transaction import Transaction
+
+CURRENT_VERSION = 1
 _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
-_DEFAULT_MCP_SERVERS_JSON = json.dumps(_DEFAULT_MCP_SERVERS)
+
+
+class UnsupportedMainStorage(RuntimeError):
+    """Retained storage has no supported preparation path; contains no payload."""
+
+
+_CATALOG = "SELECT type,name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*'"
+_LEDGER_SCHEMA = "CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+_MESSAGE_GUARDS = """
+CREATE TRIGGER messages_sequence_insert
+BEFORE INSERT ON messages
+WHEN EXISTS(SELECT 1 FROM messages WHERE session_id = NEW.session_id AND seq = NEW.seq)
+BEGIN SELECT RAISE(ABORT, 'duplicate message sequence'); END;
+CREATE TRIGGER messages_sequence_update
+BEFORE UPDATE OF session_id, seq ON messages
+WHEN (NEW.session_id != OLD.session_id OR NEW.seq != OLD.seq)
+  AND EXISTS(SELECT 1 FROM messages WHERE session_id = NEW.session_id
+             AND seq = NEW.seq AND id != OLD.id)
+BEGIN SELECT RAISE(ABORT, 'duplicate message sequence'); END;
+"""
+
+
+def _statements(script: str) -> Iterator[str]:
+    """Split trusted DDL at complete statements, including trigger bodies."""
+    start = 0
+    for end, char in enumerate(script, 1):
+        if char == ";" and sqlite3.complete_statement(script[start:end]):
+            yield script[start:end]
+            start = end
+    if script[start:].strip():
+        raise ValueError("Incomplete main-database DDL")
+
+
+_SQL_TOKEN = re.compile(
+    r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`|\[[^\]]*\]"
+    r"|--[^\n]*|/\*.*?\*/|\w+|[^\s]", re.DOTALL,
+)
+
+
+def _definition(kind: str, sql: str) -> tuple:
+    """Compare declarations, retaining constraints and literal values.
+
+    SQLite retains original CREATE text, including comments and ALTER-added
+    column order. Unquoted spelling, whitespace and declaration order are
+    immaterial. Quoted tokens remain distinct: SQLite also accepts quoted
+    type names and default text where removing quotes changes the meaning.
+    """
+    tokens = []
+    for token in _SQL_TOKEN.findall(sql):
+        if token.startswith(("--", "/*")):
+            continue
+        if token.startswith(("'", '"', '`', '[')):
+            tokens.append(token)
+        else:
+            tokens.append(token.lower())
+    if tokens[-1:] == [";"]:
+        tokens.pop()
+    # sqlite_schema omits IF NOT EXISTS in some SQLite releases.
+    for offset in (2, 3):
+        if tokens[offset:offset + 3] == ["if", "not", "exists"]:
+            del tokens[offset:offset + 3]
+            break
+    if kind != "table":
+        return tuple(tokens)
+    opening = tokens.index("(")
+    declarations = []
+    start, depth = opening + 1, 1
+    for offset in range(start, len(tokens)):
+        token = tokens[offset]
+        if token == "(":
+            depth += 1
+        elif token == ")":
+            depth -= 1
+        if depth == 0 or (token == "," and depth == 1):
+            declarations.append(tuple(tokens[start:offset]))
+            start = offset + 1
+        if depth == 0:
+            return (tuple(tokens[:opening]), tuple(sorted(declarations)), tuple(tokens[offset + 1:]))
+    raise UnsupportedMainStorage()
+
+
+def _validate_layout(version: int, rows: Sequence[tuple[str, str, str]]) -> bool:
+    """Return whether this is new empty storage; otherwise require a full format."""
+    if version not in (0, CURRENT_VERSION):
+        raise UnsupportedMainStorage()
+    if not rows:
+        if version == 0:
+            return True
+        raise UnsupportedMainStorage()
+    actual = {(kind, name): _definition(kind, sql) for kind, name, sql in rows}
+    # The private in-memory catalog compiles the single current DDL authority;
+    # it never creates or prepares a retained file and is never a version cache.
+    with closing(sqlite3.connect(":memory:")) as reference:
+        for statement in _statements(_SCHEMA):
+            reference.execute(statement)
+        expected = {(kind, name): _definition(kind, sql) for kind, name, sql in reference.execute(_CATALOG)}
+        if any(("trigger", name) in actual for name in ("messages_sequence_insert", "messages_sequence_update")):
+            if ("index", "messages_unique_sequence") not in actual:
+                del expected["index", "messages_unique_sequence"]
+            for statement in _statements(_MESSAGE_GUARDS):
+                reference.execute(statement)
+            expected.update({(kind, name): _definition(kind, sql)
+                             for kind, name, sql in reference.execute(_CATALOG) if kind == "trigger"})
+    if version == 0:
+        expected["table", "schema_migrations"] = _definition("table", _LEDGER_SCHEMA)
+        # The retired intent carries no supported interpretation. Presence is
+        # allowed only for this finite upgrade and emptiness is checked below.
+        actual.pop(("table", "token_rotation_intent"), None)
+    if actual != expected:
+        raise UnsupportedMainStorage()
+    return False
+
+
+# These are admission predicates for the one supported unversioned baseline,
+# not conversions. Ordinary format-1 startup never reinterprets these columns.
+_UNSUPPORTED_BASELINE_DATA = """
+SELECT 1 FROM backend_credentials WHERE secret_encrypted != ''
+UNION ALL SELECT 1 FROM client_submissions
+ WHERE execution_state NOT IN ('pending','running','done','withdrawn','unknown')
+    OR (reason_code='steer_delivery_unknown' AND delivery_state='none')
+    OR (reason_code='legacy_rejected' AND recovery_of IS NOT NULL)
+UNION ALL SELECT 1 FROM client_submissions original
+ WHERE recovered_by IS NOT NULL AND NOT EXISTS (
+   SELECT 1 FROM client_submissions child WHERE child.session_id=original.session_id
+    AND child.client_id=original.recovered_by AND child.recovery_of=original.client_id)
+UNION ALL SELECT 1 FROM sessions fork
+ LEFT JOIN sessions parent ON parent.id=fork.forked_from_session_id
+ LEFT JOIN agents agent ON agent.id=fork.agent_id
+ WHERE fork.origin='fork' AND fork.user_id IS NULL AND (
+   (parent.user_id IS NOT NULL AND (agent.user_id IS NULL OR agent.user_id=parent.user_id))
+   OR (parent.id IS NULL AND agent.user_id IS NOT NULL))
+UNION ALL SELECT 1 FROM agents WHERE pin_order IS NULL
+UNION ALL SELECT 1 FROM applications WHERE pin_order IS NULL
+LIMIT 1
+"""
+
+
+def require_supported_main_format(db_path: str) -> None:
+    """Inspect one consistent committed snapshot, including its real WAL."""
+    path = persistent_database_file(db_path)
+    if path is None:
+        return
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as reader:
+        reader.execute("PRAGMA query_only=ON")
+        reader.execute("BEGIN")
+        version = reader.execute("PRAGMA user_version").fetchone()[0]
+        rows = reader.execute(_CATALOG).fetchall()
+        new = _validate_layout(version, rows)
+        if not new and version == 0:
+            if reader.execute(_UNSUPPORTED_BASELINE_DATA).fetchone():
+                raise UnsupportedMainStorage()
+            if any(name == "token_rotation_intent" for _, name, _ in rows):
+                if reader.execute("SELECT 1 FROM token_rotation_intent LIMIT 1").fetchone():
+                    raise UnsupportedMainStorage()
+
+
+async def prepare_main_storage(tx: Transaction) -> None:
+    """Recheck under the original writer transaction; never commit here."""
+    version = (await tx.fetch_one("PRAGMA user_version"))[0]
+    rows = await tx.fetch_all(_CATALOG)
+    new = _validate_layout(version, rows)
+    if new:
+        for statement in _statements(_SCHEMA):
+            await tx.execute(statement)
+    elif version == 0:
+        if await tx.fetch_one(_UNSUPPORTED_BASELINE_DATA):
+            raise UnsupportedMainStorage()
+        if any(name == "token_rotation_intent" for _, name, _ in rows):
+            if await tx.fetch_one("SELECT 1 FROM token_rotation_intent LIMIT 1"):
+                raise UnsupportedMainStorage()
+            await tx.execute("DROP TABLE token_rotation_intent")
+        await tx.execute("DROP TABLE schema_migrations")
+    else:
+        return
+    _validate_layout(CURRENT_VERSION, await tx.fetch_all(_CATALOG))
+    await tx.execute(f"PRAGMA user_version={CURRENT_VERSION}")
 
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS schema_migrations (
-    version TEXT PRIMARY KEY,
-    applied_at TEXT NOT NULL
+-- Complete current main format. The physical secret/recovery placeholders
+-- remain until their separately supported successor format retires them.
+
+CREATE TABLE agent_connectors (
+    agent_id TEXT NOT NULL,
+    installation_id TEXT NOT NULL,
+    PRIMARY KEY (agent_id, installation_id),
+    FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
+    FOREIGN KEY (installation_id) REFERENCES connector_installations(id)
+        ON DELETE CASCADE
 );
 
--- Agents are the durable definition of an assistant (agent-refactor.md §4.1):
--- identity + system prompt + model + credential + built-in MCP set + tool
--- policy. They OWN sessions and schedules. Memory (the
--- north star) hangs off the agent_id later; not in this refactor.
-CREATE TABLE IF NOT EXISTS agents (
+CREATE TABLE agents (
     -- Who owns this row (multi-tenancy.md §5). NULL means the install:
     -- true of every row before accounts, of none after.
     user_id TEXT,
@@ -53,10 +236,260 @@ CREATE TABLE IF NOT EXISTS agents (
     -- agent is still listed, callable and schedulable either way.
     pinned INTEGER NOT NULL DEFAULT 1,
     pin_order INTEGER
-);
-CREATE UNIQUE INDEX IF NOT EXISTS agents_name_unique ON agents(name) WHERE archived = 0;
+, reasoning_effort TEXT, service_tier TEXT);
 
-CREATE TABLE IF NOT EXISTS sessions (
+CREATE TABLE applications (
+    -- Who owns this row (multi-tenancy.md §5). NULL means the install:
+    -- true of every row before accounts, of none after.
+    user_id TEXT,
+    id TEXT PRIMARY KEY,                   -- 12-char hex, as sessions/agents
+    name TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    icon TEXT,                             -- emoji shown in the sidebar
+    icon_src TEXT,                         -- server-owned: the app's own icon
+    agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
+    session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
+    app_dir TEXT NOT NULL,                 -- absolute path to the app root
+    entrypoint TEXT NOT NULL DEFAULT 'index.html',
+    status TEXT NOT NULL DEFAULT 'building',  -- building|ready|failed
+    error TEXT,
+    -- Archived applications leave the sidebar but keep their row AND their
+    -- files, so the Applications page's Archived section can put them back.
+    archived INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    last_built_at TEXT,
+    -- Sidebar shortcut + its place among the pinned (sidebar-pins.md).
+    pinned INTEGER NOT NULL DEFAULT 1,
+    pin_order INTEGER
+);
+
+CREATE TABLE auth_tokens (
+    -- The SHA-256 of the token, never the token. Reading this table gives you
+    -- no live session; the bearer is 256 bits of randomness, so a slow KDF
+    -- would buy nothing a plain digest does not.
+    token_hash TEXT PRIMARY KEY,
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    -- 'session' expires; 'pat' is a personal access token for scripts and the
+    -- CLI, revocable and long-lived (§3.1).
+    kind TEXT NOT NULL DEFAULT 'session',
+    label TEXT,
+    created_at TEXT NOT NULL,
+    expires_at TEXT,
+    last_seen_at TEXT,
+    revoked_at TEXT
+);
+
+CREATE TABLE backend_credentials (
+    -- Who owns this row (multi-tenancy.md §5). NULL means the install:
+    -- true of every row before accounts, of none after.
+    user_id TEXT,
+    id TEXT PRIMARY KEY,
+    backend TEXT NOT NULL,                 -- "claude-code" | "codex" | …
+    label TEXT NOT NULL,
+    auth_type TEXT NOT NULL,               -- "api_key" | "oauth"
+    secret_encrypted TEXT NOT NULL,        -- Empty legacy placeholder; the only
+                                           -- ciphertext is in credential_secrets.
+    created_at TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active', -- "active" | "needs_reconnect"
+    token_expires_at TEXT,                 -- ISO8601, null for non-expiring keys
+    needs_reconnect INTEGER NOT NULL DEFAULT 0,
+    last_refresh_error_code TEXT           -- see oauth_errors.RefreshErrorCode
+);
+
+CREATE TABLE bg_tasks (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    command TEXT NOT NULL,
+    description TEXT,
+    working_dir TEXT NOT NULL,
+    status TEXT NOT NULL,                  -- 'pending'|'running'|'completed'|'failed'|'cancelled'|'interrupted'
+    exit_code INTEGER,
+    stdout TEXT NOT NULL DEFAULT '',
+    stderr TEXT NOT NULL DEFAULT '',
+    truncated INTEGER NOT NULL DEFAULT 0,  -- bool: at least one stream hit the cap
+    started_at TEXT NOT NULL,
+    completed_at TEXT,
+    idle_timeout_seconds INTEGER,
+    timeout_seconds INTEGER,
+    stop_reason TEXT,
+    work_id TEXT,
+    knowledge_context TEXT,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE client_submissions (
+    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    client_id TEXT NOT NULL,
+    payload_sha256 TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    receipt TEXT,
+    payload TEXT,
+    execution_state TEXT NOT NULL DEFAULT 'unknown',
+    execution_owner TEXT,
+    execution_generation TEXT,
+    execution_boot TEXT,
+    process_group INTEGER,
+    delivery_state TEXT NOT NULL DEFAULT 'none',
+    reason_code TEXT,
+    state_version INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT,
+    updated_at TEXT,
+    recovery_of TEXT,
+    recovered_by TEXT,
+    dismissed INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (session_id, client_id)
+);
+
+CREATE TABLE connector_installation_secrets (
+    installation_id TEXT PRIMARY KEY,
+    secret_encrypted TEXT NOT NULL,
+    FOREIGN KEY (installation_id) REFERENCES connector_installations(id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE connector_installations (
+    -- Who owns this row (multi-tenancy.md §5). NULL means the install:
+    -- true of every row before accounts, of none after.
+    user_id TEXT,
+    id TEXT PRIMARY KEY,                   -- 12-char hex
+    kind TEXT NOT NULL,                    -- 'gmail' | 'github' | …
+    label TEXT NOT NULL,                   -- 'archeryue7@gmail.com'
+    auth_type TEXT NOT NULL,               -- 'oauth' | 'api_key'
+    external_account_id TEXT,              -- email / github "login:id" / workspace id
+    scopes TEXT,                           -- JSON list of granted OAuth scopes
+    enable_by_default INTEGER NOT NULL DEFAULT 0,  -- auto-enable on newly-created agents
+    needs_reconnect INTEGER NOT NULL DEFAULT 0,
+    token_expires_at TEXT,                 -- ISO8601, null = non-expiring
+    last_refresh_error_code TEXT,          -- mirrors backend_credentials
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE connector_oauth_clients (
+    -- No owner column: an OAuth *client* is this install's app
+    -- registration with the provider, not a user's secret — the env
+    -- fallback below says the same thing. An admin configures it once
+    -- and every account connects its own account through it
+    -- (multi-tenancy.md §5). The per-account half is
+    -- `connector_installations`, which does carry an owner.
+    kind TEXT PRIMARY KEY,                 -- 'github' | 'gmail' | …
+    client_id TEXT NOT NULL,
+    client_secret_encrypted TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE credential_secrets (
+    credential_id TEXT PRIMARY KEY,
+    secret_encrypted TEXT NOT NULL,
+    FOREIGN KEY (credential_id) REFERENCES backend_credentials(id)
+        ON DELETE CASCADE
+);
+
+CREATE TABLE custom_connectors (
+    -- No owner column: a connector *kind* is install-level, for the same
+    -- reason its OAuth client is — and `kind` is the primary key, so a
+    -- per-account definition would need a different one. An admin adds
+    -- the kind; each account connects through it.
+    kind TEXT PRIMARY KEY,                 -- user-chosen slug, e.g. 'linear'
+    display_name TEXT NOT NULL,
+    authorize_url TEXT NOT NULL,
+    token_url TEXT NOT NULL,
+    scopes TEXT,                           -- JSON list of OAuth scopes
+    pkce INTEGER NOT NULL DEFAULT 0,
+    api_base TEXT NOT NULL,                -- base URL the agent's request tool calls
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE invites (
+    code TEXT PRIMARY KEY,
+    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
+    created_at TEXT NOT NULL,
+    expires_at TEXT,
+    max_uses INTEGER NOT NULL DEFAULT 1,
+    used_count INTEGER NOT NULL DEFAULT 0,
+    revoked_at TEXT
+);
+
+CREATE TABLE messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id TEXT NOT NULL,
+    seq INTEGER NOT NULL,
+    role TEXT NOT NULL,
+    type TEXT NOT NULL,
+    content TEXT,
+    tool_name TEXT,
+    tool_input TEXT,
+    tool_use_id TEXT,
+    is_error INTEGER,
+    session_id_ref TEXT,
+    cost REAL,
+    attachments TEXT,                       -- JSON list[AttachmentMetadata], null when none
+    created_at TEXT,                        -- when the row was written; NULL for rows
+                                            -- predating the column (nothing to backfill
+                                            -- from — no other table records per-message time)
+    -- Per-turn git anchor captured when a user message row is written
+    -- (session-rewind.md §4 + §5.6.3). Powers the safe-revert preflight.
+    git_head TEXT,                          -- `git rev-parse HEAD`; NULL when not a git repo
+    git_status_clean INTEGER,               -- 1 iff `git status --porcelain` was empty
+    runtime_metadata TEXT,
+    terminal_request_id TEXT,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE notifiers (
+    -- Who owns this row (multi-tenancy.md §5). NULL means the install:
+    -- true of every row before accounts, of none after.
+    user_id TEXT,
+    id TEXT PRIMARY KEY,
+    type TEXT NOT NULL,                    -- 'webhook' | future: 'email', 'browser_push'
+    label TEXT NOT NULL,
+    config TEXT NOT NULL,                  -- JSON
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE research_jobs (
+    id TEXT PRIMARY KEY,
+    session_id TEXT NOT NULL,
+    question TEXT NOT NULL,
+    status TEXT NOT NULL,                  -- running|completed|failed|cancelled|interrupted
+    phase TEXT,                            -- scope|search|verify|synthesize|done
+    error TEXT,
+    report_path TEXT,
+    cost REAL,
+    created_at TEXT NOT NULL,
+    completed_at TEXT,
+    injection_status TEXT NOT NULL DEFAULT 'pending',  -- pending|delivered|failed
+    injected_at TEXT,
+    delivery_receipt TEXT,
+    knowledge_context TEXT,
+    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE schedules (
+    id TEXT PRIMARY KEY,
+    agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
+    origin_session_id TEXT,
+    name TEXT NOT NULL,
+    prompt TEXT NOT NULL,
+    interval_seconds INTEGER,
+    cron TEXT,
+    timezone TEXT,
+    recurrence_label TEXT,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    created_at TEXT NOT NULL,
+    last_run_at TEXT,
+    -- The session the most recent fire ran in. Two jobs: the UI links "last
+    -- run" to what actually happened, and the runner refuses to start a fire
+    -- while the previous one is still going (scheduler.md — overlap guard).
+    last_run_session_id TEXT,
+    run_at TEXT,  -- nullable ISO datetime; when set, fires once at that time then auto-deletes
+    knowledge_context TEXT
+, wiki_mode TEXT, invalid_reason TEXT);
+
+CREATE TABLE sessions (
     -- Who owns this row (multi-tenancy.md §5). NULL means the install:
     -- true of every row before accounts, of none after.
     user_id TEXT,
@@ -111,376 +544,9 @@ CREATE TABLE IF NOT EXISTS sessions (
     fork_status TEXT                       -- 'initializing'|'reverting'|'ready'
                                            -- crash-recovery marker; NULL on
                                            -- non-fork rows
-);
--- NOTE: the index on forked_from_session_id is created in _apply_migrations
--- (after the additive ALTER), NOT here — a legacy DB reaching this script
--- already has a `sessions` table, so CREATE TABLE IF NOT EXISTS is a no-op and
--- the column wouldn't exist yet at _SCHEMA time.
+, credential_id TEXT, reasoning_effort TEXT, service_tier TEXT);
 
-CREATE TABLE IF NOT EXISTS messages (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    session_id TEXT NOT NULL,
-    seq INTEGER NOT NULL,
-    role TEXT NOT NULL,
-    type TEXT NOT NULL,
-    content TEXT,
-    tool_name TEXT,
-    tool_input TEXT,
-    tool_use_id TEXT,
-    is_error INTEGER,
-    session_id_ref TEXT,
-    cost REAL,
-    attachments TEXT,                       -- JSON list[AttachmentMetadata], null when none
-    created_at TEXT,                        -- when the row was written; NULL for rows
-                                            -- predating the column (nothing to backfill
-                                            -- from — no other table records per-message time)
-    -- Per-turn git anchor captured when a user message row is written
-    -- (session-rewind.md §4 + §5.6.3). Powers the safe-revert preflight.
-    git_head TEXT,                          -- `git rev-parse HEAD`; NULL when not a git repo
-    git_status_clean INTEGER,               -- 1 iff `git status --porcelain` was empty
-    runtime_metadata TEXT,
-    terminal_request_id TEXT,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, seq);
-
-CREATE TABLE IF NOT EXISTS client_submissions (
-    session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-    client_id TEXT NOT NULL,
-    payload_sha256 TEXT NOT NULL,
-    request_id TEXT NOT NULL,
-    receipt TEXT,
-    payload TEXT,
-    execution_state TEXT NOT NULL DEFAULT 'unknown',
-    execution_owner TEXT,
-    execution_generation TEXT,
-    execution_boot TEXT,
-    process_group INTEGER,
-    delivery_state TEXT NOT NULL DEFAULT 'none',
-    reason_code TEXT,
-    state_version INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT,
-    updated_at TEXT,
-    recovery_of TEXT,
-    recovered_by TEXT,
-    dismissed INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (session_id, client_id)
-);
-
--- The receive receipt is also the persistent Wiki card. No model turn or
--- transcript mutation is involved; deletion of its old session keeps the
--- owner's job evidence and cannot retarget the notification to another user.
-CREATE TABLE IF NOT EXISTS wiki_job_notifications (
-    vault_id TEXT NOT NULL,
-    event_id TEXT NOT NULL,
-    subscriber_id TEXT NOT NULL,
-    user_id TEXT,
-    job_id TEXT NOT NULL,
-    state_version INTEGER NOT NULL CHECK(state_version>0),
-    kind TEXT NOT NULL CHECK(kind IN ('chat','schedule','app','human')),
-    target TEXT NOT NULL,
-    request_id TEXT NOT NULL,
-    client_id TEXT NOT NULL,
-    body TEXT NOT NULL CHECK(json_valid(body)),
-    outcome TEXT NOT NULL CHECK(outcome IN ('delivered','unavailable')),
-    received_at TEXT NOT NULL,
-    PRIMARY KEY(vault_id,event_id,subscriber_id)
-);
-CREATE INDEX IF NOT EXISTS wiki_job_notifications_target
-  ON wiki_job_notifications(user_id,target,vault_id,job_id,state_version DESC);
-
--- A schedule belongs to the Agent ("every morning, summarize my inbox"),
--- not to a throwaway thread. Each fire materializes a fresh session under
--- the agent (scheduler.py). No persistent session_id here anymore.
---
--- Recurrence is exactly one of:
---   * interval_seconds  — fire every N seconds (APScheduler interval trigger)
---   * cron + timezone   — fire on a 5-field crontab in that tz (cron trigger)
--- recurrence_label is the human-readable description shown in the UI (the AI
--- parser supplies it for natural-language schedules; the interval fast-path
--- derives it). Nullable for legacy rows — the UI falls back to formatting
--- interval_seconds.
--- origin_session_id: when a schedule is created from the `/schedule` chat
--- command it remembers the session it was typed in, so each fire appends the
--- run into that same conversation (the result lands where the user is looking)
--- instead of a throwaway session. Nullable — agent/API-created schedules have
--- none and fall back to a fresh schedule-origin session. No FK: liveness is
--- decided at fire time by session_manager.get_session, so a stale pointer (the
--- origin session was deleted/archived) harmlessly degrades to the fallback.
-CREATE TABLE IF NOT EXISTS schedules (
-    id TEXT PRIMARY KEY,
-    agent_id TEXT REFERENCES agents(id) ON DELETE CASCADE,
-    origin_session_id TEXT,
-    name TEXT NOT NULL,
-    prompt TEXT NOT NULL,
-    interval_seconds INTEGER,
-    cron TEXT,
-    timezone TEXT,
-    recurrence_label TEXT,
-    enabled INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL,
-    last_run_at TEXT,
-    -- The session the most recent fire ran in. Two jobs: the UI links "last
-    -- run" to what actually happened, and the runner refuses to start a fire
-    -- while the previous one is still going (scheduler.md — overlap guard).
-    last_run_session_id TEXT,
-    run_at TEXT,  -- nullable ISO datetime; when set, fires once at that time then auto-deletes
-    knowledge_context TEXT
-);
-
-CREATE TABLE IF NOT EXISTS backend_credentials (
-    -- Who owns this row (multi-tenancy.md §5). NULL means the install:
-    -- true of every row before accounts, of none after.
-    user_id TEXT,
-    id TEXT PRIMARY KEY,
-    backend TEXT NOT NULL,                 -- "claude-code" | "codex" | …
-    label TEXT NOT NULL,
-    auth_type TEXT NOT NULL,               -- "api_key" | "oauth"
-    secret_encrypted TEXT NOT NULL,        -- Empty legacy placeholder; the only
-                                           -- ciphertext is in credential_secrets.
-    created_at TEXT NOT NULL,
-    status TEXT NOT NULL DEFAULT 'active', -- "active" | "needs_reconnect"
-    token_expires_at TEXT,                 -- ISO8601, null for non-expiring keys
-    needs_reconnect INTEGER NOT NULL DEFAULT 0,
-    last_refresh_error_code TEXT           -- see oauth_errors.RefreshErrorCode
-);
-
-CREATE INDEX IF NOT EXISTS idx_credentials_backend
-  ON backend_credentials(backend);
-
--- Storage split (Steal Plan B-4): secrets live in their own table so a
--- future `serverOnly` flag can keep refresh tokens out of subprocess env,
--- and so we can join-or-not on the encrypted blob depending on the caller.
-CREATE TABLE IF NOT EXISTS credential_secrets (
-    credential_id TEXT PRIMARY KEY,
-    secret_encrypted TEXT NOT NULL,
-    FOREIGN KEY (credential_id) REFERENCES backend_credentials(id)
-        ON DELETE CASCADE
-);
-
--- Connectors (connectors.md) — first-class third-party MCP tools the user
--- installs once (OAuth) and an agent calls during a turn. Two-layer model
--- mirroring backend_credentials: a metadata row + a split-out encrypted
--- secret. Unlike credentials there is no legacy in-table secret column — the
--- token blob lives ONLY in connector_installation_secrets.
-CREATE TABLE IF NOT EXISTS connector_installations (
-    -- Who owns this row (multi-tenancy.md §5). NULL means the install:
-    -- true of every row before accounts, of none after.
-    user_id TEXT,
-    id TEXT PRIMARY KEY,                   -- 12-char hex
-    kind TEXT NOT NULL,                    -- 'gmail' | 'github' | …
-    label TEXT NOT NULL,                   -- 'archeryue7@gmail.com'
-    auth_type TEXT NOT NULL,               -- 'oauth' | 'api_key'
-    external_account_id TEXT,              -- email / github "login:id" / workspace id
-    scopes TEXT,                           -- JSON list of granted OAuth scopes
-    enable_by_default INTEGER NOT NULL DEFAULT 0,  -- auto-enable on newly-created agents
-    needs_reconnect INTEGER NOT NULL DEFAULT 0,
-    token_expires_at TEXT,                 -- ISO8601, null = non-expiring
-    last_refresh_error_code TEXT,          -- mirrors backend_credentials
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_connector_installations_kind
-  ON connector_installations(kind);
-
--- Dedup: one installation per (kind, external account). The install flow
--- upserts on this — re-authorizing the same account overwrites rather than
--- duplicating. Partial index so rows mid-install (identity not yet known)
--- don't collide on a shared NULL.
-CREATE UNIQUE INDEX IF NOT EXISTS connector_installations_account_unique
-  ON connector_installations(kind, external_account_id)
-  WHERE external_account_id IS NOT NULL;
-
-CREATE TABLE IF NOT EXISTS connector_installation_secrets (
-    installation_id TEXT PRIMARY KEY,
-    secret_encrypted TEXT NOT NULL,
-    FOREIGN KEY (installation_id) REFERENCES connector_installations(id)
-        ON DELETE CASCADE
-);
-
--- AGENT-scoped enablement (connectors.md revision 2026-05-20 + agent-refactor
--- §5.5): a row means "this agent has this installation turned on". The
--- effective MCP set for a turn is the agent's built-in mcp_servers ∪ its
--- enabled connectors. Cascades on both sides — deleting an agent or an
--- installation drops the link.
-CREATE TABLE IF NOT EXISTS agent_connectors (
-    agent_id TEXT NOT NULL,
-    installation_id TEXT NOT NULL,
-    PRIMARY KEY (agent_id, installation_id),
-    FOREIGN KEY (agent_id) REFERENCES agents(id) ON DELETE CASCADE,
-    FOREIGN KEY (installation_id) REFERENCES connector_installations(id)
-        ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_agent_connectors_agent
-  ON agent_connectors(agent_id);
-
--- Per-kind OAuth *client* credentials (the app registered with the provider),
--- set in-app so a connector works without editing env + restarting. client_id
--- is not secret; the secret is encrypted like connector tokens. When there's
--- no row, resolution falls back to env (OCTOPUS_<KIND>_OAUTH_CLIENT_ID/_SECRET).
-CREATE TABLE IF NOT EXISTS connector_oauth_clients (
-    -- No owner column: an OAuth *client* is this install's app
-    -- registration with the provider, not a user's secret — the env
-    -- fallback below says the same thing. An admin configures it once
-    -- and every account connects its own account through it
-    -- (multi-tenancy.md §5). The per-account half is
-    -- `connector_installations`, which does carry an owner.
-    kind TEXT PRIMARY KEY,                 -- 'github' | 'gmail' | …
-    client_id TEXT NOT NULL,
-    client_secret_encrypted TEXT NOT NULL,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
--- User-defined ("custom") connectors: a brand-new connector kind added
--- entirely from the browser, no server code. The OAuth *client* creds live in
--- connector_oauth_clients (same as built-ins); this row holds the definition
--- the generic OAuth provider + generic MCP server read.
-CREATE TABLE IF NOT EXISTS custom_connectors (
-    -- No owner column: a connector *kind* is install-level, for the same
-    -- reason its OAuth client is — and `kind` is the primary key, so a
-    -- per-account definition would need a different one. An admin adds
-    -- the kind; each account connects through it.
-    kind TEXT PRIMARY KEY,                 -- user-chosen slug, e.g. 'linear'
-    display_name TEXT NOT NULL,
-    authorize_url TEXT NOT NULL,
-    token_url TEXT NOT NULL,
-    scopes TEXT,                           -- JSON list of OAuth scopes
-    pkce INTEGER NOT NULL DEFAULT 0,
-    api_base TEXT NOT NULL,                -- base URL the agent's request tool calls
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-);
-
--- Async notification targets. Each row is one
--- destination Octopus can poke when a session transitions to idle
--- (and, later, when an AskUserQuestion is pending / a schedule fails).
--- `config` is a JSON blob whose shape depends on `type` (e.g. for
--- type='webhook': {"url": "https://…"}).
-CREATE TABLE IF NOT EXISTS notifiers (
-    -- Who owns this row (multi-tenancy.md §5). NULL means the install:
-    -- true of every row before accounts, of none after.
-    user_id TEXT,
-    id TEXT PRIMARY KEY,
-    type TEXT NOT NULL,                    -- 'webhook' | future: 'email', 'browser_push'
-    label TEXT NOT NULL,
-    config TEXT NOT NULL,                  -- JSON
-    enabled INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL
-);
-
--- Cross-turn background tasks. The model calls `bg_run(cmd)` via the
--- bg MCP server; we persist a row here, spawn the subprocess, and on
--- completion synthesize a follow-up user message in the session so the
--- model is told "your bg task finished, here's the result" in its next
--- turn. The whole point is that the bg subprocess lives in the
--- long-running FastAPI process — independent of any one claude --print
--- invocation — so it survives turn boundaries the way Bash's
--- run_in_background does not.
---
--- stdout/stderr are capped (see server.bg_tasks.MAX_STREAM_BYTES);
--- excess content is truncated from the head with a `…[truncated N bytes]`
--- prefix so the model sees the most recent output.
-CREATE TABLE IF NOT EXISTS bg_tasks (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    command TEXT NOT NULL,
-    description TEXT,
-    working_dir TEXT NOT NULL,
-    status TEXT NOT NULL,                  -- 'pending'|'running'|'completed'|'failed'|'cancelled'|'interrupted'
-    exit_code INTEGER,
-    stdout TEXT NOT NULL DEFAULT '',
-    stderr TEXT NOT NULL DEFAULT '',
-    truncated INTEGER NOT NULL DEFAULT 0,  -- bool: at least one stream hit the cap
-    started_at TEXT NOT NULL,
-    completed_at TEXT,
-    idle_timeout_seconds INTEGER,
-    timeout_seconds INTEGER,
-    stop_reason TEXT,
-    work_id TEXT,
-    knowledge_context TEXT,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_bg_tasks_session
-  ON bg_tasks(session_id, started_at);
-
--- Native deep-research jobs (native-deep-research.md §6). A job runs the
--- fan-out pipeline as a tracked async task; completion and delivery are
--- tracked SEPARATELY (a job can be `completed` while its report is still
--- queued behind an active turn). New-table-only — CREATE IF NOT EXISTS is a
--- no-op migration on existing DBs.
-CREATE TABLE IF NOT EXISTS research_jobs (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    question TEXT NOT NULL,
-    status TEXT NOT NULL,                  -- running|completed|failed|cancelled|interrupted
-    phase TEXT,                            -- scope|search|verify|synthesize|done
-    error TEXT,
-    report_path TEXT,
-    cost REAL,
-    created_at TEXT NOT NULL,
-    completed_at TEXT,
-    injection_status TEXT NOT NULL DEFAULT 'pending',  -- pending|delivered|failed
-    injected_at TEXT,
-    delivery_receipt TEXT,
-    knowledge_context TEXT,
-    FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
-);
-
-CREATE INDEX IF NOT EXISTS idx_research_jobs_session
-  ON research_jobs(session_id, created_at);
-
--- Agent-built web applications (applications.md §2). An application is a
--- directory of static files an agent wrote, served under /apps/{id}/ and
--- rendered in the main pane like a browser tab. The row owns the directory
--- and points at the *build session* — a normal session with
--- origin='application' whose turns write the app. Both FKs SET NULL rather
--- than CASCADE: an application outlives the agent that built it and the
--- conversation that produced it. New-table-only — CREATE IF NOT EXISTS is a
--- no-op migration on existing DBs.
-CREATE TABLE IF NOT EXISTS applications (
-    -- Who owns this row (multi-tenancy.md §5). NULL means the install:
-    -- true of every row before accounts, of none after.
-    user_id TEXT,
-    id TEXT PRIMARY KEY,                   -- 12-char hex, as sessions/agents
-    name TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    icon TEXT,                             -- emoji shown in the sidebar
-    icon_src TEXT,                         -- server-owned: the app's own icon
-    agent_id TEXT REFERENCES agents(id) ON DELETE SET NULL,
-    session_id TEXT REFERENCES sessions(id) ON DELETE SET NULL,
-    app_dir TEXT NOT NULL,                 -- absolute path to the app root
-    entrypoint TEXT NOT NULL DEFAULT 'index.html',
-    status TEXT NOT NULL DEFAULT 'building',  -- building|ready|failed
-    error TEXT,
-    -- Archived applications leave the sidebar but keep their row AND their
-    -- files, so the Applications page's Archived section can put them back.
-    archived INTEGER NOT NULL DEFAULT 0,
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL,
-    last_built_at TEXT,
-    -- Sidebar shortcut + its place among the pinned (sidebar-pins.md).
-    pinned INTEGER NOT NULL DEFAULT 1,
-    pin_order INTEGER
-);
-
--- Created in its pre-accounts form here and rebuilt per account by
--- `_apply_migrations` on the same boot. It cannot name `user_id` at this
--- point: on a database that predates accounts the CREATE TABLE above is a
--- no-op, the column does not exist yet, and this script would fail outright —
--- on exactly the installs the migration exists for.
-CREATE UNIQUE INDEX IF NOT EXISTS applications_name_unique
-  ON applications(name COLLATE NOCASE) WHERE archived = 0;
-
--- ---------------------------------------------------------------------------
--- Accounts (multi-tenancy.md §3). New tables rather than columns, so an
--- existing install grows them on the next boot with nothing to migrate.
--- ---------------------------------------------------------------------------
-
-CREATE TABLE IF NOT EXISTS users (
+CREATE TABLE users (
     id TEXT PRIMARY KEY,
     -- NOCASE so `Archer` and `archer` cannot both exist: two accounts whose
     -- names differ only in case is an impersonation surface, not a feature.
@@ -501,31 +567,60 @@ CREATE TABLE IF NOT EXISTS users (
     disabled_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS invites (
-    code TEXT PRIMARY KEY,
-    created_by TEXT REFERENCES users(id) ON DELETE SET NULL,
-    created_at TEXT NOT NULL,
-    expires_at TEXT,
-    max_uses INTEGER NOT NULL DEFAULT 1,
-    used_count INTEGER NOT NULL DEFAULT 0,
-    revoked_at TEXT
+CREATE TABLE wiki_job_notifications (
+    vault_id TEXT NOT NULL,
+    event_id TEXT NOT NULL,
+    subscriber_id TEXT NOT NULL,
+    user_id TEXT,
+    job_id TEXT NOT NULL,
+    state_version INTEGER NOT NULL CHECK(state_version>0),
+    kind TEXT NOT NULL CHECK(kind IN ('chat','schedule','app','human')),
+    target TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    client_id TEXT NOT NULL,
+    body TEXT NOT NULL CHECK(json_valid(body)),
+    outcome TEXT NOT NULL CHECK(outcome IN ('delivered','unavailable')),
+    received_at TEXT NOT NULL,
+    PRIMARY KEY(vault_id,event_id,subscriber_id)
 );
 
-CREATE TABLE IF NOT EXISTS auth_tokens (
-    -- The SHA-256 of the token, never the token. Reading this table gives you
-    -- no live session; the bearer is 256 bits of randomness, so a slow KDF
-    -- would buy nothing a plain digest does not.
-    token_hash TEXT PRIMARY KEY,
-    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    -- 'session' expires; 'pat' is a personal access token for scripts and the
-    -- CLI, revocable and long-lived (§3.1).
-    kind TEXT NOT NULL DEFAULT 'session',
-    label TEXT,
-    created_at TEXT NOT NULL,
-    expires_at TEXT,
-    last_seen_at TEXT,
-    revoked_at TEXT
-);
+CREATE UNIQUE INDEX agents_name_unique ON agents(COALESCE(user_id, ''), name) WHERE archived = 0;
 
-CREATE INDEX IF NOT EXISTS idx_auth_tokens_user ON auth_tokens(user_id);
+CREATE UNIQUE INDEX applications_name_unique ON applications(COALESCE(user_id, ''), name COLLATE NOCASE) WHERE archived = 0;
+
+CREATE UNIQUE INDEX client_submission_recovery ON client_submissions(session_id,recovery_of) WHERE recovery_of IS NOT NULL;
+
+CREATE UNIQUE INDEX client_submission_request ON client_submissions(session_id,request_id);
+
+CREATE INDEX client_submission_source ON client_submissions(client_id);
+
+CREATE UNIQUE INDEX connector_installations_account_unique ON connector_installations(COALESCE(user_id, ''), kind, external_account_id) WHERE external_account_id IS NOT NULL;
+
+CREATE INDEX idx_agent_connectors_agent
+  ON agent_connectors(agent_id);
+
+CREATE INDEX idx_auth_tokens_user ON auth_tokens(user_id);
+
+CREATE INDEX idx_bg_tasks_session
+  ON bg_tasks(session_id, started_at);
+
+CREATE INDEX idx_connector_installations_kind
+  ON connector_installations(kind);
+
+CREATE INDEX idx_credentials_backend
+  ON backend_credentials(backend);
+
+CREATE INDEX idx_messages_session ON messages(session_id, seq);
+
+CREATE INDEX idx_research_jobs_session
+  ON research_jobs(session_id, created_at);
+
+CREATE INDEX idx_sessions_forked_from ON sessions(forked_from_session_id);
+
+CREATE UNIQUE INDEX messages_terminal_request ON messages(session_id, terminal_request_id) WHERE terminal_request_id IS NOT NULL;
+
+CREATE UNIQUE INDEX messages_unique_sequence ON messages(session_id, seq);
+
+CREATE INDEX wiki_job_notifications_target
+  ON wiki_job_notifications(user_id,target,vault_id,job_id,state_version DESC);
 """

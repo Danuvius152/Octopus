@@ -77,6 +77,10 @@ server's list if the request fails.
 
 ## 4. Schema
 
+The rollout SQL and backfill description below are historical. The complete
+current schema declares these columns directly; supported format preparation
+preserves saved pin positions and never derives them again at startup.
+
 ```sql
 ALTER TABLE agents       ADD COLUMN pinned INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE agents       ADD COLUMN pin_order INTEGER;

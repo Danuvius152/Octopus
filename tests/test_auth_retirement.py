@@ -98,13 +98,17 @@ asyncio.run(start())
 async def test_empty_retained_intent_table_allows_normal_initialization(tmp_path):
     path = tmp_path / "empty-intent.sqlite3"
     with sqlite3.connect(path) as writer:
+        # An empty retired table is admissible alongside the complete supported
+        # unversioned baseline, and retires in the same format transaction.
+        writer.executescript((ROOT / "tests/fixtures/main-baseline-v0.sql").read_text())
         writer.execute("CREATE TABLE token_rotation_intent(id INTEGER PRIMARY KEY, encrypted_payload TEXT)")
     writer.close()
     database = Database(str(path))
     await database.initialize()
     try:
         async with database.transaction(write=False) as view:
-            assert await view.fetch_one("SELECT COUNT(*) FROM token_rotation_intent") == (0,)
+            assert await view.fetch_one("SELECT name FROM sqlite_schema WHERE name='token_rotation_intent'") is None
+            assert await view.fetch_one("PRAGMA user_version") == (1,)
         assert await database.load_sessions() == []
     finally:
         await database.close()

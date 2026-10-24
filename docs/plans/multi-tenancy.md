@@ -2,6 +2,11 @@
 
 > **Status:** shipped — one site, many users: the label becomes a username, the token becomes a password, and every user gets their own directory, rows and keys.
 
+> **Storage update, 2026-10-24:** pre-account business/adoption is retired; the
+> preceding dated scope note and old rollout sections are historical. Main
+> storage validates the supported complete baseline and upgrades through one
+> `user_version` transaction, without a runtime migration ledger or owner backfills.
+
 Octopus is single-user by construction: one `OCTOPUS_AUTH_TOKEN` is the API
 credential, the WebSocket ticket, the application cookie, the MCP signing key
 *and* the key every stored secret is encrypted with. `user-1.0` turns that into
@@ -149,8 +154,8 @@ counts here:
 
 1. A control-plane database is needed regardless (users, invites, tokens,
    application port allocation), so per-user means *1 + N*, not *N*.
-2. The migration ledger (`polish-2026-09.md` §3 A3) runs per database. *N* of
-   them means *N* migration runs and a new failure mode — the half-migrated
+2. Storage format preparation runs per database. *N* of
+   them means *N* preparation runs and a new failure mode — the half-migrated
    estate — on every upgrade.
 3. Under isolation level A the forgotten-`WHERE` risk is **not the weakest
    link**: an agent can read the database file directly. Paying a structural

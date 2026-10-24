@@ -56,7 +56,9 @@ class WikiJobsMixin(DatabaseBase):
                 elif delivery["kind"] == "human" and not delivery["target"] and not delivery["client_id"]:
                     outcome = "delivered"
                 await tx.execute(
-                    "INSERT INTO wiki_job_notifications VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO wiki_job_notifications "
+                    "(vault_id,event_id,subscriber_id,user_id,job_id,state_version,kind,"
+                    "target,request_id,client_id,body,outcome,received_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (*key, *values, outcome, datetime.now(UTC).isoformat()),
                 )
             return outcome

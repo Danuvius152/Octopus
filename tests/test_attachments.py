@@ -30,6 +30,7 @@ from server.harness.profile import StdinMode
 from server.main import app
 from server.session_manager import session_manager
 from server.users import UserManager
+from tests.main_storage import write_unversioned_baseline
 
 
 @pytest.fixture
@@ -442,14 +443,13 @@ async def test_start_message_caps_attachment_count(client):
 
 
 # ---------------------------------------------------------------------------
-# DB migration — pre-existing DB without `attachments` column still works
+# Supported storage upgrade — nullable attachments retain their original meaning
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_attachments_column_migration(tmp_path):
-    """An old DB created before the attachments column existed gets the
-    column added on next initialize and reads back []."""
+async def test_supported_upgrade_preserves_messages_without_attachments(tmp_path):
+    """A retained NULL attachment list stays empty without rewriting the body."""
     db_path = tmp_path / "legacy.db"
     seed = Database(str(db_path))
     await seed.initialize()
@@ -459,11 +459,9 @@ async def test_attachments_column_migration(tmp_path):
     await seed.save_session("legacy", "L", str(tmp_path), "2024-01-01T00:00:00Z",
                             agent_id=agent["id"], user_id=owner["id"])
     await seed.append_message("legacy", 0, "user", "text", "hi")
-    await seed.conn.execute("ALTER TABLE messages DROP COLUMN attachments")
-    await seed.conn.commit()
     await seed.close()
+    write_unversioned_baseline(db_path)
 
-    # Open via the real Database — migration should add the column.
     db = Database(str(db_path))
     await db.initialize()
     msgs = await db.load_messages("legacy")

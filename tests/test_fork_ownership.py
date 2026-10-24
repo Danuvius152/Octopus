@@ -1,14 +1,18 @@
-"""Recover account ownership lost by older rewind/duplicate writers."""
+"""Opening supported storage never guesses or changes a fork's account."""
+
+from pathlib import Path
 
 import pytest
 
 from server.database import Database
 from server.session_manager import SessionManager
 from tests.accounts import create_account
+from tests.main_storage import write_unversioned_baseline
 
 
 @pytest.mark.asyncio
-async def test_startup_repairs_only_unambiguous_fork_owners(tmp_path):
+@pytest.mark.parametrize("version", [0, 1])
+async def test_current_fork_owners_and_ambiguous_relationships_survive_repeated_open(tmp_path, version):
     path = str(tmp_path / "sessions.db")
     db = Database(path)
     await db.initialize()
@@ -22,17 +26,14 @@ async def test_startup_repairs_only_unambiguous_fork_owners(tmp_path):
     )
     system_agent = await db.get_agent("legacy-default")
     for agent_id, owner in (("agent-a", owner_a), ("agent-b", owner_b)):
-        await db.conn.execute(
-            "INSERT INTO agents (id, name, created_at, updated_at, user_id) "
-            "VALUES (?, ?, '2026-10-11', '2026-10-11', ?)",
-            (agent_id, agent_id, owner),
-        )
+        await db.save_agent(agent_id=agent_id, name=agent_id, created_at="2026-10-11",
+                             updated_at="2026-10-11", user_id=owner)
     rows = [
-        # Archived originals are still evidence; a fork chain needs iteration.
+        # Current writers commit the owner along with the original fork.
         ("root-a", "user", None, "agent-a", owner_a, 1),
-        ("child", "fork", "middle", "agent-a", None, 0),
-        ("middle", "fork", "root-a", "agent-a", None, 1),
-        ("deleted-parent", "fork", "gone", "agent-a", None, 0),
+        ("child", "fork", "middle", "agent-a", owner_a, 0),
+        ("middle", "fork", "root-a", "agent-a", owner_a, 1),
+        ("deleted-parent", "fork", "gone", "agent-a", owner_a, 0),
         # Never move an owned row or guess across conflicting account links.
         ("owned", "fork", "root-a", "agent-a", owner_b, 0),
         ("conflict", "fork", "root-a", "agent-b", None, 0),
@@ -58,24 +59,21 @@ async def test_startup_repairs_only_unambiguous_fork_owners(tmp_path):
     before = {r["id"]: r for r in await db.load_sessions(include_archived=True)}
     messages = await db.load_messages("child")
     await db.close()
+    if version == 0:
+        write_unversioned_baseline(Path(path))
 
     db = Database(path)
     try:
         await db.initialize()
         after = {r["id"]: r for r in await db.load_sessions(include_archived=True)}
-        repaired = {"child", "middle", "deleted-parent"}
-        for sid, row in before.items():
-            expected = {**row, "user_id": owner_a} if sid in repaired else row
-            assert after[sid] == expected
+        assert after == before
         assert await db.load_messages("child") == messages
         await db.close()
         db = Database(path)
         await db.initialize()
         assert {r["id"]: r for r in await db.load_sessions(include_archived=True)} == after
-        ledger = await db.conn.execute(
-            "SELECT COUNT(*) FROM schema_migrations WHERE version='backfill:fork_session_owners'"
-        )
-        assert (await ledger.fetchone())[0] == 1
+        async with db.transaction(write=False) as view:
+            assert await view.fetch_one("PRAGMA user_version") == (1,)
         manager = SessionManager()
         await manager.initialize(db)
         assert manager.get_session("child", owner_a) is not None

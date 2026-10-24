@@ -20,6 +20,7 @@ from server.routers.sessions import get_session
 from server.session_manager import ForkError, SessionManager
 from server.users import UserManager
 from tests.accounts import create_account
+from tests.main_storage import protect_historical_message_sequences
 
 
 @pytest.fixture
@@ -145,11 +146,12 @@ async def test_unique_sequences_are_enforced_in_clean_and_legacy_databases(histo
     await db.append_message(session.id, 5, "user", "text", "one")
     with pytest.raises(sqlite3.IntegrityError):
         await db.append_message(session.id, 5, "assistant", "text", "collision")
-    # Model a database written by the old binary. The migration must preserve
-    # its two distinct rows and protect all subsequent inserts/updates.
+    # Supply the complete constraint variant emitted by the old binary.
+    # Startup must preserve its two rows and all subsequent write protection.
     async with db.transaction() as tx:
         await tx.execute("DROP INDEX messages_unique_sequence")
     await db.append_message(session.id, 5, "assistant", "text", "legacy duplicate")
+    await protect_historical_message_sequences(db)
     db = await restart(db, manager)
     with pytest.raises(sqlite3.IntegrityError):
         await db.append_message(session.id, 5, "system", "text", "new collision")
@@ -167,6 +169,7 @@ async def test_legacy_ambiguity_is_reported_and_export_retains_every_storage_row
         await tx.execute("DROP INDEX messages_unique_sequence")
     await db.append_message(session.id, 4, "user", "text", "first row")
     await db.append_message(session.id, 4, "assistant", "text", "second row")
+    await protect_historical_message_sequences(db)
     db = await restart(db, manager)
     bearer = await UserManager(db).issue_token(session.user_id)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test",

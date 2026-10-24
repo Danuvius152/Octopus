@@ -13,8 +13,8 @@ import pytest
 
 from server.database import Database
 
-# The schema as it existed before the Agents refactor, for the three tables
-# the migration transforms. Everything else is created fresh by Database.
+# Historical pre-Agents input. It is retained verbatim and refused before
+# preparation, rather than transformed into the supported current baseline.
 _OLD_SCHEMA = """
 CREATE TABLE sessions (
     id TEXT PRIMARY KEY,

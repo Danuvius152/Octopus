@@ -20,7 +20,7 @@ async def main(configuration, phase):
     from server.service_installation import InstallationOwner, _paths
 
     # Assert the resolved installation range, including provider homes, before
-    # acquiring ownership or executing any migration. The parent sets the two
+    # acquiring ownership or preparing storage. The parent sets the two
     # provider environment overrides under this same root.
     assert all(Path(value).resolve().is_relative_to(root) for value in _paths(settings).values())
     popen = subprocess.Popen
@@ -33,25 +33,30 @@ async def main(configuration, phase):
 
     subprocess.Popen = no_model
     from server.database import Database
+    from server.knowledge import encode, for_account
     from server.session_manager import session_manager
     from server.users import UserManager
     from server.wiki import maintenance_inputs
     from server.wiki.history import WikiHistory
     from server.wiki.jobs import WikiJobs
     from server.wiki.registry import registry
+    from tests.main_storage import write_unversioned_baseline
     from tests.wiki_schema_fixtures import remove_future_job_events
 
     owner = InstallationOwner(settings)
     owner.acquire()
     db = Database(settings.db_path)
     if phase == "input":
-        migrate = db._apply_migrations
+        recover = db.recover_client_submissions
 
         async def interrupt_inputs():
-            await migrate()
+            generations = await recover()
+            states = {identity: (await db.get_client_submission("legacy", identity))["execution_state"]
+                      for identity in ("staged", "started", "unknown", "exact", "successor")}
+            (root / "input-recovery.json").write_text(json.dumps({"generations": sorted(generations), "states": states}))
             os._exit(71)
 
-        db._apply_migrations = interrupt_inputs
+        db.recover_client_submissions = interrupt_inputs
     await db.initialize()
     registry.bind_health(db.health)
     if phase == "seed":
@@ -99,23 +104,32 @@ async def main(configuration, phase):
                                                      "extra_roots": user["extra_roots"]}))
         registry.close()
         await db.close()
-        payload = json.dumps({"content": "Original accepted input", "attachment_ids": [], "attachments": [], "wiki_mode": None})
-        accepted = json.dumps({"accepted": True, "disposition": "staged"})
+        payload = {"content": "Original accepted input", "attachment_ids": [], "attachments": [], "wiki_mode": None,
+                   "source": "human", "delivery_id": None, "work_id": None, "priority": 1, "order": 1,
+                   "question_session_id": None, "question_id": None, "trusted_request": None}
+        accepted = json.dumps({"accepted": True, "disposition": "accepted"})
         with sqlite3.connect(settings.db_path) as connection:
-            for identity, state, body, receipt, successor in (
-                ("staged", "reserved", payload, accepted, None),
-                ("refused", "rejected", payload, '{"accepted":false}', None),
-                ("empty-receipt", "reserved", payload, '{}', None),
-                ("missing", "queued", None, accepted, None),
-                ("unknown", "completed", payload, accepted, None),
-                ("started", "claimed", payload, accepted, None),
-                ("exact", "completed", payload, accepted, None),
-                ("original", "withdrawn", payload, accepted, "successor"),
-                ("successor", "queued", payload, accepted, None),
-                ("bg:bg:stable", "queued", json.dumps(json.loads(payload) | {"source": "bg", "delivery_id": "bg:stable"}), accepted, None),
+            for identity, state, body, receipt, recovery_of, reason, generation in (
+                ("staged", "pending", payload, accepted, None, None, None),
+                ("refused", "withdrawn", payload, '{"accepted":false}', None, "legacy_rejected", None),
+                ("empty-receipt", "withdrawn", payload, '{}', None, None, None),
+                ("missing", "unknown", None, accepted, None, None, None),
+                ("unknown", "unknown", payload, accepted, None, None, "unknown-generation"),
+                ("started", "running", payload, accepted, None, None, "started-generation"),
+                ("exact", "done", payload, accepted, None, None, None),
+                ("original", "withdrawn", payload, accepted, None, None, None),
+                ("successor", "pending", payload, accepted, "original", None, None),
+                ("bg:bg:stable", "pending", payload | {"source": "bg", "delivery_id": "bg:stable"}, accepted, None, None, None),
             ):
-                connection.execute("INSERT INTO client_submissions(session_id,client_id,payload_sha256,request_id,payload,receipt,execution_state,recovered_by) VALUES('legacy',?,'retained-digest',?,?,?,?,?)",
-                                   (identity, identity, body, receipt, state, successor))
+                if body is not None:
+                    body = json.dumps(body | {"knowledge": encode(for_account(
+                        session_id="legacy", request_id=identity, user_id=user["id"], prompt=body["content"],
+                    ))})
+                connection.execute("INSERT INTO client_submissions(session_id,client_id,payload_sha256,request_id,payload,receipt,"
+                                   "execution_state,recovery_of,reason_code,execution_generation) VALUES('legacy',?,'retained-digest',?,?,?,?,?,?,?)",
+                                   (identity, identity, body, receipt, state, recovery_of, reason, generation))
+        connection.close()
+        write_unversioned_baseline(Path(settings.db_path))
         owner.close()
         return
 
@@ -130,7 +144,7 @@ async def main(configuration, phase):
         registry.store(json.loads((root / "seed.json").read_text())["user"])
         raise AssertionError("Wiki migration interruption was not reached")
 
-    await session_manager.initialize(db)
+    await session_manager.initialize(db, previous_writers_retired=True)
     users = UserManager(db)
     user = await users.authenticate("owner", "password1")
     assert phase in {"finish", "reopen"}, "The requested crash phase was not reached"
