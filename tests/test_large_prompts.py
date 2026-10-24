@@ -14,22 +14,28 @@ import pytest
 
 from server.large_prompts import (
     LARGE_PROMPT_THRESHOLD_BYTES,
-    delete_session_large_prompts,
     spill_if_large,
 )
 
 
 @pytest.fixture
-def spill_root(tmp_path, monkeypatch):
-    """Redirect large-prompts storage to a per-test tmpdir.
-
-    `_large_prompts_root` reads `settings.large_prompts_dir` at call
-    time, so a setattr is enough — no module reload needed.
-    """
+def users_root(tmp_path, monkeypatch):
+    """Redirect account storage to a per-test tmpdir."""
     from server.config import settings
 
-    monkeypatch.setattr(settings, "large_prompts_dir", str(tmp_path))
-    return tmp_path
+    root = tmp_path / "users"
+    monkeypatch.setattr(settings, "users_root", str(root))
+    return root
+
+
+@pytest.fixture
+def spill_owner():
+    return "spill-owner"
+
+
+@pytest.fixture
+def spill_root(users_root, spill_owner):
+    return users_root / spill_owner / "large-prompts"
 
 
 # ---------------------------------------------------------------------------
@@ -37,31 +43,31 @@ def spill_root(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_small_prompt_passes_through_unchanged(spill_root):
+def test_small_prompt_passes_through_unchanged(spill_root, spill_owner):
     """Anything at or below the threshold is returned as-is, with no
     file written. This is the hot path — must be cheap."""
     prompt = "hello world"
-    result = spill_if_large("sess-small", prompt)
+    result = spill_if_large("sess-small", prompt, user_id=spill_owner)
     assert result == prompt
     # No session dir should have been created either.
     assert not (spill_root / "sess-small").exists()
 
 
-def test_prompt_exactly_at_threshold_passes_through(spill_root):
+def test_prompt_exactly_at_threshold_passes_through(spill_root, spill_owner):
     """The threshold is inclusive: a prompt whose UTF-8 byte length
     equals the cap fits, so no spill. Off-by-one regressions show up
     here."""
     prompt = "x" * LARGE_PROMPT_THRESHOLD_BYTES
-    result = spill_if_large("sess-edge", prompt)
+    result = spill_if_large("sess-edge", prompt, user_id=spill_owner)
     assert result == prompt
     assert not (spill_root / "sess-edge").exists()
 
 
-def test_oversize_prompt_is_spilled(spill_root):
+def test_oversize_prompt_is_spilled(spill_root, spill_owner):
     """A prompt one byte over the threshold gets spilled to disk and
     the caller receives a pointer message — not the original text."""
     prompt = "x" * (LARGE_PROMPT_THRESHOLD_BYTES + 1)
-    result = spill_if_large("sess-big", prompt)
+    result = spill_if_large("sess-big", prompt, user_id=spill_owner)
 
     assert result != prompt
     assert "[octopus-large-prompt]" in result
@@ -75,22 +81,22 @@ def test_oversize_prompt_is_spilled(spill_root):
     assert files[0].read_text(encoding="utf-8") == prompt
 
 
-def test_pointer_reports_actual_byte_size(spill_root):
+def test_pointer_reports_actual_byte_size(spill_root, spill_owner):
     """The model needs to know how big the spilled prompt is so it
     can decide whether to Read in chunks (Read with offset/limit)
     or in one shot."""
     prompt = "ω" * 80_000  # multi-byte chars → byte size differs from char count
-    result = spill_if_large("sess-omega", prompt)
+    result = spill_if_large("sess-omega", prompt, user_id=spill_owner)
     expected_bytes = len(prompt.encode("utf-8"))
     assert f"{expected_bytes:,} bytes" in result
 
 
-def test_pointer_instructs_model_to_read_in_full(spill_root):
+def test_pointer_instructs_model_to_read_in_full(spill_root, spill_owner):
     """The pointer must be unambiguous — the model should not respond
     based on the pointer text alone. Test asserts the explicit
     instruction is present."""
     prompt = "x" * (LARGE_PROMPT_THRESHOLD_BYTES + 1)
-    result = spill_if_large("sess-instruct", prompt)
+    result = spill_if_large("sess-instruct", prompt, user_id=spill_owner)
     assert "Read that file in full" in result
 
 
@@ -99,22 +105,22 @@ def test_pointer_instructs_model_to_read_in_full(spill_root):
 # ---------------------------------------------------------------------------
 
 
-def test_bg_task_result_marker_is_preserved_at_front(spill_root):
+def test_bg_task_result_marker_is_preserved_at_front(spill_root, spill_owner):
     """The frontend's auto-badge keys off `[bg-task-result]` as the
     leading marker in the prompt body — must survive spilling so the
     user-visible chip rendering stays correct (see bg_tasks.py)."""
     big_body = "x" * (LARGE_PROMPT_THRESHOLD_BYTES + 1)
     prompt = f"[bg-task-result] Background task `abc123` finished.\n\n{big_body}"
-    result = spill_if_large("sess-bg", prompt)
+    result = spill_if_large("sess-bg", prompt, user_id=spill_owner)
     assert result.startswith("[bg-task-result] ")
 
 
-def test_plain_user_prompt_has_no_artificial_marker(spill_root):
+def test_plain_user_prompt_has_no_artificial_marker(spill_root, spill_owner):
     """If the original prompt had no recognized marker, the pointer
     shouldn't invent one — only `[octopus-large-prompt]` should
     appear, and the file content stays unmarked."""
     prompt = "x" * (LARGE_PROMPT_THRESHOLD_BYTES + 1)
-    result = spill_if_large("sess-plain", prompt)
+    result = spill_if_large("sess-plain", prompt, user_id=spill_owner)
     assert not result.startswith("[bg-task-result]")
     assert result.startswith("[octopus-large-prompt]")
     # The spilled file is verbatim — no marker prepended to disk.
@@ -127,50 +133,30 @@ def test_plain_user_prompt_has_no_artificial_marker(spill_root):
 # ---------------------------------------------------------------------------
 
 
-def test_spill_writes_atomically(spill_root, monkeypatch):
+def test_spill_writes_atomically(spill_root, spill_owner, monkeypatch):
     """Implementation writes to a `.tmp` sibling, then renames. Verify
     the temp file is gone after the call — if rename failed, a
     partially-written `.tmp` would be observable, which would mean
     the model could Read truncated content on a crash mid-write."""
     prompt = "x" * (LARGE_PROMPT_THRESHOLD_BYTES + 1)
-    spill_if_large("sess-atomic", prompt)
+    spill_if_large("sess-atomic", prompt, user_id=spill_owner)
     tmp_files = list((spill_root / "sess-atomic").glob("*.tmp"))
     assert tmp_files == []
     final_files = list((spill_root / "sess-atomic").glob("*.txt"))
     assert len(final_files) == 1
 
 
-def test_invalid_session_id_is_rejected(spill_root):
+def test_invalid_session_id_is_rejected(spill_root, spill_owner):
     """A session id containing path separators could otherwise be
     used to scribble outside the spill root. We surface the bad input
     as ValueError rather than silently writing somewhere unsafe."""
     prompt = "x" * (LARGE_PROMPT_THRESHOLD_BYTES + 1)
     with pytest.raises(ValueError):
-        spill_if_large("../escape", prompt)
+        spill_if_large("../escape", prompt, user_id=spill_owner)
     with pytest.raises(ValueError):
-        spill_if_large("ok\\nope", prompt)
+        spill_if_large("ok\\nope", prompt, user_id=spill_owner)
     with pytest.raises(ValueError):
-        spill_if_large("", prompt)
-
-
-# ---------------------------------------------------------------------------
-# Cleanup
-# ---------------------------------------------------------------------------
-
-
-def test_delete_session_large_prompts_removes_dir(spill_root):
-    """When a session is deleted the spill dir goes with it. Mirrors
-    delete_session_attachments behavior so callers can run the two
-    side by side without divergent semantics."""
-    spill_if_large("sess-cleanup", "x" * (LARGE_PROMPT_THRESHOLD_BYTES + 1))
-    assert (spill_root / "sess-cleanup").is_dir()
-    delete_session_large_prompts("sess-cleanup")
-    assert not (spill_root / "sess-cleanup").exists()
-
-
-def test_delete_session_large_prompts_is_noop_when_missing(spill_root):
-    """Best-effort: deleting a never-spilled session must not raise."""
-    delete_session_large_prompts("never-spilled")  # no exception
+        spill_if_large("", prompt, user_id=spill_owner)
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +166,7 @@ def test_delete_session_large_prompts_is_noop_when_missing(spill_root):
 
 @pytest.mark.asyncio
 async def test_send_message_hands_backend_pointer_for_huge_prompt(
-    spill_root, monkeypatch
+    users_root, monkeypatch
 ):
     """End-to-end at the session_manager boundary: a huge prompt
     persists as the original text in the message row (so chat history
@@ -196,7 +182,8 @@ async def test_send_message_hands_backend_pointer_for_huge_prompt(
     mgr = SessionManager()
     db = Database(":memory:")
     await db.initialize()
-    await create_account(db)
+    user, _ = await create_account(db)
+    spill_root = users_root / user["id"] / "large-prompts"
     try:
         await mgr.initialize(db)
         agent = await db.get_system_agent()
@@ -242,6 +229,10 @@ async def test_send_message_hands_backend_pointer_for_huge_prompt(
         backend_prompt = received_prompts[0]
         assert "[octopus-large-prompt]" in backend_prompt
         assert len(backend_prompt.encode("utf-8")) < LARGE_PROMPT_THRESHOLD_BYTES
+        assert str(spill_root / session.id) in backend_prompt
+        spilled = list((spill_root / session.id).glob("*.txt"))
+        assert len(spilled) == 1
+        assert spilled[0].read_text(encoding="utf-8") == huge
 
         # The DB message row should hold the original prompt verbatim so
         # the UI / transcript shows what the user actually typed, not the

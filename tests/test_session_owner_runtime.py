@@ -13,12 +13,12 @@ from pathlib import Path
 
 import pytest
 
-from server.config import settings
 from server.crypto import encrypt
 from server.harness import get_harness
 from server.harness.profile import StdinMode
 from server.sessions.owner import SessionOwnerUnavailable
 from server.users import UserManager
+from server.workspace import paths_for
 from tests import test_question_lifecycle as question_tests
 
 question_host = question_tests.question_host
@@ -180,11 +180,10 @@ async def test_preparation_failure_keeps_original_credential_diagnostics(questio
 
 async def test_owner_failure_waits_for_the_original_prompt_spill_thread(question_host, tmp_path, monkeypatch):
     manager, original, client, _events = question_host
-    spill_root = tmp_path / "spills"
-    monkeypatch.setattr(settings, "large_prompts_dir", str(spill_root))
     session = await manager.create_session(
         original.agent_id, "Original prompt writer", str(tmp_path), backend="codex",
     )
+    spill_root = paths_for(session.user_id).large_prompts
     spawned = tmp_path / "model-started"
     model = tmp_path / "must_not_start.py"
     model.write_text("from pathlib import Path\nPath(__file__).with_name('model-started').touch()\n")

@@ -2734,14 +2734,12 @@ async def test_steer_backlog_is_bounded(manager, monkeypatch):
     assert len(completions) == _MAX_PENDING_STEERS + 2
 
 
-async def test_a_message_with_attachments_is_never_steered(manager, monkeypatch, tmp_path):
+async def test_a_message_with_attachments_is_never_steered(manager, monkeypatch):
     from server.attachments import save_upload
-    from server.config import settings
 
-    monkeypatch.setattr(settings, "attachments_dir", str(tmp_path / "attachments"))
     session = await _new(manager, "File correction")
     backend, original = await _start_steerable(manager, monkeypatch, session)
-    attachment = save_upload(session.id, "evidence.txt", b"Original attachment bytes")
+    attachment = save_upload(session.id, "evidence.txt", b"Original attachment bytes", user_id=session.user_id)
     receipt = await manager.start_message(
         session.id, "look at this", [attachment.id], steerable=True,
     )

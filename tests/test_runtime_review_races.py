@@ -659,19 +659,29 @@ async def test_resume_reply_does_not_wait_for_publication_and_later_delete_is_vi
 
 async def test_detail_response_is_404_if_session_deleted_during_history_read(runtime, monkeypatch):
     manager, database, session, _, _, _ = runtime
-    entered, release = gate_sql(monkeypatch, database, lambda sql: "FROM messages WHERE session_id" in sql)
+    entered, release = asyncio.Event(), asyncio.Event()
+    load_messages = database.load_messages
+
+    async def delayed_history(*args, **kwargs):
+        rows = await load_messages(*args, **kwargs)
+        if not entered.is_set():
+            # The real SQL read has completed. Hold its response while deletion
+            # preserves attachments and commits, without holding the DB writer.
+            entered.set()
+            await release.wait()
+        return rows
+
+    monkeypatch.setattr(database, "load_messages", delayed_history)
     async with await session_client(manager, session) as client:
         request = asyncio.create_task(client.get(f"/api/sessions/{session.id}"))
         await asyncio.wait_for(entered.wait(), 5)
-        # Transcript reads now serialize flush + SELECT with writers. Let
-        # deletion revoke the live object while its durable delete waits for
-        # the paused reader, then release SQL; the response must still be 404.
+        # A completed deletion must revoke this already loaded response too.
         deletion = asyncio.create_task(manager.delete_session(session.id))
         try:
-            await wait_until(lambda: manager.get_session(session.id) is None)
+            assert await asyncio.wait_for(deletion, 5)
+            assert manager.get_session(session.id) is None
         finally:
             release.set()
-        await asyncio.wait_for(deletion, 5)
         response = await asyncio.wait_for(request, 5)
     assert response.status_code == 404
 

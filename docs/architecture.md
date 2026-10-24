@@ -160,7 +160,7 @@ One install serves several people, each fully isolated (design:
 | `mcp_identity.py` | Per-session scope for those namespaces. One HTTP endpoint serves every session, so identity travels with the request: master-key signatures identify the session/account/run and each call checks its current authority. Claude passes the bearer as a header, Codex as an env var it names; that asymmetry stops at the profile boundary. |
 | `bg_tasks.py` | Cross-turn background shell tasks: spawn, stream capture (bounded), idle watchdog, cancel, persistence in `bg_tasks`. |
 | `large_prompts.py` | Spills any synthesized prompt over ~100 KB to a file and hands the model a small `Read` pointer (avoids `E2BIG` on argv). |
-| `attachments.py` / `file_viewer.py` | Per-session upload cache; working-dir-scoped file reads for the viewer. |
+| `attachments.py` / `file_viewer.py` | Account-owned session attachments; working-dir-scoped file reads for the viewer. |
 | `connector_manager.py` + `connectors/` | Connector framework (see below). |
 | `credentials` (`oauth_login.py`, `oauth_providers.py`, `oauth_errors.py`, `codex_login.py`) | Stored backend credentials: API keys, OAuth logins, and Codex device-auth in-app login. |
 | `tunnel.py` | `cloudflared tunnel --url` subprocess manager; parses the public URL, monitors, stops gracefully. |
@@ -515,7 +515,7 @@ provisioned on agent create, kept on archive, removed on hard delete.
 | `host` / `port` | `0.0.0.0` / `8000` | Bind address. |
 | `default_working_dir` | `.` | Workspace base for the install-era (no-account) owner; accounts work under `users_root/<id>/`. |
 | `db_path` | `octopus.db` | SQLite file. |
-| `attachments_dir` / `large_prompts_dir` / `agents_dir` / `codex_home_dir` | under `~/.octopus/` | Upload cache · large-prompt spill · agent memory roots · per-credential Codex auth. |
+| `attachments_dir` / `large_prompts_dir` / `agents_dir` / `codex_home_dir` | under `~/.octopus/` | Historical roots and installation resources. Current uploads and prompt spills use `users_root/<owner>/attachments/` and `users_root/<owner>/large-prompts/`. |
 | `enable_tunnel` | `false` | Start a Cloudflare Tunnel. |
 | `ask_user_question_timeout_seconds` | `1800` | Auto-answer an unanswered question (so headless sessions don't wedge). |
 | `public_base_url` | computed | Stable public host for connector OAuth redirect URIs (tunnel). |
@@ -523,6 +523,15 @@ provisioned on agent create, kept on archive, removed on hard delete.
 | `research_max_concurrent_jobs` | `2` | Max simultaneous deep-research jobs across all sessions. |
 
 ## Key design decisions
+
+Attachment and prompt-file operations carry the verified session owner through
+admission, execution, retry and fork reads. Deleting a session removes its rows
+and closes its HTTP access; it does not prove that native transcripts, exports
+or an already authorized response have stopped using the original file paths.
+Those files remain in the account directory without automatic orphan cleanup.
+Descendant attachment IDs are materialized before parent-row removal; a copy
+failure retains the parent and its retry entry. An in-progress fork or archive
+reservation refuses deletion with 409 until that original operation finishes.
 
 - **One harness, profiles not subclasses.** All model interaction goes through a
   single `Harness` + `HarnessRun` engine parameterized by a `RuntimeProfile`

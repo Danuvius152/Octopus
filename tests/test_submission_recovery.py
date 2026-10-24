@@ -408,7 +408,7 @@ async def test_recovery_attachments_are_bound_to_saved_bytes_and_owner(tmp_path,
     from server.deps import get_session_manager
     from server.routers.sessions import router
 
-    monkeypatch.setattr(settings, "attachments_dir", str(tmp_path / "attachments"))
+    monkeypatch.setattr(settings, "users_root", str(tmp_path / "users"))
     db = Database(":memory:")
     await db.initialize()
     _, bearer = await create_account(db, extra_roots=[tmp_path])
@@ -416,7 +416,7 @@ async def test_recovery_attachments_are_bound_to_saved_bytes_and_owner(tmp_path,
     await manager.initialize(db)
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "files", str(tmp_path), backend="codex")
-    file = save_upload(session.id, "source.txt", b"original")
+    file = save_upload(session.id, "source.txt", b"original", user_id=session.user_id)
     await _submit_paused(manager, session.id, "Full input", "with-file", attachment_ids=[file.id])
     await manager.drain_turns()
     app = FastAPI()

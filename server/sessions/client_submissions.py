@@ -44,9 +44,9 @@ def saved_context(session_id: str, row: dict[str, Any]) -> KnowledgeContext | No
     return context
 
 
-def _files(session_id: str, identifiers: list[str]) -> list[dict[str, Any]]:
+def _files(session_id: str, identifiers: list[str], *, user_id: str) -> list[dict[str, Any]]:
     result = []
-    for record in validate_message_attachments(session_id, identifiers):
+    for record in validate_message_attachments(session_id, identifiers, user_id=user_id):
         with record.path.open("rb") as stream:
             digest = hashlib.file_digest(stream, "sha256").hexdigest()
         result.append({"id": record.id, "filename": record.filename, "size": record.size,
@@ -165,7 +165,10 @@ async def claim_input(manager: SessionManager, session_id: str, request_id: str,
     if stored is not None:
         payload = stored["payload"]
         if payload is not None:
-            observed = await asyncio.to_thread(_files, session_id, payload["attachment_ids"])
+            session = manager.get_session(session_id)
+            if session is None or session.user_id is None:
+                raise AttachmentUnavailable()
+            observed = await asyncio.to_thread(_files, session_id, payload["attachment_ids"], user_id=session.user_id)
             if observed != payload.get("attachments", []):
                 raise AttachmentUnavailable("Required attachments changed after this input was accepted. Restore the input and re-upload the complete files.")
     return True

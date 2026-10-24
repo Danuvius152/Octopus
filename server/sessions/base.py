@@ -449,6 +449,9 @@ class SessionManagerBase:
     async def _blit_attachments_to_descendant_forks(self, session_id: str) -> None:
         raise NotImplementedError  # provided by a mixin
 
+    async def _fork_attachment_source(self, session_id: str, attachment_id: str, *, user_id: str) -> Path | None:
+        raise NotImplementedError  # provided by a mixin
+
     async def require_active_agent(self, agent_id: str | None) -> dict[str, Any] | None:
         raise NotImplementedError
 

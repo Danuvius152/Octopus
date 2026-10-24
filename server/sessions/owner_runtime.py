@@ -458,6 +458,9 @@ class OwnerRuntime:
             return WorkRetirement(resources)
         if isinstance(command, (Reset, CloseExecution)):
             if isinstance(command, CloseExecution):
+                if command.reason == "deleted" and (session._forking or session._archive_reservation is not None):
+                    raise ForkError("A fork or archive is still using this session; retry deletion when it completes",
+                                    reason="session_lifecycle_busy", status_code=409)
                 if not self.can_close_request(command.only_request_id):
                     return False
                 if command.reservation is not None:
@@ -487,6 +490,9 @@ class OwnerRuntime:
         if isinstance(command, ReserveFork):
             if command.reserve:
                 from ..delegations import delegation_manager
+                if (session._admission_closed or session._archive_reservation is not None
+                        or manager.sessions.get(session.id) is not session):
+                    raise ForkError("Parent session admission is closed", reason="fork_blocked_parent_turn_active", status_code=409)
                 if session._dispatch_paused:
                     raise ForkError("Parent session dispatch is paused; resume it before forking", reason="fork_blocked_parent_turn_active", status_code=409)
                 if self.busy or session._dispatch_paused or session._pending_queue or session._forking:
@@ -1114,7 +1120,10 @@ class OwnerRuntime:
             if not await claim_input(manager, configured.id, request.request_id):
                 return None
         await require_retired_writers(manager, configured.id)
-        files = await asyncio.to_thread(validate_message_attachments, configured.id, request.attachment_ids)
+        if configured.user_id is None:
+            raise AttachmentUnavailable()
+        files = await asyncio.to_thread(validate_message_attachments, configured.id, request.attachment_ids,
+                                        user_id=configured.user_id)
         head, clean = await fork_helpers.capture_git_anchor(configured.working_dir)
         return _PreparedInput(
             tuple(AttachmentMetadata(id=item.id, filename=item.filename, size=item.size, mime_type=item.mime_type) for item in files),
@@ -1186,7 +1195,9 @@ class OwnerRuntime:
         connectors = await manager._load_connectors(agent)
         if configured.fork_needs_replay:
             prompt = fork_helpers.wrap_for_fork_replay(prompt, copied)
-        prompt = await asyncio.to_thread(spill_if_large, configured.id, prompt)
+        if configured.user_id is None:
+            raise ValueError("The session has no file owner")
+        prompt = await asyncio.to_thread(spill_if_large, configured.id, prompt, user_id=configured.user_id)
         if configured.agent_id:
             from ..agent_memory import ensure_agent_dirs
             await asyncio.to_thread(ensure_agent_dirs, configured.agent_id, configured.user_id)
@@ -1194,7 +1205,9 @@ class OwnerRuntime:
         return _PreparedRun(configured, agent, credential, connectors, backend, prompt)
 
     async def _prepare_retry(self, captured: Session, prepared: _PreparedRun, prompt: str) -> _PreparedRun:
-        prompt = await asyncio.to_thread(spill_if_large, captured.id, prompt)
+        if captured.user_id is None:
+            raise ValueError("The session has no file owner")
+        prompt = await asyncio.to_thread(spill_if_large, captured.id, prompt, user_id=captured.user_id)
         if captured.agent_id:
             from ..agent_memory import ensure_agent_dirs
             await asyncio.to_thread(ensure_agent_dirs, captured.agent_id, captured.user_id)

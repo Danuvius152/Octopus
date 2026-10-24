@@ -30,13 +30,13 @@ from ..attachments import (
     MAX_FILE_BYTES,
     AttachmentError,
     get_path,
-    get_path_with_fork_fallback,
     save_upload,
 )
 from ..auth import verify_token
 from ..deps import ScopeUser, SessionMgr, ViewerUser
 from ..models import AttachmentMetadata
 from ..sessions import SessionManager
+from ..sessions.base import Session
 
 logger = logging.getLogger(__name__)
 
@@ -45,13 +45,15 @@ router = APIRouter(prefix="/api/sessions", tags=["attachments"])
 
 def _require_session(
     session_manager: SessionManager, session_id: str, user_id: str | None = None
-) -> None:
+) -> Session:
     """404 if the session isn't in memory — or isn't this account's. We don't
     allow uploads to archived sessions: they're read-only history."""
-    if session_manager.get_session(session_id, user_id) is None:
+    session = session_manager.get_session(session_id, user_id)
+    if session is None or session.user_id is None:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, f"Session {session_id} not found"
         )
+    return session
 
 
 @router.post(
@@ -66,7 +68,9 @@ async def upload_attachment(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ) -> AttachmentMetadata:
-    _require_session(session_manager, session_id, user_id)
+    session = _require_session(session_manager, session_id, user_id)
+    owner_id = session.user_id
+    assert owner_id is not None
 
     # Read fully into memory: the cap is small (25 MB) and the storage
     # module needs the bytes for size + write. Streaming to disk first
@@ -84,6 +88,7 @@ async def upload_attachment(
             filename=file.filename or "file",
             content=content,
             declared_mime=file.content_type,
+            user_id=owner_id,
         )
     except AttachmentError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
@@ -111,16 +116,24 @@ async def download_attachment(
 
     # Don't require the session to still exist in memory — once a message
     # references an attachment, the chat history should be able to render
-    # the chip / thumbnail even if the session was just archived. Hard
-    # delete wipes the files, so a missing file naturally 404s below.
+    # the chip / thumbnail even if the session was just archived. Hard delete
+    # closes this API through the ownership check above; original paths may
+    # remain readable by existing native transcript or response references.
     #
     # Fork fallback (session-rewind.md §5.1 step 5.2): a fork copies only
     # attachment metadata, so resolve from the fork's own dir first, then walk
     # its `forked_from_session_id` ancestors.
-    path = get_path(session_id, attachment_id)
-    if path is None:
-        ancestors = await session_manager.fork_ancestor_ids(session_id)
-        path = get_path_with_fork_fallback(ancestors, attachment_id)
+    if session_manager.db is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
+    owner_id = await session_manager.db.get_session_owner(session_id)
+    if owner_id is None or user_id is not None and owner_id != user_id:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
+    try:
+        path = get_path(session_id, attachment_id, user_id=owner_id)
+        if path is None:
+            path = await session_manager._fork_attachment_source(session_id, attachment_id, user_id=owner_id)
+    except AttachmentError:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
     if path is None or not path.is_file():
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Attachment not found")
 

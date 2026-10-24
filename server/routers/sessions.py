@@ -436,13 +436,19 @@ async def recover_submission_attachment(session_manager: SessionMgr, session_id:
     import hashlib
     from urllib.parse import quote
 
-    from ..attachments import get_path
+    from ..attachments import AttachmentError, get_path
     if not await session_manager.session_belongs_to(session_id, user_id):
         raise HTTPException(404, "Session not found")
     row = await session_manager.db.get_client_submission(session_id, client_id)
     files = (row or {}).get("payload") or {}
     saved = next((file for file in files.get("attachments", []) if file["id"] == attachment_id), None)
-    path = get_path(session_id, attachment_id) if saved else None
+    owner_id = await session_manager.db.get_session_owner(session_id)
+    if owner_id is None or user_id is not None and owner_id != user_id:
+        raise HTTPException(404, "Session not found")
+    try:
+        path = get_path(session_id, attachment_id, user_id=owner_id) if saved else None
+    except AttachmentError:
+        raise HTTPException(409, "A required attachment is unavailable. Re-upload the complete files.")
     if path is None:
         raise HTTPException(409, "A required attachment is unavailable. Re-upload the complete files.")
     assert saved is not None
@@ -609,7 +615,10 @@ async def delete_session(
     _: str = Depends(verify_token),
 ):
     _own_session(session_manager, session_id, user_id)
-    deleted = await session_manager.delete_session(session_id)
+    try:
+        deleted = await session_manager.delete_session(session_id)
+    except ForkError as error:
+        raise HTTPException(error.status_code, detail={"reason": error.reason, "message": str(error)})
     if not deleted:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
 

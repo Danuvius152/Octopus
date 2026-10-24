@@ -39,6 +39,12 @@ AI 后端使用已经登录 ChatGPT 的 Linux 版 Codex。`.env` 设置
 工具仍由安装管理。`.octopus-installation` 和旁置的 `*.installation` 只记录资源
 所属的服务配置位置，用于阻止另一安装重复认领；有用资源的归属标记应保留。
 
+新附件和长输入分别写入`users/<user_id>/attachments/<session_id>/`与
+`users/<user_id>/large-prompts/<session_id>/`，不再因正常写入创建全局同名目录。
+启动仍沿用现有归属检查，不扫描或搬运文件，不补写缺失标记。删除会话会关闭其
+HTTP入口并删除行；原生转录、导出或已获准下载可能仍引用原绝对路径，因此原文件
+在没有完整失效证明时保留，不按会话结束、TTL或缺行自动回收。
+
 Windows 浏览器访问 <http://localhost:8000>。
 [WSL 官方文档](https://learn.microsoft.com/en-us/windows/wsl/networking)
 说明了 Windows 通过 localhost 访问 WSL 中服务的方式。
@@ -340,6 +346,10 @@ push、构建、重启或发布。用户明确要求文档提交时才提交，�
    `scripts/check-storage-layout.py` 确认不再出现；独立维护时用 `--prune`
    显式清理。只删除指向本安装且没有数据、链接或已保存工作目录引用的空壳，
    保留账户目录、旧附件和凭据；清理不使用递归强删，也不能继承模型测试环境。
+   全局 `~/.octopus/attachments` 和 `~/.octopus/large-prompts` 仅剩本安装归属
+   标记且无工作目录引用时也在此步骤退出；先完成旧 writer 退休和账户文件新写入
+   接管，再清理目录，不能只删 marker。沿用捕获的安装配置清理并检查后，账户
+   上传、长输入、安装配置核验及再次启动均不得重新制造这两个全局目录。
    验收失败时，只有旧构建仍兼容实际
    schema 和持久协议才可恢复旧指向并重启验证。更高 schema 迁移已提交时，
    不自动切回不兼容的旧构建，保留当前状态并采用兼容代码恢复或前向修复；

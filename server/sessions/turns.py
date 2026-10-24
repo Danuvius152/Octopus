@@ -469,7 +469,9 @@ class TurnsMixin(SessionManagerBase):
             return SubmissionReceipt.closed(request_id or uuid.uuid4().hex, "shutdown")
         from .client_submissions import _files
 
-        files = await asyncio.to_thread(_files, session_id, list(attachment_ids or []))
+        if session.user_id is None:
+            raise ValueError("The session has no attachment owner")
+        files = await asyncio.to_thread(_files, session_id, list(attachment_ids or []), user_id=session.user_id)
         queued = QueuedPrompt(
             prompt, list(attachment_ids or []), wiki_mode=wiki_mode, source=source,
             delivery_id=delivery_id, work_id=work_id, question_session_id=question_session_id,

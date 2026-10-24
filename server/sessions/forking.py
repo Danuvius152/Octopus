@@ -14,9 +14,11 @@ import os
 import shutil
 import uuid
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from .. import fork_helpers
+from ..attachments import AttachmentError
 from ..attachments import get_path as get_attachment_path
 from ..harness import BackendForkNotSupported, get_harness
 from ..models import MessageContent
@@ -756,8 +758,25 @@ class ForkingMixin(SessionManagerBase):
             frontier = nxt
         return out
 
+    async def _fork_attachment_source(self, session_id: str, attachment_id: str, *, user_id: str) -> Path | None:
+        """Authorize only the ancestry prefix actually needed to find a file."""
+        if self.db is None:
+            return None
+        for ancestor_id in await self.fork_ancestor_ids(session_id):
+            owner_id = await self.db.get_session_owner(ancestor_id)
+            if owner_id is None:
+                # Deleted parents are valid dangling links, not permission to
+                # guess the owner of files beyond this point.
+                return None
+            if owner_id != user_id:
+                raise AttachmentError("invalid attachment ancestor owner")
+            path = get_attachment_path(ancestor_id, attachment_id, user_id=user_id)
+            if path is not None:
+                return path
+        return None
+
     async def _blit_attachments_to_descendant_forks(self, session_id: str) -> None:
-        """Before a session's attachment dir is removed, materialize into each
+        """Before a session's row is removed, materialize into each
         descendant fork's own dir any attachment file the fork references only
         by metadata (session-rewind.md §5.5) — keeping the read-time
         fallback valid after this parent is gone."""
@@ -766,19 +785,24 @@ class ForkingMixin(SessionManagerBase):
         descendants = await self.fork_descendant_ids(session_id)
         if not descendants:
             return
-        from ..attachments import blit_attachment, get_path_with_fork_fallback
+        from ..attachments import blit_attachment
 
+        owner_id = await self.db.get_session_owner(session_id)
+        if owner_id is None:
+            raise ValueError("The session has no attachment owner")
         for fork_id in descendants:
-            try:
-                msgs = await self.db.load_messages(fork_id)
-            except Exception:
-                continue
-            ancestors = await self.fork_ancestor_ids(fork_id)
+            msgs = await self.db.load_messages(fork_id)
             for m in msgs:
                 for att in m.get("attachments") or []:
                     aid = att.get("id")
-                    if not aid or get_attachment_path(fork_id, aid) is not None:
-                        continue  # fork already owns the file
-                    src = get_path_with_fork_fallback(ancestors, aid)
+                    if not aid:
+                        continue
+                    if await self.db.get_session_owner(fork_id) != owner_id:
+                        raise ValueError("The attachment descendant has a different owner")
+                    src = get_attachment_path(fork_id, aid, user_id=owner_id)
+                    if src is None:
+                        src = await self._fork_attachment_source(fork_id, aid, user_id=owner_id)
                     if src is not None:
-                        blit_attachment(fork_id, src)
+                        await asyncio.to_thread(blit_attachment, fork_id, src, user_id=owner_id)
+                    else:
+                        raise ValueError("The descendant attachment has no retained source")

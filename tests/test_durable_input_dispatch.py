@@ -27,13 +27,11 @@ async def test_http_reuses_the_same_durable_admission_as_socket_input(runtime):
         assert starts.qsize() == 1
 
 
-async def test_refused_attachment_can_be_fixed_and_submitted_with_the_same_identity(runtime, monkeypatch, tmp_path):
+async def test_refused_attachment_can_be_fixed_and_submitted_with_the_same_identity(runtime):
     from server.attachments import save_upload
-    from server.config import settings
 
     manager, db, session, _, starts, _ = runtime
-    monkeypatch.setattr(settings, "attachments_dir", str(tmp_path / "attachments"))
-    file = save_upload(session.id, "required.txt", b"complete evidence")
+    file = save_upload(session.id, "required.txt", b"complete evidence", user_id=session.user_id)
     file.path.unlink()
     refused = await submit_client_message(manager, session.id, "Read all evidence", [file.id], "retry", wiki_mode=None)
     assert not refused["accepted"]

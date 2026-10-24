@@ -16,11 +16,9 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Any
 
-from ..attachments import delete_session_attachments
 from ..config import settings
 from ..credential_bindings import validate_credential_binding
 from ..harness import get_harness
-from ..large_prompts import delete_session_large_prompts
 from ..models import MessageContent, SessionDetail, SessionStatus
 from ..users import owner_is_available
 from ..workspace import confine
@@ -749,24 +747,21 @@ class LifecycleMixin(SessionManagerBase):
 
     async def _finish_session_deletion(self, session: Session) -> bool:
         session_id = session.id
+        if session.user_id is None:
+            raise ValueError("The session has no attachment owner")
         owner = self._session_owners.get(id(session)) or self._session_owner(session)
         await owner.call_runtime(CloseExecution("deleted"))
         await self.await_session_execution(session_id, timeout=_BACKEND_RETIRE_TIMEOUT)
         await self._join_session_owner_commands(session)
-        if self.sessions.get(session_id) is session:
-            self.sessions.pop(session_id)
-            self._session_removed(session)
-        # Blit attachment files into descendant forks BEFORE removing this
-        # session's dir, so the read-time fallback stays valid (§5.5). Done
-        # before the DB delete so the descendant message rows are still
-        # readable for their attachment references.
+        # Materialize descendant ID references before removing the parent row:
+        # the ancestor chain cannot resolve a deleted parent afterward.
         await self._blit_attachments_to_descendant_forks(session_id)
         if self.db:
             await self.db.delete_session(session_id)
-        # Best-effort: wipe any uploaded files for this session. We do
-        # this after the DB delete so the FK cascade has already removed
-        # message rows pointing at them — if rmtree fails, the session
-        # row is still gone, which is the user-visible expectation.
-        await asyncio.to_thread(delete_session_attachments, session_id)
-        await asyncio.to_thread(delete_session_large_prompts, session_id)
+        if self.sessions.get(session_id) is session:
+            self.sessions.pop(session_id)
+            self._session_removed(session)
+        # Native transcripts and already authorized downloads may still use
+        # the original attachment/spill paths. Row deletion is not proof that
+        # these references have ended, so it does not authorize file removal.
         return True

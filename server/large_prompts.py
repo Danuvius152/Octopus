@@ -18,19 +18,19 @@ tool supports offset/limit and Grep, so prompts much larger than the
 model's own context window are still consumable — the model decides
 what to ingest.
 
-Lifecycle: spill files live alongside attachments and are wiped by
-`delete_session_large_prompts(session_id)` when the session is
-deleted.
+Lifecycle: spill files live alongside attachments in the account directory.
+Their absolute paths can remain in native transcripts after session deletion;
+without proof that those references have ended, the original files remain.
 """
 
 from __future__ import annotations
 
 import logging
-import shutil
+import re
 import uuid
 from pathlib import Path
 
-from .config import settings
+from .workspace import paths_for
 
 logger = logging.getLogger(__name__)
 
@@ -47,23 +47,29 @@ LARGE_PROMPT_THRESHOLD_BYTES = 100 * 1024
 _PRESERVED_MARKERS = ("[bg-task-result]", "[octopus-large-prompt]")
 
 
-def _large_prompts_root() -> Path:
-    """Spill root with `~` expanded. Mirrors attachments_root() — we
+def _large_prompts_root(*, user_id: str) -> Path:
+    """The verified account's spill root. Mirrors attachments_root() — we
     don't mkdir here so importing the module is a no-op."""
-    return Path(settings.large_prompts_dir).expanduser().resolve()
+    if not isinstance(user_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", user_id):
+        raise ValueError("invalid large-prompt owner")
+    root = paths_for(user_id).large_prompts
+    if root.parent.is_symlink() or root.is_symlink():
+        raise ValueError("invalid large-prompt account directory")
+    return root.resolve()
 
 
-def _session_dir(session_id: str) -> Path:
-    """Per-session spill directory. Created on demand.
+def _session_dir(session_id: str, *, user_id: str) -> Path:
+    """Per-session spill directory, without creating it.
 
     Guards against a malformed session_id scribbling outside the root
     — session ids are uuid4 hex prefixes in production, but defensive
     in case a future caller passes user input through.
     """
-    if not session_id or "/" in session_id or "\\" in session_id:
+    if not isinstance(session_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", session_id):
         raise ValueError(f"invalid session_id for large-prompt spill: {session_id!r}")
-    d = _large_prompts_root() / session_id
-    d.mkdir(parents=True, exist_ok=True)
+    d = _large_prompts_root(user_id=user_id) / session_id
+    if d.is_symlink():
+        raise ValueError("invalid large-prompt session directory")
     return d
 
 
@@ -80,7 +86,7 @@ def _extract_preserved_marker(prompt: str) -> str | None:
     return None
 
 
-def spill_if_large(session_id: str, prompt: str) -> str:
+def spill_if_large(session_id: str, prompt: str, *, user_id: str) -> str:
     """Return the prompt unchanged if it fits in argv; otherwise spill
     it to disk and return a small pointer prompt for the backend.
 
@@ -95,7 +101,8 @@ def spill_if_large(session_id: str, prompt: str) -> str:
     if byte_size <= LARGE_PROMPT_THRESHOLD_BYTES:
         return prompt
 
-    spill_dir = _session_dir(session_id)
+    spill_dir = _session_dir(session_id, user_id=user_id)
+    spill_dir.mkdir(parents=True, exist_ok=True)
     fname = f"{uuid.uuid4().hex}.txt"
     path = spill_dir / fname
     # Write atomically: write to a temp sibling, then rename. Avoids a
@@ -121,11 +128,3 @@ def spill_if_large(session_id: str, prompt: str) -> str:
         byte_size, session_id, abs_path,
     )
     return pointer
-
-
-def delete_session_large_prompts(session_id: str) -> None:
-    """Wipe the session's spill dir. No-op if missing. Best-effort —
-    a failed rmtree shouldn't block session deletion."""
-    d = _large_prompts_root() / session_id
-    if d.exists():
-        shutil.rmtree(d, ignore_errors=True)
