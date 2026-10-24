@@ -920,13 +920,25 @@ async def test_curator_restructures_losslessly_and_publishes_only_current_source
 
 @pytest.mark.parametrize("operation", ["read_many", "submit"])
 @pytest.mark.parametrize("caller", ["http", "app"])
+@pytest.mark.parametrize("serve_frontend", [False, True])
 async def test_retired_wiki_urls_are_unregistered_without_effects(
-    client, tmp_path, monkeypatch, operation, caller
+    client, tmp_path, monkeypatch, operation, caller, serve_frontend
 ):
     from datetime import UTC, datetime
 
+    from fastapi.staticfiles import StaticFiles
+    from starlette.routing import Mount
+
     from server.applications import ApplicationManager, app_scope_token
     from server.routers import applications as app_routes
+
+    routes = [route for route in app.router.routes if getattr(route, "name", None) != "spa"]
+    monkeypatch.setattr(app.router, "routes", routes)
+    if serve_frontend:
+        frontend = tmp_path / "frontend"
+        frontend.mkdir()
+        (frontend / "index.html").write_text("<html>isolated frontend</html>")
+        routes.append(Mount("/", app=StaticFiles(directory=frontend, html=True), name="spa"))
 
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -957,7 +969,9 @@ async def test_retired_wiki_urls_are_unregistered_without_effects(
         "idempotency_key": "retired-entry", "material": "不能受理旧入口", "scope": "旧操作",
     }
     result = await client.post(f"{prefix}/{operation}", json=body, headers=headers)
-    assert result.status_code == 404, result.text
+    # The root static mount rejects non-GET methods before looking up a file.
+    expected_status = 405 if serve_frontend and caller == "http" else 404
+    assert result.status_code == expected_status, result.text
     assert (await client.get("/api/wiki/jobs")).json() == before
     assert (vault / "note.md").read_text() == original
     assert {path.relative_to(vault).as_posix(): path.read_bytes()
