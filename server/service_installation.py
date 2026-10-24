@@ -380,7 +380,7 @@ def _registered_vaults(config: Settings):
         try:
             # A damaged ledger cannot release a valid historical root for a
             # different account. This discovery never opens a writer.
-            value = read_registration(state, require_root=False, check_ledger=False)
+            value = read_registration(state, require_root=False, binding_only=True)
             root = Path(value["root"])
         except WikiError:
             # Registration diagnostics own malformed configuration. Do not

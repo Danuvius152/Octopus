@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from server.wiki.schema import VERSION as DURABLE_SCHEMA_VERSION
+from server.wiki.search_index import VERSION as SEARCH_SCHEMA_VERSION
 from server.wiki.store import WikiError, WikiStore
 from tests import test_wiki_api as api
 from tests import test_wiki_identity as identity_tests
@@ -442,13 +443,16 @@ def test_markdown_old_v5_qualification_is_rebuilt_without_touching_durable_state
         upgraded.close()
 
 
-def test_existing_index_upgrade_preserves_identity_revision_and_history(history):
+@pytest.mark.parametrize("missing_columns", [("readable_body",), ("readable_body", "section_role")])
+@pytest.mark.parametrize("cache_version", ["sections-v4", SEARCH_SCHEMA_VERSION])
+def test_existing_index_upgrade_preserves_identity_revision_and_history(history, missing_columns, cache_version):
     store = history.store
     created = history.write("alpha.md", b"# Alpha realtime\n", None, "human", "create source")
     alpha = represented_pair(store, source="# Alpha realtime\n", summaries=1)
     with store.connect() as db:
-        db.execute("ALTER TABLE search_sections DROP COLUMN readable_body")
-        db.execute("UPDATE search_documents SET version='sections-v4'")
+        for column in missing_columns:
+            db.execute("ALTER TABLE search_sections DROP COLUMN " + column)
+        db.execute("UPDATE search_documents SET version=?", (cache_version,))
         epoch = db.execute("SELECT epoch FROM index_state").fetchone()[0]
     root, state, vault_id = store.root, store.state, store.vault_id
     store.close()

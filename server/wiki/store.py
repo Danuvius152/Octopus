@@ -144,9 +144,6 @@ class WikiStore:
         candidate.db_path = path
         candidate._create_database = True
         initialize(candidate)
-        with candidate.connect() as db:
-            db.execute("INSERT INTO filesystem_state(singleton,protocol,root,vault_id) VALUES(1,1,?,?)", (str(candidate.root), vault_id))
-            db.execute("INSERT INTO wiki_protocols VALUES('registration_config',1)")
         candidate._create_database = False
 
     def __init__(self, root: Path, state: Path, vault_id: str, *, on_construct=None, recovery=None,
@@ -156,7 +153,7 @@ class WikiStore:
             on_construct(self)
         if not create and (not self.db_path.is_file() or self.db_path.is_symlink()):
             raise WikiError("Wiki ledger database is missing; retained registration cannot create a replacement", 503)
-        if not create:
+        if self.db_path.exists() or self.db_path.is_symlink():
             from . import protocols
 
             binding = protocols.registration_preflight(state.resolve(), health=self.health)

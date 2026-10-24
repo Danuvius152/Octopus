@@ -358,26 +358,3 @@ def apply(db, change_id):
                  "path": row["path"], "revision": row["after_hash"], "context": change_id + ":legacy-after",
                  "entries": [], "confirmed": False, "unknown_current": True}
     stage(db, draft)
-
-
-def migrate(db):
-    """Retain v9 bound targets before any derived-table fallback can erase them."""
-    available = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-    documents = db.execute("SELECT d.*,m.metadata AS managed_metadata FROM documents d LEFT JOIN managed_notes m ON m.path=d.path").fetchall()
-    if documents and "wiki_edges" not in available:
-        raise unavailable("v9 source-edge proof is missing")
-    initialize(db)
-    db.execute("ALTER TABLE app_trash ADD COLUMN source_plan TEXT")
-    for row in documents:
-        source_entries = entries(json.loads(row["metadata"]) | json.loads(row["managed_metadata"] or "{}"))
-        draft = plan(db, row["id"], row["path"], row["revision"], source_entries,
-                     "schema9:" + row["id"], prior={"entries": []}, historical=True)
-        old = {edge["ordinal"]: edge for edge in db.execute("SELECT * FROM wiki_edges WHERE source_doc=?", (row["id"],))}
-        for item in draft["entries"]:
-            ref = ParsedReference.restore(item["reference"])
-            edge = old.get(item["ordinal"])
-            if edge and (edge["resource"], edge["relation"], edge["location"], edge["recorded_revision"], edge["label"]) == (
-                    ref.raw_resource, ref.relation, ref.fragment, item["recorded_revision"], item["label"]) and edge["target_doc"]:
-                item.update(policy="bound", target_doc=edge["target_doc"], proof={"context": draft["context"], "target_doc": edge["target_doc"], "legacy_edge": dict(edge)})
-        saved = seal(db, draft, resolve_new=False)
-        db.execute("INSERT INTO source_binding_head VALUES(?,?,NULL)", (row["id"], saved["id"]))

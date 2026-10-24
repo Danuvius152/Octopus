@@ -1,6 +1,5 @@
 """Durable exact write grants; task text and tool arguments never issue one."""
 
-import hashlib
 import json
 import os
 import sqlite3
@@ -142,65 +141,6 @@ def block_ungranted(db, registration=None):
             review_required(db, job, "A current trusted V2 scope is required; re-admit this original job"), job["id"]))
 
 
-def migrate_legacy(db, store):
-    """One V9→V10 transaction; use durable facts without observing vault files."""
-    if not maintenance_inputs.jobs_initialized(db):
-        return
-    registration = {"vault_id": getattr(store, "vault_id", None),
-                    "registration_generation": getattr(store, "registration_generation", None)}
-    for job in db.execute("SELECT * FROM jobs WHERE status IN ('queued','running','interrupted')").fetchall():
-        try:
-            payload = json.loads(job["payload"])
-            items = job_items.decode(job["items"])
-            request = payload["request"]
-            if (job["status"] != "queued" or not all(registration.values())
-                    or not isinstance(request, dict) or not isinstance(items, list)
-                    or hashlib.sha256(job["payload"].encode()).hexdigest() != job["payload_hash"]
-                    or any(payload.get(key) != request.get(key) for key in ("material", "paths", "target", "actor"))
-                    or payload.get("creation") is not None):
-                raise ValueError("The original admission or registration cannot be proved")
-            alias = db.execute("SELECT request_hash,job_id FROM job_requests WHERE request_key=?", (job["request_key"],)).fetchone()
-            request_hash = hashlib.sha256(json.dumps(request, ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-            if alias and (alias["job_id"] != job["id"] or alias["request_hash"] != request_hash):
-                raise ValueError("The original idempotency evidence does not agree")
-            if (db.execute("SELECT 1 FROM operation_receipts WHERE job_id=? LIMIT 1", (job["id"],)).fetchone()
-                    or db.execute("SELECT 1 FROM job_publications WHERE job_id=? LIMIT 1", (job["id"],)).fetchone()):
-                raise ValueError("Prior worker outputs require scope and receipt review")
-            material = payload.get("material", "")
-            if not isinstance(material, str):
-                raise ValueError("The material is not an original submission")
-            reservation = None
-            material_document = None
-            if material and items and not payload.get("paths"):
-                if len(items) != 1 or items[0].get("status") != "pending":
-                    raise ValueError("Prior material work needs item-by-item scope review")
-                item = items[0]
-                material_document = db.execute("SELECT id,path,revision FROM documents WHERE id=?", (item["doc"],)).fetchone()
-                digest = hashlib.sha256(material.encode()).hexdigest()
-                if (material_document is None or not _literal_target(material_document["path"], existing=True)
-                        or material_document["revision"] != digest or item.get("revision") != digest):
-                    raise ValueError("The original material identity and exact bytes cannot be proved")
-            elif material and not items and not payload.get("paths"):
-                path = payload.get("target") or f"Library/Inbox/{job['id']}.md"
-                if (not _literal_target(path) or PurePosixPath(path).suffix.lower() != ".md"
-                        or db.execute("SELECT 1 FROM documents WHERE path=?", (path,)).fetchone()):
-                    raise ValueError("The material target already needs identity verification")
-                reservation = {"path": path, "path_key": os.path.normcase(str(store.root / path))}
-            elif not material and items and payload.get("paths") == [item["path"] for item in items]:
-                if len({item["doc"] for item in items}) != len(items):
-                    raise ValueError("The selected identities are not distinct")
-                for item in items:
-                    current = db.execute("SELECT path FROM documents WHERE id=?", (item["doc"],)).fetchone()
-                    if (item.get("status") != "pending" or not item.get("revision") or not _literal_target(item["path"], existing=True)
-                            or current is None or not _literal_target(current["path"], existing=True)):
-                        raise ValueError("An original selected identity cannot be proved")
-            else:
-                raise ValueError("The old work was broad, partially executed or had no finite selection")
-            issue(db, registration, job["id"], [] if material_document else items, policy="legacy-explicit", material=reservation)
-            if material_document:
-                bind_document(db, job["id"], material_document["id"], material_document["path"], material_document["revision"], "material")
-        except (ValueError, TypeError, KeyError) as error:
-            db.execute("UPDATE jobs SET status='failed',error=? WHERE id=?", (review_required(db, job, str(error)), job["id"]))
 
 
 def _literal_target(path, *, existing=False):

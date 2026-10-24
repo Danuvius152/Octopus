@@ -120,7 +120,9 @@ Codex 控制指令的当前交付生命周期见[运行时计划](codex-backend.
 
 主库正文唯一，保留正常按文档有限历史与必要任务/失败证据，不默认长期整库备份，也不自动 Git 提交知识库。Sapphire 继续负责文件、附件和 Git 体验；本机此前一次主库 Git 保存不授权以后每次保存都提交/推送。
 
-此前发布的简化基线使用 durable schema10；当前代码使用 schema12，在 schema11 的持久任务通知和所有者文件事件恢复上加入 attention 结算及控制操作回执。升级不改写旧通知的事件身份、正文或投递记录；主库接纳提交后才 ACK 原 outbox 事件，重送继续使用原事件去重。旧状态在同一事务中升级相应账本并保留来源证明、注册、选择及有限授权事实，迁移失败保持旧状态。旧框架拒绝打开更高版本账本；迁移提交后，恢复使用兼容当前协议的已验证代码或前向修复，不以旧数据库覆盖新写入，不为发布维护第二份知识库或额外制作旧版兼容构建。实际部署版本以发布验收为准。
+当前代码的完整 Wiki 格式为13，版本权威仍是 `wiki_schema` 的最大版本。新库一次建立含 jobs 的完整布局，只记录13；支持的12布局可有 jobs 或确实从未初始化 jobs，前者保留全部任务、授权、控制、通知和 ACK，后者须先排除持久任务引用。准备、绑定及版本在原存储事务内共同提交；健康13只验证，不重跑旧安装步骤。结构与协议只读准入先于 writer、观察器和注册发布，无支持路径、未知结构或缺失持久账本均保留原资料并拒绝。基线之前的 schema 转换及注册 generation 自动补写已经退出；安装层仍保留旧配置的根排他保护。
+
+已知派生投影仍由原 owner 重建，维护 nonce 随实际重建更新；正文、来源证明、历史和原通知事件不作为缓存清空。主库接纳提交后才 ACK 原 outbox 事件，重送继续使用原事件去重。旧 item 编码和保守 journal 恢复仍按当前合同解释，不能仅凭格式13认定旧内容已转换。恢复使用支持当前格式及协议的已验证代码或前向修复，不以旧数据库覆盖新写入，也不维护第二份知识库。实际运行提交和格式以发布验收为准，代码更新不表示生产已经升级。
 
 文件事件协议仍为1；已观察事件先持久接收，再将身份/索引应用和 applied 标记原子提交，最后精确确认。观察器中断、overflow、armed/uncertain 等不确定证据失败关闭，不丢队列伪造 ready；未被观察到的离线瞬时历史不能追溯。Store 生命周期、后台对账与关闭等待保留真实 writer/线程完成语义。
 
@@ -134,6 +136,7 @@ Codex 控制指令的当前交付生命周期见[运行时计划](codex-backend.
 | HTTP / MCP 与真实参数 | [router](../../server/routers/wiki.py)、[MCP](../../server/mcp_servers/wiki.py)、[contracts](../../server/wiki/contracts.py) |
 | 权限、命令选择、维护观察 | [tasks](../../server/wiki/tasks.py)、[maintenance_state](../../server/wiki/maintenance_state.py)、[当前合同](#4-当前运行合同) |
 | 注册、索引与文件事件 | [registry](../../server/wiki/registry.py)、[store](../../server/wiki/store.py)、[events](../../server/wiki/events.py) |
+| 格式准入、原子准备与当前 DDL | [schema](../../server/wiki/schema.py)、[schema_ddl](../../server/wiki/schema_ddl.py)、[storage](../../server/wiki/storage.py) |
 | 持久任务、历史、原始材料 | [jobs](../../server/wiki/jobs.py)、[history](../../server/wiki/history.py)、[materials](../../server/wiki/materials.py) |
 | 规则装配与按需指南 | [workflow](../../server/wiki/workflow.py)、[prompts](../../server/wiki/prompts/)；实际 Weber persona 属于代理配置，curator 参考文件不表示已自动应用 |
 | 检查、文档入口及本机发布 | [AGENTS](../../AGENTS.md)、[check.sh](../../scripts/check.sh)、[文档索引](../../scripts/gen-docs-index.py)、[local-wsl](../local-wsl.md) |

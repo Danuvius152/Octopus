@@ -1,20 +1,19 @@
 """Historical source facts survive graph loss, path reuse and exact-side recovery."""
 
-import contextlib
 import json
 import sqlite3
 import subprocess
 import sys
 import uuid
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from server.wiki import history as history_module
-from server.wiki import schema, source_bindings
+from server.wiki import source_bindings
 from server.wiki.history import WikiHistory
 from server.wiki.store import WikiError, WikiStore
+from tests.wiki_baseline import use_supported_baseline12
 
 
 @pytest.fixture
@@ -253,65 +252,25 @@ def test_unresolved_source_retains_its_original_parent_when_source_moves(history
     assert dependency(history.store, "Other/consumer.md")["doc"] == history.store.read("Library/evidence/future.md")["id"]
 
 
-def downgrade_to_v9(store):
-    from server.wiki import maintenance_inputs
-    from tests.wiki_schema_fixtures import remove_future_selections
-
-    store.close()
-    with sqlite3.connect(store.db_path) as db:
-        maintenance_inputs.discard_derived(db)
-        remove_future_selections(db)
-        for table in source_bindings.TABLES:
-            db.execute("DROP TABLE " + table)
-        db.execute("ALTER TABLE app_trash DROP COLUMN source_plan")
-        db.execute("DROP TABLE wiki_protocols")
-        db.execute("DELETE FROM wiki_schema WHERE version>=10")
-
-
-def migration_store(store):
-    @contextlib.contextmanager
-    def connect():
-        db = sqlite3.connect(store.db_path)
-        db.row_factory = sqlite3.Row
-        try:
-            with db:
-                yield db
-        finally:
-            db.close()
-
-    def no_files(*args):
-        raise AssertionError("Source migration must use existing evidence, not current files")
-
-    return SimpleNamespace(connect=connect, observed_path=no_files)
-
-
-def test_v9_migration_retains_bound_target_and_missing_occurrence_becomes_unknown(history):
+def test_unsupported_source_format_is_retained_without_promoting_derived_edges(history):
     a, consumer, raw, _ = setup_replacement(history)
     extra = raw.replace(b"---\n# Consumer", b"  - resource: a.md\n    id: missing\n---\n# Consumer")
     history.write("consumer.md", extra, consumer["revision"], "human", "add duplicate")
-    downgrade_to_v9(history.store)
-    store = migration_store(history.store)
-    with store.connect() as db:
+    store = history.store
+    store.close()
+    with sqlite3.connect(store.db_path) as db:
+        db.execute("PRAGMA recursive_triggers=ON")
         db.execute("DELETE FROM wiki_edges WHERE source_doc=? AND ordinal=1", (consumer["id"],))
-        preserved = {name: [tuple(row) for row in db.execute("SELECT * FROM " + name)]
-                     for name in ("document_identities", "uid_aliases", "changes", "material_origins")}
-    schema.initialize(store)
-    with store.connect() as db:
-        first = source_bindings.current(db, consumer["id"])
-        assert [item["policy"] for item in first["entries"]] == ["bound", "unknown"]
-        assert first["entries"][0]["target_doc"] == a["id"]
-        for name, rows in preserved.items():
-            assert [tuple(row) for row in db.execute("SELECT * FROM " + name)] == rows
-    schema.initialize(store)
-    with store.connect() as db:
-        assert source_bindings.current(db, consumer["id"]) == first
-    current = WikiStore(history.store.root, history.store.state, history.store.vault_id, health=history.store.health)
-    try:
-        refs = current.read("consumer.md")["metadata"]["source_refs"]
-        assert refs[0]["doc"] == a["id"]
-        assert refs[1]["status"] == "unknown" and refs[1]["doc"] is None
-    finally:
-        current.close()
+        db.execute("DELETE FROM wiki_schema")
+        db.execute("INSERT INTO wiki_schema VALUES(9,'original-time')")
+    retained = store.db_path.read_bytes()
+    bodies = {p.relative_to(store.root): p.read_bytes() for p in store.root.rglob("*.md")}
+    for _ in range(2):
+        with pytest.raises(WikiError, match="retained") as refused:
+            WikiStore(store.root, store.state, store.vault_id)
+        assert refused.value.status == 503
+        assert store.db_path.read_bytes() == retained
+        assert {p.relative_to(store.root): p.read_bytes() for p in store.root.rglob("*.md")} == bodies
 
 
 @pytest.mark.parametrize("missing", list(source_bindings.TABLES))
@@ -320,23 +279,16 @@ def test_missing_durable_source_table_is_rejected_and_not_recreated(history, mis
     history.store.close()
     with sqlite3.connect(history.store.db_path) as db:
         db.execute("DROP TABLE " + missing)
-        before = list(db.iterdump())
-    with pytest.raises(WikiError, match="Source-binding ledger.*retained"):
-        schema.initialize(migration_store(history.store))
-    with sqlite3.connect(history.store.db_path) as db:
-        assert list(db.iterdump()) == before
-
-
-def test_v9_missing_entire_source_ledger_fails_before_derived_fallback(history):
-    setup_replacement(history)
-    downgrade_to_v9(history.store)
-    with sqlite3.connect(history.store.db_path) as db:
         db.execute("DROP TABLE wiki_edges")
         before = list(db.iterdump())
-    with pytest.raises(WikiError, match="v9 source-edge proof is missing"):
-        schema.initialize(migration_store(history.store))
+    retained = history.store.db_path.read_bytes()
+    with pytest.raises(WikiError, match="retained") as error:
+        WikiStore(history.store.root, history.store.state, history.store.vault_id)
+    assert error.value.status == 503
+    assert history.store.db_path.read_bytes() == retained
     with sqlite3.connect(history.store.db_path) as db:
         assert list(db.iterdump()) == before
+        assert db.execute("SELECT 1 FROM sqlite_schema WHERE name='wiki_edges'").fetchone() is None
 
 
 @pytest.mark.parametrize("legacy", [False, True])
@@ -406,7 +358,15 @@ def test_legacy_prepared_after_without_exact_source_plan_stays_unknown(history):
     with history.locked():
         receipt = history.record("consumer.md", raw, proposed, "human", "legacy preparation", "prepared")
         history.store.path("consumer.md").write_bytes(proposed)
-    downgrade_to_v9(history.store)
+    history.store.close()
+    with sqlite3.connect(history.store.db_path) as db:
+        db.row_factory = sqlite3.Row
+        db.execute("BEGIN IMMEDIATE")
+        use_supported_baseline12(db)
+        # This is an old prepared record inside a complete supported ledger.
+        # Its absent exact source plan remains a current recovery obligation.
+        db.execute("DELETE FROM change_source_bindings WHERE change_id=?", (receipt["id"],))
+        assert db.execute("SELECT 1 FROM change_source_bindings WHERE change_id=?", (receipt["id"],)).fetchone() is None
     current = WikiStore(history.store.root, history.store.state, history.store.vault_id, health=history.store.health)
     try:
         WikiHistory(current).recover()
@@ -419,11 +379,10 @@ def test_legacy_prepared_after_without_exact_source_plan_stays_unknown(history):
         current.close()
 
 
-@pytest.mark.parametrize("failed_table", ["source_binding_observations", "source_binding_head", "wiki_schema"])
-def test_source_migration_failure_rolls_back_all_new_facts_and_schema_marker(history, failed_table, tmp_path):
+@pytest.mark.parametrize("failed_table", ["source_binding_observations", "source_binding_head"])
+def test_source_record_failure_rolls_back_new_facts_and_keeps_original_proof(history, failed_table, tmp_path):
     original, _consumer, _raw, _receipt = setup_replacement(history)
     store = history.store
-    downgrade_to_v9(store)
     store.close()
     with sqlite3.connect(store.db_path) as db:
         before = list(db.iterdump())
@@ -432,9 +391,13 @@ def test_source_migration_failure_rolls_back_all_new_facts_and_schema_marker(his
     program = """
 import sqlite3,sys
 from pathlib import Path
+from urllib.parse import unquote,urlsplit
+from server.wiki.history import WikiHistory
 from server.wiki.store import WikiStore
 root,state,vault_id,failed_table,marker=sys.argv[1:]
 marker=Path(marker)
+store=WikiStore(Path(root),Path(state),vault_id)
+target=store.db_path.resolve()
 connect=sqlite3.connect
 def authorize(action,table,*args):
     if action==sqlite3.SQLITE_INSERT and table==failed_table:
@@ -443,10 +406,15 @@ def authorize(action,table,*args):
     return sqlite3.SQLITE_OK
 def denied(*args,**kwargs):
     db=connect(*args,**kwargs)
-    db.set_authorizer(authorize)
+    raw=str(args[0]);location=unquote(urlsplit(raw).path) if raw.startswith('file:') else raw
+    if location!=':memory:' and Path(location).resolve()==target and 'mode=ro' not in raw:
+        db.set_authorizer(authorize)
     return db
 sqlite3.connect=denied
-try: WikiStore(Path(root),Path(state),vault_id)
+try:
+    history=WikiHistory(store)
+    raw=store.path('consumer.md').read_bytes()
+    history.record('consumer.md',raw,raw,'human','uncommitted source record','applied')
 except Exception: pass
 marker.touch()
 """
@@ -481,18 +449,6 @@ print(json.dumps({'observations':observations}))
     )
     assert restarted.returncode == 0, restarted.stderr
     assert {path.relative_to(store.root): path.read_bytes() for path in store.root.rglob("*.md")} == bodies
-
-
-def test_schema9_framework_refuses_new_source_ledger_without_mutation(history, monkeypatch):
-    setup_replacement(history)
-    store = migration_store(history.store)
-    with store.connect() as db:
-        before = list(db.iterdump())
-    monkeypatch.setattr(schema, "VERSION", 9)
-    with pytest.raises(WikiError, match="newer than this framework.*retained"):
-        schema.initialize(store)
-    with store.connect() as db:
-        assert list(db.iterdump()) == before
 
 
 def test_legacy_vault_inventory_preserves_proof_for_an_unchanged_related_note(history):

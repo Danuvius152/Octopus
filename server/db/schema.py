@@ -6,12 +6,13 @@ storage; preparation runs under Database's original writer transaction.
 
 from __future__ import annotations
 
-import re
 import sqlite3
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from contextlib import closing
 
 from ..account_baseline import persistent_database_file
+from ..sqlite_schema import definition as _schema_definition
+from ..sqlite_schema import statements as _statements
 from .transaction import Transaction
 
 CURRENT_VERSION = 2
@@ -42,63 +43,12 @@ BEGIN SELECT RAISE(ABORT, 'duplicate message sequence'); END;
 """
 
 
-def _statements(script: str) -> Iterator[str]:
-    """Split trusted DDL at complete statements, including trigger bodies."""
-    start = 0
-    for end, char in enumerate(script, 1):
-        if char == ";" and sqlite3.complete_statement(script[start:end]):
-            yield script[start:end]
-            start = end
-    if script[start:].strip():
-        raise ValueError("Incomplete main-database DDL")
-
-
-_SQL_TOKEN = re.compile(
-    r"'(?:''|[^'])*'|\"(?:\"\"|[^\"])*\"|`(?:``|[^`])*`|\[[^\]]*\]"
-    r"|--[^\n]*|/\*.*?\*/|\w+|[^\s]", re.DOTALL,
-)
-
-
 def _definition(kind: str, sql: str) -> tuple:
-    """Compare declarations, retaining constraints and literal values.
-
-    SQLite retains original CREATE text, including comments and ALTER-added
-    column order. Unquoted spelling, whitespace and declaration order are
-    immaterial. Quoted tokens remain distinct: SQLite also accepts quoted
-    type names and default text where removing quotes changes the meaning.
-    """
-    tokens = []
-    for token in _SQL_TOKEN.findall(sql):
-        if token.startswith(("--", "/*")):
-            continue
-        if token.startswith(("'", '"', '`', '[')):
-            tokens.append(token)
-        else:
-            tokens.append(token.lower())
-    if tokens[-1:] == [";"]:
-        tokens.pop()
-    # sqlite_schema omits IF NOT EXISTS in some SQLite releases.
-    for offset in (2, 3):
-        if tokens[offset:offset + 3] == ["if", "not", "exists"]:
-            del tokens[offset:offset + 3]
-            break
-    if kind != "table":
-        return tuple(tokens)
-    opening = tokens.index("(")
-    declarations = []
-    start, depth = opening + 1, 1
-    for offset in range(start, len(tokens)):
-        token = tokens[offset]
-        if token == "(":
-            depth += 1
-        elif token == ")":
-            depth -= 1
-        if depth == 0 or (token == "," and depth == 1):
-            declarations.append(tuple(tokens[start:offset]))
-            start = offset + 1
-        if depth == 0:
-            return (tuple(tokens[:opening]), tuple(sorted(declarations)), tuple(tokens[offset + 1:]))
-    raise UnsupportedMainStorage()
+    """Main storage deliberately accepts equivalent physical column orders."""
+    try:
+        return _schema_definition(kind, sql)
+    except ValueError:
+        raise UnsupportedMainStorage() from None
 
 
 def _validate_layout(version: int, rows: Sequence[tuple[str, str, str]]) -> bool:

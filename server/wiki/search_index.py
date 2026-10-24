@@ -181,8 +181,10 @@ def initialize(db) -> None:
     )
     if "section_role" not in {column[1] for column in db.execute("PRAGMA table_info(search_sections)")}:
         db.execute("ALTER TABLE search_sections ADD COLUMN section_role TEXT NOT NULL DEFAULT 'body'")
+        incomplete = True
     if "readable_body" not in {column[1] for column in db.execute("PRAGMA table_info(search_sections)")}:
         db.execute("ALTER TABLE search_sections ADD COLUMN readable_body INTEGER NOT NULL DEFAULT 0")
+        incomplete = True
     db.execute("""CREATE VIRTUAL TABLE IF NOT EXISTS search_fts USING fts5(
       title,path,aliases,tags,key_note,heading,body,tokenize='unicode61'
     )""")
@@ -193,7 +195,7 @@ def initialize(db) -> None:
       AFTER DELETE ON documents BEGIN
       DELETE FROM search_sections WHERE doc_id=old.id;
       DELETE FROM search_documents WHERE doc_id=old.id; END""")
-    if incomplete:
+    if incomplete or db.execute("SELECT 1 FROM search_documents WHERE version<>? LIMIT 1", (VERSION,)).fetchone():
         db.execute("DELETE FROM search_sections")
         db.execute("DELETE FROM search_fts")
         db.execute("DELETE FROM search_documents")

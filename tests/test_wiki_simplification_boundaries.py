@@ -79,7 +79,7 @@ def test_membership_survives_removal_of_one_of_two_roles(prepared):
     assert members(jobs.store, job) == {docs["b"]["id"]}
 
 
-@pytest.mark.parametrize("repair", ["legacy_role_cache", "legacy_index", "reopen"])
+@pytest.mark.parametrize("repair", ["legacy_role_cache", "missing_lookup_index", "reopen"])
 async def test_storage_simplification_preserves_reviews_and_frozen_selection(client, tmp_path, repair):
     _, _, jobs = await prepare(client, tmp_path, FILES)
     a, b = (jobs.store.read(f"Library/{name}.md") for name in ("a", "b"))
@@ -104,8 +104,8 @@ async def test_storage_simplification_preserves_reviews_and_frozen_selection(cli
             db.execute("DROP TABLE maintenance_job_members")
             db.execute("CREATE TABLE maintenance_job_members(job_id TEXT NOT NULL,doc_id TEXT NOT NULL,role TEXT NOT NULL,PRIMARY KEY(job_id,doc_id,role))")
             db.execute("UPDATE maintenance_input_state SET version='maintenance-inputs-v4'")
-        elif repair == "legacy_index":
-            db.execute("CREATE INDEX wiki_edge_lookup ON wiki_edges(lookup_key)")
+        elif repair == "missing_lookup_index":
+            db.execute("DROP INDEX wiki_reverse_lookup")
     if repair == "reopen":
         from server.wiki.registry import registry
 
@@ -121,6 +121,7 @@ async def test_storage_simplification_preserves_reviews_and_frozen_selection(cli
         catalog.finish(db)
         assert list(map(tuple, db.execute("SELECT * FROM wiki_edges ORDER BY source_doc,ordinal"))) == original_edges
         assert not db.execute("SELECT 1 FROM sqlite_master WHERE name='wiki_edge_lookup'").fetchone()
+        assert db.execute("SELECT 1 FROM sqlite_master WHERE name='wiki_reverse_lookup'").fetchone()
     after = await state(client, limit=1)
     assert after["items"][0]["review"] == original_review
     assert facts(jobs.store) == original_facts

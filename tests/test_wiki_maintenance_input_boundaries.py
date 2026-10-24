@@ -253,6 +253,28 @@ def test_review_incompatible_owned_index_is_repaired(prepared):
         assert any("SEARCH" in step and "maintenance_members_document" in step for step in plan)
 
 
+@pytest.mark.parametrize("damage", ["table", "trigger"])
+def test_review_known_input_projection_repair_retains_history_and_retires_old_publication(prepared, damage):
+    jobs, docs = prepared
+    seed_history(jobs, docs)
+    old = captured(jobs.store, docs["a"]["id"])
+    original = facts(jobs.store)
+    with jobs.store.connect() as db:
+        if damage == "table":
+            db.execute("DROP TABLE maintenance_job_items")
+            db.execute("CREATE TABLE maintenance_job_items(job_id TEXT,ordinal INTEGER,PRIMARY KEY(job_id,ordinal))")
+        else:
+            db.execute("DROP TRIGGER maintenance_input_documents_update")
+            db.execute("CREATE TRIGGER maintenance_input_documents_update AFTER UPDATE ON documents BEGIN SELECT 1; END")
+    schema.initialize(jobs.store)
+    assert facts(jobs.store) == original
+    assert not publish(jobs.store, old, docs["a"])
+    assert inputs.normalize(jobs.store)
+    fresh = captured(jobs.store, docs["a"]["id"])
+    assert fresh["nonce"] != old["nonce"]
+    assert publish(jobs.store, fresh, docs["a"])
+
+
 @pytest.mark.parametrize("missing", ["jobs", "maintenance_inputs"])
 def test_review_combined_cache_loss_never_bypasses_durable_validation(prepared, missing):
     from server.wiki.store import WikiError

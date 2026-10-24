@@ -79,9 +79,7 @@ def _shape(db, table):
 
 
 def validate_jobs(db):
-    columns = JOB_COLUMNS
-    if db.execute("SELECT 1 FROM wiki_schema WHERE version=12").fetchone():
-        columns += (("attempt_errors", "TEXT", 1, "'{}'", 0, 0),)
+    columns = JOB_COLUMNS + (("attempt_errors", "TEXT", 1, "'{}'", 0, 0),)
     if _shape(db, "jobs") != columns or _shape(db, "job_requests") != REQUEST_COLUMNS:
         raise unavailable("job ledger is missing or incompatible")
     unique_request = any(row[2] and not row[4] and
@@ -106,19 +104,6 @@ def jobs_initialized(db):
     return False
 
 
-def adopt_legacy_jobs(db):
-    """Called only by the v1-v9 migration, before the new protocol commits."""
-    present = names(db) & {"jobs", "job_requests"}
-    if present:
-        validate_jobs(db)
-        if (db.execute("""SELECT 1 FROM operation_receipts r LEFT JOIN jobs j ON j.id=r.job_id
-                         WHERE r.job_id IS NOT NULL AND j.id IS NULL LIMIT 1""").fetchone()
-                or db.execute("""SELECT 1 FROM job_publications p LEFT JOIN jobs j ON j.id=p.job_id
-                               WHERE j.id IS NULL LIMIT 1""").fetchone()):
-            raise unavailable("legacy job references have no owning ledger row")
-        db.execute("INSERT INTO wiki_protocols VALUES('maintenance_jobs',1)")
-    else:
-        jobs_initialized(db)
 
 
 def require(db):

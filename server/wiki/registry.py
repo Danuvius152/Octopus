@@ -161,7 +161,7 @@ class WikiRegistry:
         )
 
     def config(self, user_id: str | None, *, require_root=True) -> dict[str, Any]:
-        return protocols.read_registration(self.state(user_id), require_root=require_root, health=self.health)
+        return protocols.read_registration(self.state(user_id), require_root=require_root)
 
     def configure(
         self,
@@ -210,8 +210,7 @@ class WikiRegistry:
         database = state / "index.sqlite3"
         binding = None
         if old or database.exists() or database.is_symlink():
-            binding = protocols.registration_preflight(state.resolve(), legacy=bool(old and "registration_generation" not in old),
-                                                       complete=old is None, health=self.health)
+            binding = protocols.registration_preflight(state.resolve(), complete=old is None, health=self.health)
         if binding is not None and (binding["root"] != str(root.resolve()) or old and binding["vault_id"] != old["vault_id"]):
             raise WikiError("Wiki ledger belongs to another root or vault binding; durable state retained", 409)
         vault_id = old["vault_id"] if old else binding["vault_id"] if binding else str(uuid.uuid4())
@@ -240,7 +239,7 @@ class WikiRegistry:
         }
         same = old and all(config[key] == old.get(key) for key in config)
         config |= {"registration_protocol": 1,
-                   "registration_generation": old["registration_generation"] if old and same and old.get("registration_generation") else uuid.uuid4().hex}
+                   "registration_generation": old["registration_generation"] if same else uuid.uuid4().hex}
         if old == config:
             with storage.file_effect(self.health):
                 self._sync_config(state)
@@ -391,24 +390,13 @@ class WikiRegistry:
         candidate = None
         retire = []
         try:
-            binding = protocols.registration_preflight(state, legacy="registration_generation" not in config, health=self.health)
+            binding = protocols.registration_preflight(state, health=self.health)
             if binding is not None and binding != {"root": config["root"], "vault_id": config["vault_id"]}:
                 raise WikiError("Wiki ledger registration binding changed; durable state retained", 503)
             try:
                 guard_vault(settings, Path(config["root"]), state, health=self.health)
             except InstallationError as error:
                 raise WikiError(str(error), 503) from error
-            if "registration_generation" not in config:
-                with account:
-                    with self._lock:
-                        if permit.revoked or not self._allowed(user_id):
-                            raise WikiError("Wiki construction was revoked", 503)
-                    with self.registration_lock(user_id, shared=False):
-                        if self.config(user_id) != config:
-                            raise WikiError("Wiki registration changed during preparation", 503)
-                        config = self._configure(user_id, Path(config["root"]), config["curator_agent_id"], config.get("app_id"))
-                        permit.config = config
-                        key = self._key(user_id, state, config)
             def acquired(store):
                 permit.candidate = store
                 # Publication rechecks this captured binding and the permit

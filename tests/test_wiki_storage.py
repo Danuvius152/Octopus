@@ -49,6 +49,7 @@ def test_unknown_wiki_commit_exits_before_an_outer_handler_can_admit_more_work(t
     program = """
 import json,os,sqlite3,sys
 from pathlib import Path
+from urllib.parse import parse_qs,unquote,urlsplit
 base=Path(sys.argv[1]).parent
 os.environ['CODEX_HOME']=str(base/'default-codex')
 os.environ['CLAUDE_CONFIG_DIR']=str(base/'default-claude')
@@ -64,6 +65,11 @@ registry.configure(None,root,'curator')
 store=registry.store(None)
 original_connect=sqlite3.connect
 class FaultyConnection(sqlite3.Connection):
+    def execute(self,sql,*args,**kwargs):
+        result=super().execute(sql,*args,**kwargs)
+        if sql.startswith('INSERT INTO app_trash'):
+            Path(sys.argv[4]+'.write-started').touch()
+        return result
     def commit(self):
         if not self.in_transaction:
             return super().commit()
@@ -78,7 +84,12 @@ class FaultyConnection(sqlite3.Connection):
             self.rollback()
         return False
 def connect(*args,**kwargs):
-    kwargs['factory']=FaultyConnection
+    raw=str(args[0])
+    uri=urlsplit(raw)
+    location=unquote(uri.path) if raw.startswith('file:') else raw
+    mode=parse_qs(uri.query).get('mode',['rw'])[0]
+    if location!=':memory:' and Path(location).resolve()==store.db_path.resolve() and mode!='ro':
+        kwargs['factory']=FaultyConnection
     return original_connect(*args,**kwargs)
 sqlite3.connect=connect
 try:
@@ -99,6 +110,7 @@ Path(sys.argv[4]).touch()
         cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=5,
     )
     assert marker.with_name(marker.name + ".commit-started").is_file(), result.stderr
+    assert marker.with_name(marker.name + ".write-started").is_file(), result.stderr
     with sqlite3.connect(Path(config.wiki_dir) / "index.sqlite3") as reader:
         assert reader.execute("SELECT count(*) FROM app_trash WHERE trash_id='commit-proof'").fetchone()[0] == int(committed)
     assert result.returncode == 70, result.stderr

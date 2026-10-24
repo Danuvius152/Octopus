@@ -1,9 +1,173 @@
-"""Transactional migrations; derived tables never replace durable ledgers."""
+"""Inspect and prepare supported Wiki formats; derived data has no authority."""
 
 import re
+import sqlite3
+from contextlib import closing
+from dataclasses import dataclass
 from datetime import UTC, datetime
 
-VERSION = 12
+from ..sqlite_schema import definition
+
+VERSION = 13
+
+_CATALOG = "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*'"
+
+
+@dataclass(frozen=True)
+class Inspection:
+    version: int
+    with_jobs: bool
+    repairs: frozenset[str]
+
+
+def _columns(db, name):
+    return tuple(tuple(row)[1:] for row in db.execute("SELECT * FROM pragma_table_xinfo(?)", (name,)))
+
+
+def _catalog(db):
+    result = {}
+    for kind, name, table, sql in db.execute(_CATALOG):
+        columns = _columns(db, name) if kind == "table" else None
+        result[kind, name] = (table, definition(kind, sql), columns)
+    return result
+
+
+def _reference(with_jobs):
+    from . import maintenance_inputs, schema_ddl
+
+    with closing(sqlite3.connect(":memory:")) as reference:
+        reference.row_factory = sqlite3.Row
+        reference.execute("PRAGMA recursive_triggers=ON")
+        reference.execute("BEGIN IMMEDIATE")
+        schema_ddl.create(reference, with_jobs=with_jobs)
+        catalog = _catalog(reference)
+        protocols = dict(reference.execute("SELECT name,version FROM wiki_protocols"))
+        tables = {
+            "maintenance": set(maintenance_inputs.TABLES),
+            "search": {"search_documents", "search_sections", "search_fts"},
+            "materials": {"raw_materials"},
+            "catalog": {"wiki_edges", "wiki_edge_lookups", "wiki_lookup_names", "catalog_state",
+                        "catalog_dirty", "wiki_uid_claims", "wiki_uid_dirty"},
+        }
+        tables["search"].update(row[1] for row in reference.execute("PRAGMA table_list") if row[2] == "shadow")
+        triggers = {
+            "maintenance": set(maintenance_inputs.triggers(with_jobs)),
+            "search": {"search_section_delete", "search_document_delete"},
+            "materials": {"raw_material_delete"},
+            "catalog": {"wiki_edge_delete", "wiki_reference_delete", "wiki_lookup_delete"},
+        }
+        derived_indexes = {definition("index", sql)[2] for sql in maintenance_inputs.INDEXES}
+        repairable = {}
+        for key, value in catalog.items():
+            if key[0] == "index" and key[1] in derived_indexes:
+                repairable[key] = "maintenance"
+            else:
+                for owner in tables:
+                    if value[0] in tables[owner] or key[0] == "trigger" and key[1] in triggers[owner]:
+                        repairable[key] = owner
+                        break
+        replaceable: dict[tuple[str, str], frozenset[tuple] | None] = dict.fromkeys(
+            {("table", name) for name in maintenance_inputs.TABLES}
+            | {("trigger", name) for name in maintenance_inputs.triggers(with_jobs)}
+            | {("index", name) for name in derived_indexes})
+        # The search owner can append these two known tail columns, in order.
+        # Admit only its exact repairable layouts, never arbitrary cache DDL.
+        section_layouts = set()
+        declaration = reference.execute("SELECT sql FROM sqlite_schema WHERE name='search_sections'").fetchone()[0]
+        # ALTER validates the entire schema. These local columns need only the
+        # trusted table declaration, not repeated validation of every trigger.
+        with closing(sqlite3.connect(":memory:")) as sections:
+            sections.execute(declaration)
+            for column in ("readable_body", "section_role"):
+                sections.execute("ALTER TABLE search_sections DROP COLUMN " + column)
+                sql = sections.execute("SELECT sql FROM sqlite_schema WHERE name='search_sections'").fetchone()[0]
+                section_layouts.add(("search_sections", definition("table", sql), _columns(sections, "search_sections")))
+        replaceable["table", "search_sections"] = frozenset(section_layouts)
+    return catalog, protocols, repairable, replaceable
+
+
+def inspect(db):
+    """Read one existing committed format; no preparation or file observation."""
+    from . import (
+        grants,
+        job_controls,
+        job_events,
+        maintenance_inputs,
+        maintenance_selections,
+        protocols,
+        recovery_state,
+        source_bindings,
+    )
+    from .store import WikiError
+
+    try:
+        version = db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0]
+        if version not in (12, VERSION) or version > VERSION:
+            raise WikiError("Wiki format has no supported preparation path; durable state retained", 503)
+        protocols.require(db, "registration")
+        markers = dict(db.execute("SELECT name,version FROM wiki_protocols"))
+        with_jobs = "maintenance_jobs" in markers
+        if version == VERSION and not with_jobs:
+            raise WikiError("Current Wiki format requires its complete job authority; durable state retained", 503)
+        expected, expected_markers, repairable, replaceable = _reference(with_jobs)
+        if version == 12:
+            # A directly created, unpublished Store predates config publication.
+            # Registered readers separately require this lifecycle receipt.
+            expected_markers.pop("registration_config")
+            registration = markers.pop("registration_config", None)
+            if registration not in (None, 1):
+                raise WikiError("Wiki registration protocol is incompatible; durable state retained", 503)
+        actual = _catalog(db)
+        if markers != expected_markers:
+            raise protocols.unavailable()
+        if actual.keys() - expected.keys():
+            raise WikiError("Wiki format contains an unsupported structure or protocol; durable state retained", 503)
+        for key, value in expected.items():
+            if key not in actual:
+                if key not in repairable:
+                    raise WikiError("Wiki format is incomplete or incompatible; durable state retained", 503)
+            elif actual[key] != value:
+                if (key not in replaceable or actual[key][0] != value[0]
+                        or replaceable[key] is not None and actual[key] not in replaceable[key]):
+                    raise WikiError("Wiki format is incomplete or incompatible; durable state retained", 503)
+        validate_filesystem_ledger(db)
+        source_bindings.validate(db)
+        grants.require(db)
+        maintenance_selections.require(db)
+        job_controls.require(db)
+        job_events.require(db)
+        recovery_state.require(db)
+        maintenance_inputs.require(db)
+        if not with_jobs:
+            # References come from the trusted current declarations. The absent
+            # authority may never be recreated over retained job-specific facts.
+            references = [key[1] for key, value in expected.items() if key[0] == "table" and key not in repairable
+                          and any(column[0] == "job_id" for column in value[2])]
+            for table in references:
+                quoted = table.replace('"', '""')
+                if ("table", table) in actual and db.execute(f'SELECT 1 FROM "{quoted}" WHERE job_id IS NOT NULL LIMIT 1').fetchone():  # noqa: S608
+                    raise WikiError("Wiki job references have no authority; durable state retained", 503)
+            if db.execute("SELECT 1 FROM wiki_job_deliveries LIMIT 1").fetchone():
+                raise WikiError("Wiki job deliveries have no authority; durable state retained", 503)
+        repairs = {owner for key, owner in repairable.items() if key not in actual or actual[key] != expected[key]}
+        if "maintenance" not in repairs:
+            state = db.execute("SELECT version FROM maintenance_input_state WHERE singleton=1").fetchone()
+            if state is None or state[0] != maintenance_inputs.VERSION:
+                repairs.add("maintenance")
+        if "search" not in repairs:
+            from . import search_index
+
+            if db.execute("SELECT 1 FROM search_documents WHERE version<>? LIMIT 1", (search_index.VERSION,)).fetchone():
+                repairs.add("search")
+        if "catalog" not in repairs:
+            from . import catalog
+
+            state = db.execute("SELECT version FROM catalog_state WHERE singleton=1").fetchone()
+            if state is None or state[0] != catalog.VERSION:
+                repairs.add("catalog")
+        return Inspection(version, with_jobs, frozenset(repairs))
+    except ValueError as error:
+        raise WikiError("Wiki format is unavailable; durable state retained", 503) from error
 
 
 def validate_filesystem_ledger(db):
@@ -53,192 +217,49 @@ def validate_filesystem_ledger(db):
         raise WikiError("Filesystem-event ledger constraints are incompatible; durable state retained", 503)
 
 
+def _repair(db, owners):
+    """Known projection owners share one transaction after durable admission."""
+    from . import catalog, maintenance_inputs, materials, search_index
+
+    if not owners:
+        return
+    maintenance_inputs.prepare_repair(db)
+    if "search" in owners:
+        search_index.initialize(db)
+        db.execute("UPDATE index_state SET checked_at=NULL")
+    if "materials" in owners:
+        materials.initialize(db)
+    if "catalog" in owners:
+        catalog.initialize(db)
+    if owners & {"materials", "catalog"}:
+        db.execute("UPDATE documents SET signature=''")
+        db.execute("UPDATE index_state SET checked_at=NULL")
+    maintenance_inputs.initialize(db)
+
+
 def initialize(store):
-    from . import grants, materials, search_index
+    """Commit complete creation or the finite 12→13 step, then publish nothing."""
+    from . import schema_ddl
+    from .jobs import WikiJobs
+    from .store import WikiError
 
     with store.connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        db.execute("CREATE TABLE IF NOT EXISTS wiki_schema(version INTEGER PRIMARY KEY,applied_at TEXT NOT NULL)")
-        from .store import WikiError
-
-        if (db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] or 0) > VERSION:
-            raise WikiError("Wiki schema is newer than this framework; durable state retained", 503)
-        old_version = db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] or 0
-        if 3 <= old_version < 10 and not db.execute("SELECT 1 FROM sqlite_master WHERE name='wiki_edges'").fetchone() and db.execute("SELECT 1 FROM documents LIMIT 1").fetchone():
-            raise WikiError("Source-binding ledger v9 source-edge proof is missing; durable state retained", 503)
-        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=1").fetchone():
-            db.execute("""CREATE TABLE IF NOT EXISTS documents (
-                id TEXT PRIMARY KEY,path TEXT UNIQUE NOT NULL,revision TEXT NOT NULL,
-                title TEXT NOT NULL,kind TEXT NOT NULL,text TEXT NOT NULL,
-                pages TEXT NOT NULL,quality TEXT NOT NULL,metadata TEXT NOT NULL,
-                signature TEXT NOT NULL
-            )""")
-            db.execute("""CREATE TABLE IF NOT EXISTS managed_notes (
-                path TEXT PRIMARY KEY,base_hash TEXT NOT NULL,rendered_revision TEXT NOT NULL,
-                regions TEXT NOT NULL,metadata TEXT NOT NULL
-            )""")
-            db.execute("CREATE TABLE IF NOT EXISTS document_identities(id TEXT PRIMARY KEY,path TEXT UNIQUE,file_key TEXT NOT NULL)")
-            for row in db.execute("SELECT id,path FROM documents").fetchall():
-                file = store.observed_path(row["path"])
-                key = store.file_key(file.stat()) if file is not None and file.is_file() else ""
-                db.execute("INSERT OR IGNORE INTO document_identities VALUES(?,?,?)", (row["id"], row["path"], key))
-            db.execute("""CREATE TABLE IF NOT EXISTS changes (
-                id TEXT PRIMARY KEY,path TEXT NOT NULL,before_hash TEXT,after_hash TEXT,
-                actor TEXT NOT NULL,reason TEXT NOT NULL,status TEXT NOT NULL,created_at TEXT NOT NULL
-            )""")
-            db.execute("CREATE TABLE IF NOT EXISTS change_management(change_id TEXT PRIMARY KEY,before_state TEXT,after_state TEXT)")
-            db.execute("CREATE TABLE IF NOT EXISTS change_proposals(change_id TEXT PRIMARY KEY,operation TEXT NOT NULL)")
-            db.execute("""CREATE TABLE IF NOT EXISTS change_retention (
-                change_id TEXT PRIMARY KEY,document_id TEXT NOT NULL,
-                before_available INTEGER NOT NULL,after_available INTEGER NOT NULL,resolved_at TEXT
-            )""")
-            db.execute("""INSERT OR IGNORE INTO change_retention
-                SELECT c.id,COALESCE(i.id,c.path),1,1,NULL FROM changes c
-                LEFT JOIN document_identities i ON i.path=c.path""")
-            db.execute("CREATE TABLE IF NOT EXISTS app_trash(trash_id TEXT PRIMARY KEY,path TEXT NOT NULL,document_id TEXT,management TEXT)")
-            db.execute("""CREATE TABLE IF NOT EXISTS job_publications (
-                job_id TEXT NOT NULL,source_doc TEXT NOT NULL,input_revision TEXT NOT NULL,
-                change_id TEXT PRIMARY KEY,output_path TEXT NOT NULL,output_revision TEXT NOT NULL,
-                indexed INTEGER NOT NULL DEFAULT 0
-            )""")
-            db.execute("CREATE INDEX IF NOT EXISTS job_publication_source ON job_publications(job_id,source_doc)")
-            db.execute("""CREATE TABLE IF NOT EXISTS index_state (
-                singleton INTEGER PRIMARY KEY CHECK(singleton=1),epoch INTEGER NOT NULL,
-                checked_at TEXT,error TEXT
-            )""")
-            db.execute("INSERT OR IGNORE INTO index_state VALUES(1,0,NULL,NULL)")
-            search_index.initialize(db)
-            materials.initialize(db)
-            db.execute("INSERT INTO wiki_schema VALUES(1,?)", (datetime.now(UTC).isoformat(),))
-        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=2").fetchone():
-            db.execute("CREATE TABLE uid_aliases(uid TEXT PRIMARY KEY,doc_id TEXT NOT NULL)")
-            db.execute("CREATE INDEX uid_alias_document ON uid_aliases(doc_id)")
-            db.execute("INSERT INTO wiki_schema VALUES(2,?)", (datetime.now(UTC).isoformat(),))
-        from . import (
-            catalog,
-            maintenance_inputs,
-            maintenance_selections,
-            protocols,
-            source_bindings,
-        )
-
-        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=3").fetchone():
-            catalog.initialize(db)
-            db.execute("UPDATE documents SET signature=''")
-            db.execute("INSERT INTO wiki_schema VALUES(3,?)", (datetime.now(UTC).isoformat(),))
-        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=4").fetchone():
-            db.execute("""CREATE TABLE operation_receipts(
-                id TEXT PRIMARY KEY,job_id TEXT,item_doc TEXT,doc_id TEXT NOT NULL,
-                path TEXT NOT NULL,input_revision TEXT,output_revision TEXT,
-                operation TEXT NOT NULL,reason TEXT NOT NULL,change_id TEXT,
-                created_at TEXT NOT NULL,details TEXT NOT NULL)""")
-            db.execute("CREATE INDEX receipt_job_item ON operation_receipts(job_id,item_doc)")
-            db.execute("INSERT INTO wiki_schema VALUES(4,?)", (datetime.now(UTC).isoformat(),))
-        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=5").fetchone():
-            search_index.initialize(db)
-            db.execute("CREATE TABLE watch_directories(path TEXT PRIMARY KEY)")
-            db.execute("UPDATE index_state SET checked_at=NULL")
-            db.execute("INSERT INTO wiki_schema VALUES(5,?)", (datetime.now(UTC).isoformat(),))
-        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=6").fetchone():
-            db.execute("CREATE INDEX wiki_dirty_documents ON documents(path) WHERE signature=''")
-            for action in ("INSERT", "UPDATE", "DELETE"):
-                binding = "old" if action == "DELETE" else "new"
-                db.execute(f"""CREATE TRIGGER wiki_management_{action.lower()} AFTER {action} ON managed_notes
-                    BEGIN UPDATE documents SET signature='' WHERE path={binding}.path; END""")
-            db.execute("INSERT INTO wiki_schema VALUES(6,?)", (datetime.now(UTC).isoformat(),))
-        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=7").fetchone():
-            if "status" not in {column[1] for column in db.execute("PRAGMA table_info(wiki_edges)")}:
-                db.execute("ALTER TABLE wiki_edges ADD COLUMN status TEXT NOT NULL DEFAULT 'unresolved'")
-            db.execute("UPDATE documents SET signature=''")
-            db.execute("UPDATE index_state SET checked_at=NULL")
-            db.execute("INSERT INTO wiki_schema VALUES(7,?)", (datetime.now(UTC).isoformat(),))
-        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=8").fetchone():
-            db.execute("CREATE TABLE material_origins(doc_id TEXT PRIMARY KEY,state TEXT NOT NULL)")
-            db.execute("CREATE TABLE change_material_origins(change_id TEXT PRIMARY KEY,before_state TEXT,after_state TEXT)")
-            db.execute("ALTER TABLE app_trash ADD COLUMN origin_state TEXT")
-            for action in ("INSERT", "UPDATE", "DELETE"):
-                binding = "old" if action == "DELETE" else "new"
-                db.execute(f"""CREATE TRIGGER wiki_origin_{action.lower()} AFTER {action} ON material_origins
-                    BEGIN UPDATE documents SET signature='' WHERE id={binding}.doc_id; END""")
-            db.execute("INSERT INTO wiki_schema VALUES(8,?)", (datetime.now(UTC).isoformat(),))
-        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=9").fetchone():
-            if db.execute("SELECT 1 FROM sqlite_master WHERE name IN ('filesystem_state','filesystem_inbox') LIMIT 1").fetchone():
-                validate_filesystem_ledger(db)
-            db.execute("""CREATE TABLE IF NOT EXISTS filesystem_state(
-                singleton INTEGER PRIMARY KEY CHECK(singleton=1),protocol INTEGER NOT NULL,
-                root TEXT NOT NULL,vault_id TEXT NOT NULL,
-                received_seq INTEGER NOT NULL DEFAULT 0,applied_seq INTEGER NOT NULL DEFAULT 0,
-                armed_epoch TEXT,uncertain TEXT
-            )""")
-            db.execute("""CREATE TABLE IF NOT EXISTS filesystem_inbox(
-                seq INTEGER PRIMARY KEY,batch_id TEXT UNIQUE NOT NULL,
-                observer_epoch TEXT NOT NULL,root_generation TEXT NOT NULL,
-                payload TEXT NOT NULL,payload_hash TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('pending','applied')),created_at TEXT NOT NULL
-            )""")
-            validate_filesystem_ledger(db)
-            db.execute("INSERT INTO wiki_schema VALUES(9,?)", (datetime.now(UTC).isoformat(),))
-        validate_filesystem_ledger(db)
-        db.execute("CREATE INDEX IF NOT EXISTS filesystem_inbox_pending ON filesystem_inbox(seq) WHERE status='pending'")
-        available = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if not {"material_origins", "change_material_origins"}.issubset(available):
-            raise WikiError("Material-origin ledger is missing; durable state retained", 503)
-        if "origin_state" not in {row[1] for row in db.execute("PRAGMA table_info(app_trash)")}:
-            raise WikiError("Material-origin trash state is missing; durable state retained", 503)
-        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=10").fetchone():
-            source_bindings.migrate(db)
-            protocols.initialize(db)
-            db.execute("INSERT INTO wiki_protocols VALUES('maintenance_inputs',1)")
-            maintenance_inputs.adopt_legacy_jobs(db)
-            maintenance_selections.initialize(db)
-            grants.initialize(db)
-            grants.migrate_legacy(db, store)
-            db.execute("UPDATE documents SET signature=''")
-            db.execute("UPDATE index_state SET checked_at=NULL")
-            db.execute("INSERT INTO wiki_schema VALUES(10,?)", (datetime.now(UTC).isoformat(),))
-        source_bindings.validate(db)
-        protocols.require(db, "registration")
-        maintenance_selections.require(db)
-        grants.require(db)
-        if "source_plan" not in {row[1] for row in db.execute("PRAGMA table_info(app_trash)")}:
-            raise WikiError("Source-binding trash state is missing; durable state retained", 503)
-        maintenance_inputs.prepare_repair(db)
-        search_missing = not {"search_documents", "search_sections", "search_fts"}.issubset(available)
-        search_changed = search_missing or (
-            "readable_body" not in {column[1] for column in db.execute("PRAGMA table_info(search_sections)")}
-            or db.execute("SELECT 1 FROM search_documents WHERE version<>? LIMIT 1", (search_index.VERSION,)).fetchone()
-        )
-        search_index.initialize(db)
-        if search_changed:
-            db.execute("UPDATE index_state SET checked_at=NULL")
-        if "raw_materials" not in available:
-            materials.initialize(db)
-        if "wiki_edges" not in available:
-            catalog.initialize(db)
-            db.execute("UPDATE documents SET signature=''")
-            db.execute("UPDATE index_state SET checked_at=NULL")
-        if catalog.initialize(db):
-            db.execute("UPDATE documents SET signature=''")
-            db.execute("UPDATE index_state SET checked_at=NULL")
-        maintenance_inputs.initialize(db)
-        from . import job_events, recovery_state
-
-        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=11").fetchone():
-            job_events.initialize(db)
-            recovery_state.initialize(db)
-            db.execute("INSERT INTO wiki_schema VALUES(11,?)", (datetime.now(UTC).isoformat(),))
-        if not db.execute("SELECT 1 FROM wiki_schema WHERE version=12").fetchone():
-            from . import job_controls
-
-            if old_version >= 11:
-                job_events.upgrade(db)
-            job_controls.initialize(db)
-            from .jobs import WikiJobs
-
-            WikiJobs.upgrade_ledger(db)
-            db.execute("INSERT INTO wiki_schema VALUES(12,?)", (datetime.now(UTC).isoformat(),))
-        from . import job_controls
-
-        job_controls.require(db)
-        job_events.require(db)
-        recovery_state.require(db)
+        existing = db.execute("SELECT 1 FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*' LIMIT 1").fetchone()
+        if existing is None:
+            schema_ddl.create(db)
+            db.execute("INSERT INTO filesystem_state(singleton,protocol,root,vault_id) VALUES(1,1,?,?)",
+                       (str(store.root), store.vault_id))
+            db.execute("INSERT INTO wiki_schema VALUES(?,?)", (VERSION, datetime.now(UTC).isoformat()))
+        else:
+            admitted = inspect(db)
+            _repair(db, admitted.repairs)
+            if admitted.version == 12:
+                if not admitted.with_jobs:
+                    WikiJobs.initialize_ledger(db)
+                if db.execute("SELECT 1 FROM wiki_protocols WHERE name='registration_config'").fetchone() is None:
+                    db.execute("INSERT INTO wiki_protocols VALUES('registration_config',1)")
+                db.execute("INSERT INTO wiki_schema VALUES(?,?)", (VERSION, datetime.now(UTC).isoformat()))
+        prepared = inspect(db)
+        if prepared.version != VERSION or prepared.repairs:
+            raise WikiError("Wiki preparation did not establish the complete current format; durable state retained", 503)

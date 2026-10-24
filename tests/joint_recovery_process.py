@@ -41,7 +41,7 @@ async def main(configuration, phase):
     from server.wiki.jobs import WikiJobs
     from server.wiki.registry import registry
     from tests.main_storage import write_unversioned_baseline
-    from tests.wiki_schema_fixtures import remove_future_job_events
+    from tests.wiki_baseline import use_supported_baseline12
 
     owner = InstallationOwner(settings)
     owner.acquire()
@@ -92,8 +92,9 @@ async def main(configuration, phase):
         raw_items = json.dumps([legacy_item])
         with store.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            remove_future_job_events(connection)
-            connection.execute("INSERT INTO jobs VALUES('old-job','old-key','old-hash','{}','completed_with_attention',?,NULL,'legacy','old','old')", (raw_items,))
+            use_supported_baseline12(connection)
+            connection.execute("""INSERT INTO jobs(id,request_key,payload_hash,payload,status,items,error,session_id,created_at,updated_at)
+                                  VALUES('old-job','old-key','old-hash','{}','completed_with_attention',?,NULL,'legacy','old','old')""", (raw_items,))
             connection.execute("INSERT INTO job_requests VALUES('old-key','old-hash','old-job')")
             connection.execute("INSERT INTO operation_receipts VALUES('old-receipt','old-job',?,?,?,?,?,'patch','Original effect',?,'old','{}')",
                                (note["id"], note["id"], note["path"], first["revision"], effect["revision"], effect["change_id"]))

@@ -4,18 +4,17 @@ The synthetic proof payloads deliberately use an unknown format. These tests
 exercise the compatible state owner, not byte reconstruction or R08 reuse.
 """
 
-import contextlib
 import json
 import sqlite3
 import uuid
 from datetime import UTC, datetime, timedelta
-from types import SimpleNamespace
 
 import pytest
 
-from server.wiki import origins, schema, source_bindings
+from server.wiki import origins, schema
 from server.wiki.history import WikiHistory, atomic
 from server.wiki.store import WikiError, WikiStore, revision
+from tests.wiki_baseline import use_supported_baseline12
 
 
 @pytest.fixture
@@ -462,7 +461,7 @@ def legacy_reserved_move(history, monkeypatch, destination, window):
     return doc, state, raw, reserved[0]
 
 
-@pytest.mark.parametrize("schema_version", [7, 8])
+@pytest.mark.parametrize("schema_version", [12, 13])
 @pytest.mark.parametrize("destination", ["a-moved.md", "z-moved.md"])
 @pytest.mark.parametrize("window", ["deletion", "complete"])
 def test_legacy_deleted_path_reservation_cannot_replace_the_real_moved_identity(
@@ -471,9 +470,13 @@ def test_legacy_deleted_path_reservation_cannot_replace_the_real_moved_identity(
     doc, state, raw, reserved_id = legacy_reserved_move(history, monkeypatch, destination, window)
     upgraded = None
     active = history
-    if schema_version == 7:
-        root, state_dir, vault_id = downgrade_fixture_to_schema7(history)
-        upgraded = WikiStore(root, state_dir, vault_id)
+    if schema_version == 12:
+        history.store.close()
+        with sqlite3.connect(history.store.db_path) as db:
+            db.row_factory = sqlite3.Row
+            db.execute("BEGIN IMMEDIATE")
+            use_supported_baseline12(db)
+        upgraded = WikiStore(history.store.root, history.store.state, history.store.vault_id)
         active = WikiHistory(upgraded)
     try:
         active.recover()
@@ -493,7 +496,7 @@ def test_legacy_deleted_path_reservation_cannot_replace_the_real_moved_identity(
             assert read["id"] == doc["id"] and read["path"] == destination
             assert read["metadata"]["uid"] == doc["metadata"]["uid"]
         assert active.store.path(destination).read_bytes() == raw
-        assert current_origin(active, doc["id"]) == (state if schema_version == 8 else None)
+        assert current_origin(active, doc["id"]) == state
         assert not (active.state / "external-change.json").exists()
     finally:
         if upgraded:
@@ -647,70 +650,32 @@ def test_private_origin_state_never_appears_in_document_or_public_history(histor
     assert current_origin(history, doc["id"])["proof"] == state["proof"]
 
 
-def downgrade_fixture_to_schema7(history):
-    """Make the exact older table shape, retaining its real document/history rows."""
-    from server.wiki import maintenance_inputs
-    from tests.wiki_schema_fixtures import remove_future_selections
-
+@pytest.mark.parametrize("version", [12, 13])
+def test_supported_reopen_preserves_rows_without_synthesizing_origin_proofs(history, version):
+    history.write("note.md", b"legacy material", None, "human", "create")
     store = history.store
     store.close()
     with sqlite3.connect(store.db_path) as db:
-        maintenance_inputs.discard_derived(db)
-        remove_future_selections(db)
-        for action in ("insert", "update", "delete"):
-            db.execute(f"DROP TRIGGER wiki_origin_{action}")
-        db.execute("DROP TABLE material_origins")
-        db.execute("DROP TABLE change_material_origins")
-        db.execute("ALTER TABLE app_trash DROP COLUMN origin_state")
-        db.execute("ALTER TABLE app_trash DROP COLUMN source_plan")
-        for table in source_bindings.TABLES:
-            db.execute("DROP TABLE " + table)
-        db.execute("DROP TABLE wiki_protocols")
-        db.execute("DELETE FROM wiki_schema WHERE version>=8")
-    return store.root, store.state, store.vault_id
-
-
-def test_schema7_upgrade_is_transactional_idempotent_and_does_not_backfill_proofs(history):
-    history.write("note.md", b"legacy material", None, "human", "create")
-    root, state, vault_id = downgrade_fixture_to_schema7(history)
-    with sqlite3.connect(state / "index.sqlite3") as db:
-        tables = ["documents", "document_identities", "changes", "change_management", "change_retention", "operation_receipts"]
-        before = {t: db.execute("SELECT * FROM " + t).fetchall() for t in tables}
+        db.row_factory = sqlite3.Row
+        db.execute("BEGIN IMMEDIATE")
+        if version == 12:
+            use_supported_baseline12(db)
+        tables = ["documents", "document_identities", "changes", "change_management", "change_retention", "operation_receipts",
+                  "material_origins", "change_material_origins"]
+        before = {t: list(map(tuple, db.execute("SELECT * FROM " + t))) for t in tables}
+        assert db.execute("SELECT count(*) FROM material_origins").fetchone()[0] == 0
     for _ in range(2):
-        upgraded = WikiStore(root, state, vault_id)
+        upgraded = WikiStore(store.root, store.state, store.vault_id)
         try:
             assert upgraded.read("note.md")["content"] == "legacy material"
             with upgraded.connect() as db:
                 assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == schema.VERSION
                 assert before == {t: [tuple(r) for r in db.execute("SELECT * FROM " + t)] for t in tables}
                 assert db.execute("SELECT count(*) FROM material_origins").fetchone()[0] == 0
-                assert db.execute("SELECT count(*) FROM change_material_origins").fetchone()[0] == 0
+                assert all(value is None or json.loads(value) is None
+                           for row in db.execute("SELECT before_state,after_state FROM change_material_origins") for value in row)
         finally:
             upgraded.close()
-
-
-def test_interrupted_schema8_migration_retains_schema7_and_all_old_state(history):
-    history.write("note.md", b"legacy material", None, "human", "create")
-    _, state, _ = downgrade_fixture_to_schema7(history)
-
-    @contextlib.contextmanager
-    def connection():
-        db = sqlite3.connect(state / "index.sqlite3")
-        db.row_factory = sqlite3.Row
-        db.set_authorizer(lambda action, *args: sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_ALTER_TABLE else sqlite3.SQLITE_OK)
-        try:
-            with db:
-                yield db
-        finally:
-            db.close()
-
-    with pytest.raises(sqlite3.DatabaseError):
-        schema.initialize(SimpleNamespace(connect=connection))
-    with sqlite3.connect(state / "index.sqlite3") as db:
-        assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == 7
-        assert db.execute("SELECT count(*) FROM changes").fetchone()[0] == 1
-        assert db.execute("SELECT count(*) FROM sqlite_master WHERE name IN ('material_origins','change_material_origins')").fetchone()[0] == 0
-        assert "origin_state" not in {row[1] for row in db.execute("PRAGMA table_info(app_trash)")}
 
 
 def test_invalid_private_json_is_retained_and_reported(history):
@@ -729,10 +694,12 @@ def test_lost_durable_origin_table_is_reported_not_rebuilt_empty(history, missin
     store.close()
     with sqlite3.connect(store.db_path) as db:
         db.execute("DROP TABLE " + missing)
-    with pytest.raises(WikiError, match="ledger is missing") as error:
+    before = store.db_path.read_bytes()
+    with pytest.raises(WikiError, match="retained") as error:
         WikiStore(store.root, store.state, store.vault_id, health=store.health)
     assert error.value.status == 503
     assert store.path("note.md").read_bytes() == raw
+    assert store.db_path.read_bytes() == before
     with sqlite3.connect(store.db_path) as db:
         assert db.execute("SELECT path FROM document_identities WHERE id=?", (doc["id"],)).fetchone()[0] == "note.md"
         assert db.execute("SELECT name FROM sqlite_master WHERE name=?", (missing,)).fetchone() is None

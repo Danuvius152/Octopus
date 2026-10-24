@@ -20,7 +20,6 @@ def initialize(db):
         status TEXT NOT NULL DEFAULT 'unresolved',
         PRIMARY KEY(source_doc,ordinal))""")
     db.execute("CREATE INDEX IF NOT EXISTS wiki_edge_target ON wiki_edges(target_doc)")
-    db.execute("DROP INDEX IF EXISTS wiki_edge_lookup")
     db.execute("""CREATE TRIGGER IF NOT EXISTS wiki_edge_delete AFTER DELETE ON documents
         BEGIN DELETE FROM wiki_edges WHERE source_doc=old.id; END""")
     db.execute("""CREATE TABLE IF NOT EXISTS wiki_edge_lookups(

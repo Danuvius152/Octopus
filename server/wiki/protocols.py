@@ -9,8 +9,8 @@ from ..service_health import ServiceHealth
 from . import storage
 
 
-def read_registration(state, *, require_root=True, check_ledger=True, health=None):
-    """Read the registration used by runtime and installation setup alike."""
+def read_registration(state, *, require_root=True, binding_only=False):
+    """Read current business identity or retained root exclusion evidence."""
     from .store import WikiError
 
     path = state / "config.json"
@@ -34,8 +34,8 @@ def read_registration(state, *, require_root=True, check_ledger=True, health=Non
         if "registration_protocol" in config or "registration_generation" in config:
             if type(config.get("registration_protocol")) is not int or config["registration_protocol"] != 1 or uuid.UUID(config["registration_generation"]).hex != config["registration_generation"]:
                 raise ValueError("invalid registration generation")
-        elif check_ledger:
-            registration_preflight(state.resolve(), legacy=True, health=health)
+        elif not binding_only:
+            raise unavailable()
         return config
     except (OSError, ValueError, TypeError, KeyError, AttributeError) as exc:
         raise WikiError(f"Wiki registration is invalid; configuration retained: {exc}", 503) from exc
@@ -62,46 +62,22 @@ def require(db, name, version=1):
         raise unavailable()
 
 
-def registration_preflight(state, *, legacy=False, health=None, complete=False):
-    """Read-only check before a config upgrade can replace any file bytes."""
+def registration_preflight(state, *, health=None, complete=False):
+    """Read supported storage and binding before a writer or publication."""
     path = state / "index.sqlite3"
     if not path.is_file() or path.is_symlink():
         raise unavailable()
     try:
         with storage.connect(path, health if health is not None else ServiceHealth(), write=False) as db:
-            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-            if "wiki_schema" not in tables:
-                raise unavailable()
-            version = db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] or 0
-            from .schema import VERSION, validate_filesystem_ledger
+            db.execute("BEGIN")
+            from .schema import inspect
 
-            if version < 1 or version > VERSION or complete and version != VERSION:
-                raise unavailable()
-            if version >= 10:
-                require(db, "registration")
-            if legacy and (version >= 10 or "wiki_protocols" in tables):
-                raise unavailable()
-            if complete:
-                from . import (
-                    grants,
-                    job_events,
-                    maintenance_selections,
-                    recovery_state,
-                    source_bindings,
-                )
-
+            inspect(db)
+            if complete or (state / "config.json").exists():
                 require(db, "registration_config")
-                grants.require(db)
-                job_events.require(db)
-                maintenance_selections.require(db)
-                recovery_state.require(db)
-                source_bindings.validate(db)
-            if version >= 9:
-                validate_filesystem_ledger(db)
-                binding = db.execute("SELECT root,vault_id FROM filesystem_state WHERE singleton=1").fetchone()
-                if binding is None:
-                    raise unavailable()
-                return dict(binding)
-            return None
+            binding = db.execute("SELECT root,vault_id FROM filesystem_state WHERE singleton=1").fetchone()
+            if binding is None:
+                raise unavailable()
+            return dict(binding)
     except sqlite3.DatabaseError as error:
         raise unavailable() from error

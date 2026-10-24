@@ -176,9 +176,9 @@ def test_prepared_write_and_active_job_receipts_survive_cleanup(history):
     # protecting its input and creation receipt beyond ordinary retention.
     history.recover()
     with history.store.connect() as db:
-        db.execute("CREATE TABLE jobs (id TEXT,status TEXT,items TEXT,payload TEXT)")
         db.execute(
-            "INSERT INTO jobs VALUES(?,?,?,?)",
+            """INSERT INTO jobs(id,request_key,payload_hash,status,items,payload,created_at,updated_at)
+               VALUES(?,'active-key','active-digest',?,?,?,'original-time','original-time')""",
             (
                 "active",
                 "running",

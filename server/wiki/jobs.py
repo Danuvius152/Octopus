@@ -51,8 +51,9 @@ class WikiJobs:
         self.registration = registration if registration is not None else registry.config(user_id)
         self.store = store if store is not None else registry.store(user_id)
         with self.store.connect() as db:
-            db.execute("BEGIN IMMEDIATE")
-            self.initialize_ledger(db)
+            if not maintenance_inputs.require(db):
+                raise WikiError("Wiki job authority has not been prepared; durable state retained", 503)
+            job_events.require(db)
 
     @staticmethod
     def initialize_ledger(db):
@@ -82,10 +83,6 @@ class WikiJobs:
         job_events.attach_jobs(db)
         return True
 
-    @staticmethod
-    def upgrade_ledger(db):
-        if maintenance_inputs.jobs_initialized(db):
-            db.execute("ALTER TABLE jobs ADD COLUMN attempt_errors TEXT NOT NULL DEFAULT '{}'")
 
     @staticmethod
     def request_hash(request):

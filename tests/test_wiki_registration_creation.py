@@ -184,13 +184,15 @@ def test_initial_database_schema_uses_the_confirmed_extra_connection(tmp_path):
 connect=sqlite3.connect
 class InspectConnection(sqlite3.Connection):
     def execute(self,sql,*args,**kwargs):
-        if sql.startswith('CREATE TABLE IF NOT EXISTS wiki_schema'):
+        if getattr(self,'file_writer',False) and ' '.join(sql.split()).startswith('CREATE TABLE wiki_schema'):
             assert super().execute('PRAGMA synchronous').fetchone()[0]==3
             marker.touch()
         return super().execute(sql,*args,**kwargs)
 def inspect(*args,**kwargs):
     kwargs['factory']=InspectConnection
-    return connect(*args,**kwargs)
+    db=connect(*args,**kwargs)
+    db.file_writer=str(args[0])!=':memory:' and 'mode=ro' not in str(args[0])
+    return db
 sqlite3.connect=inspect
 registry.configure(None,root,'curator')
 registry.close()

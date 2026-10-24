@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from server.config import settings
-from server.wiki import schema, source_bindings
+from server.wiki import schema
 from server.wiki.registry import WikiRegistry
 from server.wiki.store import WikiError
 from tests.test_service_runtime import installation_settings
@@ -298,37 +298,61 @@ def test_failed_candidate_cleanup_stays_owned_and_blocks_new_work_until_drain(re
     assert not registry._constructing
 
 
-@pytest.mark.parametrize("crash", [False, True])
-def test_legacy_config_upgrade_preserves_identity_and_does_not_remint_after_restart(registered, monkeypatch, crash):
-    from server.wiki import maintenance_inputs
-    from tests.wiki_schema_fixtures import remove_future_selections
-
+@pytest.mark.parametrize("damage", ["missing_generation", "unsupported_version"])
+def test_prebaseline_registration_is_refused_without_reminting_or_rewriting(registered, damage):
     registry, _, config = registered
     store = registry.store(None)
     original = store.read("note.md")
     registry.close()
-    with sqlite3.connect(store.db_path) as db:
-        maintenance_inputs.discard_derived(db)
-        remove_future_selections(db)
-        for table in source_bindings.TABLES:
-            db.execute("DROP TABLE " + table)
-        db.execute("ALTER TABLE app_trash DROP COLUMN source_plan")
-        db.execute("DROP TABLE wiki_protocols")
-        db.execute("DELETE FROM wiki_schema WHERE version>=10")
     path = registry.state(None) / "config.json"
-    path.write_text(json.dumps({k: v for k, v in config.items() if not k.startswith("registration_")}))
-    if crash:
-        with monkeypatch.context() as patch:
-            patch.setattr(registry_module, "WikiStore", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("after config replacement")))
-            with pytest.raises(RuntimeError, match="after config replacement"):
-                registry.store(None)
-    committed = registry.config(None).get("registration_generation")
-    current = registry.store(None)
-    assert current.read("note.md")["id"] == original["id"]
-    assert current.path("note.md").read_text() == "# Original\nPreserved words.\n"
-    if committed:
-        assert registry.config(None)["registration_generation"] == committed
-    assert registry.config(None)["vault_id"] == config["vault_id"]
+    if damage == "missing_generation":
+        path.write_text(json.dumps({key: value for key, value in config.items() if not key.startswith("registration_")}))
+    else:
+        with sqlite3.connect(store.db_path) as db:
+            db.execute("DELETE FROM wiki_schema")
+            db.execute("INSERT INTO wiki_schema VALUES(11,'retained-original-time')")
+    database_bytes, config_bytes = store.db_path.read_bytes(), path.read_bytes()
+    body_bytes = store.path("note.md").read_bytes()
+    for entry in (lambda: registry.store(None), lambda: registry.configure(None, store.root, config["curator_agent_id"], config["app_id"])):
+        with pytest.raises(WikiError) as refused:
+            entry()
+        assert refused.value.status == 503
+        assert store.db_path.read_bytes() == database_bytes
+        assert path.read_bytes() == config_bytes
+        assert store.path("note.md").read_bytes() == body_bytes
+    with sqlite3.connect(store.db_path) as db:
+        assert db.execute("SELECT id,revision FROM documents WHERE path='note.md'").fetchone() == (original["id"], original["revision"])
+
+
+def test_current_registration_restart_preserves_identity_and_original_generation(registered):
+    registry, _, config = registered
+    original = registry.store(None).read("note.md")
+    for _ in range(2):
+        registry.close()
+        current = registry.store(None)
+        assert current.read("note.md")["id"] == original["id"]
+        assert current.path("note.md").read_text() == "# Original\nPreserved words.\n"
+        assert registry.config(None) == config
+
+
+def test_retained_registration_excludes_its_root_without_authorizing_business(registered, tmp_path):
+    from server.service_installation import InstallationError, guard_vault
+
+    registry, root, registration = registered
+    store = registry.store(None)
+    registry.close()
+    state = registry.state(None)
+    path = state / "config.json"
+    path.write_text(json.dumps({key: value for key, value in registration.items() if not key.startswith("registration_")}))
+    original_config, original_database = path.read_bytes(), store.db_path.read_bytes()
+    config, _ = installation_settings(tmp_path / "separate-profile")
+    config.wiki_dir = str(state)
+    with pytest.raises(WikiError, match="protocol ledger"):
+        registry.config(None)
+    with pytest.raises(InstallationError, match="conflicting registrations"):
+        guard_vault(config, root, tmp_path / "another-wiki-state", bind=True)
+    assert path.read_bytes() == original_config
+    assert store.db_path.read_bytes() == original_database
 
 
 async def test_stop_waits_for_a_registration_commit_before_finishing(registered, monkeypatch):

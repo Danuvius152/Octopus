@@ -26,7 +26,6 @@ class EventInbox:
         self.vault_id = vault_id
         self.recovery = recovery
         with self.connect() as db:
-            db.execute("INSERT OR IGNORE INTO filesystem_state(singleton,protocol,root,vault_id) VALUES(1,?,?,?)", (PROTOCOL, self.root, self.vault_id))
             self.check(db, allow_armed=recovery is not None)
 
     @contextlib.contextmanager

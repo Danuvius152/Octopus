@@ -1,46 +1,52 @@
-"""An unreleased recovery protocol installs atomically over real schema 10."""
+"""Supported recovery metadata stays readable before ordinary Store admission."""
 
-import contextlib
 import sqlite3
-from types import SimpleNamespace
+from contextlib import closing
 
 import pytest
 
-from server.wiki import recovery_state, schema
-from server.wiki.store import WikiError
-from tests.test_wiki_job_event_migration import database as database
-from tests.test_wiki_job_event_migration import old_jobs
+from server.wiki import recovery_state
+from server.wiki.recovery import Metadata
+from server.wiki.registry import WikiRegistry
+from server.wiki.store import WikiError, WikiStore
+from tests.test_wiki_format_admission import registered_account as registered_account
+from tests.test_wiki_format_preparation import facts, retained_baseline
+from tests.test_wiki_job_event_migration import baseline as baseline
 
 
-def test_failed_recovery_migration_keeps_old_jobs_and_both_protocols_uninstalled(database):
-    before = old_jobs(database)
+async def test_supported12_uncertain_metadata_is_available_without_opening_an_ordinary_store(registered_account, monkeypatch):
+    root, state, registration, owner = registered_account
+    retained_baseline(root, state, registration, owner, with_jobs=True)
+    path = state / "index.sqlite3"
+    with closing(sqlite3.connect(path)) as db:
+        db.execute("UPDATE filesystem_state SET uncertain='Original unresolved filesystem reception'")
+        db.commit()
+        original = facts(db)
+    original_bytes, config_bytes = path.read_bytes(), (state / "config.json").read_bytes()
+    registry = WikiRegistry()
 
-    @contextlib.contextmanager
-    def interrupted():
-        with database.connect() as db:
-            db.set_authorizer(lambda action, table, *args: sqlite3.SQLITE_DENY
-                              if action == sqlite3.SQLITE_CREATE_TABLE and table == "filesystem_recovery_audit"
-                              else sqlite3.SQLITE_OK)
-            yield db
+    def no_store(*args, **kwargs):
+        raise AssertionError("Recovery metadata must not depend on ordinary Store admission")
 
-    with pytest.raises(sqlite3.DatabaseError):
-        schema.initialize(SimpleNamespace(connect=interrupted))
-    with database.connect() as db:
-        assert [tuple(row)[:10] for row in db.execute("SELECT * FROM jobs ORDER BY id")] == before
-        assert db.execute("SELECT 1 FROM wiki_schema WHERE version=11").fetchone() is None
-        assert not db.execute("SELECT 1 FROM wiki_protocols WHERE name IN ('filesystem_recovery','wiki_job_events')").fetchone()
-    schema.initialize(database)
-    with database.connect() as db:
-        recovery_state.require(db)
-        assert not db.execute("SELECT * FROM filesystem_recoveries").fetchone()
-        assert [tuple(row)[:10] for row in db.execute("SELECT * FROM jobs ORDER BY id")] == before
+    monkeypatch.setattr(registry, "store", no_store)
+    try:
+        snapshot = Metadata(registry, owner).snapshot()
+        assert snapshot["filesystem"]["uncertain"] == "Original unresolved filesystem reception"
+        assert snapshot["vault_id"] == registration["vault_id"]
+        assert path.read_bytes() == original_bytes and (state / "config.json").read_bytes() == config_bytes
+        with closing(sqlite3.connect(path)) as db:
+            assert db.execute("SELECT max(version) FROM wiki_schema").fetchone()[0] == 12
+            assert facts(db) == original
+    finally:
+        registry.close()
 
 
 @pytest.mark.parametrize("loss", [*recovery_state.TABLES, "guard", "protocol"])
-def test_index_repair_does_not_recreate_lost_recovery_facts(database, loss):
-    before = old_jobs(database)
-    schema.initialize(database)
-    with database.connect() as db:
+async def test_index_repair_does_not_recreate_lost_recovery_facts(baseline, loss):
+    root, state, registration = baseline
+    path = state / "index.sqlite3"
+    with closing(sqlite3.connect(path)) as db:
+        original_jobs = list(db.execute("SELECT * FROM jobs ORDER BY id"))
         db.execute("DROP TABLE search_fts")
         if loss == "guard":
             db.execute("DROP TRIGGER filesystem_recovery_update_guard")
@@ -48,9 +54,12 @@ def test_index_repair_does_not_recreate_lost_recovery_facts(database, loss):
             db.execute("DELETE FROM wiki_protocols WHERE name='filesystem_recovery'")
         else:
             db.execute("DROP TABLE " + loss)
+        db.commit()
+    original_bytes = path.read_bytes()
     with pytest.raises(WikiError) as failed:
-        schema.initialize(database)
+        WikiStore(root, state, registration["vault_id"], defer_recovery=True)
     assert failed.value.status == 503
-    with database.connect() as db:
-        assert [tuple(row)[:10] for row in db.execute("SELECT * FROM jobs ORDER BY id")] == before
-        assert db.execute("SELECT 1 FROM sqlite_master WHERE name='search_fts'").fetchone() is None
+    assert path.read_bytes() == original_bytes
+    with closing(sqlite3.connect(path)) as db:
+        assert list(db.execute("SELECT * FROM jobs ORDER BY id")) == original_jobs
+        assert db.execute("SELECT 1 FROM sqlite_schema WHERE name='search_fts'").fetchone() is None

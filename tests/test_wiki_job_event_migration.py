@@ -1,53 +1,52 @@
-"""Schema 10 work is adopted without fabricating requesters or recording proof."""
+"""Current notification facts survive supported preparation; older formats refuse."""
 
-import contextlib
 import json
 import sqlite3
-from types import SimpleNamespace
+from contextlib import closing
 
 import pytest
 
-from server.wiki import job_events, job_items, recovery_state, schema
-from server.wiki.jobs import WikiJobs
-from server.wiki.store import WikiError
-from tests.test_wiki_event_schema import database as database
-from tests.wiki_schema_fixtures import remove_future_job_events
+from server.wiki import job_events, job_items, schema
+from server.wiki.store import WikiError, WikiStore
+from tests.test_wiki_format_admission import registered_account as registered_account
+from tests.test_wiki_format_preparation import facts, retained_baseline
 
 
-def old_jobs(database):
-    with database.connect() as db:
-        db.execute("BEGIN IMMEDIATE")
-        WikiJobs.initialize_ledger(db)
-        remove_future_job_events(db)
-        for status in ("queued", "running", "completed", "cancelled"):
-            db.execute("INSERT INTO jobs VALUES(?,?,?,?,?,?,NULL,?,'old-time','old-time')",
-                       (status, status, "retained-hash", '{"retained_input":true}', status, "[]", "old-session"))
-    with database.connect() as db:
-        return [tuple(row) for row in db.execute("SELECT * FROM jobs ORDER BY id")]
+@pytest.fixture
+async def baseline(registered_account):
+    root, state, registration, owner = registered_account
+    retained_baseline(root, state, registration, owner, with_jobs=True)
+    return root, state, registration
 
 
-def test_schema10_adoption_preserves_work_and_only_knows_proven_cancellation(database):
-    before = old_jobs(database)
-    schema.initialize(database)
-    with database.connect() as db:
-        assert [tuple(row)[:10] for row in db.execute("SELECT * FROM jobs ORDER BY id")] == before
-        assert all(row[0] == '{}' for row in db.execute("SELECT attempt_errors FROM jobs"))
-        assert [tuple(row) for row in db.execute("SELECT job_id,attempt,settlement_phase FROM wiki_job_state ORDER BY job_id")] == [
-            ("cancelled", 1, "attention"), ("completed", 1, "none"), ("queued", 0, "none"), ("running", 1, "none"),
-        ]
-        assert db.execute("SELECT count(*) FROM wiki_job_outbox").fetchone()[0] == 4
-        assert db.execute("SELECT count(*) FROM wiki_job_subscribers").fetchone()[0] == 0
-        assert db.execute("SELECT count(*) FROM wiki_job_deliveries").fetchone()[0] == 0
-    schema.initialize(database)
-    with database.connect() as db:
-        assert db.execute("SELECT count(*) FROM wiki_job_outbox").fetchone()[0] == 4
+@pytest.mark.parametrize("version", [10, 11])
+async def test_prebaseline_notifications_are_retained_without_adoption_or_fabricated_receipts(baseline, version):
+    root, state, registration = baseline
+    path = state / "index.sqlite3"
+    with closing(sqlite3.connect(path)) as db:
+        db.execute("DELETE FROM wiki_schema")
+        db.execute("INSERT INTO wiki_schema VALUES(?,'original-retained-time')", (version,))
+        db.commit()
+        original = facts(db)
+    database_bytes, config_bytes = path.read_bytes(), (state / "config.json").read_bytes()
+    body = (root / "source.md").read_bytes()
+    for _ in range(2):
+        with pytest.raises(WikiError) as refused:
+            WikiStore(root, state, registration["vault_id"], defer_recovery=True)
+        assert refused.value.status == 503
+        assert path.read_bytes() == database_bytes
+        assert (state / "config.json").read_bytes() == config_bytes
+        assert (root / "source.md").read_bytes() == body
+        with closing(sqlite3.connect(path)) as db:
+            assert facts(db) == original
 
 
 @pytest.mark.parametrize("missing", [*job_events.TABLES, "marker", "guard"])
-def test_lost_initialized_notifications_are_not_recreated_during_index_repair(database, missing):
-    old_jobs(database)
-    schema.initialize(database)
-    with database.connect() as db:
+async def test_lost_initialized_notifications_are_not_recreated_during_index_repair(baseline, missing):
+    root, state, registration = baseline
+    path = state / "index.sqlite3"
+    with closing(sqlite3.connect(path)) as db:
+        original_jobs = list(db.execute("SELECT * FROM jobs ORDER BY id"))
         db.execute("DROP TABLE search_fts")
         if missing == "marker":
             db.execute("DELETE FROM wiki_protocols WHERE name='wiki_job_events'")
@@ -55,63 +54,38 @@ def test_lost_initialized_notifications_are_not_recreated_during_index_repair(da
             db.execute("DROP TRIGGER wiki_job_insert_state")
         else:
             db.execute("DROP TABLE " + missing)
-    with pytest.raises(WikiError) as error:
-        schema.initialize(database)
-    assert error.value.status == 503
-    with database.connect() as db:
-        assert db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 4
-        assert db.execute("SELECT 1 FROM sqlite_master WHERE name='search_fts'").fetchone() is None
+        db.commit()
+    retained = path.read_bytes()
+    with pytest.raises(WikiError) as refused:
+        WikiStore(root, state, registration["vault_id"], defer_recovery=True)
+    assert refused.value.status == 503
+    assert path.read_bytes() == retained
+    with closing(sqlite3.connect(path)) as db:
+        assert list(db.execute("SELECT * FROM jobs ORDER BY id")) == original_jobs
+        assert db.execute("SELECT 1 FROM sqlite_schema WHERE name='search_fts'").fetchone() is None
 
 
-def test_failed_job_state_migration_rolls_back_protocol_and_old_work(database):
-    before = old_jobs(database)
-
-    @contextlib.contextmanager
-    def interrupted():
-        with database.connect() as db:
-            db.set_authorizer(lambda action, table, *args: sqlite3.SQLITE_DENY
-                              if action == sqlite3.SQLITE_INSERT and table == "wiki_job_outbox" else sqlite3.SQLITE_OK)
-            yield db
-
-    with pytest.raises(sqlite3.DatabaseError):
-        schema.initialize(SimpleNamespace(connect=interrupted))
-    with database.connect() as db:
-        assert [tuple(row) for row in db.execute("SELECT * FROM jobs ORDER BY id")] == before
-        assert db.execute("SELECT 1 FROM wiki_protocols WHERE name='wiki_job_events'").fetchone() is None
-        assert db.execute("SELECT 1 FROM wiki_schema WHERE version=11").fetchone() is None
-        assert not any(db.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone() for table in job_events.TABLES)
-
-
-def test_schema11_forward_upgrade_keeps_old_events_and_legacy_evidence_on_reentry(database):
-    with database.connect() as db:
-        db.execute("BEGIN IMMEDIATE")
-        WikiJobs.initialize_ledger(db)
-        remove_future_job_events(db)
-        for name, sql in job_events.TABLES.items():
-            db.execute(sql.replace("'attention'", "'unconfirmed'") if name == "wiki_job_state" else sql)
-        for sql in (job_events.INDEXES | job_events.TRIGGERS | job_events.job_triggers(legacy=True)).values():
-            db.execute(sql)
-        db.execute("INSERT INTO wiki_protocols VALUES('wiki_job_events',1)")
-        recovery_state.initialize(db)
-        db.execute("INSERT INTO wiki_schema VALUES(11,'old-time')")
-        legacy = {"doc": "original", "status": "attention", "recording_failure": {
-            "attempt": 1, "session_id": "old-session", "request_id": "old-request", "opaque": ["original", 7]},
-            "execution_unknown": {"retained": True}}
-        db.execute("INSERT INTO jobs VALUES('old','old','hash','{}','cancelled',?,NULL,'old-session','old-time','old-time')",
-                   (json.dumps([legacy]),))
-        before = [tuple(row) for row in db.execute("SELECT * FROM wiki_job_outbox")]
-        job_events.require(db, legacy=True)
-    schema.initialize(database)
-    with database.connect() as db:
-        assert [tuple(row) for row in db.execute("SELECT * FROM wiki_job_outbox ORDER BY rowid LIMIT ?", (len(before),))] == before
-        raw = db.execute("SELECT items FROM jobs WHERE id='old'").fetchone()[0]
-        assert raw == json.dumps([legacy])
-        assert [tuple(row) for row in db.execute("SELECT * FROM wiki_job_outbox")] == before
-        item = job_items.decode(raw)[0]
-        assert item["version"] == 1 and item["status"] == "unknown"
-        assert item["legacy_evidence"]["recording_failure"] == legacy["recording_failure"]
-        assert job_events.metadata(db, "old")["settlement_phase"] == "attention"
-        migrated = [tuple(row) for row in db.execute("SELECT * FROM wiki_job_outbox")]
-    schema.initialize(database)
-    with database.connect() as db:
-        assert [tuple(row) for row in db.execute("SELECT * FROM wiki_job_outbox")] == migrated
+async def test_schema12_forward_preparation_keeps_events_and_legacy_item_evidence_on_reentry(baseline):
+    root, state, registration = baseline
+    path = state / "index.sqlite3"
+    legacy = {"doc": "original", "status": "attention", "recording_failure": {
+        "attempt": 1, "session_id": "old-session", "request_id": "old-request", "opaque": ["original", 7]},
+        "execution_unknown": {"retained": True}}
+    raw = json.dumps([legacy])
+    with closing(sqlite3.connect(path)) as db:
+        db.execute("PRAGMA recursive_triggers=ON")
+        db.execute("""INSERT INTO jobs(id,request_key,payload_hash,payload,status,items,session_id,created_at,updated_at)
+                      VALUES('old-evidence','old-evidence','hash','{}','cancelled',?,'old-session','old-time','old-time')""", (raw,))
+        db.execute("INSERT INTO job_requests VALUES('old-evidence','hash','old-evidence')")
+        db.commit()
+        original = facts(db)
+    with closing(WikiStore(root, state, registration["vault_id"], defer_recovery=True)) as store:
+        for _ in range(2):
+            schema.initialize(store)
+            with store.connect() as db:
+                assert facts(db) == original
+                assert db.execute("SELECT items FROM jobs WHERE id='old-evidence'").fetchone()[0] == raw
+                assert job_events.metadata(db, "old-evidence")["settlement_phase"] == "attention"
+                item = job_items.decode(raw)[0]
+                assert item["version"] == 1 and item["status"] == "unknown"
+                assert item["legacy_evidence"]["recording_failure"] == legacy["recording_failure"]

@@ -1,17 +1,15 @@
-"""Published V9 work keeps its identity and needs provable, finite authority."""
+"""Retained supported work keeps its identity and provable finite authority."""
 
-import hashlib
-import json
 import sqlite3
 
 import pytest
 
-from server.wiki import grants, maintenance_inputs, schema, source_bindings
+from server.wiki import grants, schema
 from server.wiki.jobs import WikiJobs
 from server.wiki.registry import registry
 from server.wiki.store import WikiError
 from tests import test_wiki_api as wiki_api
-from tests.wiki_schema_fixtures import remove_future_selections
+from tests.wiki_baseline import use_supported_baseline12
 
 client = wiki_api.client
 
@@ -59,143 +57,101 @@ async def test_readmission_retains_original_recording_reference_for_its_document
     assert scope_facts(current.store) == original_scope
 
 
-def legacy_job(store, *, user_id, paths, document=None, material="", status="queued", key="legacy-key"):
-    """Build real V9 rows after checking that every future ledger is empty."""
-    WikiJobs(user_id)
-    registry.close()
-    request = {"material": material, "scope": "Organize the requested material", "paths": paths,
-               "target": None, "sources": [], "actor": "human", "created_changes": {}}
-    payload = {"kind": "submission" if material else "curation", "new_only": bool(material),
-               "material": material, "scope": request["scope"], "paths": paths,
-               "target": None, "sources": [], "actor": "human", "request": request}
-    items = [] if document is None else [{"doc": document["id"], "path": document["path"],
-                                         "revision": document["revision"], "quality": "good", "status": "pending"}]
-    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    with sqlite3.connect(store.db_path) as db:
-        db.execute("PRAGMA recursive_triggers=ON")
-        maintenance_inputs.discard_derived(db)
-        remove_future_selections(db)
-        for table in source_bindings.TABLES:
-            db.execute("DROP TABLE " + table)
-        db.execute("ALTER TABLE app_trash DROP COLUMN source_plan")
-        db.execute("DROP TABLE wiki_protocols")
-        db.execute("DELETE FROM wiki_schema WHERE version>=10")
-        db.execute("INSERT INTO jobs VALUES(?,?,?,?,?,?,NULL,NULL,'original-time','original-time')",
-                   ("old-job", key, hashlib.sha256(raw.encode()).hexdigest(), raw, status, json.dumps(items)))
-        db.execute("INSERT INTO job_requests VALUES(?,?,?)", (key, WikiJobs.request_hash(request), "old-job"))
-    return raw, items
+def supported_version(store, version):
+    if version == 12:
+        registry.close()
+        with sqlite3.connect(store.db_path) as db:
+            db.row_factory = sqlite3.Row
+            db.execute("BEGIN IMMEDIATE")
+            use_supported_baseline12(db)
 
 
+def stopped_job(user_id, root, document, *, creation=None):
+    jobs = WikiJobs(user_id)
+    job = jobs.maintain("retained-authority", "", "Finite stopped work",
+                        [document["path"]], None, [], "human", creation=creation)
+    jobs.update(job["id"], status="interrupted", session_id=None)
+    registry.configure(user_id, root, "replacement-curator")
+    return job
+
+
+@pytest.mark.parametrize("version", [12, 13])
 @pytest.mark.parametrize("path", ["Library/note.md", "Library/assets/project/notes.md"])
-async def test_v9_exact_queued_work_gains_no_new_page_rights_and_keeps_original_request(client, tmp_path, path):
+async def test_supported_queued_work_keeps_exact_grant_and_original_request(client, tmp_path, path, version):
     root = tmp_path / "vault"
-    (root / "Library").mkdir(parents=True)
-    (root / path).parent.mkdir(parents=True, exist_ok=True)
+    (root / path).parent.mkdir(parents=True)
     (root / path).write_text("# Original\n\nKeep this argument.\n")
     config = await wiki_api.configure(client, root)
-    store = registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"])
-    document = store.read(path)
-    raw, items = legacy_job(store, user_id=(await wiki_api.session_manager.db.get_system_agent())["user_id"], paths=[document["path"]], document=document)
-    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
-    migrated = jobs.get("old-job")
-    assert migrated["status"] == "queued"
-    assert migrated["items"] == [item | {"version": 1} for item in items]
-    assert migrated["grant"]["registration_generation"] == config["registration_generation"]
-    assert migrated["grant"]["allowed_new_paths"] == []
-    assert [item["doc_id"] for item in migrated["grant"]["selected_documents"]] == [document["id"]]
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    jobs = WikiJobs(owner)
+    document = jobs.store.read(path)
+    original = jobs.maintain("retained-exact-scope", "", "Finite work", [path], None, [], "human")
     with jobs.store.connect() as db:
-        assert db.execute("SELECT payload FROM jobs").fetchone()[0] == raw
+        raw = tuple(db.execute("SELECT payload,items FROM jobs WHERE id=?", (original["id"],)).fetchone())
+        grant = tuple(db.execute("SELECT * FROM wiki_job_grants WHERE job_id=?", (original["id"],)).fetchone())
+    supported_version(jobs.store, version)
+    current = WikiJobs(owner)
+    job = current.get(original["id"])
+    assert job["status"] == "queued" and job["items"] == original["items"]
+    assert job["grant"]["registration_generation"] == config["registration_generation"]
+    assert job["grant"]["allowed_new_paths"] == []
+    assert [item["doc_id"] for item in job["grant"]["selected_documents"]] == [document["id"]]
+    with current.store.connect() as db:
+        assert tuple(db.execute("SELECT payload,items FROM jobs WHERE id=?", (original["id"],)).fetchone()) == raw
+        assert tuple(db.execute("SELECT * FROM wiki_job_grants WHERE job_id=?", (original["id"],)).fetchone()) == grant
         assert db.execute("SELECT count(*) FROM wiki_path_reservations").fetchone()[0] == 0
-    assert jobs.next_queued() == "old-job"
+    assert current.next_queued() == original["id"]
 
 
-async def test_v9_broad_work_requires_same_job_readmission_and_retry_cannot_wash_it(client, tmp_path):
-    root = tmp_path / "vault"
-    (root / "Library").mkdir(parents=True)
-    (root / "Library/note.md").write_text("# Original\n\nKeep this argument.\n")
-    await wiki_api.configure(client, root)
-    store = registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"])
-    document = store.read("Library/note.md")
-    raw, _ = legacy_job(store, user_id=(await wiki_api.session_manager.db.get_system_agent())["user_id"], paths=[], document=document)
-    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
-    blocked = jobs.get("old-job")
-    assert blocked["status"] == "failed"
-    detail = json.loads(blocked["error"])
-    assert detail["code"] == "scope_review_required" and detail["proposed_grant"]["paths"] == [document["path"]]
-    assert jobs.next_queued() is None
-    refused = await client.post("/api/wiki/jobs/old-job/retry", headers=client.headers)
-    assert refused.status_code == 409
-    body = {"paths": [document["path"]]}
-    response = await client.post("/api/wiki/jobs/old-job/readmit", headers=client.headers, json=body)
-    assert response.status_code == 200, response.text
-    accepted = response.json()
-    assert accepted["id"] == "old-job" and accepted["request_key"] == "legacy-key" and accepted["status"] == "queued"
-    replay = await client.post("/api/wiki/jobs/old-job/readmit", headers=client.headers, json=body)
-    assert replay.status_code == 200 and replay.json()["grant"] == accepted["grant"]
-    with jobs.store.connect() as db:
-        assert db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
-        assert db.execute("SELECT payload FROM jobs").fetchone()[0] == raw
-        assert db.execute("SELECT count(*) FROM wiki_grant_readmissions").fetchone()[0] == 1
-        assert db.execute("SELECT count(*) FROM changes").fetchone()[0] == 0
-
-
-async def test_v9_unstarted_material_uses_one_finite_framework_reservation(client, tmp_path):
-    root = tmp_path / "vault"
-    root.mkdir()
-    await wiki_api.configure(client, root)
-    store = registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"])
-    legacy_job(store, user_id=(await wiki_api.session_manager.db.get_system_agent())["user_id"], paths=[], material="# Material\n\nPreserve submitted bytes.\n")
-    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
-    job = jobs.get("old-job")
-    assert job["status"] == "queued" and job["grant"]["allowed_new_paths"] == []
-    with jobs.store.connect() as db:
-        reservations = db.execute("SELECT path,purpose,state FROM wiki_path_reservations").fetchall()
-    assert [tuple(row) for row in reservations] == [("Library/Inbox/old-job.md", "framework_material", "reserved")]
-    created = jobs.ingest("old-job")
-    repeated = jobs.ingest("old-job")
-    assert created["id"] == repeated["id"]
-    assert (root / "Library/Inbox/old-job.md").read_text() == "# Material\n\nPreserve submitted bytes.\n"
-    with jobs.store.connect() as db:
-        assert db.execute("SELECT count(*) FROM changes").fetchone()[0] == 1
-
-
-async def test_v9_material_with_exact_input_identity_is_reused_without_a_second_raw_file(client, tmp_path):
+@pytest.mark.parametrize("existing", [False, True])
+async def test_supported_material_keeps_finite_reservation_or_exact_input_identity(client, tmp_path, existing):
     root = tmp_path / "vault"
     (root / "Library").mkdir(parents=True)
     material = "# Material\n\nPreserve these exact submitted bytes.\n"
-    (root / "Library/material.md").write_text(material)
+    if existing:
+        (root / "Library/material.md").write_text(material)
     await wiki_api.configure(client, root)
-    store = registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"])
-    document = store.read("Library/material.md")
-    legacy_job(store, user_id=(await wiki_api.session_manager.db.get_system_agent())["user_id"], paths=[], document=document, material=material)
-    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
-    job = jobs.get("old-job")
-    assert job["status"] == "queued"
-    assert [row["doc_id"] for row in job["grant"]["selected_documents"]] == [document["id"]]
-    reused = jobs.ingest("old-job")
-    assert reused["id"] == document["id"]
-    with jobs.store.connect() as db:
-        assert db.execute("SELECT count(*) FROM changes").fetchone()[0] == 0
-        assert db.execute("SELECT count(*) FROM wiki_path_reservations").fetchone()[0] == 0
-    assert [path.relative_to(root).as_posix() for path in root.rglob("*.md")] == ["Library/material.md"]
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    jobs = WikiJobs(owner)
+    document = jobs.store.read("Library/material.md") if existing else None
+    job = jobs.maintain("retained-material", material, "Preserve submitted material", [], None, [], "human")
+    supported_version(jobs.store, 12)
+    current = WikiJobs(owner)
+    retained = current.get(job["id"])
+    assert retained["grant"] == job["grant"]
+    with current.store.connect() as db:
+        reservations = [tuple(row) for row in db.execute("SELECT path,purpose,state FROM wiki_path_reservations")]
+    assert reservations == ([] if existing else [(f"Library/Inbox/{job['id']}.md", "framework_material", "reserved")])
+    first = current.ingest(job["id"])
+    assert current.ingest(job["id"])["id"] == first["id"]
+    assert (root / first["path"]).read_text() == material
+    if existing:
+        assert first["id"] == document["id"]
+    with current.store.connect() as db:
+        assert db.execute("SELECT count(*) FROM changes").fetchone()[0] == (0 if existing else 1)
+    assert [p.relative_to(root).as_posix() for p in root.rglob("*.md")] == [first["path"]]
 
 
-async def test_completed_v9_rows_are_not_reinterpreted_as_new_authority(client, tmp_path):
+async def test_completed_retained_rows_do_not_gain_new_authority(client, tmp_path):
     root = tmp_path / "vault"
     root.mkdir()
     await wiki_api.configure(client, root)
-    store = registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"])
-    raw, _ = legacy_job(store, user_id=(await wiki_api.session_manager.db.get_system_agent())["user_id"], paths=[], status="completed")
-    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
-    job = jobs.get("old-job")
-    assert job["status"] == "completed" and job["grant"] is None and job["error"] is None
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    jobs = WikiJobs(owner)
+    raw = '{"kind":"curation","opaque":{"original":true}}'
     with jobs.store.connect() as db:
-        assert db.execute("SELECT payload FROM jobs").fetchone()[0] == raw
+        db.execute("""INSERT INTO jobs(id,request_key,payload_hash,payload,status,items,created_at,updated_at)
+                      VALUES('completed-original','completed-original','hash',?,'completed','[]','original-time','original-time')""", (raw,))
+        db.execute("INSERT INTO job_requests VALUES('completed-original','hash','completed-original')")
+    supported_version(jobs.store, 12)
+    current = WikiJobs(owner)
+    job = current.get("completed-original")
+    assert job["status"] == "completed" and job["grant"] is None and job["error"] is None
+    with current.store.connect() as db:
+        assert db.execute("SELECT payload FROM jobs WHERE id='completed-original'").fetchone()[0] == raw
         assert db.execute("SELECT count(*) FROM wiki_job_grants").fetchone()[0] == 0
-    # Replaying completed work returns its existing result, including on old
-    # jobs with no surviving write grant. It does not create new authority.
-    assert jobs.retry("old-job") == job
-    assert jobs.next_queued() is None
+    assert current.retry("completed-original") == job
+    assert current.next_queued() is None
 
 
 @pytest.mark.parametrize("path", ["Library/note.md", "Library/assets/project/notes.md", "Library/ASSETS/project/notes.markdown", None])
@@ -277,19 +233,19 @@ async def test_readmission_cannot_be_forged_by_a_model_or_used_to_replace_prior_
     config = await wiki_api.configure(client, root)
     store = registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     document = store.read("Library/note.md")
-    legacy_job(store, user_id=(await wiki_api.session_manager.db.get_system_agent())["user_id"], paths=[], document=document)
+    job = stopped_job((await wiki_api.session_manager.db.get_system_agent())["user_id"], root, document)
     WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     session = SimpleNamespace(id="scope-caller", user_id=(await wiki_api.session_manager.db.get_system_agent())["user_id"], agent_id=config["curator_agent_id"])
     token = tasks.open(session, "auto")
     try:
         headers = {"Authorization": "Bearer " + mint(session.id, user_id=session.user_id, wiki_task_id=token)}
-        forged = await client.post("/api/wiki/jobs/old-job/readmit", headers=headers, json={"paths": [document["path"]]})
+        forged = await client.post(f"/api/wiki/jobs/{job['id']}/readmit", headers=headers, json={"paths": [document["path"]]})
         assert forged.status_code == 403
     finally:
         tasks.close(token)
-    accepted = await client.post("/api/wiki/jobs/old-job/readmit", headers=client.headers, json={"paths": [document["path"]]})
+    accepted = await client.post(f"/api/wiki/jobs/{job['id']}/readmit", headers=client.headers, json={"paths": [document["path"]]})
     assert accepted.status_code == 200, accepted.text
-    changed = await client.post("/api/wiki/jobs/old-job/readmit", headers=client.headers, json={"creation": {"purpose": "requested_knowledge_page"}})
+    changed = await client.post(f"/api/wiki/jobs/{job['id']}/readmit", headers=client.headers, json={"creation": {"purpose": "requested_knowledge_page"}})
     assert changed.status_code == 409
 
 
@@ -325,9 +281,10 @@ async def test_scope_facts_reject_replace_even_when_recursive_triggers_are_off(c
     await wiki_api.configure(client, root)
     store = registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     document = store.read("Library/note.md")
-    legacy_job(store, user_id=(await wiki_api.session_manager.db.get_system_agent())["user_id"], paths=[], document=document)
+    job = stopped_job((await wiki_api.session_manager.db.get_system_agent())["user_id"], root, document,
+                      creation={"purpose": "requested_knowledge_page", "paths": ["Library/new.md"]})
     current = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
-    accepted = await client.post("/api/wiki/jobs/old-job/readmit", headers=client.headers, json={
+    accepted = await client.post(f"/api/wiki/jobs/{job['id']}/readmit", headers=client.headers, json={
         "paths": [document["path"]], "creation": {"purpose": "requested_knowledge_page", "paths": ["Library/new.md"]}})
     assert accepted.status_code == 200, accepted.text
     with sqlite3.connect(current.store.db_path) as db:
