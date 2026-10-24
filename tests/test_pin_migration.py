@@ -6,7 +6,7 @@ import pytest
 
 from server.database import Database
 from tests.accounts import create_account
-from tests.main_storage import write_unversioned_baseline
+from tests.main_storage import write_unversioned_baseline, write_version_one_baseline
 
 
 async def _seed(path: Path, version: int) -> tuple[str, str]:
@@ -29,6 +29,8 @@ async def _seed(path: Path, version: int) -> tuple[str, str]:
     await db.close()
     if version == 0:
         write_unversioned_baseline(path)
+    elif version == 1:
+        write_version_one_baseline(path)
     return owner["id"], default["id"]
 
 
@@ -40,7 +42,7 @@ def _order(rows: list[dict]) -> list[tuple[str, bool, int]]:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", [0, 1])
+@pytest.mark.parametrize("version", [0, 1, 2])
 async def test_existing_sidebar_order_and_ownership_survive_repeated_open(tmp_path, version):
     path = tmp_path / "pins.db"
     owner, default = await _seed(path, version)
@@ -64,7 +66,7 @@ async def test_existing_sidebar_order_and_ownership_survive_repeated_open(tmp_pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", [0, 1])
+@pytest.mark.parametrize("version", [0, 1, 2])
 async def test_new_pinned_rows_append_after_the_saved_positions(tmp_path, version):
     path = tmp_path / "pins.db"
     owner, _ = await _seed(path, version)

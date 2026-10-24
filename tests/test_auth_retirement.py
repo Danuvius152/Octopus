@@ -108,7 +108,7 @@ async def test_empty_retained_intent_table_allows_normal_initialization(tmp_path
     try:
         async with database.transaction(write=False) as view:
             assert await view.fetch_one("SELECT name FROM sqlite_schema WHERE name='token_rotation_intent'") is None
-            assert await view.fetch_one("PRAGMA user_version") == (1,)
+            assert await view.fetch_one("PRAGMA user_version") == (2,)
         assert await database.load_sessions() == []
     finally:
         await database.close()

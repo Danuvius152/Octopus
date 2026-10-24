@@ -14,7 +14,7 @@ from contextlib import closing
 from ..account_baseline import persistent_database_file
 from .transaction import Transaction
 
-CURRENT_VERSION = 1
+CURRENT_VERSION = 2
 _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
 
 
@@ -24,6 +24,10 @@ class UnsupportedMainStorage(RuntimeError):
 
 _CATALOG = "SELECT type,name,sql FROM sqlite_schema WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*'"
 _LEDGER_SCHEMA = "CREATE TABLE schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL)"
+_PREVIOUS_COLUMNS = (
+    "ALTER TABLE backend_credentials ADD COLUMN secret_encrypted TEXT NOT NULL",
+    "ALTER TABLE client_submissions ADD COLUMN recovered_by TEXT",
+)
 _MESSAGE_GUARDS = """
 CREATE TRIGGER messages_sequence_insert
 BEFORE INSERT ON messages
@@ -99,7 +103,7 @@ def _definition(kind: str, sql: str) -> tuple:
 
 def _validate_layout(version: int, rows: Sequence[tuple[str, str, str]]) -> bool:
     """Return whether this is new empty storage; otherwise require a full format."""
-    if version not in (0, CURRENT_VERSION):
+    if version not in (0, 1, CURRENT_VERSION):
         raise UnsupportedMainStorage()
     if not rows:
         if version == 0:
@@ -111,6 +115,9 @@ def _validate_layout(version: int, rows: Sequence[tuple[str, str, str]]) -> bool
     with closing(sqlite3.connect(":memory:")) as reference:
         for statement in _statements(_SCHEMA):
             reference.execute(statement)
+        if version in (0, 1):
+            for statement in _PREVIOUS_COLUMNS:
+                reference.execute(statement)
         expected = {(kind, name): _definition(kind, sql) for kind, name, sql in reference.execute(_CATALOG)}
         if any(("trigger", name) in actual for name in ("messages_sequence_insert", "messages_sequence_update")):
             if ("index", "messages_unique_sequence") not in actual:
@@ -130,7 +137,7 @@ def _validate_layout(version: int, rows: Sequence[tuple[str, str, str]]) -> bool
 
 
 # These are admission predicates for the one supported unversioned baseline,
-# not conversions. Ordinary format-1 startup never reinterprets these columns.
+# not conversions. Format 1 has its own, narrower duplicate-retirement proof.
 _UNSUPPORTED_BASELINE_DATA = """
 SELECT 1 FROM backend_credentials WHERE secret_encrypted != ''
 UNION ALL SELECT 1 FROM client_submissions
@@ -152,6 +159,18 @@ UNION ALL SELECT 1 FROM applications WHERE pin_order IS NULL
 LIMIT 1
 """
 
+_UNSUPPORTED_RETIRED_DATA = """
+SELECT 1 FROM backend_credentials original
+ WHERE original.secret_encrypted != '' AND NOT EXISTS (
+   SELECT 1 FROM credential_secrets secret WHERE secret.credential_id=original.id
+    AND secret.secret_encrypted=original.secret_encrypted)
+UNION ALL SELECT 1 FROM client_submissions original
+ WHERE original.recovered_by IS NOT NULL AND NOT EXISTS (
+   SELECT 1 FROM client_submissions child WHERE child.session_id=original.session_id
+    AND child.client_id=original.recovered_by AND child.recovery_of=original.client_id)
+LIMIT 1
+"""
+
 
 def require_supported_main_format(db_path: str) -> None:
     """Inspect one consistent committed snapshot, including its real WAL."""
@@ -170,6 +189,9 @@ def require_supported_main_format(db_path: str) -> None:
             if any(name == "token_rotation_intent" for _, name, _ in rows):
                 if reader.execute("SELECT 1 FROM token_rotation_intent LIMIT 1").fetchone():
                     raise UnsupportedMainStorage()
+        elif not new and version == 1:
+            if reader.execute(_UNSUPPORTED_RETIRED_DATA).fetchone():
+                raise UnsupportedMainStorage()
 
 
 async def prepare_main_storage(tx: Transaction) -> None:
@@ -180,22 +202,28 @@ async def prepare_main_storage(tx: Transaction) -> None:
     if new:
         for statement in _statements(_SCHEMA):
             await tx.execute(statement)
-    elif version == 0:
-        if await tx.fetch_one(_UNSUPPORTED_BASELINE_DATA):
-            raise UnsupportedMainStorage()
-        if any(name == "token_rotation_intent" for _, name, _ in rows):
-            if await tx.fetch_one("SELECT 1 FROM token_rotation_intent LIMIT 1"):
-                raise UnsupportedMainStorage()
-            await tx.execute("DROP TABLE token_rotation_intent")
-        await tx.execute("DROP TABLE schema_migrations")
-    else:
+    elif version == CURRENT_VERSION:
         return
+    else:
+        if version == 0:
+            if await tx.fetch_one(_UNSUPPORTED_BASELINE_DATA):
+                raise UnsupportedMainStorage()
+            if any(name == "token_rotation_intent" for _, name, _ in rows):
+                if await tx.fetch_one("SELECT 1 FROM token_rotation_intent LIMIT 1"):
+                    raise UnsupportedMainStorage()
+                await tx.execute("DROP TABLE token_rotation_intent")
+            await tx.execute("DROP TABLE schema_migrations")
+            _validate_layout(1, await tx.fetch_all(_CATALOG))
+        elif await tx.fetch_one(_UNSUPPORTED_RETIRED_DATA):
+            raise UnsupportedMainStorage()
+        await tx.execute("ALTER TABLE backend_credentials DROP COLUMN secret_encrypted")
+        await tx.execute("ALTER TABLE client_submissions DROP COLUMN recovered_by")
     _validate_layout(CURRENT_VERSION, await tx.fetch_all(_CATALOG))
     await tx.execute(f"PRAGMA user_version={CURRENT_VERSION}")
 
 _SCHEMA = """
--- Complete current main format. The physical secret/recovery placeholders
--- remain until their separately supported successor format retires them.
+-- Complete current main format. Credentials and input recovery retain only
+-- their authoritative split ciphertext and successor relationship.
 
 CREATE TABLE agent_connectors (
     agent_id TEXT NOT NULL,
@@ -288,8 +316,6 @@ CREATE TABLE backend_credentials (
     backend TEXT NOT NULL,                 -- "claude-code" | "codex" | …
     label TEXT NOT NULL,
     auth_type TEXT NOT NULL,               -- "api_key" | "oauth"
-    secret_encrypted TEXT NOT NULL,        -- Empty legacy placeholder; the only
-                                           -- ciphertext is in credential_secrets.
     created_at TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'active', -- "active" | "needs_reconnect"
     token_expires_at TEXT,                 -- ISO8601, null for non-expiring keys
@@ -336,7 +362,6 @@ CREATE TABLE client_submissions (
     created_at TEXT,
     updated_at TEXT,
     recovery_of TEXT,
-    recovered_by TEXT,
     dismissed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (session_id, client_id)
 );

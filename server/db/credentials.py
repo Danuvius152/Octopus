@@ -58,9 +58,9 @@ class CredentialsMixin(DatabaseBase):
         async with self.transaction(write=True) as tx:
             await tx.execute(
                 "INSERT INTO backend_credentials "
-                "(id, backend, label, auth_type, secret_encrypted, created_at, "
+                "(id, backend, label, auth_type, created_at, "
                 " status, needs_reconnect, user_id) "
-                "VALUES (?, ?, ?, ?, '', ?, 'active', 0, ?)",
+                "VALUES (?, ?, ?, ?, ?, 'active', 0, ?)",
                 (
                     credential_id,
                     backend,

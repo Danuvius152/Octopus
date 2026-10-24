@@ -14,18 +14,22 @@ import pytest
 from server.config import settings
 from server.database import Database
 from tests.accounts import create_account
-from tests.main_storage import write_unversioned_baseline
+from tests.main_storage import write_unversioned_baseline, write_version_one_baseline
 from tests.test_service_runtime import installation_settings
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize("baseline", ["empty", "complete_v0", "owned_v0"])
+@pytest.mark.parametrize("baseline", ["empty", "complete_v0", "complete_v1", "owned_v0", "owned_v1"])
 async def test_current_format_is_prepared_once_and_reopen_preserves_owned_facts(tmp_path, monkeypatch, baseline):
     path = tmp_path / "main.db"
-    if baseline == "complete_v0":
+    if baseline in ("complete_v0", "complete_v1"):
         with closing(sqlite3.connect(path)) as original:
             original.executescript((ROOT / "tests/fixtures/main-baseline-v0.sql").read_text())
+            if baseline == "complete_v1":
+                original.execute("DROP TABLE schema_migrations")
+                original.execute("PRAGMA user_version=1")
+                original.commit()
     database = Database(str(path))
     await database.initialize()
     owner, _ = await create_account(database, extra_roots=[tmp_path])
@@ -42,13 +46,15 @@ async def test_current_format_is_prepared_once_and_reopen_preserves_owned_facts(
                          "reason_code='steer_delivery_unknown',delivery_state='unknown'")
     await database.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (1,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (2,)
         assert reader.execute("SELECT name FROM sqlite_schema WHERE name='schema_migrations'").fetchall() == []
         original_rows = reader.execute("SELECT * FROM sessions").fetchall()
         original_messages = reader.execute("SELECT * FROM messages").fetchall()
         original_agents = reader.execute("SELECT * FROM agents").fetchall()
     if baseline == "owned_v0":
         write_unversioned_baseline(path)
+    elif baseline == "owned_v1":
+        write_version_one_baseline(path)
     statements = []
     connect = aiosqlite.Connection._connect
 
@@ -70,12 +76,12 @@ async def test_current_format_is_prepared_once_and_reopen_preserves_owned_facts(
             "unknown", "steer_delivery_unknown", "unknown",
         )
         await reopened.close()
-        if opening or baseline != "owned_v0":
+        if opening or baseline not in ("owned_v0", "owned_v1"):
             assert not [sql for sql in statements if sql.lstrip().upper().startswith(
                 ("CREATE", "ALTER", "DROP", "INSERT", "UPDATE", "DELETE", "PRAGMA USER_VERSION="),
             )]
         with closing(sqlite3.connect(path)) as reader:
-            assert reader.execute("PRAGMA user_version").fetchone() == (1,)
+            assert reader.execute("PRAGMA user_version").fetchone() == (2,)
             assert reader.execute("SELECT * FROM sessions").fetchall() == original_rows
             assert reader.execute("SELECT * FROM messages").fetchall() == original_messages
             assert reader.execute("SELECT * FROM agents").fetchall() == original_agents
@@ -95,6 +101,8 @@ async def test_unsupported_owned_format_is_refused_without_writes(tmp_path, monk
     await database.save_session("original", "Original session", str(tmp_path), "time", user_id=owner["id"])
     await database.append_message(session_id="original", seq=0, role="user", type="text", content="Original input must survive")
     await database.close()
+    if damage == "no_upgrade_path":
+        write_unversioned_baseline(path)
     if damage == "future_version_wal":
         keeper = sqlite3.connect(path)
         request.addfinalizer(keeper.close)
@@ -104,7 +112,7 @@ async def test_unsupported_owned_format_is_refused_without_writes(tmp_path, monk
         if damage in ("future_version", "future_version_wal"):
             writer.execute("PRAGMA user_version=1000000")
         elif damage == "unknown_structure":
-            writer.execute("PRAGMA user_version=1")
+            writer.execute("PRAGMA user_version=2")
             writer.execute("CREATE TABLE future_business(id TEXT PRIMARY KEY, original BLOB)")
             writer.execute("INSERT INTO future_business VALUES('original', ?)", (b"unknown durable fact\x00\xff",))
         else:
@@ -115,7 +123,7 @@ async def test_unsupported_owned_format_is_refused_without_writes(tmp_path, monk
     wal = Path(str(path) + "-wal")
     original_wal = wal.read_bytes() if wal.exists() else None
     if damage == "future_version_wal":
-        assert int.from_bytes(original[60:64], "big") == 1
+        assert int.from_bytes(original[60:64], "big") == 2
         assert original_wal is not None and len(original_wal) > 32
     directories = {child.relative_to(tmp_path) for child in tmp_path.rglob("*") if child.is_dir()}
     admitted = tmp_path / "admitted"
@@ -215,7 +223,7 @@ asyncio.run(main())
     assert proof.read_text() == failure
     with closing(sqlite3.connect(path)) as reader:
         committed = failure == "commit_ack"
-        assert reader.execute("PRAGMA user_version").fetchone() == (int(committed),)
+        assert reader.execute("PRAGMA user_version").fetchone() == (2 if committed else 0,)
         tables = {row[0] for row in reader.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
         if baseline == "empty" and not committed:
             assert tables == set()
@@ -229,7 +237,7 @@ asyncio.run(main())
         assert (await reopened.load_messages("saved"))[0]["content"] == "Original input before interruption"
     await reopened.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (1,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (2,)
         assert reader.execute("SELECT name FROM sqlite_schema WHERE name='schema_migrations'").fetchall() == []
 
 
@@ -312,7 +320,7 @@ asyncio.run(Database(sys.argv[1]).initialize())
     assert path.read_bytes() == original
 
 
-@pytest.mark.parametrize("version", [0, 1])
+@pytest.mark.parametrize("version", [0, 1, 2])
 async def test_complete_historical_sequence_guards_survive_format_preparation(tmp_path, version):
     path = tmp_path / "historical.db"
     database = Database(str(path))
@@ -323,6 +331,8 @@ async def test_complete_historical_sequence_guards_survive_format_preparation(tm
     await database.close()
     if version == 0:
         write_unversioned_baseline(path)
+    elif version == 1:
+        write_version_one_baseline(path)
     with closing(sqlite3.connect(path)) as writer:
         writer.execute("DROP INDEX messages_unique_sequence")
         writer.execute("INSERT INTO messages(session_id,seq,role,type,content) VALUES('history',5,'assistant','text',?)",
@@ -345,7 +355,7 @@ async def test_complete_historical_sequence_guards_survive_format_preparation(tm
     finally:
         await database.close()
     with closing(sqlite3.connect(path)) as reader:
-        assert reader.execute("PRAGMA user_version").fetchone() == (1,)
+        assert reader.execute("PRAGMA user_version").fetchone() == (2,)
         assert reader.execute("SELECT id,session_id,seq,content FROM messages WHERE seq=5 ORDER BY id").fetchall() == original
         assert {row[0] for row in reader.execute("SELECT name FROM sqlite_schema WHERE type='trigger'")} == {
             "messages_sequence_insert", "messages_sequence_update",

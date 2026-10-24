@@ -42,8 +42,23 @@ def write_unversioned_baseline(path: Path) -> None:
             columns = [row[1] for row in source.execute(f'PRAGMA table_info("{table}")')]
             names = ",".join('"' + column + '"' for column in columns)
             values = source.execute(f'SELECT {names} FROM "{table}"').fetchall()  # noqa: S608
+            # Format 2 has no legacy credential placeholder. Construct the
+            # old fixture explicitly; production never adds this column back.
+            if table == "backend_credentials" and "secret_encrypted" not in columns:
+                columns.append("secret_encrypted")
+                values = [(*row, "") for row in values]
+                names += ',"secret_encrypted"'
             baseline.executemany(
                 f'INSERT INTO "{table}" ({names}) VALUES ({",".join("?" for _ in columns)})', values,  # noqa: S608
             )
         baseline.commit()
     target.replace(path)
+
+
+def write_version_one_baseline(path: Path) -> None:
+    """Construct the frozen complete baseline after ticket 10's one step."""
+    write_unversioned_baseline(path)
+    with closing(sqlite3.connect(path)) as baseline:
+        baseline.execute("DROP TABLE schema_migrations")
+        baseline.execute("PRAGMA user_version=1")
+        baseline.commit()

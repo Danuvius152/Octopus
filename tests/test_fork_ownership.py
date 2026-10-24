@@ -7,11 +7,11 @@ import pytest
 from server.database import Database
 from server.session_manager import SessionManager
 from tests.accounts import create_account
-from tests.main_storage import write_unversioned_baseline
+from tests.main_storage import write_unversioned_baseline, write_version_one_baseline
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("version", [0, 1])
+@pytest.mark.parametrize("version", [0, 1, 2])
 async def test_current_fork_owners_and_ambiguous_relationships_survive_repeated_open(tmp_path, version):
     path = str(tmp_path / "sessions.db")
     db = Database(path)
@@ -61,6 +61,8 @@ async def test_current_fork_owners_and_ambiguous_relationships_survive_repeated_
     await db.close()
     if version == 0:
         write_unversioned_baseline(Path(path))
+    elif version == 1:
+        write_version_one_baseline(Path(path))
 
     db = Database(path)
     try:
@@ -73,7 +75,7 @@ async def test_current_fork_owners_and_ambiguous_relationships_survive_repeated_
         await db.initialize()
         assert {r["id"]: r for r in await db.load_sessions(include_archived=True)} == after
         async with db.transaction(write=False) as view:
-            assert await view.fetch_one("PRAGMA user_version") == (1,)
+            assert await view.fetch_one("PRAGMA user_version") == (2,)
         manager = SessionManager()
         await manager.initialize(db)
         assert manager.get_session("child", owner_a) is not None

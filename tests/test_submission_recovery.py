@@ -17,7 +17,7 @@ from server.sessions import SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
 from server.users import UserManager
 from tests.accounts import create_account
-from tests.main_storage import write_unversioned_baseline
+from tests.main_storage import write_unversioned_baseline, write_version_one_baseline
 
 
 @pytest.fixture(autouse=True)
@@ -438,7 +438,7 @@ async def test_recovery_attachments_are_bound_to_saved_bytes_and_owner(tmp_path,
             await db.close()
 
 
-@pytest.mark.parametrize("version", [0, 1])
+@pytest.mark.parametrize("version", [0, 1, 2])
 async def test_supported_format_preserves_a_receipt_without_inventing_missing_input(tmp_path, version):
     import sqlite3
 
@@ -457,6 +457,8 @@ async def test_supported_format_preserves_a_receipt_without_inventing_missing_in
     legacy.close()
     if version == 0:
         write_unversioned_baseline(Path(path))
+    elif version == 1:
+        write_version_one_baseline(Path(path))
     reopened = Database(path)
     await reopened.initialize()
     deps.set_user_manager(UserManager(reopened))

@@ -8,10 +8,10 @@ import pytest
 
 from server.database import Database
 from tests.accounts import create_account
-from tests.main_storage import write_unversioned_baseline
+from tests.main_storage import write_unversioned_baseline, write_version_one_baseline
 
 
-@pytest.mark.parametrize("version", [0, 1])
+@pytest.mark.parametrize("version", [0, 1, 2])
 async def test_current_stages_and_child_recovery_authority_survive_repeated_open(tmp_path, version):
     path = tmp_path / "legacy-inputs.db"
     db = Database(str(path))
@@ -38,10 +38,12 @@ async def test_current_stages_and_child_recovery_authority_survive_repeated_open
                 (identity, "digest", identity, body, receipt, state, recovery_of, reason, generation),
             )
         stored.commit()
-        original = stored.execute("SELECT client_id,payload,receipt,execution_state,recovery_of,recovered_by,execution_generation "
+        original = stored.execute("SELECT client_id,payload,receipt,execution_state,recovery_of,execution_generation "
                                   "FROM client_submissions ORDER BY client_id").fetchall()
     if version == 0:
         write_unversioned_baseline(path)
+    elif version == 1:
+        write_version_one_baseline(path)
     for _ in range(2):
         reopened = Database(str(path))
         await reopened.initialize()
@@ -58,7 +60,7 @@ async def test_current_stages_and_child_recovery_authority_survive_repeated_open
             assert (await reopened.get_client_submission("legacy", "unproven-result"))["execution_state"] == "unknown"
             assert (await reopened.get_session_binding("legacy"))["user_id"] == owner["id"]
             async with reopened.transaction(write=False) as tx:
-                assert await tx.fetch_all("SELECT client_id,payload,receipt,execution_state,recovery_of,recovered_by,execution_generation "
+                assert await tx.fetch_all("SELECT client_id,payload,receipt,execution_state,recovery_of,execution_generation "
                                           "FROM client_submissions ORDER BY client_id") == original
         finally:
             await reopened.close()

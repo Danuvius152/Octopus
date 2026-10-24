@@ -11,7 +11,7 @@ import pytest
 from server.crypto import decrypt, encrypt
 from server.database import Database
 from tests.accounts import create_account
-from tests.main_storage import write_unversioned_baseline
+from tests.main_storage import write_unversioned_baseline, write_version_one_baseline
 
 # ---------------------------------------------------------------------------
 # crypto
@@ -138,28 +138,28 @@ async def test_save_writes_to_credential_secrets_table(db):
 
 
 @pytest.mark.asyncio
-async def test_load_prefers_split_secret_over_legacy_column(db):
-    """get_credential reads from credential_secrets via JOIN; if a future
-    rotation only updates the split table, the read should still surface
-    the fresh value."""
+async def test_updating_the_authoritative_secret_preserves_metadata(db):
+    """Readers return the current split ciphertext without changing metadata."""
     now = datetime.now(UTC).isoformat()
     await db.save_credential(
         "c-rot", "claude-code", "L", "api_key", encrypt("first", "k"), now
     )
-    # Simulate a split-only rotation (the legacy column stays "first").
+    original = await db.get_credential("c-rot")
     fresh = encrypt("second", "k")
     await db.conn.execute(
         "UPDATE credential_secrets SET secret_encrypted = ? WHERE credential_id = ?",
         (fresh, "c-rot"),
     )
-    await db.conn.execute("UPDATE backend_credentials SET secret_encrypted=? WHERE id='c-rot'",
-                          (encrypt("stale placeholder", "retired key"),))
     await db.conn.commit()
     row = await db.get_credential("c-rot")
     assert decrypt(row["secret_encrypted"], "k") == "second"
+    assert {key: value for key, value in row.items() if key != "secret_encrypted"} == {
+        key: value for key, value in original.items() if key != "secret_encrypted"
+    }
 
 
-async def test_supported_upgrade_preserves_split_ciphertexts_and_account_ownership(tmp_path):
+@pytest.mark.parametrize("version", [0, 1])
+async def test_supported_upgrade_preserves_split_ciphertexts_and_account_ownership(tmp_path, version):
     path = tmp_path / "legacy.db"
     seed = Database(str(path))
     await seed.initialize()
@@ -169,7 +169,10 @@ async def test_supported_upgrade_preserves_split_ciphertexts_and_account_ownersh
     await seed.save_credential("original", "codex", "Personal", "api_key", original, "t", user_id=owner["id"])
     await seed.save_credential("rotated", "codex", "Personal", "api_key", current, "t", user_id=owner["id"])
     await seed.close()
-    write_unversioned_baseline(Path(path))
+    if version == 0:
+        write_unversioned_baseline(Path(path))
+    else:
+        write_version_one_baseline(Path(path))
 
     for _ in range(2):
         upgraded = Database(str(path))

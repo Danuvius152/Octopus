@@ -11,7 +11,7 @@ import pytest
 
 from server.database import Database
 from server.wiki import job_notifications
-from tests.main_storage import write_unversioned_baseline
+from tests.main_storage import write_unversioned_baseline, write_version_one_baseline
 from tests.test_wiki_job_notifications import (
     client as client,
 )
@@ -46,7 +46,7 @@ async def test_unversioned_test_baseline_cannot_discard_an_unrecognized_table(tm
     assert path.read_bytes() == original
 
 
-@pytest.mark.parametrize("version", [0, 1])
+@pytest.mark.parametrize("version", [0, 1, 2])
 @pytest.mark.parametrize("damage", ["quoted_primary_key", "quoted_default", "missing_unique"])
 def test_constraint_keywords_cannot_be_replaced_by_quoted_type_or_default_tokens(tmp_path, version, damage):
     path = tmp_path / "keywords.db"
@@ -60,9 +60,12 @@ def test_constraint_keywords_cannot_be_replaced_by_quoted_type_or_default_tokens
     assert damaged != script
     with closing(sqlite3.connect(path)) as seed:
         seed.executescript(damaged)
-        if version == 1:
+        if version in (1, 2):
             seed.execute("DROP TABLE schema_migrations")
-            seed.execute("PRAGMA user_version=1")
+            if version == 2:
+                seed.execute("ALTER TABLE backend_credentials DROP COLUMN secret_encrypted")
+                seed.execute("ALTER TABLE client_submissions DROP COLUMN recovered_by")
+            seed.execute(f"PRAGMA user_version={version}")
         seed.commit()
         # Check the engine's interpretation independently of our comparator.
         if damage == "quoted_primary_key":
@@ -87,7 +90,7 @@ asyncio.run(main())
     assert path.read_bytes() == original
 
 
-@pytest.mark.parametrize("version", [0, 1])
+@pytest.mark.parametrize("version", [0, 1, 2])
 async def test_reordered_notice_columns_preserve_cards_and_exact_replay(jobs, receiver, monkeypatch, version):
     job = enqueue(jobs)
     await session(receiver.db, owner=jobs.user_id)
@@ -96,6 +99,8 @@ async def test_reordered_notice_columns_preserve_cards_and_exact_replay(jobs, re
     await receiver.db.close()
     if version == 0:
         write_unversioned_baseline(path)
+    elif version == 1:
+        write_version_one_baseline(path)
     with closing(sqlite3.connect(path)) as seed:
         original = seed.execute("SELECT sql FROM sqlite_schema WHERE name='wiki_job_notifications'").fetchone()[0]
         reordered = original.replace("target TEXT NOT NULL,\n    request_id TEXT NOT NULL,",
