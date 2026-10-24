@@ -39,6 +39,7 @@ from .db.users import owner_is_available as _owner_is_available
 
 if TYPE_CHECKING:
     from .database import Database
+    from .db.transaction import Transaction
 
 # scrypt cost. ~17 MB and tens of milliseconds per attempt — enough to make
 # offline guessing expensive, little enough that a login feels instant.
@@ -67,8 +68,7 @@ _RESERVED_USERNAMES = frozenset(
 class UserError(Exception):
     """A rejected account operation, with the status the route should send.
 
-    Same shape as `TokenRotationError`: the manager decides *what* went wrong
-    and how bad it is, the router only translates.
+    The manager decides what went wrong and how bad it is; the router translates.
     """
 
     def __init__(self, message: str, *, status_code: int = 400) -> None:
@@ -186,7 +186,7 @@ def validate_password(password: str, *, username: str = "") -> None:
 
 
 async def owner_is_available(db: Database, user_id: str | None) -> bool:
-    """Current account authority, including the installation's legacy era."""
+    """Current account authority shared with runtime capabilities."""
     async with db.transaction(write=False) as tx:
         return await _owner_is_available(tx, user_id)
 
@@ -212,18 +212,52 @@ class UserManager:
         }
 
     async def _insert(self, prepared: dict[str, Any]) -> dict[str, Any]:
-        from . import deps
+        user = await self.db.create_user(**prepared)
+        await self._ensure_directories(user["id"])
+        return user
+
+    async def _ensure_directories(self, user_id: str) -> None:
+        from .agent_memory import ensure_agent_dirs
         from .workspace import paths_for
 
-        user = await self.db.create_user(**prepared)
-        deps.forget_accounts_exist()
-        # Provision the account's directories at creation, so the first session
-        # has a working directory to run in. Bootstrap did this for the first
-        # account; invite-registration did not, so a registered account's first
-        # turn spawned the CLI with cwd=<workspace> and died on
-        # FileNotFoundError. One place now covers every way an account is made.
-        paths_for(user["id"]).ensure()
+        paths_for(user_id).ensure()
+        for agent in await self.db.load_agents(include_archived=True, user_id=user_id):
+            ensure_agent_dirs(agent["id"], user_id)
+
+    async def setup(self, *, username: str, password: str) -> dict[str, Any]:
+        """One first account; the write transaction arbitrates across connections."""
+        async def require_empty(tx: Transaction) -> None:
+            if await tx.fetch_one("SELECT 1 FROM users LIMIT 1") is not None:
+                raise UserError("This installation already has an account", status_code=409)
+            if await self.db._has_setup_data(tx):
+                raise UserError("Setup requires an empty installation; retained business data needs operator verification", status_code=409)
+            self._require_empty_setup_files()
+
+        # Reject retained inputs before preparing a key, then recheck under the
+        # write transaction that decides which competing first account wins.
+        async with self.db.transaction(write=False) as tx:
+            await require_empty(tx)
+        prepared = self.prepare_user(username=username, password=password, is_admin=True)
+        async with self.db.transaction(write=True) as tx:
+            await require_empty(tx)
+            user = await self.db._create_account(tx, **prepared)
+        await self._ensure_directories(user["id"])
         return user
+
+    @staticmethod
+    def _require_empty_setup_files() -> None:
+        from .account_baseline import (
+            RetainedLegacyInstallation,
+            require_empty_account_resources,
+        )
+        from .config import settings
+
+        try:
+            require_empty_account_resources(settings)
+        except RetainedLegacyInstallation as error:
+            raise UserError("Setup requires empty account resources; retained files need operator verification", status_code=409) from error
+        except OSError as error:
+            raise UserError("Setup resources are unavailable; retained files need operator verification", status_code=503) from error
 
     async def create_user(
         self, *, username: str, password: str, is_admin: bool = False
@@ -249,18 +283,9 @@ class UserManager:
         return unwrap_dek(wrapped, key=key)
 
     async def data_key_for(self, user_id: str | None) -> str:
-        """The key `user_id`'s secrets are encrypted with, by id.
-
-        `None` answers `OCTOPUS_AUTH_TOKEN`, which is the pre-accounts install:
-        its secrets were encrypted with it and stay that way until the upgrade
-        re-keys them (multi-tenancy.md §9.3). So one call answers "what key do
-        I use here" in both eras, and nothing outside this module has to know
-        there are two.
-        """
-        from .config import settings
-
+        """Resolve the owning account's stable DEK; never an installation proof."""
         if user_id is None:
-            return settings.auth_token
+            raise UserError("A current account is required for stored secrets", status_code=401)
         user = await self.db.get_user(user_id)
         if user is None:
             raise UserError("no such account", status_code=404)
@@ -281,6 +306,11 @@ class UserManager:
             raise UserError("Wrong username or password", status_code=401)
         if user["disabled_at"]:
             raise UserError("This account is disabled", status_code=403)
+        from .workspace import paths_for
+
+        # Complete directory provisioning after a committed account creation.
+        # Agent memory keeps its existing first-use/recovery owner.
+        paths_for(user["id"]).ensure()
         return user
 
     async def set_password(
@@ -386,13 +416,15 @@ class UserManager:
     async def register(
         self, *, invite_code: str, username: str, password: str
     ) -> dict[str, Any]:
-        """Create an account against an invite, or raise.
+        """Create a subsequent account against an invite, or raise.
 
         The code is checked before the name is validated so a wrong code cannot
         be used to probe which usernames are taken, and it is *claimed* before
         the user is created so a failure after the claim costs a use rather
         than leaving a code that was spent on nothing.
         """
+        if not await self.db.count_users():
+            raise UserError("Complete first-account setup before registering", status_code=409)
         invite = await self.db.get_invite((invite_code or "").strip())
         if invite is None or invite["revoked_at"]:
             raise UserError("That invite code is not valid", status_code=403)

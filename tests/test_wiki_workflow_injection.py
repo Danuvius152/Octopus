@@ -20,7 +20,8 @@ async def test_regular_turn_only_advertises_stable_discovery_and_loads_current_g
     vault = tmp_path / "vault"
     vault.mkdir()
     config = await wiki_api.configure(client, vault)
-    session = SimpleNamespace(id="reader", user_id=None, agent_id="ordinary-reader")
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    session = SimpleNamespace(id="reader", user_id=owner, agent_id="ordinary-reader")
     token = tasks.open(session, mode)
     try:
         prompt = instructions(mode, token)
@@ -37,14 +38,15 @@ async def test_regular_turn_only_advertises_stable_discovery_and_loads_current_g
         assert config["vault_id"] not in prompt and config["registration_generation"] not in prompt
         # Marker reuse is advisory, never a cached denial of a fresh guide request.
         assert load_guide("query", token) == load_guide("query", token) == guide("query-v2")
-        info = (await client.get("/api/wiki/info", headers=wiki_api.HEADERS)).json()
+        info = (await client.get("/api/wiki/info", headers=client.headers)).json()
         assert info["capabilities"]["incremental_index"] is True
     finally:
         tasks.close(token)
 
 
 async def test_unbound_turn_does_not_advertise_a_vault_or_write_grants(client):
-    token = tasks.open(SimpleNamespace(id="unbound", user_id=None, agent_id="reader"), "auto")
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    token = tasks.open(SimpleNamespace(id="unbound", user_id=owner, agent_id="reader"), "auto")
     try:
         prompt = instructions("auto", token)
         operation = card(token)
@@ -65,8 +67,9 @@ async def test_worker_and_cancelled_assignment_mark_the_actual_branch(client, tm
     (vault / "Library").mkdir(parents=True)
     (vault / "Library/note.md").write_text("# Source\nKeep these words.\n")
     config = await wiki_api.configure(client, vault)
-    session = SimpleNamespace(id="worker", user_id=None, agent_id=config["curator_agent_id"])
-    jobs = WikiJobs(None)
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    session = SimpleNamespace(id="worker", user_id=owner, agent_id=config["curator_agent_id"])
+    jobs = WikiJobs(owner)
     job = jobs.maintain("injection-worker", "", "organize", ["Library/note.md"], None, [], "human")
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], job["items"])
@@ -126,15 +129,16 @@ async def test_actual_read_survives_guide_loading_but_not_a_fresh_task(client, t
 
     note, config, original = await workflow_article(client, tmp_path)
     path = "Library/note.md"
-    jobs = WikiJobs(None)
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    jobs = WikiJobs(owner)
     job = jobs.maintain("guide-read-reuse", "", "organize", [path], None, [], "human")
-    session = SimpleNamespace(id="guide-read-worker", user_id=None, agent_id=config["curator_agent_id"])
+    session = SimpleNamespace(id="guide-read-worker", user_id=owner, agent_id=config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
 
     def headers():
-        return {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
+        return {"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}
 
     try:
         response = await client.get("/api/wiki/read", params={"doc": path, "view": "compact"}, headers=headers())
@@ -158,7 +162,7 @@ async def test_actual_read_survives_guide_loading_but_not_a_fresh_task(client, t
         assert observed.status_code == 200, observed.text
         final = observed.json()
         assert final["revision"] == normalized.json()["revision"] and final["next_start"] is None
-        history = WikiHistory(registry.store(None))
+        history = WikiHistory(registry.store(owner))
         before_history, before_bytes = history.history(path), note.read_bytes()
         tasks.close(token)
         token = tasks.open(session, "maintain")
@@ -184,8 +188,9 @@ async def test_article_request_errors_do_not_write_or_convert_originals(client, 
     heading = "摘要" if case == "unrecognized_summary" else "Key note"
     note, _, original = await workflow_article(client, tmp_path, heading)
     path = "Library/note.md"
-    current = (await client.get("/api/wiki/read", params={"doc": path}, headers=wiki_api.HEADERS)).json()
-    history = WikiHistory(registry.store(None))
+    current = (await client.get("/api/wiki/read", params={"doc": path}, headers=client.headers)).json()
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    history = WikiHistory(registry.store(owner))
     before_history = history.history(path)
     body = {
         "path": path, "expected_revision": current["revision"], "reuse_existing_summary": True,
@@ -196,7 +201,7 @@ async def test_article_request_errors_do_not_write_or_convert_originals(client, 
         body["frontmatter_patch"].update({"source": "/materials/source.md", "source_sha256": "a" * 64, "source_bytes": 123})
     elif case == "external_resource_without_doc":
         body["sources"] = [{"resource": "file:///materials/source.md", "revision": current["revision"], "location": "L1"}]
-    result = await client.post("/api/wiki/organize", headers=wiki_api.HEADERS, json=body)
+    result = await client.post("/api/wiki/organize", headers=client.headers, json=body)
     assert result.status_code == 422, result.text
     if case == "unsupported_frontmatter":
         assert "Unsupported frontmatter_patch field" in result.text

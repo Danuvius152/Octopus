@@ -1,4 +1,4 @@
-"""Isolated ticket50 process: real exits leave both SQLite owners' evidence."""
+"""Owned-storage recovery subprocess; real exits retain both SQLite owners."""
 
 import asyncio
 import json
@@ -32,11 +32,10 @@ async def main(configuration, phase):
         return popen(command, *args, **kwargs)
 
     subprocess.Popen = no_model
-    from server.bootstrap import bootstrap_first_account
     from server.database import Database
     from server.session_manager import session_manager
     from server.users import UserManager
-    from server.wiki import account_upgrade, maintenance_inputs
+    from server.wiki import maintenance_inputs
     from server.wiki.history import WikiHistory
     from server.wiki.jobs import WikiJobs
     from server.wiki.registry import registry
@@ -56,18 +55,21 @@ async def main(configuration, phase):
     await db.initialize()
     registry.bind_health(db.health)
     if phase == "seed":
-        agent = await db.get_system_agent()
+        user = await UserManager(db).setup(username="owner", password="password1")
+        await db.update_user_field(user["id"], extra_roots=json.dumps([settings.default_working_dir]))
+        user = await db.get_user(user["id"])
+        agent = await db.get_system_agent(user["id"])
         await db.save_session("legacy", "Ordinary completed delegation", settings.default_working_dir,
-                              "2026-10-20", agent_id=agent["id"], origin="delegation", backend="codex")
+                              "2026-10-20", agent_id=agent["id"], user_id=user["id"], origin="delegation", backend="codex")
         await db.append_message("legacy", 0, "assistant", "result",
                                 json.dumps({"request_id": "exact", "status": "succeeded"}), terminal_request_id="exact")
-        memory = Path(settings.agents_dir) / agent["id"] / "memory"
+        memory = Path(settings.users_root) / user["id"] / "agents" / agent["id"] / "memory"
         memory.mkdir(parents=True, exist_ok=True)
         (memory / "MEMORY.md").write_text("Retain the original account memory.\n")
         vault = root / "vault"
         (vault / "Library").mkdir(parents=True)
-        registry.configure(None, vault, agent["id"])
-        store = registry.store(None)
+        registry.configure(user["id"], vault, agent["id"])
+        store = registry.store(user["id"])
         history = WikiHistory(store)
         history.write("Library/source.md", b"# Source\nOriginal supporting evidence.\n", None, "human", "create source")
         source = store.read("Library/source.md")
@@ -77,7 +79,7 @@ async def main(configuration, phase):
         applied = raw + b"\nAlready applied effect, never replay.\n"
         effect = history.write("Library/note.md", applied, first["revision"], "human", "applied before migration")
         note = store.read("Library/note.md")
-        WikiJobs(None)
+        WikiJobs(user["id"])
         legacy_item = {"doc": note["id"], "path": note["path"], "revision": first["revision"],
                        "status": "attention", "output": note["path"], "output_revision": effect["revision"],
                        "recording_failure": {"attempt": 1, "session_id": "legacy", "request_id": "exact", "opaque": ["keep", 7]},
@@ -92,7 +94,9 @@ async def main(configuration, phase):
                                (note["id"], note["id"], note["path"], first["revision"], effect["revision"], effect["change_id"]))
             connection.execute("UPDATE maintenance_input_state SET version='maintenance-inputs-v7'")
         (root / "seed.json").write_text(json.dumps({"note": note, "source": source, "raw_items": raw_items,
-                                                     "effect": effect, "memory_agent": agent["id"]}))
+                                                     "effect": effect, "memory_agent": agent["id"],
+                                                     "user": user["id"], "dek_wrapped": user["dek_wrapped"],
+                                                     "extra_roots": user["extra_roots"]}))
         registry.close()
         await db.close()
         payload = json.dumps({"content": "Original accepted input", "attachment_ids": [], "attachments": [], "wiki_mode": None})
@@ -123,33 +127,17 @@ async def main(configuration, phase):
             os._exit(72)
 
         maintenance_inputs.initialize = interrupt_wiki
-        registry.store(None)
+        registry.store(json.loads((root / "seed.json").read_text())["user"])
         raise AssertionError("Wiki migration interruption was not reached")
 
     await session_manager.initialize(db)
     users = UserManager(db)
-    if phase == "account":
-        account_upgrade.publish = lambda *_: os._exit(73)
-    elif phase == "reentry":
-        save = account_upgrade.save
-
-        def interrupt_published(journal):
-            save(journal)
-            if journal["phase"] == "reopening":
-                os._exit(74)
-
-        account_upgrade.save = interrupt_published
-    if await db.count_users():
-        user = await users.authenticate("owner", "password1")
-        if account_upgrade.pending_upgrade() is not None:
-            await account_upgrade.resume_upgrade(db, user, session_manager)
-    else:
-        await bootstrap_first_account(db, username="owner", password="password1", session_manager=session_manager)
-        user = await users.authenticate("owner", "password1")
+    user = await users.authenticate("owner", "password1")
     assert phase in {"finish", "reopen"}, "The requested crash phase was not reached"
     store = registry.store(user["id"])
     jobs = WikiJobs(user["id"])
     seed = json.loads((root / "seed.json").read_text())
+    assert (user["id"], user["dek_wrapped"], user["extra_roots"]) == (seed["user"], seed["dek_wrapped"], seed["extra_roots"])
     current = store.read(seed["note"]["id"])
     assert current["revision"] != seed["note"]["revision"]
     assert current["metadata"]["source_refs"][0]["doc"] == seed["source"]["id"]
@@ -181,8 +169,8 @@ async def main(configuration, phase):
     from server.workspace import paths_for
 
     assert (paths_for(user["id"]).agents / seed["memory_agent"] / "memory/MEMORY.md").read_text() == "Retain the original account memory.\n"
-    assert not (registry.state(None) / "config.json").exists()
-    assert account_upgrade.pending_upgrade() is None
+    assert not registry.state(None).exists()
+    assert not (Path(settings.users_root) / ".first-account-upgrade.json").exists()
     (root / (phase + ".json")).write_text(json.dumps({"user": user["id"], "revision": current["revision"], "states": states,
                                                       "job_version": job["state_version"], "receipts": job["receipts"]}))
     await session_manager.close_session_owners()

@@ -14,7 +14,7 @@ from server.harness.profile import StdinMode
 from server.sessions.owner import SessionMailboxFull
 from tests import test_question_lifecycle as question_tests
 
-HEADERS, QUESTIONS = question_tests.HEADERS, question_tests.QUESTIONS
+QUESTIONS = question_tests.QUESTIONS
 question_host = question_tests.question_host
 
 
@@ -46,16 +46,16 @@ async def test_cancelled_creation_waiter_keeps_the_original_question_command(que
         release.set()
         await asyncio.wait_for(delivered.wait(), 1)
         question_id = next(event["question_id"] for event in events if event["type"] == "question_request")
-        snapshot = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+        snapshot = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
         assert [question["question_id"] for question in snapshot.json()["pending_questions"]] == [question_id]
         answered = await client.post(
-            f"/api/sessions/{session.id}/questions/{question_id}/answer", headers=HEADERS,
+            f"/api/sessions/{session.id}/questions/{question_id}/answer", headers=client.headers,
             json={"answers": [{"selected": ["B"]}]},
         )
         assert answered.status_code == 200
-        poll = await client.get(f"/api/sessions/{session.id}/questions/{question_id}/answer", headers=HEADERS)
+        poll = await client.get(f"/api/sessions/{session.id}/questions/{question_id}/answer", headers=client.headers)
         assert poll.json() == {"answer": "Q: Choose\nA: B"}
-        snapshot = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+        snapshot = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
         assert [row["type"] for row in snapshot.json()["messages"]] == ["question_request", "question_answer"]
     finally:
         release.set()
@@ -70,7 +70,7 @@ async def test_question_subscriber_can_answer_and_stop_its_original_session(ques
     async def reenter(event):
         if event.get("type") == "question_request":
             response = await client.post(
-                f"/api/sessions/{session.id}/questions/{event['question_id']}/answer", headers=HEADERS,
+                f"/api/sessions/{session.id}/questions/{event['question_id']}/answer", headers=client.headers,
                 json={"answers": [{"selected": ["A"]}]},
             )
             answers.append(response.status_code)
@@ -81,7 +81,7 @@ async def test_question_subscriber_can_answer_and_stop_its_original_session(ques
 
     manager.on_broadcast("answer-stop-reentry", reenter)
     created = await asyncio.wait_for(client.post(
-        f"/api/sessions/{session.id}/questions", headers=HEADERS, json={"questions": QUESTIONS},
+        f"/api/sessions/{session.id}/questions", headers=client.headers, json={"questions": QUESTIONS},
     ), 1)
     assert created.status_code == 201
     await asyncio.wait_for(answered.wait(), 1)
@@ -90,7 +90,7 @@ async def test_question_subscriber_can_answer_and_stop_its_original_session(ques
     assert [event["type"] for event in events if event["type"].startswith("question_")] == [
         "question_request", "question_answer",
     ]
-    detail = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+    detail = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
     assert [(row["type"], row.get("content")) for row in detail.json()["messages"]] == [
         ("question_request", None), ("question_answer", "Q: Choose\nA: A"),
     ]
@@ -115,7 +115,7 @@ async def test_native_question_prefix_precedes_the_original_success_receipt(ques
         done, _ = await asyncio.wait({waiting}, timeout=.1)
         assert not done, "Success overtook the original native question notification"
         assert not [event for event in events if event["type"] == "result"]
-        detail = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+        detail = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
         native = next(row for row in detail.json()["messages"] if row["type"] == "question_request")
         assert native["tool_use_id"] == "native-question"
         assert native["tool_input"]["request_id"] == receipt.request_id
@@ -158,7 +158,13 @@ async def test_question_control_has_entry_when_ordinary_command_capacity_is_full
         receipt = await manager.start_message(session.id, "Retain the original native observation")
         await asyncio.wait_for(native_ready.wait(), 1)
     entered, release, queued_entered, queued_release = (asyncio.Event() for _ in range(4))
+    answer_entered = asyncio.Event()
+    answer_question = manager.answer_question
     has_notice = manager.db.has_delivery_notice
+
+    async def observe_answer_entry(*args, **kwargs):
+        answer_entered.set()
+        return await answer_question(*args, **kwargs)
 
     async def hold_real_reads(session_id, delivery_id):
         result = await has_notice(session_id, delivery_id)
@@ -171,6 +177,7 @@ async def test_question_control_has_entry_when_ordinary_command_capacity_is_full
         return result
 
     monkeypatch.setattr(manager.db, "has_delivery_notice", hold_real_reads)
+    monkeypatch.setattr(manager, "answer_question", observe_answer_entry)
     first = asyncio.create_task(manager.retain_result_notice(session.id, "block-ordinary", "First material"))
     queued = []
     answering = None
@@ -185,9 +192,12 @@ async def test_question_control_has_entry_when_ordinary_command_capacity_is_full
             await next(iter(done))
         if entry == "answer":
             answering = asyncio.create_task(client.post(
-                f"/api/sessions/{session.id}/questions/{question}/answer", headers=HEADERS,
+                f"/api/sessions/{session.id}/questions/{question}/answer", headers=client.headers,
                 json={"answers": [{"selected": ["B"]}]},
             ))
+            # Authenticate and hand off the real answer before releasing the
+            # current command. The next ordinary read stays held below.
+            await asyncio.wait_for(answer_entered.wait(), 1)
         else:
             allow_native.set()
             await asyncio.sleep(0)
@@ -196,11 +206,11 @@ async def test_question_control_has_entry_when_ordinary_command_capacity_is_full
         if entry == "answer":
             response = await asyncio.wait_for(answering, .2)
             assert response.status_code == 200
-            poll = await client.get(f"/api/sessions/{session.id}/questions/{question}/answer", headers=HEADERS)
+            poll = await client.get(f"/api/sessions/{session.id}/questions/{question}/answer", headers=client.headers)
             assert poll.json() == {"answer": "Q: Choose\nA: B"}
         else:
             await asyncio.wait_for(native_delivered.wait(), .2)
-            detail = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+            detail = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
             native = [row for row in detail.json()["messages"] if row["type"] == "question_request"]
             assert len(native) == 1 and native[0]["tool_use_id"] == "original-native"
     finally:
@@ -282,7 +292,7 @@ async def test_http_question_prefix_precedes_the_original_success_receipt(
             f"/api/sessions/{session.id}/questions/{question}/answer", headers=scope_headers,
         ))
         answered = await client.post(
-            f"/api/sessions/{session.id}/questions/{question}/answer", headers=HEADERS,
+            f"/api/sessions/{session.id}/questions/{question}/answer", headers=client.headers,
             json={"answers": [{"selected": ["A"]}]},
         )
         assert answered.status_code == 200
@@ -307,7 +317,7 @@ async def test_http_question_prefix_precedes_the_original_success_receipt(
             assert completion.state == "completed" and completion.recording_state == "committed"
             assert completion.outcome.status == "success" and completion.notification_state == "failed"
             assert not [event for event in events if event["type"] == "result" and event.get("session_id") == session.id]
-            detail = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+            detail = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
             terminal = [row for row in detail.json()["messages"] if row["type"] == "result"]
             assert len(terminal) == 1 and terminal[0]["content"]["status"] == "success"
             assert any(row.get("content") == "The original answer was received." for row in detail.json()["messages"])
@@ -320,7 +330,7 @@ async def test_http_question_prefix_precedes_the_original_success_receipt(
                 completion = await asyncio.wait_for(waiting, 2)
                 assert completion.state == "completed" and completion.recording_state == "committed"
                 assert completion.outcome.status == "success" and completion.notification_state == "failed"
-                detail = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+                detail = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
                 terminal = [row for row in detail.json()["messages"] if row["type"] == "result"]
                 assert len(terminal) == 1 and terminal[0]["content"]["status"] == "success"
                 assert any(row.get("content") == "The original answer was received." for row in detail.json()["messages"])
@@ -369,12 +379,12 @@ async def test_live_question_subscriber_can_archive_without_waiting_on_its_prefi
     receipt = await manager.start_message(session.id, "Retain this original request through archive.")
     try:
         await asyncio.wait_for(ready.wait(), 2)
-        created = await client.post(f"/api/sessions/{session.id}/questions", headers=HEADERS, json={"questions": QUESTIONS})
+        created = await client.post(f"/api/sessions/{session.id}/questions", headers=client.headers, json={"questions": QUESTIONS})
         assert created.status_code == 201
         await asyncio.wait_for(archived.wait(), 3)
         completion = await asyncio.wait_for(receipt.wait(), 3)
         assert completion.outcome is not None and completion.outcome.status == "interrupted"
-        detail = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+        detail = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
         assert detail.status_code == 200 and detail.json()["archived"] is True
         assert len([row for row in detail.json()["messages"] if row["type"] == "question_closed"]) == 1
         assert len([row for row in detail.json()["messages"] if row["type"] == "result"]) == 1
@@ -412,15 +422,15 @@ async def test_question_resolution_keeps_its_original_slot_when_publication_is_f
         for index in range(1, count):
             assert await manager.retain_result_notice(session.id, f"prefix-{index}", "Original queued material")
         refused = await client.post(
-            f"/api/sessions/{session.id}/questions", headers=HEADERS, json={"questions": QUESTIONS},
+            f"/api/sessions/{session.id}/questions", headers=client.headers, json={"questions": QUESTIONS},
         )
         assert refused.status_code == 400 and "notification capacity is full" in refused.json()["detail"]
         response = await asyncio.wait_for(client.post(
-            f"/api/sessions/{session.id}/questions/{question}/answer", headers=HEADERS,
+            f"/api/sessions/{session.id}/questions/{question}/answer", headers=client.headers,
             json={"answers": [{"selected": ["B"]}]},
         ), 1)
         assert response.status_code == 200
-        poll = await client.get(f"/api/sessions/{session.id}/questions/{question}/answer", headers=HEADERS)
+        poll = await client.get(f"/api/sessions/{session.id}/questions/{question}/answer", headers=client.headers)
         assert poll.json() == {"answer": "Q: Choose\nA: B"}
         assert await manager.interrupt(session.id) is False
         assert not delivered and not answered.is_set()
@@ -428,7 +438,7 @@ async def test_question_resolution_keeps_its_original_slot_when_publication_is_f
         await asyncio.wait_for(answered.wait(), 2)
         assert delivered == [*(f"prefix-{index}" for index in range(count)), "original-answer"]
         detail = await client.get(
-            f"/api/sessions/{session.id}/messages?before_seq={count + 2}&limit=500", headers=HEADERS,
+            f"/api/sessions/{session.id}/messages?before_seq={count + 2}&limit=500", headers=client.headers,
         )
         assert [row["type"] for row in detail.json()["messages"]] == [
             "question_request", *(["delivery_notice"] * count), "question_answer",

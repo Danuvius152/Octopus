@@ -39,7 +39,9 @@ from server.config import settings
 from server.database import Database
 from server.delegations import DelegationManager
 from server.deps import get_session_manager
+from server.mcp_identity import mint
 from server.session_manager import SessionManager
+from tests.accounts import create_account
 from tests.callback_api import start_callback_api
 
 # Widen PATH so shutil.which finds binaries in nvm + ~/.local/bin in
@@ -77,6 +79,7 @@ async def _bootstrap(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "agents"))
     db = Database(":memory:")
     await db.initialize()
+    owner, _ = await create_account(db, extra_roots=[tmp_path])
 
     mgr = SessionManager()
     await mgr.initialize(db)
@@ -101,6 +104,7 @@ async def _bootstrap(tmp_path, monkeypatch):
         delegations_routes.router,
         questions_routes.router,
         overrides={get_session_manager: lambda: mgr},
+        readiness_token=mint("delegation-test-readiness", user_id=owner["id"]),
     )
     monkeypatch.setattr(settings, "port", api.port)
 
@@ -161,11 +165,11 @@ async def test_real_two_hop_claude_to_claude(tmp_path, monkeypatch):
     db, mgr, dm, am, wd, teardown = await _bootstrap(tmp_path, monkeypatch)
     try:
         # The system Default Agent is "Octo" — created by the
-        # migration. Reuse it as the parent rather than colliding on
+        # account aggregate. Reuse it as the parent rather than colliding on
         # the unique name index.
         octo = await db.get_system_agent()
         assert octo is not None
-        await am.create_agent(name="Vera", model="haiku", backend="claude-code")
+        await am.create_agent(name="Vera", model="haiku", backend="claude-code", user_id=octo["user_id"])
         octo_sess = await mgr.create_session(
             agent_id=octo["id"], name="octo", working_dir=wd
         )
@@ -217,7 +221,7 @@ async def test_real_question_loop_claude_to_claude(tmp_path, monkeypatch):
         # test used to skip itself on those runs. The model is a fixture
         # detail, so pick one that follows the STRICT INSTRUCTION reliably
         # and let a genuine routing regression fail loudly.
-        await am.create_agent(name="Vera", model="sonnet", backend="claude-code")
+        await am.create_agent(name="Vera", model="sonnet", backend="claude-code", user_id=octo["user_id"])
         octo_sess = await mgr.create_session(
             agent_id=octo["id"], name="octo", working_dir=wd
         )
@@ -299,7 +303,7 @@ async def test_real_two_hop_claude_to_codex(tmp_path, monkeypatch):
         octo = await db.get_system_agent()
         assert octo is not None
         # Vera runs codex; we leave model None so codex's default applies.
-        await am.create_agent(name="Vera", backend="codex")
+        await am.create_agent(name="Vera", backend="codex", user_id=octo["user_id"])
         octo_sess = await mgr.create_session(
             agent_id=octo["id"], name="octo", working_dir=wd
         )
@@ -344,8 +348,8 @@ async def test_real_three_hop_chain(tmp_path, monkeypatch):
     try:
         octo = await db.get_system_agent()
         assert octo is not None
-        await am.create_agent(name="Vera", model="haiku", backend="claude-code")
-        await am.create_agent(name="Pete", model="haiku", backend="claude-code")
+        await am.create_agent(name="Vera", model="haiku", backend="claude-code", user_id=octo["user_id"])
+        await am.create_agent(name="Pete", model="haiku", backend="claude-code", user_id=octo["user_id"])
         octo_sess = await mgr.create_session(
             agent_id=octo["id"], name="octo", working_dir=wd
         )

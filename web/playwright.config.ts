@@ -43,12 +43,12 @@ export const E2E_METRICS_DB = path.join(os.tmpdir(), "octopus-e2e-metrics.db");
 // install they actually run. Removed in global-teardown.
 export const E2E_STATE_DIR = path.join(os.tmpdir(), "octopus-e2e-state");
 
-// Accounts get a backend of their own (accounts.spec.ts). Claiming an install
-// is a one-way door — it retires the token every other spec signs in with —
-// so it cannot be done to the shared server. A second uvicorn on its own port,
+// Accounts get a backend of their own (accounts.spec.ts). First-account setup
+// needs an empty installation, separate from the shared owned-account server.
+// A second uvicorn on its own port,
 // with its own everything, plus the dev server that proxies to it. Started
 // fresh each run rather than reused: a leftover server from a previous run
-// would already be claimed, and the spec would pass by testing nothing.
+// would already have accounts and could not exercise first-account setup.
 //
 // Both buckets need them: the UI story is in accounts.spec.ts and the real
 // turn — the one that proves an agent's tools still work once an account owns
@@ -75,6 +75,7 @@ export default defineConfig({
   // Select the bucket together with its execution mode. Real mode retains the
   // product entrypoint; neither mode can reuse the other's existing servers.
   ...(offline ? { grepInvert: /@llm/ } : { grep: /@llm/ }),
+  globalSetup: "./e2e/global-setup.ts",
   globalTeardown: "./e2e/global-teardown.ts",
   timeout: 30_000,
   retries: 0,

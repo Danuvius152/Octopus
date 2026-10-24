@@ -579,21 +579,17 @@ class AuthStateResponse(BaseModel):
     accounts_exist: bool
 
 
-class BootstrapRequest(BaseModel):
-    username: str
-    password: str
 
 
-class BootstrapResponse(BaseModel):
-    token: str
-    user_id: str
-    username: str
-    summary: dict[str, object] = {}
 
 
 class LoginRequest(BaseModel):
     username: str
     password: str
+
+
+class SetupRequest(LoginRequest):
+    """Credentials for the first account, exchanged with a setup-only proof."""
 
 
 class RegisterRequest(BaseModel):

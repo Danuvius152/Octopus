@@ -14,7 +14,6 @@ from server.wiki import maintenance_admission, maintenance_selections, schema
 from server.wiki.jobs import worker
 from server.wiki.store import WikiError
 from server.wiki.tasks import tasks
-from tests.test_wiki_api import HEADERS
 from tests.test_wiki_maintenance_selections import FILES, select, submission
 from tests.test_wiki_maintenance_state import client as client
 from tests.test_wiki_maintenance_state import entry, prepare
@@ -31,7 +30,7 @@ async def test_concurrent_equivalent_selection_admissions_commit_one_job_and_bot
     selections = [await select(client, limit=1) for _ in range(2)]
     wakes = []
     monkeypatch.setattr(worker, "wake", lambda _: wakes.append(True))
-    responses = await asyncio.gather(*(client.post("/api/wiki/maintain", headers=HEADERS,
+    responses = await asyncio.gather(*(client.post("/api/wiki/maintain", headers=client.headers,
         json=submission(selection, selection["items"][0])) for selection in selections))
     assert all(response.status_code == 200 for response in responses), [r.text for r in responses]
     assert responses[0].json()["id"] == responses[1].json()["id"]
@@ -56,7 +55,7 @@ async def test_final_transaction_exit_failure_rolls_back_before_worker_wake(clie
 
     monkeypatch.setattr(jobs.store, "connect", fail_before_commit)
     monkeypatch.setattr(worker, "wake", lambda _: wakes.append(True))
-    response = await client.post("/api/wiki/maintain", headers=HEADERS,
+    response = await client.post("/api/wiki/maintain", headers=client.headers,
                                  json=submission(selection, selection["items"][0]))
     assert response.status_code == 503 and injected == [True], response.text
     assert ledger_counts(jobs.store) == (0, 0, 0) and not wakes
@@ -66,7 +65,7 @@ async def test_final_transaction_exit_failure_rolls_back_before_worker_wake(clie
 async def test_authority_lost_after_preparation_is_rechecked_before_accepting(client, tmp_path, monkeypatch, revocation):
     _, _, jobs = await prepare(client, tmp_path, FILES)
     prepare_admission = maintenance_admission.prepare
-    with entry() as (headers, task):
+    async with entry(client) as (headers, task):
         selection = await select(client, headers=headers, limit=1)
 
         def revoke(*args, **kwargs):
@@ -98,7 +97,7 @@ async def test_original_mcp_scope_revoked_after_preparation_cannot_accept_or_add
     prepare_admission = maintenance_admission.prepare
     wakes = []
     monkeypatch.setattr(worker, "wake", lambda _: wakes.append(True))
-    with entry() as (diagnostic_headers, task):
+    async with entry(client) as (diagnostic_headers, task):
         diagnostic = mcp_identity.verify(diagnostic_headers["Authorization"].removeprefix("Bearer "))
         lease, work = uuid4().hex, uuid4().hex
         mcp_identity.register_run(lease, task.session_id, task.user_id, work)
@@ -147,7 +146,7 @@ async def test_unavailable_final_read_is_not_reported_as_a_missing_document(clie
         raise WikiError("Known filesystem notifications are unavailable", 503)
 
     monkeypatch.setattr(jobs.store, "read", unavailable)
-    response = await client.post("/api/wiki/maintain", headers=HEADERS,
+    response = await client.post("/api/wiki/maintain", headers=client.headers,
                                  json=submission(selection, selection["items"][0]))
     assert response.status_code == 503 and "unavailable" in response.json()["detail"], response.text
     assert ledger_counts(jobs.store) == (0, 0, 0)
@@ -169,7 +168,7 @@ async def test_readiness_lost_after_preparation_prevents_final_admission(client,
             db.execute(statement)
 
     monkeypatch.setattr(maintenance_admission, "prepare", change)
-    response = await client.post("/api/wiki/maintain", headers=HEADERS,
+    response = await client.post("/api/wiki/maintain", headers=client.headers,
                                  json=submission(selection, selection["items"][0]))
     assert response.status_code == 503 and response.json()["code"] == "maintenance_updating", response.text
     assert ledger_counts(jobs.store) == (0, 0, 0)
@@ -197,7 +196,7 @@ async def test_new_no_change_baseline_after_preparation_invalidates_the_frozen_o
         injected.append(job["id"])
 
     monkeypatch.setattr(maintenance_admission, "prepare", complete_equivalent_review)
-    response = await client.post("/api/wiki/maintain", headers=HEADERS, json=submission(selection, frozen))
+    response = await client.post("/api/wiki/maintain", headers=client.headers, json=submission(selection, frozen))
     assert response.status_code == 409 and response.json()["code"] == "review_changed", response.text
     assert len(injected) == 1 and ledger_counts(jobs.store) == (1, 1, 0)
     assert jobs.store.read(frozen["doc_id"], length=1)["revision"] == frozen["observed_revision"]
@@ -249,9 +248,9 @@ async def test_final_writer_has_no_nested_connection_or_synchronizing_read_and_w
     monkeypatch.setattr(maintenance_admission, "_current", check)
     monkeypatch.setattr(maintenance_admission, "commit", final)
     monkeypatch.setattr(worker, "wake", lambda _: wakes.append(ledger_counts(jobs.store)))
-    first = await client.post("/api/wiki/maintain", headers=HEADERS, json=body)
+    first = await client.post("/api/wiki/maintain", headers=client.headers, json=body)
     assert first.status_code == 200, first.text
-    replay = await client.post("/api/wiki/maintain", headers=HEADERS, json=body)
+    replay = await client.post("/api/wiki/maintain", headers=client.headers, json=body)
     assert replay.status_code == 200 and replay.json()["id"] == first.json()["id"], replay.text
     assert visited == [True, True] and wakes == [(1, 1, int(selected))]
 
@@ -261,7 +260,7 @@ async def test_failure_after_provenance_insert_rolls_back_job_alias_and_evidence
     _, _, jobs = await prepare(client, tmp_path, FILES)
     first, second = await select(client, limit=1), await select(client, limit=1)
     if existing:
-        accepted = await client.post("/api/wiki/maintain", headers=HEADERS, json=submission(first, first["items"][0]))
+        accepted = await client.post("/api/wiki/maintain", headers=client.headers, json=submission(first, first["items"][0]))
         assert accepted.status_code == 200, accepted.text
     accept = maintenance_selections.accept
     injected, wakes = [], []
@@ -273,7 +272,7 @@ async def test_failure_after_provenance_insert_rolls_back_job_alias_and_evidence
 
     monkeypatch.setattr(maintenance_selections, "accept", crash)
     monkeypatch.setattr(worker, "wake", lambda _: wakes.append(True))
-    failed = await client.post("/api/wiki/maintain", headers=HEADERS, json=submission(second, second["items"][0]))
+    failed = await client.post("/api/wiki/maintain", headers=client.headers, json=submission(second, second["items"][0]))
     assert failed.status_code == 503 and injected == [True], failed.text
     assert ledger_counts(jobs.store) == ((1, 1, 1) if existing else (0, 0, 0))
     assert not wakes
@@ -290,7 +289,7 @@ async def test_selection_expiring_after_preparation_cannot_commit_a_job(client, 
         monkeypatch.setattr(maintenance_selections, "utcnow", lambda: later)
 
     monkeypatch.setattr(maintenance_admission, "prepare", expire)
-    response = await client.post("/api/wiki/maintain", headers=HEADERS, json=submission(selection, selection["items"][0]))
+    response = await client.post("/api/wiki/maintain", headers=client.headers, json=submission(selection, selection["items"][0]))
     assert response.status_code == 410 and response.json()["code"] == "selection_expired", response.text
     assert ledger_counts(jobs.store) == (0, 0, 0)
 
@@ -320,7 +319,7 @@ async def test_source_only_change_rejects_frozen_review_without_accepting_proven
         monkeypatch.setattr(maintenance_admission, "prepare", race)
     else:
         change_source()
-    rejected = await client.post("/api/wiki/maintain", headers=HEADERS, json=submission(selection, frozen))
+    rejected = await client.post("/api/wiki/maintain", headers=client.headers, json=submission(selection, frozen))
     assert rejected.status_code in {409, 503}, rejected.text
     assert jobs.store.read(frozen["doc_id"])["revision"] == frozen["observed_revision"]
     assert ledger_counts(jobs.store) == (0, 0, 0)
@@ -336,7 +335,7 @@ async def test_source_only_change_rejects_frozen_review_without_accepting_proven
 async def test_accepted_observation_and_provenance_cannot_be_deleted_or_rewritten(client, tmp_path, statement):
     _, _, jobs = await prepare(client, tmp_path, FILES)
     selection = await select(client, limit=1)
-    response = await client.post("/api/wiki/maintain", headers=HEADERS, json=submission(selection, selection["items"][0]))
+    response = await client.post("/api/wiki/maintain", headers=client.headers, json=submission(selection, selection["items"][0]))
     assert response.status_code == 200, response.text
     with jobs.store.connect() as db, pytest.raises(sqlite3.IntegrityError):
         db.execute(statement)
@@ -347,7 +346,7 @@ async def test_accepted_observation_and_provenance_cannot_be_deleted_or_rewritte
 async def test_expired_cleanup_keeps_accepted_full_evidence_and_removes_only_unaccepted_selection(client, tmp_path, monkeypatch):
     _, _, jobs = await prepare(client, tmp_path, FILES)
     accepted, unaccepted = await select(client, limit=1), await select(client, limit=1)
-    response = await client.post("/api/wiki/maintain", headers=HEADERS, json=submission(accepted, accepted["items"][0]))
+    response = await client.post("/api/wiki/maintain", headers=client.headers, json=submission(accepted, accepted["items"][0]))
     assert response.status_code == 200, response.text
     later = max(datetime.fromisoformat(s["expires_at"]) for s in (accepted, unaccepted)) + timedelta(seconds=1)
     monkeypatch.setattr(maintenance_selections, "utcnow", lambda: later)
@@ -383,7 +382,7 @@ async def test_missing_initialized_selection_ledger_fails_before_disposable_cach
 async def test_accepted_selection_replace_cannot_bypass_guards_with_recursive_triggers_off(client, tmp_path, table):
     _, _, jobs = await prepare(client, tmp_path, FILES)
     selection = await select(client, limit=1)
-    response = await client.post("/api/wiki/maintain", headers=HEADERS, json=submission(selection, selection["items"][0]))
+    response = await client.post("/api/wiki/maintain", headers=client.headers, json=submission(selection, selection["items"][0]))
     assert response.status_code == 200, response.text
     db = sqlite3.connect(jobs.store.db_path)
     db.row_factory = sqlite3.Row

@@ -10,7 +10,6 @@ import signal
 import sys
 import time
 from dataclasses import replace
-from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import httpx
@@ -20,28 +19,28 @@ from fastapi import FastAPI
 from server import deps, mcp_http
 from server.agent_manager import AgentManager
 from server.bg_tasks import BgTaskManager
-from server.bootstrap import bootstrap_first_account
 from server.config import settings
 from server.database import Database
 from server.delegations import DelegationError, DelegationManager
-from server.deps import get_session_manager, scope_user_id
+from server.deps import get_session_manager
 from server.harness import get_harness
-from server.mcp_identity import mint, scope_is_live, verify
+from server.mcp_identity import mint, register_run, revoke_run, scope_is_live, verify
 from server.routers.sessions import router as sessions_router
 from server.routers.ws import router as ws_router
 from server.sessions import SessionManager
 from server.sessions import turns as turn_module
 from server.users import UserManager
+from tests.accounts import create_account
 
 
-def session_client(manager, session):
+async def session_client(manager, session):
     app = FastAPI()
     app.include_router(sessions_router)
     app.dependency_overrides[get_session_manager] = lambda: manager
-    app.dependency_overrides[scope_user_id] = lambda: session.user_id
+    bearer = await deps.get_user_manager().issue_token(session.user_id)
     return httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app, raise_app_exceptions=False),
-        base_url="http://test", headers={"Authorization": f"Bearer {settings.auth_token}"},
+        base_url="http://test", headers={"Authorization": f"Bearer {bearer}"},
     )
 
 
@@ -116,11 +115,12 @@ async def runtime(monkeypatch, tmp_path, short_process_shutdown):
     monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "legacy-agents"))
     database = Database(":memory:")
     await database.initialize()
+    owner, _ = await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     agents = AgentManager(database)
     agent = await database.get_system_agent()
-    await agents.create_agent(name="Review worker", backend="codex")
+    await agents.create_agent(name="Review worker", backend="codex", user_id=owner["id"])
     parent = await manager.create_session(agent["id"], "Review caller", str(tmp_path), backend="codex")
     await manager.interrupt(parent.id)
     delegations = DelegationManager()
@@ -249,7 +249,7 @@ async def test_first_app_timeout_recovers_late_completed_attempt_without_resubmi
     worker = next(a for a in await db.load_agents() if a["name"] == "Review worker")
     await db.save_application(app_id="timeout-app", name="Recovery app", description="Recover original requests",
         agent_id=worker["id"], session_id=None, app_dir=str(tmp_path / "apps" / "recovery"),
-        entrypoint="index.html", status="ready", created_at="now", updated_at="now")
+        entrypoint="index.html", status="ready", created_at="now", updated_at="now", user_id=worker["user_id"])
     row = await db.get_application("timeout-app")
     release = tmp_path / "release-app-turn"
     def argv(context):
@@ -285,16 +285,9 @@ async def test_first_app_timeout_recovers_late_completed_attempt_without_resubmi
         apps.shutdown()
 
 
-async def begin_ownerless_run(runtime):
-    manager, _, session, _, starts, events = runtime
-    await manager.start_message(session.id, "held before account")
-    context = await asyncio.wait_for(starts.get(), 5)
-    await wait_until(lambda: any(event["type"] == "assistant_text" for event in events))
-    token = next(entry.credential for entry in context.mcp_servers if entry.key == "ask")
-    return token, verify(token)
 
 
-async def connect_ws(manager, token):
+async def connect_ws(manager, token, *, authorized=True):
     app = FastAPI()
     app.include_router(ws_router)
     app.dependency_overrides[get_session_manager] = lambda: manager
@@ -302,7 +295,11 @@ async def connect_ws(manager, token):
     await incoming.put({"type": "websocket.connect"})
     scope = {"type": "websocket", "asgi": {"version": "3.0"}, "scheme": "ws", "path": "/ws", "raw_path": b"/ws", "query_string": f"token={token}".encode(), "headers": [], "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 8000), "subprotocols": []}
     task = asyncio.create_task(app(scope, incoming.get, outgoing.put))
-    assert (await asyncio.wait_for(outgoing.get(), 5))["type"] == "websocket.accept"
+    first = await asyncio.wait_for(outgoing.get(), 5)
+    assert first["type"] == "websocket.accept"
+    if not authorized:
+        refused = await asyncio.wait_for(outgoing.get(), 5)
+        assert refused["type"] == "websocket.close" and refused["code"] == 4001
     return incoming, outgoing, task
 
 
@@ -313,13 +310,20 @@ async def disconnect_ws(incoming, task):
 
 
 @pytest.mark.parametrize("legacy", [False, True])
-async def test_ownerless_scope_is_rejected_by_rest_ws_and_direct_mcp_after_first_account(runtime, monkeypatch, legacy):
-    manager, database, session, _, _, _ = runtime
+@pytest.mark.parametrize("accounts_exist", [False, True])
+async def test_ownerless_scope_is_rejected_before_and_after_setup(tmp_path, monkeypatch, legacy, accounts_exist):
+    database = Database(":memory:")
+    await database.initialize()
     users = UserManager(database)
     monkeypatch.setattr(deps, "_user_manager", users)
-    token, _ = await begin_ownerless_run(runtime)
-    if legacy:
-        token = mint(session.id)
+    manager = SessionManager()
+    await manager.initialize(database)
+    if accounts_exist:
+        await users.create_user(username="first", password="password1")
+    lease = None if legacy else "retained-ownerless-lease"
+    if lease:
+        register_run(lease, "retained-ownerless-session", None, None)
+    token = mint("retained-ownerless-session", run_lease_id=lease)
     app = FastAPI()
     app.include_router(sessions_router)
     app.dependency_overrides[get_session_manager] = lambda: manager
@@ -327,35 +331,28 @@ async def test_ownerless_scope_is_rejected_by_rest_ws_and_direct_mcp_after_first
     mcp_http.mount_all(app, servers)
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json, text/event-stream"}
     initialize = {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-03-26", "capabilities": {}, "clientInfo": {"name": "scope-review", "version": "1"}}}
-    async with mcp_http.lifespan(app, servers), httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000", headers=headers) as client:
-        assert (await client.get("/api/sessions")).status_code == 200
-        assert await deps.scope_user_id_for(token) == (True, None)
-        assert (await client.post("/mcp/ask/mcp", json=initialize)).status_code == 200
-        await users.create_user(username="first", password="password1")
-        await users.create_user(username="second", password="password2")
-        assert (await client.get("/api/sessions")).status_code == 401
-        assert await deps.scope_user_id_for(token) == (False, None)
-        assert (await client.post("/mcp/ask/mcp", json=initialize)).status_code == 401
+    try:
+        async with mcp_http.lifespan(app, servers), httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1:8000", headers=headers) as client:
+            assert (await client.get("/api/sessions")).status_code == 401
+            assert await deps.scope_user_id_for(token) == (False, None)
+            assert (await client.post("/mcp/ask/mcp", json=initialize)).status_code == 401
+            incoming, _, socket = await connect_ws(manager, token, authorized=False)
+            await disconnect_ws(incoming, socket)
+            assert await database.load_sessions() == []
+
+            owned = await users.create_user(username="owned", password="password2")
+            owned_scope = mint("owned-diagnostic-session", user_id=owned["id"])
+            client.headers["Authorization"] = "Bearer " + owned_scope
+            assert (await client.get("/api/sessions")).status_code == 200
+            assert (await client.post("/mcp/ask/mcp", json=initialize)).status_code == 200
+            bearer = await users.issue_token(owned["id"])
+            incoming, _, socket = await connect_ws(manager, bearer)
+            await disconnect_ws(incoming, socket)
+    finally:
+        revoke_run(lease)
+        await database.close()
 
 
-async def test_bootstrap_retires_actual_ownerless_run_and_next_request_uses_new_owner(runtime, monkeypatch):
-    manager, database, session, _, starts, events = runtime
-    users = UserManager(database)
-    monkeypatch.setattr(deps, "_user_manager", users)
-    _, scope = await begin_ownerless_run(runtime)
-    assert scope_is_live(scope)
-    summary = await bootstrap_first_account(database, username="first", password="password1", session_manager=manager)
-    assert not scope_is_live(scope)
-    assert session.user_id == summary["user_id"]
-    await wait_dispatch_idle(manager, session.id)
-    before = len(events)
-    await manager.start_message(session.id, "Continue after claim")
-    context = await asyncio.wait_for(starts.get(), 5)
-    next_token = next(entry.credential for entry in context.mcp_servers if entry.key == "ask")
-    assert verify(next_token).user_id == summary["user_id"]
-    await wait_dispatch_idle(manager, session.id)
-    outcomes = [event["content"] for event in events[before:] if event["type"] == "result"]
-    assert len(outcomes) == 1 and outcomes[0]["status"] == "success"
 
 
 async def test_closing_old_work_retires_its_held_backend_while_new_input_is_claiming(runtime, monkeypatch, tmp_path):
@@ -380,11 +377,13 @@ async def test_closing_old_work_retires_its_held_backend_while_new_input_is_clai
     session = await manager.create_session(parent.agent_id, "Held old work", str(tmp_path), backend="claude-code")
     old_work = f"held-work:{session.id}"
     await manager.start_message(session.id, "Finish the original work", work_id=old_work)
-    await asyncio.wait_for(starts.get(), 5)
+    original_context = await asyncio.wait_for(starts.get(), 5)
+    old_scope = verify(next(entry.credential for entry in original_context.mcp_servers if entry.key == "ask"))
     await wait_dispatch_idle(manager, session.id)
     old_pid = int(pid_file.read_text())
     backend = session._run.backend
     assert backend is not None and backend.work_id == old_work and process_alive(old_pid)
+    assert scope_is_live(old_scope) and old_scope.user_id == session.user_id
     stopped = asyncio.Event()
     stop = backend.stop
 
@@ -406,6 +405,7 @@ async def test_closing_old_work_retires_its_held_backend_while_new_input_is_clai
         await manager.finish_work_cancellation(affected)
         await asyncio.wait_for(stopped.wait(), 2)
         assert not process_alive(old_pid)
+        assert not scope_is_live(old_scope)
         assert starts.empty(), "retiring the old backend must not dispatch the blocked input"
     finally:
         release.set()
@@ -413,43 +413,13 @@ async def test_closing_old_work_retires_its_held_backend_while_new_input_is_clai
     assert result["accepted"]
     context = await asyncio.wait_for(starts.get(), 5)
     scope = verify(next(entry.credential for entry in context.mcp_servers if entry.key == "ask"))
-    assert scope.work_id is None and context.resume_id == "held-work-thread"
+    assert scope.work_id is None and scope.user_id == session.user_id and context.resume_id == "held-work-thread"
     await wait_dispatch_idle(manager, session.id)
     assert int(pid_file.read_text()) != old_pid
     status = await submission_status(manager, session.id, "next-held-work")
     assert status is not None and status["execution"]["state"] == "done"
 
 
-async def test_bootstrap_retires_held_process_and_resumes_transcript_under_new_owner(runtime, monkeypatch, tmp_path):
-    manager, database, parent, _, starts, _ = runtime
-    monkeypatch.setattr(deps, "_user_manager", UserManager(database))
-    pid_file = tmp_path / "held-before-adoption.pid"
-
-    def argv(context):
-        starts.put_nowait(context)
-        code = f"import json,os,sys; open({str(pid_file)!r},'w').write(str(os.getpid()))\n"
-        code += "for line in sys.stdin:\n"
-        code += " print(json.dumps({'type':'system','subtype':'init','session_id':'held-thread'}),flush=True)\n"
-        code += " print(json.dumps({'type':'result','subtype':'success','session_id':'held-thread','result':'Done.','is_error':False}),flush=True)\n"
-        return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
-
-    harness = get_harness("claude-code")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
-    held = await manager.create_session(parent.agent_id, "Held scope", str(tmp_path), backend="claude-code")
-    await manager.start_message(held.id, "Finish initial request")
-    before = await asyncio.wait_for(starts.get(), 5)
-    await wait_dispatch_idle(manager, held.id)
-    old_scope = verify(next(entry.credential for entry in before.mcp_servers if entry.key == "ask"))
-    old_pid = int(pid_file.read_text())
-    assert scope_is_live(old_scope) and process_alive(old_pid)
-    summary = await bootstrap_first_account(database, username="first", password="password1", session_manager=manager)
-    assert not scope_is_live(old_scope) and not process_alive(old_pid)
-    await manager.start_message(held.id, "Continue the existing transcript")
-    after = await asyncio.wait_for(starts.get(), 5)
-    new_scope = verify(next(entry.credential for entry in after.mcp_servers if entry.key == "ask"))
-    assert new_scope.user_id == summary["user_id"]
-    assert after.resume_id == "held-thread"
-    await wait_dispatch_idle(manager, held.id)
 
 
 async def test_wiki_held_process_reuses_transport_with_fresh_turn_authority(runtime, monkeypatch, tmp_path):
@@ -494,13 +464,13 @@ async def test_wiki_held_process_reuses_transport_with_fresh_turn_authority(runt
         tasks.require(scope)
 
 
-async def test_account_transition_does_not_fan_out_unadopted_question_answer(runtime, monkeypatch):
+async def test_blocked_question_answer_publication_stays_with_its_original_account(runtime, monkeypatch):
     manager, database, session, _, _, _ = runtime
     users = UserManager(database)
     monkeypatch.setattr(deps, "_user_manager", users)
-    # The answer has already been recorded when account adoption crosses its
-    # publication. Do not submit a new synchronous write while a connection
-    # operation is deliberately gated: writes are now serialized.
+    foreign = await users.create_user(username="second", password="password2")
+    # Hold delivery after the answer commits, then verify the original fact
+    # and both accounts' actual subscriptions while the prefix is blocked.
     publication_entered, publication_release = asyncio.Event(), asyncio.Event()
 
     async def hold_publication(event):
@@ -508,11 +478,11 @@ async def test_account_transition_does_not_fan_out_unadopted_question_answer(run
             publication_entered.set()
             await publication_release.wait()
 
-    foreign_events = []
+    owner_events, foreign_events = [], []
     creation_delivered, answer_delivered = asyncio.Event(), asyncio.Event()
 
     async def receive(event):
-        foreign_events.append(event)
+        owner_events.append(event)
         if event["type"] == "question_request":
             creation_delivered.set()
 
@@ -520,31 +490,35 @@ async def test_account_transition_does_not_fan_out_unadopted_question_answer(run
         if event["type"] == "question_answer":
             answer_delivered.set()
 
+    async def foreign_receive(event):
+        foreign_events.append(event)
+
     manager.on_broadcast("hold-answer-publication", hold_publication)
-    manager.on_broadcast("foreign-during-adoption", receive, "unrelated-account")
-    manager.on_broadcast("after-adoption-answer-publication", observe_answer_prefix)
+    manager.on_broadcast("original-question-owner", receive, session.user_id)
+    manager.on_broadcast("foreign-during-answer", foreign_receive, foreign["id"])
+    manager.on_broadcast("original-answer-prefix", observe_answer_prefix, session.user_id)
     question = await manager.create_pending_question(session.id, [{"question": "Private choice", "options": [{"label": "A"}]}])
     await asyncio.wait_for(creation_delivered.wait(), 2)
-    assert [event["type"] for event in foreign_events] == ["question_request"]
-    foreign_events.clear()
-    answer = asyncio.create_task(manager.answer_question(session.id, question, [{"question": "Private choice", "answer": "synthetic private answer"}]))
+    assert [event["type"] for event in owner_events] == ["question_request"]
+    assert foreign_events == []
+    answer = asyncio.create_task(manager.answer_question(session.id, question, [{"question": "Private choice", "text": "synthetic private answer"}]))
     await asyncio.wait_for(publication_entered.wait(), 5)
-    # Commit account/row adoption without handing this manager's live objects
-    # over. Publication must consult the committed owner during that window.
-    await bootstrap_first_account(database, username="first", password="password1")
-    assert session.user_id is None and await deps.accounts_exist()
-    foreign = asyncio.create_task(users.create_user(username="second", password="password2"))
     try:
+        messages = await database.load_messages(session.id)
+        answers = [row for row in messages if row["type"] == "question_answer"]
+        assert len(answers) == 1 and "synthetic private answer" in answers[0]["content"]
+        assert not answer_delivered.is_set() and foreign_events == []
         publication_release.set()
         assert await asyncio.wait_for(answer, 5)
         await asyncio.wait_for(answer_delivered.wait(), 2)
+        assert [event["type"] for event in owner_events] == ["question_request", "question_answer"]
         assert foreign_events == []
     finally:
         publication_release.set()
-        await foreign
+        await asyncio.gather(answer, return_exceptions=True)
 
 
-async def test_archived_background_result_keeps_adopted_owner(background, runtime, monkeypatch, tmp_path):
+async def test_archived_background_result_keeps_its_original_account(background, runtime, monkeypatch, tmp_path):
     bg, session, delivered, _ = background
     manager, database, _, _, _, _ = runtime
     users = UserManager(database)
@@ -552,7 +526,6 @@ async def test_archived_background_result_keeps_adopted_owner(background, runtim
     gate = tmp_path / "complete-bg"
     code = f"import pathlib,time; gate=pathlib.Path({str(gate)!r});\nwhile not gate.exists(): time.sleep(.01)\nprint('synthetic private output')"
     record = await bg.start_task(session_id=session.id, command=shlex.join([sys.executable, "-c", code]), working_dir=str(tmp_path), idle_timeout_seconds=0)
-    summary = await bootstrap_first_account(database, username="first", password="password1", session_manager=manager)
     foreign = await users.create_user(username="second", password="password2")
     owner_events, foreign_events = [], []
 
@@ -562,7 +535,7 @@ async def test_archived_background_result_keeps_adopted_owner(background, runtim
     async def foreign_receive(event):
         foreign_events.append(event)
 
-    manager.on_broadcast("bg-owner", owner_receive, summary["user_id"])
+    manager.on_broadcast("bg-owner", owner_receive, session.user_id)
     manager.on_broadcast("bg-foreign", foreign_receive, foreign["id"])
     await manager.archive_session(session.id, replace=False)
     gate.touch()
@@ -573,18 +546,22 @@ async def test_archived_background_result_keeps_adopted_owner(background, runtim
 
 
 @pytest.mark.parametrize("boundary", ["incoming", "broadcast", "unscoped_notice"])
-async def test_connected_ownerless_websocket_retires_on_account_transition(runtime, monkeypatch, boundary):
+@pytest.mark.parametrize("revocation", ["bearer", "account"])
+async def test_connected_account_websocket_retires_when_authority_is_revoked(runtime, monkeypatch, boundary, revocation):
     manager, database, session, _, _, _ = runtime
     users = UserManager(database)
     monkeypatch.setattr(deps, "_user_manager", users)
-    token = settings.auth_token
+    token = await users.issue_token(session.user_id)
     incoming, outgoing, task = await connect_ws(manager, token)
     try:
-        account = await users.create_user(username="first", password="password1")
+        if revocation == "account":
+            await users.set_disabled(session.user_id, True)
+        else:
+            await users.revoke_token(token)
         if boundary == "incoming":
             await incoming.put({"type": "websocket.receive", "text": "bad json"})
         elif boundary == "broadcast":
-            await manager._broadcast({"type": "assistant_text", "session_id": session.id, "content": "synthetic private output"}, user_id=account["id"])
+            await manager._broadcast({"type": "assistant_text", "session_id": session.id, "content": "synthetic private output"}, user_id=session.user_id)
         else:
             await manager._broadcast({"type": "schedules_changed"})
         frame = await asyncio.wait_for(outgoing.get(), 5)
@@ -597,20 +574,21 @@ async def test_outbound_retirement_during_incoming_request_is_normal_disconnect(
     manager, database, session, _, _, _ = runtime
     users = UserManager(database)
     monkeypatch.setattr(deps, "_user_manager", users)
-    claimed = False
+    token = await users.issue_token(session.user_id)
+    revoked = False
 
-    async def create_account_during_delivery(event):
-        nonlocal claimed
-        if event["type"] == "dispatch_state" and not claimed:
-            claimed = True
-            await users.create_user(username="first", password="password1")
+    async def revoke_bearer_during_delivery(event):
+        nonlocal revoked
+        if event["type"] == "dispatch_state" and not revoked:
+            revoked = True
+            await users.revoke_token(token)
 
-    manager.on_broadcast("claim-during-ws-request", create_account_during_delivery)
-    incoming, outgoing, task = await connect_ws(manager, settings.auth_token)
+    manager.on_broadcast("revoke-during-ws-request", revoke_bearer_during_delivery)
+    incoming, outgoing, task = await connect_ws(manager, token)
     try:
         await incoming.put({"type": "websocket.receive", "text": json.dumps({
-            "type": "send_message", "session_id": session.id, "content": "A pre-claim request",
-            "client_request_id": "pre-claim-request",
+            "type": "send_message", "session_id": session.id, "content": "A request crossing bearer revocation",
+            "client_request_id": "revoke-during-request",
         })})
         frame = await asyncio.wait_for(outgoing.get(), 5)
         assert frame["type"] == "websocket.close" and frame["code"] == 4001
@@ -621,8 +599,9 @@ async def test_outbound_retirement_during_incoming_request_is_normal_disconnect(
 
 
 async def test_unretired_websocket_transport_error_remains_logged(runtime, caplog):
-    manager, _, _, _, _, _ = runtime
-    incoming, _, task = await connect_ws(manager, settings.auth_token)
+    manager, _, session, _, _, _ = runtime
+    token = await deps.get_user_manager().issue_token(session.user_id)
+    incoming, _, task = await connect_ws(manager, token)
     await incoming.put({"type": "unexpected-transport-frame"})
     await asyncio.wait_for(task, 5)
     errors = [record for record in caplog.records if record.name == "server.routers.ws" and record.levelno >= 40]
@@ -633,7 +612,6 @@ async def test_websocket_cannot_resolve_another_accounts_question(runtime, monke
     manager, database, session, _, _, _ = runtime
     users = UserManager(database)
     monkeypatch.setattr(deps, "_user_manager", users)
-    await bootstrap_first_account(database, username="first", password="password1", session_manager=manager)
     foreign = await users.create_user(username="second", password="password2")
     token = await users.issue_token(foreign["id"])
     question = await manager.create_pending_question(session.id, [{"question": "Private choice", "options": [{"label": "A"}]}])
@@ -664,7 +642,7 @@ async def test_resume_reply_does_not_wait_for_publication_and_later_delete_is_vi
             await release.wait()
 
     manager.on_broadcast("slow-resume", slow_resume)
-    async with session_client(manager, session) as client:
+    async with await session_client(manager, session) as client:
         request = asyncio.create_task(client.post(f"/api/sessions/{session.id}/dispatch/resume"))
         try:
             await asyncio.wait_for(entered.wait(), 5)
@@ -682,7 +660,7 @@ async def test_resume_reply_does_not_wait_for_publication_and_later_delete_is_vi
 async def test_detail_response_is_404_if_session_deleted_during_history_read(runtime, monkeypatch):
     manager, database, session, _, _, _ = runtime
     entered, release = gate_sql(monkeypatch, database, lambda sql: "FROM messages WHERE session_id" in sql)
-    async with session_client(manager, session) as client:
+    async with await session_client(manager, session) as client:
         request = asyncio.create_task(client.get(f"/api/sessions/{session.id}"))
         await asyncio.wait_for(entered.wait(), 5)
         # Transcript reads now serialize flush + SELECT with writers. Let
@@ -935,10 +913,7 @@ async def test_stop_of_unstarted_delegation_preserves_round_until_resume(runtime
 
 async def test_queued_return_keeps_its_owner_when_deleted_during_dispatch_publication(runtime):
     manager, database, _, _, _, _ = runtime
-    owner = await database.create_user(
-        user_id="review-owner", username="review-owner", password_hash="unused",
-        created_at=datetime.now(UTC).isoformat(),
-    )
+    owner = await deps.get_user_manager().create_user(username="review-owner", password="password2")
     agent = await AgentManager(database).create_agent(name="Owned queue", user_id=owner["id"])
     session = await manager.create_session(agent["id"], "Private pending reply", None, backend="codex")
     await manager.interrupt(session.id)

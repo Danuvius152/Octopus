@@ -20,6 +20,7 @@ from server.database import Database
 from server.harness import get_harness
 from server.session_manager import SessionManager
 from server.sessions.questions import QuestionClosedError
+from tests.accounts import create_account
 
 
 @pytest.mark.asyncio
@@ -101,6 +102,7 @@ async def test_the_session_manager_drains_its_turns_when_the_db_closes(tmp_path,
     unwind, rather than cancelled into a connection that has gone."""
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     mgr = SessionManager()
     await mgr.initialize(db)
 
@@ -144,6 +146,7 @@ async def test_shutdown_keeps_database_open_until_terminal_writer_finishes(tmp_p
     monkeypatch.setattr("server.sessions.ownership._BACKEND_RETIRE_TIMEOUT", .05)
     db = Database(str(tmp_path / "shutdown.db"))
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
@@ -200,6 +203,7 @@ async def test_shutdown_keeps_database_open_until_terminal_writer_finishes(tmp_p
 async def test_failed_question_owner_closes_observers_before_database_retry(tmp_path, monkeypatch):
     db = Database(str(tmp_path / "questions-shutdown.db"))
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()

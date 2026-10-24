@@ -28,6 +28,7 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from server import deps
 from server.agent_manager import AgentManager
 from server.applications import (
     ApplicationError,
@@ -47,12 +48,10 @@ from server.main import app
 from server.routers import agents as agents_mod
 from server.routers import applications as applications_mod
 from server.session_manager import SessionManager, session_manager
+from server.users import UserManager
+from tests.accounts import create_account
 from tests.completion_models import CompletionModels
 from tests.fake_run import FakeRunBase
-
-TOKEN = "changeme"
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -72,9 +71,10 @@ def apps_root(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-async def db():
+async def db(tmp_path):
     d = Database(":memory:")
     await d.initialize()
+    await create_account(d, extra_roots=[tmp_path])
     yield d
     await d.close()
 
@@ -110,7 +110,8 @@ def sent(mgr, monkeypatch, models):
 
 
 async def _make_agent(db, name: str = "Octo Builder") -> dict:
-    return await AgentManager(db).create_agent(name=name)
+    owner = await db.get_system_agent()
+    return await AgentManager(db).create_agent(name=name, user_id=owner["user_id"])
 
 
 async def _create_app(am, db, *, name="Todo App", **extra) -> dict:
@@ -380,6 +381,7 @@ async def test_build_commit_failure_exits_and_cold_read_keeps_original_result(tm
         applications = ApplicationManager()
         try:
             await db.initialize()
+            deps.set_user_manager(UserManager(db))
             await manager.initialize(db)
             applications.bind(manager, db)
             row = await applications.get_application(proof["application_id"])
@@ -443,6 +445,7 @@ async def _application_commit_child(tmp_path, tmp_path_factory, monkeypatch):
     database_path = tmp_path / "application.db"
     db = Database(str(database_path))
     await db.initialize()
+    await create_account(db, extra_roots=[artifacts])
     manager = SessionManager()
     await manager.initialize(db)
     applications = ApplicationManager()
@@ -817,11 +820,39 @@ async def test_delete_refuses_to_touch_a_dir_outside_the_root(
     outside = tmp_path / "precious"
     outside.mkdir()
     (outside / "keepme.txt").write_text("hi")
-    await db.update_application(row["id"], app_dir=str(outside))
+    async with db.transaction(write=True) as tx:
+        await tx.execute("UPDATE applications SET app_dir=? WHERE id=?", (str(outside), row["id"]))
+    assert (await db.get_application(row["id"]))["app_dir"] == str(outside)
 
     await am.delete_application(row["id"])
     assert await db.get_application(row["id"]) is None
     assert (outside / "keepme.txt").exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("destination", ["other-account", "installation"])
+async def test_owned_application_cannot_delete_another_managed_roots_files(
+    am, db, sent, apps_root, destination,
+):
+    from server.workspace import paths_for
+
+    row = await _create_app(am, db)
+    if destination == "other-account":
+        other, _ = await create_account(db, username="another-owner")
+        root = paths_for(other["id"]).applications
+    else:
+        root = apps_root
+    outside = root / "precious"
+    outside.mkdir(parents=True)
+    (outside / "keep.txt").write_text("other resources")
+    async with db.transaction(write=True) as tx:
+        await tx.execute("UPDATE applications SET app_dir=? WHERE id=?", (str(outside), row["id"]))
+    assert (await db.get_application(row["id"]))["app_dir"] == str(outside)
+
+    await am.delete_application(row["id"], user_id=row["user_id"])
+
+    assert await db.get_application(row["id"]) is None
+    assert (outside / "keep.txt").read_text() == "other resources"
 
 
 @pytest.mark.asyncio
@@ -837,11 +868,11 @@ async def test_delete_keeps_the_build_session(am, db, mgr, sent):
 
 
 @pytest.fixture
-async def client(models, apps_root, monkeypatch):
+async def client(models, apps_root, monkeypatch, db):
     """The real app wired to a fresh DB + the singleton managers, with
     `start_message` stubbed so no harness ever spawns."""
-    db = Database(":memory:")
-    await db.initialize()
+    owner = await db.get_system_agent()
+    bearer = await deps.get_user_manager().issue_token(owner["user_id"])
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
@@ -860,30 +891,29 @@ async def client(models, apps_root, monkeypatch):
     monkeypatch.setattr(session_manager, "start_message", fake_start_message)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization": f"Bearer {bearer}"}) as c:
         c.sent = calls  # type: ignore[attr-defined]
         yield c
 
     singleton_application_manager.shutdown()
-    await db.close()
 
 
 async def _api_create(client, name="Todo App", **extra) -> dict:
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+    agents = (await client.get("/api/agents", headers=client.headers)).json()
     body = {
         "name": name,
         "description": "A todo list",
         "agent_id": extra.pop("agent_id", agents[0]["id"]),
         **extra,
     }
-    resp = await client.post("/api/applications", json=body, headers=HEADERS)
+    resp = await client.post("/api/applications", json=body, headers=client.headers)
     assert resp.status_code == 201, resp.text
     return resp.json()
 
 
 @pytest.mark.asyncio
 async def test_api_auth_required(client):
-    assert (await client.get("/api/applications")).status_code in (401, 403)
+    assert (await client.get("/api/applications", headers={"Authorization": ""})).status_code in (401, 403)
 
 
 @pytest.mark.asyncio
@@ -892,32 +922,32 @@ async def test_api_create_list_get(client):
     assert created["status"] == "building"
     assert created["session_id"]
 
-    listed = (await client.get("/api/applications", headers=HEADERS)).json()
+    listed = (await client.get("/api/applications", headers=client.headers)).json()
     assert [a["id"] for a in listed] == [created["id"]]
 
-    one = await client.get(f"/api/applications/{created['id']}", headers=HEADERS)
+    one = await client.get(f"/api/applications/{created['id']}", headers=client.headers)
     assert one.status_code == 200
     assert one.json()["name"] == "Todo App"
 
     assert (
-        await client.get("/api/applications/missing", headers=HEADERS)
+        await client.get("/api/applications/missing", headers=client.headers)
     ).status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_api_create_validation(client):
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+    agents = (await client.get("/api/agents", headers=client.headers)).json()
     # Pydantic rejects the empty name/description before the manager sees them.
     resp = await client.post(
         "/api/applications",
         json={"name": "", "description": "d", "agent_id": agents[0]["id"]},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 422
     resp = await client.post(
         "/api/applications",
         json={"name": "X", "description": "d", "agent_id": "ghost"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 404
 
@@ -925,11 +955,11 @@ async def test_api_create_validation(client):
 @pytest.mark.asyncio
 async def test_api_duplicate_name_is_409(client):
     await _api_create(client, name="Dup")
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+    agents = (await client.get("/api/agents", headers=client.headers)).json()
     resp = await client.post(
         "/api/applications",
         json={"name": "dup", "description": "d", "agent_id": agents[0]["id"]},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 409
 
@@ -941,7 +971,7 @@ async def test_api_patch_and_build_and_delete(client):
     patched = await client.patch(
         f"/api/applications/{created['id']}",
         json={"name": "Renamed", "icon": "🧮"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert patched.status_code == 200
     assert patched.json()["name"] == "Renamed"
@@ -951,17 +981,17 @@ async def test_api_patch_and_build_and_delete(client):
     built = await client.post(
         f"/api/applications/{created['id']}/build",
         json={"prompt": "make it blue"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert built.status_code == 200
     assert built.json()["status"] == "building"
     assert "make it blue" in client.sent[0][1]  # type: ignore[attr-defined]
 
     resp = await client.delete(
-        f"/api/applications/{created['id']}", headers=HEADERS
+        f"/api/applications/{created['id']}", headers=client.headers
     )
     assert resp.status_code == 204
-    assert (await client.get("/api/applications", headers=HEADERS)).json() == []
+    assert (await client.get("/api/applications", headers=client.headers)).json() == []
 
 
 @pytest.mark.asyncio
@@ -969,22 +999,22 @@ async def test_api_archive_and_restore(client):
     created = await _api_create(client, name="Archivable")
 
     resp = await client.post(
-        f"/api/applications/{created['id']}/archive", headers=HEADERS
+        f"/api/applications/{created['id']}/archive", headers=client.headers
     )
     assert resp.status_code == 200
     assert resp.json()["archived"] is True
-    assert (await client.get("/api/applications", headers=HEADERS)).json() == []
+    assert (await client.get("/api/applications", headers=client.headers)).json() == []
     archived = await client.get(
-        "/api/applications", params={"archived": "true"}, headers=HEADERS
+        "/api/applications", params={"archived": "true"}, headers=client.headers
     )
     assert [a["id"] for a in archived.json()] == [created["id"]]
 
     resp = await client.post(
-        f"/api/applications/{created['id']}/unarchive", headers=HEADERS
+        f"/api/applications/{created['id']}/unarchive", headers=client.headers
     )
     assert resp.status_code == 200
     assert resp.json()["archived"] is False
-    live = (await client.get("/api/applications", headers=HEADERS)).json()
+    live = (await client.get("/api/applications", headers=client.headers)).json()
     assert [a["id"] for a in live] == [created["id"]]
 
 
@@ -992,7 +1022,7 @@ async def test_api_archive_and_restore(client):
 async def test_api_build_requires_a_prompt(client):
     created = await _api_create(client)
     resp = await client.post(
-        f"/api/applications/{created['id']}/build", json={"prompt": ""}, headers=HEADERS
+        f"/api/applications/{created['id']}/build", json={"prompt": ""}, headers=client.headers
     )
     assert resp.status_code == 422
 
@@ -1008,7 +1038,7 @@ async def test_static_serves_the_entrypoint_for_the_app_root(client):
     with open(os.path.join(created["app_dir"], "index.html"), "w") as f:
         f.write("<h1>Hello Octopus</h1>")
 
-    resp = await client.get(f"/apps/{created['id']}/", headers=HEADERS)
+    resp = await client.get(f"/apps/{created['id']}/", headers=client.headers)
     assert resp.status_code == 200
     assert "Hello Octopus" in resp.text
     assert resp.headers["content-type"].startswith("text/html")
@@ -1022,7 +1052,7 @@ async def test_static_serves_nested_assets(client):
     with open(os.path.join(created["app_dir"], "assets", "app.js"), "w") as f:
         f.write("console.log(1)")
 
-    resp = await client.get(f"/apps/{created['id']}/assets/app.js", headers=HEADERS)
+    resp = await client.get(f"/apps/{created['id']}/assets/app.js", headers=client.headers)
     assert resp.status_code == 200
     assert resp.text == "console.log(1)"
     assert "javascript" in resp.headers["content-type"]
@@ -1030,21 +1060,23 @@ async def test_static_serves_nested_assets(client):
 
 @pytest.mark.asyncio
 async def test_static_accepts_query_token_and_cookie(client):
+    token = client.headers["Authorization"].removeprefix("Bearer ")
     created = await _api_create(client, name="Authy")
     with open(os.path.join(created["app_dir"], "index.html"), "w") as f:
         f.write("ok")
 
     # No credentials at all.
+    client.headers.pop("Authorization")
     assert (await client.get(f"/apps/{created['id']}/")).status_code == 401
     # ?token= — what an "open in a new tab" link uses.
     assert (
-        await client.get(f"/apps/{created['id']}/", params={"token": TOKEN})
+        await client.get(f"/apps/{created['id']}/", params={"token": token})
     ).status_code == 200
     # The cookie the SPA sets before mounting the iframe. Set on the client
     # rather than per request: httpx deprecated per-request `cookies=` because
     # what it should do about persistence is ambiguous, and a browser sends the
     # cookie jar it has — which is what setting it on the client models.
-    client.cookies.set("octopus_app_token", TOKEN)
+    client.cookies.set("octopus_app_token", token)
     assert (await client.get(f"/apps/{created['id']}/")).status_code == 200
     client.cookies.set("octopus_app_token", "wrong")
     assert (await client.get(f"/apps/{created['id']}/")).status_code == 401
@@ -1065,7 +1097,7 @@ async def test_static_cookie_survives_a_token_javascript_encodes(client, monkeyp
     that found it, happened to encode to itself. It appears the first time
     someone rotates to a token that does not — which is exactly how it appeared.
     """
-    from server.config import settings
+    from server import users as users_module
 
     created = await _api_create(client, name="Encoded")
     with open(os.path.join(created["app_dir"], "index.html"), "w") as f:
@@ -1073,7 +1105,10 @@ async def test_static_cookie_survives_a_token_javascript_encodes(client, monkeyp
 
     # Any token with a character JS encodes reproduces it; never a real one.
     rotated = "an@encoded-token!"
-    monkeypatch.setattr(settings, "auth_token", rotated)
+    monkeypatch.setattr(users_module, "new_token", lambda: rotated)
+    owner = await session_manager.db.get_system_agent()
+    assert await deps.get_user_manager().issue_token(owner["user_id"]) == rotated
+    client.headers.pop("Authorization")
     # Character for character what the browser stores: encodeURIComponent
     # leaves !*()' alone and percent-encodes the rest.
     encoded = quote(rotated, safe="!*()'")
@@ -1097,11 +1132,11 @@ async def test_static_traversal_is_a_404(client, tmp_path):
     secret.write_text("top secret")
 
     for path in ("..%2Fsecret.txt", "%2e%2e/secret.txt", "....//secret.txt"):
-        resp = await client.get(f"/apps/{created['id']}/{path}", headers=HEADERS)
+        resp = await client.get(f"/apps/{created['id']}/{path}", headers=client.headers)
         assert resp.status_code == 404, path
 
     for path in ("../secret.txt", "a/../../secret.txt"):
-        resp = await client.get(f"/apps/{created['id']}/{path}", headers=HEADERS)
+        resp = await client.get(f"/apps/{created['id']}/{path}", headers=client.headers)
         assert "top secret" not in resp.text, path
 
 
@@ -1112,7 +1147,7 @@ async def test_static_refuses_a_symlink_out_of_the_app(client, tmp_path):
     secret.write_text("top secret")
     os.symlink(str(secret), os.path.join(created["app_dir"], "link.txt"))
 
-    resp = await client.get(f"/apps/{created['id']}/link.txt", headers=HEADERS)
+    resp = await client.get(f"/apps/{created['id']}/link.txt", headers=client.headers)
     assert resp.status_code == 404
 
 
@@ -1120,15 +1155,15 @@ async def test_static_refuses_a_symlink_out_of_the_app(client, tmp_path):
 async def test_static_missing_file_and_missing_app_are_404(client):
     created = await _api_create(client, name="Empty")
     assert (
-        await client.get(f"/apps/{created['id']}/", headers=HEADERS)
+        await client.get(f"/apps/{created['id']}/", headers=client.headers)
     ).status_code == 404
-    assert (await client.get("/apps/ghost/x.html", headers=HEADERS)).status_code == 404
+    assert (await client.get("/apps/ghost/x.html", headers=client.headers)).status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_static_bare_app_url_redirects_to_a_trailing_slash(client):
     created = await _api_create(client, name="Redirected")
-    resp = await client.get(f"/apps/{created['id']}", headers=HEADERS)
+    resp = await client.get(f"/apps/{created['id']}", headers=client.headers)
     assert resp.status_code in (307, 308)
     assert resp.headers["location"] == f"/apps/{created['id']}/"
 
@@ -1293,10 +1328,12 @@ async def test_existing_database_migrates_to_icon_src(tmp_path):
     db_file = str(tmp_path / "old.db")
     seed = Database(db_file)
     await seed.initialize()
+    owner, _ = await create_account(seed, extra_roots=[tmp_path])
     await seed._conn.execute(
         "INSERT INTO applications (id, name, app_dir, entrypoint, status,"
-        " created_at, updated_at) VALUES"
-        " ('a1', 'Legacy', '/tmp/legacy', 'index.html', 'ready', 't', 't')"
+        " created_at, updated_at, user_id) VALUES"
+        " ('a1', 'Legacy', '/tmp/legacy', 'index.html', 'ready', 't', 't', ?)",
+        (owner["id"],),
     )
     await seed._conn.commit()
     await seed._conn.execute("ALTER TABLE applications DROP COLUMN icon_src")
@@ -1313,6 +1350,7 @@ async def test_existing_database_migrates_to_icon_src(tmp_path):
         assert "icon_src" in [r[1] for r in await cur.fetchall()]
         row = await db.get_application("a1")
         assert row is not None
+        assert row["user_id"] == owner["id"]
         assert row["name"] == "Legacy"    # the old row survived
         assert row["icon_src"] is None    # and simply has no icon yet
     finally:
@@ -1483,7 +1521,7 @@ async def test_a_real_backend_answers_through_the_proxy(client, query_contract):
 
     try:
         resp = await client.get(
-            f"/apps/{app_row['id']}/api/notes?limit=2", headers=HEADERS
+            f"/apps/{app_row['id']}/api/notes?limit=2", headers=client.headers
         )
         assert resp.status_code == 200, resp.text
         payload = resp.json()
@@ -1499,17 +1537,17 @@ async def test_a_real_backend_answers_through_the_proxy(client, query_contract):
             ]
             # Build the actual incoming URL: httpx's params helper itself groups
             # repeated keys, hiding the interleaving this contract protects.
-            echoed = await client.get(f"/apps/{app_row['id']}/api/notes?{urlencode(pairs)}", headers=HEADERS)
+            echoed = await client.get(f"/apps/{app_row['id']}/api/notes?{urlencode(pairs)}", headers=client.headers)
             assert echoed.status_code == 200, echoed.text
             assert parse_qsl(urlsplit(echoed.json()["path"]).query, keep_blank_values=True) == pairs
         elif query_contract == "credentials":
             from server.applications import app_scope_token
 
             cases = [
-                (HEADERS, ["discarded-first", "discarded-last"]),
-                ({}, ["discarded-first", TOKEN]),
-                ({"Cookie": f"octopus_app_token={TOKEN}; private_cookie=private"}, [""]),
-                ({"X-Octopus-App-Token": app_scope_token(app_row["id"])}, ["discarded-first", "discarded-last"]),
+                (client.headers, ["discarded-first", "discarded-last"]),
+                ({"Authorization": ""}, ["discarded-first", client.headers["Authorization"].removeprefix("Bearer ")]),
+                ({"Authorization": "", "Cookie": f"octopus_app_token={client.headers['Authorization'].removeprefix('Bearer ')}; private_cookie=private"}, [""]),
+                ({"Authorization": "", "X-Octopus-App-Token": app_scope_token(app_row["id"])}, ["discarded-first", "discarded-last"]),
             ]
             for headers, tokens in cases:
                 pairs = [("tag", "visible"), *[("token", token) for token in tokens], ("token_hint", "kept")]
@@ -1520,13 +1558,13 @@ async def test_a_real_backend_answers_through_the_proxy(client, query_contract):
                 assert observed["authorization"] is None and observed["cookie"] is None
 
         # Static files still come from the code directory, unproxied.
-        page = await client.get(f"/apps/{app_row['id']}/index.html", headers=HEADERS)
+        page = await client.get(f"/apps/{app_row['id']}/index.html", headers=client.headers)
         assert page.status_code == 200
         assert "ui" in page.text
 
         # The row reports the backend as running, with its port.
         detail = (await client.get(
-            f"/api/applications/{app_row['id']}", headers=HEADERS
+            f"/api/applications/{app_row['id']}", headers=client.headers
         )).json()
         assert detail["backend"]["state"] == "running"
         assert detail["backend"]["port"]
@@ -1538,7 +1576,7 @@ async def test_a_real_backend_answers_through_the_proxy(client, query_contract):
 async def test_proxy_is_404_when_the_app_has_no_backend(client):
     app_row = await _api_create(client, name="Static Only")
     Path(app_row["app_dir"], "index.html").write_text("<html></html>")
-    resp = await client.get(f"/apps/{app_row['id']}/api/anything", headers=HEADERS)
+    resp = await client.get(f"/apps/{app_row['id']}/api/anything", headers=client.headers)
     assert resp.status_code == 404
     assert "no backend" in resp.text.lower()
 
@@ -1553,12 +1591,12 @@ async def test_proxy_reports_a_broken_backend_rather_than_hanging(client):
     app_row = await _api_create(client, name="Broken Backend")
     _script(app_row["app_dir"], "start.sh", "#!/bin/sh\necho 'boom' >&2\nexit 7\n")
     try:
-        resp = await client.get(f"/apps/{app_row['id']}/api/x", headers=HEADERS)
+        resp = await client.get(f"/apps/{app_row['id']}/api/x", headers=client.headers)
         assert resp.status_code == 503
         assert "exited 7" in resp.text
 
         detail = (await client.get(
-            f"/api/applications/{app_row['id']}", headers=HEADERS
+            f"/api/applications/{app_row['id']}", headers=client.headers
         )).json()
         assert detail["backend"]["state"] == "failed"
         assert any("boom" in line for line in detail["backend"]["log_tail"])
@@ -1570,7 +1608,7 @@ async def test_proxy_reports_a_broken_backend_rather_than_hanging(client):
 async def test_proxy_requires_auth(client):
     app_row = await _api_create(client, name="Guarded")
     _script(app_row["app_dir"], "start.sh", "#!/bin/sh\nsleep 5\n")
-    resp = await client.get(f"/apps/{app_row['id']}/api/x")
+    resp = await client.get(f"/apps/{app_row['id']}/api/x", headers={"Authorization": ""})
     assert resp.status_code == 401
 
 
@@ -1588,14 +1626,14 @@ async def test_deleting_an_application_stops_its_backend(client):
         '#!/usr/bin/env bash\nexec python3 -m http.server "$PORT" --bind 127.0.0.1\n',
     )
     try:
-        resp = await client.get(f"/apps/{app_row['id']}/api/x", headers=HEADERS)
+        resp = await client.get(f"/apps/{app_row['id']}/api/x", headers=client.headers)
         assert resp.status_code in (200, 404)  # the stub server's own answer
         state = backend_supervisor.get(app_row["id"])
         assert state and state.state == RUNNING
         proc = state.process
         assert proc is not None and proc.returncode is None
 
-        await client.delete(f"/api/applications/{app_row['id']}", headers=HEADERS)
+        await client.delete(f"/api/applications/{app_row['id']}", headers=client.headers)
 
         await asyncio.sleep(0.3)
         assert proc.returncode is not None, "the backend process outlived its app"
@@ -1614,7 +1652,7 @@ async def test_deleting_an_application_removes_its_data_and_runtime(client):
     os.makedirs(app_dir + ".runtime", exist_ok=True)
     Path(app_dir + ".data", "notes.json").write_text("[]")
 
-    await client.delete(f"/api/applications/{app_row['id']}", headers=HEADERS)
+    await client.delete(f"/api/applications/{app_row['id']}", headers=client.headers)
 
     assert not os.path.exists(app_dir)
     assert not os.path.exists(app_dir + ".data")
@@ -1753,28 +1791,28 @@ async def test_api_pin_unpin_and_order(client):
     two = await _api_create(client, name="Two")
 
     resp = await client.post(
-        f"/api/applications/{one['id']}/unpin", headers=HEADERS
+        f"/api/applications/{one['id']}/unpin", headers=client.headers
     )
     assert resp.status_code == 200
     assert resp.json()["pinned"] is False
     # The response carries live backend state like every other read.
     assert resp.json()["backend"]["state"] == "absent"
 
-    resp = await client.post(f"/api/applications/{one['id']}/pin", headers=HEADERS)
+    resp = await client.post(f"/api/applications/{one['id']}/pin", headers=client.headers)
     assert resp.json()["pinned"] is True
 
     resp = await client.put(
         "/api/applications/pin-order",
         json={"ids": [one["id"], two["id"]]},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 200
     assert _pinned_ids(resp.json()) == [one["id"], two["id"]]
 
     resp = await client.put(
-        "/api/applications/pin-order", json={"ids": ["ghost"]}, headers=HEADERS
+        "/api/applications/pin-order", json={"ids": ["ghost"]}, headers=client.headers
     )
     assert resp.status_code == 400
     assert (
-        await client.post("/api/applications/ghost/pin", headers=HEADERS)
+        await client.post("/api/applications/ghost/pin", headers=client.headers)
     ).status_code == 404

@@ -1,8 +1,9 @@
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { expect, test } from "@playwright/test";
 
 test("current questions submit complete answers and keep answered and cancelled history after reload", async ({ page, request }) => {
   const api = "http://localhost:8765/api";
-  const headers = { Authorization: "Bearer changeme" };
+  const headers = { Authorization: `Bearer ${TEST_BEARER}` };
   const listed = await request.get(`${api}/agents`, { headers });
   expect(listed.ok()).toBeTruthy();
   const agents = await listed.json() as { id: string; name: string; archived?: boolean; pinned?: boolean }[];
@@ -36,8 +37,7 @@ test("current questions submit complete answers and keep answered and cancelled 
 
   try {
     await page.goto("/");
-    await page.locator('input[type="password"]').fill("changeme");
-    await page.locator(".btn-login").click();
+    await enterAccountCredentials(page);
     await openSession();
     const asked = await request.post(`${api}/sessions/${session.id}/questions`, {
       headers,

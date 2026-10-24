@@ -25,9 +25,11 @@ import pytest
 
 from server.config import settings
 from server.database import Database
+from server.mcp_identity import mint
 from server.schedule_ai import cron_trigger
 from server.scheduler import ScheduleRunner
 from server.session_manager import session_manager
+from tests.accounts import create_account
 from tests.callback_api import start_callback_api
 
 # Widen PATH so the CLIs resolve in a non-interactive pytest run.
@@ -52,6 +54,7 @@ async def _bootstrap(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "agents"))
     db = Database(":memory:")
     await db.initialize()
+    owner, _ = await create_account(db, extra_roots=[tmp_path])
 
     session_manager.sessions.clear()
     session_manager._admission_closed = False
@@ -67,7 +70,8 @@ async def _bootstrap(tmp_path, monkeypatch):
 
     # Both halves a real tool call needs reachable: the REST route the shim
     # posts to, and the /mcp/schedule mount the CLI itself speaks to.
-    api = await start_callback_api(schedules_routes.session_router)
+    api = await start_callback_api(schedules_routes.session_router,
+                                   readiness_token=mint("schedule-test-readiness", user_id=owner["id"]))
     monkeypatch.setattr(settings, "port", api.port)
 
     wd = str(tmp_path / "ws")
@@ -185,7 +189,8 @@ async def test_real_codex_schedules_an_interval_run(tmp_path, monkeypatch):
         from server.agent_manager import AgentManager
 
         am = AgentManager(db)
-        agent = await am.create_agent(name="Codexy", backend="codex")
+        owner = (await db.get_system_agent())["user_id"]
+        agent = await am.create_agent(name="Codexy", backend="codex", user_id=owner)
         session = await session_manager.create_session(
             agent_id=agent["id"], name="sched", working_dir=wd, backend="codex"
         )

@@ -17,11 +17,13 @@ from server.config import settings
 from server.database import Database
 from server.deps import get_session_manager
 from server.main import _wiki_error
+from server.mcp_identity import mint
 from server.mcp_servers import wiki as wiki_tools
 from server.routers.wiki import router
 from server.session_manager import SessionManager
 from server.wiki import WikiError, registry
 from server.wiki.workflow import guide
+from tests.accounts import create_account
 from tests.callback_api import start_callback_api
 from tests.wiki_query_evidence import collect_evaluation
 
@@ -115,10 +117,11 @@ async def query_probe(tmp_path, monkeypatch):
     (root / "Library/Research/职业讨论.md").write_text("# 职业讨论\n\n文章中的人物是一位工程师；这不是本用户的资料。\n")
     db = Database(":memory:")
     await db.initialize()
+    owner, _ = await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
-    agent = await AgentManager(db).create_agent(name="Weber", backend="codex", system_prompt=guide("curator"), mcp_servers=[])
-    registry.configure(None, root, agent["id"])
+    agent = await AgentManager(db).create_agent(name="Weber", backend="codex", system_prompt=guide("curator"), mcp_servers=[], user_id=owner["id"])
+    registry.configure(owner["id"], root, agent["id"])
     probe = QueryProbe(manager, agent["id"], root)
     original_result = manager._handle_result_event
 
@@ -132,7 +135,8 @@ async def query_probe(tmp_path, monkeypatch):
         await original_result(session, attempt, event)
 
     monkeypatch.setattr(manager, "_handle_result_event", record_usage)
-    api = await start_callback_api(router, overrides={get_session_manager: lambda: manager}, exception_handlers={WikiError: _wiki_error})
+    api = await start_callback_api(router, overrides={get_session_manager: lambda: manager}, exception_handlers={WikiError: _wiki_error},
+                                   readiness_token=mint("callback-api-readiness", user_id=owner["id"]))
     monkeypatch.setattr(settings, "port", api.port)
 
     # start_callback_api reloads the namespaces and verifies them over HTTP.

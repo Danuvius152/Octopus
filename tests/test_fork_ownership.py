@@ -4,6 +4,7 @@ import pytest
 
 from server.database import Database
 from server.session_manager import SessionManager
+from tests.accounts import create_account
 
 
 @pytest.mark.asyncio
@@ -11,8 +12,16 @@ async def test_startup_repairs_only_unambiguous_fork_owners(tmp_path):
     path = str(tmp_path / "sessions.db")
     db = Database(path)
     await db.initialize()
-    system_agent = await db.get_system_agent()
-    for agent_id, owner in (("agent-a", "owner-a"), ("agent-b", "owner-b")):
+    account_a, _ = await create_account(db, username="owner-a", extra_roots=[tmp_path])
+    account_b, _ = await create_account(db, username="owner-b", extra_roots=[tmp_path])
+    owner_a, owner_b = account_a["id"], account_b["id"]
+    # Keep an unresolved historical agent alongside the real current accounts.
+    await db.save_agent(
+        agent_id="legacy-default", name="Octo", is_system=True,
+        created_at="2026-10-11", updated_at="2026-10-11",
+    )
+    system_agent = await db.get_agent("legacy-default")
+    for agent_id, owner in (("agent-a", owner_a), ("agent-b", owner_b)):
         await db.conn.execute(
             "INSERT INTO agents (id, name, created_at, updated_at, user_id) "
             "VALUES (?, ?, '2026-10-11', '2026-10-11', ?)",
@@ -20,12 +29,12 @@ async def test_startup_repairs_only_unambiguous_fork_owners(tmp_path):
         )
     rows = [
         # Archived originals are still evidence; a fork chain needs iteration.
-        ("root-a", "user", None, "agent-a", "owner-a", 1),
+        ("root-a", "user", None, "agent-a", owner_a, 1),
         ("child", "fork", "middle", "agent-a", None, 0),
         ("middle", "fork", "root-a", "agent-a", None, 1),
         ("deleted-parent", "fork", "gone", "agent-a", None, 0),
         # Never move an owned row or guess across conflicting account links.
-        ("owned", "fork", "root-a", "agent-a", "owner-b", 0),
+        ("owned", "fork", "root-a", "agent-a", owner_b, 0),
         ("conflict", "fork", "root-a", "agent-b", None, 0),
         ("unknown", "fork", "gone", None, None, 0),
         ("cycle-1", "fork", "cycle-2", None, None, 0),
@@ -56,7 +65,7 @@ async def test_startup_repairs_only_unambiguous_fork_owners(tmp_path):
         after = {r["id"]: r for r in await db.load_sessions(include_archived=True)}
         repaired = {"child", "middle", "deleted-parent"}
         for sid, row in before.items():
-            expected = {**row, "user_id": "owner-a"} if sid in repaired else row
+            expected = {**row, "user_id": owner_a} if sid in repaired else row
             assert after[sid] == expected
         assert await db.load_messages("child") == messages
         await db.close()
@@ -69,7 +78,8 @@ async def test_startup_repairs_only_unambiguous_fork_owners(tmp_path):
         assert (await ledger.fetchone())[0] == 1
         manager = SessionManager()
         await manager.initialize(db)
-        assert manager.get_session("child", "owner-a") is not None
-        assert manager.get_session("child", "owner-b") is None
+        assert manager.get_session("child", owner_a) is not None
+        assert manager.get_session("child", owner_b) is None
+        assert {row["id"] for row in await db.list_users()} == {owner_a, owner_b}
     finally:
         await db.close()

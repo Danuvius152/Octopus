@@ -10,12 +10,25 @@ from __future__ import annotations
 
 import json
 import sqlite3
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from ..config import settings
 from .base import DatabaseBase, _load_json_list
 from .schema import _DEFAULT_MCP_SERVERS
+from .transaction import Transaction
+
+
+async def create_default_agent(tx: Transaction, *, user_id: str, created_at: str) -> None:
+    """The account transaction also owns its initial protected definition."""
+    await tx.execute(
+        "INSERT INTO agents (id,user_id,name,is_system,mcp_servers,backend,created_at,updated_at,pin_order) "
+        "VALUES (?,?, 'Octo',1,?,?,?,?, "
+        "(SELECT COALESCE(MAX(pin_order),0)+1 FROM agents))",
+        (uuid.uuid4().hex[:12], user_id, json.dumps(_DEFAULT_MCP_SERVERS),
+         settings.default_backend, created_at, created_at),
+    )
 
 
 class AgentsMixin(DatabaseBase):

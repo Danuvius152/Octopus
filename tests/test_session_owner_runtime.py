@@ -18,10 +18,10 @@ from server.crypto import encrypt
 from server.harness import get_harness
 from server.harness.profile import StdinMode
 from server.sessions.owner import SessionOwnerUnavailable
+from server.users import UserManager
 from tests import test_question_lifecycle as question_tests
 
 question_host = question_tests.question_host
-HEADERS = question_tests.HEADERS
 
 
 @pytest.mark.parametrize("operation", ["interrupt", "archive"])
@@ -63,7 +63,7 @@ async def test_runtime_text_subscriber_can_stop_its_original_request(question_ho
         assert replies == ([True] if operation == "interrupt" else ["archived"])
         assert completed.outcome is not None and completed.outcome.status == "interrupted"
         assert completed.outcome.code == "interrupted"
-        detail = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+        detail = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
         assert detail.status_code == 200
         assert detail.json()["archived"] is (operation == "archive")
         messages = detail.json()["messages"]
@@ -127,7 +127,7 @@ async def test_initial_stdout_is_delivered_before_a_blocked_initial_stdin_drains
         completed = await asyncio.wait_for(receipt.wait(), 3)
         assert completed.outcome is not None and completed.outcome.status == "success"
         assert json.loads(saved_input.read_text())["message"]["content"] == prompt
-        detail = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+        detail = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
         assert [row["content"] for row in detail.json()["messages"] if row["role"] == "user"] == [prompt]
         assert len([row for row in detail.json()["messages"] if row["type"] == "result"]) == 1
     finally:
@@ -143,7 +143,8 @@ async def test_preparation_failure_keeps_original_credential_diagnostics(questio
     cause = RuntimeError(f"Original catalog context: {secret}")
     await manager.db.save_credential(
         "original-preparation-credential", "claude-code", "Preparation diagnostic credential", "api_key",
-        encrypt(secret, settings.auth_token), "2026-10-21T00:00:00+00:00",
+        encrypt(secret, await UserManager(manager.db).data_key_for(original.user_id)), "2026-10-21T00:00:00+00:00",
+        user_id=original.user_id,
     )
     session = await manager.create_session(
         original.agent_id, "Original preparation diagnostic", str(tmp_path),
@@ -171,7 +172,7 @@ async def test_preparation_failure_keeps_original_credential_diagnostics(questio
     assert "Traceback (most recent call last)" in diagnostic and "refuse_catalog" in diagnostic
     assert session.id in diagnostic and receipt.request_id in diagnostic
     assert secret not in diagnostic and "[redacted]" in diagnostic
-    detail = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+    detail = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
     assert [row["content"] for row in detail.json()["messages"] if row["role"] == "user"] == [prompt]
     terminal = [row for row in detail.json()["messages"] if row["type"] == "result"]
     assert len(terminal) == 1 and terminal[0]["content"]["status"] == "failed"
@@ -233,7 +234,7 @@ async def test_owner_failure_waits_for_the_original_prompt_spill_thread(question
         assert len(spills) == 1 and spills[0].read_text() == prompt
         assert not list((spill_root / session.id).glob("*.tmp"))
         assert not spawned.exists()
-        detail = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+        detail = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
         assert detail.status_code == 200
         assert [row["content"] for row in detail.json()["messages"] if row["role"] == "user"] == [prompt]
         assert not [row for row in detail.json()["messages"] if row["type"] == "result"]
@@ -252,7 +253,8 @@ async def test_runtime_publication_failure_uses_its_original_credential(question
     cause = RuntimeError(f"Original publication cause: {secret}")
     await manager.db.save_credential(
         "original-publication-credential", "claude-code", "Publication diagnostic credential", "api_key",
-        encrypt(secret, settings.auth_token), "2026-10-21T00:00:00+00:00",
+        encrypt(secret, await UserManager(manager.db).data_key_for(original.user_id)), "2026-10-21T00:00:00+00:00",
+        user_id=original.user_id,
     )
     session = await manager.create_session(
         original.agent_id, "Original publication diagnostic", str(tmp_path),
@@ -297,7 +299,7 @@ async def test_runtime_publication_failure_uses_its_original_credential(question
     assert detail in diagnostic and "Original publication cause" in diagnostic
     assert "Traceback (most recent call last)" in diagnostic and "cancel_original_publication" in diagnostic
     assert secret not in diagnostic and "[redacted]" in diagnostic
-    detail_response = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+    detail_response = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
     assert detail_response.status_code == 200
     messages = detail_response.json()["messages"]
     assert [row["content"] for row in messages if row["role"] == "user"] == [prompt]

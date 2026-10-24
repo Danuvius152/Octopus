@@ -7,28 +7,25 @@ anyone who could see the screen. It answers with a label instead.
 
 from __future__ import annotations
 
+import hmac
 import json
 import logging
 import time
 from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from ..auth import verify_token
-from ..bootstrap import BootstrapError, bootstrap_first_account
 from ..config import settings
 from ..deps import (
     AdminUser,
     CurrentUser,
-    OperatorUser,
     ScopeUser,
-    SessionMgr,
     UserMgr,
 )
 from ..models import (
     AuthStateResponse,
-    BootstrapRequest,
-    BootstrapResponse,
     ExtraRootsRequest,
     IdentityResponse,
     InviteCreateRequest,
@@ -37,6 +34,7 @@ from ..models import (
     LoginResponse,
     PasswordChangeRequest,
     RegisterRequest,
+    SetupRequest,
     UserDisabledRequest,
     UserInfo,
     WorkspaceInfo,
@@ -47,35 +45,10 @@ from ..workspace import normalise_root, paths_for
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
-# Injected at startup, like the other routers' managers.
-_db = None
 
 
-def set_db(db) -> None:
-    global _db
-    _db = db
 
 
-@router.post("/bootstrap/resume")
-async def resume_bootstrap(user: CurrentUser, session_manager: SessionMgr) -> dict:
-    from ..wiki.account_upgrade import resume_upgrade
-    try:
-        return await resume_upgrade(_db, user, session_manager)
-    except BootstrapError as exc:
-        raise HTTPException(exc.status_code, exc.message) from exc
-
-
-@router.get("/bootstrap/status")
-async def bootstrap_status(user: CurrentUser) -> dict:
-    from ..wiki.account_upgrade import pending_upgrade
-    journal = pending_upgrade()
-    if journal is None or (
-        journal.get("user_id") != user["id"] and not (
-            journal.get("user_id") is None and journal.get("username") == user["username"]
-        )
-    ):
-        return {"pending": False}
-    return {"pending": True, "phase": journal["phase"], "adopt": journal["adopt"]}
 
 
 def _throttle_key(username: str, request: Request) -> str:
@@ -106,51 +79,34 @@ def _record_failure(key: str) -> None:
 
 
 @router.get("/state", response_model=AuthStateResponse)
-async def auth_state() -> AuthStateResponse:
+async def auth_state(users: UserMgr) -> AuthStateResponse:
     """Whether this install has accounts yet.
 
     Unauthenticated, deliberately and narrowly: the sign-in screen cannot ask
     the right question without it, and the answer — "has anybody set this box
     up" — is already implied by whether the sign-in screen works at all.
     """
-    from .. import deps
-
-    return AuthStateResponse(accounts_exist=await deps.accounts_exist())
+    return AuthStateResponse(accounts_exist=await users.db.count_users() > 0)
 
 
-@router.post("/bootstrap", response_model=BootstrapResponse)
-async def bootstrap(
-    req: BootstrapRequest,
-    users: UserMgr,
-    session_manager: SessionMgr,
-    _: str = Depends(verify_token),
-) -> BootstrapResponse:
-    """Create this install's first account, and hand it what is already here.
+def verify_setup_proof(credentials: HTTPAuthorizationCredentials | None = Depends(HTTPBearer(auto_error=False))) -> None:
+    """A proof for setup only; it never resolves to a business principal."""
+    if not settings.auth_token:
+        raise HTTPException(503, "Setup proof is not configured")
+    if credentials is None or not hmac.compare_digest(credentials.credentials, settings.auth_token):
+        raise HTTPException(401, "Invalid setup proof")
 
-    Authenticated with the install's own token, which is the only credential
-    that exists at this point and stops working the moment this succeeds — the
-    two facts are the same fact (§9). Refused outright once an account exists,
-    so it cannot be a second way in.
-    """
-    if _db is None:
-        raise HTTPException(503, "database not available")
+
+@router.post("/setup", response_model=LoginResponse)
+async def setup(req: SetupRequest, users: UserMgr, _: None = Depends(verify_setup_proof)) -> LoginResponse:
     try:
-        summary = await bootstrap_first_account(
-            _db,
-            username=req.username,
-            password=req.password,
-            session_manager=session_manager,
-        )
-    except BootstrapError as e:
-        raise HTTPException(e.status_code, e.message) from e
+        user = await users.setup(username=req.username, password=req.password)
+    except UserError as error:
+        raise HTTPException(error.status_code, error.message) from error
+    token = await users.issue_token(user["id"])
+    return LoginResponse(token=token, user_id=user["id"], username=user["username"], is_admin=user["is_admin"])
 
-    token = await users.issue_token(str(summary["user_id"]))
-    return BootstrapResponse(
-        token=token,
-        user_id=str(summary["user_id"]),
-        username=str(summary["username"]),
-        summary=summary,
-    )
+
 
 
 @router.post("/login", response_model=LoginResponse)
@@ -248,18 +204,9 @@ async def identity(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ) -> IdentityResponse:
-    """Who you are, for the sidebar's account row.
-
-    Before the first account, the install token identifies its operator by
-    `OCTOPUS_USER_LABEL`. After it, the authenticated scope names the account
-    whose username belongs in the sidebar.
-    """
+    """The current account's sidebar label."""
     if user_id is None:
-        from .. import deps
-
-        if await deps.accounts_exist():
-            raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
-        return IdentityResponse(label=settings.user_label)
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
 
     user = await users.db.get_user(user_id)
     if user is None:
@@ -270,7 +217,9 @@ async def identity(
 
 
 @router.get("/workspace", response_model=WorkspaceInfo)
-async def workspace(users: UserMgr, user_id: ScopeUser = None) -> WorkspaceInfo:
+async def workspace(
+    users: UserMgr, user_id: ScopeUser = None, _: str = Depends(verify_token),
+) -> WorkspaceInfo:
     """Where this account may work.
 
     The UI needs it to explain a refusal: "that path is outside your workspace"
@@ -278,11 +227,7 @@ async def workspace(users: UserMgr, user_id: ScopeUser = None) -> WorkspaceInfo:
     been opened up.
     """
     if user_id is None:
-        # No accounts: nothing has ever been confined, and saying otherwise
-        # would invite somebody to fix a restriction that is not there.
-        return WorkspaceInfo(
-            workspace=str(paths_for(None).workspace), extra_roots=[], confined=False
-        )
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
     row = await users.db.get_user(user_id)
     raw = (row or {}).get("extra_roots")
     try:
@@ -301,7 +246,7 @@ async def set_extra_roots(
     user_id: str,
     req: ExtraRootsRequest,
     users: UserMgr,
-    _operator: OperatorUser = None,
+    _operator: AdminUser,
 ) -> WorkspaceInfo:
     """Open a path outside an account's workspace to it, or close one.
 

@@ -4,23 +4,26 @@ import pytest
 from httpx import ASGITransport, AsyncClient
 
 from server.database import Database
+from server.deps import set_user_manager
 from server.main import app
 from server.session_manager import session_manager
-
-TOKEN = "changeme"
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
+from server.users import UserManager
 
 
 @pytest.fixture
 async def client():
     db = Database(":memory:")
     await db.initialize()
+    users = UserManager(db)
+    owner = await users.create_user(username="import-owner", password="test-password")
+    set_user_manager(users)
+    token = await users.issue_token(owner["id"])
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization": f"Bearer {token}"}) as c:
         yield c
 
     await db.close()
@@ -30,7 +33,7 @@ async def client():
 async def test_import_basic(client):
     resp = await client.post(
         "/api/sessions/import",
-        headers=HEADERS,
+        headers=client.headers,
         json={
             "name": "Imported",
             "messages": [
@@ -50,7 +53,7 @@ async def test_import_basic(client):
 async def test_import_sets_claude_session_id(client):
     resp = await client.post(
         "/api/sessions/import",
-        headers=HEADERS,
+        headers=client.headers,
         json={
             "name": "With Resume",
             "claude_session_id": "abc-123-def",
@@ -71,7 +74,7 @@ async def test_import_sets_claude_session_id(client):
 async def test_import_messages_retrievable(client):
     resp = await client.post(
         "/api/sessions/import",
-        headers=HEADERS,
+        headers=client.headers,
         json={
             "name": "Persistent",
             "messages": [
@@ -95,7 +98,7 @@ async def test_import_messages_retrievable(client):
     sid = resp.json()["id"]
 
     # GET the session and verify messages are persisted
-    get_resp = await client.get(f"/api/sessions/{sid}", headers=HEADERS)
+    get_resp = await client.get(f"/api/sessions/{sid}", headers=client.headers)
     assert get_resp.status_code == 200
     messages = get_resp.json()["messages"]
     assert len(messages) == 3
@@ -108,16 +111,40 @@ async def test_import_messages_retrievable(client):
 async def test_import_auth_required(client):
     resp = await client.post(
         "/api/sessions/import",
+        headers={"Authorization": ""},
         json={"name": "No Auth", "messages": []},
     )
     assert resp.status_code in (401, 403)
+
+
+async def test_each_accounts_import_uses_its_own_default_and_rejects_a_foreign_agent(client):
+    database = session_manager.db
+    users = UserManager(database)
+    first = await users.resolve_token(client.headers["Authorization"].removeprefix("Bearer "))
+    invite = await users.create_invite(created_by=first["id"])
+    second = await users.register(invite_code=invite["code"], username="second-owner", password="another-password")
+    second_token = await users.issue_token(second["id"])
+    first_agent = await database.get_system_agent(first["id"])
+    second_agent = await database.get_system_agent(second["id"])
+    assert first_agent["id"] != second_agent["id"] and second_agent["is_system"]
+    one = await client.post("/api/sessions/import", json={"name": "First import", "messages": []})
+    two = await client.post("/api/sessions/import", json={"name": "Second import", "messages": []},
+                            headers={"Authorization": f"Bearer {second_token}"})
+    assert one.status_code == two.status_code == 201
+    assert one.json()["agent_id"] == first_agent["id"]
+    assert two.json()["agent_id"] == second_agent["id"]
+    assert session_manager.get_session(one.json()["id"]).user_id == first["id"]
+    assert session_manager.get_session(two.json()["id"]).user_id == second["id"]
+    foreign = await client.post("/api/sessions/import", headers={"Authorization": f"Bearer {second_token}"},
+                                json={"name": "Refused", "agent_id": first_agent["id"], "messages": []})
+    assert foreign.status_code == 404 and len(await database.load_sessions()) == 2
 
 
 @pytest.mark.asyncio
 async def test_import_empty_messages(client):
     resp = await client.post(
         "/api/sessions/import",
-        headers=HEADERS,
+        headers=client.headers,
         json={"name": "Empty"},
     )
     assert resp.status_code == 201
@@ -130,14 +157,14 @@ async def test_import_empty_messages(client):
 async def test_import_appears_in_list(client):
     await client.post(
         "/api/sessions/import",
-        headers=HEADERS,
+        headers=client.headers,
         json={
             "name": "Listed Session",
             "messages": [{"role": "user", "type": "text", "content": "hey"}],
         },
     )
 
-    resp = await client.get("/api/sessions", headers=HEADERS)
+    resp = await client.get("/api/sessions", headers=client.headers)
     assert resp.status_code == 200
     sessions = resp.json()
     names = [s["name"] for s in sessions]

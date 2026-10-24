@@ -5,7 +5,6 @@ import json
 
 import pytest
 
-from server.config import settings
 from tests.test_ws_delivery import (
     connection,
     frame,
@@ -25,13 +24,13 @@ INVALID_IDENTITIES = [
 
 @pytest.mark.parametrize('identity', INVALID_IDENTITIES)
 async def test_send_without_valid_client_identity_has_no_dispatch_effect(runtime, monkeypatch, tmp_path, identity):
-    manager, db = runtime
+    manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent['id'], 'Current identity', str(tmp_path), backend='codex')
     starts = hold_model_runs(manager, monkeypatch)
     before = manager.dispatch_snapshot(session.id)
     try:
-        async with connection(manager, settings.auth_token) as browser:
+        async with connection(manager, bearer) as browser:
             payload = {
                 'type': 'send_message', 'session_id': session.id, 'content': 'Must not execute without identity',
             }
@@ -54,7 +53,7 @@ async def send_control(browser, payload):
 
 
 async def test_current_submission_identity_replays_conflicts_and_keeps_new_ids_distinct(runtime, monkeypatch, tmp_path):
-    manager, db = runtime
+    manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent['id'], 'Distinct inputs', str(tmp_path), backend='codex')
     starts = hold_model_runs(manager, monkeypatch)
@@ -62,7 +61,7 @@ async def test_current_submission_identity_replays_conflicts_and_keeps_new_ids_d
     await asyncio.wait_for(starts.get(), 2)
     payload = {'type': 'send_message', 'session_id': session.id, 'content': 'Identical text', 'client_request_id': 'x' * 128}
     try:
-        async with connection(manager, settings.auth_token) as browser:
+        async with connection(manager, bearer) as browser:
             async def send(data):
                 await browser[0].put({'type': 'websocket.receive', 'text': json.dumps(data)})
                 return await receipt_frame(browser[1], 'submission')
@@ -84,8 +83,8 @@ async def test_current_submission_identity_replays_conflicts_and_keeps_new_ids_d
 
 @pytest.mark.parametrize('operation', ['send_message', 'interrupt', 'answer_question'])
 async def test_identity_refusal_for_unknown_session_preserves_the_socket(runtime, operation):
-    manager, _ = runtime
-    async with connection(manager, settings.auth_token) as browser:
+    manager, _, bearer = runtime
+    async with connection(manager, bearer) as browser:
         await browser[0].put({'type': 'websocket.receive', 'text': json.dumps({
             'type': operation, 'session_id': 'unknown', 'content': 'Unaccepted input',
         })})
@@ -97,14 +96,14 @@ async def test_identity_refusal_for_unknown_session_preserves_the_socket(runtime
 
 @pytest.mark.parametrize('missing', ['request_id', 'attempt_id'])
 async def test_idle_stop_requires_explicit_null_targets(runtime, tmp_path, missing):
-    manager, db = runtime
+    manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent['id'], 'Idle identity', str(tmp_path), backend='codex')
     before = manager.dispatch_snapshot(session.id)
     payload = {'type': 'interrupt', 'session_id': session.id, 'client_command_id': 'missing-target',
                'request_id': None, 'attempt_id': None, 'generation': before['generation'], 'revision': before['revision']}
     del payload[missing]
-    async with connection(manager, settings.auth_token) as browser:
+    async with connection(manager, bearer) as browser:
         refusal = await send_control(browser, payload)
         assert refusal['accepted'] is False and refusal['code'] == 'stale_command'
         assert manager.dispatch_snapshot(session.id) == before
@@ -114,7 +113,7 @@ async def test_idle_stop_requires_explicit_null_targets(runtime, tmp_path, missi
 
 
 async def test_idle_stop_captured_before_a_completed_turn_cannot_pause_the_new_idle_state(runtime, monkeypatch, tmp_path):
-    manager, db = runtime
+    manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent['id'], 'Idle cycle', str(tmp_path), backend='codex')
     before = manager.dispatch_snapshot(session.id)
@@ -127,7 +126,7 @@ async def test_idle_stop_captured_before_a_completed_turn_cannot_pause_the_new_i
     current = manager.dispatch_snapshot(session.id)
     assert current['active_request_id'] is None and current['paused'] is False
     assert current['revision'] > before['revision'] and current['generation'] == before['generation']
-    async with connection(manager, settings.auth_token) as browser:
+    async with connection(manager, bearer) as browser:
         payload = {'type': 'interrupt', 'session_id': session.id, 'client_command_id': 'late-idle-stop',
                    'request_id': None, 'attempt_id': None, 'generation': before['generation'], 'revision': before['revision']}
         refusal = await send_control(browser, payload)
@@ -138,7 +137,7 @@ async def test_idle_stop_captured_before_a_completed_turn_cannot_pause_the_new_i
 
 
 async def test_correlated_question_requires_the_complete_answer_batch(runtime, monkeypatch, tmp_path):
-    manager, db = runtime
+    manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent['id'], 'Whole answers', str(tmp_path), backend='codex')
     starts = hold_model_runs(manager, monkeypatch)
@@ -148,7 +147,7 @@ async def test_correlated_question_requires_the_complete_answer_batch(runtime, m
     payload = {'type': 'answer_question', 'session_id': session.id, 'question_id': question,
                'request_id': receipt.request_id, 'attempt_id': scope['attempt_id']}
     try:
-        async with connection(manager, settings.auth_token) as browser:
+        async with connection(manager, bearer) as browser:
             for number, answers in enumerate(([{'text': 'first'}], [{'text': 'first'}, {}])):
                 refusal = await send_control(browser, {**payload, 'client_command_id': f'incomplete-{number}', 'answers': answers})
                 assert refusal['accepted'] is False
@@ -169,7 +168,7 @@ async def test_correlated_question_requires_the_complete_answer_batch(runtime, m
 async def test_control_without_valid_command_identity_preserves_the_current_execution(
     runtime, monkeypatch, tmp_path, operation, identity,
 ):
-    manager, db = runtime
+    manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent['id'], 'Scoped control', str(tmp_path), backend='codex')
     starts = hold_model_runs(manager, monkeypatch)
@@ -178,7 +177,7 @@ async def test_control_without_valid_command_identity_preserves_the_current_exec
     question_id = await manager.create_pending_question(session.id, [{'question': 'Choose', 'options': [{'label': 'A'}]}])
     before = manager.dispatch_snapshot(session.id)
     try:
-        async with connection(manager, settings.auth_token) as browser:
+        async with connection(manager, bearer) as browser:
             payload = {
                 'type': operation, 'session_id': session.id,
                 'request_id': receipt.request_id, 'attempt_id': scope['attempt_id'],

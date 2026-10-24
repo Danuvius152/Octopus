@@ -19,6 +19,22 @@ from tests.test_service_runtime import installation_settings
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize("method,path", [("POST", "/bootstrap"), ("POST", "/bootstrap/resume"),
+                                         ("GET", "/bootstrap/status")])
+async def test_account_adoption_routes_are_retired_without_mutating_accounts(client, method, path):
+    http, users, _ = client
+    owner = await users.create_user(username="current-owner", password="current-owned-password", is_admin=True)
+    token = await users.issue_token(owner["id"])
+    before = await users.db.list_users(), await users.db.load_agents(include_archived=True)
+    response = await http.request(method, "/api/auth" + path, headers={"Authorization": f"Bearer {token}"},
+                                  json={"username": "replacement", "password": "replacement-password"})
+    assert response.status_code in {404, 405}
+    schema = (await http.get("/openapi.json")).json()
+    assert "/api/auth" + path not in schema["paths"]
+    assert (await users.db.list_users(), await users.db.load_agents(include_archived=True)) == before
+    assert (await http.get("/api/auth/identity", headers={"Authorization": f"Bearer {token}"})).status_code == 200
+
+
 @pytest.mark.parametrize("crashed_wal", [False, True])
 @pytest.mark.parametrize("foreign_key", [False, True])
 def test_unfinished_rotation_is_rejected_before_preparing_storage(tmp_path, crashed_wal, foreign_key):

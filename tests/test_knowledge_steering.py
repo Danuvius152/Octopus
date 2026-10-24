@@ -22,6 +22,7 @@ from server.session_manager import SessionManager
 from server.wiki.limits import MaintenanceLimit
 from server.wiki.registry import registry
 from server.wiki.tasks import RUN_WIKI_SCOPE, tasks
+from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
 
 
@@ -30,12 +31,13 @@ async def steering(tmp_path, monkeypatch):
     path = str(tmp_path / "steering.db")
     db = Database(path)
     await db.initialize()
+    user, _ = await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
     vault = tmp_path / "vault"
     vault.mkdir()
-    registry.configure(None, vault, agent["id"])
+    registry.configure(user["id"], vault, agent["id"])
     session = await manager.create_session(agent["id"], "Steering", str(tmp_path), backend="codex")
     reader = Database(path)
     await reader.initialize()

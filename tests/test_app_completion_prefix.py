@@ -23,17 +23,18 @@ notices = publication_tests.notices
 async def test_app_answer_waits_for_the_original_terminal_notification_prefix(
     notices, tmp_path, monkeypatch, cancelled_terminal,
 ):
-    manager, _original, client = notices
+    manager, original, client = notices
     monkeypatch.setattr(settings, "applications_dir", str(tmp_path / "applications"))
     applications = ApplicationManager()
     applications.bind(session_mgr=manager, db=manager.db)
     app_agent = AppAgentManager()
     app_agent.bind(session_mgr=manager, db=manager.db, app_mgr=applications)
-    agent = await AgentManager(manager.db).create_agent(name="Original App agent", backend="codex")
+    agent = await AgentManager(manager.db).create_agent(name="Original App agent", backend="codex", user_id=original.user_id)
     await manager.db.save_application(
         app_id="original-prefix-app", name="Original App", agent_id=agent["id"],
         description="A ready App with an original agent conversation.",
         app_dir=str(tmp_path / "applications" / "original"), status="ready",
+        user_id=original.user_id,
         created_at="2026-10-21T00:00:00+00:00", updated_at="2026-10-21T00:00:00+00:00",
     )
     application = await manager.db.get_application("original-prefix-app")

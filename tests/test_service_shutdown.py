@@ -29,6 +29,7 @@ from server.sessions import SessionManager
 from server.wiki import jobs as wiki_jobs
 from server.wiki.registry import registry
 from server.wiki.store import WikiError
+from tests.accounts import create_account
 
 
 @pytest.fixture
@@ -224,6 +225,7 @@ async def test_lifespan_shutdown_rejects_terminal_followup_and_records_service_i
     deliveries = []
 
     async with main.app.router.lifespan_context(main.app):
+        await create_account(service.db, extra_roots=[tmp_path])
         agent = await service.db.get_system_agent()
         parent = await service.create_session(agent["id"], "parent", str(tmp_path), backend="codex")
         child = await service.create_session(agent["id"], "child", str(tmp_path), backend="codex")
@@ -258,11 +260,12 @@ async def test_lifespan_shutdown_preserves_wiki_job_as_interrupted(service, tmp_
     ready = asyncio.Event()
 
     async with main.app.router.lifespan_context(main.app):
-        curator = await AgentManager(service.db).create_agent(name="Curator", backend="codex")
+        user, _ = await create_account(service.db, extra_roots=[tmp_path])
+        curator = await AgentManager(service.db).create_agent(name="Curator", backend="codex", user_id=user["id"])
         vault = tmp_path / "vault"
         (vault / "Library").mkdir(parents=True)
-        registry.configure(None, vault, curator["id"])
-        jobs = wiki_jobs.WikiJobs(None)
+        registry.configure(user["id"], vault, curator["id"])
+        jobs = wiki_jobs.WikiJobs(user["id"])
 
         async def observe(event):
             if event.get("type") == "assistant_text":
@@ -276,10 +279,10 @@ async def test_lifespan_shutdown_preserves_wiki_job_as_interrupted(service, tmp_
         await asyncio.wait_for(ready.wait(), 5)
 
     with pytest.raises(WikiError) as stopped:
-        wiki_jobs.WikiJobs(None)
+        wiki_jobs.WikiJobs(user["id"])
     assert stopped.value.status == 503
     registry.resume_access()
-    saved = wiki_jobs.WikiJobs(None).get(job["id"])
+    saved = wiki_jobs.WikiJobs(user["id"]).get(job["id"])
     assert saved["status"] == "interrupted"
     assert saved["items"][0]["status"] == "pending"
     assert len(starts) == 1
@@ -300,6 +303,7 @@ async def test_user_stop_keeps_its_reason_when_service_shutdown_follows(service,
     stopping = None
     try:
         async with main.app.router.lifespan_context(main.app):
+            await create_account(service.db, extra_roots=[tmp_path])
             agent = await service.db.get_system_agent()
             session = await service.create_session(agent["id"], "Stop race", str(tmp_path), backend="codex")
 
@@ -339,6 +343,7 @@ async def test_unconfirmed_lifespan_keeps_selected_success_writer_and_database(s
     try:
         with pytest.raises(Exception) as failure:
             async with main.app.router.lifespan_context(main.app):
+                await create_account(service.db, extra_roots=[tmp_path])
                 agent = await service.db.get_system_agent()
                 session = await service.create_session(agent["id"], "Selected result", str(tmp_path), backend="codex")
                 record = service.db.record_terminal
@@ -385,6 +390,7 @@ async def test_lifespan_retires_failed_writer_without_inventing_an_unconfirmed_r
             raise OSError("synthetic terminal adapter failure")
 
         monkeypatch.setattr(service.db, "record_terminal", record_terminal)
+        await create_account(service.db, extra_roots=[tmp_path])
         agent = await service.db.get_system_agent()
         session = await service.create_session(agent["id"], "completed", str(tmp_path), backend="codex")
 
@@ -458,6 +464,7 @@ async def test_lifespan_joins_retirement_already_started_by_held_reaper(
     try:
         with pytest.raises(Exception) as failure:
             async with main.app.router.lifespan_context(main.app):
+                await create_account(service.db, extra_roots=[tmp_path])
                 agent = await service.db.get_system_agent()
                 session = await service.create_session(agent["id"], "held", str(tmp_path), backend="codex")
                 receipt = await service.start_message(session.id, "finish and hold")

@@ -24,7 +24,7 @@ async def test_invalid_future_receipt_fails_startup_without_leaking_its_database
     )
     await asyncio.wait_for(starts.get(), 5)
     before = await seed.database.load_delegation_state(
-        rec.delegation_id, parent_session_id=seed.parent_id, user_id=None,
+        rec.delegation_id, parent_session_id=seed.parent_id, user_id=seed.manager.get_session(seed.parent_id).user_id,
     )
     broken = json.loads(before)
     request_marker = "private malformed request marker"
@@ -32,7 +32,7 @@ async def test_invalid_future_receipt_fails_startup_without_leaking_its_database
     broken["state"] = False
     assert await seed.database.compare_and_set_delegation_state(
         rec.delegation_id, before, json.dumps(broken),
-        target_agent_id=rec.target_agent_id, parent_session_id=seed.parent_id, user_id=None,
+        target_agent_id=rec.target_agent_id, parent_session_id=seed.parent_id, user_id=seed.manager.get_session(seed.parent_id).user_id,
     )
     await seed.close()
     removed = []

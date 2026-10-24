@@ -26,7 +26,7 @@ async def test_publication_settlement_follows_the_same_moved_identity(
     )
     job = jobs.maintain("move-recovery", "", "Add a summary", [old], None, [], "human")
     item = dict(job["items"][0])
-    with assigned(job, config) as (headers, _):
+    async with assigned(job, config, client=client) as (headers, _):
         if move_when == "before_write":
             (root / old).rename(root / moved)
             jobs.store.refresh()
@@ -244,11 +244,11 @@ async def test_legacy_candidates_keep_verified_ownership_after_scope_readmission
     jobs.update(job["id"], status="interrupted", items=job["items"])
     for path, candidate, _ in candidates:
         assert next(row for row in history.history(path)["items"] if row["id"] == candidate)["recoverable"]["before"]
-    curator = await AgentManager(api.session_manager.db).create_agent(name="Replacement curator")
-    changed = await client.put("/api/wiki/config", headers=api.HEADERS,
+    curator = await AgentManager(api.session_manager.db).create_agent(name="Replacement curator", user_id=jobs.user_id)
+    changed = await client.put("/api/wiki/config", headers=client.headers,
                                json={"root": str(root), "curator_agent_id": curator["id"]})
     assert changed.status_code == 200, changed.text
-    current = WikiJobs(None)
+    current = WikiJobs(jobs.user_id)
     current.readmit(job["id"], paths[:1] if narrow else paths)
     for path, candidate, revision in candidates:
         restored = WikiHistory(current.store).restore(candidate, revision, "before", "human")
@@ -286,11 +286,11 @@ async def test_candidate_retention_boundary_preserves_identity_after_readmission
     jobs.store.refresh()
     before_b = (root / old).read_bytes()
     jobs.update(job["id"], status="interrupted")
-    curator = await AgentManager(api.session_manager.db).create_agent(name="Retention review curator")
-    changed = await client.put("/api/wiki/config", headers=api.HEADERS,
+    curator = await AgentManager(api.session_manager.db).create_agent(name="Retention review curator", user_id=jobs.user_id)
+    changed = await client.put("/api/wiki/config", headers=client.headers,
                                json={"root": str(root), "curator_agent_id": curator["id"]})
     assert changed.status_code == 200, changed.text
-    current = WikiJobs(None)
+    current = WikiJobs(jobs.user_id)
     readmitted = current.readmit(job["id"], [old])  # Only B remains selected; A has no active-job protection.
     assert current.next_queued() == job["id"]
     current.recover_jobs()
@@ -342,7 +342,7 @@ async def test_settlement_resolves_the_selected_documents_candidates_at_both_pat
     (root / moved).write_text("# A\nSecond human update.\n")
     jobs.store.refresh()
     jobs.reread(job["id"], item, "Second update after moving")
-    with assigned(jobs.get(job["id"]), config) as (headers, _):
+    async with assigned(jobs.get(job["id"]), config, client=client) as (headers, _):
         read = await client.get("/api/wiki/read", headers=headers, params={"doc": item["doc"]})
         assert read.status_code == 200, read.text
         response = await client.post(

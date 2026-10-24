@@ -18,7 +18,6 @@ async def accounts(client, monkeypatch):
     connection, db = client
     users = UserManager(db)
     monkeypatch.setattr(deps, "_user_manager", users)
-    deps.forget_accounts_exist()
     actor = await users.create_user(username="actor", password="actor-password")
     other = await users.create_user(username="other", password="other-password")
     bearer = await users.issue_token(actor["id"])
@@ -27,7 +26,6 @@ async def accounts(client, monkeypatch):
         await db.save_credential(user["id"], "claude-code", "original", "oauth",
                                  encrypt("old-secret", users.data_key(user)), "now", user_id=user["id"])
     yield connection, db, users, actor, other, {"Authorization": f"Bearer {bearer}"}
-    deps.forget_accounts_exist()
 
 
 async def complete(connection, headers, target):
@@ -78,7 +76,7 @@ async def test_owned_reauth_keeps_binding_and_decryptable_secret(accounts, monke
     connection, db, users, actor, other, headers = accounts
     await db.update_credential(actor["id"], status="needs_reconnect", needs_reconnect=True,
                                last_refresh_error_code="invalid_grant")
-    agent = await db.get_system_agent()
+    agent = await db.get_system_agent(actor["id"])
     await db.update_agent(agent["id"], credential_id=actor["id"])
 
     async def submit(self, login_id, code):

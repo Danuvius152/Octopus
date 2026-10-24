@@ -9,7 +9,7 @@ from ..diagnostics import exception_diagnostic
 from ..service_health import ServiceHealth
 from .base import _BACKEND_RETIRE_TIMEOUT, Session, SessionManagerBase, logger
 from .owner import SessionOwner, SessionOwnerUnavailable
-from .owner_runtime import ApplyOwner, ReleaseArchive, ReserveFork
+from .owner_runtime import ReleaseArchive, ReserveFork
 
 
 class OwnershipMixin(SessionManagerBase):
@@ -19,23 +19,6 @@ class OwnershipMixin(SessionManagerBase):
         owner = self._session_owners.get(id(session)) if session is not None else None
         return owner is not None and owner.failed
 
-    async def adopt_orphan_sessions(self, user_id: str) -> int:
-        """Give every live session with no owner to `user_id`.
-
-        The database half of the upgrade (`db.adopt_orphan_rows`) does not
-        reach the `Session` objects already in memory, and this manager is a
-        long-lived process: until it was restarted, the account that had just
-        claimed the install saw none of its own sessions (they no longer match
-        the filter) and their frames still went out to everyone (`_audience`
-        reads the same field). Called by `bootstrap_first_account`, so the two
-        halves happen together.
-        """
-        adopted = 0
-        for session in tuple(self.sessions.values()):
-            if session.user_id is None:
-                await self._session_owner(session).call_runtime(ApplyOwner(user_id))
-                adopted += 1
-        return adopted
 
 
     def _session_owner(self, session: Session) -> SessionOwner:

@@ -3,11 +3,12 @@
 import asyncio
 import base64
 import json
-from contextlib import contextmanager
+from contextlib import asynccontextmanager, contextmanager
 from types import SimpleNamespace
 
 import pytest
 
+from server import deps
 from server.mcp_identity import mint
 from server.wiki import registry
 from server.wiki.jobs import WikiJobs
@@ -26,29 +27,37 @@ async def prepare(client, tmp_path, files=None):
         file.parent.mkdir(parents=True, exist_ok=True)
         file.write_text(text)
     config = await api.configure(client, vault)
-    return vault, config, WikiJobs(None)
+    owner = await deps.get_user_manager().resolve_token(
+        client.headers["Authorization"].removeprefix("Bearer "), touch=False,
+    )
+    assert owner is not None
+    return vault, config, WikiJobs(owner["id"])
 
 
-@contextmanager
-def entry(mode="maintain", request="/wiki维护", agent="reader"):
-    session = SimpleNamespace(id="state-" + agent, user_id=None, agent_id=agent)
+@asynccontextmanager
+async def entry(client, mode="maintain", request="/wiki维护", agent="reader"):
+    owner = await deps.get_user_manager().resolve_token(
+        client.headers["Authorization"].removeprefix("Bearer "), touch=False,
+    )
+    assert owner is not None
+    session = SimpleNamespace(id="state-" + agent, user_id=owner["id"], agent_id=agent)
     token = tasks.open(session, mode, request)
     try:
-        yield {"Authorization": "Bearer " + mint(session.id, wiki_task_id=token)}, tasks.active[token]
+        yield {"Authorization": "Bearer " + mint(session.id, user_id=session.user_id, wiki_task_id=token)}, tasks.active[token]
     finally:
         tasks.close(token)
 
 
 async def state(client, doc=None, headers=None, **kwargs):
     params = {"doc": doc, **kwargs} if doc else kwargs
-    result = await client.get("/api/wiki/maintenance-status", params=params, headers=headers or api.HEADERS)
+    result = await client.get("/api/wiki/maintenance-status", params=params, headers=headers or client.headers)
     assert result.status_code == 200, result.text
     return result.json()
 
 
 async def current_read(client, doc, headers=None):
     for _ in range(100):
-        result = await client.get("/api/wiki/read", params={"doc": doc}, headers=headers or api.HEADERS)
+        result = await client.get("/api/wiki/read", params={"doc": doc}, headers=headers or client.headers)
         if result.status_code != 503:
             return result
         await asyncio.sleep(0.01)
@@ -58,11 +67,11 @@ async def current_read(client, doc, headers=None):
 async def settle(client, jobs, config, path="Library/journal.md", *, job=None, operation="no_change", final_status="completed", settled=True):
     job = job or jobs.maintain("baseline-" + path, "", "Review current words", [path] if operation != "publish" else [], None, [], "human",
                                creation={"purpose": "requested_knowledge_page", "paths": ["Library/summary.md"]} if operation == "publish" else None)
-    session = SimpleNamespace(id="settle-worker", user_id=None, agent_id=config["curator_agent_id"])
+    session = SimpleNamespace(id="settle-worker", user_id=jobs.user_id, agent_id=config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
-    headers = {"Authorization": "Bearer " + mint(session.id, wiki_task_id=token)}
+    headers = {"Authorization": "Bearer " + mint(session.id, user_id=session.user_id, wiki_task_id=token)}
     try:
         read = (await client.get("/api/wiki/read", params={"doc": path}, headers=headers)).json()
         if operation == "no_change":
@@ -104,7 +113,7 @@ async def test_save_is_not_review_and_a_pure_move_needs_no_new_worker(client, tm
     assert current["current"]["revision"] == accepted["revision"]
     assert current["status"] == "unchanged" and current["path_changed"] and not current["actionable"]
     assert current["baseline"]["path"] == "Library/journal.md"
-    saved = await client.put("/api/wiki/document", headers=api.HEADERS, json={"path": current["current"]["path"], "expected_revision": accepted["revision"], "content": "# Journal\n\nCurrent human changes.\n", "reason": "human save"})
+    saved = await client.put("/api/wiki/document", headers=client.headers, json={"path": current["current"]["path"], "expected_revision": accepted["revision"], "content": "# Journal\n\nCurrent human changes.\n", "reason": "human save"})
     assert saved.status_code == 200, saved.text
     changed = (await state(client, read.json()["id"]))["items"][0]
     assert changed["status"] == "changed" and changed["baseline"]["id"] == first["baseline"]["id"]
@@ -113,7 +122,7 @@ async def test_save_is_not_review_and_a_pure_move_needs_no_new_worker(client, tm
 @pytest.mark.parametrize("command", ["/wiki维护", "/wiki 维护", "/wiki maintain"])
 async def test_bare_command_requires_a_checked_current_library_selection(client, tmp_path, command):
     _, _, jobs = await prepare(client, tmp_path, {"Library/log.md": "# Log\nOne current record.\n", "outside.md": "# Outside\n", "Library/source.txt": "original"})
-    with entry(request=command) as (headers, task):
+    async with entry(client, request=command) as (headers, task):
         observed = (await state(client, headers=headers))["items"]
         assert [i["current"]["path"] for i in observed] == ["Library/log.md"]
         assert not task.document_ids and not task.reservation_ids and not task.reads
@@ -132,15 +141,15 @@ async def test_bare_command_requires_a_checked_current_library_selection(client,
 
 async def test_explicit_short_name_is_unique_and_cannot_expand_to_another_delta(client, tmp_path):
     await prepare(client, tmp_path, {"Library/a/brief.md": "# Brief\n", "Library/another.md": "# Another\n"})
-    with entry(request="/wiki维护 brief.md") as (headers, _):
+    async with entry(client, request="/wiki维护 brief.md") as (headers, _):
         allowed = (await state(client, "Library/a/brief.md", headers=headers))["items"][0]
         other = (await state(client, "Library/another.md", headers=headers))["items"][0]
         assert (await client.post("/api/wiki/maintain", headers=headers, json=submission(other))).status_code == 403
         assert (await client.post("/api/wiki/maintain", headers=headers, json=submission(allowed))).status_code == 200
-    (registry.store(None).root / "Library/b").mkdir()
-    (registry.store(None).root / "Library/b/brief.md").write_text("# Other brief\n")
-    registry.store(None).refresh()
-    with entry(request="/wiki维护 brief.md") as (headers, _):
+    (registry.store((await api.session_manager.db.get_system_agent())["user_id"]).root / "Library/b").mkdir()
+    (registry.store((await api.session_manager.db.get_system_agent())["user_id"]).root / "Library/b/brief.md").write_text("# Other brief\n")
+    registry.store((await api.session_manager.db.get_system_agent())["user_id"]).refresh()
+    async with entry(client, request="/wiki维护 brief.md") as (headers, _):
         observed = (await state(client, "Library/a/brief.md", headers=headers))["items"][0]
         assert (await client.post("/api/wiki/maintain", headers=headers, json=submission(observed))).status_code == 403
 
@@ -148,7 +157,7 @@ async def test_explicit_short_name_is_unique_and_cannot_expand_to_another_delta(
 async def test_observation_drift_and_return_to_old_input_are_not_false_success(client, tmp_path):
     vault, config, jobs = await prepare(client, tmp_path)
     original = (vault / "Library/journal.md").read_bytes()
-    with entry() as (headers, _):
+    async with entry(client) as (headers, _):
         first = (await state(client, "Library/journal.md", headers=headers))["items"][0]
         queued = await client.post("/api/wiki/maintain", headers=headers, json=submission(first))
         assert queued.status_code == 200, queued.text
@@ -169,13 +178,13 @@ async def test_status_has_no_private_body_error_or_receipt_payload_and_does_not_
     secret = "PRIVATE_SENTINEL_NOT_NAVIGATION"
     vault, config, jobs = await prepare(client, tmp_path, {"Library/record.md": "---\ndescription: " + secret + "\nunknown: preserved\n---\n# Record\n" + secret + "\n"})
     _, job = await settle(client, jobs, config, path="Library/record.md")
-    store = registry.store(None)
+    store = registry.store((await api.session_manager.db.get_system_agent())["user_id"])
     with store.connect() as db:
         db.execute("UPDATE operation_receipts SET reason=?,details=?", (secret, json.dumps({"secret": secret})))
         db.execute("UPDATE jobs SET error=? WHERE id=?", (secret, job["id"]))
         before = {table: db.execute("SELECT count(*) FROM " + table).fetchone()[0] for table in ("changes", "operation_receipts", "jobs")}
     original = (vault / "Library/record.md").read_bytes()
-    with entry(request="/wiki维护 record.md") as (headers, task):
+    async with entry(client, request="/wiki维护 record.md") as (headers, task):
         response = await state(client, "Library/record.md", headers=headers)
         assert secret not in json.dumps(response) and not task.reads
         assert not task.document_ids and not task.reservation_ids
@@ -208,14 +217,14 @@ async def test_three_page_snapshot_detects_receipt_only_and_settlement_changes(c
     index = first["index_epoch"]
     await settle(client, jobs, config, path=paths[-1])
     assert (await state(client))["index_epoch"] == index
-    stale = await client.get("/api/wiki/maintenance-status", params={"limit": 2, "cursor": first["next_cursor"]}, headers=api.HEADERS)
+    stale = await client.get("/api/wiki/maintenance-status", params={"limit": 2, "cursor": first["next_cursor"]}, headers=client.headers)
     assert stale.status_code == 409
     _, pending = await settle(client, jobs, config, path=paths[-2], settled=False)
     before_settlement = await state(client, limit=1)
     item = pending["items"][0]
     assert jobs.recover_publication(pending["id"], item)
     jobs.update(pending["id"], status="completed", items=pending["items"], session_id=None)
-    stale = await client.get("/api/wiki/maintenance-status", params={"limit": 1, "cursor": before_settlement["next_cursor"]}, headers=api.HEADERS)
+    stale = await client.get("/api/wiki/maintenance-status", params={"limit": 1, "cursor": before_settlement["next_cursor"]}, headers=client.headers)
     assert stale.status_code == 409
 
 
@@ -223,7 +232,7 @@ async def test_three_page_snapshot_detects_receipt_only_and_settlement_changes(c
 async def test_unsettled_publications_block_regeneration_without_recovery_side_effects(client, tmp_path, failure):
     _, config, jobs = await prepare(client, tmp_path)
     _, job = await settle(client, jobs, config, operation="organize")
-    store = registry.store(None)
+    store = registry.store((await api.session_manager.db.get_system_agent())["user_id"])
     if failure == "recording":
         job["items"][0]["recording_failure"] = {"session_id": "not-committed", "request_id": "original"}
         jobs.update(job["id"], status="cancelled", items=job["items"])
@@ -277,7 +286,7 @@ async def test_same_bytes_replacement_has_no_inherited_review_identity(client, t
     replacement = (await state(client, "Library/journal.md"))["items"][0]
     assert replacement["current"]["id"] != first["current"]["id"] and replacement["status"] == "unreviewed"
     assert replacement["current"]["revision"] == first["current"]["revision"]
-    old = await client.get("/api/wiki/maintenance-status", params={"doc": first["current"]["id"]}, headers=api.HEADERS)
+    old = await client.get("/api/wiki/maintenance-status", params={"doc": first["current"]["id"]}, headers=client.headers)
     assert old.status_code == 404
 
 
@@ -297,7 +306,7 @@ async def test_renamed_literal_inlinks_include_outside_library_without_leaking_a
     assert first["total"] == 2 and {r["source_path"] for p in (first, second) for r in p["items"]} == {"Library/ref.md", "map.md"}
     assert secret not in json.dumps([first, second]) and "unavailable.json" not in json.dumps([first, second])
     assert all(r["matched_path"] == "Library/original.md" for p in (first, second) for r in p["items"])
-    with entry(request="/wiki维护 renamed.md") as (headers, _):
+    async with entry(client, request="/wiki维护 renamed.md") as (headers, _):
         other = (await state(client, "Library/ref.md", headers=headers))["items"][0]
         assert (await client.post("/api/wiki/maintain", headers=headers, json=submission(other))).status_code == 403
 
@@ -321,7 +330,7 @@ async def test_old_path_impact_uses_one_uri_decode_for_literal_percent_filename(
 async def test_checked_no_change_replay_does_not_fail_on_its_own_new_baseline(client, tmp_path):
     vault, config, jobs = await prepare(client, tmp_path, {"Library/record.md": "---\nunknown_field: keep\n---\n# Record\n\nCurrent human additions; removed text stays removed.\n"})
     original = (vault / "Library/record.md").read_bytes()
-    with entry(request="/wiki维护 record.md") as (headers, _):
+    async with entry(client, request="/wiki维护 record.md") as (headers, _):
         observed = (await state(client, "Library/record.md", headers=headers))["items"][0]
         queued = await client.post("/api/wiki/maintain", headers=headers, json=submission(observed))
         assert queued.status_code == 200, queued.text
@@ -337,7 +346,7 @@ async def test_checked_no_change_replay_does_not_fail_on_its_own_new_baseline(cl
 @pytest.mark.parametrize("command", ['/wiki维护 "Library/a b.md"', "/wiki维护 Library/a b.md"])
 async def test_exact_path_with_spaces_selects_only_that_document(client, tmp_path, command):
     await prepare(client, tmp_path, {"Library/a b.md": "# A B\n", "Library/a.md": "# A\n"})
-    with entry(request=command) as (headers, _):
+    async with entry(client, request=command) as (headers, _):
         chosen = (await state(client, "Library/a b.md", headers=headers))["items"][0]
         other = (await state(client, "Library/a.md", headers=headers))["items"][0]
         assert (await client.post("/api/wiki/maintain", headers=headers, json=submission(chosen))).status_code == 200
@@ -347,7 +356,7 @@ async def test_exact_path_with_spaces_selects_only_that_document(client, tmp_pat
 @pytest.mark.parametrize("drift", ["rename", "replacement"])
 async def test_new_submission_rejects_identity_or_path_drift_after_observation(client, tmp_path, drift):
     vault, _, jobs = await prepare(client, tmp_path)
-    with entry() as (headers, _):
+    async with entry(client) as (headers, _):
         observed = (await state(client, "Library/journal.md", headers=headers))["items"][0]
         path = vault / "Library/journal.md"
         if drift == "rename":
@@ -369,15 +378,15 @@ async def test_cursor_binds_actor_registration_and_filters(client, tmp_path):
     from server.wiki.store import WikiError
 
     await prepare(client, tmp_path, {"Library/a.md": "# A\n", "Library/b.md": "# B\n"})
-    with entry(agent="first") as (first, _), entry(agent="second") as (second, _):
+    async with entry(client, agent="first") as (first, _), entry(client, agent="second") as (second, _):
         cursor = (await state(client, headers=first, limit=1))["next_cursor"]
         for params, headers, expected in [({"limit": 1, "cursor": cursor}, second, 409),
                                           ({"limit": 1, "cursor": cursor, "directory": "Library/a"}, first, 422),
                                           ({"limit": 1, "cursor": cursor, "doc": "Library/a.md", "view": "links"}, first, 422)]:
             denied = await client.get("/api/wiki/maintenance-status", headers=headers, params=params)
             assert denied.status_code == expected, denied.text
-    store = registry.store(None)
-    registration = registry.config(None)
+    store = registry.store((await api.session_manager.db.get_system_agent())["user_id"])
+    registration = registry.config((await api.session_manager.db.get_system_agent())["user_id"])
     own = status(store, registration, "one-account", limit=1)
     with pytest.raises(WikiError) as changed_account:
         status(store, registration, "another-account", limit=1, cursor=own["next_cursor"])
@@ -421,8 +430,8 @@ async def test_normal_weber_mcp_can_observe_and_enqueue_but_not_write_or_reuse_e
     vault, config, jobs = await prepare(client, tmp_path, {"Library/journal.md": "# Journal\n\nKeep the current words.\n", "Library/other.md": "# Other\n"})
     session = await api.session_manager.create_session(config["curator_agent_id"], "Ordinary maintenance entry", str(tmp_path))
     token = tasks.open(session, "maintain", "/wiki维护 journal.md")
-    headers = {"Authorization": "Bearer " + mint(session.id, wiki_task_id=token)}
-    host = await start_callback_api(router, overrides={get_session_manager: lambda: api.session_manager}, exception_handlers={WikiError: _wiki_error})
+    headers = {"Authorization": "Bearer " + mint(session.id, user_id=session.user_id, wiki_task_id=token)}
+    host = await start_callback_api(router, overrides={get_session_manager: lambda: api.session_manager}, exception_handlers={WikiError: _wiki_error}, readiness_token=mint(session.id, user_id=session.user_id))
     monkeypatch.setattr(settings, "port", host.port)
     original = (vault / "Library/journal.md").read_bytes()
     try:
@@ -470,7 +479,7 @@ async def test_read_only_turn_observation_cannot_authorize_maintenance(client, t
     from server.wiki.tasks import explicit_mode
 
     await prepare(client, tmp_path)
-    with entry(mode=explicit_mode("/wiki维护", mode)) as (headers, _):
+    async with entry(client, mode=explicit_mode("/wiki维护", mode)) as (headers, _):
         observed = (await state(client, "Library/journal.md", headers=headers))["items"][0]
         assert observed["actionable"]
         assert (await client.post("/api/wiki/maintain", headers=headers, json=submission(observed))).status_code == 403
@@ -478,12 +487,12 @@ async def test_read_only_turn_observation_cannot_authorize_maintenance(client, t
 
 async def test_registration_rebinding_invalidates_old_observation(client, tmp_path):
     vault, _, _ = await prepare(client, tmp_path)
-    with entry(request="/wiki维护 journal.md") as (headers, _):
+    async with entry(client, request="/wiki维护 journal.md") as (headers, _):
         observed = (await state(client, "Library/journal.md", headers=headers))["items"][0]
-        registry.configure(None, vault, "new-curator")
+        registry.configure((await api.session_manager.db.get_system_agent())["user_id"], vault, "new-curator")
         denied = await client.post("/api/wiki/maintain", headers=headers, json=submission(observed))
         assert denied.status_code == 409, denied.text
-        assert WikiJobs(None).list()["items"] == []
+        assert WikiJobs((await api.session_manager.db.get_system_agent())["user_id"]).list()["items"] == []
 
 
 async def test_status_and_checked_submission_are_isolated_between_real_accounts(two_accounts):
@@ -539,7 +548,7 @@ async def test_checked_admission_does_not_hold_registration_lock_while_waiting_f
             worker_ready.set()
             if not admission_waiting.wait(3):
                 return
-            guard = registry._account_lock(None)
+            guard = registry._account_lock(jobs.user_id)
             obtained = guard.acquire(blocking=False)
             acquired.append(obtained)
             if obtained:
@@ -558,7 +567,7 @@ async def test_checked_admission_does_not_hold_registration_lock_while_waiting_f
 
 async def test_empty_explicit_request_is_a_selection_error_not_a_server_error(client, tmp_path):
     await prepare(client, tmp_path)
-    with entry(request="") as (headers, _):
+    async with entry(client, request="") as (headers, _):
         observed = (await state(client, "Library/journal.md", headers=headers))["items"][0]
         denied = await client.post("/api/wiki/maintain", headers=headers, json=submission(observed))
         assert denied.status_code == 403, denied.text
@@ -569,8 +578,8 @@ async def test_empty_explicit_request_is_a_selection_error_not_a_server_error(cl
 async def test_command_tokens_do_not_select_a_third_note(client, tmp_path, command, title, checked):
     files = {"Library/a.md": "# A\n", "Library/b.md": "# B\n", "Library/third.md": f"# {title}\n"}
     vault, _, jobs = await prepare(client, tmp_path, files)
-    store = registry.store(None)
-    with entry(request=command + ' "Library/a.md" "Library/b.md"') as (headers, _):
+    store = registry.store((await api.session_manager.db.get_system_agent())["user_id"])
+    async with entry(client, request=command + ' "Library/a.md" "Library/b.md"') as (headers, _):
         third = (await state(client, "Library/third.md", headers=headers))["items"][0]
         request = submission(third) if checked else {"idempotency_key": "legacy-third", "paths": ["Library/third.md"]}
         rejected = await client.post("/api/wiki/maintain", headers=headers, json=request)
@@ -585,7 +594,7 @@ async def test_command_tokens_do_not_select_a_third_note(client, tmp_path, comma
         assert {item["path"] for job in jobs.list()["items"] for item in jobs.get(job["id"])["items"]} == {"Library/a.md", "Library/b.md"}
     assert all((vault / path).read_text() == text for path, text in files.items())
     # The same title is a valid selection when it is actually the argument.
-    with entry(request="/wiki维护 " + title) as (headers, _):
+    async with entry(client, request="/wiki维护 " + title) as (headers, _):
         chosen = (await state(client, "Library/third.md", headers=headers))["items"][0]
         assert (await client.post("/api/wiki/maintain", headers=headers, json=submission(chosen))).status_code == 200
 
@@ -595,10 +604,10 @@ async def test_final_item_read_cannot_rebind_a_checked_observation(client, tmp_p
     from server.wiki import maintenance_admission, maintenance_projection
 
     vault, _, jobs = await prepare(client, tmp_path)
-    store = registry.store(None)
+    store = registry.store((await api.session_manager.db.get_system_agent())["user_id"])
     original_prepare = maintenance_admission.prepare
     changed = False
-    with entry() as (headers, _):
+    async with entry(client) as (headers, _):
         observed = (await state(client, "Library/journal.md", headers=headers))["items"][0]
 
         def edit_after_final_preparation(*args, **kwargs):
@@ -640,7 +649,7 @@ async def test_unreceipted_unfinished_work_blocks_another_actor(client, tmp_path
     if newer_input:
         (vault / "Library/journal.md").write_text("# Journal\n\nLater human words.\n")
         assert (await current_read(client, "Library/journal.md")).status_code == 200
-    with entry(agent="new-actor") as (headers, _):
+    async with entry(client, agent="new-actor") as (headers, _):
         current = (await state(client, "Library/journal.md", headers=headers))["items"][0]
         assert not current["actionable"] and current["attempt_count"] == 1
         assert current["attempts"][0]["job_id"] == retained["id"]
@@ -700,7 +709,7 @@ async def test_malformed_cursor_is_422_at_normal_http_boundary(client, tmp_path)
     await prepare(client, tmp_path, {"Library/a.md": "# A\n", "Library/b.md": "# B\n"})
     first = await state(client, limit=1)
     for cursor in malformed_cursors(first["next_cursor"]):
-        rejected = await client.get("/api/wiki/maintenance-status", headers=api.HEADERS,
+        rejected = await client.get("/api/wiki/maintenance-status", headers=client.headers,
                                     params={"limit": 1, "cursor": cursor})
         assert rejected.status_code == 422, (cursor, rejected.text)
     # Rejections must leave the original observation and continuation usable.

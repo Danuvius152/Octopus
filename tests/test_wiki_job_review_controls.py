@@ -1,12 +1,10 @@
-"""Reviewer counterexamples use original receipts, two databases and real adoption."""
+"""Reviewer counterexamples preserve original receipts across two databases."""
 
 import asyncio
 from types import SimpleNamespace
 
 import pytest
 
-from server.bootstrap import bootstrap_first_account
-from server.session_manager import session_manager
 from server.wiki import job_events, job_notifications, registry
 from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiJobs, WikiWorker
@@ -20,8 +18,6 @@ from tests.test_wiki_job_notifications import receiver as receiver
 from tests.test_wiki_jobs import Curator, process, sapphire_delete
 from tests.test_wiki_jobs import client as client
 from tests.test_wiki_jobs import jobs as jobs
-from tests.test_wiki_upgrade import legacy as legacy
-from tests.test_wiki_upgrade import registered as registered
 
 
 async def test_navigation_receipt_does_not_become_an_unstarted_creation_effect(jobs, client, disk_manager):
@@ -46,10 +42,10 @@ async def test_navigation_receipt_does_not_become_an_unstarted_creation_effect(j
 
         async def start_message(self, session_id, prompt, **kwargs):
             async def events():
-                token = tasks.open(SimpleNamespace(id=session_id, user_id=None, agent_id=jobs.registration["curator_agent_id"]),
+                token = tasks.open(SimpleNamespace(id=session_id, user_id=jobs.user_id, agent_id=jobs.registration["curator_agent_id"]),
                                    "maintain", request_id=kwargs["request_id"])
                 try:
-                    headers = {"Authorization": "Bearer " + mint(session_id, wiki_task_id=token)}
+                    headers = {"Authorization": "Bearer " + mint(session_id, user_id=jobs.user_id, wiki_task_id=token)}
                     original = (await client.get("/api/wiki/read", headers=headers, params={"doc": primary["id"]})).json()
                     navigation = (await client.get("/api/wiki/read", headers=headers, params={"doc": "Library/index.md"})).json()
                     added = await client.post("/api/wiki/organize", headers=headers, json=addition(original, navigation))
@@ -95,11 +91,12 @@ async def test_navigation_receipt_does_not_become_an_unstarted_creation_effect(j
 
 
 @pytest.mark.parametrize("window", ["acked", "main_committed", "not_received"])
-async def test_first_account_adopts_original_notice_and_replays_same_identity(registered, window):
-    db, root, config, note = registered
-    jobs = WikiJobs(None)
-    job = jobs.maintain("adopt-notice", "", "Review the original", [note["path"]], None, [], "human")
-    await session(db)
+async def test_owned_notice_replays_its_original_subscription_identity(jobs, receiver, window):
+    db = receiver.db
+    config, owner = jobs.registration, jobs.user_id
+    job = enqueue(jobs)
+    note = jobs.store.read(job["items"][0]["path"])
+    await session(db, owner=owner)
     subscriber = subscribe(jobs, job)
     original = pending(jobs)[0]
     frames = []
@@ -111,10 +108,8 @@ async def test_first_account_adopts_original_notice_and_replays_same_identity(re
     if window == "acked":
         await job_notifications.dispatch(jobs, manager)
     elif window == "main_committed":
-        await db.receive_wiki_job_notice(config["vault_id"], None, original)
-    raw = (root / note["path"]).read_bytes()
-    adopted = await bootstrap_first_account(db, username="notice-owner", password="password1", session_manager=session_manager)
-    owner = adopted["user_id"]
+        await db.receive_wiki_job_notice(config["vault_id"], owner, original)
+    raw = jobs.store.path(note["path"]).read_bytes()
     current = WikiJobs(owner)
     await job_notifications.dispatch(current, manager)
     cards = await db.wiki_job_cards("original", owner)
@@ -125,7 +120,7 @@ async def test_first_account_adopts_original_notice_and_replays_same_identity(re
     cursor = await db.conn.execute("SELECT event_id,subscriber_id,user_id FROM wiki_job_notifications")
     assert [tuple(row) for row in await cursor.fetchall()] == [(original["event_id"], subscriber, owner)]
     assert pending(current) == []
-    assert (root / note["path"]).read_bytes() == raw
+    assert jobs.store.path(note["path"]).read_bytes() == raw
     with pytest.raises(WikiError, match="account"):
         await db.receive_wiki_job_notice(config["vault_id"], "unrelated-owner", original)
 
@@ -135,7 +130,7 @@ async def test_unavailable_old_batch_does_not_starve_a_later_valid_notice(jobs, 
     for number in range(55):
         subscribe(jobs, first, f"unavailable-{number}")
     following = jobs.maintain("later-notice", "", "Review again", [first["items"][0]["path"]], None, [], "human")
-    await session(receiver.db)
+    await session(receiver.db, owner=jobs.user_id)
     subscribe(jobs, following)
     receive = receiver.db.receive_wiki_job_notice
 
@@ -147,10 +142,10 @@ async def test_unavailable_old_batch_does_not_starve_a_later_valid_notice(jobs, 
     monkeypatch.setattr(receiver.db, "receive_wiki_job_notice", unavailable_prefix)
     for _ in range(4):
         try:
-            await job_notifications.dispatch(WikiJobs(None), receiver)
+            await job_notifications.dispatch(WikiJobs(jobs.user_id), receiver)
         except OSError:
             pass
-    assert [card["job_id"] for card in await receiver.db.wiki_job_cards("original", None)] == [following["id"]]
+    assert [card["job_id"] for card in await receiver.db.wiki_job_cards("original", jobs.user_id)] == [following["id"]]
     with jobs.store.connect() as db:
         assert len(job_events.pending(db, limit=100)) == 55
 
@@ -180,10 +175,10 @@ async def test_saved_outputs_exclude_non_applied_proposal_but_keep_applied_cance
     assert item["status"] == ("done" if applied else "attention")
     jobs.update(job["id"], items=current["items"])
     jobs.mark_cancelled(job["id"])
-    await session(receiver.db)
+    await session(receiver.db, owner=jobs.user_id)
     subscribe(jobs, job)
     await job_notifications.dispatch(jobs, receiver)
-    card = (await receiver.db.wiki_job_cards("original", None))[0]
+    card = (await receiver.db.wiki_job_cards("original", jobs.user_id))[0]
     assert card["effects"]["recorded"] == 1
     assert card["effects"]["applied"] == int(applied)
     assert card["outcome_count"] == int(applied)
@@ -230,7 +225,7 @@ async def test_framework_ingest_cancellation_settles_without_preparing_or_regene
             assert jobs.get(job["id"])["settlement_phase"] == "attention"
             monkeypatch.setattr(jobs.store, "require_indexed", indexed)
             registry.close()
-            jobs = WikiJobs(None)
+            jobs = WikiJobs(jobs.user_id)
             await jobs.settle_cancelled(job["id"], manager)
         current = jobs.get(job["id"])
         assert current["settlement_phase"] == "confirmed", current

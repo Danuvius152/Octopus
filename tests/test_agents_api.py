@@ -12,22 +12,25 @@ from httpx import ASGITransport, AsyncClient
 
 from server.agent_manager import AgentManager
 from server.database import Database
+from server.deps import set_user_manager
 from server.main import app
 from server.routers import agents as agents_mod
 from server.routers import schedules as schedules_mod
 from server.scheduler import ScheduleRunner
 from server.session_manager import session_manager
+from server.users import UserManager
 from tests.fake_run import FakeRunBase
 from tests.test_session_retirement import _retire_original_test_process
-
-TOKEN = "changeme"
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
 
 
 @pytest.fixture
 async def client():
     db = Database(":memory:")
     await db.initialize()
+    users = UserManager(db)
+    owner = await users.create_user(username="agent-owner", password="test-password", is_admin=True)
+    set_user_manager(users)
+    token = await users.issue_token(owner["id"])
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
@@ -39,7 +42,7 @@ async def client():
     schedules_mod._runner = runner
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization": f"Bearer {token}"}) as c:
         yield c
 
     await runner.shutdown()
@@ -48,7 +51,7 @@ async def client():
 
 async def _create_agent(client, name="Researcher", **extra):
     body = {"name": name, **extra}
-    resp = await client.post("/api/agents", json=body, headers=HEADERS)
+    resp = await client.post("/api/agents", json=body, headers=client.headers)
     assert resp.status_code == 201, resp.text
     return resp.json()
 
@@ -58,7 +61,7 @@ async def _create_agent(client, name="Researcher", **extra):
 
 @pytest.mark.asyncio
 async def test_default_agent_present(client):
-    resp = await client.get("/api/agents", headers=HEADERS)
+    resp = await client.get("/api/agents", headers=client.headers)
     assert resp.status_code == 200
     agents = resp.json()
     system = [a for a in agents if a["is_system"]]
@@ -73,13 +76,13 @@ async def test_default_agent_present(client):
 
 @pytest.mark.asyncio
 async def test_auth_required(client):
-    resp = await client.get("/api/agents")
+    resp = await client.get("/api/agents", headers={"Authorization": ""})
     assert resp.status_code in (401, 403)
 
 
 @pytest.mark.asyncio
 async def test_default_agent_backend_is_claude(client):
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+    agents = (await client.get("/api/agents", headers=client.headers)).json()
     system = next(a for a in agents if a["is_system"])
     assert system["backend"] == "claude-code"
 
@@ -89,13 +92,13 @@ async def test_new_agents_and_sessions_use_the_configured_backend(client, monkey
     from server.config import settings
 
     monkeypatch.setattr(settings, "default_backend", "codex")
-    backends = await client.get("/api/backends", headers=HEADERS)
+    backends = await client.get("/api/backends", headers=client.headers)
     assert backends.json()["default"] == "codex"
 
     agent = await _create_agent(client, name="Configured Codex")
     assert agent["backend"] == "codex"
     session = await client.post(
-        f"/api/agents/{agent['id']}/sessions", json={}, headers=HEADERS,
+        f"/api/agents/{agent['id']}/sessions", json={}, headers=client.headers,
     )
     assert session.status_code == 201
     assert session.json()["backend"] == "codex"
@@ -115,8 +118,9 @@ async def test_new_install_uses_configured_backend_without_overwriting_saved_age
     db = Database(path)
     await db.initialize()
     try:
+        owner = await UserManager(db).create_user(username="backend-owner", password="test-password")
         assert (await db.get_system_agent())["backend"] == "codex"
-        agent = await AgentManager(db).create_agent(name="Manager default")
+        agent = await AgentManager(db).create_agent(name="Manager default", user_id=owner["id"])
         assert agent["backend"] == "codex"
     finally:
         await db.close()
@@ -136,11 +140,11 @@ async def test_agent_backend_create_and_update(client):
     a = await _create_agent(client, name="Codex Agent", backend="codex")
     assert a["backend"] == "codex"
     # round-trips through GET
-    got = (await client.get(f"/api/agents/{a['id']}", headers=HEADERS)).json()
+    got = (await client.get(f"/api/agents/{a['id']}", headers=client.headers)).json()
     assert got["backend"] == "codex"
     # PATCH switches it back
     patched = await client.patch(
-        f"/api/agents/{a['id']}", json={"backend": "claude-code"}, headers=HEADERS
+        f"/api/agents/{a['id']}", json={"backend": "claude-code"}, headers=client.headers
     )
     assert patched.status_code == 200
     assert patched.json()["backend"] == "claude-code"
@@ -153,7 +157,7 @@ async def test_session_inherits_agent_backend(client):
     a = await _create_agent(client, name="Codex Default", backend="codex")
 
     inherited = await client.post(
-        f"/api/agents/{a['id']}/sessions", json={"name": "inherit"}, headers=HEADERS
+        f"/api/agents/{a['id']}/sessions", json={"name": "inherit"}, headers=client.headers
     )
     assert inherited.status_code == 201, inherited.text
     assert inherited.json()["backend"] == "codex"
@@ -161,7 +165,7 @@ async def test_session_inherits_agent_backend(client):
     overridden = await client.post(
         f"/api/agents/{a['id']}/sessions",
         json={"name": "override", "backend": "claude-code"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert overridden.status_code == 201, overridden.text
     assert overridden.json()["backend"] == "claude-code"
@@ -188,21 +192,21 @@ async def test_create_and_get_agent(client):
     assert agent["is_system"] is False
     assert agent["active_session_count"] == 0
 
-    got = await client.get(f"/api/agents/{agent['id']}", headers=HEADERS)
+    got = await client.get(f"/api/agents/{agent['id']}", headers=client.headers)
     assert got.status_code == 200
     assert got.json()["id"] == agent["id"]
 
 
 @pytest.mark.asyncio
 async def test_get_unknown_agent_404(client):
-    resp = await client.get("/api/agents/nope", headers=HEADERS)
+    resp = await client.get("/api/agents/nope", headers=client.headers)
     assert resp.status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_create_duplicate_name_rejected(client):
     await _create_agent(client, name="Dup")
-    resp = await client.post("/api/agents", json={"name": "Dup"}, headers=HEADERS)
+    resp = await client.post("/api/agents", json={"name": "Dup"}, headers=client.headers)
     assert resp.status_code == 400
 
 
@@ -212,7 +216,7 @@ async def test_patch_agent(client):
     resp = await client.patch(
         f"/api/agents/{agent['id']}",
         json={"system_prompt": "new prompt", "model": None},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 200
     data = resp.json()
@@ -226,7 +230,7 @@ async def test_patch_duplicate_name_rejected(client):
     await _create_agent(client, name="First")
     second = await _create_agent(client, name="Second")
     resp = await client.patch(
-        f"/api/agents/{second['id']}", json={"name": "First"}, headers=HEADERS
+        f"/api/agents/{second['id']}", json={"name": "First"}, headers=client.headers
     )
     assert resp.status_code == 400
 
@@ -236,11 +240,11 @@ async def test_patch_duplicate_name_rejected(client):
 
 @pytest.mark.asyncio
 async def test_default_agent_cannot_be_archived_or_deleted(client):
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+    agents = (await client.get("/api/agents", headers=client.headers)).json()
     default = next(a for a in agents if a["is_system"])
-    arch = await client.post(f"/api/agents/{default['id']}/archive", headers=HEADERS)
+    arch = await client.post(f"/api/agents/{default['id']}/archive", headers=client.headers)
     assert arch.status_code == 400
-    dele = await client.delete(f"/api/agents/{default['id']}", headers=HEADERS)
+    dele = await client.delete(f"/api/agents/{default['id']}", headers=client.headers)
     assert dele.status_code == 400
 
 
@@ -250,18 +254,18 @@ async def test_default_agent_cannot_be_archived_or_deleted(client):
 @pytest.mark.asyncio
 async def test_delete_empty_agent(client):
     agent = await _create_agent(client, name="Throwaway")
-    resp = await client.delete(f"/api/agents/{agent['id']}", headers=HEADERS)
+    resp = await client.delete(f"/api/agents/{agent['id']}", headers=client.headers)
     assert resp.status_code == 204
-    assert (await client.get(f"/api/agents/{agent['id']}", headers=HEADERS)).status_code == 404
+    assert (await client.get(f"/api/agents/{agent['id']}", headers=client.headers)).status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_delete_agent_with_sessions_refused(client):
     agent = await _create_agent(client, name="Busy")
     await client.post(
-        f"/api/agents/{agent['id']}/sessions", json={"name": "s"}, headers=HEADERS
+        f"/api/agents/{agent['id']}/sessions", json={"name": "s"}, headers=client.headers
     )
-    resp = await client.delete(f"/api/agents/{agent['id']}", headers=HEADERS)
+    resp = await client.delete(f"/api/agents/{agent['id']}", headers=client.headers)
     assert resp.status_code == 400
 
 
@@ -270,18 +274,18 @@ async def test_archive_agent_cascades_sessions(client):
     agent = await _create_agent(client, name="Archivable")
     sess = (
         await client.post(
-            f"/api/agents/{agent['id']}/sessions", json={"name": "s"}, headers=HEADERS
+            f"/api/agents/{agent['id']}/sessions", json={"name": "s"}, headers=client.headers
         )
     ).json()
-    resp = await client.post(f"/api/agents/{agent['id']}/archive", headers=HEADERS)
+    resp = await client.post(f"/api/agents/{agent['id']}/archive", headers=client.headers)
     assert resp.status_code == 200
 
     # Its session is no longer in the live list.
-    live = (await client.get("/api/sessions", headers=HEADERS)).json()
+    live = (await client.get("/api/sessions", headers=client.headers)).json()
     assert sess["id"] not in [s["id"] for s in live]
     # But it's there as archived.
     arch = (
-        await client.get("/api/sessions?include_archived=true", headers=HEADERS)
+        await client.get("/api/sessions?include_archived=true", headers=client.headers)
     ).json()
     assert sess["id"] in [s["id"] for s in arch]
 
@@ -324,7 +328,7 @@ async def test_archive_agent_retirement_refusal_keeps_agent_and_session_live(tmp
 async def _cold_archive_fault(tmp_path, mode):
     from fastapi import FastAPI
 
-    from server.deps import get_session_manager, scope_user_id
+    from server.deps import get_session_manager
     from server.routers import sessions as sessions_mod
     from server.sessions import SessionManager
     from server.sessions.client_submissions import (
@@ -362,18 +366,21 @@ async def _cold_archive_fault(tmp_path, mode):
         manager = SessionManager()
         try:
             await db.initialize()
+            users = UserManager(db)
+            set_user_manager(users)
+            token = await users.issue_token(proof["user_id"])
             await manager.initialize(db)
             application = FastAPI()
             application.include_router(agents_mod.router)
             application.include_router(sessions_mod.router)
             application.dependency_overrides[get_session_manager] = lambda: manager
-            application.dependency_overrides[scope_user_id] = lambda: None
             with pytest.MonkeyPatch.context() as routes:
                 routes.setattr(agents_mod, "_manager", AgentManager(db))
-                async with AsyncClient(transport=ASGITransport(application), base_url="http://test") as http:
-                    agent = await http.get(f"/api/agents/{proof['agent_id']}", headers=HEADERS)
+                async with AsyncClient(transport=ASGITransport(application), base_url="http://test",
+                                       headers={"Authorization": f"Bearer {token}"}) as http:
+                    agent = await http.get(f"/api/agents/{proof['agent_id']}", headers=http.headers)
                     assert agent.status_code == 200 and agent.json()["archived"] is False
-                    detail = await http.get(f"/api/sessions/{proof['session_id']}", headers=HEADERS)
+                    detail = await http.get(f"/api/sessions/{proof['session_id']}", headers=http.headers)
                     assert detail.status_code == 200 and detail.json()["id"] == proof["session_id"]
             assert await db.get_agent(proof["agent_id"]) == proof["agent_row_before"]
             row = next(row for row in await db.load_sessions(include_archived=True) if row["id"] == proof["session_id"])
@@ -413,7 +420,7 @@ async def _agent_archive_fault_child(tmp_path, tmp_path_factory, monkeypatch):
 
     from fastapi import FastAPI
 
-    from server.deps import get_session_manager, scope_user_id
+    from server.deps import get_session_manager
     from server.harness import HarnessEvent, get_harness
     from server.routers import sessions as sessions_mod
     from server.sessions import SessionManager
@@ -424,19 +431,23 @@ async def _agent_archive_fault_child(tmp_path, tmp_path_factory, monkeypatch):
     database_path = tmp_path / "agent-archive.db"
     db = Database(str(database_path))
     await db.initialize()
+    users = UserManager(db)
+    owner = await users.create_user(username="archive-owner", password="test-password")
+    await db.update_user_field(owner["id"], extra_roots=json.dumps([str(tmp_path)]))
+    set_user_manager(users)
+    token = await users.issue_token(owner["id"])
     manager = SessionManager()
     await manager.initialize(db)
     application = FastAPI()
     application.include_router(agents_mod.router)
     application.include_router(sessions_mod.router)
     application.dependency_overrides[get_session_manager] = lambda: manager
-    application.dependency_overrides[scope_user_id] = lambda: None
     agents_mod.set_manager(AgentManager(db))
     handler = logging.FileHandler(artifacts / "service.log")
     handler.setFormatter(logging.Formatter("%(name)s %(levelname)s %(message)s"))
     logging.getLogger("server").addHandler(handler)
     ready = asyncio.Event()
-    proof = {"database": str(database_path), "mode": mode, "model": None}
+    proof = {"database": str(database_path), "mode": mode, "model": None, "user_id": owner["id"]}
 
     def save_proof():
         (artifacts / "proof.json").write_text(json.dumps(proof))
@@ -497,13 +508,14 @@ async def _agent_archive_fault_child(tmp_path, tmp_path_factory, monkeypatch):
             harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None,
         ))
 
-    async with AsyncClient(transport=ASGITransport(application), base_url="http://test") as http:
+    async with AsyncClient(transport=ASGITransport(application), base_url="http://test",
+                           headers={"Authorization": f"Bearer {token}"}) as http:
         agent = await _create_agent(
             http, name="Original archive owner", backend="codex",
             mcp_servers=["ask", "bg", "ask_agent", "research", "schedule"],
         )
         created = await http.post(
-            f"/api/agents/{agent['id']}/sessions", headers=HEADERS,
+            f"/api/agents/{agent['id']}/sessions", headers=http.headers,
             json={"name": "Original archive session", "working_dir": str(tmp_path), "backend": "codex"},
         )
         assert created.status_code == 201, created.text
@@ -546,7 +558,7 @@ async def _agent_archive_fault_child(tmp_path, tmp_path_factory, monkeypatch):
             monkeypatch.setattr(db.conn, "execute", terminal_sql)
             monkeypatch.setattr(db.conn, "commit", lost_terminal_commit_acknowledgment)
         (artifacts / "archive-entered").touch()
-        response = await http.post(f"/api/agents/{agent['id']}/archive", headers=HEADERS)
+        response = await http.post(f"/api/agents/{agent['id']}/archive", headers=http.headers)
         (artifacts / "archive-response.json").write_text(json.dumps({"status_code": response.status_code, "body": response.json()}))
         (artifacts / "archive-returned").touch()
         assert response.status_code != 200
@@ -558,10 +570,10 @@ async def _agent_archive_fault_child(tmp_path, tmp_path_factory, monkeypatch):
 @pytest.mark.asyncio
 async def test_protected_agent_is_validated_before_session_eviction(client):
     system = await session_manager.db.get_system_agent()
-    session = await session_manager.create_session(system["id"], "Protected queue", "/tmp")
+    session = await session_manager.create_session(system["id"], "Protected queue")
     await session_manager.interrupt(session.id)
     receipt = await session_manager.start_message(session.id, "Queued result", source="bg")
-    response = await client.post(f"/api/agents/{system['id']}/archive", headers=HEADERS)
+    response = await client.post(f"/api/agents/{system['id']}/archive", headers=client.headers)
     assert response.status_code == 400
     assert session_manager.get_session(session.id) is session
     assert session_manager.dispatch_snapshot(session.id)["items"][0]["request_id"] == receipt.request_id
@@ -570,7 +582,7 @@ async def test_protected_agent_is_validated_before_session_eviction(client):
 @pytest.mark.asyncio
 async def test_cancelled_archive_waiter_still_finishes_agent_and_session_archive(client, monkeypatch):
     agent = await _create_agent(client, name="Owned archive")
-    session = await session_manager.create_session(agent["id"], "Captured session", "/tmp")
+    session = await session_manager.create_session(agent["id"], "Captured session")
     database = session_manager.db
     archive = database.archive_agent
     entered, release = asyncio.Event(), asyncio.Event()
@@ -587,7 +599,7 @@ async def test_cancelled_archive_waiter_still_finishes_agent_and_session_archive
 
     monkeypatch.setattr(database, "archive_agent", held_archive)
     session_manager.on_broadcast("archive-completion-observer", observe)
-    request = asyncio.create_task(client.post(f"/api/agents/{agent['id']}/archive", headers=HEADERS))
+    request = asyncio.create_task(client.post(f"/api/agents/{agent['id']}/archive", headers=client.headers))
     try:
         await asyncio.wait_for(entered.wait(), 1)
         assert session_manager.get_session(session.id) is None
@@ -614,14 +626,14 @@ async def test_cancelled_archive_waiter_still_finishes_agent_and_session_archive
 async def test_create_session_under_agent_inherits_agent_id(client):
     agent = await _create_agent(client, name="Owner")
     resp = await client.post(
-        f"/api/agents/{agent['id']}/sessions", json={"name": "thread"}, headers=HEADERS
+        f"/api/agents/{agent['id']}/sessions", json={"name": "thread"}, headers=client.headers
     )
     assert resp.status_code == 201
     session = resp.json()
     assert session["agent_id"] == agent["id"]
     assert session["origin"] == "user"
 
-    listed = await client.get(f"/api/agents/{agent['id']}/sessions", headers=HEADERS)
+    listed = await client.get(f"/api/agents/{agent['id']}/sessions", headers=client.headers)
     assert [s["id"] for s in listed.json()] == [session["id"]]
 
 
@@ -636,7 +648,7 @@ async def test_session_create_unknown_agent_404(client):
     oracle, so both are 404, which is also what `/api/agents/{id}` answers.
     """
     resp = await client.post(
-        "/api/sessions", json={"name": "x", "agent_id": "ghost"}, headers=HEADERS
+        "/api/sessions", json={"name": "x", "agent_id": "ghost"}, headers=client.headers
     )
     assert resp.status_code == 404
 
@@ -647,13 +659,13 @@ async def test_agent_scoped_schedule_crud(client):
     resp = await client.post(
         f"/api/agents/{agent['id']}/schedules",
         json={"name": "daily", "prompt": "summarize", "interval_seconds": 60},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 201
     sched = resp.json()
     assert sched["agent_id"] == agent["id"]
 
-    listed = await client.get(f"/api/agents/{agent['id']}/schedules", headers=HEADERS)
+    listed = await client.get(f"/api/agents/{agent['id']}/schedules", headers=client.headers)
     assert [s["id"] for s in listed.json()] == [sched["id"]]
 
 
@@ -667,7 +679,7 @@ async def test_schedule_from_text_rigid(client):
     resp = await client.post(
         f"/api/agents/{agent['id']}/schedules/from_text",
         json={"text": "30m check the build"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 201, resp.text
     data = resp.json()
@@ -701,7 +713,7 @@ async def test_schedule_from_text_ai_cron(client, monkeypatch):
             "timezone": "America/Los_Angeles",
             "session_id": origin.id,
         },
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 201, resp.text
     data = resp.json()
@@ -728,7 +740,7 @@ async def test_schedule_from_text_parse_error_is_422(client, monkeypatch):
     resp = await client.post(
         f"/api/agents/{agent['id']}/schedules/from_text",
         json={"text": "do something clever at some point"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 422
     assert isinstance(resp.json()["detail"], str)
@@ -760,7 +772,7 @@ async def test_schedule_from_text_codex_agent_parses_on_codex(client, monkeypatc
     r = await client.post(
         f"/api/agents/{agent['id']}/schedules/from_text",
         json={"text": "do it every morning at 9am", "timezone": "UTC"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 201, r.text
     assert seen["model"] == "gpt-5.5"  # the agent's own model, on its own harness
@@ -771,7 +783,7 @@ async def test_schedule_from_text_unknown_agent(client):
     resp = await client.post(
         "/api/agents/nope/schedules/from_text",
         json={"text": "30m check the build"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 404
 
@@ -783,42 +795,42 @@ async def test_schedule_from_text_unknown_agent(client):
 async def test_unarchive_restores_an_agent(client):
     a = await _create_agent(client, name="Retired")
     assert (
-        await client.post(f"/api/agents/{a['id']}/archive", headers=HEADERS)
+        await client.post(f"/api/agents/{a['id']}/archive", headers=client.headers)
     ).status_code == 200
-    assert [x["id"] for x in (await client.get("/api/agents", headers=HEADERS)).json()
+    assert [x["id"] for x in (await client.get("/api/agents", headers=client.headers)).json()
             if x["id"] == a["id"]] == []
 
     # The Archived tab lists it...
     archived = (
         await client.get(
-            "/api/agents", params={"include_archived": "true"}, headers=HEADERS
+            "/api/agents", params={"include_archived": "true"}, headers=client.headers
         )
     ).json()
     assert any(x["id"] == a["id"] and x["archived"] for x in archived)
 
     # ...and restores it.
-    resp = await client.post(f"/api/agents/{a['id']}/unarchive", headers=HEADERS)
+    resp = await client.post(f"/api/agents/{a['id']}/unarchive", headers=client.headers)
     assert resp.status_code == 200
     assert resp.json()["archived"] is False
-    live = (await client.get("/api/agents", headers=HEADERS)).json()
+    live = (await client.get("/api/agents", headers=client.headers)).json()
     assert any(x["id"] == a["id"] for x in live)
 
 
 @pytest.mark.asyncio
 async def test_unarchive_refuses_when_the_name_was_taken(client):
     a = await _create_agent(client, name="Scout")
-    await client.post(f"/api/agents/{a['id']}/archive", headers=HEADERS)
+    await client.post(f"/api/agents/{a['id']}/archive", headers=client.headers)
     # The live-only unique index frees the name while it's archived.
     await _create_agent(client, name="Scout")
 
-    resp = await client.post(f"/api/agents/{a['id']}/unarchive", headers=HEADERS)
+    resp = await client.post(f"/api/agents/{a['id']}/unarchive", headers=client.headers)
     assert resp.status_code == 400
     assert "already exists" in resp.json()["detail"]
 
 
 @pytest.mark.asyncio
 async def test_unarchive_unknown_agent_is_404(client):
-    resp = await client.post("/api/agents/ghost/unarchive", headers=HEADERS)
+    resp = await client.post("/api/agents/ghost/unarchive", headers=client.headers)
     assert resp.status_code == 404
 
 
@@ -826,7 +838,7 @@ async def test_unarchive_unknown_agent_is_404(client):
 
 
 async def _live(client) -> list[dict]:
-    return (await client.get("/api/agents", headers=HEADERS)).json()
+    return (await client.get("/api/agents", headers=client.headers)).json()
 
 
 def _pinned_ids(agents: list[dict]) -> list[str]:
@@ -848,7 +860,7 @@ async def test_new_agents_are_pinned_at_the_bottom(client):
 @pytest.mark.asyncio
 async def test_unpinned_agent_stays_live_and_listed(client):
     a = await _create_agent(client, name="Quiet")
-    resp = await client.post(f"/api/agents/{a['id']}/unpin", headers=HEADERS)
+    resp = await client.post(f"/api/agents/{a['id']}/unpin", headers=client.headers)
     assert resp.status_code == 200
     assert resp.json()["pinned"] is False
 
@@ -858,7 +870,7 @@ async def test_unpinned_agent_stays_live_and_listed(client):
     assert any(x["id"] == a["id"] and not x["archived"] for x in live)
     assert a["id"] not in _pinned_ids(live)
     resp = await client.post(
-        f"/api/agents/{a['id']}/sessions", json={}, headers=HEADERS
+        f"/api/agents/{a['id']}/sessions", json={}, headers=client.headers
     )
     assert resp.status_code == 201
 
@@ -867,19 +879,19 @@ async def test_unpinned_agent_stays_live_and_listed(client):
 async def test_repinning_appends_to_the_bottom(client):
     a = await _create_agent(client, name="A")
     b = await _create_agent(client, name="B")
-    await client.post(f"/api/agents/{a['id']}/unpin", headers=HEADERS)
-    resp = await client.post(f"/api/agents/{a['id']}/pin", headers=HEADERS)
+    await client.post(f"/api/agents/{a['id']}/unpin", headers=client.headers)
+    resp = await client.post(f"/api/agents/{a['id']}/pin", headers=client.headers)
     assert resp.status_code == 200
     assert _pinned_ids(await _live(client))[-2:] == [b["id"], a["id"]]
     # Pinning something already pinned leaves its place alone.
-    await client.post(f"/api/agents/{b['id']}/pin", headers=HEADERS)
+    await client.post(f"/api/agents/{b['id']}/pin", headers=client.headers)
     assert _pinned_ids(await _live(client))[-2:] == [b["id"], a["id"]]
 
 
 @pytest.mark.asyncio
 async def test_default_agent_cannot_be_unpinned(client):
     default = next(a for a in await _live(client) if a["is_system"])
-    resp = await client.post(f"/api/agents/{default['id']}/unpin", headers=HEADERS)
+    resp = await client.post(f"/api/agents/{default['id']}/unpin", headers=client.headers)
     assert resp.status_code == 400
     assert "always pinned" in resp.json()["detail"]
     assert next(a for a in await _live(client) if a["is_system"])["pinned"] is True
@@ -888,21 +900,21 @@ async def test_default_agent_cannot_be_unpinned(client):
 @pytest.mark.asyncio
 async def test_pin_refuses_archived_and_unknown_agents(client):
     a = await _create_agent(client, name="Shelved")
-    await client.post(f"/api/agents/{a['id']}/archive", headers=HEADERS)
-    resp = await client.post(f"/api/agents/{a['id']}/pin", headers=HEADERS)
+    await client.post(f"/api/agents/{a['id']}/archive", headers=client.headers)
+    resp = await client.post(f"/api/agents/{a['id']}/pin", headers=client.headers)
     assert resp.status_code == 400
     assert "Restore" in resp.json()["detail"]
     assert (
-        await client.post("/api/agents/ghost/pin", headers=HEADERS)
+        await client.post("/api/agents/ghost/pin", headers=client.headers)
     ).status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_restoring_an_agent_pins_it(client):
     a = await _create_agent(client, name="Returning")
-    await client.post(f"/api/agents/{a['id']}/unpin", headers=HEADERS)
-    await client.post(f"/api/agents/{a['id']}/archive", headers=HEADERS)
-    resp = await client.post(f"/api/agents/{a['id']}/unarchive", headers=HEADERS)
+    await client.post(f"/api/agents/{a['id']}/unpin", headers=client.headers)
+    await client.post(f"/api/agents/{a['id']}/archive", headers=client.headers)
+    resp = await client.post(f"/api/agents/{a['id']}/unarchive", headers=client.headers)
     assert resp.json()["pinned"] is True
     assert _pinned_ids(await _live(client))[-1] == a["id"]
 
@@ -917,7 +929,7 @@ async def test_reorder_pins(client):
     resp = await client.put(
         "/api/agents/pin-order",
         json={"ids": [c["id"], default["id"], a["id"], b["id"]]},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 200
     # The response is the whole live list, already in the new order.
@@ -933,7 +945,7 @@ async def test_reorder_keeps_pins_the_list_did_not_name(client):
     a = await _create_agent(client, name="A")
     b = await _create_agent(client, name="B")
     resp = await client.put(
-        "/api/agents/pin-order", json={"ids": [b["id"]]}, headers=HEADERS
+        "/api/agents/pin-order", json={"ids": [b["id"]]}, headers=client.headers
     )
     assert resp.status_code == 200
     assert _pinned_ids(resp.json()) == [b["id"], default["id"], a["id"]]
@@ -943,11 +955,11 @@ async def test_reorder_keeps_pins_the_list_did_not_name(client):
 async def test_reorder_rejects_unpinned_unknown_and_repeated_ids(client):
     a = await _create_agent(client, name="A")
     b = await _create_agent(client, name="B")
-    await client.post(f"/api/agents/{b['id']}/unpin", headers=HEADERS)
+    await client.post(f"/api/agents/{b['id']}/unpin", headers=client.headers)
 
     for ids in ([a["id"], b["id"]], [a["id"], "ghost"], [a["id"], a["id"]]):
         resp = await client.put(
-            "/api/agents/pin-order", json={"ids": ids}, headers=HEADERS
+            "/api/agents/pin-order", json={"ids": ids}, headers=client.headers
         )
         assert resp.status_code == 400, ids
 
@@ -968,13 +980,13 @@ async def test_agent_changes_are_broadcast(client, monkeypatch):
     monkeypatch.setattr(session_manager, "_broadcast", capture)
 
     a = await _create_agent(client, name="Loud")
-    await client.post(f"/api/agents/{a['id']}/unpin", headers=HEADERS)
+    await client.post(f"/api/agents/{a['id']}/unpin", headers=client.headers)
     await client.patch(
-        f"/api/agents/{a['id']}", json={"description": "d"}, headers=HEADERS
+        f"/api/agents/{a['id']}", json={"description": "d"}, headers=client.headers
     )
-    await client.post(f"/api/agents/{a['id']}/pin", headers=HEADERS)
-    await client.post(f"/api/agents/{a['id']}/archive", headers=HEADERS)
-    await client.post(f"/api/agents/{a['id']}/unarchive", headers=HEADERS)
+    await client.post(f"/api/agents/{a['id']}/pin", headers=client.headers)
+    await client.post(f"/api/agents/{a['id']}/archive", headers=client.headers)
+    await client.post(f"/api/agents/{a['id']}/unarchive", headers=client.headers)
 
     mine = [(e["type"], e["agent"]["pinned"]) for e in events
             if "agent" in e and e["agent_id"] == a["id"]]
@@ -989,12 +1001,12 @@ async def test_agent_changes_are_broadcast(client, monkeypatch):
     # A failed request broadcasts nothing.
     events.clear()
     default = next(x for x in await _live(client) if x["is_system"])
-    await client.post(f"/api/agents/{default['id']}/unpin", headers=HEADERS)
+    await client.post(f"/api/agents/{default['id']}/unpin", headers=client.headers)
     assert [e for e in events if "agent" in e] == []
 
     b = await _create_agent(client, name="Deletable")
     events.clear()
     assert (
-        await client.delete(f"/api/agents/{b['id']}", headers=HEADERS)
+        await client.delete(f"/api/agents/{b['id']}", headers=client.headers)
     ).status_code == 204
     assert [e["type"] for e in events if "agent" in e] == ["agent_deleted"]

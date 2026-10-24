@@ -23,12 +23,14 @@ from server.config import settings
 from server.database import Database
 from server.deps import get_session_manager
 from server.main import _wiki_error
+from server.mcp_identity import mint
 from server.mcp_servers import wiki as wiki_tools
 from server.routers.sessions import router as sessions_router
 from server.routers.wiki import router as wiki_router
 from server.routers.ws import router as ws_router
 from server.sessions import SessionManager
 from server.wiki import WikiError, registry
+from tests.accounts import create_account
 from tests.callback_api import start_callback_api
 from tests.wiki_query_evidence import collect_evaluation, source_manifest
 
@@ -141,7 +143,6 @@ async def ordinary_chat_probe(tmp_path, monkeypatch, request):
     monkeypatch.setattr(settings, "users_root", str(tmp_path / "users"))
     monkeypatch.setattr(settings, "auth_token", secrets.token_urlsafe(32))
     monkeypatch.setattr(deps, "_user_manager", None)
-    monkeypatch.setattr(deps, "_accounts_exist", None)
     # Keep this fixture's observer handles separate from other test registries.
     monkeypatch.setattr(registry, "_stores", OrderedDict())
     monkeypatch.setattr(registry, "_retired_stores", {})
@@ -149,27 +150,34 @@ async def ordinary_chat_probe(tmp_path, monkeypatch, request):
     work.mkdir()
     db = Database(":memory:")
     await db.initialize()
+    owner, bearer = await create_account(db, extra_roots=[root, work])
+    await db.save_credential(
+        credential_id, "codex", "Registered evaluation home", "oauth", "",
+        "2026-10-24T00:00:00+00:00", user_id=owner["id"],
+    )
     manager = SessionManager()
     await manager.initialize(db)
     api = None
     try:
         # Directory-backed credential resolution reads no provider secrets here.
         # Refuse fallback to an unrelated default CLI login.
-        credential = await manager.resolve_credential_by_id(credential_id, style="home_dir")
+        credential = await manager.resolve_credential_by_id(credential_id, style="home_dir", user_id=owner["id"])
         assert credential is not None, "selected credential home is unavailable; default-login fallback forbidden"
         monkeypatch.setattr(manager, "_resolve_credential", guarded_chat_credential(manager, credential_id, credential.home_dir))
         agent = await AgentManager(db).create_agent(
             name="Assistant", backend="codex", system_prompt="",
             model="gpt-6.1-sol", reasoning_effort="high", service_tier="default", mcp_servers=[],
+            user_id=owner["id"],
         )
-        curator = await db.get_system_agent()
-        registry.configure(None, root, curator["id"])
+        curator = await db.get_system_agent(owner["id"])
+        registry.configure(owner["id"], root, curator["id"])
         api = await start_callback_api(
             ws_router, sessions_router, wiki_router, websocket=True,
             overrides={get_session_manager: lambda: manager}, exception_handlers={WikiError: _wiki_error},
+            readiness_token=mint("callback-api-readiness", user_id=owner["id"]),
         )
         monkeypatch.setattr(settings, "port", api.port)
-        probe = OrdinaryChatProbe(manager, agent["id"], root, work, api.port, settings.auth_token, credential_id)
+        probe = OrdinaryChatProbe(manager, agent["id"], root, work, api.port, bearer, credential_id)
         probe.input_context = {
             "transport": "authenticated WS send_message", "origin": "user", "parent_session_id": None,
             "forced_wiki_mode": False, "per_question_evaluator_prompt": False,
@@ -177,7 +185,7 @@ async def ordinary_chat_probe(tmp_path, monkeypatch, request):
             "agent_name": "Assistant", "session_title": "Chat",
             "configured_profile": "gpt-6.1-sol/high/default", "credential_id": credential_id,
             "source_manifest_sha256": registration["source_manifest_sha256"],
-            "environment": "isolated database, legacy-auth test host, registered fixed corpus; production account binding not exercised",
+            "environment": "isolated owned account and bearer, registered fixed corpus; production data not used",
             "blind": False, "filesystem_isolation": "fresh cwd and memory; unrestricted process filesystem access is not a blind-test guarantee",
             "extra_cli_availability_model_probe": False,
         }

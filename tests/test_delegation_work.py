@@ -10,16 +10,15 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from server import deps
 from server.agent_manager import AgentManager
 from server.bg_tasks import BgTaskManager
 from server.database import Database
 from server.delegations import DelegationError, DelegationManager
 from server.deps import get_session_manager
 from server.harness import get_harness
-from server.mcp_identity import verify
+from server.mcp_identity import mint, verify
 from server.sessions import SessionManager
-from server.users import UserManager
+from tests.accounts import create_account
 from tests.test_delegation_restart_security import wait_live_scope
 
 
@@ -27,13 +26,12 @@ from tests.test_delegation_restart_security import wait_live_scope
 async def work_runtime(monkeypatch, tmp_path, short_process_shutdown):
     database = Database(":memory:")
     await database.initialize()
-    monkeypatch.setattr(deps, "_user_manager", UserManager(database))
-    monkeypatch.setattr(deps, "_accounts_exist", None)
+    owner, token = await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     agents = AgentManager(database)
     root = await database.get_system_agent()
-    await agents.create_agent(name="Worker", backend="codex")
+    await agents.create_agent(name="Worker", backend="codex", user_id=owner["id"])
     parent = await manager.create_session(root["id"], "Caller", working_dir=str(tmp_path))
     await manager.interrupt(parent.id)  # inspect automatic replies without driving a model
     delegations = DelegationManager()
@@ -51,6 +49,7 @@ async def work_runtime(monkeypatch, tmp_path, short_process_shutdown):
     app.dependency_overrides[get_session_manager] = lambda: manager
     manager.work_test_client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test",
+        headers={"Authorization": "Bearer " + token},
     )
     manager.work_test_bg = bg
     starts = asyncio.Queue()
@@ -305,7 +304,7 @@ async def test_completed_old_round_can_cancel_residual_bg_without_touching_new_r
 
 async def test_nested_cancellation_closes_descendants_without_waking_closed_branch(work_runtime):
     manager, delegations, parent, starts = work_runtime
-    await AgentManager(manager.db).create_agent(name="Grandchild", backend="codex")
+    await AgentManager(manager.db).create_agent(name="Grandchild", backend="codex", user_id=parent.user_id)
     child = await delegations.start_delegation(
         parent_session_id=parent.id, agent_name="Worker", request="held child",
     )
@@ -388,6 +387,7 @@ async def test_signed_work_survives_mcp_thread_and_late_loopback_is_refused(work
     manager, delegations, parent, starts = work_runtime
     api = await start_callback_api(
         bg_router.router, overrides={get_session_manager: lambda: manager},
+        readiness_token=mint("callback-api-readiness", user_id=parent.user_id),
     )
     monkeypatch.setattr(settings, "port", api.port)
     entered, release = threading.Event(), threading.Event()
@@ -630,13 +630,13 @@ async def test_concurrent_follow_ups_accept_one_new_round(work_runtime):
     assert starts.empty()
 
 
-async def test_signed_diagnostic_identity_cannot_create_unowned_model_work(work_runtime, tmp_path):
+async def test_signed_diagnostic_identity_without_a_run_cannot_create_model_work(work_runtime, tmp_path):
     from server.mcp_identity import mint
 
     manager, _, parent, _ = work_runtime
     response = await manager.work_test_client.post(
         f"/api/sessions/{parent.id}/bg-tasks",
-        headers={"Authorization": f"Bearer {mint(parent.id)}"},
+        headers={"Authorization": f"Bearer {mint(parent.id, user_id=parent.user_id)}"},
         json={"command": f"touch {tmp_path}/unowned"},
     )
     assert response.status_code == 400

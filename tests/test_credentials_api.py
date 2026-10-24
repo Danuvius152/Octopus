@@ -7,22 +7,22 @@ from datetime import UTC
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from server import deps
 from server.crypto import decrypt
 from server.database import Database
 from server.main import app
 from server.routers import credentials as creds_router
-
-TOKEN = "changeme"
-AUTH = {"Authorization": f"Bearer {TOKEN}"}
+from tests.accounts import create_account
 
 
 @pytest.fixture
 async def client():
     db = Database(":memory:")
     await db.initialize()
+    _, bearer = await create_account(db)
     creds_router.set_db(db)
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization": f"Bearer {bearer}"}) as c:
         yield c, db
     await db.close()
     creds_router.set_db(None)
@@ -39,7 +39,7 @@ async def test_create_returns_metadata_not_secret(client):
             "auth_type": "api_key",
             "secret": "sk-ant-abc",
         },
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 201
     body = res.json()
@@ -50,7 +50,7 @@ async def test_create_returns_metadata_not_secret(client):
     # Confirm the secret really was stored (encrypted)
     rows = await db.load_credentials()
     assert len(rows) == 1
-    assert decrypt(rows[0]["secret_encrypted"], TOKEN) == "sk-ant-abc"
+    assert decrypt(rows[0]["secret_encrypted"], await deps.get_user_manager().data_key_for(rows[0]["user_id"])) == "sk-ant-abc"
 
 
 @pytest.mark.asyncio
@@ -59,14 +59,14 @@ async def test_list_omits_secret(client):
     await c.post(
         "/api/credentials",
         json={"backend": "claude-code", "label": "L1", "secret": "x1"},
-        headers=AUTH,
+        headers=c.headers,
     )
     await c.post(
         "/api/credentials",
         json={"backend": "codex", "label": "L2", "secret": "x2"},
-        headers=AUTH,
+        headers=c.headers,
     )
-    res = await c.get("/api/credentials", headers=AUTH)
+    res = await c.get("/api/credentials", headers=c.headers)
     assert res.status_code == 200
     items = res.json()
     assert len(items) == 2
@@ -82,14 +82,14 @@ async def test_update_renames_and_rotates_secret(client):
     create = await c.post(
         "/api/credentials",
         json={"backend": "claude-code", "label": "Old", "secret": "old"},
-        headers=AUTH,
+        headers=c.headers,
     )
     cid = create.json()["id"]
     # Rename only
     res = await c.patch(
         f"/api/credentials/{cid}",
         json={"label": "New"},
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 200
     assert res.json()["label"] == "New"
@@ -97,11 +97,11 @@ async def test_update_renames_and_rotates_secret(client):
     res = await c.patch(
         f"/api/credentials/{cid}",
         json={"secret": "rotated"},
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 200
     row = await db.get_credential(cid)
-    assert decrypt(row["secret_encrypted"], TOKEN) == "rotated"
+    assert decrypt(row["secret_encrypted"], await deps.get_user_manager().data_key_for(row["user_id"])) == "rotated"
     assert row["label"] == "New"  # unchanged
 
 
@@ -109,7 +109,7 @@ async def test_update_renames_and_rotates_secret(client):
 async def test_update_unknown_returns_404(client):
     c, _ = client
     res = await c.patch(
-        "/api/credentials/missing", json={"label": "x"}, headers=AUTH
+        "/api/credentials/missing", json={"label": "x"}, headers=c.headers
     )
     assert res.status_code == 404
 
@@ -120,16 +120,17 @@ async def test_delete_then_404(client):
     create = await c.post(
         "/api/credentials",
         json={"backend": "claude-code", "label": "L", "secret": "x"},
-        headers=AUTH,
+        headers=c.headers,
     )
     cid = create.json()["id"]
-    assert (await c.delete(f"/api/credentials/{cid}", headers=AUTH)).status_code == 204
-    assert (await c.delete(f"/api/credentials/{cid}", headers=AUTH)).status_code == 404
+    assert (await c.delete(f"/api/credentials/{cid}", headers=c.headers)).status_code == 204
+    assert (await c.delete(f"/api/credentials/{cid}", headers=c.headers)).status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_rejects_unauthenticated(client):
     c, _ = client
+    c.headers.pop("Authorization")
     res = await c.get("/api/credentials")
     assert res.status_code in (401, 403)
     res = await c.post(
@@ -145,7 +146,7 @@ async def test_create_rejects_empty_secret(client):
     res = await c.post(
         "/api/credentials",
         json={"backend": "claude-code", "label": "L", "secret": ""},
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 422  # pydantic validation
 
@@ -182,7 +183,7 @@ class _StubLoginSession:
         return None
 
 
-def _login_exists(monkeypatch, login_id: str = "login-xyz") -> None:
+async def _login_exists(monkeypatch, database, login_id: str = "login-xyz") -> None:
     """Let the route find the login record for `login_id`.
 
     `oauth/complete` and `oauth/cancel` check that the login belongs to the
@@ -193,11 +194,12 @@ def _login_exists(monkeypatch, login_id: str = "login-xyz") -> None:
     """
     from server import oauth_login
 
+    owner = await database.get_system_agent()
     monkeypatch.setattr(
         oauth_login.OAuthLoginManager,
         "get",
         lambda self, lid: (
-            _StubLoginSession(oauth_login.LoginState.awaiting_code)
+            _make_login_for(owner["user_id"])
             if lid == login_id
             else None
         ),
@@ -218,7 +220,7 @@ async def test_oauth_start_returns_login_id_and_url(client, monkeypatch):
     res = await c.post(
         "/api/credentials/oauth/start",
         json={"backend": "claude-code"},
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 201, res.text
     body = res.json()
@@ -243,7 +245,7 @@ async def test_oauth_start_502_on_orchestrator_runtime_error(client, monkeypatch
     res = await c.post(
         "/api/credentials/oauth/start",
         json={"backend": "claude-code"},
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 502
     assert "upstream unreachable" in res.json()["detail"]
@@ -258,7 +260,7 @@ async def test_oauth_start_rejects_codex(client):
     res = await c.post(
         "/api/credentials/oauth/start",
         json={"backend": "codex"},
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 400
     assert "codex" in res.json()["detail"].lower()
@@ -278,13 +280,13 @@ async def test_oauth_complete_persists_credential(client, monkeypatch):
         )
 
     monkeypatch.setattr(oauth_login.OAuthLoginManager, "submit_code", fake_submit)
-    _login_exists(monkeypatch)
+    await _login_exists(monkeypatch, client[1])
 
     c, db = client
     res = await c.post(
         "/api/credentials/oauth/complete",
         json={"login_id": "login-xyz", "code": "the-code", "label": "Personal"},
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 201, res.text
     body = res.json()
@@ -295,7 +297,7 @@ async def test_oauth_complete_persists_credential(client, monkeypatch):
 
     rows = await db.load_credentials()
     assert len(rows) == 1
-    assert decrypt(rows[0]["secret_encrypted"], TOKEN).startswith("sk-ant-fake-oauth")
+    assert decrypt(rows[0]["secret_encrypted"], await deps.get_user_manager().data_key_for(rows[0]["user_id"])).startswith("sk-ant-fake-oauth")
 
 
 @pytest.mark.asyncio
@@ -322,13 +324,13 @@ async def test_oauth_complete_persists_oauth_token_bundle(client, monkeypatch):
         return _StubLoginSession(LoginState.success, oauth_tokens=ts)
 
     monkeypatch.setattr(oauth_login.OAuthLoginManager, "submit_code", fake_submit)
-    _login_exists(monkeypatch)
+    await _login_exists(monkeypatch, client[1])
 
     c, db = client
     res = await c.post(
         "/api/credentials/oauth/complete",
         json={"login_id": "login-xyz", "code": "the-code", "label": "Pro/Max"},
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 201, res.text
     body = res.json()
@@ -338,7 +340,7 @@ async def test_oauth_complete_persists_oauth_token_bundle(client, monkeypatch):
 
     rows = await db.load_credentials()
     assert len(rows) == 1
-    decrypted = decrypt(rows[0]["secret_encrypted"], TOKEN)
+    decrypted = decrypt(rows[0]["secret_encrypted"], await deps.get_user_manager().data_key_for(rows[0]["user_id"]))
     bundle = json.loads(decrypted)
     assert bundle["access_token"] == "oat-fresh"
     assert bundle["refresh_token"] == "ort-fresh"
@@ -358,13 +360,13 @@ async def test_oauth_complete_returns_500_on_no_token(client, monkeypatch):
         return _StubLoginSession(LoginState.error, message="token exchange failed")
 
     monkeypatch.setattr(oauth_login.OAuthLoginManager, "submit_code", fake_submit)
-    _login_exists(monkeypatch)
+    await _login_exists(monkeypatch, client[1])
 
     c, _ = client
     res = await c.post(
         "/api/credentials/oauth/complete",
         json={"login_id": "login-xyz", "code": "bad-code", "label": "L"},
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 500
 
@@ -377,13 +379,13 @@ async def test_oauth_complete_404_unknown_id(client, monkeypatch):
         raise KeyError(login_id)
 
     monkeypatch.setattr(oauth_login.OAuthLoginManager, "submit_code", fake_submit)
-    _login_exists(monkeypatch)
+    await _login_exists(monkeypatch, client[1])
 
     c, _ = client
     res = await c.post(
         "/api/credentials/oauth/complete",
         json={"login_id": "ghost", "code": "x", "label": "L"},
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 404
 
@@ -398,19 +400,19 @@ async def test_oauth_cancel_is_idempotent(client, monkeypatch):
         called.append(login_id)
 
     monkeypatch.setattr(oauth_login.OAuthLoginManager, "cancel", fake_cancel)
-    _login_exists(monkeypatch)
+    await _login_exists(monkeypatch, client[1])
 
     c, _ = client
     res = await c.post(
         "/api/credentials/oauth/cancel",
         json={"login_id": "login-xyz"},
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 204
     res = await c.post(
         "/api/credentials/oauth/cancel",
         json={"login_id": "login-xyz"},
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 204
     assert called == ["login-xyz", "login-xyz"]
@@ -419,6 +421,7 @@ async def test_oauth_cancel_is_idempotent(client, monkeypatch):
 @pytest.mark.asyncio
 async def test_oauth_endpoints_require_auth(client):
     c, _ = client
+    c.headers.pop("Authorization")
     for path, body in [
         ("/api/credentials/oauth/start", {"backend": "claude-code"}),
         (
@@ -439,16 +442,17 @@ async def test_oauth_endpoints_require_auth(client):
 async def _flagged_credential(db, *, cid, backend, auth_type, secret):
     from datetime import datetime
 
-    from server.config import settings
     from server.crypto import encrypt
 
+    owner = await db.get_system_agent()
     await db.save_credential(
         credential_id=cid,
         backend=backend,
         label="Personal",
         auth_type=auth_type,
-        secret_encrypted=encrypt(secret, settings.auth_token),
+        secret_encrypted=encrypt(secret, await deps.get_user_manager().data_key_for(owner["user_id"])),
         created_at=datetime.now(UTC).isoformat(),
+        user_id=owner["user_id"],
     )
     await db.update_credential(
         cid,
@@ -475,7 +479,7 @@ async def test_oauth_complete_reauth_updates_in_place(client, monkeypatch):
         )
 
     monkeypatch.setattr(oauth_login.OAuthLoginManager, "submit_code", fake_submit)
-    _login_exists(monkeypatch, "x")
+    await _login_exists(monkeypatch, client[1], "x")
 
     res = await c.post(
         "/api/credentials/oauth/complete",
@@ -483,7 +487,7 @@ async def test_oauth_complete_reauth_updates_in_place(client, monkeypatch):
             "login_id": "x", "code": "y", "label": "Personal",
             "credential_id": "claudecred01",
         },
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 201, res.text
     body = res.json()
@@ -493,7 +497,7 @@ async def test_oauth_complete_reauth_updates_in_place(client, monkeypatch):
 
     rows = await db.load_credentials()
     assert len(rows) == 1                         # no duplicate credential minted
-    assert decrypt(rows[0]["secret_encrypted"], TOKEN) == "sk-ant-fresh-token-1234567890"
+    assert decrypt(rows[0]["secret_encrypted"], await deps.get_user_manager().data_key_for(rows[0]["user_id"])) == "sk-ant-fresh-token-1234567890"
 
 
 @pytest.mark.asyncio
@@ -505,7 +509,7 @@ async def test_oauth_complete_reauth_404_unknown_credential(client, monkeypatch)
         return _StubLoginSession(LoginState.success, token="sk-ant-fresh-1234567890")
 
     monkeypatch.setattr(oauth_login.OAuthLoginManager, "submit_code", fake_submit)
-    _login_exists(monkeypatch)
+    await _login_exists(monkeypatch, client[1])
 
     c, _ = client
     res = await c.post(
@@ -513,7 +517,7 @@ async def test_oauth_complete_reauth_404_unknown_credential(client, monkeypatch)
         json={
             "login_id": "x", "code": "y", "label": "P", "credential_id": "nope",
         },
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 404
 
@@ -528,14 +532,14 @@ async def test_patch_new_secret_clears_needs_reconnect(client):
     res = await c.patch(
         "/api/credentials/apikeycred01",
         json={"secret": "sk-ant-fresh-key"},
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["needs_reconnect"] is False
     assert body["status"] == "active"
     rows = await db.load_credentials()
-    assert decrypt(rows[0]["secret_encrypted"], TOKEN) == "sk-ant-fresh-key"
+    assert decrypt(rows[0]["secret_encrypted"], await deps.get_user_manager().data_key_for(rows[0]["user_id"])) == "sk-ant-fresh-key"
 
 
 @pytest.mark.asyncio
@@ -559,11 +563,12 @@ async def test_codex_status_reauth_clears_flag_in_place(client):
         codex_home="/tmp/codexhome",
         label="Personal",
         state=CodexLoginState.success,
+        user_id=(await db.get_system_agent())["user_id"],
     )
     codex_login_manager._sessions["login-reauth"] = sess
     try:
         res = await c.get(
-            "/api/credentials/codex/login-reauth/status", headers=AUTH
+            "/api/credentials/codex/login-reauth/status", headers=c.headers
         )
         assert res.status_code == 200, res.text
         body = res.json()
@@ -599,7 +604,7 @@ async def test_delete_unbinds_the_sessions_that_pinned_it(client):
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
-    agent = await AgentManager(db).create_agent(name="Binder")
+    agent = await AgentManager(db).create_agent(name="Binder", user_id=(await db.get_system_agent())["user_id"])
 
     made = await c.post(
         "/api/credentials",
@@ -609,7 +614,7 @@ async def test_delete_unbinds_the_sessions_that_pinned_it(client):
             "auth_type": "api_key",
             "secret": "sk-ant-old",
         },
-        headers=AUTH,
+        headers=c.headers,
     )
     cred_id = made.json()["id"]
 
@@ -619,7 +624,7 @@ async def test_delete_unbinds_the_sessions_that_pinned_it(client):
     free = await session_manager.create_session(agent_id=agent["id"], name="free")
     assert bound.credential_id == cred_id
 
-    res = await c.delete(f"/api/credentials/{cred_id}", headers=AUTH)
+    res = await c.delete(f"/api/credentials/{cred_id}", headers=c.headers)
     assert res.status_code == 204
 
     # In memory and on disk, the dead id is gone — not left dangling.
@@ -643,7 +648,7 @@ async def test_a_session_can_be_repointed_at_another_credential(client):
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
-    agent = await AgentManager(db).create_agent(name="Swapper")
+    agent = await AgentManager(db).create_agent(name="Swapper", user_id=(await db.get_system_agent())["user_id"])
     session = await session_manager.create_session(agent_id=agent["id"], name="s")
 
     new_id = (
@@ -655,14 +660,14 @@ async def test_a_session_can_be_repointed_at_another_credential(client):
                 "auth_type": "api_key",
                 "secret": "sk-ant-new",
             },
-            headers=AUTH,
+            headers=c.headers,
         )
     ).json()["id"]
 
     res = await c.patch(
         f"/api/sessions/{session.id}",
         json={"credential_id": new_id},
-        headers=AUTH,
+        headers=c.headers,
     )
     assert res.status_code == 200, res.text
     assert res.json()["credential_id"] == new_id
@@ -670,7 +675,7 @@ async def test_a_session_can_be_repointed_at_another_credential(client):
 
     # Explicit null clears it again (back to the agent's credential).
     res = await c.patch(
-        f"/api/sessions/{session.id}", json={"credential_id": None}, headers=AUTH
+        f"/api/sessions/{session.id}", json={"credential_id": None}, headers=c.headers
     )
     assert res.status_code == 200
     assert res.json()["credential_id"] is None
@@ -678,7 +683,7 @@ async def test_a_session_can_be_repointed_at_another_credential(client):
     # A credential that doesn't exist is refused — a dangling id is exactly
     # what this route exists to get out of.
     res = await c.patch(
-        f"/api/sessions/{session.id}", json={"credential_id": "ghost"}, headers=AUTH
+        f"/api/sessions/{session.id}", json={"credential_id": "ghost"}, headers=c.headers
     )
     assert res.status_code == 404
 
@@ -687,11 +692,11 @@ async def test_a_session_can_be_repointed_at_another_credential(client):
         await c.post(
             "/api/credentials",
             json={"backend": "codex", "label": "Codex", "auth_type": "oauth", "secret": "x"},
-            headers=AUTH,
+            headers=c.headers,
         )
     ).json()["id"]
     res = await c.patch(
-        f"/api/sessions/{session.id}", json={"credential_id": codex_id}, headers=AUTH
+        f"/api/sessions/{session.id}", json={"credential_id": codex_id}, headers=c.headers
     )
     assert res.status_code == 400
     assert "does not match" in res.json()["detail"]
@@ -708,20 +713,20 @@ async def test_patch_renames_a_session_and_rejects_an_empty_name(client):
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
-    agent = await AgentManager(db).create_agent(name="Renamer")
+    agent = await AgentManager(db).create_agent(name="Renamer", user_id=(await db.get_system_agent())["user_id"])
     session = await session_manager.create_session(agent_id=agent["id"], name="old")
 
     res = await c.patch(
-        f"/api/sessions/{session.id}", json={"name": "  new name  "}, headers=AUTH
+        f"/api/sessions/{session.id}", json={"name": "  new name  "}, headers=c.headers
     )
     assert res.status_code == 200
     assert res.json()["name"] == "new name"
 
     res = await c.patch(
-        f"/api/sessions/{session.id}", json={"name": "   "}, headers=AUTH
+        f"/api/sessions/{session.id}", json={"name": "   "}, headers=c.headers
     )
     assert res.status_code == 400
-    assert (await c.patch("/api/sessions/ghost", json={"name": "x"}, headers=AUTH)).status_code == 404
+    assert (await c.patch("/api/sessions/ghost", json={"name": "x"}, headers=c.headers)).status_code == 404
     session_manager.sessions.clear()
     session_manager._admission_closed = False
 
@@ -741,16 +746,16 @@ async def test_patch_sets_a_per_session_model_and_clears_it(client):
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
-    agent = await AgentManager(db).create_agent(name="Modeller", model="sonnet")
+    agent = await AgentManager(db).create_agent(name="Modeller", model="sonnet", user_id=(await db.get_system_agent())["user_id"])
     session = await session_manager.create_session(agent_id=agent["id"], name="s")
 
     # Unset to begin with: the agent's model is what runs.
     assert (
-        await c.get(f"/api/sessions/{session.id}", headers=AUTH)
+        await c.get(f"/api/sessions/{session.id}", headers=c.headers)
     ).json()["model"] is None
 
     res = await c.patch(
-        f"/api/sessions/{session.id}", json={"model": "  opus  "}, headers=AUTH
+        f"/api/sessions/{session.id}", json={"model": "  opus  "}, headers=c.headers
     )
     assert res.status_code == 200
     assert res.json()["model"] == "opus"
@@ -758,13 +763,13 @@ async def test_patch_sets_a_per_session_model_and_clears_it(client):
 
     # A name nothing knows about is still accepted — that is the point.
     res = await c.patch(
-        f"/api/sessions/{session.id}", json={"model": "some-model-9"}, headers=AUTH
+        f"/api/sessions/{session.id}", json={"model": "some-model-9"}, headers=c.headers
     )
     assert res.json()["model"] == "some-model-9"
 
     for blank in (None, "   "):
         res = await c.patch(
-            f"/api/sessions/{session.id}", json={"model": blank}, headers=AUTH
+            f"/api/sessions/{session.id}", json={"model": blank}, headers=c.headers
         )
         assert res.status_code == 200
         assert res.json()["model"] is None, blank
@@ -776,7 +781,7 @@ async def test_patch_sets_a_per_session_model_and_clears_it(client):
 async def test_backends_lists_a_model_shortlist_per_backend(client):
     """The picker's options come from the harness profile, not the frontend."""
     c, _db = client
-    body = (await c.get("/api/backends", headers=AUTH)).json()
+    body = (await c.get("/api/backends", headers=c.headers)).json()
     assert "claude-code" in body["available"]
     assert body["models"]["claude-code"] == ["opus", "sonnet", "haiku"]
     # Every listed backend has an entry, even when its shortlist is empty.
@@ -784,7 +789,7 @@ async def test_backends_lists_a_model_shortlist_per_backend(client):
 
 
 @pytest.mark.asyncio
-async def test_a_claude_signin_credential_belongs_to_the_account(client, monkeypatch):
+async def test_a_claude_signin_credential_belongs_to_the_account(client, monkeypatch, tmp_path):
     """The bug that made Nancy's Claude sign-in "disappear": oauth/complete
     encrypted the secret with the account's key but saved the row with no
     owner. So it fell out of her scoped credential list, and every turn
@@ -799,7 +804,7 @@ async def test_a_claude_signin_credential_belongs_to_the_account(client, monkeyp
 
     c, db = client
     monkeypatch.setattr(settings, "master_key", "test-master-key")
-    monkeypatch.setattr(settings, "users_root", "/tmp/octopus-cred-test-users")
+    monkeypatch.setattr(settings, "users_root", str(tmp_path / "users"))
     from server import crypto
 
     crypto._MASTER_CACHE.clear()
@@ -849,7 +854,6 @@ async def test_a_claude_signin_credential_belongs_to_the_account(client, monkeyp
         assert decrypt(row["secret_encrypted"], key).startswith("sk-ant-nancy")
     finally:
         deps.set_user_manager(None)
-        deps.forget_accounts_exist()
 
 
 def _make_login_for(user_id: str):

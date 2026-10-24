@@ -218,18 +218,30 @@ class TestSampler:
         assert collect_db(str(tmp_path / "nope.db")) == []
 
 
-async def test_codex_http_report_weights_response_time_and_exposes_missing_samples(store, monkeypatch):
+@pytest.fixture
+async def administrator_token():
+    from server.database import Database
+    from tests.accounts import create_account
+
+    database = Database(":memory:")
+    await database.initialize()
+    try:
+        _, token = await create_account(database)
+        yield token
+    finally:
+        await database.close()
+
+
+async def test_codex_http_report_weights_response_time_and_exposes_missing_samples(store, monkeypatch, administrator_token):
     """300 output / 12 response seconds = 25 TPS, not mean(50, 20)=35."""
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
 
     from server.config import settings
-    from server.deps import operator_user
     from server.routers.monitor import router
 
     app = FastAPI()
     app.include_router(router)
-    app.dependency_overrides[operator_user] = lambda: None
     monkeypatch.setattr(settings, "metrics_db_path", store._db_path)
     now = time.time()
     for index, (seconds, output, reasoning) in enumerate(((2, 100, 60), (10, 200, 150), (None, 50, 30))):
@@ -246,7 +258,8 @@ async def test_codex_http_report_weights_response_time_and_exposes_missing_sampl
     store.record(Event(kind="codex_turn_latency", ts=now, duration_ms=2000,
                        detail={"model": "gpt-test", "native_thread_id": "thread", "native_turn_id": "turn"}))
     await store.drain()
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test",
+                           headers={"Authorization": "Bearer " + administrator_token}) as client:
         response = await client.get("/api/monitor/codex?window=1h")
         assert response.status_code == 200, response.text
         rows = {row["model"]: row for row in response.json()["rows"]}

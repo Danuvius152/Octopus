@@ -11,11 +11,11 @@ from server.deps import get_session_manager
 from server.knowledge import decode_context
 from server.routers import schedules
 from server.scheduler import ScheduleRunner
+from server.users import UserManager
 from tests import test_schedule_tool as schedule_api
 from tests.test_delegation_work import work_runtime as work_runtime
 
 client = schedule_api.client
-HEADERS = schedule_api.HEADERS
 
 
 @pytest.mark.parametrize("scoped", [False, True])
@@ -24,26 +24,26 @@ async def test_schedule_prompt_edit_preserves_read_and_null_cannot_clear_it(clie
     response = await client.post(
         f"/api/sessions/{sid}/schedules",
         json={"prompt": "/wiki Explain X", "interval_seconds": 600, "wiki_mode": "read"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert response.status_code == 201
     schedule_id = response.json()["id"]
     url = f"/api/sessions/{sid}/schedules/{schedule_id}" if scoped else f"/api/schedules/{schedule_id}"
 
-    changed = await client.patch(url, json={"prompt": "/wiki maintain Library/Y.md"}, headers=HEADERS)
+    changed = await client.patch(url, json={"prompt": "/wiki maintain Library/Y.md"}, headers=client.headers)
     assert changed.status_code == 200, changed.text
     assert changed.json()["wiki_mode"] == "read"
-    rejected = await client.patch(url, json={"wiki_mode": None}, headers=HEADERS)
+    rejected = await client.patch(url, json={"wiki_mode": None}, headers=client.headers)
     assert rejected.status_code == 422
-    stored = (await client.get("/api/schedules", headers=HEADERS)).json()[0]
+    stored = (await client.get("/api/schedules", headers=client.headers)).json()[0]
     assert stored["wiki_mode"] == "read"
 
 
 async def test_human_can_explicitly_reauthorize_definition_without_editing_prompt(client):
     sid = await schedule_api._session(client)
-    created = await client.post(f"/api/sessions/{sid}/schedules", headers=HEADERS,
+    created = await client.post(f"/api/sessions/{sid}/schedules", headers=client.headers,
                                 json={"prompt": "Explain X", "interval_seconds": 600, "wiki_mode": "read"})
-    changed = await client.patch(f"/api/schedules/{created.json()['id']}", headers=HEADERS,
+    changed = await client.patch(f"/api/schedules/{created.json()['id']}", headers=client.headers,
                                 json={"wiki_mode": "auto"})
     assert changed.status_code == 200, changed.text
     assert changed.json()["wiki_mode"] == "auto"
@@ -51,7 +51,7 @@ async def test_human_can_explicitly_reauthorize_definition_without_editing_promp
 
 @pytest.fixture
 async def plan_runtime(work_runtime, monkeypatch):
-    manager, _, _, starts = work_runtime
+    manager, _, caller, starts = work_runtime
     runner = ScheduleRunner(manager, manager.db)
     monkeypatch.setattr(schedules, "_db", manager.db)
     monkeypatch.setattr(schedules, "_runner", runner)
@@ -59,10 +59,12 @@ async def plan_runtime(work_runtime, monkeypatch):
     app.include_router(schedules.router)
     app.include_router(schedules.session_router)
     app.dependency_overrides[get_session_manager] = lambda: manager
-    agent = await AgentManager(manager.db).create_agent(name="Planner", backend="codex")
+    agent = await AgentManager(manager.db).create_agent(name="Planner", backend="codex", user_id=caller.user_id)
     parent = await manager.create_session(agent["id"], backend="codex")
     try:
-        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as api:
+        token = await UserManager(manager.db).issue_token(parent.user_id)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test",
+                                    headers={"Authorization": "Bearer " + token}) as api:
             yield manager, runner, parent, starts, api
     finally:
         await runner.shutdown()
@@ -104,7 +106,7 @@ async def test_mcp_creation_inherits_read_even_when_the_scheduled_body_requests_
 @pytest.mark.parametrize("scoped", [False, True])
 async def test_mcp_edit_intersects_saved_and_callers_limits_in_both_patch_adapters(plan_runtime, scoped):
     manager, _runner, parent, starts, api = plan_runtime
-    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=HEADERS,
+    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=api.headers,
                              json={"prompt": "Human task", "interval_seconds": 3600})
     schedule_id = created.json()["id"]
     _, headers = await live_caller(manager, parent, starts)
@@ -132,7 +134,7 @@ async def test_human_reauthorization_clears_missing_contract_without_enabling_th
     await manager.db.save_schedule(schedule_id="legacy", agent_id=parent.agent_id, name="old", prompt="Explain X",
                                    interval_seconds=3600, created_at="2026-10-19")
     await runner._fire("legacy")
-    response = await api.patch("/api/schedules/legacy", headers=HEADERS, json={"wiki_mode": "read"})
+    response = await api.patch("/api/schedules/legacy", headers=api.headers, json={"wiki_mode": "read"})
     assert response.status_code == 200, response.text
     assert response.json()["invalid_reason"] is None
     assert response.json()["enabled"] is False
@@ -140,14 +142,14 @@ async def test_human_reauthorization_clears_missing_contract_without_enabling_th
 
 async def test_definition_edit_does_not_change_a_fire_already_captured_by_its_owner(plan_runtime, tmp_path):
     manager, runner, parent, starts, api = plan_runtime
-    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=HEADERS, json={
+    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=api.headers, json={
         "prompt": "/wiki controlled first definition", "interval_seconds": 3600, "in_session": False,
     })
     schedule_id = created.json()["id"]
     first = asyncio.create_task(runner._fire(schedule_id))
     try:
         await asyncio.wait_for(starts.get(), 5)
-        changed = await api.patch(f"/api/schedules/{schedule_id}", headers=HEADERS,
+        changed = await api.patch(f"/api/schedules/{schedule_id}", headers=api.headers,
                                  json={"prompt": "Second definition", "wiki_mode": "auto"})
         assert changed.status_code == 200, changed.text
         first_sid = (await manager.db.load_schedules())[0]["last_run_session_id"]
@@ -171,7 +173,7 @@ async def test_definition_edit_does_not_change_a_fire_already_captured_by_its_ow
 @pytest.mark.parametrize("narrowing", [{"wiki_mode": "read"}, {"wiki_mode": "maintain", "prompt": "/wiki maintain Library/X.md"}])
 async def test_concurrent_name_edit_cannot_restore_the_previous_maintenance_contract(plan_runtime, monkeypatch, scoped, narrowing):
     manager, _runner, parent, _starts, api = plan_runtime
-    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=HEADERS,
+    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=api.headers,
                              json={"prompt": "Human task", "interval_seconds": 3600})
     schedule_id = created.json()["id"]
     url = f"/api/sessions/{parent.id}/schedules/{schedule_id}" if scoped else f"/api/schedules/{schedule_id}"
@@ -185,10 +187,10 @@ async def test_concurrent_name_edit_cannot_restore_the_previous_maintenance_cont
         await validate(existing, updates)
 
     monkeypatch.setattr(schedules, "validate_schedule_enabling", pause_name_edit)
-    pending = asyncio.create_task(api.patch(url, headers=HEADERS, json={"name": "paused name edit"}))
+    pending = asyncio.create_task(api.patch(url, headers=api.headers, json={"name": "paused name edit"}))
     try:
         await asyncio.wait_for(prepared.wait(), 5)
-        narrowed = await api.patch(url, headers=HEADERS, json=narrowing)
+        narrowed = await api.patch(url, headers=api.headers, json=narrowing)
         assert narrowed.status_code == 200
     finally:
         release.set()
@@ -206,7 +208,7 @@ async def test_concurrent_name_edit_cannot_restore_the_previous_maintenance_cont
 @pytest.mark.parametrize("scoped", [False, True])
 async def test_mcp_target_refinement_survives_definition_and_fire(plan_runtime, tmp_path, scoped):
     manager, runner, parent, starts, api = plan_runtime
-    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=HEADERS,
+    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=api.headers,
                              json={"prompt": "Human task", "interval_seconds": 3600, "in_session": False})
     schedule_id = created.json()["id"]
     receipt, headers = await live_caller(manager, parent, starts, prompt="controlled ordinary task")
@@ -226,7 +228,7 @@ async def test_mcp_target_refinement_survives_definition_and_fire(plan_runtime, 
 @pytest.mark.parametrize("changes", [{"wiki_mode": "read"}, {"name": "Further restricted plan"}])
 async def test_mcp_edit_without_body_keeps_new_source_limits_in_the_actual_fire(plan_runtime, tmp_path, scoped, changes):
     manager, runner, parent, starts, api = plan_runtime
-    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=HEADERS,
+    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=api.headers,
                              json={"prompt": "/wiki Compare X", "interval_seconds": 3600, "in_session": False})
     schedule_id = created.json()["id"]
     request = "controlled: this plan must use local notes only; do not make new web requests."
@@ -252,7 +254,7 @@ async def test_work_closed_during_schedule_preparation_cannot_publish_a_definiti
     from server.mcp_identity import close_work
 
     manager, runner, parent, starts, api = plan_runtime
-    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=HEADERS,
+    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=api.headers,
                              json={"prompt": "Original task", "interval_seconds": 3600})
     schedule_id = created.json()["id"]
     before = (await manager.db.load_schedules())[0]
@@ -293,13 +295,13 @@ async def test_work_closed_during_schedule_preparation_cannot_publish_a_definiti
 @pytest.mark.parametrize("scoped", [False, True])
 async def test_maintenance_only_edit_keeps_the_definitions_source_contract(plan_runtime, scoped):
     manager, _runner, parent, _starts, api = plan_runtime
-    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=HEADERS, json={
+    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=api.headers, json={
         "prompt": "/wiki Explain X; do not make new web requests", "interval_seconds": 3600,
     })
     schedule_id = created.json()["id"]
     url = f"/api/sessions/{parent.id}/schedules/{schedule_id}" if scoped else f"/api/schedules/{schedule_id}"
-    assert (await api.patch(url, headers=HEADERS, json={"prompt": "Current scheduled task"})).status_code == 200
-    changed = await api.patch(url, headers=HEADERS, json={"wiki_mode": "auto"})
+    assert (await api.patch(url, headers=api.headers, json={"prompt": "Current scheduled task"})).status_code == 200
+    changed = await api.patch(url, headers=api.headers, json={"wiki_mode": "auto"})
     assert changed.status_code == 200, changed.text
     contract = decode_context((await manager.db.load_schedules())[0]["knowledge_context"])
     assert contract.mode == "auto" and contract.sources == ("wiki", "web")
@@ -308,7 +310,7 @@ async def test_maintenance_only_edit_keeps_the_definitions_source_contract(plan_
 
 async def test_delayed_registration_cannot_restore_an_already_disabled_plan(plan_runtime, monkeypatch):
     manager, runner, parent, _starts, api = plan_runtime
-    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=HEADERS,
+    created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=api.headers,
                              json={"prompt": "Human task", "interval_seconds": 3600})
     schedule_id = created.json()["id"]
     url = f"/api/schedules/{schedule_id}"
@@ -322,10 +324,10 @@ async def test_delayed_registration_cannot_restore_an_already_disabled_plan(plan
         await reschedule(row)
 
     monkeypatch.setattr(runner, "reschedule", delayed_registration)
-    old = asyncio.create_task(api.patch(url, headers=HEADERS, json={"name": "delayed registration"}))
+    old = asyncio.create_task(api.patch(url, headers=api.headers, json={"name": "delayed registration"}))
     try:
         await asyncio.wait_for(entered.wait(), 5)
-        disabled = await api.patch(url, headers=HEADERS, json={"enabled": False, "wiki_mode": "read", "name": "New definition"})
+        disabled = await api.patch(url, headers=api.headers, json={"enabled": False, "wiki_mode": "read", "name": "New definition"})
         assert disabled.status_code == 200
     finally:
         release.set()
@@ -343,7 +345,7 @@ async def test_fire_reads_the_confirmed_definition_after_update_interruption(pla
 
     manager, runner, parent, starts, api = plan_runtime
     destination = await manager.create_session(parent.agent_id, "Schedule destination", str(tmp_path))
-    created = await api.post(f"/api/sessions/{destination.id}/schedules", headers=HEADERS, json={
+    created = await api.post(f"/api/sessions/{destination.id}/schedules", headers=api.headers, json={
         "prompt": "Original scheduled task", "interval_seconds": 3600, "in_session": in_session,
     })
     schedule_id = created.json()["id"]

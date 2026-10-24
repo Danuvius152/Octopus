@@ -5,8 +5,8 @@ import json
 
 import pytest
 
+from server import deps
 from server.attachments import MAX_FILE_BYTES, get_path, save_upload
-from server.config import settings
 from tests.test_attachments import attachments_root as attachments_root
 from tests.test_runtime_review_races import (
     connect_ws,
@@ -83,7 +83,8 @@ async def test_missing_queued_file_fails_without_a_second_model_and_retains_inpu
 @pytest.mark.parametrize("identifiers", [[17], ["abcdef123456", None], "abcdef123456", {"id": "abcdef123456"}])
 async def test_websocket_does_not_filter_invalid_file_input_into_a_partial_message(runtime, identifiers):
     manager, _, session, _, starts, _ = runtime
-    incoming, outgoing, connection = await connect_ws(manager, settings.auth_token)
+    bearer = await deps.get_user_manager().issue_token(session.user_id)
+    incoming, outgoing, connection = await connect_ws(manager, bearer)
     try:
         await incoming.put({"type": "websocket.receive", "text": json.dumps({
             "type": "send_message", "session_id": session.id, "content": "Required files",

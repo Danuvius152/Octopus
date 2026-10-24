@@ -11,11 +11,13 @@ from pathlib import Path
 import pytest
 
 from server.config import settings
+from server.database import Database
 from server.wiki import origins
 from server.wiki.app_bridge import begin
 from server.wiki.history import WikiHistory, atomic
 from server.wiki.registry import registry
 from server.wiki.store import WikiError, WikiStore, revision
+from tests.accounts import create_account
 
 
 @pytest.fixture
@@ -283,7 +285,11 @@ def test_gc_and_restore_blob_read_share_the_same_lock(history, monkeypatch):
 
 
 @pytest.fixture
-def sapphire(tmp_path, monkeypatch):
+async def sapphire(tmp_path, monkeypatch):
+    database = Database(":memory:")
+    await database.initialize()
+    owner, _ = await create_account(database, extra_roots=[tmp_path])
+    agent = await database.get_system_agent(owner["id"])
     app_dir = tmp_path / "sapphire"
     app_dir.mkdir()
     root = tmp_path / "sapphire.data" / "vaults" / "obv" / "repo"
@@ -291,14 +297,18 @@ def sapphire(tmp_path, monkeypatch):
     data = tmp_path / "sapphire.data"
     (data / "registry.json").write_text(json.dumps({"vaults": [{"id": "obv"}]}))
     monkeypatch.setattr(settings, "wiki_dir", str(tmp_path / "state"))
-    registry.configure(None, root, "curator", "sapphire")
-    store = registry.store(None)
+    registry.configure(owner["id"], root, agent["id"], "sapphire")
+    store = registry.store(owner["id"])
     (root / "note.md").write_bytes(b"original")
     (root / "unchanged.md").write_bytes(b"unrelated text")
     (root / "huge.pdf").write_bytes(b"unread PDF")
     (root / "video.mp4").write_bytes(b"unread video")
     store.refresh()
-    return {"id": "sapphire", "app_dir": str(app_dir)}, WikiHistory(store)
+    try:
+        yield {"id": "sapphire", "app_dir": str(app_dir), "user_id": owner["id"]}, WikiHistory(store)
+    finally:
+        registry.close()
+        await database.close()
 
 
 async def test_sapphire_save_only_captures_modified_text_and_never_reads_attachments(

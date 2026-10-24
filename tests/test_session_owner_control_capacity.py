@@ -13,7 +13,7 @@ from server.sessions.questions import QuestionClosedError
 from tests import test_question_lifecycle as question_tests
 
 question_host = question_tests.question_host
-HEADERS, QUESTIONS = question_tests.HEADERS, question_tests.QUESTIONS
+QUESTIONS = question_tests.QUESTIONS
 
 
 @pytest.mark.parametrize("cancelled_kind", ["runtime", "question"])
@@ -173,7 +173,7 @@ async def test_full_control_capacity_releases_original_waiters_after_owner_failu
         assert delivered == ["original-prefix"]
         assert await manager.drain_turns(timeout=3) == 0
 
-        detail = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+        detail = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
         assert detail.status_code == 200 and detail.json()["pending_questions"] == []
         assert [row["type"] for row in detail.json()["messages"]] == ["question_request", "delivery_notice"]
         assert not await has_notice(session.id, "control-capacity-fault")

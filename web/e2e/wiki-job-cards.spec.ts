@@ -1,13 +1,14 @@
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { expect, test, type WebSocketRoute } from "@playwright/test";
 import { systemAgentId } from "./system-agent";
 
 const API = "http://localhost:8765/api";
-const headers = { Authorization: "Bearer changeme" };
+const headers = { Authorization: `Bearer ${TEST_BEARER}` };
 
 test("Wiki cards persist, cancel their displayed attempt, and catch up after reconnect", async ({ page, context, request }) => {
   test.setTimeout(60_000);
   const created = await request.post(`${API}/sessions`, {
-    headers, data: { agent_id: await systemAgentId(request, `${API}/sessions`, headers), name: "Persistent Wiki cards", working_dir: "/tmp" },
+    headers, data: { agent_id: await systemAgentId(request, `${API}/sessions`, headers), name: "Persistent Wiki cards", },
   });
   expect(created.ok()).toBeTruthy();
   const session = await created.json();
@@ -56,8 +57,7 @@ test("Wiki cards persist, cancel their displayed attempt, and catch up after rec
   };
   try {
     await page.goto("/");
-    await page.locator('input[type="password"]').fill("changeme");
-    await page.locator(".btn-login").click();
+    await enterAccountCredentials(page);
     await page.locator(".agent-item", { hasText: "Octo" }).click();
     await page.locator(".session-item", { hasText: session.name }).click();
     await expect(page.locator(".conn-status.on")).toBeVisible();

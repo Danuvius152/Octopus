@@ -1,8 +1,9 @@
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { expect, test } from "@playwright/test";
 import { systemAgentId } from "./system-agent";
 
 const API = "http://localhost:8765/api";
-const headers = { Authorization: "Bearer changeme" };
+const headers = { Authorization: `Bearer ${TEST_BEARER}` };
 
 test("a rejected draft survives archive and restores its text and attachment to a new conversation", async ({ page, request }) => {
   const sent: { session_id: string; client_request_id: string; content: string; attachment_ids: string[]; wiki_mode?: string }[] = [];
@@ -16,14 +17,13 @@ test("a rejected draft survives archive and restores its text and attachment to 
         client_request_id: data.client_request_id, accepted: false, message: "This conversation is closed to new messages." }));
     });
   });
-  const firstResponse = await request.post(`${API}/sessions`, { headers, data: { agent_id: await systemAgentId(request, `${API}/sessions`, headers), name: "Rejected draft original", working_dir: "/tmp" } });
+  const firstResponse = await request.post(`${API}/sessions`, { headers, data: { agent_id: await systemAgentId(request, `${API}/sessions`, headers), name: "Rejected draft original", } });
   expect(firstResponse.ok()).toBeTruthy();
   const first = await firstResponse.json();
   let nextId: string | undefined;
   try {
     await page.goto("/");
-    await page.locator('input[type="password"]').fill("changeme");
-    await page.locator(".btn-login").click();
+    await enterAccountCredentials(page);
     await page.locator(".agent-item", { hasText: "Octo" }).click();
     await page.locator(".session-item", { hasText: first.name }).click();
     await expect(page.locator(".conn-status.on")).toBeVisible();
@@ -76,7 +76,7 @@ test("session-owned uploads preserve the complete draft across conversations", a
   for (const suffix of ["A", "B"]) {
     const response = await request.post(`${API}/sessions`, { headers, data: {
       agent_id: await systemAgentId(request, `${API}/sessions`, headers),
-      name: `Attachment ownership ${suffix}`, working_dir: "/tmp", backend: "codex",
+      name: `Attachment ownership ${suffix}`, backend: "codex",
     } });
     expect(response.ok()).toBeTruthy();
     sessions.push(await response.json());
@@ -84,8 +84,7 @@ test("session-owned uploads preserve the complete draft across conversations", a
   const [first, second] = sessions;
   try {
     await page.goto("/");
-    await page.locator('input[type="password"]').fill("changeme");
-    await page.locator(".btn-login").click();
+    await enterAccountCredentials(page);
     await page.locator(".agent-item", { hasText: "Octo" }).click();
     await page.locator(".session-item", { hasText: first.name }).click();
     await expect(page.locator(".conn-status.on")).toBeVisible();
@@ -106,7 +105,7 @@ test("session-owned uploads preserve the complete draft across conversations", a
     // A forged mixed request must be rejected as a whole over the real socket.
     const refusal = await page.evaluate(async ({ sessionId, ids }) => {
       return await new Promise<Record<string, unknown>>((resolve, reject) => {
-        const socket = new WebSocket(`${location.origin.replace(/^http/, "ws")}/ws?token=changeme`);
+        const socket = new WebSocket(`${location.origin.replace(/^http/, "ws")}/ws?token=${encodeURIComponent(localStorage.getItem("octopus_token") ?? "")}`);
         const deadline = setTimeout(() => { socket.close(); reject(new Error("Attachment refusal not received")); }, 5000);
         socket.onopen = () => socket.send(JSON.stringify({ type: "send_message", session_id: sessionId,
           content: "Must not run with missing input", attachment_ids: ids, client_request_id: "foreign-file-input" }));

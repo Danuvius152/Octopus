@@ -2246,40 +2246,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/auth/bootstrap/resume": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Resume Bootstrap */
-        post: operations["resume_bootstrap_api_auth_bootstrap_resume_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
-    "/api/auth/bootstrap/status": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        /** Bootstrap Status */
-        get: operations["bootstrap_status_api_auth_bootstrap_status_get"];
-        put?: never;
-        post?: never;
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/auth/state": {
         parameters: {
             query?: never;
@@ -2304,7 +2270,7 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/auth/bootstrap": {
+    "/api/auth/setup": {
         parameters: {
             query?: never;
             header?: never;
@@ -2313,16 +2279,8 @@ export interface paths {
         };
         get?: never;
         put?: never;
-        /**
-         * Bootstrap
-         * @description Create this install's first account, and hand it what is already here.
-         *
-         *     Authenticated with the install's own token, which is the only credential
-         *     that exists at this point and stops working the moment this succeeds — the
-         *     two facts are the same fact (§9). Refused outright once an account exists,
-         *     so it cannot be a second way in.
-         */
-        post: operations["bootstrap_api_auth_bootstrap_post"];
+        /** Setup */
+        post: operations["setup_api_auth_setup_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -2428,11 +2386,7 @@ export interface paths {
         };
         /**
          * Identity
-         * @description Who you are, for the sidebar's account row.
-         *
-         *     Before the first account, the install token identifies its operator by
-         *     `OCTOPUS_USER_LABEL`. After it, the authenticated scope names the account
-         *     whose username belongs in the sidebar.
+         * @description The current account's sidebar label.
          */
         get: operations["identity_api_auth_identity_get"];
         put?: never;
@@ -3448,29 +3402,6 @@ export interface components {
         Body_upload_attachment_api_sessions__session_id__attachments_post: {
             /** File */
             file: string;
-        };
-        /** BootstrapRequest */
-        BootstrapRequest: {
-            /** Username */
-            username: string;
-            /** Password */
-            password: string;
-        };
-        /** BootstrapResponse */
-        BootstrapResponse: {
-            /** Token */
-            token: string;
-            /** User Id */
-            user_id: string;
-            /** Username */
-            username: string;
-            /**
-             * Summary
-             * @default {}
-             */
-            summary: {
-                [key: string]: unknown;
-            };
         };
         /** CancelDelegationRequest */
         CancelDelegationRequest: {
@@ -5270,6 +5201,16 @@ export interface components {
             client_id: string;
             /** Client Secret */
             client_secret: string;
+        };
+        /**
+         * SetupRequest
+         * @description Credentials for the first account, exchanged with a setup-only proof.
+         */
+        SetupRequest: {
+            /** Username */
+            username: string;
+            /** Password */
+            password: string;
         };
         /** ShowMeResolveRequest */
         ShowMeResolveRequest: {
@@ -10539,72 +10480,6 @@ export interface operations {
             };
         };
     };
-    resume_bootstrap_api_auth_bootstrap_resume_post: {
-        parameters: {
-            query?: {
-                token?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    bootstrap_status_api_auth_bootstrap_status_get: {
-        parameters: {
-            query?: {
-                token?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
     auth_state_api_auth_state_get: {
         parameters: {
             query?: never;
@@ -10625,7 +10500,7 @@ export interface operations {
             };
         };
     };
-    bootstrap_api_auth_bootstrap_post: {
+    setup_api_auth_setup_post: {
         parameters: {
             query?: never;
             header?: never;
@@ -10634,7 +10509,7 @@ export interface operations {
         };
         requestBody: {
             content: {
-                "application/json": components["schemas"]["BootstrapRequest"];
+                "application/json": components["schemas"]["SetupRequest"];
             };
         };
         responses: {
@@ -10644,7 +10519,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": components["schemas"]["BootstrapResponse"];
+                    "application/json": components["schemas"]["LoginResponse"];
                 };
             };
             /** @description Validation Error */

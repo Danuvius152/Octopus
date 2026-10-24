@@ -1,6 +1,6 @@
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from "fs";
-import { tmpdir } from "os";
 import { join } from "path";
 import { systemAgentId } from "./system-agent";
 
@@ -12,7 +12,7 @@ import { systemAgentId } from "./system-agent";
 // /fork triggers a real backend copytree into ~/.octopus/fork/, so afterAll
 // deletes both sessions and removes the copied + source dirs.
 
-const TOKEN = "changeme";
+const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api";
 const OWNED = new Set([
   "Fork-Copy E2E Parent",
@@ -21,6 +21,12 @@ const OWNED = new Set([
   "deferred-fork",
 ]);
 const cleanupDirs: string[] = [];
+
+async function workspaceDirectory(request: APIRequestContext): Promise<string> {
+  const response = await request.get(`${API}/auth/workspace`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+  expect(response.ok()).toBeTruthy();
+  return (await response.json()).workspace;
+}
 
 test.afterAll(async ({ request }) => {
   try {
@@ -57,8 +63,7 @@ test.afterAll(async ({ request }) => {
 
 async function login(page: Page) {
   await page.goto("/");
-  await page.locator('input[type="password"]').fill(TOKEN);
-  await page.locator("button.btn-login").click();
+  await enterAccountCredentials(page);
   await expect(page.locator(".agent-list-header")).toBeVisible();
   // Sessions live behind a folded agent row; open the default
   // agent's rail so they're reachable.
@@ -102,7 +107,7 @@ test("/fork duplicates onto a copied dir; the original session stays", async ({
   request,
 }) => {
   // A small, real working dir so the backend copytree is cheap and safe.
-  const srcDir = mkdtempSync(join(tmpdir(), "octo-forkcopy-"));
+  const srcDir = mkdtempSync(join(await workspaceDirectory(request), "octo-forkcopy-"));
   cleanupDirs.push(srcDir);
   writeFileSync(join(srcDir, "hello.txt"), "original\n");
 
@@ -161,7 +166,7 @@ test.describe("Deferred /fork @llm", () => {
     page,
     request,
   }) => {
-    const srcDir = mkdtempSync(join(tmpdir(), "octo-deferfork-"));
+    const srcDir = mkdtempSync(join(await workspaceDirectory(request), "octo-deferfork-"));
     cleanupDirs.push(srcDir);
     writeFileSync(join(srcDir, "hello.txt"), "original\n");
 

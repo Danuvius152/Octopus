@@ -1,17 +1,7 @@
-"""Is this request allowed in at all.
+"""Admit current account bearers and authorized runtime scopes.
 
-Two eras meet here (multi-tenancy.md §9). Before the first account exists, the
-install is the single-user one it has always been and `OCTOPUS_AUTH_TOKEN` is
-the way in. From the moment an account exists, it is a site: only a session
-bearer or a personal access token opens anything, and the global token is dead.
-
-That is not a dual path kept for convenience — it is self-limiting. It cannot
-be used to bypass an account, because it stops working the instant the first
-one is created, and there is no configuration that brings it back.
-
-`verify_token` still returns the presented bearer, so the ~100 routes that
-declare it did not have to change while ownership lands. Knowing *who* is
-asking is `deps.current_user`; this only decides whether to let them in.
+Setup proof belongs only to the setup endpoint. These guards return the
+presented business bearer; request-scoped dependencies resolve its owner.
 """
 
 from __future__ import annotations

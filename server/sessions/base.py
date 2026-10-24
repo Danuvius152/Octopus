@@ -664,7 +664,6 @@ class SessionManagerBase:
         self._dispatch_generation = uuid.uuid4().hex
         self._retired_dispatch_generations: frozenset[str] = frozenset()
         self._admission_closed = False
-        self._legacy_transition = False
         self._owned_tasks: set[asyncio.Task[Any]] = set()
         # Short configuration operations share a lock, independently of turn
         # execution. Read/validate/write and turn snapshots must agree.
@@ -833,9 +832,6 @@ class SessionManagerBase:
             return False
         rows = await self.db.load_sessions(include_archived=True, user_id=user_id)
         return any(row["id"] == session_id for row in rows)
-
-    async def adopt_orphan_sessions(self, user_id: str) -> int:
-        raise NotImplementedError
 
     def get_session(
         self, session_id: str, user_id: str | None = None

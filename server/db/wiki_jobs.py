@@ -16,12 +16,8 @@ class WikiJobsMixin(DatabaseBase):
         self, vault_id: str, user_id: str | None, delivery: dict[str, Any],
     ) -> str:
         """Commit before the Wiki ACK; replay must match all original coordinates."""
-        owner = user_id if user_id is not None else "legacy"
-        if delivery["owner"] != owner:
-            from ..wiki.account_upgrade import adopts_notice
-
-            if not adopts_notice(user_id, vault_id, delivery):
-                raise WikiError("Wiki notification account changed", 403)
+        if user_id is None or delivery["owner"] != user_id:
+            raise WikiError("Wiki notification account changed", 403)
         body = delivery["body"]
         if len(body.encode()) > 24000:
             raise WikiError("Wiki notification exceeds its durable budget", 503)

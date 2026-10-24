@@ -29,7 +29,8 @@ async def test_all_turns_can_query_and_legacy_off_only_disables_maintenance(clie
 
     config = await wiki_api.configure(client, vault)
     manager = wiki_api.session_manager
-    reader = await AgentManager(manager.db).create_agent(name="Reader", backend="codex", mcp_servers=[])
+    owner = (await manager.db.get_system_agent())["user_id"]
+    reader = await AgentManager(manager.db).create_agent(name="Reader", backend="codex", mcp_servers=[], user_id=owner)
     assert reader["id"] != config["curator_agent_id"]
     actor_id = reader["id"] if actor == "reader" else config["curator_agent_id"]
     session = await manager.create_session(actor_id, "Autonomy", str(tmp_path), backend="codex")
@@ -139,33 +140,34 @@ async def test_native_job_navigation_avoids_embedding_large_payload_in_command(c
     (vault / "Library").mkdir(parents=True)
     (vault / "Library/note.md").write_text("# Source\nOriginal material\n")
     await wiki_api.configure(client, vault)
-    jobs = WikiJobs(None)
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    jobs = WikiJobs(owner)
     original = jobs.maintain("large-scope", "", "scope " * 30000, ["Library/note.md"], None, [], "human")
-    response = await client.get("/api/wiki/jobs", params={"view": "compact", "idempotency_key": "large-scope"}, headers=wiki_api.HEADERS)
+    response = await client.get("/api/wiki/jobs", params={"view": "compact", "idempotency_key": "large-scope"}, headers=client.headers)
     assert response.status_code == 200, response.text
     assert len(response.content) < 16000, "job navigation still carries the complete scope into shell argv"
     item = response.json()["items"][0]
     assert item["id"] == original["id"] and item["progress"]["total"] == 1
     assert "payload" not in item and "items" not in item
     assert jobs.get(original["id"])["payload"]["request"]["scope"] == "scope " * 30000
-    missing = await client.get("/api/wiki/jobs", params={"view": "compact", "idempotency_key": "large"}, headers=wiki_api.HEADERS)
+    missing = await client.get("/api/wiki/jobs", params={"view": "compact", "idempotency_key": "large"}, headers=client.headers)
     assert missing.json()["items"] == []
 
 
 async def test_native_full_jobs_capture_avoids_actual_e2big_and_preserves_evidence(client, tmp_path, monkeypatch):
-    from server.config import settings
     from server.mcp_identity import mint, reset_current_scope, set_current_scope, verify
     from server.mcp_servers import wiki
     from server.wiki.jobs import WikiJobs
     from server.wiki.store import WikiError
+    from server.workspace import paths_for
 
     vault = tmp_path / "vault"
     (vault / "Library").mkdir(parents=True)
     (vault / "Library/note.md").write_text("# Source\nKeep this material.\n")
     config = await wiki_api.configure(client, vault)
-    monkeypatch.setattr(settings, "default_working_dir", str(tmp_path / "workspace"))
-    job = WikiJobs(None).maintain("capture-large", "", "scope " * 30000, ["Library/note.md"], None, [], "human")
-    full = (await client.get(f"/api/wiki/jobs/{job['id']}", headers=wiki_api.HEADERS)).json()
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    job = WikiJobs(owner).maintain("capture-large", "", "scope " * 30000, ["Library/note.md"], None, [], "human")
+    full = (await client.get(f"/api/wiki/jobs/{job['id']}", headers=client.headers)).json()
     raw = json.dumps(full, ensure_ascii=False).encode()
     with pytest.raises(OSError) as oversized:
         subprocess.run([sys.executable, "-c", "", raw.decode()], check=True)
@@ -173,7 +175,7 @@ async def test_native_full_jobs_capture_avoids_actual_e2big_and_preserves_eviden
 
     session = await wiki_api.session_manager.create_session(config["curator_agent_id"], "Capture", str(tmp_path), backend="codex")
     task_id = tasks.open(session, "auto")
-    scope = verify(mint(session.id, wiki_task_id=task_id))
+    scope = verify(mint(session.id, user_id=session.user_id, wiki_task_id=task_id))
     context = set_current_scope(scope)
     monkeypatch.setattr(wiki, "call", lambda *args, **kwargs: full)
     try:
@@ -182,7 +184,7 @@ async def test_native_full_jobs_capture_avoids_actual_e2big_and_preserves_eviden
         assert len(json.dumps(captured).encode()) < 16000
         artifact = captured["artifact"]
         path = Path(artifact["path"])
-        assert path.is_relative_to(tmp_path / "workspace")
+        assert path.is_relative_to(paths_for(owner).workspace)
         assert path.stat().st_mode & 0o777 == 0o600
         content = path.read_bytes()
         assert len(content) == artifact["bytes"]
@@ -208,29 +210,34 @@ async def test_job_evidence_stays_confined_and_outside_canonical_vault(client, t
     from server.mcp_identity import mint, verify
     from server.wiki.evidence import capture_jobs
     from server.wiki.store import WikiError
+    from server.workspace import paths_for
 
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     vault = tmp_path / "vault"
-    vault.mkdir()
     if layout == "all-roots-in-vault":
-        # Configure a complete installation here; moving config.json alone
-        # would discard the authoritative ledger and test missing state instead.
-        monkeypatch.setattr(settings, "wiki_dir", str(vault / "state"))
+        # Put both account workspace and Wiki state inside the vault before
+        # registration; moving config alone would discard its ledger.
+        monkeypatch.setattr(settings, "users_root", str(vault / "users"))
+    workspace = paths_for(owner).workspace
+    if layout == "workspace-is-vault":
+        vault = workspace
+    vault.mkdir(parents=True, exist_ok=True)
     config = await wiki_api.configure(client, vault)
-    workspace = tmp_path / "workspace" if layout == "escaped-directory" else vault
-    workspace.mkdir(exist_ok=True)
-    monkeypatch.setattr(settings, "default_working_dir", str(workspace))
+    workspace.mkdir(parents=True, exist_ok=True)
     outside = tmp_path / "outside"
     if layout == "escaped-directory":
         outside.mkdir()
         (workspace / "wiki-evidence").symlink_to(outside, target_is_directory=True)
     session = await wiki_api.session_manager.create_session(config["curator_agent_id"], "Confined evidence", str(tmp_path), backend="codex")
     task_id = tasks.open(session, "auto")
-    scope = verify(mint(session.id, wiki_task_id=task_id))
+    scope = verify(mint(session.id, user_id=session.user_id, wiki_task_id=task_id))
     try:
         if layout == "workspace-is-vault":
             artifact = capture_jobs(scope, {"private": "job metadata"})
             path = Path(artifact["path"])
-            assert path.is_relative_to(tmp_path / "state/tool-evidence")
+            from server.wiki.registry import registry
+
+            assert path.is_relative_to(registry.state(owner) / "tool-evidence")
             assert not path.is_relative_to(vault)
             assert json.loads(path.read_text()) == {"private": "job metadata"}
         else:

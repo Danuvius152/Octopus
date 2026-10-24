@@ -455,18 +455,17 @@ async def client():
 
     db = Database(":memory:")
     await db.initialize()
+    from tests.accounts import create_account
+    _, token = await create_account(db)
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
     agents_mod.set_manager(AgentManager(db))
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization": "Bearer " + token}) as c:
         yield c
     await db.close()
-
-
-HEADERS = {"Authorization": "Bearer changeme"}
 
 
 @pytest.mark.asyncio
@@ -483,7 +482,7 @@ async def test_an_agent_can_carry_its_own_subagents(client):
                 }
             ],
         },
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert created.status_code == 201, created.text
     agent = created.json()
@@ -492,7 +491,7 @@ async def test_an_agent_can_carry_its_own_subagents(client):
     # And they round-trip through an edit, where an agent that defines none
     # is the normal state.
     patched = await client.patch(
-        f"/api/agents/{agent['id']}", json={"subagents": []}, headers=HEADERS
+        f"/api/agents/{agent['id']}", json={"subagents": []}, headers=client.headers
     )
     assert patched.status_code == 200
     assert patched.json()["subagents"] == []
@@ -502,7 +501,7 @@ async def test_an_agent_can_carry_its_own_subagents(client):
 async def test_pre_existing_agents_read_back_with_no_subagents(client):
     """The column is additive — every row that predates it means "built-ins
     only", not "broken agent"."""
-    listed = (await client.get("/api/agents", headers=HEADERS)).json()
+    listed = (await client.get("/api/agents", headers=client.headers)).json()
     assert listed, "the Default Agent should exist"
     assert all(a["subagents"] == [] for a in listed)
 
@@ -511,12 +510,13 @@ async def test_pre_existing_agents_read_back_with_no_subagents(client):
 async def test_the_session_snapshot_carries_live_runs(client):
     from server.session_manager import SessionManager, session_manager
 
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+    agents = (await client.get("/api/agents", headers=client.headers)).json()
     made = await client.post(
         "/api/sessions",
-        json={"name": "S", "working_dir": "/tmp", "agent_id": agents[0]["id"]},
-        headers=HEADERS,
+        json={"name": "S", "agent_id": agents[0]["id"]},
+        headers=client.headers,
     )
+    assert made.status_code == 201, made.text
     sid = made.json()["id"]
 
     SessionManager._record_subagent(
@@ -528,7 +528,7 @@ async def test_the_session_snapshot_carries_live_runs(client):
 
     # A browser reloading mid-run repaints the card instead of showing a
     # tool call that looks frozen.
-    detail = (await client.get(f"/api/sessions/{sid}", headers=HEADERS)).json()
+    detail = (await client.get(f"/api/sessions/{sid}", headers=client.headers)).json()
     assert detail["subagents"] == [
         {
             "task_id": "t1",

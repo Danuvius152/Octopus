@@ -5,7 +5,6 @@ import json
 
 import pytest
 
-from server.config import settings
 from tests.test_ws_delivery import (
     connection,
     hold_model_runs,
@@ -19,7 +18,7 @@ from tests.test_ws_delivery import runtime as runtime
 async def test_unsupported_command_needs_no_execution_target_and_keeps_replay_rules(
     runtime, monkeypatch, tmp_path, operation,
 ):
-    manager, db = runtime
+    manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent['id'], 'Unsupported command', str(tmp_path), backend='codex')
     starts = hold_model_runs(manager, monkeypatch)
@@ -31,7 +30,7 @@ async def test_unsupported_command_needs_no_execution_target_and_keeps_replay_ru
     before = manager.dispatch_snapshot(session.id)
     payload = {'type': operation, 'session_id': session.id, 'client_command_id': 'unsupported-command'}
     try:
-        async with connection(manager, settings.auth_token) as browser:
+        async with connection(manager, bearer) as browser:
             async def send(data):
                 await browser[0].put({'type': 'websocket.receive', 'text': json.dumps(data)})
                 return await receipt_frame(browser[1], 'command_receipt')
@@ -54,7 +53,7 @@ async def test_unsupported_command_needs_no_execution_target_and_keeps_replay_ru
 async def test_unknown_wire_action_is_refused_without_session_side_effects_or_socket_loss(
     runtime, tmp_path, operation,
 ):
-    manager, db = runtime
+    manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent['id'], 'Unsupported wire action', str(tmp_path), backend='codex')
     question = await manager.create_pending_question(session.id, [
@@ -62,9 +61,9 @@ async def test_unknown_wire_action_is_refused_without_session_side_effects_or_so
     ])
     before = manager.dispatch_snapshot(session.id)
     try:
-        async with connection(manager, settings.auth_token) as browser:
+        async with connection(manager, bearer) as browser:
             for target in ('owned', 'missing', 'foreign'):
-                session.user_id = 'another-account' if target == 'foreign' else None
+                session.user_id = 'another-account' if target == 'foreign' else agent['user_id']
                 payload = {'type': operation, 'session_id': 'missing-session' if target == 'missing' else session.id,
                            'tool_use_id': 'old-tool'}
                 await browser[0].put({'type': 'websocket.receive', 'text': json.dumps(payload)})
@@ -75,7 +74,7 @@ async def test_unknown_wire_action_is_refused_without_session_side_effects_or_so
             await browser[0].put({'type': 'websocket.receive', 'text': 'invalid json'})
             assert (await receipt_frame(browser[1], 'error'))['message'] == 'Invalid JSON'
     finally:
-        session.user_id = None
+        session.user_id = agent['user_id']
         await manager.delete_session(session.id)
 
 
@@ -83,7 +82,7 @@ async def test_unknown_wire_action_is_refused_without_session_side_effects_or_so
 async def test_unsupported_commands_keep_foreign_and_missing_sessions_indistinguishable(
     runtime, tmp_path, operation,
 ):
-    manager, db = runtime
+    manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent['id'], 'Private command', str(tmp_path), backend='codex')
     question = await manager.create_pending_question(session.id, [
@@ -92,7 +91,7 @@ async def test_unsupported_commands_keep_foreign_and_missing_sessions_indistingu
     before = manager.dispatch_snapshot(session.id)
     session.user_id = 'another-account'
     try:
-        async with connection(manager, settings.auth_token) as browser:
+        async with connection(manager, bearer) as browser:
             for target in (session.id, 'missing-session'):
                 payload = {'type': operation, 'session_id': target, 'client_command_id': 'unowned-command'}
                 await browser[0].put({'type': 'websocket.receive', 'text': json.dumps(payload)})
@@ -102,5 +101,5 @@ async def test_unsupported_commands_keep_foreign_and_missing_sessions_indistingu
                 assert manager.dispatch_snapshot(session.id) == before
                 assert manager.has_pending_question(session.id, question)
     finally:
-        session.user_id = None
+        session.user_id = agent['user_id']
         await manager.delete_session(session.id)

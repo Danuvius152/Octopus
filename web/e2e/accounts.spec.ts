@@ -8,13 +8,11 @@ import {
 /**
  * Accounts, end to end (multi-tenancy.md §3, §5, §9).
  *
- * This spec drives a **backend of its own**. Claiming an install is a one-way
- * door — the token every other spec signs in with stops working the moment it
- * succeeds — so it cannot be done to the shared server. Its uvicorn and dev
- * server are declared in playwright.config.ts and started fresh each run.
+ * This spec drives a backend of its own, left empty until the first-account
+ * setup test. The other specs use an already-created account on the shared host.
  *
  * The tests run in order, because they are one story: a single-user install
- * becomes an account, that account invites somebody, and the two of them
+ * gets its first account, that account invites somebody, and the two of them
  * cannot see each other's work.
  */
 
@@ -25,14 +23,6 @@ const API = `http://localhost:${E2E_ACCOUNTS_PORT}/api`;
 const INSTALL_TOKEN = "changeme";
 const OWNER = { username: "archer", password: "owner-password-1" };
 const GUEST = { username: "vera", password: "guest-password-2" };
-
-/** Sign in with the install's own token — the pre-accounts way in. */
-async function signInWithToken(page: Page) {
-  await page.goto("/");
-  await page.locator('input[type="password"]').fill(INSTALL_TOKEN);
-  await page.locator("button.btn-login").click();
-  await expect(page.locator(".agent-list-header")).toBeVisible();
-}
 
 /** Sign in as an account — the way in once one exists. */
 async function signIn(page: Page, who: { username: string; password: string }) {
@@ -51,43 +41,42 @@ async function openAccountPage(page: Page) {
 }
 
 test.describe("Accounts", () => {
-  test("a fresh install asks for its token, not a username", async ({ page }) => {
+  test("a fresh install requires setup before business is available", async ({ page, request }) => {
     await page.goto("/");
-    await expect(page.locator("#token")).toBeVisible();
-    await expect(page.locator("#username")).toHaveCount(0);
+    await expect(page.locator("#setup-proof")).toBeVisible();
+    await expect(page.locator("#username")).toBeVisible();
+    await expect(page.locator("#password")).toBeVisible();
+    const response = await request.get(`${API}/sessions`, { headers: { Authorization: `Bearer ${INSTALL_TOKEN}` } });
+    expect(response.status()).toBe(401);
   });
 
-  test("the first account adopts everything already here", async ({ page }) => {
-    await signInWithToken(page);
+  test("setup creates the first owner before its first conversation", async ({ page }) => {
+    await page.goto("/");
+    await page.locator("#setup-proof").fill(INSTALL_TOKEN);
+    await page.locator("#username").fill(OWNER.username);
+    await page.locator("#password").fill(OWNER.password);
+    await page.locator("button.btn-setup").click();
+    await expect(page.locator(".account-handle")).toHaveText(OWNER.username);
+    expect(await page.evaluate(() => localStorage.getItem("octopus_token"))).not.toBe(INSTALL_TOKEN);
 
-    // Something to adopt: a session made before the account existed.
     await page
       .locator(".agent-item", { hasText: "Octo" })
       .locator(".btn-session-add")
       .click();
     await page
       .locator('.session-create input[placeholder="Session name"]')
-      .fill("Made before accounts");
+      .fill("Owned first conversation");
     await page.locator("button.btn-create").click();
     await expect(
-      page.locator(".session-item .session-name", { hasText: "Made before accounts" })
+      page.locator(".session-item .session-name", { hasText: "Owned first conversation" })
     ).toBeVisible();
 
-    await openAccountPage(page);
-    await expect(page.locator(".account-claim")).toBeVisible();
-    await page.locator("#claim-username").fill(OWNER.username);
-    await page.locator("#claim-password").fill(OWNER.password);
-    await page.locator("button.btn-claim-install").click();
-
-    // It reports what moved rather than asking to be trusted.
-    const claimed = page.locator(".account-claimed");
-    await expect(claimed).toBeVisible({ timeout: 15_000 });
-    await expect(claimed).toContainText(`belongs to ${OWNER.username}`);
-    await expect(claimed).toContainText("sessions");
-
-    // The session made before the account is still there, now owned.
+    await page.reload();
+    const rail = page.locator(".agent-item", { hasText: "Octo" });
+    await expect(rail).toBeVisible();
+    if (await rail.locator(".agent-fold.rotate-90").count() === 0) await rail.click();
     await expect(
-      page.locator(".session-item .session-name", { hasText: "Made before accounts" })
+      page.locator(".session-item .session-name", { hasText: "Owned first conversation" })
     ).toBeVisible();
   });
 
@@ -204,7 +193,7 @@ test.describe("Accounts", () => {
   test("the invited account sees none of the owner's work", async ({ page }) => {
     await signIn(page, GUEST);
     await expect(
-      page.locator(".session-item .session-name", { hasText: "Made before accounts" })
+      page.locator(".session-item .session-name", { hasText: "Owned first conversation" })
     ).toHaveCount(0);
   });
 

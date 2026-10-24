@@ -15,7 +15,6 @@ from server.wiki.tasks import tasks
 from tests import test_wiki_api as wiki_api
 
 client = wiki_api.client
-HEADERS = wiki_api.HEADERS
 NOTE = "Library/note.md"
 SOURCE = "Library/source.md"
 NATIVE = "\ufeff---\r\ntags: [native-tag]\r\naliases: [Native alias]\r\n---\r\n# Note\r\nUser sentence with #native-body.\r\n"
@@ -28,10 +27,12 @@ async def notes(client, tmp_path):
     (root / NOTE).write_bytes(NATIVE.encode())
     (root / SOURCE).write_text("# Source\n\n## Evidence\nOnly under condition A.\n")
     config = await wiki_api.configure(client, root)
-    return root, registry.store(None), config
+    return root, registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"]), config
 
 
-async def read(client, path=NOTE, *, headers=HEADERS, view="full"):
+async def read(client, path=NOTE, *, headers=None, view="full"):
+    if headers is None:
+        headers = client.headers
     response = await client.get(
         "/api/wiki/read", params={"doc": path, "view": view}, headers=headers
     )
@@ -56,7 +57,9 @@ def citation(document):
     return {"doc": document["id"], "revision": document["revision"], "location": "L3-L4"}
 
 
-async def organize(client, *, headers=HEADERS, **fields):
+async def organize(client, *, headers=None, **fields):
+    if headers is None:
+        headers = client.headers
     current = await read(client, headers=headers)
     return await client.post("/api/wiki/organize", headers=headers, json={
         "path": NOTE, "expected_revision": current["revision"], "reason": "metadata regression",
@@ -269,7 +272,7 @@ async def test_legacy_paired_page_keeps_original_evidence_version_on_omission(cl
     # explicitly; the HTML original remains a read-only versioned source.
     (root / paired_path).write_text("# Human view\n\n[原文](page.html)\n\nFirst claim.\n")
     paired_original = await read(client, paired_path)
-    first = await client.post("/api/wiki/organize", headers=HEADERS, json={
+    first = await client.post("/api/wiki/organize", headers=client.headers, json={
         "path": paired_path, "expected_revision": paired_original["revision"],
         "key_note": "Reading points from the human view.", "reason": "paired page",
         "sources": [{"doc": source["id"], "revision": source["revision"], "location": "L1"}],
@@ -279,7 +282,7 @@ async def test_legacy_paired_page_keeps_original_evidence_version_on_omission(cl
     html.write_text("<html><body><h1>Human view</h1><p>Changed claim.</p></body></html>")
     current = await read(client, source["path"])
     assert current["revision"] != source["revision"]
-    refreshed = await client.post("/api/wiki/organize", headers=HEADERS, json={
+    refreshed = await client.post("/api/wiki/organize", headers=client.headers, json={
         "path": paired_path, "expected_revision": before["revision"],
         "tags": ["metadata-only"], "reason": "paired refresh without new evidence",
     })
@@ -312,13 +315,13 @@ async def test_worker_preserves_old_evidence_without_new_read_but_new_refs_keep_
     root, store, config = notes
     old_source = await initially_organize(client)
     change_source(root, store, "changed")
-    jobs = WikiJobs(None)
+    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     job = jobs.maintain("metadata regression", "", "organize", [NOTE], None, [], "human")
-    session = SimpleNamespace(id="legacy-metadata-worker", user_id=None, agent_id=config["curator_agent_id"])
+    session = SimpleNamespace(id="legacy-metadata-worker", user_id=(await wiki_api.session_manager.db.get_system_agent())["user_id"], agent_id=config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
-    headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
+    headers = {"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}
     try:
         preserved = await organize(client, headers=headers, tags=["worker-refresh"])
         assert preserved.status_code == 200, preserved.text

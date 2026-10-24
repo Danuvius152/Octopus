@@ -1,3 +1,4 @@
+import { enterAccountCredentials } from "./current-account";
 /**
  * The Monitor page (docs/plans/polish-2026-09.md §9).
  *
@@ -15,12 +16,9 @@
 
 import { expect, test, type Page } from "@playwright/test";
 
-const TOKEN = "changeme";
-
 async function login(page: Page) {
   await page.goto("/");
-  await page.locator('input[type="password"]').fill(TOKEN);
-  await page.locator("button.btn-login").click();
+  await enterAccountCredentials(page);
   await expect(page.locator(".agent-list-header h2")).toHaveText("Agents");
 }
 

@@ -16,6 +16,7 @@ from server.database import Database
 from server.deps import get_session_manager
 from server.routers.ws import router
 from server.sessions import SessionManager
+from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
 
 
@@ -102,16 +103,14 @@ async def connection(manager, token, *, release=None):
 
 
 @pytest.fixture
-async def runtime(monkeypatch):
+async def runtime(tmp_path):
     db = Database(":memory:")
     await db.initialize()
+    _, bearer = await create_account(db, username="transport-owner", extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
-    monkeypatch.setattr(deps, "_user_manager", None)
-    monkeypatch.setattr(deps, "_accounts_exist", None)
-    monkeypatch.setattr(settings, "auth_token", "ws-delivery-test")
     try:
-        yield manager, db
+        yield manager, db, bearer
     finally:
         await manager.stop_all_held_processes()
         await db.close()
@@ -131,7 +130,7 @@ async def receipt_frame(outgoing, kind):
 
 
 async def test_submission_identity_survives_ack_loss_reconnect_and_manager_restart(runtime, monkeypatch, tmp_path):
-    manager, db = runtime
+    manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "deduplicated", str(tmp_path), backend="codex")
     starts = hold_model_runs(manager, monkeypatch)
@@ -140,7 +139,7 @@ async def test_submission_identity_survives_ack_loss_reconnect_and_manager_resta
     original_run = await asyncio.wait_for(starts.get(), 2)
     payload = {"type": "send_message", "session_id": session.id, "content": "execute once", "client_request_id": "same-input"}
     async def submit(owner, data):
-        async with connection(owner, settings.auth_token) as client:
+        async with connection(owner, bearer) as client:
             await client[0].put({"type": "websocket.receive", "text": json.dumps(data)})
             return await receipt_frame(client[1], "submission")
     first = await submit(manager, payload)
@@ -165,14 +164,14 @@ async def test_submission_identity_survives_ack_loss_reconnect_and_manager_resta
 
 
 async def test_control_receipts_bind_stop_and_reject_a_new_attempt(runtime, monkeypatch, tmp_path):
-    manager, db = runtime
+    manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "scoped Stop", str(tmp_path), backend="codex")
     starts = hold_model_runs(manager, monkeypatch)
     original, scope = await start_held_request(manager, session.id, "first")
     first_run = await asyncio.wait_for(starts.get(), 2)
     successor = None
-    async with connection(manager, settings.auth_token) as client:
+    async with connection(manager, bearer) as client:
         async def send(data):
             await client[0].put({"type": "websocket.receive", "text": json.dumps(data)})
             return await receipt_frame(client[1], "command_receipt")
@@ -200,13 +199,13 @@ async def test_control_receipts_bind_stop_and_reject_a_new_attempt(runtime, monk
 
 
 async def test_idle_stop_and_specific_question_commands_reject_stale_scope(runtime, tmp_path, monkeypatch):
-    manager, db = runtime
+    manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "scoped controls", str(tmp_path), backend="codex")
     starts = hold_model_runs(manager, monkeypatch)
     active = None
     command_number = 0
-    async with connection(manager, settings.auth_token) as client:
+    async with connection(manager, bearer) as client:
         async def send(operation, **fields):
             nonlocal command_number
             command_number += 1
@@ -243,13 +242,13 @@ async def test_agent_bearer_cannot_enter_human_websocket(runtime, monkeypatch, t
     from server.mcp_identity import mint, register_run, revoke_run
     from server.wiki.tasks import tasks
 
-    manager, db = runtime
+    manager, db, _bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "agent ws", str(tmp_path), backend="codex")
     grant = tasks.open(session, mode, "/wiki maintain Library/note.md") if mode else None
     lease = "ws-authority-test"
-    register_run(lease, session.id, None, None)
-    token = mint(session.id, wiki_task_id=grant, run_lease_id=lease)
+    register_run(lease, session.id, session.user_id, None)
+    token = mint(session.id, user_id=session.user_id, wiki_task_id=grant, run_lease_id=lease)
     try:
         assert await deps.resolve_principal(token) is not None
         async with connection(manager, token) as client:
@@ -263,11 +262,11 @@ async def test_agent_bearer_cannot_enter_human_websocket(runtime, monkeypatch, t
 
 
 async def test_closed_submission_is_rejected_with_client_identity(runtime, tmp_path):
-    manager, db = runtime
+    manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "closed ws", str(tmp_path), backend="codex")
     manager.close_admission()
-    async with connection(manager, settings.auth_token) as client:
+    async with connection(manager, bearer) as client:
         await client[0].put({"type": "websocket.receive", "text": json.dumps({
             "type": "send_message", "session_id": session.id, "content": "keep my draft",
             "client_request_id": "draft-1",
@@ -283,10 +282,10 @@ async def test_closed_submission_is_rejected_with_client_identity(runtime, tmp_p
 
 
 async def test_blocked_asgi_send_does_not_hold_bus_or_other_browser(runtime):
-    manager, _ = runtime
+    manager, _, bearer = runtime
     release = asyncio.Event()
-    async with connection(manager, settings.auth_token, release=release) as slow:
-        async with connection(manager, settings.auth_token) as healthy:
+    async with connection(manager, bearer, release=release) as slow:
+        async with connection(manager, bearer) as healthy:
             event = {"type": "schedules_changed"}
             publish = asyncio.create_task(manager._broadcast(event))
             try:
@@ -301,7 +300,7 @@ async def test_blocked_asgi_send_does_not_hold_bus_or_other_browser(runtime):
 
 async def account(runtime, monkeypatch):
     from server.users import UserManager
-    manager, db = runtime
+    manager, db, _bearer = runtime
     users = UserManager(db)
     monkeypatch.setattr(deps, "_user_manager", users)
     user = await users.create_user(username="wsowner", password="password1")
@@ -310,7 +309,7 @@ async def account(runtime, monkeypatch):
 
 @pytest.mark.parametrize("resource", ["missing", "deleted", "other-owner"])
 async def test_resource_rejection_preserves_account_socket(runtime, monkeypatch, tmp_path, resource):
-    manager, db = runtime
+    manager, db, _bearer = runtime
     users, user, token = await account(runtime, monkeypatch)
     agent = await db.get_system_agent()
     sid = "nonexistent"
@@ -344,7 +343,7 @@ async def test_resource_rejection_preserves_account_socket(runtime, monkeypatch,
 
 
 async def test_outgoing_account_frame_uses_one_read_and_no_activity_write(runtime, monkeypatch):
-    manager, db = runtime
+    manager, db, _bearer = runtime
     _, _, token = await account(runtime, monkeypatch)
     async with connection(manager, token) as client:
         statements = []
@@ -356,7 +355,7 @@ async def test_outgoing_account_frame_uses_one_read_and_no_activity_write(runtim
 
 
 async def test_incoming_account_activity_is_throttled_independently(runtime, monkeypatch):
-    manager, db = runtime
+    manager, db, _bearer = runtime
     _, _, token = await account(runtime, monkeypatch)
     async with connection(manager, token) as client:
         statements = []
@@ -370,7 +369,7 @@ async def test_incoming_account_activity_is_throttled_independently(runtime, mon
 
 @pytest.mark.parametrize("withdraw", ["revoke", "disable"])
 async def test_queued_account_frame_rechecks_live_authority(runtime, monkeypatch, withdraw):
-    manager, _ = runtime
+    manager, _, _bearer = runtime
     users, user, token = await account(runtime, monkeypatch)
     release = asyncio.Event()
     async with connection(manager, token, release=release) as client:
@@ -389,33 +388,42 @@ async def test_queued_account_frame_rechecks_live_authority(runtime, monkeypatch
         assert client[1].empty()
 
 
-async def test_account_adoption_cannot_receive_queued_ownerless_data(runtime, monkeypatch):
-    manager, db = runtime
-    release = asyncio.Event()
-    async with connection(manager, settings.auth_token, release=release) as client:
-        await manager._broadcast({"type": "schedules_changed", "marker": "in-flight"})
-        await asyncio.wait_for(client[3].wait(), 1)
-        await manager._broadcast({"type": "schedules_changed", "marker": "ownerless-queued"})
-        from server.users import UserManager
-        users = UserManager(db)
-        monkeypatch.setattr(deps, "_user_manager", users)
-        await users.create_user(username="firstowner", password="password1")
-        await manager._broadcast({"type": "schedules_changed"})
-        release.set()
-        assert (await frame(client[1]))["marker"] == "in-flight"
-        closed = await asyncio.wait_for(client[1].get(), 1)
-        assert closed["type"] == "websocket.close" and closed["code"] == 4001
-        assert client[1].empty()
+async def test_setup_proof_cannot_open_business_socket_before_or_after_setup(monkeypatch):
+    from server.users import UserManager
+
+    monkeypatch.setattr(settings, "auth_token", "ws-setup-proof-only")
+    db = Database(":memory:")
+    await db.initialize()
+    users = UserManager(db)
+    deps.set_user_manager(users)
+    manager = SessionManager()
+    await manager.initialize(db)
+    try:
+        for accounts_exist in (False, True):
+            if accounts_exist:
+                user = await users.setup(username="socket-owner", password="socket-account-password")
+                bearer = await users.issue_token(user["id"])
+                async with connection(manager, bearer) as account_client:
+                    await manager._broadcast({"type": "schedules_changed"})
+                    assert await frame(account_client[1]) == {"type": "schedules_changed"}
+            async with connection(manager, settings.auth_token) as client:
+                closed = await asyncio.wait_for(client[1].get(), 1)
+                assert closed["type"] == "websocket.close" and closed["code"] == 4001
+                assert client[1].empty()
+            assert await db.load_sessions() == []
+    finally:
+        await manager.stop_all_held_processes()
+        await db.close()
 
 
 @pytest.mark.parametrize("limit", ["frames", "bytes"])
 async def test_overflow_ends_connection_instead_of_silently_losing_control(runtime, monkeypatch, limit):
     from server import ws_delivery
-    manager, _ = runtime
+    manager, _, bearer = runtime
     monkeypatch.setattr(ws_delivery, "MAX_PENDING_FRAMES", 2 if limit == "frames" else 100)
     monkeypatch.setattr(ws_delivery, "MAX_PENDING_BYTES", 160 if limit == "bytes" else 10000)
     release = asyncio.Event()
-    async with connection(manager, settings.auth_token, release=release) as client:
+    async with connection(manager, bearer, release=release) as client:
         await manager._broadcast({"type": "text_delta", "content": "x" * 50})
         await asyncio.wait_for(client[3].wait(), 1)
         await manager._broadcast({"type": "question_request", "content": "y" * 50})
@@ -429,10 +437,10 @@ async def test_overflow_ends_connection_instead_of_silently_losing_control(runti
 
 async def test_send_timeout_cancels_transport_and_reconnects_instead_of_signout(runtime, monkeypatch):
     from server import ws_delivery
-    manager, _ = runtime
+    manager, _, bearer = runtime
     monkeypatch.setattr(ws_delivery, "SEND_TIMEOUT_SECONDS", 0.03)
     release = asyncio.Event()
-    async with connection(manager, settings.auth_token, release=release) as client:
+    async with connection(manager, bearer, release=release) as client:
         await manager._broadcast({"type": "schedules_changed"})
         await asyncio.wait_for(client[3].wait(), 1)
         closed = await asyncio.wait_for(client[1].get(), 1)
@@ -446,7 +454,7 @@ async def test_slow_browser_does_not_delay_stop_or_the_committed_result(runtime,
 
     from server.harness import get_harness
 
-    manager, db = runtime
+    manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent["id"], "network stop", str(tmp_path), backend="codex")
 
@@ -462,8 +470,8 @@ async def test_slow_browser_does_not_delay_stop_or_the_committed_result(runtime,
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
     release = asyncio.Event()
-    async with connection(manager, settings.auth_token, release=release) as slow:
-        async with connection(manager, settings.auth_token) as healthy:
+    async with connection(manager, bearer, release=release) as slow:
+        async with connection(manager, bearer) as healthy:
             original = await asyncio.wait_for(manager.start_message(session.id, "hold this turn"), 1)
             await asyncio.wait_for(slow[3].wait(), 1)
             ready = await receipt_frame(healthy[1], "assistant_text")

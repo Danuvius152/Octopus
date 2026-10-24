@@ -185,21 +185,19 @@ the name index is live-only, so an archived name frees up (same rule as
 agents, which gained `POST /api/agents/{id}/unarchive` for the same section).
 - `server/routers/applications.py` — `/api/applications` CRUD **plus** `/apps/{id}/{path}` — the app itself, streamed out of its directory with traversal + symlink guards, `Cache-Control: no-store`, and bearer / `?token=` / `octopus_app_token`-cookie auth (an iframe can't send an Authorization header)
 - `server/agent_manager.py` — Agent CRUD (durable assistant definitions that own sessions/schedules)
-- `server/agent_memory.py` — Per-agent native memory (`docs/plans/memory.md`): one canonical markdown dir per agent (`<agents_dir>/<id>/memory/`), shared by both harnesses. Claude points its auto-memory at it via `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE`; Codex via an injected `developer_instructions` blurb naming the dir (its native `features.memories` pipeline is unused — it doesn't run in headless `exec`). Memory is decoupled from both harnesses' config/auth dirs — `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are never touched, so auth and `--resume` transcripts are unaffected. Pure path helpers + idempotent provisioning.
+- `server/agent_memory.py` — Per-agent native memory (`docs/plans/memory.md`): one canonical markdown dir per owned agent (`<users_root>/<user_id>/agents/<id>/memory/`), shared by both harnesses. Claude points its auto-memory at it via `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE`; Codex via an injected `developer_instructions` blurb naming the dir (its native `features.memories` pipeline is unused — it doesn't run in headless `exec`). Memory is decoupled from both harnesses' config/auth dirs — `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are never touched, so auth and `--resume` transcripts are unaffected. Pure path helpers + idempotent provisioning.
 ### Accounts
 
-- `docs/plans/multi-tenancy.md` — one site, many people: the label becomes a
-  username, the token becomes a password, and every account gets its own rows,
-  keys and directories. The install itself is an era: before the first account
-  `OCTOPUS_AUTH_TOKEN` is the way in and `user_id` is NULL on every row; after
-  it, the token opens nothing and every row has an owner. `POST
-  /api/auth/bootstrap` is the one-way door between the two — it re-encrypts
-  every stored secret under the new account's key, adopts the orphan rows *and
-  the live `Session` objects*, and keeps the working directories the existing
-  sessions already use as that account's `extra_roots`.
+- `docs/plans/multi-tenancy.md` — account ownership background. Every account
+  gets its own rows, keys and directories. `POST /api/auth/setup` creates the first administrator,
+  wrapped DEK and owned protected agent on an empty installation. The configured
+  `OCTOPUS_AUTH_TOKEN` is setup proof only; business requires an account or
+  authorized MCP scope. Missing proof or retained business inputs closes setup.
 - `server/users.py` — accounts: scrypt password hashing (stdlib, so no new
   dependency), `UserManager` (create / authenticate / set-password / disable /
-  issue-token / resolve-token / invites / register). A password is spent once
+  setup / issue-token / resolve-token / invites / register). The account
+  aggregate commits the user and default agent together; normal login completes
+  missing account directories without recreating users or keys. A password is spent once
   for a bearer that can be revoked without changing it; the row keeps only
   digests.
 - `server/crypto.py` — `master_key()` (env wins, else a 0600 file created with
@@ -207,19 +205,21 @@ agents, which gained `POST /api/agents/{id}/unarchive` for the same section).
   demanding one is deliberate: a key an operator has to invent is a key that
   ends up guessable or lost, and losing it loses every stored secret.
 - `server/workspace.py` — `paths_for(user_id)`: every `settings.*_dir` as a
-  function of an account, with the pre-accounts answer being the legacy layout.
+  function of an account. A null owner locates historical roots for controlled inspection.
   `confine()` resolves symlinks *before* comparing, because a check against the
   literal path is decoration.
-- `server/bootstrap.py` — the upgrade above, in one operation, reporting what it
-  moved rather than asking to be trusted.
-- `server/db/users.py` — `users` / `invites` / `auth_tokens`, `adopt_orphan_rows`
-  (idempotent by `user_id IS NULL`, not by a ledger stamp), and `claim_invite`
+- `server/account_baseline.py` — startup admission before keys and writers;
+  rejects retained ownerless business input and handoff evidence. See the
+  `RetainedLegacyInstallation` guidance in `docs/local-wsl.md` when it refuses startup.
+- `server/db/users.py` — `users` / `invites` / `auth_tokens`, account creation
+  with the owned default agent in one transaction, and `claim_invite`
   whose use-count check is inside the UPDATE so two registrations cannot both
   win the last use.
 - `web/src/components/SignIn.tsx` / `AccountPage.tsx` — the sign-in screen asks
   whichever question the install can answer (`GET /api/auth/state`), and the
-  account page is where an install becomes an account, a password changes, and
-  an admin manages invites and people.
+  setup page holds proof locally and only stores the returned account bearer.
+  Unknown auth state keeps business closed. The account page changes passwords
+  and lets an admin manage invites and people.
 
 ### Agents, memory and delegation
 

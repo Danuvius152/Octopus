@@ -18,6 +18,7 @@ from server.connectors.custom import (
 )
 from server.database import Database
 from server.oauth_providers import OAuthTokenSet
+from tests.accounts import create_account
 
 
 @pytest.fixture
@@ -214,6 +215,7 @@ async def test_manager_create_and_delete_custom(db):
 
 @pytest.mark.asyncio
 async def test_delete_custom_cascades_installations(db):
+    owner, _ = await create_account(db)
     m = ConnectorManager(db)
     await m.create_custom_connector(
         kind="linear", display_name="Linear", authorize_url="a", token_url="t",
@@ -221,8 +223,9 @@ async def test_delete_custom_cascades_installations(db):
         client_id="cid", client_secret="csec",
     )
     inst = await m.complete_install(
-        kind="linear", token_set=OAuthTokenSet("at", "rt", time.time() + 3600)
+        kind="linear", token_set=OAuthTokenSet("at", "rt", time.time() + 3600), user_id=owner["id"],
     )
+    assert inst["user_id"] == owner["id"]
     assert await m.get_installation(inst["id"]) is not None
     await m.delete_custom_connector("linear")
     # Installation of that kind is gone too.

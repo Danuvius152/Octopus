@@ -1,3 +1,4 @@
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import {
   test, expect, type Page, type APIRequestContext, type WebSocketRoute,
 } from "@playwright/test";
@@ -7,7 +8,7 @@ import {
 // and sign-in still use the real backend. ResearchManager's cancellation is
 // covered by backend unit tests; the live pipeline by test_research_real.py.
 
-const TOKEN = "changeme";
+const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api";
 const OWNED = new Set(["Research E2E"]);
 
@@ -37,8 +38,7 @@ test.afterAll(async ({ request }) => {
 
 async function login(page: Page) {
   await page.goto("/");
-  await page.locator('input[type="password"]').fill(TOKEN);
-  await page.locator("button.btn-login").click();
+  await enterAccountCredentials(page);
   await expect(page.locator(".agent-list-header")).toBeVisible();
   // Sessions live behind a folded agent row; open the default
   // agent's rail so they're reachable.
@@ -63,7 +63,6 @@ async function importSession(request: APIRequestContext): Promise<{ id: string }
     headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
     data: {
       name: "Research E2E",
-      working_dir: "/tmp",
       messages: [{ role: "user", type: "text", content: "hello" }],
     },
   });
@@ -89,7 +88,9 @@ test("the /research command surfaces a live research card", async ({ page, reque
   });
   await page.route(`**/api/sessions/${session.id}/research`, async (route) => {
     const req = route.request();
-    expect(req.headers().authorization).toBe(`Bearer ${TOKEN}`);
+    const bearer = await page.evaluate(() => localStorage.getItem("octopus_token") ?? "");
+    expect(bearer).toBeTruthy();
+    expect(req.headers().authorization).toBe(`Bearer ${bearer}`);
     if (req.method() === "GET") {
       await route.fulfill({ json: started ? [job] : [] });
       return;
@@ -102,7 +103,9 @@ test("the /research command surfaces a live research card", async ({ page, reque
   const cancelPath = `/api/sessions/${session.id}/research/${job.id}/cancel`;
   await page.route(`**${cancelPath}`, async (route) => {
     expect(route.request().method()).toBe("POST");
-    expect(route.request().headers().authorization).toBe(`Bearer ${TOKEN}`);
+    const bearer = await page.evaluate(() => localStorage.getItem("octopus_token") ?? "");
+    expect(bearer).toBeTruthy();
+    expect(route.request().headers().authorization).toBe(`Bearer ${bearer}`);
     job.status = "cancelled";
     await route.fulfill({ json: job });
     expect(socket).toBeDefined();

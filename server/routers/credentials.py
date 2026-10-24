@@ -1,6 +1,6 @@
 """REST endpoints for per-backend credentials.
 
-Secrets are encrypted at rest with the auth token as the key (see
+Secrets are encrypted at rest with their owning account's DEK (see
 `server/crypto.py`). The wire format never includes the plaintext secret —
 the only way to use a credential is to attach it to a session that the
 backend then resolves at run time.
@@ -31,7 +31,6 @@ from ..crypto import encrypt
 from ..database import Database
 from ..deps import ScopeUser, SessionMgr
 from ..harness import LoginDriver, LoginMethod, get_harness, has_backend
-from ..installation_keys import secret_key_scope
 from ..models import (
     AuthType,
     BackendKind,
@@ -42,6 +41,7 @@ from ..models import (
 )
 from ..oauth_login import LoginState
 from ..oauth_providers import OAuthTokenSet
+from ..users import UserManager
 
 if TYPE_CHECKING:
     from ..codex_login import CodexLoginSession
@@ -96,16 +96,16 @@ async def create_credential(
     db = _require_db()
     cid = uuid.uuid4().hex[:12]
     created_at = datetime.now(UTC).isoformat()
-    async with secret_key_scope(db, user_id) as secret_key:
-        await db.save_credential(
-            credential_id=cid,
-            backend=req.backend.value,
-            label=req.label,
-            auth_type=req.auth_type.value,
-            secret_encrypted=encrypt(req.secret, secret_key),
-            created_at=created_at,
-            user_id=user_id,
-        )
+    secret_key = await UserManager(db).data_key_for(user_id)
+    await db.save_credential(
+        credential_id=cid,
+        backend=req.backend.value,
+        label=req.label,
+        auth_type=req.auth_type.value,
+        secret_encrypted=encrypt(req.secret, secret_key),
+        created_at=created_at,
+        user_id=user_id,
+    )
     return CredentialInfo(
         id=cid,
         backend=req.backend,
@@ -123,8 +123,8 @@ async def update_credential(
     _: str = Depends(verify_token),
 ):
     db = _require_db()
-    async with secret_key_scope(db, user_id) as secret_key:
-        return await _update_credential(db, credential_id, req, user_id, secret_key)
+    secret_key = await UserManager(db).data_key_for(user_id)
+    return await _update_credential(db, credential_id, req, user_id, secret_key)
 
 
 async def _update_credential(
@@ -302,8 +302,8 @@ async def oauth_complete(
         token_expires_at populated so the resolver knows when to refresh.
     """
     db = _require_db()
-    async with secret_key_scope(db, user_id) as secret_key:
-        return await _complete_oauth(db, req, user_id, secret_key)
+    secret_key = await UserManager(db).data_key_for(user_id)
+    return await _complete_oauth(db, req, user_id, secret_key)
 
 
 async def _complete_oauth(
@@ -504,8 +504,8 @@ async def codex_login_status(
     credential: CredentialInfo | None = None
     if session.state == CodexLoginState.success and not session.persisted:
         db = _require_db()
-        async with secret_key_scope(db, user_id) as secret_key:
-            credential = await _persist_codex_login(db, session, user_id, secret_key)
+        secret_key = await UserManager(db).data_key_for(user_id)
+        credential = await _persist_codex_login(db, session, user_id, secret_key)
 
     return CodexLoginStatusResponse(
         state=session.state.value,

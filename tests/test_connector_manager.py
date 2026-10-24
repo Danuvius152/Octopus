@@ -20,6 +20,7 @@ from server.connectors.registry import KIND_REGISTRY, register
 from server.crypto import decrypt
 from server.database import Database
 from server.oauth_providers import OAuthTokenSet
+from server.users import UserManager
 
 
 class FakeProvider:
@@ -98,6 +99,13 @@ async def db():
 
 
 @pytest.fixture
+async def owner(db):
+    from tests.accounts import create_account
+
+    return (await create_account(db))[0]
+
+
+@pytest.fixture
 def provider():
     return FakeProvider()
 
@@ -116,9 +124,35 @@ def _token_set(expires_in: float = 3600.0) -> OAuthTokenSet:
     return OAuthTokenSet("at", "rt", time.time() + expires_in, scopes=["s"])
 
 
-async def _agent(db: Database, agent_id: str = "a-1") -> None:
+async def test_owned_refresh_keeps_short_database_operations_available(mgr, db, provider, monkeypatch):
+    from tests.accounts import create_account
+
+    owner, _ = await create_account(db)
+    installation = await mgr.complete_install(kind="fakekind", token_set=_token_set(1), user_id=owner["id"])
+    entered, release = asyncio.Event(), asyncio.Event()
+    refresh = provider.refresh
+
+    async def blocked(**kwargs):
+        entered.set()
+        await release.wait()
+        return await refresh(**kwargs)
+
+    monkeypatch.setattr(provider, "refresh", blocked)
+    refreshing = asyncio.create_task(mgr.get_access_token(installation["id"], owner["id"]))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        await asyncio.wait_for(db.update_user_field(owner["id"], extra_roots="[]"), 1)
+        release.set()
+        assert (await asyncio.wait_for(refreshing, 2))["access_token"] == "refreshed"
+        assert provider.refresh_calls == 1
+    finally:
+        release.set()
+        await asyncio.gather(refreshing, return_exceptions=True)
+
+
+async def _agent(db: Database, agent_id: str = "a-1", *, user_id: str) -> None:
     now = datetime.now(UTC).isoformat()
-    await db.save_agent(agent_id=agent_id, name=agent_id, created_at=now, updated_at=now)
+    await db.save_agent(agent_id=agent_id, name=agent_id, created_at=now, updated_at=now, user_id=user_id)
 
 
 # --- catalog ---------------------------------------------------------------
@@ -145,91 +179,91 @@ async def test_catalog_reflects_availability(db, clean_registry, provider):
 
 
 @pytest.mark.asyncio
-async def test_complete_install_creates_and_encrypts(mgr, db):
-    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set())
+async def test_complete_install_creates_and_encrypts(mgr, db, owner):
+    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"])
     assert inst["kind"] == "fakekind"
     assert inst["label"] == "me@x.com"
     assert inst["external_account_id"] == "ext-1"
     assert inst["scopes"] == ["s"]
     # Secret is stored encrypted and round-trips to the original token set.
     blob = await db.get_connector_secret(inst["id"])
-    ts = _deserialize_token_set(decrypt(blob, "changeme"))
+    ts = _deserialize_token_set(decrypt(blob, await UserManager(db).data_key_for(owner["id"])))
     assert ts.access_token == "at" and ts.refresh_token == "rt"
 
 
 @pytest.mark.asyncio
-async def test_complete_install_upserts_same_account(mgr, db):
-    a = await mgr.complete_install(kind="fakekind", token_set=_token_set())
-    b = await mgr.complete_install(kind="fakekind", token_set=_token_set())
+async def test_complete_install_upserts_same_account(mgr, db, owner):
+    a = await mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"])
+    b = await mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"])
     assert a["id"] == b["id"]  # same account → same row, not a duplicate
     assert len(await db.load_connector_installations()) == 1
 
 
 @pytest.mark.asyncio
-async def test_requested_label_overrides_identity(mgr):
+async def test_requested_label_overrides_identity(mgr, owner):
     inst = await mgr.complete_install(
         kind="fakekind", token_set=_token_set(), requested_label="Work"
-    )
+    , user_id=owner["id"])
     assert inst["label"] == "Work"
 
 
 @pytest.mark.asyncio
-async def test_unknown_kind_rejected(mgr):
+async def test_unknown_kind_rejected(mgr, owner):
     with pytest.raises(ConnectorError):
-        await mgr.complete_install(kind="ghost", token_set=_token_set())
+        await mgr.complete_install(kind="ghost", token_set=_token_set(), user_id=owner["id"])
 
 
 # --- token access / refresh -----------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_token_no_refresh_when_fresh(mgr, provider):
-    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(3600))
-    out = await mgr.get_access_token(inst["id"])
+async def test_token_no_refresh_when_fresh(mgr, provider, owner):
+    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(3600), user_id=owner["id"])
+    out = await mgr.get_access_token(inst["id"], user_id=owner["id"])
     assert out["access_token"] == "at"
     assert provider.refresh_calls == 0
 
 
 @pytest.mark.asyncio
-async def test_token_refreshes_near_expiry(mgr, db, provider):
-    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(10))
-    out = await mgr.get_access_token(inst["id"])
+async def test_token_refreshes_near_expiry(mgr, db, provider, owner):
+    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(10), user_id=owner["id"])
+    out = await mgr.get_access_token(inst["id"], user_id=owner["id"])
     assert out["access_token"] == "refreshed"
     assert provider.refresh_calls == 1
     # New token persisted; reconnect state stays clean.
     refreshed = await mgr.get_installation(inst["id"])
     assert refreshed["needs_reconnect"] is False
     blob = await db.get_connector_secret(inst["id"])
-    ts = _deserialize_token_set(decrypt(blob, "changeme"))
+    ts = _deserialize_token_set(decrypt(blob, await UserManager(db).data_key_for(owner["id"])))
     assert ts.access_token == "refreshed"
     assert ts.refresh_token == "rt"  # carried over when refresh omits it
 
 
 @pytest.mark.asyncio
-async def test_refresh_failure_marks_needs_reconnect(mgr, provider):
+async def test_refresh_failure_marks_needs_reconnect(mgr, provider, owner):
     provider.refresh_should_fail = True
-    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(10))
+    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(10), user_id=owner["id"])
     with pytest.raises(ConnectorError):
-        await mgr.get_access_token(inst["id"])
+        await mgr.get_access_token(inst["id"], user_id=owner["id"])
     after = await mgr.get_installation(inst["id"])
     assert after["needs_reconnect"] is True
     assert after["last_refresh_error_code"] == "invalid_grant"
 
 
 @pytest.mark.asyncio
-async def test_concurrent_token_refreshes_once(mgr, provider):
+async def test_concurrent_token_refreshes_once(mgr, provider, owner):
     provider.refresh_delay = 0.05
-    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(10))
+    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(10), user_id=owner["id"])
     results = await asyncio.gather(
-        mgr.get_access_token(inst["id"]), mgr.get_access_token(inst["id"])
+        mgr.get_access_token(inst["id"], user_id=owner["id"]), mgr.get_access_token(inst["id"], user_id=owner["id"])
     )
     assert provider.refresh_calls == 1  # lock serializes; 2nd sees fresh token
     assert all(r["access_token"] == "refreshed" for r in results)
 
 
 @pytest.mark.asyncio
-async def test_mark_needs_reconnect_and_missing(mgr):
-    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set())
+async def test_mark_needs_reconnect_and_missing(mgr, owner):
+    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"])
     await mgr.mark_needs_reconnect(inst["id"], "invalid_grant")
     assert (await mgr.get_installation(inst["id"]))["needs_reconnect"] is True
     with pytest.raises(ConnectorError):
@@ -246,24 +280,24 @@ async def test_delete_missing_raises(mgr):
 
 
 @pytest.mark.asyncio
-async def test_agent_enable_validates_installation(mgr, db):
-    await _agent(db)
+async def test_agent_enable_validates_installation(mgr, db, owner):
+    await _agent(db, user_id=owner["id"])
     with pytest.raises(ConnectorError):
         await mgr.set_agent_connector("a-1", "ghost", True)
-    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set())
+    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"])
     await mgr.set_agent_connector("a-1", inst["id"], True)
     assert await mgr.get_agent_connector_ids("a-1") == [inst["id"]]
 
 
 @pytest.mark.asyncio
-async def test_replace_agent_connectors_diffs(mgr, db):
-    await _agent(db)
-    i1 = await mgr.complete_install(kind="fakekind", token_set=_token_set())
+async def test_replace_agent_connectors_diffs(mgr, db, owner):
+    await _agent(db, user_id=owner["id"])
+    i1 = await mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"])
     # Make a 2nd installation by faking a different account on the connector.
     from server.connectors.registry import get_connector
 
     get_connector("fakekind")._identity = ("ext-2", "two@x.com")  # type: ignore
-    i2 = await mgr.complete_install(kind="fakekind", token_set=_token_set())
+    i2 = await mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"])
 
     await mgr.set_agent_connector("a-1", i1["id"], True)
     result = await mgr.replace_agent_connectors("a-1", [i2["id"]])
@@ -310,9 +344,9 @@ async def test_resolve_client_creds_db_and_env(db, clean_registry, provider, mon
 
 
 @pytest.mark.asyncio
-async def test_enabled_installations_for_agent_views(mgr, db):
-    await _agent(db)
-    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set())
+async def test_enabled_installations_for_agent_views(mgr, db, owner):
+    await _agent(db, user_id=owner["id"])
+    inst = await mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"])
     await mgr.set_agent_connector("a-1", inst["id"], True)
     views = await mgr.enabled_installations_for_agent("a-1")
     assert len(views) == 1

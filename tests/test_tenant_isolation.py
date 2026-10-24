@@ -26,7 +26,6 @@ from server.config import settings
 from server.database import Database
 from server.main import app
 from server.routers import agents as agents_router
-from server.routers import auth as auth_router
 from server.session_manager import session_manager
 from server.users import UserManager
 from server.workspace import WorkspaceError, paths_for
@@ -78,7 +77,6 @@ async def two_accounts(tmp_path, monkeypatch):
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
-    auth_router.set_db(db)
     agents_router.set_manager(AgentManager(db))
     users = UserManager(db)
     deps.set_user_manager(users)
@@ -771,21 +769,23 @@ async def test_nobody_can_rename_pin_or_restore_someone_elses_agent(two_accounts
 
 
 @pytest.mark.asyncio
-async def test_two_accounts_can_both_have_an_agent_called_octo(two_accounts):
+async def test_two_accounts_can_both_create_the_same_custom_agent_name(two_accounts):
     """Agent names are unique per account, like application names — the index
     says so, and `get_agent_by_name` has to agree or the second person to want
-    an agent called "Octo" is told somebody else already has one."""
+    a custom agent is told somebody else already has one. Both accounts
+    already have their own protected default agent."""
     ctx = two_accounts
     c = ctx["client"]
+    name = "Shared assistant"
 
     for who in ("archer", "vera"):
         res = await c.post(
-            "/api/agents", json={"name": "Octo"}, headers=_as(ctx[who]["token"])
+            "/api/agents", json={"name": name}, headers=_as(ctx[who]["token"])
         )
         assert res.status_code == 201, f"{who}: {res.text}"
 
     # Still taken within one account.
     again = await c.post(
-        "/api/agents", json={"name": "Octo"}, headers=_as(ctx["vera"]["token"])
+        "/api/agents", json={"name": name}, headers=_as(ctx["vera"]["token"])
     )
     assert again.status_code >= 400

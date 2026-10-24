@@ -4,7 +4,6 @@ import pytest
 
 from server.wiki import job_execution
 from server.wiki.history import WikiHistory
-from tests import test_wiki_api as wiki_api
 from tests.test_wiki_grant_v2 import assigned
 from tests.test_wiki_jobs import Curator, process
 from tests.test_wiki_jobs import client as client
@@ -28,7 +27,7 @@ async def test_prior_attempt_detail_retains_complete_job_error_after_retry(jobs,
     jobs.update(job["id"], status="failed", error=diagnostic, session_id=None)
     jobs.retry(job["id"])
     jobs.next_queued()
-    response = await client.get(f"/api/wiki/jobs/{job['id']}/details", headers=wiki_api.HEADERS,
+    response = await client.get(f"/api/wiki/jobs/{job['id']}/details", headers=client.headers,
                                 params={"attempt": job["attempt"]})
     assert response.status_code == 200, response.text
     assert response.json()["error"] == diagnostic
@@ -46,7 +45,7 @@ async def test_restart_preserves_original_diagnostic_when_verification_continues
     jobs.recover_jobs(previous_writers_retired=True)
     assert jobs.get(job["id"])["error"] == diagnostic
     assert jobs.next_queued() == job["id"]
-    response = await client.get(f"/api/wiki/jobs/{job['id']}/details", headers=wiki_api.HEADERS,
+    response = await client.get(f"/api/wiki/jobs/{job['id']}/details", headers=client.headers,
                                 params={"attempt": job["attempt"]})
     assert response.status_code == 200, response.text
     assert response.json()["error"] == diagnostic
@@ -67,7 +66,7 @@ async def test_historical_detail_pages_original_bytes_after_move_without_restori
     full_error = "Complete diagnostic: " + "detail\n" * 2000
     jobs.update(job["id"], error=full_error)
     before = jobs.get(job["id"])
-    detail = await client.get(f"/api/wiki/jobs/{job['id']}/details", headers=wiki_api.HEADERS,
+    detail = await client.get(f"/api/wiki/jobs/{job['id']}/details", headers=client.headers,
                               params={"attempt": done["attempt"]})
     assert detail.status_code == 200, detail.text
     data = detail.json()
@@ -80,7 +79,7 @@ async def test_historical_detail_pages_original_bytes_after_move_without_restori
     page_length = (len(original) + 1) // 2
     parts, start = [], 0
     while start is not None:
-        response = await client.get(endpoint, headers=wiki_api.HEADERS, params={
+        response = await client.get(endpoint, headers=client.headers, params={
             "attempt": done["attempt"], "view": "history", "start": start, "length": page_length,
         })
         assert response.status_code == 200, response.text
@@ -90,7 +89,7 @@ async def test_historical_detail_pages_original_bytes_after_move_without_restori
         start = page["next_start"]
     assert len(parts) == 2
     assert "".join(parts) == original
-    response = await client.get(endpoint, headers=wiki_api.HEADERS, params={"attempt": done["attempt"], "view": "current"})
+    response = await client.get(endpoint, headers=client.headers, params={"attempt": done["attempt"], "view": "current"})
     assert response.status_code == 200, response.text
     assert response.json()["content"] == current
     assert jobs.store.path("Library/moved.md").read_text() == current
@@ -104,7 +103,7 @@ async def test_no_change_detail_keeps_reason_and_original_body_after_external_ed
     jobs.store.path("Library/note.md").write_bytes(raw)
     jobs.store.refresh()
     job = jobs.maintain("no-change-history", "", "Review", ["Library/note.md"], None, [], "human")
-    with assigned(job, jobs.registration) as (headers, _):
+    async with assigned(job, jobs.registration, client=client) as (headers, _):
         document = (await client.get("/api/wiki/read", headers=headers, params={"doc": job["items"][0]["doc"]})).json()
         saved = await client.post("/api/wiki/revise", headers=headers, json={
             "operation": "no_change", "doc": document["id"], "expected_revision": document["revision"],
@@ -114,9 +113,9 @@ async def test_no_change_detail_keeps_reason_and_original_body_after_external_ed
     current = jobs.get(job["id"])
     jobs.store.path("Library/note.md").write_text("# Later\nIndependent human edit.\n")
     jobs.store.refresh()
-    detail = await client.get(f"/api/wiki/jobs/{job['id']}/details", headers=wiki_api.HEADERS)
+    detail = await client.get(f"/api/wiki/jobs/{job['id']}/details", headers=client.headers)
     assert detail.json()["outputs"][0]["reason"] == "Every original condition is already present."
     output = await client.get(f"/api/wiki/jobs/{job['id']}/outputs/{saved.json()['receipt_id']}",
-                              headers=wiki_api.HEADERS, params={"attempt": current["attempt"]})
+                              headers=client.headers, params={"attempt": current["attempt"]})
     assert output.status_code == 200, output.text
     assert output.json()["content"].encode() == raw

@@ -12,10 +12,12 @@ from server.database import Database
 from server.deps import get_session_manager
 from server.harness import get_harness
 from server.main import _wiki_error
+from server.mcp_identity import mint
 from server.routers.wiki import router
 from server.session_manager import SessionManager
 from server.wiki import WikiError, registry
 from server.wiki.jobs import WikiJobs
+from tests.accounts import create_account
 from tests.callback_api import start_callback_api
 
 pytestmark = [pytest.mark.real, pytest.mark.real_codex]
@@ -63,6 +65,7 @@ async def test_codex_resumed_turn_replaces_previous_wiki_off_instruction(tmp_pat
     monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "agents"))
     db = Database(":memory:")
     await db.initialize()
+    owner, _ = await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
@@ -71,15 +74,17 @@ async def test_codex_resumed_turn_replaces_previous_wiki_off_instruction(tmp_pat
     proof = "WIKI-REOPENED-" + uuid.uuid4().hex
     note = vault / "Library/permission-proof.md"
     note.write_text("# Permission proof\nThe current proof is " + proof + "\n")
-    registry.configure(None, vault, agent["id"])
+    registry.configure(owner["id"], vault, agent["id"])
     export_proof = "AUTONOMOUS-EVIDENCE-" + uuid.uuid4().hex
-    job = WikiJobs(None).maintain("autonomous-large-proof", "", "scope " * 24000 + "\nProof: " + export_proof,
+    job = WikiJobs(owner["id"]).maintain("autonomous-large-proof", "", "scope " * 24000 + "\nProof: " + export_proof,
                                 ["Library/permission-proof.md"], None, [], "human")
     api = await start_callback_api(router, overrides={get_session_manager: lambda: manager},
-                                   exception_handlers={WikiError: _wiki_error})
+                                   exception_handlers={WikiError: _wiki_error},
+                                   readiness_token=mint("callback-api-readiness", user_id=owner["id"]))
     monkeypatch.setattr(settings, "port", api.port)
     reader = await AgentManager(db).create_agent(
         name="Reader", backend="codex", mcp_servers=[], reasoning_effort="low",
+        user_id=owner["id"],
     )
     session = await manager.create_session(reader["id"], "Wiki Off then reopen", str(tmp_path), backend="codex")
     try:
@@ -92,7 +97,7 @@ async def test_codex_resumed_turn_replaces_previous_wiki_off_instruction(tmp_pat
             assert (await asyncio.wait_for(first.wait(), 120)).outcome.status == "success"
         native_id = session.claude_session_id
         cutoff = len(await db.load_messages(session.id))
-        observed = observe_reads(registry.store(None), monkeypatch)
+        observed = observe_reads(registry.store(owner["id"]), monkeypatch)
         next_turn = await manager.start_message(session.id,
             "请查询共享本地 Wiki 的 Library/permission-proof.md，返回当前核验码。"
             "使用本轮提供的 Wiki read 工具读笔记，禁止 shell 读取笔记或委托。"
@@ -113,7 +118,7 @@ async def test_codex_resumed_turn_replaces_previous_wiki_off_instruction(tmp_pat
         assert not any("Argument list too long" in (row.get("content") or "") for row in messages)
         assert session.claude_session_id == native_id, "A per-turn mode change must preserve native conversation history"
         assert note.read_text() == "# Permission proof\nThe current proof is " + proof + "\n"
-        assert WikiJobs(None).get(job["id"])["status"] == "queued"
+        assert WikiJobs(owner["id"]).get(job["id"])["status"] == "queued"
     finally:
         await manager.stop_all_held_processes()
         await api.stop()
@@ -127,6 +132,7 @@ async def test_codex_explicit_wiki_and_native_helper(
     monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "agents"))
     db = Database(":memory:")
     await db.initialize()
+    owner, _ = await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
@@ -136,17 +142,18 @@ async def test_codex_explicit_wiki_and_native_helper(
     (vault / "证据.md").write_text(
         "# 工程决定\n\n唯一核验码：WIKI-COBALT-9472\n采用显式授权以避免上下文污染。\n"
     )
-    registry.configure(None, vault, agent["id"])
+    registry.configure(owner["id"], vault, agent["id"])
     api = await start_callback_api(
         router,
         overrides={get_session_manager: lambda: manager},
         exception_handlers={WikiError: _wiki_error},
+        readiness_token=mint("callback-api-readiness", user_id=owner["id"]),
     )
     monkeypatch.setattr(settings, "port", api.port)
     session = await manager.create_session(
         agent["id"], "Wiki real", str(tmp_path), backend="codex"
     )
-    observed = observe_reads(registry.store(None), monkeypatch)
+    observed = observe_reads(registry.store(owner["id"]), monkeypatch)
     # Capture the same real normalized stream consumed by SessionManager; the
     # wire identity checks share the Wiki helper's two rounds.
     runs = []

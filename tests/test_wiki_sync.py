@@ -6,40 +6,49 @@ import os
 import pytest
 
 from server.config import settings
+from server.database import Database
 from server.wiki.registry import WikiRegistry
 from server.wiki.store import WikiError
+from tests.accounts import create_account
 
 
 @pytest.fixture
-def registered(tmp_path, monkeypatch):
+async def registered(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "wiki_dir", str(tmp_path / "state"))
     monkeypatch.setattr(settings, "users_root", str(tmp_path / "users"))
     root = tmp_path / "vault"
     root.mkdir()
     (root / "note.md").write_text("# 原文\n原来的解释。\n")
+    database = Database(":memory:")
+    await database.initialize()
+    owner, _ = await create_account(database, extra_roots=[tmp_path])
+    curator = await database.get_system_agent(owner["id"])
     registry = WikiRegistry()
-    registry.configure(None, root, "curator")
-    yield registry, root
-    registry.close()
+    registry.configure(owner["id"], root, curator["id"])
+    try:
+        yield registry, root, owner["id"]
+    finally:
+        registry.close()
+        await database.close()
 
 
 async def test_compensation_finds_an_edit_without_a_directory_event(registered, tmp_path):
-    registry, root = registered
-    service = registry.store(None)
+    registry, root, owner = registered
+    service = registry.store(owner)
     original = service.read("note.md")
     outside = tmp_path / "outside.md"
     os.link(root / "note.md", outside)
     outside.write_text("# 原文\n补偿对账发现的新解释。\n")
     await registry.reconcile()
-    found = registry.store(None).search("补偿对账")
+    found = registry.store(owner).search("补偿对账")
     assert found["items"][0]["id"] == original["id"]
     assert found["items"][0]["revision"] != original["revision"]
     assert found["index_status"] == "ready"
 
 
 def test_failed_inventory_preserves_document_identity_and_reports_unavailable(registered, monkeypatch):
-    registry, root = registered
-    store = registry.store(None)
+    registry, root, owner = registered
+    store = registry.store(owner)
     original = store.read("note.md")
     original_walk = os.walk
 
@@ -63,8 +72,8 @@ def test_failed_inventory_preserves_document_identity_and_reports_unavailable(re
 
 
 def test_external_rename_and_edit_keep_the_same_article_identity(registered):
-    registry, root = registered
-    store = registry.store(None)
+    registry, root, owner = registered
+    store = registry.store(owner)
     original = store.read("note.md")
     renamed = root / "renamed.md"
     (root / "note.md").rename(renamed)
@@ -76,10 +85,10 @@ def test_external_rename_and_edit_keep_the_same_article_identity(registered):
 
 
 def test_compensation_keeps_identity_when_a_directory_is_renamed_and_child_edited(registered):
-    registry, root = registered
+    registry, root, owner = registered
     (root / "old").mkdir()
     (root / "old/note.md").write_text("# 文件夹里的文章\n原观点。\n")
-    store = registry.store(None)
+    store = registry.store(owner)
     store.refresh()
     original = store.read("old/note.md")
     (root / "old").rename(root / "new")
@@ -91,20 +100,20 @@ def test_compensation_keeps_identity_when_a_directory_is_renamed_and_child_edite
 
 
 def test_unsupported_symlink_does_not_block_queries_for_real_articles(registered, tmp_path):
-    registry, root = registered
+    registry, root, owner = registered
     outside = tmp_path / "private.md"
     outside.write_text("# 库外私有资料\n不能读入主库。\n")
     (root / "link.md").symlink_to(outside)
-    service = registry.store(None)
+    service = registry.store(owner)
     assert service.search("原文")["items"][0]["path"] == "note.md"
     assert service.search("库外私有资料")["items"] == []
 
 
 async def test_background_updates_the_index_and_restart_preserves_identity(registered):
-    registry, root = registered
+    registry, root, owner = registered
     await registry.start()
     try:
-        service = registry.store(None)
+        service = registry.store(owner)
         original = service.read("note.md")
         epoch = service.index_state()["index_epoch"]
         (root / "note.md").write_text("# 后台更新\n无需查询触发的内容。\n")
@@ -116,29 +125,29 @@ async def test_background_updates_the_index_and_restart_preserves_identity(regis
         await asyncio.wait_for(wait_for_index(), timeout=3)
         assert service.search("后台更新")["items"][0]["id"] == original["id"]
         updated_revision = service.read(original["id"])["revision"]
-        generation = registry.config(None)["registration_generation"]
+        generation = registry.config(owner)["registration_generation"]
     finally:
         await registry.stop()
     with pytest.raises(WikiError) as stopped:
-        registry.store(None)
+        registry.store(owner)
     assert stopped.value.status == 503
     await registry.start()
     try:
-        restarted = registry.store(None)
+        restarted = registry.store(owner)
         assert restarted is not service
         preserved = restarted.read(original["id"])
         assert preserved["id"] == original["id"]
         assert preserved["revision"] == updated_revision
         assert preserved["content"] == "# 后台更新\n无需查询触发的内容。\n"
-        assert registry.config(None)["registration_generation"] == generation
+        assert registry.config(owner)["registration_generation"] == generation
     finally:
         await registry.stop()
 
 def test_reconfigured_store_cannot_report_stale_results_as_ready(registered):
-    registry, root = registered
-    previous = registry.store(None)
-    registry.configure(None, root, "replacement-curator")
+    registry, root, owner = registered
+    previous = registry.store(owner)
+    registry.configure(owner, root, "replacement-curator")
     (root / "note.md").write_text("# Changed\nnewword after retirement\n")
     with pytest.raises(WikiError, match="retired"):
         previous.search("newword")
-    assert registry.store(None).search("newword")["items"]
+    assert registry.store(owner).search("newword")["items"]

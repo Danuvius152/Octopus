@@ -12,7 +12,6 @@ from server.wiki.store import WikiError, WikiStore
 from tests import test_wiki_api as api
 from tests import test_wiki_identity as identity_tests
 
-HEADERS = api.HEADERS
 client = api.client
 history = identity_tests.history
 INTENTS = ["question", "overview", "compare"]
@@ -71,10 +70,10 @@ async def test_twenty_summaries_preserve_original_other_direction_and_comparison
     )
     await api.configure(client, vault)
     alpha = (await client.get(
-        "/api/wiki/read", params={"doc": "alpha.md"}, headers=HEADERS,
+        "/api/wiki/read", params={"doc": "alpha.md"}, headers=client.headers,
     )).json()
     for intent, view in product(INTENTS, ("full", "compact")):
-        baseline = await client.get("/api/wiki/search", headers=HEADERS, params={
+        baseline = await client.get("/api/wiki/search", headers=client.headers, params={
             "query": "realtime", "intent": intent, "view": view, "limit": 3,
         })
         assert baseline.status_code == 200, baseline.text
@@ -89,15 +88,15 @@ async def test_twenty_summaries_preserve_original_other_direction_and_comparison
         )
     from server.wiki.registry import registry
 
-    registry.store(None).refresh()
-    with registry.store(None).connect() as db:
+    registry.store((await api.session_manager.db.get_system_agent())["user_id"]).refresh()
+    with registry.store((await api.session_manager.db.get_system_agent())["user_id"]).connect() as db:
         assert db.execute(
             "SELECT count(*) FROM wiki_edges WHERE relation='representation_of' "
             "AND target_doc=?", (alpha["id"],),
         ).fetchone()[0] == 20
     # Query variations share the unchanged source and all twenty summaries.
     for intent, view in product(INTENTS, ("full", "compact")):
-        response = await client.get("/api/wiki/search", headers=HEADERS, params={
+        response = await client.get("/api/wiki/search", headers=client.headers, params={
             "query": "realtime", "intent": intent, "view": view, "limit": 3,
         })
         assert response.status_code == 200, response.text
@@ -110,7 +109,7 @@ async def test_twenty_summaries_preserve_original_other_direction_and_comparison
         assert hit["id"] == alpha["id"] and hit["revision"] == alpha["revision"]
         part = hit["sections"][0]
         read = await client.get(
-            "/api/wiki/read", headers=HEADERS,
+            "/api/wiki/read", headers=client.headers,
             params={"doc": hit["id"], "expected_revision": hit["revision"],
                     "start": part["start"], "length": part["end"] - part["start"]},
         )

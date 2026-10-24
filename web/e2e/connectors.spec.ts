@@ -1,16 +1,16 @@
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { test, expect, type Page } from "@playwright/test";
 
 // Connectors UI against the real backend. No real third-party OAuth is needed:
 // configuring an OAuth client (or creating a custom connector) just flips a
 // connector to "available" — which is the browser-only setup flow we verify.
 
-const TOKEN = "changeme";
+const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api";
 
 async function login(page: Page) {
   await page.goto("/");
-  await page.locator('input[type="password"]').fill(TOKEN);
-  await page.locator("button.btn-login").click();
+  await enterAccountCredentials(page);
   await expect(page.locator(".agent-list-header h2")).toHaveText("Agents");
 }
 

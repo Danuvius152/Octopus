@@ -24,6 +24,7 @@ from server.agent_manager import AgentManager
 from server.config import settings
 from server.database import Database
 from server.session_manager import SessionManager
+from tests.accounts import create_account
 
 for _d in [
     os.path.expanduser("~/.local/bin"),
@@ -43,6 +44,7 @@ async def _bootstrap(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "agents"))
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     mgr = SessionManager()
     await mgr.initialize(db)
     am = AgentManager(db)
@@ -174,7 +176,8 @@ async def test_codex_fork_history_replay_then_native_resume(tmp_path, monkeypatc
     wd = str(tmp_path / "ws")
     os.makedirs(wd, exist_ok=True)
     try:
-        await am.create_agent(name="Codey", backend="codex", mcp_servers=[])
+        owner = (await db.get_system_agent())["user_id"]
+        await am.create_agent(name="Codey", backend="codex", mcp_servers=[], user_id=owner)
         agent = await db.get_agent_by_name("Codey")
         sess = await mgr.create_session(agent_id=agent["id"], name="s",
                                         working_dir=wd, backend="codex")

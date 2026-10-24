@@ -10,7 +10,6 @@ import {
   IconUserCheck,
 } from "@tabler/icons-react";
 import type {
-  BootstrapResponse,
   IdentityResponse,
   InviteInfo,
   UserInfo,
@@ -40,103 +39,29 @@ async function getJson<T>(url: string, headers?: HeadersInit): Promise<T | null>
   }
 }
 
-/** What `POST /api/auth/bootstrap` reports it moved.
- *
- * `BootstrapResponse.summary` is `dict[str, object]` on the wire — the route
- * hands back whatever the upgrade did rather than a fixed record — so the
- * shape it actually contains is stated here, where it is read. */
-interface BootstrapSummary {
-  user_id?: string;
-  username?: string;
-  adopted?: Record<string, number>;
-  reencrypted?: Record<string, number>;
-  extra_roots?: string[];
-  agent_memory_moved?: boolean;
-}
-
-/** Everything about *who you are* on this install (multi-tenancy.md §3).
- *
- * Three things live here, and which of them you see depends on the install
- * rather than on a setting:
- *
- * * **Claim this install** — only before the first account exists. It takes
- *   the install token, which is the credential you are already signed in with,
- *   so the form asks only for the username and password it is exchanged for.
- *   Doing it here rather than on the login screen means it is done by somebody
- *   already holding the token, not by anybody who can reach a login form.
- * * **Password** — once you are an account. The password is never a bearer, so
- *   changing it revokes every token except the one you are using.
- * * **Invites and people** — only for an admin. An invite code is readable
- *   once, here, for as long as the page is open; the row keeps a digest.
- */
+/** Current account settings, password, and administrator controls. */
 export function AccountPage({ onToggleSidebar }: { onToggleSidebar?: () => void }) {
   const token = useSessionStore((s) => s.token);
-  const setToken = useSessionStore((s) => s.setToken);
+  return <AccountSettings key={token} token={token} onToggleSidebar={onToggleSidebar} />;
+}
 
+function AccountSettings({ token, onToggleSidebar }: { token: string; onToggleSidebar?: () => void }) {
   const [identity, setIdentity] = useState<IdentityResponse | null>(null);
-  const [accountsExist, setAccountsExist] = useState<boolean | null>(null);
-  const [claimSummary, setClaimSummary] = useState<BootstrapSummary | null>(null);
-  const [upgradePending, setUpgradePending] = useState(false);
-  const [upgradeBusy, setUpgradeBusy] = useState(false);
-  const [upgradeError, setUpgradeError] = useState("");
-
   const headers = useCallback(
-    () => ({
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${token}`,
-    }),
+    () => ({ "Content-Type": "application/json", Authorization: `Bearer ${token}` }),
     [token]
   );
 
-  // Asked again whenever the bearer changes — claiming the install replaces it
-  // with the new account's, and the answer to both questions changes with it.
   useEffect(() => {
     let alive = true;
-    Promise.all([
-      getJson<{ accounts_exist: boolean }>(`${API}/state`),
-      getJson<IdentityResponse>(`${API}/identity`, headers()),
-    ]).then(([state, who]) => {
-      if (!alive) return;
-      if (state) setAccountsExist(Boolean(state.accounts_exist));
-      if (who) setIdentity(who);
-      if (who?.user_id) {
-        void getJson<{ pending: boolean }>(`${API}/bootstrap/status`, headers()).then((upgrade) => {
-          if (alive) setUpgradePending(upgrade?.pending === true);
-        });
-      } else {
-        setUpgradePending(false);
-      }
+    void getJson<IdentityResponse>(`${API}/identity`, headers()).then((who) => {
+      if (alive) setIdentity(who);
     });
-    return () => {
-      alive = false;
-    };
+    return () => { alive = false; };
   }, [headers]);
-
-  const resumeUpgrade = async () => {
-    setUpgradeBusy(true);
-    setUpgradeError("");
-    try {
-      const response = await fetch(`${API}/bootstrap/resume`, { method: "POST", headers: headers() });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.detail || "Couldn't resume the account upgrade");
-      setClaimSummary(body as BootstrapSummary);
-      setUpgradePending(false);
-    } catch (error) {
-      setUpgradeError(error instanceof Error ? error.message : "Couldn't resume the account upgrade");
-    } finally {
-      setUpgradeBusy(false);
-    }
-  };
 
   return (
     <div className="account-page flex min-h-0 flex-1 flex-col">
-      {upgradePending && <div role="alert" className="mx-6 my-3 rounded-md border border-primary-200 bg-primary-50 p-4">
-        <p>Your account upgrade is incomplete. Your Wiki state is retained; finish the upgrade to use it.</p>
-        <Button className="mt-2" disabled={upgradeBusy} onClick={() => void resumeUpgrade()}>
-          {upgradeBusy ? "Resuming upgrade…" : "Resume account upgrade"}
-        </Button>
-        {upgradeError && <p className="mt-2 text-destructive">{upgradeError}</p>}
-      </div>}
       <PageHeader
         className="account-header"
         icon={<IconUser size={17} className="shrink-0 text-gray-700" />}
@@ -146,25 +71,8 @@ export function AccountPage({ onToggleSidebar }: { onToggleSidebar?: () => void 
       />
       <div className="min-h-0 flex-1 overflow-y-auto px-5 py-5">
         <div className="mx-auto flex w-full max-w-2xl flex-col gap-8">
-          <IdentityCard identity={identity} accountsExist={accountsExist} />
-          {claimSummary && <ClaimSummary summary={claimSummary} />}
-          {accountsExist === false && !claimSummary && (
-            <ClaimInstall
-              token={token}
-              /* Storing the new bearer re-runs the loader above, which is how
-               * the page turns from "claim this install" into the account it
-               * just created. */
-              onClaimed={(newToken, summary) => {
-                setClaimSummary(summary);
-                setToken(newToken, summary.user_id && summary.username ? {
-                  sameAccount: true, identity: { user_id: summary.user_id, label: summary.username, is_admin: true },
-                } : undefined);
-              }}
-            />
-          )}
-          {identity?.user_id && (
-            <Workspace headers={headers} me={identity} />
-          )}
+          <IdentityCard identity={identity} />
+          {identity?.user_id && <Workspace headers={headers} me={identity} />}
           {identity?.user_id && <ChangePassword headers={headers} />}
           {identity?.is_admin && <Invites headers={headers} />}
           {identity?.is_admin && <People headers={headers} me={identity.user_id ?? null} />}
@@ -207,137 +115,22 @@ function Section({
 
 function IdentityCard({
   identity,
-  accountsExist,
 }: {
   identity: IdentityResponse | null;
-  accountsExist: boolean | null;
 }) {
   return (
     <Section
       className="account-identity"
       title={identity?.label || "Signed in"}
       description={
-        accountsExist === false
-          ? "This install has no accounts yet — you are signed in with its token."
-          : identity?.is_admin
-            ? "You administer this install: you can invite people and disable accounts."
-            : "Your sessions, agents, applications and files are yours alone."
+        identity?.is_admin
+          ? "You administer this install: you can invite people and disable accounts."
+          : "Your sessions, agents, applications and files are yours alone."
       }
     >
       {identity?.user_id && (
         <p className="font-mono text-[11px] text-gray-600">{identity.user_id}</p>
       )}
-    </Section>
-  );
-}
-
-function ClaimSummary({ summary }: { summary: BootstrapSummary }) {
-  const moved = Object.entries(summary.adopted ?? {});
-  return (
-    <Section
-      className="account-claimed"
-      title={`This install now belongs to ${summary.username}`}
-      description="The install token no longer signs anybody in. Use your username and password from here on."
-    >
-      <ul className="space-y-1 text-[12.5px] text-gray-800">
-        {moved.length === 0 && <li>Nothing was here to adopt.</li>}
-        {moved.map(([table, n]) => (
-          <li key={table}>
-            <span className="font-mono text-[11.5px]">{table}</span> — {n} row
-            {n === 1 ? "" : "s"} adopted
-          </li>
-        ))}
-        {(summary.extra_roots ?? []).length > 0 && (
-          <li>
-            {summary.extra_roots?.length} existing working director
-            {summary.extra_roots?.length === 1 ? "y" : "ies"} stay reachable
-          </li>
-        )}
-        {summary.agent_memory_moved && <li>Agent memory moved into your workspace</li>}
-      </ul>
-    </Section>
-  );
-}
-
-function ClaimInstall({
-  token,
-  onClaimed,
-}: {
-  token: string;
-  onClaimed: (token: string, summary: BootstrapSummary) => void;
-}) {
-  const [username, setUsername] = useState("");
-  const [password, setPassword] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const claim = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      const res = await fetch(`${API}/bootstrap`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-        body: JSON.stringify({ username, password }),
-      });
-      const data = await res.json().catch(() => null);
-      if (!res.ok) {
-        setError(
-          typeof data?.detail === "string"
-            ? data.detail
-            : `Could not create the account — HTTP ${res.status}`
-        );
-        return;
-      }
-      const reply = data as BootstrapResponse;
-      onClaimed(reply.token, (reply.summary ?? {}) as BootstrapSummary);
-    } catch {
-      setError("Could not reach Octopus.");
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <Section
-      className="account-claim"
-      title="Claim this install"
-      description="Create the first account. Everything already here becomes yours, the stored secrets are re-encrypted under your own key, and the install token stops signing anybody in."
-    >
-      <div className="flex max-w-sm flex-col gap-3">
-        <div className="space-y-1.5">
-          <Label htmlFor="claim-username">Username</Label>
-          <Input
-            id="claim-username"
-            className="input-claim-username"
-            autoCapitalize="off"
-            autoCorrect="off"
-            spellCheck={false}
-            value={username}
-            onChange={(e) => setUsername(e.target.value)}
-          />
-        </div>
-        <div className="space-y-1.5">
-          <Label htmlFor="claim-password">Password</Label>
-          <Input
-            id="claim-password"
-            className="input-claim-password"
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            onKeyDown={(e) => {
-              if (e.key === "Enter") void claim();
-            }}
-          />
-        </div>
-        <Button className="btn-claim-install self-start" disabled={busy} onClick={claim}>
-          Create account
-        </Button>
-        {error && <p className="claim-error text-xs text-destructive">{error}</p>}
-      </div>
     </Section>
   );
 }

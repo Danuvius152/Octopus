@@ -246,7 +246,7 @@ async def test_hermetic_checks_do_not_reuse_managed_host_storage(tmp_path, monke
     environment["OCTOPUS_ENV_FILE"] = str(environment_path(config))
     result = subprocess.run(
         [sys.executable, "-m", "pytest",
-         "tests/test_bootstrap.py::test_bootstrap_adopts_registered_wiki_state_and_exact_root",
+         "tests/test_account_setup.py::test_two_connections_compete_for_one_owned_first_account",
          "--basetemp", str(tmp_path / "isolated-checks"), "-q", "--tb=short"],
         cwd=Path(__file__).resolve().parents[1], env=environment,
         capture_output=True, text=True, timeout=30,

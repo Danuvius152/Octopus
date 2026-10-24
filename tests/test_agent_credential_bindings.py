@@ -9,7 +9,7 @@ from server import deps
 from server.agent_manager import AgentError, AgentManager
 from server.database import Database
 from server.main import app
-from server.routers import agents, auth, credentials
+from server.routers import agents, credentials
 from server.session_manager import session_manager
 from server.users import UserManager
 
@@ -23,7 +23,6 @@ async def bindings(monkeypatch):
     await session_manager.initialize(db)
     manager = AgentManager(db)
     monkeypatch.setattr(agents, "_manager", manager)
-    monkeypatch.setattr(auth, "_db", db)
     monkeypatch.setattr(credentials, "_db", db)
     users = UserManager(db)
     deps.set_user_manager(users)

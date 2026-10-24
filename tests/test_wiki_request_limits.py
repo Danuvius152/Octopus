@@ -53,22 +53,23 @@ async def test_final_writer_retains_all_inherited_path_restrictions(client, tmp_
     token, task, scope, _ = await open_turn(client, tmp_path, limit=limit)
     try:
         with pytest.raises(WikiError, match="Select an unambiguous"):
-            WikiJobs(None).maintain("narrowed-y", "", "Preserve Y", ["Library/y.md"], None, [],
+            WikiJobs(task.user_id).maintain("narrowed-y", "", "Preserve Y", ["Library/y.md"], None, [],
                                     actor_for(task), selection_task=task, mcp_scope=scope)
     finally:
         tasks.close(token)
 
 
 async def test_agent_definition_target_edit_is_enforced_by_the_actual_final_writer(client, tmp_path):
-    existing = admit(session_id="origin", request_id="r", user_id=None, prompt="Normal task")
-    editor = admit(session_id="editor", request_id="e", user_id=None, prompt="Normal current task")
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    existing = admit(session_id="origin", request_id="r", user_id=owner, prompt="Normal task")
+    editor = admit(session_id="editor", request_id="e", user_id=owner, prompt="Normal current task")
     revised = revise(existing, AdmittedRequest(editor.origin, editor), {
         "prompt": "/wiki maintain Library/x.md", "wiki_mode": "maintain",
     })
     token, task, scope, _ = await open_turn(client, tmp_path, limit=revised.maintenance, mode=revised.mode)
     try:
         with pytest.raises(WikiError, match="Select an unambiguous"):
-            WikiJobs(None).maintain("outside-revised-definition", "", "Preserve Y", ["Library/y.md"],
+            WikiJobs(task.user_id).maintain("outside-revised-definition", "", "Preserve Y", ["Library/y.md"],
                                     None, [], actor_for(task), selection_task=task, mcp_scope=scope)
     finally:
         tasks.close(token)
@@ -80,7 +81,7 @@ async def test_empty_paths_cannot_hide_material_outside_the_inherited_scope(clie
     )
     try:
         with pytest.raises(WikiError, match="Select an unambiguous"):
-            WikiJobs(None).maintain("outside-material", "# New material\nKeep me.", "Retain material", [],
+            WikiJobs(task.user_id).maintain("outside-material", "# New material\nKeep me.", "Retain material", [],
                                     "Library/new.md", [], actor_for(task), selection_task=task, mcp_scope=scope)
     finally:
         tasks.close(token)
@@ -109,14 +110,14 @@ async def test_unrestricted_auto_preserves_normal_new_material_admission(client,
     }},
 ])
 async def test_scope_checks_creation_and_framework_material_destinations(client, tmp_path, payload):
-    token, _, _, headers = await open_turn(
+    token, task, _, headers = await open_turn(
         client, tmp_path, limit=MaintenanceLimit(True, ("/wiki maintain Library/x-summary.md",)),
     )
     try:
         response = await client.post("/api/wiki/maintain", headers=headers,
                                      json={"idempotency_key": "full-effects", **payload})
         assert response.status_code == 403, response.text
-        assert WikiJobs(None).list()["items"] == []
+        assert WikiJobs(task.user_id).list()["items"] == []
     finally:
         tasks.close(token)
 
@@ -143,7 +144,7 @@ async def test_replay_and_material_dedup_recheck_the_actual_admitted_destination
     token, task, scope, _ = await open_turn(client, tmp_path, limit=MaintenanceLimit(True))
     second_token = None
     try:
-        jobs = WikiJobs(None)
+        jobs = WikiJobs(task.user_id)
         material = "# Repeated material\nPreserve this input."
         original = jobs.maintain("original-material", material, "Preserve", [], None, [], actor_for(task),
                                  selection_task=task, mcp_scope=scope)
@@ -151,7 +152,7 @@ async def test_replay_and_material_dedup_recheck_the_actual_admitted_destination
         narrowed = replace(task.knowledge, maintenance=MaintenanceLimit(True, ("/wiki maintain Library/x.md",)))
         second_token = tasks.open(session, "auto", request_id="narrowed-return", knowledge=narrowed)
         second = tasks.active[second_token]
-        second_scope = verify(mint(session.id, wiki_task_id=second_token))
+        second_scope = verify(mint(session.id, user_id=session.user_id, wiki_task_id=second_token))
         with pytest.raises(WikiError, match="Select an unambiguous"):
             jobs.maintain("original-material" if same_key else "alias-material", material, "Preserve", [], None, [],
                           actor_for(second), selection_task=second, mcp_scope=second_scope)
@@ -162,7 +163,7 @@ async def test_replay_and_material_dedup_recheck_the_actual_admitted_destination
 
 
 async def test_reusing_current_material_cannot_escape_the_inherited_scope(client, tmp_path):
-    token, _, _, headers = await open_turn(
+    token, task, _, headers = await open_turn(
         client, tmp_path, limit=MaintenanceLimit(True, ("/wiki maintain Library/x.md",)),
     )
     try:
@@ -170,7 +171,7 @@ async def test_reusing_current_material_cannot_escape_the_inherited_scope(client
             "idempotency_key": "reuse-outside-scope", "material": "# Y\nPreserve Y.\n",
         })
         assert response.status_code == 403, response.text
-        assert WikiJobs(None).list()["items"] == []
+        assert WikiJobs(task.user_id).list()["items"] == []
     finally:
         tasks.close(token)
 
@@ -196,7 +197,7 @@ async def test_missing_or_changed_registration_keeps_queries_but_rejects_submiss
     try:
         session = wiki_api.session_manager.sessions[task.session_id]
         second_token = tasks.open(session, "auto", knowledge=replace(task.knowledge, registration=binding))
-        bearer = mint(session.id, wiki_task_id=second_token)
+        bearer = mint(session.id, user_id=session.user_id, wiki_task_id=second_token)
         headers = {"Authorization": f"Bearer {bearer}"}
         response = await client.post("/api/wiki/maintain", headers=headers, json={
             "idempotency_key": "unknown-binding", "material": "# New knowledge\nPreserve this input.",
@@ -216,7 +217,7 @@ async def test_full_curation_and_its_subscription_cannot_exceed_the_request_scop
         client, tmp_path, limit=MaintenanceLimit(True, ("/wiki maintain Library/x.md",)),
     )
     try:
-        jobs = WikiJobs(None)
+        jobs = WikiJobs(task.user_id)
         if existing:
             jobs.curate("full-curation", "Review all current originals")
         with pytest.raises(WikiError, match="Select an unambiguous"):
@@ -237,7 +238,7 @@ async def test_checked_daily_admission_requires_every_inherited_selection(client
         observed = await client.get("/api/wiki/maintenance-status", params={"doc": path}, headers=headers)
         assert observed.status_code == 200, observed.text
         review = observed.json()["items"][0]["review"]
-        jobs = WikiJobs(None)
+        jobs = WikiJobs(task.user_id)
         if allowed:
             accepted = jobs.maintain(review["review_key"], "", "Checked review", [path], None, [], actor_for(task),
                                      review=review, selection_task=task, mcp_scope=scope)
@@ -255,14 +256,14 @@ async def test_a_real_worker_grant_survives_a_prohibition_on_new_submissions(cli
     token, task, _, _ = await open_turn(client, tmp_path, limit=MaintenanceLimit(True))
     worker_token = None
     try:
-        jobs = WikiJobs(None)
+        jobs = WikiJobs(task.user_id)
         job = jobs.maintain("assigned-worker", "", "Review only X", ["Library/x.md"], None, [], "human")
         session = wiki_api.session_manager.sessions[task.session_id]
         jobs.update(job["id"], status="running", session_id=session.id)
         tasks.assign(session.id, job["id"], job["items"], registration=jobs.registration)
         context = replace(task.knowledge, maintenance=MaintenanceLimit(False))
         worker_token = tasks.open(session, "maintain", knowledge=context)
-        headers = {"Authorization": "Bearer " + mint(session.id, wiki_task_id=worker_token)}
+        headers = {"Authorization": "Bearer " + mint(session.id, user_id=session.user_id, wiki_task_id=worker_token)}
         current = await client.get("/api/wiki/read", params={"doc": "Library/x.md"}, headers=headers)
         assert current.status_code == 200, current.text
         saved = await client.post("/api/wiki/revise", headers=headers, json={

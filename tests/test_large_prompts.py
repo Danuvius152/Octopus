@@ -190,11 +190,13 @@ async def test_send_message_hands_backend_pointer_for_huge_prompt(
     from server.database import Database
     from server.harness import HarnessEvent
     from server.session_manager import SessionManager
+    from tests.accounts import create_account
     from tests.fake_run import FakeRunBase
 
     mgr = SessionManager()
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db)
     try:
         await mgr.initialize(db)
         agent = await db.get_system_agent()

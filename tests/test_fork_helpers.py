@@ -20,6 +20,10 @@ from server.models import MessageContent, MessageRole
 async def db():
     d = Database(":memory:")
     await d.initialize()
+    await d.save_agent(
+        agent_id="classifier-agent", name="Classifier",
+        created_at="2026-06-08", updated_at="2026-06-08",
+    )
     try:
         yield d
     finally:
@@ -27,10 +31,9 @@ async def db():
 
 
 async def _seed_session(db, sid="parent"):
-    agent = await db.get_system_agent()
     await db.save_session(
         session_id=sid, name="P", working_dir="/tmp",
-        created_at="2026-06-08T00:00:00+00:00", agent_id=agent["id"],
+        created_at="2026-06-08T00:00:00+00:00", agent_id="classifier-agent",
     )
 
 

@@ -26,7 +26,8 @@ async def uncertain(client, tmp_path):
     path = root / "Library/note.md"
     path.write_bytes(b"# Original\nKeep this argument and its conditions.\n")
     config = await wiki_api.configure(client, root)
-    store = registry.store(None)
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    store = registry.store(owner)
     original = store.read("Library/note.md")
     with store.connect() as db:
         db.execute("UPDATE filesystem_state SET uncertain='Isolated missing-event history' WHERE singleton=1")
@@ -42,20 +43,20 @@ def sql(store, statement, parameters=()):
 
 
 async def plan(client, retain=()):
-    response = await client.post("/api/wiki/recovery/plan", headers=wiki_api.HEADERS, json={"retain": list(retain)})
+    response = await client.post("/api/wiki/recovery/plan", headers=client.headers, json={"retain": list(retain)})
     assert response.status_code == 200, response.text
     return response.json()
 
 
 async def approve(client, result):
-    response = await client.post(f"/api/wiki/recovery/{result['recovery_id']}/approve", headers=wiki_api.HEADERS,
+    response = await client.post(f"/api/wiki/recovery/{result['recovery_id']}/approve", headers=client.headers,
                                  json={"plan_hash": result["plan_hash"]})
     assert response.status_code == 200, response.text
     return response.json()
 
 
 async def apply(client, result):
-    return await client.post(f"/api/wiki/recovery/{result['recovery_id']}/apply", headers=wiki_api.HEADERS,
+    return await client.post(f"/api/wiki/recovery/{result['recovery_id']}/apply", headers=client.headers,
                              json={"plan_hash": result["plan_hash"]})
 
 
@@ -71,12 +72,12 @@ async def finish(client, result):
 async def test_inspection_and_evidence_export_work_without_constructing_the_uncertain_store(uncertain):
     client, root, store, original, _ = uncertain
     before = sql(store, "SELECT * FROM filesystem_state")
-    denied = await client.get("/api/wiki/read", params={"doc": original["id"]}, headers=wiki_api.HEADERS)
+    denied = await client.get("/api/wiki/read", params={"doc": original["id"]}, headers=client.headers)
     assert denied.status_code == 503
-    response = await client.get("/api/wiki/recovery", headers=wiki_api.HEADERS)
+    response = await client.get("/api/wiki/recovery", headers=client.headers)
     assert response.status_code == 200, response.text
     assert response.json()["filesystem"]["uncertain"] == before[0]["uncertain"]
-    exported = await client.post("/api/wiki/recovery/export", headers=wiki_api.HEADERS)
+    exported = await client.post("/api/wiki/recovery/export", headers=client.headers)
     assert exported.status_code == 200, exported.text
     receipt = exported.json()
     raw = Path(receipt["path"]).read_bytes()
@@ -88,9 +89,10 @@ async def test_inspection_and_evidence_export_work_without_constructing_the_unce
 
 async def test_model_scope_never_receives_owner_recovery_or_approval(uncertain):
     client, _, _, _, config = uncertain
-    session = SimpleNamespace(id="recovery-model", user_id=None, agent_id=config["curator_agent_id"])
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    session = SimpleNamespace(id="recovery-model", user_id=owner, agent_id=config["curator_agent_id"])
     token = tasks.open(session, "maintain")
-    headers = {"Authorization": "Bearer " + mint(session.id, wiki_task_id=token)}
+    headers = {"Authorization": "Bearer " + mint(session.id, user_id=session.user_id, wiki_task_id=token)}
     try:
         for method, path, body in (("GET", "/api/wiki/recovery", None),
                                    ("POST", "/api/wiki/recovery/export", None),
@@ -103,6 +105,7 @@ async def test_model_scope_never_receives_owner_recovery_or_approval(uncertain):
 
 async def test_default_plan_requires_approval_and_ends_old_identity_without_editing_bytes(uncertain):
     client, root, store, original, _ = uncertain
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     raw = (root / original["path"]).read_bytes()
     result = await plan(client)
     assert result["phase"] == "prepared" and result["files_count"] == 1
@@ -116,18 +119,18 @@ async def test_default_plan_requires_approval_and_ends_old_identity_without_edit
     assert complete["completion_receipt"] and complete["mapping_receipt"]
     repeated = await apply(client, result)
     assert repeated.status_code == 200 and repeated.json()["completion_receipt"] == complete["completion_receipt"]
-    current = registry.store(None).read(original["path"])
+    current = registry.store(owner).read(original["path"])
     assert current["id"] == entry["document_id"]
     assert sql(store, "SELECT path FROM document_identities WHERE id=?", (original["id"],)) == [{"path": None}]
     with pytest.raises(WikiError) as gone:
-        registry.store(None).read(original["id"])
+        registry.store(owner).read(original["id"])
     assert gone.value.status == 404 and (root / original["path"]).read_bytes() == raw
 
 
 async def test_changed_plan_and_wrong_approval_do_not_mutate_identity(uncertain):
     client, root, store, original, _ = uncertain
     result = await plan(client)
-    wrong = await client.post(f"/api/wiki/recovery/{result['recovery_id']}/approve", headers=wiki_api.HEADERS,
+    wrong = await client.post(f"/api/wiki/recovery/{result['recovery_id']}/approve", headers=client.headers,
                               json={"plan_hash": "0" * 64})
     assert wrong.status_code == 409
     await approve(client, result)
@@ -142,6 +145,7 @@ async def test_changed_plan_and_wrong_approval_do_not_mutate_identity(uncertain)
 
 async def test_intake_remains_live_while_normal_store_writer_drains(uncertain, monkeypatch):
     client, root, store, _, _ = uncertain
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     held, release, draining = threading.Event(), threading.Event(), threading.Event()
     original_block = registry.block
 
@@ -162,7 +166,7 @@ async def test_intake_remains_live_while_normal_store_writer_drains(uncertain, m
     try:
         assert await asyncio.to_thread(draining.wait, 5)
         (root / "Library/new.md").write_bytes(b"# New while draining\n")
-        await asyncio.to_thread(registry.recoveries().flush, None)
+        await asyncio.to_thread(registry.recoveries().flush, owner)
         received = sql(store, "SELECT payload FROM filesystem_inbox WHERE status='pending'")
         assert any(record.get("path") == "Library/new.md" for row in received for record in json.loads(row["payload"])["records"])
         assert not store.events._closed and not pending.done()
@@ -178,6 +182,7 @@ async def test_intake_remains_live_while_normal_store_writer_drains(uncertain, m
 
 async def test_cold_handoff_stays_closed_after_uncertainty_clear_before_takeover(uncertain):
     client, root, store, original, config = uncertain
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     result = await plan(client)
     await approve(client, result)
     for _ in range(8):
@@ -192,7 +197,7 @@ async def test_cold_handoff_stays_closed_after_uncertainty_clear_before_takeover
     registry.close()
     fresh = WikiRegistry()
     try:
-        for open_store in (lambda: fresh.store(None), lambda: WikiStore(root, store.state, config["vault_id"])):
+        for open_store in (lambda: fresh.store(owner), lambda: WikiStore(root, store.state, config["vault_id"])):
             with pytest.raises(WikiError, match="recovery") as closed:
                 open_store()
             assert closed.value.status == 503

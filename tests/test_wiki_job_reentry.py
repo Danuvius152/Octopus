@@ -4,7 +4,6 @@ import pytest
 
 from server.wiki import job_execution
 from server.wiki.store import WikiError
-from tests import test_wiki_api as wiki_api
 from tests.test_wiki_job_events import enqueue
 from tests.test_wiki_job_execution import disk_manager as disk_manager
 from tests.test_wiki_job_execution import prepare, record_terminal
@@ -50,7 +49,7 @@ async def test_explicit_verify_uses_original_terminal_and_never_creates_model_wo
                "expected_vault_id": jobs.registration["vault_id"]}
     try:
         for _ in range(2):
-            result = await client.post(f"/api/wiki/jobs/{job['id']}/verify", json=control, headers=wiki_api.HEADERS)
+            result = await client.post(f"/api/wiki/jobs/{job['id']}/verify", json=control, headers=client.headers)
             assert result.status_code == 200, result.text
             assert result.json()["attempt"] == reference["attempt"]
             assert result.json()["items"][0]["status"] == "attention"
@@ -141,10 +140,10 @@ def test_scope_readmission_keeps_evidence_for_original_items_outside_new_scope(j
     reference = job_execution.prepare(jobs, running, running["items"], "original", "both-original")
     job_execution.transition(jobs, job["id"], reference, "rejected", disposition="not_admitted", retired=True)
     old = jobs.update(job["id"], status="failed", session_id=None)
-    registry.configure(None, jobs.store.root, "replacement-curator")
+    registry.configure(jobs.user_id, jobs.store.root, "replacement-curator")
     from server.wiki.jobs import WikiJobs
 
-    current = WikiJobs(None)
+    current = WikiJobs(jobs.user_id)
     accepted = current.readmit(job["id"], [first["items"][0]["path"]], operation_id="narrow-original",
                                expected_attempt=old["attempt"], expected_vault_id=current.registration["vault_id"])
     retained = next(item for item in accepted["items"] if item["path"] == "Library/other.md")
@@ -159,8 +158,8 @@ async def test_retry_reacquires_only_creation_paths_inside_readmitted_scope(jobs
     job = jobs.maintain("narrow-creations", "", "Create the two explicit pages", [], None, [], "human",
                         creation={"purpose": "requested_knowledge_page", "paths": ["Library/keep.md", "Library/exclude.md"]})
     jobs.update(job["id"], status="failed")
-    registry.configure(None, jobs.store.root, "replacement-curator")
-    current = WikiJobs(None)
+    registry.configure(jobs.user_id, jobs.store.root, "replacement-curator")
+    current = WikiJobs(jobs.user_id)
     readmitted = current.readmit(job["id"], [], creation={"purpose": "requested_knowledge_page", "paths": ["Library/keep.md"]})
     excluded = next(item for item in readmitted["items"] if item["path"] == "Library/exclude.md")
     assert excluded["status"] == "excluded"

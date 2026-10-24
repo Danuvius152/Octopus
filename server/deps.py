@@ -61,7 +61,7 @@ SessionMgr = Annotated[SessionManager, Depends(get_session_manager)]
 _user_manager: UserManager | None = None
 
 
-def set_user_manager(manager: UserManager) -> None:
+def set_user_manager(manager: UserManager | None) -> None:
     """Bound at startup, like the other managers (`main.py`)."""
     global _user_manager
     _user_manager = manager
@@ -77,28 +77,11 @@ def get_user_manager() -> UserManager:
 
 UserMgr = Annotated[UserManager, Depends(get_user_manager)]
 
-_accounts_exist: bool | None = None
 
 
-async def accounts_exist() -> bool:
-    """Whether this install has any account at all.
-
-    The answer is the difference between a site and a single-user install, and
-    it is what lets the legacy `OCTOPUS_AUTH_TOKEN` keep working right up until
-    the moment the first account is created and not one request after
-    (multi-tenancy.md §9). Cached because it is consulted on every
-    unauthenticated request and the answer only ever goes False → True.
-    """
-    global _accounts_exist
-    if _accounts_exist:
-        return True
-    if _user_manager is None:
-        return False
-    _accounts_exist = await _user_manager.db.count_users() > 0
-    return _accounts_exist
 
 
-async def owner_is_available(user_id: str) -> bool:
+async def owner_is_available(user_id: str | None) -> bool:
     """Runtime capabilities consult the same current account rows as bearers."""
     from .users import owner_is_available as available
 
@@ -107,11 +90,6 @@ async def owner_is_available(user_id: str) -> bool:
     return await available(_user_manager.db, user_id)
 
 
-def forget_accounts_exist() -> None:
-    """Drop the cached answer. Called when an account is created, and by tests
-    that build a fresh database under the same process."""
-    global _accounts_exist
-    _accounts_exist = None
 
 
 _bearer = HTTPBearer(auto_error=False)
@@ -164,36 +142,19 @@ async def scope_user_id(
     creds: _BearerCreds,
     token: _QueryToken = None,
 ) -> str | None:
-    """Whose rows this request may see, or None when nobody owns anything yet.
-
-    `None` is not "unscoped because we could not tell" — `verify_token` has
-    already refused anyone who should not be here. It is the pre-accounts era
-    (§9), where the install has one operator and no `user_id` on any row, and
-    filtering by an owner that does not exist would return nothing at all.
-
-    The moment the first account exists this always resolves to that account,
-    and from then on a route filters whether or not its author thought about
-    it. That is the point: ownership is the default, not a thing to remember.
-    """
+    """Resolve a current account for both human and authorized runtime requests."""
     presented = _presented(request, creds, token)
-    if _user_manager is None:
-        # No account layer bound at all. Asking for a scope must not be how a
-        # request discovers that: `get_user_manager` answers 503 because a
-        # *login* without accounts is broken, while a *read* without accounts
-        # is the pre-accounts install working exactly as it always did.
-        return None
-    user = await _user_manager.resolve_token(presented)
+    manager = get_user_manager()
+    user = await manager.resolve_token(presented)
     if user is not None:
         return user["id"]
     # A tool call from inside a turn acts as its session's owner (§7). The
     # bearer is the MCP scope the CLI was given; `auth._allowed` has already
     # accepted it, and this is the same claim read for the same request.
     scope = verify_mcp_scope(presented)
-    if scope is not None and await scope_is_authorized(scope):
+    if scope is not None and scope.user_id is not None and await scope_is_authorized(scope):
         return scope.user_id
-    if await accounts_exist():
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
-    return None
+    raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
 
 
 ScopeUser = Annotated[str | None, Depends(scope_user_id)]
@@ -202,13 +163,11 @@ ScopeUser = Annotated[str | None, Depends(scope_user_id)]
 @dataclass(frozen=True)
 class Principal:
     user_id: str | None
-    credential_kind: Literal["account", "mcp", "legacy"]
+    credential_kind: Literal["account", "mcp"]
 
 
 async def resolve_principal(token: str) -> Principal | None:
     """Validate once, read only. Runtime scopes keep their live authority checks."""
-    from .config import settings
-
     if not token:
         return None
     if _user_manager is not None:
@@ -216,10 +175,8 @@ async def resolve_principal(token: str) -> Principal | None:
         if user is not None:
             return Principal(user["id"], "account")
     scope = verify_mcp_scope(token)
-    if scope is not None:
+    if scope is not None and scope.user_id is not None:
         return Principal(scope.user_id, "mcp") if await scope_is_authorized(scope) else None
-    if not await accounts_exist() and token == settings.auth_token:
-        return Principal(None, "legacy")
     return None
 
 
@@ -230,17 +187,8 @@ async def scope_user_id_for(token: str) -> tuple[bool, str | None]:
 
 
 async def data_key_for(user_id: str | None) -> str:
-    """The encryption key for this account's stored secrets (§4).
-
-    Here as well as on `UserManager` because the callers are background paths
-    and routers that hold a `user_id` and no manager — and because an install
-    with no account layer bound at all still has to answer the question.
-    """
-    if _user_manager is None:
-        from .config import settings
-
-        return settings.auth_token
-    return await _user_manager.data_key_for(user_id)
+    """Resolve stored secrets through the bound current account service."""
+    return await get_user_manager().data_key_for(user_id)
 
 
 async def viewer_user_id(
@@ -273,35 +221,3 @@ async def require_admin(user: CurrentUser) -> dict[str, Any]:
 
 
 AdminUser = Annotated[dict, Depends(require_admin)]
-
-async def operator_user(
-    request: Request,
-    creds: _BearerCreds,
-    token: _QueryToken = None,
-) -> dict[str, Any] | None:
-    """An admin — or the single operator of an install that has no accounts yet.
-
-    For **install-level** configuration: a connector kind, an OAuth client
-    registration. `AdminUser` is wrong there, because before the first account
-    exists there is nobody to be an admin and asking for one answers 503 on an
-    install where the operator is standing right there with the token
-    (multi-tenancy.md §5). `verify_token` has already admitted them; this only
-    decides whether they may change something everybody shares.
-
-    Returns `None` in that era, and the admin's row after it.
-    """
-    if not await accounts_exist():
-        return None
-    if _user_manager is None:  # pragma: no cover - startup wiring bug
-        raise HTTPException(
-            status.HTTP_503_SERVICE_UNAVAILABLE, "accounts are not available"
-        )
-    user = await _user_manager.resolve_token(_presented(request, creds, token))
-    if user is None:
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
-    if not user.get("is_admin"):
-        raise HTTPException(status.HTTP_403_FORBIDDEN, "Admins only")
-    return user
-
-
-OperatorUser = Annotated[dict | None, Depends(operator_user)]

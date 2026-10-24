@@ -55,7 +55,7 @@ async def test_changed_child_relation_is_a_confirmed_refusal_even_with_the_same_
     boot, starts = runtime
     current, original = await completed_before_restart(boot, starts)
     previous = await current.database.load_delegation_state(
-        original.delegation_id, parent_session_id=current.parent_id, user_id=None,
+        original.delegation_id, parent_session_id=current.parent_id, user_id=current.manager.get_session(current.parent_id).user_id,
     )
     save = current.database.compare_and_set_delegation_state
     entered, release = asyncio.Event(), asyncio.Event()
@@ -74,12 +74,14 @@ async def test_changed_child_relation_is_a_confirmed_refusal_even_with_the_same_
     try:
         await asyncio.wait_for(entered.wait(), 5)
         if changed == "target":
-            replacement = await AgentManager(current.database).create_agent(name="Replacement", backend="codex")
+            replacement = await AgentManager(current.database).create_agent(
+                name="Replacement", backend="codex", user_id=current.manager.get_session(current.parent_id).user_id,
+            )
             await current.database.update_session_field(original.delegation_id, agent_id=replacement["id"])
             # The read scope intentionally does not include a target argument:
             # an equal old snapshot cannot confirm authority for the old target.
             assert await current.database.load_delegation_state(
-                original.delegation_id, parent_session_id=current.parent_id, user_id=None,
+                original.delegation_id, parent_session_id=current.parent_id, user_id=current.manager.get_session(current.parent_id).user_id,
             ) == previous
         elif changed == "origin":
             await current.database.update_session_field(original.delegation_id, origin="user")

@@ -3,7 +3,6 @@
 import pytest
 
 from server.wiki.store import revision
-from tests.test_wiki_api import HEADERS
 from tests.test_wiki_jobs import Curator, process
 from tests.test_wiki_maintenance_selections import FILES, select
 from tests.test_wiki_maintenance_selections import submission as selected_submission
@@ -14,16 +13,16 @@ from tests.test_wiki_maintenance_state import prepare, state, submission
 async def test_unchanged_read_and_refresh_preserve_cursor_but_changed_content_expires_it(client, tmp_path):
     root, _, jobs = await prepare(client, tmp_path, FILES)
     first = await state(client, limit=1)
-    read = await client.get("/api/wiki/read", params={"doc": "Library/a.md"}, headers=HEADERS)
+    read = await client.get("/api/wiki/read", params={"doc": "Library/a.md"}, headers=client.headers)
     assert read.status_code == 200, read.text
     jobs.store.refresh()
-    second = await client.get("/api/wiki/maintenance-status", headers=HEADERS,
+    second = await client.get("/api/wiki/maintenance-status", headers=client.headers,
                               params={"limit": 1, "cursor": first["next_cursor"]})
     assert second.status_code == 200, second.text
     assert second.json()["items"][0]["current"]["path"] == "Library/b.md"
     (root / "Library/b.md").write_text("# B\nChanged semantic content.\n")
     jobs.store.refresh()
-    stale = await client.get("/api/wiki/maintenance-status", headers=HEADERS,
+    stale = await client.get("/api/wiki/maintenance-status", headers=client.headers,
                              params={"limit": 1, "cursor": first["next_cursor"]})
     assert stale.status_code == 409, stale.text
 
@@ -43,7 +42,7 @@ async def test_applied_inbox_for_same_bytes_preserves_the_maintenance_cursor(cli
     current = jobs.store.read("Library/a.md")
     assert current["id"] == first["items"][0]["current"]["id"]
     assert current["revision"] == revision(original)
-    second = await client.get("/api/wiki/maintenance-status", headers=HEADERS,
+    second = await client.get("/api/wiki/maintenance-status", headers=client.headers,
                               params={"limit": 1, "cursor": first["next_cursor"]})
     assert second.status_code == 200, second.text
     assert second.json()["items"][0]["current"]["path"] == "Library/b.md"
@@ -62,7 +61,7 @@ async def test_unrelated_bad_asset_does_not_block_checked_maintenance_or_selecti
     assert current["items"][0]["review"] == observed["review"]
     selected = await select(client, limit=1)
     assert selected["items"][0]["review"] == frozen["items"][0]["review"]
-    accepted = await client.post("/api/wiki/maintain", headers=HEADERS,
+    accepted = await client.post("/api/wiki/maintain", headers=client.headers,
                                  json=selected_submission(frozen, frozen["items"][0]))
     assert accepted.status_code == 200, accepted.text
     finished = await process(jobs, accepted.json(), Curator(jobs))
@@ -81,7 +80,7 @@ async def test_related_bad_document_is_not_actionable_or_admitted(client, tmp_pa
     jobs.store.refresh()
     current = await state(client, "Library/a.md")
     assert current["ready"] and not current["items"][0]["actionable"], current
-    rejected = await client.post("/api/wiki/maintain", headers=HEADERS, json=submission(observed))
+    rejected = await client.post("/api/wiki/maintain", headers=client.headers, json=submission(observed))
     assert rejected.status_code in {409, 503}, rejected.text
     assert jobs.list()["items"] == []
 
@@ -91,7 +90,7 @@ async def test_source_health_change_after_admission_prevents_worker_effects(clie
     target = "---\nsources:\n  - resource: source.md\n    revision: " + revision(source.encode()) + "\n---\n# A\nDerived.\n"
     root, _, jobs = await prepare(client, tmp_path, FILES | {"Library/a.md": target, "Library/source.md": source})
     observed = (await state(client, "Library/a.md"))["items"][0]
-    accepted = await client.post("/api/wiki/maintain", headers=HEADERS, json=submission(observed))
+    accepted = await client.post("/api/wiki/maintain", headers=client.headers, json=submission(observed))
     assert accepted.status_code == 200, accepted.text
     (root / "Library/source.md").write_text("---\nsources: [\n---\n# Broken source\n")
     jobs.store.refresh()

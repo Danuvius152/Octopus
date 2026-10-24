@@ -13,7 +13,6 @@ from server.harness.profile import StdinMode
 from tests import test_question_lifecycle as question_tests
 
 question_host = question_tests.question_host
-HEADERS = question_tests.HEADERS
 
 
 @pytest.mark.parametrize("operation", ["cancel_request", "close_work"])
@@ -133,7 +132,7 @@ async def test_cancelled_steer_does_not_deliver_after_its_git_preparation_finish
         finish.touch()
         assert (await asyncio.wait_for(initial.wait(), 2)).outcome.status == "success"
         assert (await asyncio.wait_for(next_correction.wait(), 2)).outcome.status == "success"
-        detail = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+        detail = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
         assert detail.status_code == 200
         assert [row["content"] for row in detail.json()["messages"] if row["role"] == "user"] == [prompt, following]
         assert len([row for row in detail.json()["messages"] if row["type"] == "result"]) == 1

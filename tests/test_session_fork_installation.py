@@ -8,19 +8,20 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from server.config import settings
 from server.database import Database
 from server.deps import get_session_manager
 from server.harness import get_harness
 from server.routers.sessions import router
 from server.sessions import SessionManager
 from server.sessions.questions import QuestionClosedError
+from tests.accounts import create_account
 
 
 @pytest.fixture
 async def installation(tmp_path, monkeypatch):
     database = Database(str(tmp_path / "installation.sqlite3"))
     await database.initialize()
+    _, bearer = await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     directory = tmp_path / "source"
@@ -39,7 +40,7 @@ async def installation(tmp_path, monkeypatch):
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
-            headers={"Authorization": f"Bearer {settings.auth_token}"},
+            headers={"Authorization": "Bearer " + bearer},
         ) as client:
             yield manager, parent.id, client, directory
     finally:

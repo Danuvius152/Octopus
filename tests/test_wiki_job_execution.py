@@ -1,6 +1,8 @@
 """Admission intent, exact original completion and cancellation crash windows."""
 
 import asyncio
+import sqlite3
+from contextlib import closing
 
 import pytest
 
@@ -20,12 +22,15 @@ from tests.test_wiki_jobs import jobs as jobs
 
 @pytest.fixture
 async def disk_manager(jobs, tmp_path):
-    database = Database(str(tmp_path / "execution-main.db"))
+    path = tmp_path / "execution-main.db"
+    # Recovery reopens the original account and curator together with its rows.
+    with closing(sqlite3.connect(path, check_same_thread=False)) as target:
+        await wiki_api.session_manager.db.conn.backup(target)
+    database = Database(str(path))
     await database.initialize()
     agent_id = jobs.registration["curator_agent_id"]
-    if await database.get_agent(agent_id) is None:
-        await database.save_agent(agent_id=agent_id, name="Recovery worker", created_at="time", updated_at="time", backend="codex")
-    await database.save_session("original-worker", "Original worker", str(tmp_path), "time", agent_id=agent_id, origin="wiki")
+    assert (await database.get_agent(agent_id))["user_id"] == jobs.user_id
+    await database.save_session("original-worker", "Original worker", str(tmp_path), "time", agent_id=agent_id, origin="wiki", user_id=jobs.user_id)
 
     class RecoveryOnly(Curator):
         async def start_message(self, *args, **kwargs):
@@ -139,6 +144,8 @@ async def test_committed_original_terminal_and_publication_resume_without_new_re
     await disk_manager.db.close()
     disk_manager.db = Database(path)
     await disk_manager.db.initialize()
+    assert (await disk_manager.db.get_user(jobs.user_id))["id"] == jobs.user_id
+    assert await disk_manager.db.get_session_owner("original-worker") == jobs.user_id
     jobs.recover_jobs(previous_writers_retired=True)
     assert jobs.next_queued() == job["id"]
     worker = WikiWorker()

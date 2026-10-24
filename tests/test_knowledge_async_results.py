@@ -25,6 +25,7 @@ from server.mcp_identity import (
 )
 from server.research.manager import ResearchManager
 from server.session_manager import SessionManager
+from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
 
 CREATED_AT = "2026-10-19T12:00:00+00:00"
@@ -69,19 +70,26 @@ def _install_research_provider(monkeypatch, on_start):
 
 
 @pytest.fixture
-async def database(tmp_path):
+async def owned_database(tmp_path):
     db = Database(str(tmp_path / "async-jobs.db"))
     await db.initialize()
-    await db.save_session("parent", "Parent", str(tmp_path), CREATED_AT)
+    user, _ = await create_account(db, extra_roots=[tmp_path])
+    agent = await db.get_system_agent(user["id"])
+    await db.save_session(
+        "parent", "Parent", str(tmp_path), CREATED_AT,
+        agent_id=agent["id"], user_id=user["id"],
+    )
     try:
         yield db
     finally:
         await db.close()
 
 
-async def test_background_contract_is_committed_before_process_launch(database, tmp_path, monkeypatch):
+async def test_background_contract_is_committed_before_process_launch(owned_database, tmp_path, monkeypatch):
+    database = owned_database
+    owner = (await database.get_session_binding("parent"))["user_id"]
     context = admit(
-        session_id="parent", request_id="read-request", user_id=None,
+        session_id="parent", request_id="read-request", user_id=owner,
         prompt="/wiki Compare X and Y.",
     )
     owned = derive(AdmittedRequest(context.origin, context), "Run an offline check.")
@@ -121,8 +129,12 @@ async def test_background_contract_is_committed_before_process_launch(database, 
 @pytest.mark.parametrize("committed", [False, True])
 async def test_background_commit_failure_never_launches_a_process(tmp_path, monkeypatch, committed):
     path = tmp_path / "async-jobs.db"
+    seed = Database(str(path))
+    await seed.initialize()
+    owner, _ = await create_account(seed, extra_roots=[tmp_path])
+    await seed.close()
     context = admit(
-        session_id="parent", request_id="background-request", user_id=None,
+        session_id="parent", request_id="background-request", user_id=owner["id"],
         prompt="/wiki Keep the original background request.",
     )
     owned = derive(AdmittedRequest(context.origin, context, "background-work"), "touch must-not-run")
@@ -139,11 +151,15 @@ async def main():
     root = Path(working_dir)
     database = Database(path)
     await database.initialize()
+    owned = decode_owned(encoded)
+    owner = owned.return_binding.reference.user_id
+    assert owner is not None
     stamp = "2026-10-19T12:00:00+00:00"
     await database.save_agent(
         agent_id="background-agent", name="Background agent", created_at=stamp, updated_at=stamp,
+        user_id=owner,
     )
-    await database.save_session("parent", "Parent", working_dir, stamp, agent_id="background-agent")
+    await database.save_session("parent", "Parent", working_dir, stamp, agent_id="background-agent", user_id=owner)
     await database.append_message(
         "parent", 0, "user", "text", "Original background request",
         tool_input={"request_context": {
@@ -181,7 +197,7 @@ async def main():
     try:
         await manager.start_task(
             session_id="parent", command="touch must-not-run", working_dir=working_dir,
-            work_id="background-work", owned_context=decode_owned(encoded),
+            work_id="background-work", owned_context=owned,
         )
     except BaseException:
         (root / "returned-storage-error").touch()
@@ -221,7 +237,7 @@ asyncio.run(main())
     manager.bind(reopened, notice, notice)
     try:
         assert await reopened.get_session_binding("parent") == {
-            "id": "parent", "agent_id": "background-agent", "user_id": None, "archived": False,
+            "id": "parent", "agent_id": "background-agent", "user_id": owner["id"], "archived": False,
         }
         messages = await reopened.load_messages("parent")
         assert [(row["seq"], row["role"], row["content"]) for row in messages] == [
@@ -276,8 +292,9 @@ asyncio.run(main())
 
 
 async def test_research_return_restores_original_read_request_at_backend_boundary(
-    database, tmp_path, monkeypatch,
+    owned_database, tmp_path, monkeypatch,
 ):
+    database = owned_database
     observed = asyncio.Queue()
     leaves = []
 
@@ -312,8 +329,9 @@ async def test_research_return_restores_original_read_request_at_backend_boundar
 
 @pytest.mark.parametrize("return_state", ["retired_lease", "new_root", "closed_work", "missing_context", "unknown_context", "cancelled_work"])
 async def test_research_return_uses_fixed_parent_after_lease_retires(
-    database, tmp_path, monkeypatch, return_state,
+    owned_database, tmp_path, monkeypatch, return_state,
 ):
+    database = owned_database
     sessions = SessionManager()
     await sessions.initialize(database)
     agent = await database.get_system_agent()
@@ -414,10 +432,12 @@ async def test_research_return_uses_fixed_parent_after_lease_retires(
 
 
 @pytest.mark.parametrize("contract", ["missing", "unknown", "closed"])
-async def test_background_material_retention_is_visible_once_without_starting_a_turn(database, tmp_path, contract):
+async def test_background_material_retention_is_visible_once_without_starting_a_turn(owned_database, tmp_path, contract):
+    database = owned_database
     sessions = SessionManager()
     await sessions.initialize(database)
-    context = admit(session_id="parent", request_id="original", user_id=None, prompt="/wiki Read X")
+    owner = (await database.get_session_binding("parent"))["user_id"]
+    context = admit(session_id="parent", request_id="original", user_id=owner, prompt="/wiki Read X")
     work_id = "closed-material-" + uuid.uuid4().hex if contract == "closed" else None
     owned = derive(AdmittedRequest(context.origin, context, work_id), "Check X")
     if work_id:

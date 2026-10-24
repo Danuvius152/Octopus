@@ -144,7 +144,7 @@ async def test_question_return_keeps_the_parents_full_scope(controlled_runtime, 
 async def test_nested_return_restores_the_immediate_parent_without_losing_its_narrowing(controlled_runtime, tmp_path):
     manager, delegations, parent, starts = controlled_runtime
     parent = await new_parent(manager, parent)
-    await AgentManager(manager.db).create_agent(name="Grandchild", backend="codex")
+    await AgentManager(manager.db).create_agent(name="Grandchild", backend="codex", user_id=parent.user_id)
     original = "/wiki maintain Library/x.md Library/y.md\nGATE:root"
     await manager.start_message(parent.id, original)
     root_scope = await live_scope(await asyncio.wait_for(starts.get(), 5))

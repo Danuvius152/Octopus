@@ -19,7 +19,7 @@ from tests import test_ws_delivery as ws_tests
 runtime = ws_tests.runtime
 
 
-async def connect_browser(manager, sockets):
+async def connect_browser(manager, sockets, bearer):
     """ASGI transport only; authentication and the WS endpoint remain real."""
     app = FastAPI()
     app.include_router(router)
@@ -32,7 +32,7 @@ async def connect_browser(manager, sockets):
     scope = {
         "type": "websocket", "asgi": {"version": "3.0"}, "scheme": "ws",
         "path": "/ws", "raw_path": b"/ws", "headers": [],
-        "query_string": f"token={settings.auth_token}".encode(), "subprotocols": [],
+        "query_string": f"token={bearer}".encode(), "subprotocols": [],
         "client": ("127.0.0.1", 1), "server": ("127.0.0.1", 8000),
     }
     await incoming.put({"type": "websocket.connect"})
@@ -49,7 +49,7 @@ async def connect_browser(manager, sockets):
 async def test_ws_large_answers_wait_for_bytes_and_release_after_cancel_and_owner_failure(
     runtime, monkeypatch, tmp_path, character, characters,
 ):
-    manager, database = runtime
+    manager, database, bearer = runtime
     monkeypatch.setattr(settings, "ask_user_question_timeout_seconds", 60)
     agent = await database.get_system_agent()
     session = await manager.create_session(agent["id"], "WS answer capacity", str(tmp_path), backend="codex")
@@ -107,9 +107,9 @@ async def test_ws_large_answers_wait_for_bytes_and_release_after_cancel_and_owne
         assert await asyncio.wait_for(entered.get(), 2) == (command_id, browser[1])
 
     try:
-        first = await connect_browser(manager, sockets)
-        cancelled = await connect_browser(manager, sockets)
-        surviving = await connect_browser(manager, sockets)
+        first = await connect_browser(manager, sockets, bearer)
+        cancelled = await connect_browser(manager, sockets, bearer)
+        surviving = await connect_browser(manager, sockets, bearer)
         poll = asyncio.create_task(manager.wait_for_question_answer(session.id, question_id, timeout=10))
         notice = asyncio.create_task(manager.retain_result_notice(
             session.id, "ws-byte-fault", "The unconfirmed original append",

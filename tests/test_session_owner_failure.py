@@ -28,6 +28,8 @@ from server.routers import questions, sessions
 from server.session_manager import SessionManager
 from server.sessions.client_submissions import submit_client_message
 from server.sessions.owner import SessionOwnerUnavailable
+from server.users import UserManager
+from tests.accounts import create_account
 
 
 @pytest.mark.parametrize("delivery", ["ask", "chat"])
@@ -38,6 +40,7 @@ async def test_owner_failure_ends_app_and_question_waits_without_replaying_input
     monkeypatch.setattr(settings, "ask_user_question_timeout_seconds", 0)
     database = Database(str(tmp_path / "owner-failure.db"))
     await database.initialize()
+    owner, bearer = await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     applications = ApplicationManager()
@@ -54,6 +57,7 @@ async def test_owner_failure_ends_app_and_question_waits_without_replaying_input
     monkeypatch.setattr(app_routes, "app_agent_manager", app_agent)
     agent = await AgentManager(database).create_agent(
         name="Owner failure worker", backend="codex", mcp_servers=[],
+        user_id=owner["id"],
     )
     app_directory = tmp_path / "application"
     app_directory.mkdir()
@@ -63,6 +67,7 @@ async def test_owner_failure_ends_app_and_question_waits_without_replaying_input
         description="An existing application conversation", agent_id=agent["id"],
         session_id=None, app_dir=str(app_directory), entrypoint="index.html",
         status="ready", created_at=stamp, updated_at=stamp,
+        user_id=owner["id"],
     )
     app_row = await database.get_application("owner-failure-app")
     assert app_row is not None
@@ -129,7 +134,7 @@ async def test_owner_failure_ends_app_and_question_waits_without_replaying_input
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
-            headers={"Authorization": "Bearer owner-failure-token"},
+            headers={"Authorization": f"Bearer {bearer}"},
         ) as client:
             asking = asyncio.create_task(client.post(
                 f"/apps/{app_row['id']}/agent/{delivery}",
@@ -271,6 +276,9 @@ async def test_unconfirmed_owner_retirement_exits_70_and_cold_start_keeps_origin
         # the actual persisted writer identity before restart reconciliation.
         database = Database(proof["database"])
         await database.initialize()
+        users = UserManager(database)
+        deps.set_user_manager(users)
+        bearer = await users.issue_token(proof["user_id"])
         original = await database.get_client_submission(proof["session_id"], "owner-failure-input")
         assert original["request_id"] == original["execution_owner"] == proof["request_id"]
         assert original["process_group"] == model["process_group"]
@@ -282,7 +290,7 @@ async def test_unconfirmed_owner_retirement_exits_70_and_cold_start_keeps_origin
         app.dependency_overrides[deps.get_session_manager] = lambda: restored
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
-            headers={"Authorization": f"Bearer {settings.auth_token}"},
+            headers={"Authorization": f"Bearer {bearer}"},
         ) as client:
             detail = await client.get(f"/api/sessions/{proof['session_id']}")
             assert detail.status_code == 200, detail.text
@@ -346,10 +354,12 @@ async def _owner_retirement_failure_child(tmp_path, tmp_path_factory, monkeypatc
     database_path = tmp_path / "unconfirmed-owner.db"
     database = Database(str(database_path))
     await database.initialize()
+    owner, _ = await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     agent = await AgentManager(database).create_agent(
         name="Unconfirmed owner resource", backend="codex", mcp_servers=[],
+        user_id=owner["id"],
     )
     holder_script = tmp_path / "original_pipe_holder.py"
     holder_script.write_text(
@@ -403,6 +413,7 @@ async def _owner_retirement_failure_child(tmp_path, tmp_path_factory, monkeypatc
     assert stored["process_group"] == model["process_group"]
     (artifacts / "retirement-proof.json").write_text(json.dumps({
         "database": str(database_path), "session_id": session.id, "request_id": admitted["request_id"],
+        "user_id": owner["id"],
         "process_group": stored["process_group"], "model": model,
         "holder": json.loads((artifacts / "holder-identity.json").read_text()),
     }))
@@ -427,6 +438,7 @@ async def test_owner_failure_keeps_a_committed_result_while_its_notification_is_
     monkeypatch.setattr(settings, "auth_token", "owner-finality-token")
     database = Database(str(tmp_path / "committed-result.db"))
     await database.initialize()
+    owner, bearer = await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     applications = ApplicationManager()
@@ -462,6 +474,7 @@ async def test_owner_failure_keeps_a_committed_result_while_its_notification_is_
     monkeypatch.setattr(app_routes, "app_agent_manager", app_agent)
     agent = await AgentManager(database).create_agent(
         name="Committed owner failure", backend="codex", mcp_servers=[],
+        user_id=owner["id"],
     )
     application_directory = tmp_path / "existing-app"
     application_directory.mkdir()
@@ -470,6 +483,7 @@ async def test_owner_failure_keeps_a_committed_result_while_its_notification_is_
         app_id="committed-app", name="Committed app", description="Existing app",
         agent_id=agent["id"], session_id=None, app_dir=str(application_directory),
         entrypoint="index.html", status="ready", created_at=stamp, updated_at=stamp,
+        user_id=owner["id"],
     )
     model = tmp_path / "completed_model.py"
     retired = tmp_path / "completed-model-retired"
@@ -522,7 +536,7 @@ async def test_owner_failure_keeps_a_committed_result_while_its_notification_is_
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
-            headers={"Authorization": "Bearer owner-finality-token"},
+            headers={"Authorization": f"Bearer {bearer}"},
         ) as client:
             chatting = asyncio.create_task(client.post(
                 "/apps/committed-app/agent/chat", json={"message": original_input},

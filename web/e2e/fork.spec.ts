@@ -1,3 +1,4 @@
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
 
 // Pure-UI e2e for session tree-rewind / fork (session-rewind.md §6).
@@ -7,7 +8,7 @@ import { test, expect, type Page, type APIRequestContext } from "@playwright/tes
 // the parent's name and the parent is archived, so the fork surfaces in the
 // sidebar as a plain top-level session (no nesting, no "@msg" badge).
 
-const TOKEN = "changeme";
+const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api";
 const OWNED = new Set(["Fork E2E Parent"]);
 
@@ -39,8 +40,7 @@ test.afterAll(async ({ request }) => {
 
 async function login(page: Page) {
   await page.goto("/");
-  await page.locator('input[type="password"]').fill(TOKEN);
-  await page.locator("button.btn-login").click();
+  await enterAccountCredentials(page);
   await expect(page.locator(".agent-list-header")).toBeVisible();
   // Sessions live behind a folded agent row; open the default
   // agent's rail so they're reachable.
@@ -65,7 +65,6 @@ async function importParent(request: APIRequestContext): Promise<{ id: string }>
     headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
     data: {
       name: "Fork E2E Parent",
-      working_dir: "/tmp",
       messages: [
         { role: "user", type: "text", content: "first question about auth" },
         { role: "assistant", type: "text", content: "here is the auth answer" },

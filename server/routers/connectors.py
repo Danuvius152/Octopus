@@ -20,7 +20,7 @@ from fastapi.responses import HTMLResponse
 from ..auth import verify_token
 from ..connector_manager import ConnectorError, ConnectorManager
 from ..connectors.oauth import ConnectorLoginError, ConnectorLoginManager
-from ..deps import OperatorUser, ScopeUser, SessionMgr
+from ..deps import AdminUser, ScopeUser, SessionMgr
 from ..models import (
     AgentConnectorsResponse,
     ConnectorCatalogEntry,
@@ -149,7 +149,7 @@ async def set_oauth_client(
     kind: str,
     req: SetConnectorOAuthClientRequest,
     request: Request,
-    _operator: OperatorUser,
+    _operator: AdminUser,
 ):
     """The operator's, not an account's: an OAuth client is this install's
     registration with the provider, shared by everybody (multi-tenancy.md §5).
@@ -165,7 +165,7 @@ async def set_oauth_client(
 
 
 @router.delete("/{kind}/oauth-client", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_oauth_client(kind: str, _operator: OperatorUser):
+async def delete_oauth_client(kind: str, _operator: AdminUser):
     await _require_manager().clear_client_creds(kind)
 
 
@@ -178,7 +178,7 @@ async def delete_oauth_client(kind: str, _operator: OperatorUser):
     status_code=status.HTTP_201_CREATED,
 )
 async def create_custom_connector(
-    req: CustomConnectorCreateRequest, _operator: OperatorUser
+    req: CustomConnectorCreateRequest, _operator: AdminUser
 ):
     """The operator's, for the same reason as the OAuth client: a connector
     *kind* is install-level configuration, keyed by the kind alone."""
@@ -193,7 +193,7 @@ async def create_custom_connector(
 
 
 @router.delete("/custom/{kind}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_custom_connector(kind: str, _operator: OperatorUser):
+async def delete_custom_connector(kind: str, _operator: AdminUser):
     try:
         await _require_manager().delete_custom_connector(kind)
     except ConnectorError as e:

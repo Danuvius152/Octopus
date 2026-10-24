@@ -36,15 +36,13 @@ SCOPE_MARKERS = (
     "current_user",
     "AdminUser",
     "require_admin",
-    "OperatorUser",
-    "operator_user",
     "ViewerUser",
     "viewer_user_id",
 )
 
 SCOPE_GUARDS = (
     deps.scope_user_id, deps.current_user, deps.require_admin,
-    deps.operator_user, deps.viewer_user_id,
+    deps.viewer_user_id,
 )
 
 # (method, path) -> why this one carries no account scope.
@@ -61,9 +59,8 @@ UNSCOPED_BY_DESIGN: dict[tuple[str, str], str] = {
     ),
     ("POST", "/api/auth/login"): "the request that establishes who you are",
     ("POST", "/api/auth/register"): "same, with an invite code",
-    ("POST", "/api/auth/bootstrap"): (
-        "creates the first account; authenticated with the install's own token, "
-        "which is the only credential that exists at that moment"
+    ("POST", "/api/auth/setup"): (
+        "dedicated setup proof creates the first owned account on an empty install"
     ),
     ("GET", "/api/connectors/catalog"): (
         "what this install can connect to: the kinds and whether each has an "

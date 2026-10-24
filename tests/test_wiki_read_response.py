@@ -13,7 +13,6 @@ from tests import test_wiki_api as wiki_tests
 from tests.test_wiki_write_gates import active_worker
 
 client = wiki_tests.client
-HEADERS = wiki_tests.HEADERS
 
 
 async def setup_note(client, tmp_path, text):
@@ -42,9 +41,9 @@ async def test_compact_omits_large_structure_but_full_http_default_is_compatible
     text = "# 资料\n\n" + "## 小节\n\n理由与条件。\n\n" * 600
     await setup_note(client, tmp_path, text)
     params = {"doc": "Library/note.md", "start": 30, "length": 80}
-    full = (await client.get("/api/wiki/read", headers=HEADERS, params=params)).json()
-    compact = (await client.get("/api/wiki/read", headers=HEADERS, params=params | {"view": "compact"})).json()
-    explicit = (await client.get("/api/wiki/read", headers=HEADERS, params=params | {"view": "full"})).json()
+    full = (await client.get("/api/wiki/read", headers=client.headers, params=params)).json()
+    compact = (await client.get("/api/wiki/read", headers=client.headers, params=params | {"view": "compact"})).json()
+    explicit = (await client.get("/api/wiki/read", headers=client.headers, params=params | {"view": "full"})).json()
     assert len(full["metadata"]["body_sections"]) >= 600
     assert "metadata" not in compact and "pages" not in compact
     assert compact["content"] == full["content"] == explicit["content"] == text[30:110]
@@ -70,7 +69,7 @@ async def test_byte_clipping_records_only_actual_unicode_prefix_and_can_finish_m
         record(task, document)
 
     monkeypatch.setattr(tasks, "record_read", observe)
-    with active_worker(config, ["Library/note.md"]) as headers:
+    async with active_worker(config, ["Library/note.md"], client=client) as headers:
         start, revision, passages = 0, None, []
         while True:
             if batch:
@@ -120,7 +119,7 @@ async def test_batch_overlap_errors_and_response_cutoff_keep_truthful_ranges(cli
     await setup_note(client, tmp_path, text)
     seen = []
     monkeypatch.setattr(tasks, "record_read", lambda task, doc: seen.append((doc["id"], doc["start"], doc["end"])))
-    response = await client.post("/api/wiki/read-many", headers=HEADERS, json={"view": "compact", "items": [
+    response = await client.post("/api/wiki/read-many", headers=client.headers, json={"view": "compact", "items": [
         {"doc": "Library/note.md", "start": 0, "length": 24000},
         {"doc": "Library/note.md", "start": 50, "length": 50},
         {"doc": "Library/note.md", "start": 23990, "length": 100},
@@ -147,9 +146,9 @@ async def test_unfittable_compact_envelope_does_not_grant_a_read(client, tmp_pat
     monkeypatch.setattr(read_response, "COMPACT_READ_MAX_BYTES", 1)
     monkeypatch.setattr(tasks, "record_read", lambda *args: seen.append(args))
     if batch:
-        response = await client.post("/api/wiki/read-many", headers=HEADERS, json={"view": "compact", "items": [{"doc": "Library/note.md"}]})
+        response = await client.post("/api/wiki/read-many", headers=client.headers, json={"view": "compact", "items": [{"doc": "Library/note.md"}]})
     else:
-        response = await client.get("/api/wiki/read", headers=HEADERS, params={"view": "compact", "doc": "Library/note.md"})
+        response = await client.get("/api/wiki/read", headers=client.headers, params={"view": "compact", "doc": "Library/note.md"})
     assert response.status_code == 422 and "envelope" in response.text
     assert seen == []
 
@@ -157,15 +156,15 @@ async def test_unfittable_compact_envelope_does_not_grant_a_read(client, tmp_pat
 async def test_compact_keeps_eof_and_rejects_invalid_views_and_changed_revisions(client, tmp_path):
     text = "# 当前\n" + "甲" * 200
     await setup_note(client, tmp_path, text)
-    initial = (await client.get("/api/wiki/read", headers=HEADERS, params={"doc": "Library/note.md", "view": "compact"})).json()
-    eof = (await client.get("/api/wiki/read", headers=HEADERS, params={"doc": initial["id"], "start": len(text), "view": "compact"})).json()
+    initial = (await client.get("/api/wiki/read", headers=client.headers, params={"doc": "Library/note.md", "view": "compact"})).json()
+    eof = (await client.get("/api/wiki/read", headers=client.headers, params={"doc": initial["id"], "start": len(text), "view": "compact"})).json()
     assert eof["status"] == "ok" and eof["content"] == "" and eof["next_start"] is None
     assert eof["start"] == eof["end"] == len(text)
-    changed = await client.get("/api/wiki/read", headers=HEADERS, params={"doc": initial["id"], "expected_revision": "0" * 64, "view": "compact"})
+    changed = await client.get("/api/wiki/read", headers=client.headers, params={"doc": initial["id"], "expected_revision": "0" * 64, "view": "compact"})
     assert changed.status_code == 409
-    invalid = await client.get("/api/wiki/read", headers=HEADERS, params={"doc": initial["id"], "view": "other"})
+    invalid = await client.get("/api/wiki/read", headers=client.headers, params={"doc": initial["id"], "view": "other"})
     assert invalid.status_code == 422
-    invalid = await client.post("/api/wiki/read-many", headers=HEADERS, json={"items": [{"doc": initial["id"]}], "view": "other"})
+    invalid = await client.post("/api/wiki/read-many", headers=client.headers, json={"items": [{"doc": initial["id"]}], "view": "other"})
     assert invalid.status_code == 422
 
 
@@ -194,7 +193,7 @@ async def test_clipped_batch_keeps_merged_empty_eof_in_its_own_range(client, tmp
                 {"doc": "Library/note.md", "start": len(text), "length": 1}]
     if eof_first:
         requests.reverse()
-    with active_worker(config, ["Library/note.md"]) as headers:
+    async with active_worker(config, ["Library/note.md"], client=client) as headers:
         response = await client.post("/api/wiki/read-many", headers=headers, json={"view": "compact", "items": requests})
         assert response.status_code == 200, response.text
         data = response.json()

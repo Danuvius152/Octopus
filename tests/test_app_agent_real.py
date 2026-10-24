@@ -32,6 +32,7 @@ from server.applications import ApplicationManager, data_dir_for  # noqa: E402
 from server.config import settings  # noqa: E402
 from server.database import Database  # noqa: E402
 from server.session_manager import SessionManager  # noqa: E402
+from tests.accounts import create_account  # noqa: E402
 
 pytestmark = pytest.mark.real
 
@@ -46,6 +47,7 @@ async def test_an_app_asks_a_real_agent_about_its_context(tmp_path, monkeypatch)
     monkeypatch.setattr(settings, "applications_dir", str(tmp_path / "applications"))
     db = Database(":memory:")
     await db.initialize()
+    owner, _ = await create_account(db, extra_roots=[tmp_path])
     try:
         sessions = SessionManager()
         await sessions.initialize(db)
@@ -54,7 +56,7 @@ async def test_an_app_asks_a_real_agent_about_its_context(tmp_path, monkeypatch)
         agent_api = AppAgentManager()
         agent_api.bind(session_mgr=sessions, db=db, app_mgr=apps)
 
-        agent = await AgentManager(db).create_agent(name=f"Reader {uuid.uuid4().hex[:6]}")
+        agent = await AgentManager(db).create_agent(name=f"Reader {uuid.uuid4().hex[:6]}", user_id=owner["id"])
         # The row directly, not create_application: a build turn would cost a
         # second real call and has nothing to do with what's under test.
         app_id = uuid.uuid4().hex[:12]
@@ -73,6 +75,7 @@ async def test_an_app_asks_a_real_agent_about_its_context(tmp_path, monkeypatch)
             status="ready",
             created_at=now,
             updated_at=now,
+            user_id=owner["id"],
         )
         row = await db.get_application(app_id)
 

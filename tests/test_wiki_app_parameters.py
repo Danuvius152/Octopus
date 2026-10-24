@@ -14,7 +14,7 @@ from tests.test_wiki_maintenance_state import prepare
 
 @pytest.fixture
 async def bound(client, tmp_path, monkeypatch):
-    root, config, _ = await prepare(client, tmp_path, {
+    root, config, jobs = await prepare(client, tmp_path, {
         "Library/note.md": "# Note\nCurrent words.\n", "Assets/raw.md": "# Asset\nCurrent words.\n",
     })
     manager = ApplicationManager()
@@ -24,11 +24,12 @@ async def bound(client, tmp_path, monkeypatch):
     await api.session_manager.db.save_application(
         app_id="parameters", name="Parameters", app_dir=str(tmp_path / "app"),
         created_at=now, updated_at=now, agent_id=config["curator_agent_id"],
+        user_id=jobs.user_id,
     )
-    result = await client.put("/api/wiki/config", headers=api.HEADERS,
+    result = await client.put("/api/wiki/config", headers=client.headers,
                               json={"root": str(root), "curator_agent_id": config["curator_agent_id"], "app_id": "parameters"})
     assert result.status_code == 200, result.text
-    jobs = WikiJobs(None)
+    jobs = WikiJobs(jobs.user_id)
     jobs.store.refresh()
     try:
         yield client, jobs, {"Authorization": "Bearer " + app_scope_token("parameters")}
@@ -41,7 +42,7 @@ async def test_app_cancel_uses_the_original_job_and_rejects_stale_target_without
     original = jobs.maintain("original", "", "Review", ["Library/note.md"], None, [], "human")
     other = jobs.maintain("other", "", "Review", ["Library/note.md"], None, [], "human")
     for body in ({"expected_attempt": 9}, {"expected_vault_id": "another-vault"}, {"expected_attempt": True}):
-        for base, auth in (("/api/wiki", api.HEADERS), ("/apps/parameters/wiki", headers)):
+        for base, auth in (("/api/wiki", client.headers), ("/apps/parameters/wiki", headers)):
             rejected = await client.post(f"{base}/jobs/{original['id']}/cancel", headers=auth, json=body)
             assert rejected.status_code == (422 if body.get("expected_attempt") is True else 409), rejected.text
             assert jobs.get(original["id"])["status"] == "queued"
@@ -67,7 +68,7 @@ async def test_app_cancel_uses_the_original_job_and_rejects_stale_target_without
 async def test_app_and_main_api_parse_boolean_aliases_and_invalid_values_identically(bound, value):
     client, _, headers = bound
     params = {"include_assets": value}
-    main = await client.get("/api/wiki/documents", headers=api.HEADERS, params=params)
+    main = await client.get("/api/wiki/documents", headers=client.headers, params=params)
     bridged = await client.get("/apps/parameters/wiki/documents", headers=headers, params=params)
     assert main.status_code == bridged.status_code
     if main.status_code == 200:
@@ -86,7 +87,7 @@ async def test_app_and_main_api_parse_boolean_aliases_and_invalid_values_identic
 ])
 async def test_shared_query_defaults_types_and_bounds_match_the_main_route(bound, operation, params):
     client, jobs, headers = bound
-    main = await client.get(f"/api/wiki/{operation}", headers=api.HEADERS, params=params)
+    main = await client.get(f"/api/wiki/{operation}", headers=client.headers, params=params)
     bridged = await client.get(f"/apps/parameters/wiki/{operation}", headers=headers, params=params)
     assert main.status_code == bridged.status_code, (main.text, bridged.text)
     assert main.status_code in {200, 422}

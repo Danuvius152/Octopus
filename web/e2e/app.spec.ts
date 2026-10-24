@@ -1,7 +1,8 @@
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { test, expect, type Page } from "@playwright/test";
 import { systemAgentId } from "./system-agent";
 
-const TOKEN = "changeme";
+const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api/sessions";
 
 /** Click the new-session "+" on the default "Octo" agent's row. The button is
@@ -52,7 +53,7 @@ test.describe("Login", () => {
     await expect(page.locator('input[type="password"]')).toBeVisible();
   });
 
-  test("rejects empty token", async ({ page }) => {
+  test("rejects empty account credentials", async ({ page }) => {
     await page.goto("/");
     const btn = page.locator("button.btn-login");
     await btn.click();
@@ -60,10 +61,9 @@ test.describe("Login", () => {
     await expect(page.locator("h1")).toHaveText("Octopus");
   });
 
-  test("logs in with valid token", async ({ page }) => {
+  test("logs in with valid account credentials", async ({ page }) => {
     await page.goto("/");
-    await page.locator('input[type="password"]').fill(TOKEN);
-    await page.locator("button.btn-login").click();
+    await enterAccountCredentials(page);
     // Should see the main app layout
     await expect(page.locator(".agent-list-header h2")).toHaveText("Agents");
   });
@@ -73,8 +73,7 @@ test.describe("Session Management", () => {
   test.beforeEach(async ({ page }) => {
     // Login first
     await page.goto("/");
-    await page.locator('input[type="password"]').fill(TOKEN);
-    await page.locator("button.btn-login").click();
+    await enterAccountCredentials(page);
     await expect(page.locator(".agent-list-header")).toBeVisible();
   });
 
@@ -133,7 +132,7 @@ test.describe("Session Management", () => {
     await expect(target).toHaveCount(0);
     // …but it was put away, not destroyed: the history is still there.
     const all = await request.get("http://localhost:8765/api/sessions", {
-      headers: { Authorization: "Bearer changeme" },
+      headers: { Authorization: `Bearer ${TEST_BEARER}` },
       params: { include_archived: "true" },
     });
     const row = ((await all.json()) as { name: string; archived: boolean }[]).find(
@@ -149,8 +148,7 @@ test.describe("Chat @llm", () => {
 
   test.beforeEach(async ({ page }) => {
     await page.goto("/");
-    await page.locator('input[type="password"]').fill(TOKEN);
-    await page.locator("button.btn-login").click();
+    await enterAccountCredentials(page);
     await expect(page.locator(".agent-list-header")).toBeVisible();
 
     // Create a session
@@ -228,8 +226,7 @@ test.describe("Chat @llm", () => {
 test.describe("WebSocket Connection", () => {
   test("shows connected status after login", async ({ page }) => {
     await page.goto("/");
-    await page.locator('input[type="password"]').fill(TOKEN);
-    await page.locator("button.btn-login").click();
+    await enterAccountCredentials(page);
 
     await expect(page.locator(".conn-status.on")).toBeVisible({
       timeout: 5_000,
@@ -264,14 +261,13 @@ test.describe("Touch affordances", () => {
     for (const name of ["Touch Chosen", "Touch Other"]) {
       const created = await request.post(API, {
         headers,
-        data: { agent_id: await systemAgentId(request, API, headers), name, working_dir: "/tmp" },
+        data: { agent_id: await systemAgentId(request, API, headers), name, },
       });
       expect(created.ok()).toBeTruthy();
     }
 
     await page.goto("/");
-    await page.locator('input[type="password"]').fill(TOKEN);
-    await page.locator("button.btn-login").click();
+    await enterAccountCredentials(page);
 
     // Without this the test proves nothing: every assertion below is about a
     // rule that only applies when the browser reports no hover.
@@ -311,8 +307,7 @@ test.describe("Responsive Layout", () => {
   test("shows hamburger menu on mobile", async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 667 });
     await page.goto("/");
-    await page.locator('input[type="password"]').fill(TOKEN);
-    await page.locator("button.btn-login").click();
+    await enterAccountCredentials(page);
 
     // Hamburger should be visible on mobile
     await expect(page.locator(".btn-menu")).toBeVisible();
@@ -357,14 +352,13 @@ test.describe("Responsive Layout", () => {
         Authorization: `Bearer ${TOKEN}`,
         "Content-Type": "application/json",
       },
-      data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${TOKEN}` }), name: "Mobile Drawer", working_dir: "/tmp" },
+      data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${TOKEN}` }), name: "Mobile Drawer", },
     });
     expect(created.ok()).toBeTruthy();
 
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/");
-    await page.locator('input[type="password"]').fill(TOKEN);
-    await page.locator("button.btn-login").click();
+    await enterAccountCredentials(page);
 
     await page.locator(".btn-menu").first().click();
     await expect(page.locator(".sidebar")).toHaveClass(/open/);
@@ -395,7 +389,7 @@ test.describe("Responsive Layout", () => {
         Authorization: `Bearer ${TOKEN}`,
         "Content-Type": "application/json",
       },
-      data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${TOKEN}` }), name: "Mobile Viewport", working_dir: "/tmp" },
+      data: { agent_id: await systemAgentId(request, API, { Authorization: `Bearer ${TOKEN}` }), name: "Mobile Viewport", },
     });
     expect(created.ok()).toBeTruthy();
 
@@ -410,8 +404,7 @@ test.describe("Responsive Layout", () => {
       }
     });
     await page.goto("/");
-    await page.locator('input[type="password"]').fill(TOKEN);
-    await page.locator("button.btn-login").click();
+    await enterAccountCredentials(page);
 
     await page.locator(".btn-menu").first().click();
     await page.locator(".agent-item", { hasText: "Octo" }).click();
@@ -446,8 +439,7 @@ test.describe("Responsive Layout", () => {
         .evaluate((el) => parseFloat(getComputedStyle(el).fontSize))
     ).toBeGreaterThanOrEqual(16);
 
-    await page.locator('input[type="password"]').fill(TOKEN);
-    await page.locator("button.btn-login").click();
+    await enterAccountCredentials(page);
     await expect(page.locator(".conn-status.on")).toBeVisible({
       timeout: 10_000,
     });
@@ -484,8 +476,7 @@ test.describe("Foldable sidebar", () => {
     page,
   }) => {
     await page.goto("/");
-    await page.locator('input[type="password"]').fill(TOKEN);
-    await page.locator("button.btn-login").click();
+    await enterAccountCredentials(page);
     await expect(page.locator(".sidebar")).toHaveCSS("width", "270px");
 
     const handle = page.locator(".btn-sidebar-toggle");
@@ -528,8 +519,7 @@ test.describe("Foldable sidebar", () => {
     page,
   }) => {
     await page.goto("/");
-    await page.locator('input[type="password"]').fill(TOKEN);
-    await page.locator("button.btn-login").click();
+    await enterAccountCredentials(page);
     await expect(page.locator(".agent-item").first()).toBeVisible();
 
     await page.mouse.move(263, EDGE_Y);

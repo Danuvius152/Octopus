@@ -1,6 +1,7 @@
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { test, expect, type Page } from "@playwright/test";
 
-const TOKEN = "changeme";
+const TOKEN = TEST_BEARER;
 const AGENTS_API = "http://localhost:8765/api/agents";
 const SESSIONS_API = "http://localhost:8765/api/sessions";
 
@@ -16,8 +17,7 @@ const OWNED_SESSIONS = new Set(["Agent Thread"]);
 
 async function login(page: Page) {
   await page.goto("/");
-  await page.locator('input[type="password"]').fill(TOKEN);
-  await page.locator("button.btn-login").click();
+  await enterAccountCredentials(page);
   await expect(page.locator(".agent-list-header h2")).toHaveText("Agents");
 }
 

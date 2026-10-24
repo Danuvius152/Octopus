@@ -33,28 +33,22 @@ class AgentError(Exception):
 
 
 def _memory_mutation(operation):
-    """Join the installation command's ownership, without waiting inside a run.
-
-    Bootstrap drains old runs while holding this same lock. A mutation must
-    therefore refuse contention before any effect, rather than make that run
-    wait for the command draining it. This also makes concurrent memory CRUD
-    explicitly retryable; an already-entered mutation finishes before bootstrap.
-    """
+    """Own create, restore and deletion through their database and file effects."""
     @wraps(operation)
     async def mutate(self, *args, **kwargs):
         async def command():
             self.db.health.require_healthy()
             try:
-                # locked() alone misses a released lock with an earlier
-                # bootstrap waiter. A zero deadline also respects its queue.
+                # Refuse a competing memory operation before either mutates
+                # the same agent, including a released lock with a waiter.
                 async with asyncio.timeout(0):
-                    await self.db._bootstrap_lock.acquire()
+                    await self.db._agent_memory_lock.acquire()
             except TimeoutError as error:
-                raise AgentError("Agent memory is busy with another installation or memory operation; retry") from error
+                raise AgentError("Agent memory is busy with another memory operation; retry") from error
             try:
                 return await operation(self, *args, **kwargs)
             finally:
-                self.db._bootstrap_lock.release()
+                self.db._agent_memory_lock.release()
 
         return await complete_cleanup(command())
 
@@ -65,16 +59,6 @@ class AgentManager:
     def __init__(self, db: Database) -> None:
         self.db = db
 
-    def _require_memory_handoff(self, agent: dict[str, Any]) -> None:
-        from .memory_handoff import MemoryHandoffConflict, memory_handoff_pending
-
-        try:
-            if memory_handoff_pending(agent["id"], agent.get("user_id")):
-                raise AgentError("Agent memory handoff is incomplete; finish account recovery before changing this agent")
-        except MemoryHandoffConflict as error:
-            raise AgentError(str(error)) from error
-        except OSError as error:
-            self.db.health.fail(error)
 
     async def list_agents(
         self, *, include_archived: bool = False, user_id: str | None = None
@@ -227,7 +211,6 @@ class AgentManager:
         agent = await self.db.get_agent(agent_id, user_id=user_id)
         if agent is None:
             raise AgentError("Agent not found")
-        self._require_memory_handoff(agent)
         if not agent["archived"]:
             return agent
         clash = await self.db.get_agent_by_name(
@@ -296,7 +279,6 @@ class AgentManager:
             raise AgentError("Agent not found")
         if agent["is_system"]:
             raise AgentError("The Default Agent cannot be deleted")
-        self._require_memory_handoff(agent)
         if await self.db.count_sessions_for_agent(agent_id) > 0:
             raise AgentError(
                 "Agent still has sessions; archive it instead of deleting"

@@ -19,9 +19,7 @@ from server.research.manager import research_manager
 from server.research.orchestrator import ResearchReport
 from server.routers import agents as agents_mod
 from server.session_manager import session_manager
-
-TOKEN = "changeme"
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
+from tests.accounts import create_account
 
 
 @pytest.fixture
@@ -34,6 +32,7 @@ async def db():
 
 @pytest.fixture
 async def client(db, monkeypatch):
+    _, bearer = await create_account(db)
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
@@ -42,16 +41,17 @@ async def client(db, monkeypatch):
     monkeypatch.setattr(session_manager, "start_message", lambda *a, **k: asyncio.sleep(0))
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://test",
+                           headers={"Authorization": f"Bearer {bearer}"}) as c:
         yield c
 
 
 async def _session(client):
-    octo = (await client.get("/api/agents", headers=HEADERS)).json()[0]
+    octo = (await client.get("/api/agents", headers=client.headers)).json()[0]
     r = await client.post(
         "/api/sessions",
-        json={"name": "S", "working_dir": "/tmp", "agent_id": octo["id"]},
-        headers=HEADERS,
+        json={"name": "S", "agent_id": octo["id"]},
+        headers=client.headers,
     )
     assert r.status_code == 201, r.text
     return r.json()
@@ -70,7 +70,7 @@ async def test_start_get_list_research(client, monkeypatch):
     session = await _session(client)
     r = await client.post(
         f"/api/sessions/{session['id']}/research",
-        json={"question": "what is X?"}, headers=HEADERS,
+        json={"question": "what is X?"}, headers=client.headers,
     )
     assert r.status_code == 201, r.text
     rid = r.json()["id"]
@@ -78,10 +78,10 @@ async def test_start_get_list_research(client, monkeypatch):
     assert "knowledge_context" not in r.json()
 
     # GET single + list
-    got = await client.get(f"/api/sessions/{session['id']}/research/{rid}", headers=HEADERS)
+    got = await client.get(f"/api/sessions/{session['id']}/research/{rid}", headers=client.headers)
     assert got.status_code == 200 and got.json()["question"] == "what is X?"
     assert "knowledge_context" not in got.json()
-    lst = await client.get(f"/api/sessions/{session['id']}/research", headers=HEADERS)
+    lst = await client.get(f"/api/sessions/{session['id']}/research", headers=client.headers)
     assert any(j["id"] == rid for j in lst.json())
     assert all("knowledge_context" not in job for job in lst.json())
 
@@ -92,7 +92,7 @@ async def test_research_rejects_client_supplied_knowledge_context(client):
     response = await client.post(
         f"/api/sessions/{session['id']}/research",
         json={"question": "what is X?", "knowledge_context": '{"version":1}'},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert response.status_code == 422
 
@@ -102,7 +102,7 @@ async def test_start_research_empty_question_422(client):
     session = await _session(client)
     r = await client.post(
         f"/api/sessions/{session['id']}/research", json={"question": "  "},
-        headers=HEADERS,
+        headers=client.headers,
     )
     # pydantic min_length on a stripped-empty string → 422, or our 400.
     assert r.status_code in (400, 422)
@@ -111,13 +111,14 @@ async def test_start_research_empty_question_422(client):
 @pytest.mark.asyncio
 async def test_start_research_unknown_session_404(client):
     r = await client.post(
-        "/api/sessions/nope/research", json={"question": "q"}, headers=HEADERS
+        "/api/sessions/nope/research", json={"question": "q"}, headers=client.headers
     )
     assert r.status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_research_requires_auth(client):
+    client.headers.clear()
     r = await client.post("/api/sessions/x/research", json={"question": "q"})
     assert r.status_code in (401, 403)
 
@@ -139,14 +140,14 @@ async def test_cancel_wrong_session_404_does_not_cancel(client, monkeypatch):
     session = await _session(client)
     started = await client.post(
         f"/api/sessions/{session['id']}/research",
-        json={"question": "q"}, headers=HEADERS,
+        json={"question": "q"}, headers=client.headers,
     )
     rid = started.json()["id"]
 
     bad = await client.post(
-        f"/api/sessions/some-other-session/research/{rid}/cancel", headers=HEADERS
+        f"/api/sessions/some-other-session/research/{rid}/cancel", headers=client.headers
     )
     assert bad.status_code == 404
     # The real job must still be running — not cancelled by the bad request.
-    got = await client.get(f"/api/sessions/{session['id']}/research/{rid}", headers=HEADERS)
+    got = await client.get(f"/api/sessions/{session['id']}/research/{rid}", headers=client.headers)
     assert got.json()["status"] == "running"

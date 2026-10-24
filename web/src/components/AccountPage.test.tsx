@@ -1,26 +1,17 @@
-/**
- * The Account page is where an install becomes an account and where an admin
- * decides who else gets one (multi-tenancy.md §3, §9).
- *
- * The tests that matter are about *what is shown to whom*: the claim form only
- * before accounts exist, the admin sections only to an admin, and — the one
- * that would be a real incident — no way for an admin to disable themselves
- * and leave the site with nobody who can administer it.
- */
+/** Current account settings keep administrator controls scoped to admins,
+ * with no way to disable the administrator who is using the page. */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { AccountPage } from "./AccountPage";
 import { useSessionStore } from "../stores/sessionStore";
 
 interface Routes {
-  accountsExist: boolean;
   identity: { label: string; user_id: string | null; is_admin: boolean };
   invites?: unknown[];
   users?: unknown[];
   workspace?: unknown;
-  upgradePending?: boolean;
 }
 
 let posts: { path: string; body: unknown }[] = [];
@@ -33,32 +24,10 @@ function stub(routes: Routes) {
       const path = String(url).replace(`${window.location.origin}/api/auth`, "");
       if (init?.method && init.method !== "GET") {
         posts.push({ path, body: init.body ? JSON.parse(String(init.body)) : null });
-        if (path === "/bootstrap") {
-          routes.accountsExist = true;
-          routes.identity = { label: "archer", user_id: "owner", is_admin: true };
-          return {
-            ok: true,
-            json: async () => ({
-              token: "issued",
-              summary: {
-                username: "archer",
-                adopted: { sessions: 12, agents: 2 },
-                extra_roots: ["/home/start-up/Octopus"],
-                agent_memory_moved: true,
-              },
-            }),
-          };
-        }
-        if (path === "/bootstrap/resume") {
-          routes.upgradePending = false;
-          return { ok: true, json: async () => ({ username: routes.identity.label, adopted: { sessions: 1 } }) };
-        }
         return { ok: true, status: 200, json: async () => ({}) };
       }
       const body: Record<string, unknown> = {
-        "/state": { accounts_exist: routes.accountsExist },
         "/identity": routes.identity,
-        "/bootstrap/status": { pending: routes.upgradePending ?? false },
         "/invites": routes.invites ?? [],
         "/users": routes.users ?? [],
         "/workspace": routes.workspace ?? {
@@ -72,62 +41,48 @@ function stub(routes: Routes) {
   );
 }
 
-beforeEach(() => useSessionStore.getState().setToken("install-token"));
+beforeEach(() => useSessionStore.getState().setToken("account-token"));
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
 });
 
-it("lets the authenticated migration owner resume a retained upgrade", async () => {
-  stub({ accountsExist: true, identity: { label: "owner", user_id: "owner-id", is_admin: true }, upgradePending: true });
+it("loads the current account without calling adoption or recovery endpoints", async () => {
+  stub({ identity: { label: "owner", user_id: "owner-id", is_admin: false } });
   render(<AccountPage />);
-  const resume = await screen.findByRole("button", { name: "Resume account upgrade" });
-  fireEvent.click(resume);
-  await waitFor(() => expect(screen.queryByRole("button", { name: "Resume account upgrade" })).toBeNull());
-  expect(posts).toContainEqual({ path: "/bootstrap/resume", body: null });
-  expect(screen.getByText("This install now belongs to owner")).toBeTruthy();
+  await screen.findByText("Change password");
+  expect(vi.mocked(globalThis.fetch).mock.calls.map(([url]) => String(url)).some((url) => url.includes("/bootstrap"))).toBe(false);
+  expect(screen.queryByText("Claim this install")).toBeNull();
+  expect(screen.queryByRole("button", { name: "Resume account upgrade" })).toBeNull();
+});
+
+it("retires the previous account controls while the next identity is still loading", async () => {
+  const routes: Routes = { identity: { label: "first-owner", user_id: "first", is_admin: true } };
+  stub(routes);
+  const fetch = globalThis.fetch;
+  let resolveIdentity!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => { resolveIdentity = resolve; });
+  vi.stubGlobal("fetch", vi.fn((url: string, init?: RequestInit) => {
+    if (String(url).endsWith("/identity") && new Headers(init?.headers).get("Authorization") === "Bearer next-account-token") {
+      return pending;
+    }
+    return fetch(url, init);
+  }));
+  render(<AccountPage />);
+  await screen.findByText("Invites");
+  act(() => useSessionStore.getState().setToken("next-account-token"));
+  expect(screen.queryByText("first-owner")).toBeNull();
+  expect(screen.queryByText("Invites")).toBeNull();
+  expect(screen.queryByText("People")).toBeNull();
+  await act(async () => resolveIdentity(new Response(JSON.stringify({ label: "second-owner", user_id: "second", is_admin: false }),
+    { status: 200, headers: { "Content-Type": "application/json" } })));
+  await screen.findByText("second-owner");
+  expect(screen.queryByText("Invites")).toBeNull();
 });
 
 describe("AccountPage", () => {
-  it("offers to claim an install that has no accounts yet", async () => {
-    stub({
-      accountsExist: false,
-      identity: { label: "archeryue", user_id: null, is_admin: false },
-    });
-    render(<AccountPage />);
-    await waitFor(() => expect(screen.getByText("Claim this install")).toBeTruthy());
-    // Nothing else applies yet: there is no password to change and no admin.
-    // ("Password" alone would match the claim form's own field.)
-    expect(screen.queryByText("Change password")).toBeNull();
-    expect(screen.queryByText("Invites")).toBeNull();
-  });
-
-  it("keeps the claim report after refreshing the new account identity", async () => {
-    stub({
-      accountsExist: false,
-      identity: { label: "archeryue", user_id: null, is_admin: false },
-    });
-    render(<AccountPage />);
-    await waitFor(() => expect(screen.getByText("Claim this install")).toBeTruthy());
-    fireEvent.change(screen.getByLabelText("Username"), { target: { value: "archer" } });
-    fireEvent.change(screen.getByLabelText("Password"), { target: { value: "pw" } });
-    fireEvent.click(screen.getByText("Create account"));
-
-    await waitFor(() =>
-      expect(screen.getByText("Change password")).toBeTruthy()
-    );
-    expect(screen.getByText("This install now belongs to archer")).toBeTruthy();
-    expect(screen.getByText(/12 rows adopted/)).toBeTruthy();
-    expect(useSessionStore.getState().token).toBe("issued");
-    expect(posts[0]).toEqual({
-      path: "/bootstrap",
-      body: { username: "archer", password: "pw" },
-    });
-  });
-
   it("shows an ordinary account its password and nothing else", async () => {
     stub({
-      accountsExist: true,
       identity: { label: "vera", user_id: "u2", is_admin: false },
     });
     render(<AccountPage />);
@@ -139,7 +94,6 @@ describe("AccountPage", () => {
 
   it("gives an admin invites and people", async () => {
     stub({
-      accountsExist: true,
       identity: { label: "archer", user_id: "u1", is_admin: true },
       invites: [
         {
@@ -185,7 +139,6 @@ describe("AccountPage", () => {
 
   it("gives an admin no way to disable their own account", async () => {
     stub({
-      accountsExist: true,
       identity: { label: "archer", user_id: "u1", is_admin: true },
       users: [
         {
@@ -220,7 +173,6 @@ describe("AccountPage", () => {
 
   it("sends the current password with the new one", async () => {
     stub({
-      accountsExist: true,
       identity: { label: "vera", user_id: "u2", is_admin: false },
     });
     render(<AccountPage />);
@@ -249,7 +201,6 @@ describe("AccountPage — where you can work", () => {
 
   it("shows the workspace and the directories opened outside it", async () => {
     stub({
-      accountsExist: true,
       identity: { label: "archer", user_id: "u1", is_admin: true },
       workspace,
     });
@@ -262,7 +213,6 @@ describe("AccountPage — where you can work", () => {
 
   it("adds a directory, sending the whole list", async () => {
     stub({
-      accountsExist: true,
       identity: { label: "archer", user_id: "u1", is_admin: true },
       workspace,
     });
@@ -282,7 +232,6 @@ describe("AccountPage — where you can work", () => {
 
   it("removes one by sending the list without it", async () => {
     stub({
-      accountsExist: true,
       identity: { label: "archer", user_id: "u1", is_admin: true },
       workspace,
     });
@@ -301,7 +250,6 @@ describe("AccountPage — where you can work", () => {
 
   it("gives a non-admin no way to open a hole in their own confinement", async () => {
     stub({
-      accountsExist: true,
       identity: { label: "vera", user_id: "u2", is_admin: false },
       workspace: { ...workspace, extra_roots: [] },
     });

@@ -45,7 +45,7 @@ async def test_descendant_cas_refusal_finishes_captured_cancellation_before_retu
     manager, delegations, parent, starts = work_runtime
     agents = AgentManager(manager.db)
     for name in ("Changed helper", "Later helper", "Replacement"):
-        await agents.create_agent(name=name, backend="codex")
+        await agents.create_agent(name=name, backend="codex", user_id=parent.user_id)
     outer = await delegations.start_delegation(
         parent_session_id=parent.id, agent_name="Worker", request="held outer review",
     )
@@ -71,7 +71,7 @@ async def test_descendant_cas_refusal_finishes_captured_cancellation_before_retu
     outer_bg, outer_pid = await _background(manager, outer, outer_context, tmp_path / "outer.pid")
     later_bg, later_pid = await _background(manager, later, later_context, tmp_path / "later.pid")
     independent_bg, independent_pid = await _background(manager, independent, independent_context, tmp_path / "independent.pid")
-    scope = {"parent_session_id": outer.delegation_id, "user_id": None}
+    scope = {"parent_session_id": outer.delegation_id, "user_id": parent.user_id}
     original_conflicted = await manager.db.load_delegation_state(conflicted.delegation_id, **scope)
     replacement = next(row for row in await manager.db.load_agents() if row["name"] == "Replacement")
     if conflict_stage == "state":
@@ -118,7 +118,7 @@ async def test_descendant_cas_refusal_finishes_captured_cancellation_before_retu
         assert refused.value.status_code == 409 and "relationship changed" in str(refused.value)
         await asyncio.wait_for(confirming, 5)
         assert json.loads(await manager.db.load_delegation_state(
-            outer.delegation_id, parent_session_id=parent.id, user_id=None,
+            outer.delegation_id, parent_session_id=parent.id, user_id=parent.user_id,
         ))["state"] == "cancelled"
         stored_conflicted = await manager.db.load_delegation_state(conflicted.delegation_id, **scope)
         if conflict_stage == "state":

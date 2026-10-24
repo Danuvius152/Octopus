@@ -135,9 +135,6 @@ class ReserveFork:
     reserve: bool
 
 
-@dataclass(frozen=True)
-class ApplyOwner:
-    user_id: str
 
 
 @dataclass(frozen=True)
@@ -183,7 +180,7 @@ class IdlePublication:
 
 
 RuntimeCommand = (Submit | Resume | Interrupt | CancelRequest | Reset | CloseWork | RetireProcess | RetireHeldProcess
-                  | CloseExecution | ReserveFork | ApplyOwner | ReleaseArchive | AutoArchive | FinishAutoArchive
+                  | CloseExecution | ReserveFork | ReleaseArchive | AutoArchive | FinishAutoArchive
                   | IdleEvent | CorrelatedControl | RecoveryDismissed)
 
 
@@ -496,11 +493,6 @@ class OwnerRuntime:
             else:
                 session._forking = False
             return True
-        if isinstance(command, ApplyOwner):
-            from ..mcp_identity import revoke_run
-            revoke_run(getattr(session._run.backend, "run_lease_id", None))
-            session.user_id = command.user_id
-            return True
         if isinstance(command, ReleaseArchive):
             if session._archive_reservation is command.reservation:
                 session._archive_reservation = None
@@ -578,7 +570,7 @@ class OwnerRuntime:
         await manager.require_active_agent(session.agent_id)
         if session._transcript_integrity != "ok":
             raise ValueError("Transcript has duplicate sequences; export and review it before continuing")
-        closed = (manager._admission_closed or manager._legacy_transition or session._admission_closed
+        closed = (manager._admission_closed or session._admission_closed
                   or session.agent_id in manager._closed_agents or not work_is_open(request.work_id))
         if closed:
             return SubmissionReceipt.closed(request.request_id, "shutdown" if manager._admission_closed else "withdrawn")
@@ -958,7 +950,7 @@ class OwnerRuntime:
             if not publication_ready:
                 return
             eligible = manager._eligible_request(session)
-            if (eligible is None or manager._legacy_transition or manager._admission_closed
+            if (eligible is None or manager._admission_closed
                     or session._forking or session._archive_reservation is not None or session._run.retirements
                     or self._idle_action is not None):
                 return
@@ -967,7 +959,7 @@ class OwnerRuntime:
             # Retain the projection while loading. An awaited database read
             # must not make admitted work disappear or leave a stale quota
             # decision in force before this Owner reserves its active slot.
-            if manager._admission_closed or manager._legacy_transition:
+            if manager._admission_closed:
                 return
             try:
                 manager._check_turn_quota(session)

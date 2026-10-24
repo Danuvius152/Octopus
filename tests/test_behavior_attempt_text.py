@@ -5,6 +5,7 @@ from server.app_agent import AppAgentManager, _Turn
 from server.database import Database
 from server.delegations import DelegationManager
 from server.sessions import SessionManager
+from tests.accounts import create_account
 from tests.completion_models import CompletionModels
 
 
@@ -32,12 +33,13 @@ async def test_app_recovery_replaces_failed_text_and_tells_stream_consumer():
 async def test_delegation_recovery_discards_only_failed_attempt(monkeypatch, tmp_path):
     database = Database(":memory:")
     await database.initialize()
+    owner, _ = await create_account(database, extra_roots=[tmp_path])
     sessions, manager, models = SessionManager(), DelegationManager(), CompletionModels()
     await sessions.initialize(database)
     manager.bind(sessions, database)
     monkeypatch.setattr(sessions, "start_message", models.start_for(sessions))
     root = await database.get_system_agent()
-    await AgentManager(database).create_agent(name="Worker")
+    await AgentManager(database).create_agent(name="Worker", user_id=owner["id"])
     parent = await sessions.create_session(root["id"], "Caller", str(tmp_path))
     try:
         rec = await manager.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="review")

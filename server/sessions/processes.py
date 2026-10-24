@@ -29,39 +29,6 @@ from .owner_runtime import RetireHeldProcess
 
 class ProcessesMixin(SessionManagerBase):
 
-    async def retire_ownerless_runs(self) -> None:
-        """Join old lifecycle work and stop execution before account adoption."""
-        from ..mcp_identity import revoke_ownerless_runs
-
-        async def join_lifecycle_commands() -> None:
-            while True:
-                async with self._agent_lifecycle_lock:
-                    self._legacy_transition = True
-                    pending = tuple(
-                        operation
-                        for operations in self._agent_operations.values()
-                        for operation in operations
-                    )
-                if not pending:
-                    return
-                await asyncio.gather(*(asyncio.shield(operation) for operation in pending))
-
-        # A reserved command still owns its file work and final installation
-        # or compensation. It must finish before the account transaction can
-        # adopt its rows and live sessions; no coordination lock spans the join.
-        await join_lifecycle_commands()
-        revoke_ownerless_runs()
-        retiring = [
-            session
-            for session in list(self.sessions.values())
-            if session.user_id is None and (session._run.backend or self.session_is_executing(session))
-        ]
-        for session in retiring:
-            await self.interrupt(session.id)
-            await self.await_session_execution(session.id, timeout=5.0)
-        # Request retirement may finish an exact Wiki cleanup archive. Join
-        # those registrations too, without closing their original cleanup path.
-        await join_lifecycle_commands()
 
 
     async def _enforce_held_cap(self, *, keep_session_id: str | None = None) -> int:

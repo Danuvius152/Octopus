@@ -4,9 +4,12 @@ import asyncio
 import hashlib
 import json
 
+from server import deps
 from server.database import Database
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submit_client_message
+from server.users import UserManager
+from tests.accounts import create_account
 from tests.test_submission_recovery import _submit_paused
 from tests.test_submission_recovery import offline_harness as offline_harness
 
@@ -15,6 +18,7 @@ async def test_submission_and_legacy_receipt_survive_database_reopen(tmp_path, m
     path = str(tmp_path / "receipts.db")
     db = Database(path)
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
@@ -30,6 +34,7 @@ async def test_submission_and_legacy_receipt_survive_database_reopen(tmp_path, m
     await db.close()
     reopened = Database(path)
     await reopened.initialize()
+    deps.set_user_manager(UserManager(reopened))
     restored = SessionManager()
     await restored.initialize(reopened)
     try:
@@ -48,6 +53,7 @@ async def test_submission_and_legacy_receipt_survive_database_reopen(tmp_path, m
 async def test_concurrent_duplicate_submission_has_one_admission(tmp_path, monkeypatch):
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()

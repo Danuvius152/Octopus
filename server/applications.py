@@ -181,11 +181,11 @@ def has_backend(app_dir: str) -> bool:
     return backend_script(app_dir, "start.sh") is not None
 
 
-def is_inside_root(path: str) -> bool:
+def is_inside_root(path: str, user_id: str | None = None) -> bool:
     """True iff `path` resolves inside the managed applications root. Guards
     the delete path — a hand-edited `app_dir` must not be able to make us
     `rmtree` something outside our own tree."""
-    root = os.path.realpath(applications_root())
+    root = os.path.realpath(str(paths_for(user_id).applications) if user_id else applications_root())
     target = os.path.realpath(path)
     return target != root and os.path.commonpath([root, target]) == root
 
@@ -724,13 +724,13 @@ class ApplicationManager:
 
         if not keep_files:
             app_dir = row["app_dir"]
-            if is_inside_root(app_dir):
+            if is_inside_root(app_dir, row.get("user_id")):
                 shutil.rmtree(app_dir, ignore_errors=True)
                 # The data and runtime directories are siblings, so rmtree on
                 # the code directory leaves them behind. Deleting an
                 # application means deleting its state too.
                 for extra in (data_dir_for(app_dir), runtime_dir_for(app_dir)):
-                    if is_inside_root(extra):
+                    if is_inside_root(extra, row.get("user_id")):
                         shutil.rmtree(extra, ignore_errors=True)
             else:
                 logger.warning(

@@ -14,7 +14,6 @@ from server.wiki.workflow import BOOTSTRAP, guide, instructions, load_guide, vie
 from tests import test_wiki_api as wiki_api
 
 client = wiki_api.client
-HEADERS = wiki_api.HEADERS
 
 
 @pytest.fixture
@@ -28,7 +27,7 @@ async def notes(client, tmp_path):
 
 
 async def read(client, path, **params):
-    response = await client.get("/api/wiki/read", params={"doc": path, **params}, headers=HEADERS)
+    response = await client.get("/api/wiki/read", params={"doc": path, **params}, headers=client.headers)
     assert response.status_code == 200, response.text
     return response.json()
 
@@ -39,14 +38,14 @@ async def test_supplied_points_survive_existing_summary_heading(client, notes, s
     original = f"# Note\n\n## 摘要\n{summary}\n\n## 正文\n原来的观点与条件。\n"
     (root / "Library/note.md").write_text(original)
     current = await read(client, "Library/note.md")
-    result = await client.post("/api/wiki/organize", headers=HEADERS, json={
+    result = await client.post("/api/wiki/organize", headers=client.headers, json={
         "path": current["path"], "expected_revision": current["revision"],
         "key_note": "必要补充，不能忽略条件。", "reason": "supplement",
     })
     assert result.status_code == 200, result.text
     text = (root / "Library/note.md").read_text()
     assert "必要补充，不能忽略条件。" in text
-    with registry.store(None).connect() as db:
+    with registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"]).connect() as db:
         regions = json.loads(db.execute("SELECT regions FROM managed_notes WHERE path=?", (current["path"],)).fetchone()[0])
     assert original_text(text, regions) == original
 
@@ -58,10 +57,10 @@ async def test_existing_points_require_explicit_reuse_decision(client, notes, ke
     (root / "Library/note.md").write_text(original)
     current = await read(client, "Library/note.md")
     body = {"path": current["path"], "expected_revision": current["revision"], "key_note": key_note, "reason": "reuse"}
-    rejected = await client.post("/api/wiki/organize", headers=HEADERS, json=body)
+    rejected = await client.post("/api/wiki/organize", headers=client.headers, json=body)
     assert rejected.status_code == 422
     body["reuse_existing_summary"] = True
-    reused = await client.post("/api/wiki/organize", headers=HEADERS, json=body)
+    reused = await client.post("/api/wiki/organize", headers=client.headers, json=body)
     assert reused.status_code == 200, reused.text
     assert (root / "Library/note.md").read_text() == original
     assert (await read(client, current["path"]))["metadata"]["opening_points_decision"] == "reuse"
@@ -72,23 +71,23 @@ async def test_native_and_curator_aliases_work_in_search_metadata_and_links(clie
     native = "---\naliases: [原有名称]\n---\n# Source\n\nA related claim.\n"
     (root / "Library/source.md").write_text(native)
     source = await read(client, "Library/source.md")
-    added = await client.post("/api/wiki/organize", headers=HEADERS, json={
+    added = await client.post("/api/wiki/organize", headers=client.headers, json={
         "path": source["path"], "expected_revision": source["revision"], "key_note": "来源说明。",
         "aliases": ["Reliable Name", "可靠名称"], "reason": "aliases",
     })
     assert added.status_code == 200, added.text
     for alias in ["原有名称", "Reliable Name", "可靠名称"]:
-        found = await client.get("/api/wiki/search", params={"query": alias}, headers=HEADERS)
+        found = await client.get("/api/wiki/search", params={"query": alias}, headers=client.headers)
         assert found.json()["items"][0]["path"] == source["path"]
     current = await read(client, source["path"])
     assert set(current["metadata"]["aliases"]) == {"原有名称", "Reliable Name", "可靠名称"}
     assert (root / "Library/source.md").read_text().startswith("---\naliases: [原有名称]\n---")
     target = await read(client, "Library/note.md")
-    linked = await client.post("/api/wiki/organize", headers=HEADERS, json={
+    linked = await client.post("/api/wiki/organize", headers=client.headers, json={
         "path": target["path"], "expected_revision": target["revision"], "key_note": "参见 [[可靠名称]]。", "reason": "alias link",
     })
     assert linked.status_code == 200, linked.text
-    graph = (await client.get("/api/wiki/graph", params={"doc": target["id"]}, headers=HEADERS)).json()
+    graph = (await client.get("/api/wiki/graph", params={"doc": target["id"]}, headers=client.headers)).json()
     assert any(edge["to"] == source["id"] and edge["relation"] == "wikilink" for edge in graph["edges"])
 
 
@@ -103,7 +102,7 @@ async def test_new_link_paths_and_anchors_are_checked_against_current_candidate(
     original = (root / "Library/note.md").read_text() + "\nKeep [[old-missing]].\n"
     (root / "Library/note.md").write_text(original)
     current = await read(client, "Library/note.md")
-    result = await client.post("/api/wiki/organize", headers=HEADERS, json={
+    result = await client.post("/api/wiki/organize", headers=client.headers, json={
         "path": current["path"], "expected_revision": current["revision"], "key_note": f"See {link}.", "reason": "anchor",
     })
     assert result.status_code == (200 if accepted else 422), result.text
@@ -117,13 +116,13 @@ async def test_relation_requires_current_cited_read_and_keeps_old_note_read_only
     target = await read(client, "Library/note.md")
     source = await read(client, "Library/source.md")
     before = (root / "Library/source.md").read_bytes()
-    jobs = WikiJobs(None)
+    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     job = jobs.maintain("related", "", "organize", [target["path"]], None, [], "human")
-    session = SimpleNamespace(id="verified-worker", user_id=None, agent_id=config["curator_agent_id"])
+    session = SimpleNamespace(id="verified-worker", user_id=(await wiki_api.session_manager.db.get_system_agent())["user_id"], agent_id=config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
-    headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
+    headers = {"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}
     body = {"path": target["path"], "expected_revision": target["revision"], "key_note": "保留原论点。", "reason": "strong relation", "relations": [{"doc": source["id"], "revision": source["revision"], "location": "L3-L4", "explanation": "同一具体论点，适用条件在来源中说明。"}]}
     try:
         await client.get("/api/wiki/read", params={"doc": target["id"]}, headers=headers)
@@ -166,7 +165,7 @@ def test_block_locator_covers_multiline_paragraph_and_complete_list(text, identi
 
 async def test_guides_follow_verified_job_role_instead_of_agent_name(client, notes):
     _, config = notes
-    session = SimpleNamespace(id="guide-worker", user_id=None, agent_id=config["curator_agent_id"])
+    session = SimpleNamespace(id="guide-worker", user_id=(await wiki_api.session_manager.db.get_system_agent())["user_id"], agent_id=config["curator_agent_id"])
     entry_token = tasks.open(session, "maintain")
     try:
         entry = instructions("maintain", entry_token)
@@ -175,7 +174,7 @@ async def test_guides_follow_verified_job_role_instead_of_agent_name(client, not
         assert "worker" not in view(tasks.active[entry_token]).guides
     finally:
         tasks.close(entry_token)
-    jobs = WikiJobs(None)
+    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     job = jobs.maintain("guide", "", "organize", ["Library/note.md"], None, [], "human")
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], job["items"])
@@ -191,7 +190,7 @@ async def test_guides_follow_verified_job_role_instead_of_agent_name(client, not
         card = view(tasks.active[token]).card
         assert card["injected_guides"] == []
         assert "guides" not in card and "capabilities" not in card
-        headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
+        headers = {"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}
         for module in modules:
             response = await client.get("/api/wiki/guide", params={"module": module}, headers=headers)
             assert response.status_code == 200, response.text
@@ -233,7 +232,7 @@ async def test_graph_reads_only_selected_current_neighbors(client, notes, monkey
     for number in range(20):
         (root / f"Library/unrelated-{number}.md").write_text(f"# Unrelated {number}\nOther evidence.\n")
     current = await read(client, "Library/note.md")
-    store = registry.store(None)
+    store = registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     store.refresh()
     from pathlib import Path
 
@@ -246,6 +245,6 @@ async def test_graph_reads_only_selected_current_neighbors(client, notes, monkey
         return original(path)
 
     monkeypatch.setattr(Path, "read_bytes", watch)
-    response = await client.get("/api/wiki/graph", params={"doc": current["id"]}, headers=HEADERS)
+    response = await client.get("/api/wiki/graph", params={"doc": current["id"]}, headers=client.headers)
     assert response.status_code == 200, response.text
     assert not any("unrelated-" in path for path in opened)

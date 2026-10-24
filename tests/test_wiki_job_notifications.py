@@ -1,6 +1,8 @@
 """Original-entry delivery across the real Wiki and main database commits."""
 
 import json
+import sqlite3
+from contextlib import closing
 from types import SimpleNamespace
 
 import pytest
@@ -18,8 +20,13 @@ from tests.test_wiki_jobs import jobs as jobs
 
 
 @pytest.fixture
-async def receiver(tmp_path):
-    database = Database(str(tmp_path / "main.db"))
+async def receiver(tmp_path, jobs):
+    path = tmp_path / "main.db"
+    # The second receiver is a cold copy of the real current account, not a
+    # second owner or an account-free database containing somebody else's rows.
+    with closing(sqlite3.connect(path, check_same_thread=False)) as target:
+        await wiki_api.session_manager.db.conn.backup(target)
+    database = Database(str(path))
     await database.initialize()
     frames = []
 
@@ -33,14 +40,14 @@ async def receiver(tmp_path):
         await manager.db.close()
 
 
-async def session(database, sid="original", owner=None):
+async def session(database, sid="original", *, owner):
     await database.save_session(sid, "Original entry", "/isolated", "time", user_id=owner)
 
 
-def subscribe(jobs, job, sid="original", *, owner=None, request_id="original-request", client_id=""):
+def subscribe(jobs, job, sid="original", *, request_id="original-request", client_id=""):
     with jobs.store.connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        return job_events.subscribe(db, job["id"], job_events.Requester(owner, "chat", sid, request_id, client_id))
+        return job_events.subscribe(db, job["id"], job_events.Requester(jobs.user_id, "chat", sid, request_id, client_id))
 
 
 def pending(jobs):
@@ -50,7 +57,7 @@ def pending(jobs):
 
 async def test_main_commit_precedes_ack_and_replay_survives_receiver_restart(jobs, receiver, monkeypatch):
     job = enqueue(jobs)
-    await session(receiver.db)
+    await session(receiver.db, owner=jobs.user_id)
     subscribe(jobs, job)
     original_ack = job_notifications._acknowledge
 
@@ -61,7 +68,7 @@ async def test_main_commit_precedes_ack_and_replay_survives_receiver_restart(job
     with pytest.raises(OSError, match="ACK failure"):
         await job_notifications.dispatch(jobs, receiver)
     assert len(pending(jobs)) == 1
-    assert (await receiver.db.wiki_job_cards("original", None))[0]["job_id"] == job["id"]
+    assert (await receiver.db.wiki_job_cards("original", jobs.user_id))[0]["job_id"] == job["id"]
     assert len(receiver.frames) == 1
     path = receiver.db._db_path
     await receiver.db.close()
@@ -72,12 +79,12 @@ async def test_main_commit_precedes_ack_and_replay_survives_receiver_restart(job
     assert pending(jobs) == []
     cursor = await receiver.db.conn.execute("SELECT count(*) FROM wiki_job_notifications")
     assert (await cursor.fetchone())[0] == 1
-    assert len(await receiver.db.wiki_job_cards("original", None)) == 1
+    assert len(await receiver.db.wiki_job_cards("original", jobs.user_id)) == 1
 
 
 async def test_before_main_commit_failure_keeps_original_delivery_pending(jobs, receiver, monkeypatch):
     job = enqueue(jobs)
-    await session(receiver.db)
+    await session(receiver.db, owner=jobs.user_id)
     subscribe(jobs, job)
     receive = receiver.db.receive_wiki_job_notice
 
@@ -88,28 +95,28 @@ async def test_before_main_commit_failure_keeps_original_delivery_pending(jobs, 
     with pytest.raises(OSError, match="not committed"):
         await job_notifications.dispatch(jobs, receiver)
     assert len(pending(jobs)) == 1
-    assert await receiver.db.wiki_job_cards("original", None) == []
+    assert await receiver.db.wiki_job_cards("original", jobs.user_id) == []
     assert receiver.frames == []
     monkeypatch.setattr(receiver.db, "receive_wiki_job_notice", receive)
     await job_notifications.dispatch(jobs, receiver)
-    assert len(await receiver.db.wiki_job_cards("original", None)) == 1
+    assert len(await receiver.db.wiki_job_cards("original", jobs.user_id)) == 1
 
 
 async def test_old_version_cannot_overwrite_completed_card_and_archive_keeps_it(jobs, receiver):
     job = enqueue(jobs)
-    await session(receiver.db)
+    await session(receiver.db, owner=jobs.user_id)
     subscribe(jobs, job)
     jobs.update(job["id"], status="completed")
     deliveries = pending(jobs)
     assert len(deliveries) == 2
     vault = jobs.registration["vault_id"]
     for delivery in reversed(deliveries):
-        await receiver.db.receive_wiki_job_notice(vault, None, delivery)
-    cards = await receiver.db.wiki_job_cards("original", None)
+        await receiver.db.receive_wiki_job_notice(vault, jobs.user_id, delivery)
+    cards = await receiver.db.wiki_job_cards("original", jobs.user_id)
     assert len(cards) == 1 and cards[0]["status"] == "completed"
     await receiver.db.conn.execute("UPDATE sessions SET archived=1 WHERE id='original'")
     await receiver.db.conn.commit()
-    assert await receiver.db.wiki_job_cards("original", None) == cards
+    assert await receiver.db.wiki_job_cards("original", jobs.user_id) == cards
 
 
 async def test_deleted_or_different_owner_entry_is_not_retargeted(jobs, receiver):
@@ -131,17 +138,17 @@ async def test_deleted_or_different_owner_entry_is_not_retargeted(jobs, receiver
 
 async def test_duplicate_receive_rejects_conflicting_snapshot_and_wrong_account(jobs, receiver):
     job = enqueue(jobs)
-    await session(receiver.db)
+    await session(receiver.db, owner=jobs.user_id)
     subscribe(jobs, job)
     delivery = pending(jobs)[0]
     vault = jobs.registration["vault_id"]
-    await receiver.db.receive_wiki_job_notice(vault, None, delivery)
+    await receiver.db.receive_wiki_job_notice(vault, jobs.user_id, delivery)
     tampered = json.loads(delivery["body"]) | {"status": "completed"}
     with pytest.raises(WikiError, match="conflicts"):
-        await receiver.db.receive_wiki_job_notice(vault, None, delivery | {"body": json.dumps(tampered)})
+        await receiver.db.receive_wiki_job_notice(vault, jobs.user_id, delivery | {"body": json.dumps(tampered)})
     with pytest.raises(WikiError, match="account"):
         await receiver.db.receive_wiki_job_notice(vault, "different-owner", delivery)
-    assert (await receiver.db.wiki_job_cards("original", None))[0]["status"] == "queued"
+    assert (await receiver.db.wiki_job_cards("original", jobs.user_id))[0]["status"] == "queued"
 
 
 async def test_original_request_is_captured_at_open_and_http_replay_subscribes_new_entry(jobs, client, tmp_path):
@@ -150,7 +157,7 @@ async def test_original_request_is_captured_at_open_and_http_replay_subscribes_n
     sessions = [await manager.create_session(jobs.registration["curator_agent_id"], name, str(tmp_path))
                 for name in ("Original", "Following")]
     tokens = [tasks.open(value, "auto", request_id=f"original-{i}") for i, value in enumerate(sessions)]
-    headers = [{"Authorization": f"Bearer {mint(value.id, wiki_task_id=token)}"}
+    headers = [{"Authorization": f"Bearer {mint(value.id, user_id=value.user_id, wiki_task_id=token)}"}
                for value, token in zip(sessions, tokens, strict=True)]
     body = {"idempotency_key": "same-original-job", "paths": ["Library/note.md"]}
     try:
@@ -165,7 +172,7 @@ async def test_original_request_is_captured_at_open_and_http_replay_subscribes_n
         assert len(pending(jobs)) == 1
         assert pending(jobs)[0]["request_id"] == "original-1"
         await job_notifications.dispatch(jobs, manager)
-        cards = await client.get(f"/api/sessions/{sessions[1].id}/wiki-jobs", headers=wiki_api.HEADERS)
+        cards = await client.get(f"/api/sessions/{sessions[1].id}/wiki-jobs", headers=client.headers)
         assert cards.status_code == 200, cards.text
         assert len(cards.json()) == 1
         assert cards.json()[0]["status"] == "completed"
@@ -177,9 +184,9 @@ async def test_original_request_is_captured_at_open_and_http_replay_subscribes_n
 
 
 async def test_material_alias_and_completed_reuse_keep_original_subscriptions(jobs, receiver):
-    await session(receiver.db)
+    await session(receiver.db, owner=jobs.user_id)
     material = "# Claim\nKeep the qualification.\n"
-    origin = job_events.Requester(None, "chat", "original", "original-request")
+    origin = job_events.Requester(jobs.user_id, "chat", "original", "original-request")
     first = jobs.maintain("first", material, "Review", [], None, [], "human", requester=origin)
     aliased = jobs.maintain("alias", material, "Review", [], None, [], "human", requester=origin)
     assert first["id"] == aliased["id"]
@@ -190,4 +197,4 @@ async def test_material_alias_and_completed_reuse_keep_original_subscriptions(jo
     reused = jobs.maintain("reuse", material, "Review", [], None, [], "human", requester=origin)
     assert reused["status"] == "completed" and reused["items"][0]["reused"]
     await job_notifications.dispatch(jobs, receiver)
-    assert {card["job_id"] for card in await receiver.db.wiki_job_cards("original", None)} == {first["id"], reused["id"]}
+    assert {card["job_id"] for card in await receiver.db.wiki_job_cards("original", jobs.user_id)} == {first["id"], reused["id"]}

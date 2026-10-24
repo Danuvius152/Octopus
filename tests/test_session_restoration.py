@@ -5,17 +5,19 @@ import pytest
 from server.app_agent import AppAgentError, AppAgentManager
 from server.database import Database
 from server.session_manager import SessionManager
+from tests.accounts import create_account
 
 
 @pytest.mark.parametrize("empty_settings", [False, True])
 async def test_app_conversation_roundtrips_all_persisted_fields(tmp_path, empty_settings):
     db = Database(":memory:")
     await db.initialize()
+    owner, _ = await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     try:
         agent = await db.get_system_agent()
-        await db.save_credential("synthetic-credential", "claude-code", "test", "api_key", "unused", "now")
+        await db.save_credential("synthetic-credential", "claude-code", "test", "api_key", "unused", "now", user_id=owner["id"])
         parent = await manager.create_session(agent["id"], "parent", str(tmp_path))
         session = await manager.create_session(agent["id"], "app conversation", str(tmp_path),
             origin="app", app_id="owned-app", parent_session_id=parent.id, delegation_request="original request",

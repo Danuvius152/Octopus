@@ -19,14 +19,16 @@ from server.main import app
 from server.session_manager import ForkError, SessionManager
 from server.session_manager import session_manager as global_sm
 from server.sessions import forking as sm_forking
+from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
 
 
 @pytest.fixture
-async def manager():
+async def manager(tmp_path):
     mgr = SessionManager()
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     await mgr.initialize(db)
     try:
         yield mgr
@@ -312,14 +314,15 @@ async def test_duplicate_prepare_fork_failure_compensates(manager, tmp_path, mon
 
 
 @pytest.fixture
-async def client():
+async def client(tmp_path):
     db = Database(":memory:")
     await db.initialize()
+    _, bearer = await create_account(db, extra_roots=[tmp_path])
     global_sm.sessions.clear()
     global_sm._admission_closed = False
     await global_sm.initialize(db)
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization": f"Bearer {bearer}"}) as c:
         yield c
     await db.close()
 
@@ -330,7 +333,7 @@ async def test_duplicate_route(client, tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     parent = await _seed_parent(global_sm, repo)
 
-    H = {"Authorization": "Bearer changeme"}
+    H = {"Authorization": client.headers["Authorization"]}
     res = await client.post(
         f"/api/sessions/{parent.id}/duplicate",
         headers=H,
@@ -350,7 +353,7 @@ async def test_duplicate_route(client, tmp_path, monkeypatch):
 async def test_duplicate_route_unknown_parent(client):
     res = await client.post(
         "/api/sessions/missing/duplicate",
-        headers={"Authorization": "Bearer changeme"},
+        headers={"Authorization": client.headers["Authorization"]},
         json={},
     )
     assert res.status_code == 404
@@ -362,7 +365,7 @@ async def test_duplicate_route_exposes_full_copy_flag(client, tmp_path, monkeypa
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     repo = _repo(tmp_path)
     parent = await _seed_parent(global_sm, repo)
-    H = {"Authorization": "Bearer changeme"}
+    H = {"Authorization": client.headers["Authorization"]}
     body = (
         await client.post(f"/api/sessions/{parent.id}/duplicate", headers=H, json={})
     ).json()

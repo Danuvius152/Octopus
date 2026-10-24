@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 
-from server.config import settings
 from server.wiki.tasks import explicit_mode
 from tests.test_ws_delivery import connection, hold_model_runs, receipt_frame
 from tests.test_ws_delivery import runtime as runtime
@@ -26,7 +25,7 @@ def test_legacy_off_cancels_maintenance_and_keeps_shared_lookup(case):
 
 
 async def submit_composer(runtime, monkeypatch, tmp_path, message, selection):
-    manager, db = runtime
+    manager, db, bearer = runtime
     agent = await db.get_system_agent()
     session = await manager.create_session(agent['id'], 'Wiki composer', str(tmp_path), backend='codex')
     hold_model_runs(manager, monkeypatch)
@@ -35,7 +34,7 @@ async def submit_composer(runtime, monkeypatch, tmp_path, message, selection):
     if selection is not None:
         payload['wiki_mode'] = selection
     try:
-        async with connection(manager, settings.auth_token) as browser:
+        async with connection(manager, bearer) as browser:
             await browser[0].put({'type': 'websocket.receive', 'text': json.dumps(payload)})
             receipt = await receipt_frame(browser[1], 'submission')
             assert receipt['accepted'] is True, receipt

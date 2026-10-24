@@ -24,7 +24,6 @@ async def creation(tmp_path, monkeypatch):
     await db.initialize()
     users = UserManager(db)
     monkeypatch.setattr(deps, "_user_manager", users)
-    monkeypatch.setattr(deps, "_accounts_exist", None)
     owner = await users.create_user(username="owner", password="password-owner")
     foreign = await users.create_user(username="foreign", password="password-foreign")
     token = await users.issue_token(owner["id"])

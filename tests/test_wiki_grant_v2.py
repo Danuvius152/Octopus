@@ -1,11 +1,12 @@
 """A worker's write authority comes from its admitted job, not its role."""
 
 import json
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 
+from server import deps
 from server.mcp_identity import mint
 from server.wiki import grants
 from server.wiki.history import WikiHistory
@@ -18,16 +19,20 @@ from tests import test_wiki_api as wiki_api
 client = wiki_api.client
 
 
-@contextmanager
-def assigned(job, config, paths=None):
-    session = SimpleNamespace(id="exact-worker-" + job["id"], user_id=None, agent_id=config["curator_agent_id"])
-    jobs = WikiJobs(None)
+@asynccontextmanager
+async def assigned(job, config, paths=None, *, client):
+    owner = await deps.get_user_manager().resolve_token(
+        client.headers["Authorization"].removeprefix("Bearer "), touch=False,
+    )
+    assert owner is not None
+    session = SimpleNamespace(id="exact-worker-" + job["id"], user_id=owner["id"], agent_id=config["curator_agent_id"])
+    jobs = WikiJobs(owner["id"])
     jobs.update(job["id"], status="running", session_id=session.id)
     batch = [item for item in job["items"] if paths is None or item["path"] in paths]
     tasks.assign(session.id, job["id"], batch, registration=config)
     token = tasks.open(session, "maintain")
     try:
-        yield {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}, tasks.active[token]
+        yield {"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}, tasks.active[token]
     finally:
         tasks.close(token)
         tasks.unassign(session.id)
@@ -35,7 +40,7 @@ def assigned(job, config, paths=None):
 
 async def proposed(client, root, *, paths=None, key="new-knowledge", material=""):
     config = await wiki_api.configure(client, root)
-    response = await client.post("/api/wiki/maintain", headers=wiki_api.HEADERS, json={
+    response = await client.post("/api/wiki/maintain", headers=client.headers, json={
         "idempotency_key": key, "scope": "Create the requested finite knowledge page",
         "creation": {"purpose": "requested_knowledge_page", "paths": paths}, "material": material,
     })
@@ -56,16 +61,16 @@ async def test_existing_document_worker_cannot_publish_an_unrequested_page(clien
     original = b"# Requested note\n\nKeep the original argument.\n"
     (root / "Library/requested.md").write_bytes(original)
     config = await wiki_api.configure(client, root)
-    jobs = WikiJobs(None)
+    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     job = jobs.maintain(
         "grant-existing-only", "", "Correct the selected existing note",
         ["Library/requested.md"], None, [], "human",
     )
-    session = SimpleNamespace(id="bounded-worker", user_id=None, agent_id=config["curator_agent_id"])
+    session = SimpleNamespace(id="bounded-worker", user_id=(await wiki_api.session_manager.db.get_system_agent())["user_id"], agent_id=config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], job["items"], registration=config)
     token = tasks.open(session, "maintain")
-    headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
+    headers = {"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}
     unrequested = "Library/unrequested.md"
     try:
         read = await client.get("/api/wiki/read", params={"doc": "Library/requested.md"}, headers=headers)
@@ -111,16 +116,16 @@ async def test_actual_replace_rechecks_original_worker_lease_even_when_task_and_
     if before is not None:
         (root / path).write_bytes(before)
     config = await wiki_api.configure(client, root)
-    jobs = WikiJobs(None)
+    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     job = jobs.maintain("original-worker-scope", "", "Maintain the finite target", [path] if before else [], None, [], "human",
                         creation={"purpose": "requested_knowledge_page", "paths": [path]} if before is None else None)
     monkeypatch.setattr(mcp_identity, "_run_leases", {})
     monkeypatch.setattr(mcp_identity, "_closed_works", set())
-    with assigned(job, config) as (diagnostic, task):
+    async with assigned(job, config, client=client) as (diagnostic, task):
         token = mcp_identity.verify(diagnostic["Authorization"].removeprefix("Bearer ")).wiki_task_id
         lease, work = uuid4().hex, uuid4().hex
         mcp_identity.register_run(lease, task.session_id, task.user_id, work)
-        headers = {"Authorization": "Bearer " + mcp_identity.mint(task.session_id, wiki_task_id=token, run_lease_id=lease, work_id=work)}
+        headers = {"Authorization": "Bearer " + mcp_identity.mint(task.session_id, user_id=task.user_id, wiki_task_id=token, run_lease_id=lease, work_id=work)}
         current = (await client.get("/api/wiki/read", headers=headers, params={"doc": path})).json() if before else None
         atomic = history.atomic
         injected = []
@@ -161,7 +166,7 @@ async def test_requested_page_consumes_reservation_and_can_be_revised_as_the_sam
     assert job["grant"]["selected_documents"] == []
     item = job["items"][0]
     assert item["kind"] == "creation" and "doc" not in item
-    with assigned(job, config) as (headers, task):
+    async with assigned(job, config, client=client) as (headers, task):
         refused = await publish(client, headers, "Library/other.md", item["reservation_id"])
         assert refused.status_code == 403 and not (root / "Library/other.md").exists()
         created = await publish(client, headers, item["path"], item["reservation_id"])
@@ -190,11 +195,11 @@ async def test_default_target_and_explicit_target_replays_reuse_the_admitted_job
     replay, _ = await proposed(client, root)
     assert replay["id"] == job["id"] and replay["grant"] == job["grant"]
     other, _ = await proposed(client, root, key="different", paths=["Library/fixed.md"])
-    conflict = await client.post("/api/wiki/maintain", headers=wiki_api.HEADERS, json={
+    conflict = await client.post("/api/wiki/maintain", headers=client.headers, json={
         "idempotency_key": "third", "creation": {"purpose": "requested_knowledge_page", "paths": ["Library/fixed.md"]},
     })
     assert conflict.status_code == 409
-    with registry.store(None).connect() as db:
+    with registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"]).connect() as db:
         assert db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 2
         assert db.execute("SELECT count(*) FROM wiki_path_reservations").fetchone()[0] == 2
     assert other["id"] != job["id"] and config["vault_id"] == replay["grant"]["vault_id"]
@@ -209,8 +214,8 @@ async def test_existing_note_remains_writable_and_publish_is_hidden(client, tmp_
     (root / "Library").mkdir(parents=True)
     (root / "Library/note.md").write_text("# Note\n\nKeep this original argument.\n")
     config = await wiki_api.configure(client, root)
-    job = WikiJobs(None).maintain("existing", "", "Organize only this note", ["Library/note.md"], None, [], "human")
-    with assigned(job, config) as (headers, task):
+    job = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"]).maintain("existing", "", "Organize only this note", ["Library/note.md"], None, [], "human")
+    async with assigned(job, config, client=client) as (headers, task):
         scope = verify(headers["Authorization"].removeprefix("Bearer "))
         context = set_current_scope(scope)
         try:
@@ -239,7 +244,7 @@ async def test_three_document_grant_lookup_does_not_scan_the_whole_job(client, t
     (root / "Library").mkdir(parents=True)
     (root / "Library/note-00000.md").write_text("# Current\n\nA synthetic selected document.\n")
     registration = await wiki_api.configure(client, root)
-    jobs = WikiJobs(None)
+    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     counts = []
     with jobs.store.connect() as db:
         template = dict(db.execute("SELECT * FROM documents").fetchone())
@@ -289,9 +294,9 @@ async def test_creation_proposals_follow_trusted_entry_scope(client, tmp_path, m
     root = tmp_path / "vault"
     root.mkdir()
     config = await wiki_api.configure(client, root)
-    session = SimpleNamespace(id="entry", user_id=None, agent_id=config["curator_agent_id"])
+    session = SimpleNamespace(id="entry", user_id=(await wiki_api.session_manager.db.get_system_agent())["user_id"], agent_id=config["curator_agent_id"])
     token = tasks.open(session, mode, trusted_request)
-    headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
+    headers = {"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}
     try:
         result = await client.post("/api/wiki/maintain", headers=headers, json={
             "idempotency_key": "creation-scope", "creation": {"purpose": "requested_knowledge_page", "paths": ["Library/new.md"]},
@@ -305,11 +310,11 @@ async def test_forged_grant_fields_are_not_creation_authority(client, tmp_path):
     root = tmp_path / "vault"
     root.mkdir()
     await wiki_api.configure(client, root)
-    result = await client.post("/api/wiki/maintain", headers=wiki_api.HEADERS, json={
+    result = await client.post("/api/wiki/maintain", headers=client.headers, json={
         "idempotency_key": "forged", "allow_new_pages": True, "allowed_new_paths": ["Library/forged.md"],
     })
     assert result.status_code == 422
-    with registry.store(None).connect() as db:
+    with registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"]).connect() as db:
         assert db.execute("SELECT count(*) FROM wiki_job_grants").fetchone()[0] == 0
         grants.require(db)
 
@@ -320,9 +325,9 @@ async def test_created_output_keeps_its_historical_baseline_after_a_human_edit(c
     root = tmp_path / "vault"
     (root / "Library").mkdir(parents=True)
     job, config = await proposed(client, root, paths=["Library/knowledge.md"])
-    jobs = WikiJobs(None)
+    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     item = job["items"][0]
-    with assigned(job, config) as (headers, _):
+    async with assigned(job, config, client=client) as (headers, _):
         response = await publish(client, headers, item["path"], item["reservation_id"])
         assert response.status_code == 200, response.text
     assert jobs.recover_creation(job["id"], item) and item["status"] == "done", item
@@ -330,7 +335,7 @@ async def test_created_output_keeps_its_historical_baseline_after_a_human_edit(c
     accepted = (await state(client, item["doc"]))["items"][0]
     assert accepted["status"] == "unchanged" and accepted["baseline"]["id"] == item["receipt_id"], accepted
     before = (root / item["path"]).read_bytes()
-    edited = await client.put("/api/wiki/document", headers=wiki_api.HEADERS, json={
+    edited = await client.put("/api/wiki/document", headers=client.headers, json={
         "path": item["path"], "content": before.decode() + "\nA later human condition.\n",
         "expected_revision": item["output_revision"], "reason": "Human adds a condition",
     })
@@ -345,7 +350,7 @@ async def test_landed_creation_recovers_the_same_change_without_a_second_publish
     root = tmp_path / "vault"
     (root / "Library").mkdir(parents=True)
     job, config = await proposed(client, root, paths=["Library/knowledge.md"])
-    jobs = WikiJobs(None)
+    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     status = WikiHistory.status
     injected = []
 
@@ -356,7 +361,7 @@ async def test_landed_creation_recovers_the_same_change_without_a_second_publish
         return status(history, change_id, value)
 
     monkeypatch.setattr(WikiHistory, "status", fail_applied)
-    with assigned(job, config) as (headers, _):
+    async with assigned(job, config, client=client) as (headers, _):
         item = job["items"][0]
         response = await publish(client, headers, item["path"], item["reservation_id"])
         assert response.status_code == 503 and (root / item["path"]).exists(), response.text
@@ -374,14 +379,14 @@ async def test_framework_material_is_an_existing_document_grant_not_a_publish_gr
     root = tmp_path / "vault"
     root.mkdir()
     config = await wiki_api.configure(client, root)
-    jobs = WikiJobs(None)
+    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     job = jobs.maintain("material", "# Original material\n\nPreserve these exact words.\n", "Organize the material", [], None, [], "human")
     document = jobs.ingest(job["id"])
     item = {"doc": document["id"], "path": document["path"], "revision": document["revision"],
             "quality": document["quality"], "status": "pending"}
     job = jobs.update(job["id"], items=[item])
     assert job["grant"]["allowed_new_paths"] == []
-    with assigned(job, config) as (headers, task):
+    async with assigned(job, config, client=client) as (headers, task):
         assert [d["doc_id"] for d in tasks.current_grant(task)["selected_documents"]] == [document["id"]]
         denied = await publish(client, headers, "Library/a-second-original.md")
         assert denied.status_code == 403
@@ -400,15 +405,15 @@ async def test_worker_executes_each_finite_output_and_does_not_skip_material_ing
     (root / "Library").mkdir(parents=True)
     paths = [f"Library/page-{index}.md" for index in range(5)]
     job, config = await proposed(client, root, paths=paths, material=material)
-    jobs = WikiJobs(None)
+    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
 
     class HttpCurator(Curator):
         async def start_message(self, session_id, prompt, **kwargs):
             async def events():
                 self.turns += 1
-                session = SimpleNamespace(id=session_id, user_id=None, agent_id=config["curator_agent_id"])
+                session = SimpleNamespace(id=session_id, user_id=(await wiki_api.session_manager.db.get_system_agent())["user_id"], agent_id=config["curator_agent_id"])
                 token = tasks.open(session, "maintain", request_id=kwargs["request_id"])
-                headers = {"Authorization": "Bearer " + mint(session_id, wiki_task_id=token)}
+                headers = {"Authorization": "Bearer " + mint(session_id, user_id=session.user_id, wiki_task_id=token)}
                 task = tasks.active[token]
                 assert verify(headers["Authorization"].removeprefix("Bearer ")).wiki_task_id == token
                 try:

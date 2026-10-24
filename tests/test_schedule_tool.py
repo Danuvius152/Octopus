@@ -12,6 +12,7 @@ from datetime import UTC
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from server import deps
 from server.agent_manager import AgentManager
 from server.database import Database
 from server.main import app
@@ -19,15 +20,17 @@ from server.routers import agents as agents_mod
 from server.routers import schedules as schedules_mod
 from server.scheduler import ScheduleRunner
 from server.session_manager import session_manager
-
-TOKEN = "changeme"
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
+from server.users import UserManager
 
 
 @pytest.fixture
 async def client():
     db = Database(":memory:")
     await db.initialize()
+    users = UserManager(db)
+    user = await users.create_user(username="tool-owner", password="password-for-tools")
+    deps.set_user_manager(users)
+    headers = {"Authorization": "Bearer " + await users.issue_token(user["id"])}
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
@@ -39,7 +42,7 @@ async def client():
     schedules_mod._runner = runner
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://test", headers=headers) as c:
         yield c
 
     await runner.shutdown()
@@ -49,7 +52,7 @@ async def client():
 async def _session(client) -> str:
     agent = await session_manager.db.get_system_agent()
     assert agent is not None
-    resp = await client.post("/api/sessions", json={"agent_id": agent["id"], "name": "s"}, headers=HEADERS)
+    resp = await client.post("/api/sessions", json={"agent_id": agent["id"], "name": "s"}, headers=client.headers)
     assert resp.status_code == 201
     return resp.json()["id"]
 
@@ -58,13 +61,13 @@ async def _other_agents_schedule(client) -> str:
     """A schedule owned by a different agent — the thing this session must
     not be able to see or touch."""
     agent = await client.post(
-        "/api/agents", json={"name": "Someone Else"}, headers=HEADERS
+        "/api/agents", json={"name": "Someone Else"}, headers=client.headers
     )
     assert agent.status_code == 201
     resp = await client.post(
         f"/api/agents/{agent.json()['id']}/schedules",
         json={"name": "theirs", "prompt": "not yours", "interval_seconds": 600},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 201
     return resp.json()["id"]
@@ -84,7 +87,7 @@ async def test_create_cron_schedule_for_this_session(client):
             "cron": "0 9 * * 1-5",
             "timezone": "America/Los_Angeles",
         },
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 201, resp.text
     data = resp.json()
@@ -94,7 +97,7 @@ async def test_create_cron_schedule_for_this_session(client):
     assert data["interval_seconds"] is None
     assert data["enabled"] is True
     # Derived, not passed: the schedule belongs to this session's agent...
-    sess = (await client.get(f"/api/sessions/{sid}", headers=HEADERS)).json()
+    sess = (await client.get(f"/api/sessions/{sid}", headers=client.headers)).json()
     assert data["agent_id"] == sess["agent_id"]
     # ...and by default its fires land back in this conversation.
     assert data["origin_session_id"] == sid
@@ -108,7 +111,7 @@ async def test_create_interval_schedule_outside_this_session(client):
     resp = await client.post(
         f"/api/sessions/{sid}/schedules",
         json={"prompt": "poll the queue", "interval_seconds": 900, "in_session": False},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 201
     data = resp.json()
@@ -129,7 +132,7 @@ async def test_create_one_time_schedule(client):
     resp = await client.post(
         f"/api/sessions/{sid}/schedules",
         json={"prompt": "remind me about the release", "run_at": when},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 201
     data = resp.json()
@@ -143,7 +146,7 @@ async def test_create_rejects_two_recurrences(client):
     resp = await client.post(
         f"/api/sessions/{sid}/schedules",
         json={"prompt": "x", "cron": "0 9 * * *", "interval_seconds": 600},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 422
     assert "exactly one" in resp.json()["detail"]
@@ -153,7 +156,7 @@ async def test_create_rejects_two_recurrences(client):
 async def test_create_rejects_no_recurrence(client):
     sid = await _session(client)
     resp = await client.post(
-        f"/api/sessions/{sid}/schedules", json={"prompt": "x"}, headers=HEADERS
+        f"/api/sessions/{sid}/schedules", json={"prompt": "x"}, headers=client.headers
     )
     assert resp.status_code == 422
 
@@ -166,7 +169,7 @@ async def test_create_rejects_a_too_short_interval(client):
     resp = await client.post(
         f"/api/sessions/{sid}/schedules",
         json={"prompt": "x", "interval_seconds": 5},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 422
     assert "60" in resp.json()["detail"]
@@ -178,7 +181,7 @@ async def test_create_rejects_an_unknown_timezone(client):
     resp = await client.post(
         f"/api/sessions/{sid}/schedules",
         json={"prompt": "x", "cron": "0 9 * * *", "timezone": "PST"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 422
     assert "IANA" in resp.json()["detail"]
@@ -189,7 +192,7 @@ async def test_create_on_an_unknown_session_is_404(client):
     resp = await client.post(
         "/api/sessions/nope/schedules",
         json={"prompt": "x", "interval_seconds": 600},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 404
 
@@ -203,17 +206,17 @@ async def test_list_is_scoped_to_this_agent(client):
     await client.post(
         f"/api/sessions/{sid}/schedules",
         json={"prompt": "mine", "interval_seconds": 600},
-        headers=HEADERS,
+        headers=client.headers,
     )
     theirs = await _other_agents_schedule(client)
 
-    resp = await client.get(f"/api/sessions/{sid}/schedules", headers=HEADERS)
+    resp = await client.get(f"/api/sessions/{sid}/schedules", headers=client.headers)
     assert resp.status_code == 200
     ids = [r["id"] for r in resp.json()]
     assert theirs not in ids
     assert len(ids) == 1
     # The unscoped admin route still sees both.
-    everything = (await client.get("/api/schedules", headers=HEADERS)).json()
+    everything = (await client.get("/api/schedules", headers=client.headers)).json()
     assert len(everything) == 2
 
 
@@ -226,14 +229,14 @@ async def test_pause_and_resume(client):
     created = await client.post(
         f"/api/sessions/{sid}/schedules",
         json={"prompt": "x", "interval_seconds": 600},
-        headers=HEADERS,
+        headers=client.headers,
     )
     sched_id = created.json()["id"]
 
     paused = await client.patch(
         f"/api/sessions/{sid}/schedules/{sched_id}",
         json={"enabled": False},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert paused.status_code == 200
     assert paused.json()["enabled"] is False
@@ -243,7 +246,7 @@ async def test_pause_and_resume(client):
     resumed = await client.patch(
         f"/api/sessions/{sid}/schedules/{sched_id}",
         json={"enabled": True},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resumed.json()["enabled"] is True
     assert resumed.json()["next_run_at"]
@@ -257,14 +260,14 @@ async def test_switching_recurrence_clears_the_old_one(client):
     created = await client.post(
         f"/api/sessions/{sid}/schedules",
         json={"prompt": "x", "interval_seconds": 600},
-        headers=HEADERS,
+        headers=client.headers,
     )
     sched_id = created.json()["id"]
 
     resp = await client.patch(
         f"/api/sessions/{sid}/schedules/{sched_id}",
         json={"cron": "0 7 * * *", "timezone": "Asia/Shanghai"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 200, resp.text
     data = resp.json()
@@ -274,7 +277,7 @@ async def test_switching_recurrence_clears_the_old_one(client):
     assert data["recurrence_label"] == "Every day at 07:00"
 
     # And it survives a reload — the columns really were rewritten.
-    rows = (await client.get(f"/api/sessions/{sid}/schedules", headers=HEADERS)).json()
+    rows = (await client.get(f"/api/sessions/{sid}/schedules", headers=client.headers)).json()
     assert rows[0]["interval_seconds"] is None and rows[0]["cron"] == "0 7 * * *"
 
 
@@ -284,13 +287,13 @@ async def test_timezone_alone_moves_an_existing_cron(client):
     created = await client.post(
         f"/api/sessions/{sid}/schedules",
         json={"prompt": "x", "cron": "0 9 * * *", "timezone": "America/Los_Angeles"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     sched_id = created.json()["id"]
     resp = await client.patch(
         f"/api/sessions/{sid}/schedules/{sched_id}",
         json={"timezone": "Asia/Shanghai"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 200
     assert resp.json()["cron"] == "0 9 * * *"
@@ -303,12 +306,12 @@ async def test_update_rejects_two_recurrences(client):
     created = await client.post(
         f"/api/sessions/{sid}/schedules",
         json={"prompt": "x", "interval_seconds": 600},
-        headers=HEADERS,
+        headers=client.headers,
     )
     resp = await client.patch(
         f"/api/sessions/{sid}/schedules/{created.json()['id']}",
         json={"cron": "0 9 * * *", "interval_seconds": 900},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 422
 
@@ -321,15 +324,15 @@ async def test_cannot_touch_another_agents_schedule(client):
     patched = await client.patch(
         f"/api/sessions/{sid}/schedules/{theirs}",
         json={"enabled": False},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert patched.status_code == 404
     deleted = await client.delete(
-        f"/api/sessions/{sid}/schedules/{theirs}", headers=HEADERS
+        f"/api/sessions/{sid}/schedules/{theirs}", headers=client.headers
     )
     assert deleted.status_code == 404
     # Still there, still running.
-    everything = (await client.get("/api/schedules", headers=HEADERS)).json()
+    everything = (await client.get("/api/schedules", headers=client.headers)).json()
     assert [r["id"] for r in everything] == [theirs]
     assert everything[0]["enabled"] is True
 
@@ -343,14 +346,14 @@ async def test_delete(client):
     created = await client.post(
         f"/api/sessions/{sid}/schedules",
         json={"prompt": "x", "interval_seconds": 600},
-        headers=HEADERS,
+        headers=client.headers,
     )
     sched_id = created.json()["id"]
     resp = await client.delete(
-        f"/api/sessions/{sid}/schedules/{sched_id}", headers=HEADERS
+        f"/api/sessions/{sid}/schedules/{sched_id}", headers=client.headers
     )
     assert resp.status_code == 204
-    assert (await client.get("/api/schedules", headers=HEADERS)).json() == []
+    assert (await client.get("/api/schedules", headers=client.headers)).json() == []
     # Gone from the runner too, not just the table.
     assert schedules_mod._runner.next_run_at(sched_id) is None
 
@@ -358,7 +361,7 @@ async def test_delete(client):
 @pytest.mark.asyncio
 async def test_auth_required(client):
     sid = await _session(client)
-    assert (await client.get(f"/api/sessions/{sid}/schedules")).status_code in (401, 403)
+    assert (await client.get(f"/api/sessions/{sid}/schedules", headers={"Authorization": ""})).status_code in (401, 403)
 
 
 # --- the change reaches open clients --------------------------------------- #
@@ -379,15 +382,15 @@ async def test_every_mutation_broadcasts(client, monkeypatch):
     created = await client.post(
         f"/api/sessions/{sid}/schedules",
         json={"prompt": "x", "interval_seconds": 600},
-        headers=HEADERS,
+        headers=client.headers,
     )
     sched_id = created.json()["id"]
     await client.patch(
         f"/api/sessions/{sid}/schedules/{sched_id}",
         json={"enabled": False},
-        headers=HEADERS,
+        headers=client.headers,
     )
-    await client.delete(f"/api/sessions/{sid}/schedules/{sched_id}", headers=HEADERS)
+    await client.delete(f"/api/sessions/{sid}/schedules/{sched_id}", headers=client.headers)
 
     kinds = [p["type"] for p in seen if p.get("type") == "schedules_changed"]
     assert len(kinds) == 3

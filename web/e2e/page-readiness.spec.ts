@@ -1,3 +1,4 @@
+import { enterAccountCredentials } from "./current-account";
 import { expect, test } from "@playwright/test";
 
 for (const fontNetwork of ["delayed", "offline"] as const) {
@@ -23,8 +24,7 @@ for (const fontNetwork of ["delayed", "offline"] as const) {
       await page.goto("/", { waitUntil: "load", timeout: 5_000 });
       await expect(page.locator('input[type="password"]')).toBeVisible();
       await expect.poll(() => fontRequested).toBe(true);
-      await page.locator('input[type="password"]').fill("changeme");
-      await page.locator("button.btn-login").click();
+      await enterAccountCredentials(page);
       await expect(page.locator(".conn-status.on")).toBeVisible();
       releaseFonts();
       await fontsFinished;

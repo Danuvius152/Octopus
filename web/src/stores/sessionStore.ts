@@ -158,7 +158,7 @@ interface SessionStore {
   dismissControlCommand: (id: string) => void;
   token: string;
   accountGeneration: number;
-  setToken: (t: string, options?: { sameAccount: boolean; identity?: Identity }) => void;
+  setToken: (t: string) => void;
 
   /** Who this browser is signed in as (multi-tenancy.md §3), or null before
    * the answer arrives. Held here rather than fetched per component because
@@ -472,14 +472,10 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
 
   token: localStorage.getItem("octopus_token") || "",
   accountGeneration: 0,
-  setToken: (t, options) => {
+  setToken: (t) => {
     localStorage.setItem("octopus_token", t);
     const current = get();
     if (t === current.token) return;
-    // Authenticated rotation and first-account adoption can prove continuity.
-    if (t && current.token && options?.sameAccount) {
-      set({ token: t, ...(options.identity ? { identity: options.identity } : {}) }); return;
-    }
     set({ ...useSessionStore.getInitialState(), token: t,
       accountGeneration: current.accountGeneration + 1,
       showDelegations: current.showDelegations, sidebarCollapsed: current.sidebarCollapsed,

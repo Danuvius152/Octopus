@@ -42,10 +42,6 @@ from .owner_runtime import AutoArchive, CloseExecution, ReleaseArchive
 _ARCHIVED_MESSAGE_WINDOW = 200
 
 
-class LifecycleAdmissionError(ValueError):
-    """The lifecycle command was refused before taking ownership of effects."""
-
-
 class LifecycleMixin(SessionManagerBase):
 
     async def require_active_agent(self, agent_id: str | None) -> dict[str, Any] | None:
@@ -62,15 +58,13 @@ class LifecycleMixin(SessionManagerBase):
 
     @asynccontextmanager
     async def agent_operation(self, agent_id: str | None) -> AsyncIterator[None]:
-        """Reserve agent work; archive and adoption join it outside the lock.
+        """Reserve agent work; archive joins it outside the lock.
 
         Global turn admission is checked by start_message, which also records
         a refused application/delegation attempt. Session restoration must
         remain available to confirm earlier receipts during shutdown recovery.
         """
         async with self._agent_lifecycle_lock:
-            if self._legacy_transition:
-                raise LifecycleAdmissionError("Account memory handoff is in progress; retry after account recovery")
             await self.require_active_agent(agent_id)
             completion = asyncio.get_running_loop().create_future()
             owners = self._agent_operations.setdefault(agent_id, set())
@@ -104,8 +98,6 @@ class LifecycleMixin(SessionManagerBase):
         archive or delete has no such cleanup authority.
         """
         async with self._agent_lifecycle_lock:
-            if self._legacy_transition and only_request_id is None:
-                raise LifecycleAdmissionError("Account memory handoff is in progress; retry after account recovery")
             completion = asyncio.get_running_loop().create_future()
             owners = self._agent_operations.setdefault(agent_id, set())
             owners.add(completion)
@@ -148,8 +140,6 @@ class LifecycleMixin(SessionManagerBase):
         from ..agent_manager import AgentError, AgentManager
 
         async with self._agent_lifecycle_lock:
-            if self._legacy_transition:
-                raise AgentError("Account memory handoff is in progress; retry after account recovery")
             agent = await self.db.get_agent(agent_id, user_id=user_id)
             if agent is None or agent.get("user_id") != user_id:
                 raise AgentError("Agent not found")
@@ -263,8 +253,8 @@ class LifecycleMixin(SessionManagerBase):
             # (multi-tenancy.md §5). Derived rather than passed in, so every
             # path that creates a session — a route, a schedule firing, a
             # delegation, an application build — gets the owner right without
-            # each of them having to remember. Before accounts exist there is
-            # no owner, and `adopt_orphan_rows` settles that at upgrade.
+            # each of them having to remember. Persistent business admission
+            # requires that agent's current account.
             user_id=owner_id,
         )
         if self.db and persist:

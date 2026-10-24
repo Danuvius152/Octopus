@@ -11,9 +11,12 @@ from pathlib import Path
 
 import pytest
 
+from server import deps
 from server.database import Database
 from server.harness import get_harness
 from server.sessions import SessionManager
+from server.users import UserManager
+from tests.accounts import create_account
 
 
 @pytest.fixture
@@ -58,12 +61,17 @@ async def test_uncertain_terminal_commit_exits_and_restart_keeps_one_outcome(tmp
 import asyncio
 import sys
 from pathlib import Path
+from server import deps
 from server.database import Database
+from tests.accounts import create_account
 
 async def main():
     database = Database(sys.argv[1])
     await database.initialize()
-    await database.save_session("s", "test", "/tmp", "2026-10-14")
+    owner, _ = await create_account(database)
+    agent = await database.get_system_agent(owner["id"])
+    await database.save_session("s", "test", "/tmp", "2026-10-14",
+                                agent_id=agent["id"], user_id=owner["id"])
     commit = database.conn.commit
     async def uncertain():
         if sys.argv[2] == "True":
@@ -86,6 +94,9 @@ asyncio.run(main())
     database = Database(str(path))
     await database.initialize()
     try:
+        owners = await database.list_users()
+        assert len(owners) == 1
+        assert await database.get_session_owner("s") == owners[0]["id"]
         assert await database.count_messages("s") == int(committed)
         await database.record_terminal(**terminal())
         await database.record_terminal(**terminal())
@@ -135,12 +146,14 @@ from pathlib import Path
 from server.database import Database
 from server.harness import get_harness
 from server.sessions import SessionManager
+from tests.accounts import create_account
 from server.sessions.client_submissions import submit_client_message
 
 async def main():
     artifacts = Path(sys.argv[1])
     database = Database(str(artifacts / "runtime.db"))
     await database.initialize()
+    await create_account(database, extra_roots=[artifacts])
     manager = SessionManager()
     await manager.initialize(database)
     agent = await database.get_system_agent()
@@ -214,6 +227,7 @@ async def test_recording_failure_preserves_choice_without_reexecution(tmp_path, 
     proof, _ = _crash_runtime_terminal(tmp_path, committed)
     database = Database(proof["database"])
     await database.initialize()
+    deps.set_user_manager(UserManager(database))
     manager = SessionManager()
     await manager.initialize(database)
     try:
@@ -236,6 +250,7 @@ async def test_recording_failure_preserves_choice_without_reexecution(tmp_path, 
 
 @pytest.mark.asyncio
 async def test_actual_dispatch_waits_for_storage_then_preserves_stop_pause(database, monkeypatch, tmp_path):
+    await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     agent = await database.get_system_agent()

@@ -18,8 +18,10 @@ from server.agent_manager import AgentManager
 from server.config import settings
 from server.database import Database
 from server.deps import get_session_manager
+from server.mcp_identity import mint
 from server.routers import questions, sessions
 from server.session_manager import SessionManager
+from tests.accounts import create_account
 from tests.callback_api import CallbackApi, start_callback_api
 
 pytestmark = [pytest.mark.real, pytest.mark.real_codex]
@@ -47,15 +49,17 @@ async def test_codex_http_question_waits_sixty_five_seconds_then_resumes(
     question_received: asyncio.Future[dict[str, Any]] = loop.create_future()
     # The model cannot know the selected banner before the HTTP tool returns.
     banner = f"HUMAN-BANNER-{uuid.uuid4().hex}"
-    headers = {"Authorization": f"Bearer {settings.auth_token}"}
     question_seen_at: float | None = None
     answer_sent_at: float | None = None
 
     try:
         await db.initialize()
+        owner, bearer = await create_account(db, extra_roots=[tmp_path])
+        headers = {"Authorization": f"Bearer {bearer}"}
         await manager.initialize(db)
         agent = await AgentManager(db).create_agent(
             name="Codex question waiting acceptance",
+            user_id=owner["id"],
             backend="codex",
             reasoning_effort="low",
             service_tier="default",
@@ -74,6 +78,7 @@ async def test_codex_http_question_waits_sixty_five_seconds_then_resumes(
             questions.router,
             sessions.router,
             overrides={get_session_manager: lambda: manager},
+            readiness_token=mint("callback-api-readiness", user_id=owner["id"]),
         )
         monkeypatch.setattr(settings, "port", api.port)
 

@@ -3,20 +3,23 @@
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from server import deps
 from server.database import Database
 from server.main import app
 from server.routers import schedules as schedules_mod
 from server.scheduler import ScheduleRunner
 from server.session_manager import session_manager
-
-TOKEN = "changeme"
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
+from server.users import UserManager
 
 
 @pytest.fixture
 async def client():
     db = Database(":memory:")
     await db.initialize()
+    users = UserManager(db)
+    user = await users.create_user(username="schedule-owner", password="password-for-schedules")
+    deps.set_user_manager(users)
+    headers = {"Authorization": "Bearer " + await users.issue_token(user["id"])}
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
@@ -27,7 +30,7 @@ async def client():
     schedules_mod._runner = runner
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://test", headers=headers) as c:
         yield c
 
     await runner.shutdown()
@@ -38,7 +41,7 @@ async def _create_session(client):
     agent = await session_manager.db.get_system_agent()
     assert agent is not None
     resp = await client.post(
-        "/api/sessions", json={"agent_id": agent["id"], "name": "test"}, headers=HEADERS
+        "/api/sessions", json={"agent_id": agent["id"], "name": "test"}, headers=client.headers
     )
     assert resp.status_code == 201
     return resp.json()["id"]
@@ -46,7 +49,7 @@ async def _create_session(client):
 
 @pytest.mark.asyncio
 async def test_list_schedules_empty(client):
-    resp = await client.get("/api/schedules", headers=HEADERS)
+    resp = await client.get("/api/schedules", headers=client.headers)
     assert resp.status_code == 200
     assert resp.json() == []
 
@@ -65,7 +68,7 @@ async def test_create_schedule(client):
             "prompt": "check status",
             "interval_seconds": 60,
         },
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 201
     data = resp.json()
@@ -74,7 +77,7 @@ async def test_create_schedule(client):
     assert data["interval_seconds"] == 60
     assert data["enabled"] is True
     # The explicit owner must match the target session's owning agent.
-    sess = (await client.get(f"/api/sessions/{session_id}", headers=HEADERS)).json()
+    sess = (await client.get(f"/api/sessions/{session_id}", headers=client.headers)).json()
     assert data["agent_id"] == sess["agent_id"]
     # The originating session is remembered so fires append into it.
     assert data["origin_session_id"] == session_id
@@ -93,7 +96,7 @@ async def test_create_schedule_invalid_session(client):
             "prompt": "hello",
             "interval_seconds": 60,
         },
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 404
 
@@ -112,7 +115,7 @@ async def test_create_schedule_interval_too_short(client):
             "prompt": "hello",
             "interval_seconds": 30,
         },
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 422
 
@@ -131,9 +134,9 @@ async def test_list_schedules_after_create(client):
             "prompt": "hi",
             "interval_seconds": 120,
         },
-        headers=HEADERS,
+        headers=client.headers,
     )
-    resp = await client.get("/api/schedules", headers=HEADERS)
+    resp = await client.get("/api/schedules", headers=client.headers)
     assert resp.status_code == 200
     data = resp.json()
     assert len(data) == 1
@@ -154,14 +157,14 @@ async def test_update_schedule(client):
             "prompt": "hi",
             "interval_seconds": 60,
         },
-        headers=HEADERS,
+        headers=client.headers,
     )
     sched_id = create_resp.json()["id"]
 
     resp = await client.patch(
         f"/api/schedules/{sched_id}",
         json={"name": "updated", "enabled": False},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 200
     data = resp.json()
@@ -174,7 +177,7 @@ async def test_update_schedule_not_found(client):
     resp = await client.patch(
         "/api/schedules/nonexistent",
         json={"name": "x"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert resp.status_code == 404
 
@@ -193,18 +196,18 @@ async def test_delete_schedule(client):
             "prompt": "hi",
             "interval_seconds": 60,
         },
-        headers=HEADERS,
+        headers=client.headers,
     )
     sched_id = create_resp.json()["id"]
 
-    resp = await client.delete(f"/api/schedules/{sched_id}", headers=HEADERS)
+    resp = await client.delete(f"/api/schedules/{sched_id}", headers=client.headers)
     assert resp.status_code == 204
 
-    list_resp = await client.get("/api/schedules", headers=HEADERS)
+    list_resp = await client.get("/api/schedules", headers=client.headers)
     assert list_resp.json() == []
 
 
 @pytest.mark.asyncio
 async def test_auth_required(client):
-    resp = await client.get("/api/schedules")
+    resp = await client.get("/api/schedules", headers={"Authorization": ""})
     assert resp.status_code in (401, 403)

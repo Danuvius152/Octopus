@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .agents import create_default_agent
 from .base import DatabaseBase
 from .transaction import Transaction
 
@@ -37,15 +38,27 @@ _USER_COLUMNS = (
 
 
 async def owner_is_available(tx: Transaction, user_id: str | None) -> bool:
-    """Read the current owner/legacy-era fact within the caller's transaction."""
+    """Business admission requires a current account in the same transaction."""
     if user_id is None:
-        return await tx.fetch_one("SELECT 1 FROM users LIMIT 1") is None
+        return False
     row = await tx.fetch_one("SELECT disabled_at FROM users WHERE id=?", (user_id,))
     return row is not None and not row[0]
 
 
 class UsersMixin(DatabaseBase):
     # -- users --------------------------------------------------------------
+
+    async def _has_setup_data(self, tx: Transaction) -> bool:
+        """Fresh schema records are allowed; retained business rows are not."""
+        tables = await tx.fetch_all(
+            "SELECT name FROM sqlite_schema WHERE type='table' "
+            "AND name NOT LIKE 'sqlite_%' AND name!='schema_migrations'"
+        )
+        for (name,) in tables:
+            quoted = name.replace('"', '""')
+            if await tx.fetch_one(f'SELECT 1 FROM "{quoted}" LIMIT 1') is not None:
+                return True
+        return False
 
     async def create_user(
         self,
@@ -58,8 +71,15 @@ class UsersMixin(DatabaseBase):
         dek_wrapped: str | None = None,
     ) -> dict[str, Any]:
         async with self.transaction(write=True) as tx:
-            return await self._create_user(tx, user_id=user_id, username=username, password_hash=password_hash,
+            return await self._create_account(tx, user_id=user_id, username=username, password_hash=password_hash,
                                            created_at=created_at, is_admin=is_admin, dek_wrapped=dek_wrapped)
+
+    async def _create_account(self, tx: Transaction, *, user_id: str, username: str, password_hash: str,
+                              created_at: str, is_admin: bool = False, dek_wrapped: str | None = None) -> dict[str, Any]:
+        user = await self._create_user(tx, user_id=user_id, username=username, password_hash=password_hash,
+                                       created_at=created_at, is_admin=is_admin, dek_wrapped=dek_wrapped)
+        await create_default_agent(tx, user_id=user_id, created_at=created_at)
+        return user
 
     async def _create_user(self, tx: Transaction, *, user_id: str, username: str, password_hash: str,
                            created_at: str, is_admin: bool = False, dek_wrapped: str | None = None) -> dict[str, Any]:
@@ -117,43 +137,6 @@ class UsersMixin(DatabaseBase):
                 (*fields.values(), user_id),
             )
 
-    # -- ownership ----------------------------------------------------------
-
-    async def adopt_orphan_rows(self, user_id: str) -> dict[str, int]:
-        """Give every unowned row to `user_id`. Returns what moved, per table.
-
-        `user_id IS NULL` is the state of every row written before accounts
-        existed, and of no row written after — so this is both the upgrade path
-        for an existing install (multi-tenancy.md §9) and a no-op on every boot
-        after it. Idempotent by that predicate rather than by a ledger stamp,
-        because "adopt anything orphaned" stays correct if a later import or a
-        restored backup ever produces one.
-        """
-        async with self.transaction(write=True) as tx:
-            return await self._adopt_orphan_rows(tx, user_id)
-
-    async def _adopt_orphan_rows(self, tx: Transaction, user_id: str) -> dict[str, int]:
-        moved: dict[str, int] = {}
-        for table in self.OWNED_TABLES:
-            cursor = await tx.execute(
-                f"UPDATE {table} SET user_id = ? WHERE user_id IS NULL",  # noqa: S608
-                (user_id,),
-            )
-            if cursor.rowcount:
-                moved[table] = cursor.rowcount
-        return moved
-
-    async def count_orphan_rows(self) -> dict[str, int]:
-        """Unowned rows per table — what `adopt_orphan_rows` would move."""
-        async with self.transaction(write=False) as tx:
-            out: dict[str, int] = {}
-            for table in self.OWNED_TABLES:
-                n = await self._count(tx,
-                    f"SELECT COUNT(*) FROM {table} WHERE user_id IS NULL"  # noqa: S608
-                )
-                if n:
-                    out[table] = n
-            return out
 
     # -- invites ------------------------------------------------------------
 

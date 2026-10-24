@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { enterAccountCredentials } from "./current-account";
 
 /** Browser recovery contract; real SQLite reopen is covered in backend tests. */
 test("saved input survives a page reload and only executes after an explicit new send", async ({ page }) => {
@@ -12,8 +13,9 @@ test("saved input survives a page reload and only executes after an explicit new
     const path = new URL(route.request().url()).pathname;
     if (!path.startsWith("/api/")) { await route.continue(); return; }
     let data: unknown = [];
-    if (path === "/api/auth/state") data = { accounts_exist: false };
-    else if (path === "/api/auth/identity") data = { label: "Operator", is_admin: false };
+    if (path === "/api/auth/state") data = { accounts_exist: true };
+    else if (path === "/api/auth/login") data = { token: "browser-token" };
+    else if (path === "/api/auth/identity") data = { user_id: "browser-user", label: "Operator", is_admin: false };
     else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
     else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
     else if (path === "/api/sessions") data = [session];
@@ -37,8 +39,7 @@ test("saved input survives a page reload and only executes after an explicit new
     await expect(page.getByText("Not executed · input saved")).toBeVisible();
   };
   await page.goto("/");
-  await page.locator('input[type="password"]').fill("browser-token");
-  await page.locator(".btn-login").click();
+  await enterAccountCredentials(page);
   await open();
   await page.reload();
   await open();

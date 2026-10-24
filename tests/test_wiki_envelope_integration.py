@@ -68,7 +68,7 @@ async def test_navigation_http_shape_and_shortened_final_pages_keep_every_identi
     _, config = await configure(client, tmp_path, files)
     grants = []
     monkeypatch.setattr(tasks, "record_read", lambda *args: grants.append(args))
-    with active_worker(config, ["Library/note00.md"]) as headers:
+    async with active_worker(config, ["Library/note00.md"], client=client) as headers:
         bridge(client, monkeypatch, headers)
         for name, route, arguments in [
             ("search", "search", {"query": "shared", "intent": "lookup", "view": "compact"}),
@@ -76,7 +76,7 @@ async def test_navigation_http_shape_and_shortened_final_pages_keep_every_identi
             ("list_documents", "documents", {"directory": "Library", "view": "compact"}),
             ("list_documents", "documents", {"directory": "Library", "view": "full"}),
         ]:
-            human = (await client.get("/api/wiki/" + route, headers=api.HEADERS, params=arguments | {"limit": 50})).json()
+            human = (await client.get("/api/wiki/" + route, headers=client.headers, params=arguments | {"limit": 50})).json()
             expected = [item["id"] for item in human["items"]]
             assert len(expected) == 36 and len(human["items"][0]["title"]) > 36000
             seen, cursor, clipped = [], None, False
@@ -97,7 +97,7 @@ async def test_navigation_http_shape_and_shortened_final_pages_keep_every_identi
             else:
                 pytest.fail("pagination did not advance")
             assert seen == expected and clipped, (name, arguments, len(seen))
-        human_graph = (await client.get("/api/wiki/graph", params={"doc": "Library/note00.md"}, headers=api.HEADERS)).json()
+        human_graph = (await client.get("/api/wiki/graph", params={"doc": "Library/note00.md"}, headers=client.headers)).json()
         seen, cursor = [], None
         while True:
             value = await invoke("graph", {"doc": "Library/note00.md", "limit": 36, **({"cursor": cursor} if cursor else {})}, headers)
@@ -111,7 +111,7 @@ async def test_navigation_http_shape_and_shortened_final_pages_keep_every_identi
         assert seen == human_graph["edges"] and grants == []
         expected, cursor = [], None
         while True:
-            human = (await client.get("/api/wiki/maintenance-status", params={"limit": 50, **({"cursor": cursor} if cursor else {})}, headers=api.HEADERS)).json()
+            human = (await client.get("/api/wiki/maintenance-status", params={"limit": 50, **({"cursor": cursor} if cursor else {})}, headers=client.headers)).json()
             expected.extend(item["current"]["id"] for item in human["items"])
             cursor = human["next_cursor"]
             if cursor is None:
@@ -133,7 +133,7 @@ async def test_full_model_reads_clip_before_grants_and_finish_exact_unicode(clie
     original = '\ufeff# Source\r\n\r\n' + '甲😀e\u0301\\"\t条件。\r\n' * 2200
     text = original.removeprefix('\ufeff')
     _, config = await configure(client, tmp_path, {"Library/note.md": original})
-    with active_worker(config, ["Library/note.md"]) as headers:
+    async with active_worker(config, ["Library/note.md"], client=client) as headers:
         bridge(client, monkeypatch, headers)
         task = tasks.require(verify(headers["Authorization"].split()[1]))
         passages, start, revision = [], 0, None
@@ -152,19 +152,19 @@ async def test_full_model_reads_clip_before_grants_and_finish_exact_unicode(clie
             if start == 0:
                 assert part["end"] < len(text)
                 with pytest.raises(WikiError, match="full current note"):
-                    tasks.require_read(task, registry.store(None), "Library/note.md", revision)
+                    tasks.require_read(task, registry.store(task.user_id), "Library/note.md", revision)
             passages.append(part["content"])
             start = item["next_start"]
             if start is None:
                 break
         assert "".join(passages) == text
-        tasks.require_read(task, registry.store(None), "Library/note.md", revision)
+        tasks.require_read(task, registry.store(task.user_id), "Library/note.md", revision)
 
 
 async def test_full_metadata_refusal_retains_prior_receipts_without_granting_more(client, tmp_path, monkeypatch):
     text = "# Source\n\n" + "## Heading\n\nA paragraph.\n\n" * 600
     _, config = await configure(client, tmp_path, {"Library/note.md": text})
-    with active_worker(config, ["Library/note.md"]) as headers:
+    async with active_worker(config, ["Library/note.md"], client=client) as headers:
         bridge(client, monkeypatch, headers)
         task = tasks.require(verify(headers["Authorization"].split()[1]))
         await invoke("read", {"doc": "Library/note.md", "length": 4}, headers)
@@ -178,10 +178,11 @@ async def test_full_metadata_refusal_retains_prior_receipts_without_granting_mor
 async def test_raw_large_block_keeps_hash_and_can_continue_without_unseen_edit_grants(client, tmp_path, monkeypatch):
     original = "\ufeff# Source\r\n\r\n" + "甲😀条件与理由。\r\n" * 6000 + "\r\nEnd.\r\n"
     root, config = await configure(client, tmp_path, {"Library/note.md": original})
-    full = WikiCuration(registry.store(None)).blocks("Library/note.md")
+    owner = (await api.session_manager.db.get_system_agent())["user_id"]
+    full = WikiCuration(registry.store(owner)).blocks("Library/note.md")
     block = max(full["blocks"], key=lambda part: part["characters"])
     assert block["sha256"] == hashlib.sha256(block["content"].encode()).hexdigest()
-    with active_worker(config, ["Library/note.md"]) as headers:
+    async with active_worker(config, ["Library/note.md"], client=client) as headers:
         bridge(client, monkeypatch, headers)
         task = tasks.require(verify(headers["Authorization"].split()[1]))
         cursor, passages = None, []
@@ -217,10 +218,11 @@ async def test_raw_large_block_keeps_hash_and_can_continue_without_unseen_edit_g
 
 async def test_compact_jobs_pages_keep_exact_keys_and_minimum_oversize_is_refused(client, tmp_path, monkeypatch):
     _, config = await configure(client, tmp_path, {"Library/note.md": "# Source\nText.\n"})
-    jobs = WikiJobs(None)
+    owner = (await api.session_manager.db.get_system_agent())["user_id"]
+    jobs = WikiJobs(owner)
     for index in range(8):
         jobs.maintain(str(index) + "甲😀" * 1200, "", f"purpose{index}", ["Library/note.md"], None, [], "human")
-    with active_worker(config, ["Library/note.md"]) as headers:
+    async with active_worker(config, ["Library/note.md"], client=client) as headers:
         bridge(client, monkeypatch, headers)
         # active_worker adds one genuine scoped job as well.
         expected = jobs.list(limit=30, view="full")["items"]

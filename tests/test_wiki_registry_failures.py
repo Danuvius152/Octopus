@@ -5,7 +5,6 @@ import importlib
 import json
 import sqlite3
 import threading
-import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -164,8 +163,7 @@ registry.close()
 
 
 @pytest.fixture
-async def http_boundary(tmp_path, monkeypatch, request):
-    account = request.param
+async def http_boundary(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "wiki_dir", str(tmp_path / "legacy-wiki"))
     registry = WikiRegistry()
     monkeypatch.setattr(wiki_router, "registry", registry)
@@ -173,12 +171,9 @@ async def http_boundary(tmp_path, monkeypatch, request):
     await db.initialize()
     users = UserManager(db)
     deps.set_user_manager(users)
-    owner = None
-    token = "changeme"
-    if account:
-        user = await users.create_user(username="reader", password="test-password")
-        owner = user["id"]
-        token = await users.issue_token(owner)
+    user = await users.create_user(username="reader", password="test-password")
+    owner = user["id"]
+    token = await users.issue_token(owner)
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             yield registry, owner, client, {"Authorization": "Bearer " + token}
@@ -187,7 +182,6 @@ async def http_boundary(tmp_path, monkeypatch, request):
         await db.close()
 
 
-@pytest.mark.parametrize("http_boundary", [False, True], indirect=True)
 async def test_unregistered_http_queries_return_404_without_creating_state(http_boundary):
     registry, owner, client, headers = http_boundary
     state = registry.state(owner)
@@ -205,7 +199,6 @@ async def test_unregistered_http_queries_return_404_without_creating_state(http_
         assert not state.exists()
 
 
-@pytest.mark.parametrize("http_boundary", [False, True], indirect=True)
 @pytest.mark.parametrize("missing", [("registration_protocol",), ("registration_generation",),
                                     ("registration_protocol", "registration_generation")])
 async def test_initialized_config_field_loss_is_rejected_without_rewriting(
@@ -440,69 +433,3 @@ def test_cold_store_refuses_hidden_construction_under_outer_locks(registered, mo
             cold.store(None)
         assert unavailable.value.status == 503
     assert not cold._constructing and store.events._references == 1
-
-
-@pytest.mark.parametrize("revoke", ["block", "close", "journal_phase"])
-def test_controlled_reopen_cannot_publish_after_lifecycle_or_journal_changes(
-    registered, monkeypatch, revoke
-):
-    from server.wiki import account_upgrade as upgrade
-
-    registry, root, config = registered
-    owner = "migration-owner"
-    monkeypatch.setattr(upgrade, "registry", registry)
-    identifier = uuid.uuid4().hex
-    journal = {"version": 1, "upgrade_id": identifier, "phase": "preparing", "user_id": owner,
-               "username": "owner", "adopt": True, "source": str(registry.state(None)),
-               "stage": str(upgrade.journal_path().parent / (".wiki-adoption-" + identifier)),
-               "config": config}
-    registry.block(None)
-    registry.state(owner).parent.mkdir(parents=True, exist_ok=True)
-    upgrade.prepare(journal)
-    journal["phase"] = "account_created"
-    upgrade.save(journal)
-    upgrade.publish(journal)
-    registry.block(owner)
-    journal["phase"] = "reopening"
-    upgrade.save(journal)
-    entered, release = threading.Event(), threading.Event()
-    real_store = registry_module.WikiStore
-    candidates = []
-
-    def paused(*args, **kwargs):
-        candidate = real_store(*args, **kwargs)
-        candidates.append(candidate)
-        entered.set()
-        assert release.wait(5)
-        return candidate
-
-    monkeypatch.setattr(registry_module, "WikiStore", paused)
-    with ThreadPoolExecutor(2) as pool:
-        creating = pool.submit(registry.reopen_for_upgrade, owner, journal)
-        draining = None
-        try:
-            assert entered.wait(2)
-            if revoke == "journal_phase":
-                journal["phase"] = "activating"
-                upgrade.save(journal)
-            else:
-                draining = pool.submit(registry.block, owner) if revoke == "block" else pool.submit(registry.close)
-                deadline = threading.Event()
-                for _ in range(200):
-                    with registry._lock:
-                        revoked = all(permit.revoked for permit in registry._constructing)
-                    if revoked:
-                        break
-                    deadline.wait(0.005)
-                assert revoked and not draining.done()
-        finally:
-            release.set()
-        with pytest.raises(WikiError) as unavailable:
-            creating.result(timeout=3)
-        assert unavailable.value.status == 503
-        if draining is not None:
-            draining.result(timeout=3)
-    assert candidates and all(store._events_released for store in candidates)
-    assert not registry._constructing and not registry._migration_caps
-    with pytest.raises(WikiError):
-        registry.store(owner)

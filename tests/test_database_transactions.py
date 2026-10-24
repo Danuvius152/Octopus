@@ -189,10 +189,12 @@ import asyncio
 import sys
 from pathlib import Path
 from server.database import Database
+from server.users import UserManager
 
 async def main():
     database = Database(sys.argv[1])
     await database.initialize()
+    await UserManager(database).create_user(username="transaction-owner", password="transaction-password")
     commit = database.conn.commit
     async def failed_commit():
         if sys.argv[2] == "True":
@@ -231,9 +233,11 @@ async def test_hung_commit_or_rollback_still_exits_within_the_original_deadline(
 import asyncio,sys,threading,time
 from pathlib import Path
 from server.database import Database
+from server.users import UserManager
 async def main():
     database=Database(sys.argv[1])
     await database.initialize()
+    await UserManager(database).create_user(username="transaction-owner", password="transaction-password")
     operation=sys.argv[2]
     driver=getattr(database.conn._conn,operation)
     entered=threading.Event()

@@ -15,6 +15,7 @@ from server.deps import get_session_manager
 from server.harness import get_harness
 from server.routers.sessions import router
 from server.sessions import SessionManager
+from tests.accounts import create_account
 
 
 @pytest.fixture
@@ -23,6 +24,7 @@ async def runtime(monkeypatch):
     monkeypatch.setattr(settings, "turn_max_seconds", 0)
     db = Database(":memory:")
     await db.initialize()
+    _, bearer = await create_account(db)
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
@@ -33,7 +35,7 @@ async def runtime(monkeypatch):
     try:
         async with httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app), base_url="http://test",
-            headers={"Authorization": "Bearer changeme"},
+            headers={"Authorization": "Bearer " + bearer},
         ) as client:
             yield manager, session, client
     finally:

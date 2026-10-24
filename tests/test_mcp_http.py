@@ -20,6 +20,23 @@ from server.harness import assembly
 from server.mcp_identity import McpScope, mint, verify
 
 
+@pytest.fixture
+async def tool_owner():
+    from server.database import Database
+    from server.deps import set_user_manager
+    from server.users import UserManager
+
+    database = Database(":memory:")
+    await database.initialize()
+    users = UserManager(database)
+    owner = await users.create_user(username="tool-owner", password="test-password")
+    set_user_manager(users)
+    try:
+        yield owner
+    finally:
+        await database.close()
+
+
 class TestIdentity:
     def test_a_bearer_round_trips_to_its_scope(self):
         assert verify(mint("sess-a")) == McpScope("sess-a", None)
@@ -179,7 +196,7 @@ class TestServedToolCalls:
     """
 
     @pytest.mark.asyncio
-    async def test_a_sync_tool_answers_over_http(self):
+    async def test_a_sync_tool_answers_over_http(self, tool_owner):
         import httpx
         from mcp import ClientSession
         from mcp.client.streamable_http import streamable_http_client
@@ -188,7 +205,7 @@ class TestServedToolCalls:
         from server.routers import schedules as schedules_routes
         from tests.callback_api import start_callback_api
 
-        api = await start_callback_api(schedules_routes.session_router)
+        api = await start_callback_api(schedules_routes.session_router, readiness_token=mint("readiness", user_id=tool_owner["id"]))
         original_port = settings.port
         settings.port = api.port
         try:
@@ -198,7 +215,7 @@ class TestServedToolCalls:
             # rather than hang the suite — a tool that deadlocks the loop cannot
             # finish inside it.
             client = httpx.AsyncClient(
-                headers={"Authorization": f"Bearer {mint('no-such-session')}"},
+                headers={"Authorization": f"Bearer {mint('no-such-session', user_id=tool_owner['id'])}"},
                 timeout=15,
             )
             async with streamable_http_client(url, http_client=client) as (
@@ -241,7 +258,7 @@ class TestServedToolCalls:
                 assert tool.is_async, f"mcp__{name}__{tool_name} runs on the loop"
 
     @pytest.mark.asyncio
-    async def test_a_second_host_in_the_process_still_serves(self):
+    async def test_a_second_host_in_the_process_still_serves(self, tool_owner):
         """Stopping one host must not take the transport down with it.
 
         `sse_starlette` decides whether to cut an SSE stream short from a
@@ -268,7 +285,7 @@ class TestServedToolCalls:
         for round_ in range(2):
             if round_:
                 AppStatus.should_exit = True
-            api = await start_callback_api(schedules_routes.session_router)
+            api = await start_callback_api(schedules_routes.session_router, readiness_token=mint("readiness", user_id=tool_owner["id"]))
             try:
                 async with httpx.AsyncClient(timeout=10) as client:
                     reply = await client.post(
@@ -284,7 +301,7 @@ class TestServedToolCalls:
                             },
                         },
                         headers={
-                            "Authorization": f"Bearer {mint('s-1')}",
+                            "Authorization": f"Bearer {mint('s-1', user_id=tool_owner['id'])}",
                             "Accept": "application/json, text/event-stream",
                             "Content-Type": "application/json",
                         },
@@ -298,7 +315,7 @@ class TestServedToolCalls:
             assert AppStatus.should_exit is False
 
     @pytest.mark.asyncio
-    async def test_a_400_is_logged_with_the_sdks_reason(self, caplog):
+    async def test_a_400_is_logged_with_the_sdks_reason(self, caplog, tool_owner):
         """The Monitor only records the status; the reason is in the body.
 
         Every CLI start draws one 400 per namespace, and without the SDK's
@@ -312,7 +329,7 @@ class TestServedToolCalls:
         from server.routers import schedules as schedules_routes
         from tests.callback_api import start_callback_api
 
-        api = await start_callback_api(schedules_routes.session_router)
+        api = await start_callback_api(schedules_routes.session_router, readiness_token=mint("readiness", user_id=tool_owner["id"]))
         try:
             with caplog.at_level(logging.INFO, logger="server.mcp_http"):
                 async with httpx.AsyncClient(timeout=10) as client:
@@ -320,7 +337,7 @@ class TestServedToolCalls:
                         f"http://127.0.0.1:{api.port}/mcp/bg/mcp",
                         json={"jsonrpc": "2.0", "id": 1, "method": "tools/list"},
                         headers={
-                            "Authorization": f"Bearer {mint('s-1')}",
+                            "Authorization": f"Bearer {mint('s-1', user_id=tool_owner['id'])}",
                             "Accept": "application/json, text/event-stream",
                             "Content-Type": "application/json",
                         },

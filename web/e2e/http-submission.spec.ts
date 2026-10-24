@@ -1,8 +1,9 @@
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { expect, test } from "@playwright/test";
 import { systemAgentId } from "./system-agent";
 
 const API = "http://localhost:8765/api";
-const headers = { Authorization: "Bearer changeme" };
+const headers = { Authorization: `Bearer ${TEST_BEARER}` };
 
 for (const noCrypto of [false, true]) {
   test(noCrypto ? "keeps the draft without submitting when Web Crypto is unavailable"
@@ -24,15 +25,14 @@ for (const noCrypto of [false, true]) {
           client_request_id: data.client_request_id, accepted: false, message: "Session not found" }));
       });
     });
-    const response = await request.post(`${API}/sessions`, { headers, data: { agent_id: await systemAgentId(request, `${API}/sessions`, headers), name: `HTTP draft ${noCrypto}`, working_dir: "/tmp" } });
+    const response = await request.post(`${API}/sessions`, { headers, data: { agent_id: await systemAgentId(request, `${API}/sessions`, headers), name: `HTTP draft ${noCrypto}`, } });
     expect(response.ok()).toBeTruthy();
     const session = await response.json();
     try {
       await page.goto(origin);
       expect(await page.evaluate(() => window.isSecureContext)).toBe(false);
       expect(await page.evaluate(() => typeof globalThis.crypto?.randomUUID)).toBe("undefined");
-      await page.locator('input[type="password"]').fill("changeme");
-      await page.locator(".btn-login").click();
+      await enterAccountCredentials(page);
       await expect(page.locator(".agent-list-header")).toBeVisible();
       await page.locator(".agent-item", { hasText: "Octo" }).click();
       await page.locator(".session-item", { hasText: session.name }).click();

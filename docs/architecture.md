@@ -68,8 +68,8 @@ An **Agent** is the durable definition of an assistant: name/avatar, system
 prompt, model, default backend (`claude-code` | `codex`), an attached credential,
 an optional reasoning-effort default (Codex),
 its MCP/tool set, tool allow/deny policy, and enabled connectors. Agents **own**
-their Sessions and Schedules. A protected **Default Agent**
-("Octo", `is_system=1`) always exists.
+their Sessions and Schedules. Each account starts with its own protected
+**Default Agent** (`is_system=1`).
 
 Global session and schedule creation requires an explicit, authorized
 `agent_id`. Agent-scoped URLs supply that identity themselves; their request
@@ -103,10 +103,12 @@ One install serves several people, each fully isolated (design:
   flag, and a wrapped **data-encryption key** (DEK). Signup is invite-only
   (`invites`); a login mints a **session bearer** stored hashed in `auth_tokens`
   (30-day TTL) — that bearer, not the password, is what every later request
-  carries. Before the first account exists the install authenticates with its
-  **install token** (`OCTOPUS_AUTH_TOKEN`), and creating the first account (`POST
-  /api/auth/bootstrap`, install-token-authed) makes it admin and adopts whatever
-  data is already on disk.
+  carries. An empty installation uses `POST /api/auth/setup` to create its first
+  administrator, wrapped DEK and owned protected agent in one SQL transaction.
+  `OCTOPUS_AUTH_TOKEN` proves setup authority only; ordinary business requires
+  an account or authorized MCP scope. Missing proof configuration or retained
+  business data blocks setup. A lost setup response is recovered by ordinary
+  login, which also completes missing account directories without replacing keys.
   Both the sidebar and Settings sign-out actions await the same device-bearer
   revocation before clearing local authentication; a network failure still
   allows local sign-out.
@@ -118,8 +120,8 @@ One install serves several people, each fully isolated (design:
 - **Key isolation.** A server-held **master key** wraps each account's DEK, and
   that DEK — not the access token — encrypts that account's credentials and
   connector tokens, so even direct DB access cannot read one account's secrets
-  with another's key. A password change re-wraps the DEK; dropping it
-  crypto-shreds the account.
+  with another's key. Password changes preserve the DEK and can revoke other
+  account bearers; losing the master key or wrapped DEK loses access to secrets.
 - **Workspace confinement.** Each account gets a directory under `users_root`
   (`~/.octopus/users/<id>/`) holding its workspace, agent memory, applications
   and uploads (`paths_for(user_id)` in `server/workspace.py`). A session's
@@ -138,8 +140,8 @@ One install serves several people, each fully isolated (design:
 |---|---|
 | `main.py` | FastAPI app + lifespan. Clears the `CLAUDECODE` env var so a nested `claude` subprocess behaves normally. Wires DB, SessionManager, ScheduleRunner, ConnectorManager, AgentManager, the in-process MCP namespaces, the metrics store, optional CloudflareTunnel. Registers routers, `GET /api/backends`, `GET /health`, and the SPA static mount. |
 | `config.py` | Pydantic settings from `.env` (prefix `OCTOPUS_`) — see **Configuration** below. |
-| `auth.py` / `users.py` / `bootstrap.py` | Accounts: login → session bearer, register-against-invite, password change, admin invites/disable, first-account bootstrap. Requests present a session bearer (`Authorization` / WS `?token=`), or the install token before any account exists; `deps.py` resolves the scoped `user_id`. |
-| `crypto.py` | Encryption at rest: a server-held **master key** wraps each account's data-encryption key (DEK), which Fernet-encrypts that account's secrets. Install-era secrets (before the first account) are keyed by `OCTOPUS_AUTH_TOKEN`. A password only authenticates. |
+| `auth.py` / `users.py` | Accounts: empty-installation setup → first admin and owned default agent, login → session bearer, invite registration, password change and admin operations. Setup proof is checked only at `/api/auth/setup`; `deps.py` resolves the current business identity and owner. Historical handoff protection remains separate from new setup. |
+| `crypto.py` | Encryption at rest: a server-held **master key** wraps each account's data-encryption key (DEK), which Fernet-encrypts that account's secrets. A password only authenticates. Historical install-key handling remains confined to retained handoff protection. |
 | `models.py` | Pydantic request/response models + enums (`SessionStatus`, `MessageRole`, agent/schedule/connector/credential DTOs). |
 | `session_manager.py` | Core turn engine. Owns in-memory `Session` objects, drives each turn through the **Harness**, persists + broadcasts events to WebSocket clients, runs tool-result forwarding, interactive questions, mid-turn interrupt, the per-session message queue, premature-exit auto-respawn, and large-prompt spill. |
 | `sessions/` | SessionOwner serializes mutable execution, question and lifecycle state; managed Harness I/O reports original results. Completion consumers read the plan §3.2 contract. |
@@ -372,14 +374,15 @@ correlated `submission` or `command_receipt`, including refusals.
 
 ## REST API
 
-All endpoints require `Authorization: Bearer <token>` — a per-account session
-bearer, or the install token before the first account exists. Owned resources
-are scoped to the caller's account; admin-only routes are marked below.
+Business endpoints require `Authorization: Bearer <token>` from an account or
+an authorized MCP scope. Owned resources are scoped to that account; admin-only
+routes are marked below. Auth state, login and invite registration have their
+own admission rules; setup checks its dedicated proof on an empty installation.
 
 ```
 # Accounts & auth
 GET                /api/auth/state                       # does this install have accounts yet?
-POST               /api/auth/bootstrap                   # create the first account (install-token auth)
+POST               /api/auth/setup                       # empty installation: setup proof, username, password
 POST               /api/auth/login | /register | /logout # register uses an invite code
 POST               /api/auth/password                    # change password (re-wraps the DEK)
 GET                /api/auth/identity | /workspace
@@ -487,7 +490,8 @@ migrations (never re-create or duplicate the schema in docs).
 
 ## Memory
 
-Each agent gets one canonical markdown dir, `<agents_dir>/<id>/memory/`, shared
+Each owned agent gets one canonical markdown dir,
+`<users_root>/<user_id>/agents/<id>/memory/`, shared
 by both backends (design: [`plans/memory.md`](plans/memory.md)):
 
 - **Claude Code** points its auto-memory there via the

@@ -16,9 +16,7 @@ from server.config import settings
 from server.database import Database
 from server.main import app
 from server.routers import credentials as credentials_mod
-
-TOKEN = "changeme"
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
+from tests.accounts import create_account
 
 _FAKE = os.path.join(os.path.dirname(__file__), "_fixtures", "fake_codex_login.py")
 
@@ -42,9 +40,11 @@ def _isolate_codex_home(tmp_path, monkeypatch):
 async def client():
     db = Database(":memory:")
     await db.initialize()
+    _, bearer = await create_account(db)
     credentials_mod.set_db(db)
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://test",
+                           headers={"Authorization": f"Bearer {bearer}"}) as c:
         yield c, db
     await db.close()
 
@@ -200,7 +200,7 @@ async def test_shutdown_owns_login_spawn_before_its_process_handle_arrives(monke
 async def test_codex_login_route_end_to_end(client):
     c, db = client
     start = await c.post(
-        "/api/credentials/codex/start", json={"label": "ChatGPT Plus"}, headers=HEADERS
+        "/api/credentials/codex/start", json={"label": "ChatGPT Plus"}, headers=c.headers
     )
     assert start.status_code == 201, start.text
     login_id = start.json()["login_id"]
@@ -210,7 +210,7 @@ async def test_codex_login_route_end_to_end(client):
     cred = None
     saw_code = False
     for _ in range(50):
-        st = await c.get(f"/api/credentials/codex/{login_id}/status", headers=HEADERS)
+        st = await c.get(f"/api/credentials/codex/{login_id}/status", headers=c.headers)
         assert st.status_code == 200
         data = st.json()
         if data.get("verification_url") and data.get("user_code"):
@@ -229,13 +229,15 @@ async def test_codex_login_route_end_to_end(client):
     assert cred["auth_type"] == "oauth"
 
     # It shows up in the credential list, scoped to the codex backend.
-    listed = (await c.get("/api/credentials", headers=HEADERS)).json()
+    listed = (await c.get("/api/credentials", headers=c.headers)).json()
     assert any(x["id"] == cred["id"] and x["backend"] == "codex" for x in listed)
 
     # Deleting it removes the CODEX_HOME dir.
+    row = await db.get_credential(cred["id"])
+    assert row["user_id"] == (await db.get_system_agent())["user_id"]
     home = codex_login.codex_home_for(cred["id"])
     assert os.path.exists(os.path.join(home, "auth.json"))
-    delr = await c.delete(f"/api/credentials/{cred['id']}", headers=HEADERS)
+    delr = await c.delete(f"/api/credentials/{cred['id']}", headers=c.headers)
     assert delr.status_code == 204
     assert not os.path.exists(home)
 
@@ -243,7 +245,7 @@ async def test_codex_login_route_end_to_end(client):
 @pytest.mark.asyncio
 async def test_codex_login_status_unknown(client):
     c, _ = client
-    r = await c.get("/api/credentials/codex/nope/status", headers=HEADERS)
+    r = await c.get("/api/credentials/codex/nope/status", headers=c.headers)
     assert r.status_code == 404
 
 
@@ -287,12 +289,12 @@ async def test_codex_login_cancel_route(client, monkeypatch):
     monkeypatch.setenv("CODEX_FAKE_LOGIN_MODE", "hang")
     c, _ = client
     start = await c.post(
-        "/api/credentials/codex/start", json={"label": "x"}, headers=HEADERS
+        "/api/credentials/codex/start", json={"label": "x"}, headers=c.headers
     )
     login_id = start.json()["login_id"]
     cancel = await c.post(
-        "/api/credentials/codex/cancel", json={"login_id": login_id}, headers=HEADERS
+        "/api/credentials/codex/cancel", json={"login_id": login_id}, headers=c.headers
     )
     assert cancel.status_code == 204
-    st = await c.get(f"/api/credentials/codex/{login_id}/status", headers=HEADERS)
+    st = await c.get(f"/api/credentials/codex/{login_id}/status", headers=c.headers)
     assert st.json()["state"] == "cancelled"

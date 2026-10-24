@@ -1,3 +1,4 @@
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 /**
  * End-to-end coverage of applications (docs/plans/applications.md).
  *
@@ -13,7 +14,7 @@
 
 import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
 
-const TOKEN = "changeme";
+const TOKEN = TEST_BEARER;
 const SERVER_URL = "http://localhost:8765";
 const API = `${SERVER_URL}/api`;
 
@@ -66,8 +67,7 @@ test.afterAll(async ({ request }) => {
 
 async function login(page: Page) {
   await page.goto("/");
-  await page.locator('input[type="password"]').fill(TOKEN);
-  await page.locator("button.btn-login").click();
+  await enterAccountCredentials(page);
   await expect(page.locator(".agent-list-header")).toBeVisible();
 }
 

@@ -21,7 +21,7 @@ async def setup_notes(client, tmp_path, *, index="Library/index.md", topic=True)
            + "# Navigation\r\n\r\nKeep these manual entries and explanations.\r\n").encode()
     (root / index).write_bytes(raw)
     config = await wiki_api.configure(client, root)
-    jobs = WikiJobs(None)
+    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     job = jobs.maintain("selected-note", "", "Ingest only the selected note, including necessary index links",
                         ["Library/requested.md"], None, [], "human")
     return root, jobs, job, config, raw
@@ -43,7 +43,7 @@ def addition(source, navigation):
 @pytest.mark.parametrize("index,topic", [("Library/index.md", False), ("Wiki/topics/topic.md", True)])
 async def test_selected_note_can_add_an_index_link_without_reviewing_or_rewriting_the_index(client, tmp_path, index, topic):
     root, jobs, job, config, original = await setup_notes(client, tmp_path, index=index, topic=topic)
-    with assigned(job, config) as (headers, task):
+    async with assigned(job, config, client=client) as (headers, task):
         source, navigation = await read_pair(client, headers, index)
         added = await client.post("/api/wiki/organize", headers=headers, json=addition(source, navigation))
         assert added.status_code == 200, added.text
@@ -78,7 +78,7 @@ async def test_selected_note_can_add_an_index_link_without_reviewing_or_rewritin
 @pytest.mark.parametrize("case", ["ordinary-note", "unassigned-relation", "frontmatter-change", "new-index"])
 async def test_supporting_index_addition_cannot_expand_to_other_notes_or_body_changes(client, tmp_path, case):
     root, _, job, config, original = await setup_notes(client, tmp_path)
-    with assigned(job, config) as (headers, _):
+    async with assigned(job, config, client=client) as (headers, _):
         source, navigation = await read_pair(client, headers, "Library/index.md")
         body = addition(source, navigation)
         if case == "ordinary-note":
@@ -103,7 +103,7 @@ async def test_mcp_default_fields_allow_navigation_but_actual_metadata_changes_d
 
     root, _, job, config, original = await setup_notes(client, tmp_path)
     monkeypatch.setattr(wiki, "call", lambda method, path, *, body: body)
-    with assigned(job, config) as (headers, _):
+    async with assigned(job, config, client=client) as (headers, _):
         source, navigation = await read_pair(client, headers, "Library/index.md")
         payload = wiki.organize(**addition(source, navigation))
         assert payload["key_note"] is None and payload["frontmatter_patch"] is None
@@ -120,8 +120,8 @@ async def test_mcp_default_fields_allow_navigation_but_actual_metadata_changes_d
 async def test_navigation_preserves_old_owned_evidence_and_does_not_wash_human_edits(client, tmp_path, edited):
     root, jobs, job, config, _ = await setup_notes(client, tmp_path)
     index = "Library/index.md"
-    read = (await client.get("/api/wiki/read", headers=wiki_api.HEADERS, params={"doc": index})).json()
-    organized = await client.post("/api/wiki/organize", headers=wiki_api.HEADERS, json={
+    read = (await client.get("/api/wiki/read", headers=client.headers, params={"doc": index})).json()
+    organized = await client.post("/api/wiki/organize", headers=client.headers, json={
         "path": index, "expected_revision": read["revision"], "key_note": "Original owned summary.", "reason": "Existing trusted organization"})
     assert organized.status_code == 200, organized.text
     with jobs.store.connect() as db:
@@ -130,7 +130,7 @@ async def test_navigation_preserves_old_owned_evidence_and_does_not_wash_human_e
         b"manual entries" if edited == "body" else b"Original owned summary.",
         b"human entries" if edited == "body" else b"Human corrected summary.")
     (root / index).write_bytes(raw)
-    with assigned(job, config) as (headers, _):
+    async with assigned(job, config, client=client) as (headers, _):
         source, navigation = await read_pair(client, headers, index)
         assert navigation["stale"] and navigation["metadata"]["needs_refresh"]
         added = await client.post("/api/wiki/organize", headers=headers, json=addition(source, navigation))
@@ -152,14 +152,14 @@ async def test_navigation_preserves_old_owned_evidence_and_does_not_wash_human_e
 async def test_later_explicit_index_organization_keeps_owned_navigation_links(client, tmp_path, frontmatter):
     root, jobs, job, config, _ = await setup_notes(client, tmp_path)
     index = "Library/index.md"
-    with assigned(job, config) as (headers, _):
+    async with assigned(job, config, client=client) as (headers, _):
         source, navigation = await read_pair(client, headers, index)
         added = await client.post("/api/wiki/organize", headers=headers, json=addition(source, navigation))
         assert added.status_code == 200, added.text
     with jobs.store.connect() as db:
         nav_region = json.loads(db.execute("SELECT regions FROM managed_notes WHERE path=?", (index,)).fetchone()[0])[0]
     own = jobs.maintain("explicit-index", "", "Organize this index itself", [index], None, [], "human")
-    with assigned(own, config) as (headers, _):
+    async with assigned(own, config, client=client) as (headers, _):
         current = (await client.get("/api/wiki/read", headers=headers, params={"doc": index})).json()
         body = {"path": index, "expected_revision": current["revision"], "key_note": "Navigation for the related topic.", "reason": "Explicit index body task"}
         if frontmatter:
@@ -179,7 +179,7 @@ async def test_navigation_deduplicates_resolved_identity_and_never_accepts_an_in
     await settle(client, jobs, config, path=index)
     before_b = (await state(client, index))["items"][0]
     before_a = (await state(client, "Library/requested.md"))["items"][0]
-    with assigned(job, config) as (headers, _):
+    async with assigned(job, config, client=client) as (headers, _):
         source, navigation = await read_pair(client, headers, index)
         added = await client.post("/api/wiki/organize", headers=headers, json=addition(source, navigation))
         assert added.status_code == 200, added.text
@@ -196,7 +196,7 @@ async def test_navigation_deduplicates_resolved_identity_and_never_accepts_an_in
     assert after_a["baseline"] is None and after_a["attempt_count"] == before_a["attempt_count"] == 1
     # A title link with different spelling resolves to the same actual A.
     (root / index).write_bytes(original + b"\r\n- [[Requested]]\r\n")
-    with assigned(job, config) as (headers, _):
+    async with assigned(job, config, client=client) as (headers, _):
         source, navigation = await read_pair(client, headers, index)
         before = (root / index).read_bytes()
         repeated = await client.post("/api/wiki/organize", headers=headers, json=addition(source, navigation))
@@ -216,11 +216,11 @@ async def test_navigation_checks_the_original_scope_at_each_write_boundary(clien
     root, jobs, job, config, original = await setup_notes(client, tmp_path)
     monkeypatch.setattr(mcp_identity, "_run_leases", {})
     monkeypatch.setattr(mcp_identity, "_closed_works", set())
-    with assigned(job, config) as (diagnostic, task):
+    async with assigned(job, config, client=client) as (diagnostic, task):
         token = mcp_identity.verify(diagnostic["Authorization"].removeprefix("Bearer ")).wiki_task_id
         lease, work = uuid4().hex, uuid4().hex
         mcp_identity.register_run(lease, task.session_id, task.user_id, work)
-        bearer = mcp_identity.mint(task.session_id, wiki_task_id=token, run_lease_id=lease, work_id=work)
+        bearer = mcp_identity.mint(task.session_id, user_id=task.user_id, wiki_task_id=token, run_lease_id=lease, work_id=work)
         headers = {"Authorization": "Bearer " + bearer}
         source, navigation = await read_pair(client, headers, "Library/index.md")
         if phase == "repeat":
@@ -279,7 +279,7 @@ async def test_navigation_cannot_reuse_stale_or_same_byte_replacement_proofs(cli
     from server.wiki import history
 
     root, jobs, job, config, original = await setup_notes(client, tmp_path)
-    with assigned(job, config) as (headers, _):
+    async with assigned(job, config, client=client) as (headers, _):
         source, navigation = await read_pair(client, headers, "Library/index.md")
         injected = []
 
@@ -331,7 +331,7 @@ async def test_navigation_accepts_actual_ingest_and_bound_creation_identities_wi
     else:
         job = jobs.maintain("created-nav", "", "Create a requested page", [], None, [], "human",
                             creation={"purpose": "requested_knowledge_page", "paths": [path]})
-    with assigned(job, config) as (headers, _):
+    async with assigned(job, config, client=client) as (headers, _):
         created = await publish(client, headers, path, job["items"][0]["reservation_id"]) if origin == "created" else None
         if created:
             assert created.status_code == 200, created.text
@@ -364,10 +364,10 @@ async def test_only_navigation_output_does_not_complete_primary_or_unstarted_cre
         async def start_message(self, session_id, prompt, **kwargs):
             async def events():
                 self.turns += 1
-                token = tasks.open(SimpleNamespace(id=session_id, user_id=None, agent_id=config["curator_agent_id"]), "maintain",
+                token = tasks.open(SimpleNamespace(id=session_id, user_id=(await wiki_api.session_manager.db.get_system_agent())["user_id"], agent_id=config["curator_agent_id"]), "maintain",
                                    request_id=kwargs["request_id"])
                 try:
-                    headers = {"Authorization": "Bearer " + mint(session_id, wiki_task_id=token)}
+                    headers = {"Authorization": "Bearer " + mint(session_id, user_id=jobs.user_id, wiki_task_id=token)}
                     source, navigation = await read_pair(client, headers, "Library/index.md")
                     result = await client.post("/api/wiki/organize", headers=headers, json=addition(source, navigation))
                     assert result.status_code == 200, result.text
@@ -396,15 +396,15 @@ async def test_cancel_keeps_excluded_navigation_target_and_checks_its_original_r
     index = "Library/index.md"
     job = jobs.maintain("finite-navigation-scope", "", "Review the selected notes",
                         [index, "Library/requested.md"], None, [], "human")
-    with assigned(job, config, paths=["Library/requested.md"]) as (headers, _):
+    async with assigned(job, config, paths=["Library/requested.md"], client=client) as (headers, _):
         source, navigation = await read_pair(client, headers, index)
         added = await client.post("/api/wiki/organize", headers=headers, json=addition(source, navigation))
         assert added.status_code == 200, added.text
     jobs.update(job["id"], status="failed", session_id=None)
     jobs.retry(job["id"])
     jobs.update(job["id"], status="failed")
-    registry.configure(None, root, "replacement-curator")
-    current = WikiJobs(None)
+    registry.configure((await wiki_api.session_manager.db.get_system_agent())["user_id"], root, "replacement-curator")
+    current = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     readmitted = current.readmit(job["id"], ["Library/requested.md"])
     excluded = next(item for item in readmitted["items"] if item["path"] == index)
     assert excluded["status"] == "excluded"
@@ -444,7 +444,7 @@ async def test_navigation_recovery_preserves_the_original_change_and_receipt_wit
             raise OSError("injected navigation applied-marker interruption")
         return status(self, change_id, value)
 
-    with assigned(job, config) as (headers, _):
+    async with assigned(job, config, client=client) as (headers, _):
         source, navigation = await read_pair(client, headers, "Library/index.md")
         with monkeypatch.context() as patch:
             patch.setattr(WikiHistory, "status", fail_applied)

@@ -14,7 +14,6 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from server.config import settings
 from server.database import Database
 from server.deps import get_session_manager
 from server.harness import get_harness
@@ -23,6 +22,7 @@ from server.harness.run import HarnessRun
 from server.routers.sessions import router
 from server.sessions import SessionManager
 from server.sessions.owner import SessionOwnerUnavailable
+from tests.accounts import create_account
 
 
 @pytest.fixture
@@ -76,6 +76,7 @@ async def held_rewind(tmp_path, monkeypatch, request):
     monkeypatch.setattr(HarnessRun, "stream", capture_stream)
     database = Database(str(tmp_path / "rewind.sqlite3"))
     await database.initialize()
+    _, bearer = await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     agent = await database.get_system_agent()
@@ -91,7 +92,7 @@ async def held_rewind(tmp_path, monkeypatch, request):
     app.dependency_overrides[get_session_manager] = lambda: manager
     async with AsyncClient(
         transport=ASGITransport(app), base_url="http://test",
-        headers={"Authorization": f"Bearer {settings.auth_token}"},
+        headers={"Authorization": "Bearer " + bearer},
     ) as client:
         try:
             prompt = "Keep this original request and completed answer."

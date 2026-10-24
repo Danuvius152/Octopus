@@ -1,33 +1,15 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
-import { useEffect, useState, type KeyboardEvent } from "react";
-import type { AuthStateResponse, LoginResponse } from "../api";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import type { LoginResponse } from "../api";
+import { useSessionStore } from "../stores/sessionStore";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 
 const API = window.location.origin;
 
-/** The way in, for both eras of this install (multi-tenancy.md §9).
- *
- * Before the first account exists Octopus is the single-user install it has
- * always been, the way in is its own token, and that is the only thing this
- * screen asks for — offering a username field to somebody who has no account
- * would be asking a question with no answer. Once an account exists it asks
- * for a username and a password, and an invite code opens a second form.
- *
- * The screen learns which era it is in from `GET /api/auth/state`, the one
- * thing a signed-out caller may know. It defaults to the token form: that is
- * the form that works on an install nobody has set up yet, and it is also the
- * one the existing e2e suite drives.
- *
- * Claiming the install — turning it into its first account — is deliberately
- * *not* here. It needs the install token, so the person doing it can already
- * sign in; it belongs on the Account page, one step further in, where it is
- * done by somebody who is already holding the credential rather than by
- * anybody who can reach the login screen.
- */
-
-type Mode = "token" | "login" | "register";
+/** First setup exchanges a proof for an account; only account bearers sign in. */
+type Mode = "loading" | "unavailable" | "setup" | "login" | "register";
 
 export function SignIn({
   /** Called with the bearer to store once the server has issued one. */
@@ -35,40 +17,59 @@ export function SignIn({
 }: {
   onSignedIn: (token: string) => void;
 }) {
-  const [mode, setMode] = useState<Mode>("token");
-  const [token, setToken] = useState("");
+  const [mode, setMode] = useState<Mode>("loading");
+  const [setupProof, setSetupProof] = useState("");
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [invite, setInvite] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [reload, setReload] = useState(0);
+  const mounted = useRef(false);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
 
   useEffect(() => {
     let alive = true;
     fetch(`${API}/api/auth/state`)
-      .then((r) => (r.ok ? (r.json() as Promise<AuthStateResponse>) : null))
-      .then((d) => {
-        if (alive && d?.accounts_exist) setMode("login");
+      .then(async (r) => {
+        if (!r.ok) throw new Error("Account state unavailable");
+        const body = await r.json();
+        if (!body || typeof body.accounts_exist !== "boolean") throw new Error("Invalid account state");
+        return body.accounts_exist as boolean;
       })
-      .catch(() => {
-        // An unreachable server leaves the token form up, which is the right
-        // guess for an install that has not been set up.
+      .then((d) => {
+        if (alive) setMode(d ? "login" : "setup");
+      })
+      .catch((error: unknown) => {
+        if (!alive || error instanceof DOMException && error.name === "AbortError") return;
+        setMode("unavailable");
+        setError("Could not load sign-in information.");
       });
     return () => {
       alive = false;
     };
-  }, []);
+  }, [reload]);
 
-  const post = async (path: string, body: object) => {
+  const post = async (path: string, body: object, proof?: string) => {
+    const generation = useSessionStore.getState().accountGeneration;
+    const current = () => mounted.current && useSessionStore.getState().accountGeneration === generation;
     setBusy(true);
     setError(null);
     try {
-      const res = await fetch(`${API}${path}`, {
+      // Setup proof stays outside the store and accountFetch's bearer check.
+      const send = proof === undefined ? fetch : globalThis.fetch;
+      const res = await send(`${API}${path}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...(proof === undefined ? {} : { Authorization: `Bearer ${proof}` }) },
         body: JSON.stringify(body),
       });
-      const data = await res.json().catch(() => null);
+      if (!current()) return;
+      const data: (Partial<LoginResponse> & { detail?: unknown }) | null = await res.json().catch(() => null);
+      if (!current()) return;
       if (!res.ok) {
         const detail = data?.detail;
         setError(
@@ -76,35 +77,35 @@ export function SignIn({
             ? detail
             : `Could not sign in — HTTP ${res.status}`
         );
-        return null;
+        return;
       }
-      return data as LoginResponse;
+      if (typeof data?.token !== "string" || !data.token.trim()) {
+        setError("Could not confirm sign-in.");
+        return;
+      }
+      setSetupProof("");
+      onSignedIn(data.token);
     } catch {
-      setError("Could not reach Octopus.");
-      return null;
+      if (current()) setError("Could not reach Octopus.");
     } finally {
-      setBusy(false);
+      if (current()) setBusy(false);
     }
   };
 
-  // Pre-accounts: the install token *is* the bearer, so there is nothing to
-  // exchange it for. Stored as it was typed, exactly as before.
-  const submitToken = () => {
-    if (token.trim()) onSignedIn(token.trim());
+  const submitLogin = async () => {
+    await post("/api/auth/login", { username, password });
   };
 
-  const submitLogin = async () => {
-    const data = await post("/api/auth/login", { username, password });
-    if (data?.token) onSignedIn(data.token);
+  const submitSetup = async () => {
+    if (setupProof.trim()) await post("/api/auth/setup", { username, password }, setupProof.trim());
   };
 
   const submitRegister = async () => {
-    const data = await post("/api/auth/register", {
+    await post("/api/auth/register", {
       invite_code: invite,
       username,
       password,
     });
-    if (data?.token) onSignedIn(data.token);
   };
 
   return (
@@ -114,24 +115,31 @@ export function SignIn({
           Octopus
         </h1>
 
-        {mode === "token" && (
+        {mode === "loading" && <p role="status">Loading sign-in information…</p>}
+        {mode === "unavailable" && (
+          <Button onClick={() => { setError(null); setMode("loading"); setReload((value) => value + 1); }}>Retry</Button>
+        )}
+
+        {mode === "setup" && (
           <>
             <p className="mb-6 text-sm leading-relaxed text-gray-800">
-              Enter your access token to continue.
+              Create the first administrator account for this Octopus.
             </p>
             <div className="space-y-4">
               <SignInField
-                id="token"
-                label="Token"
+                id="setup-proof"
+                label="Setup token"
                 type="password"
-                value={token}
-                onChange={setToken}
-                onEnter={submitToken}
-                placeholder="Paste your token"
+                value={setupProof}
+                onChange={setSetupProof}
+                onEnter={submitSetup}
+                placeholder="Paste your setup token"
                 autoFocus
               />
-              <Button className="btn-login w-full" onClick={submitToken}>
-                Connect
+              <SignInField id="username" label="Username" value={username} onChange={setUsername} onEnter={submitSetup} />
+              <SignInField id="password" label="Password" type="password" value={password} onChange={setPassword} onEnter={submitSetup} />
+              <Button className="btn-setup w-full" disabled={busy || !setupProof.trim()} onClick={submitSetup}>
+                Set up Octopus
               </Button>
             </div>
           </>

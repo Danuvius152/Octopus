@@ -15,12 +15,14 @@ from server.database import Database
 from server.harness import get_harness
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
+from tests.accounts import create_account
 
 
 @pytest.fixture
 async def runtime(tmp_path, short_process_shutdown):
     database = Database(str(tmp_path / "retirement.db"))
     await database.initialize()
+    await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     agent = await database.get_system_agent()
@@ -297,6 +299,7 @@ async def _retirement_recording_child(tmp_path, tmp_path_factory, monkeypatch):
     path = tmp_path / "terminal.db"
     database = Database(str(path))
     await database.initialize()
+    await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     agent = await database.get_system_agent()

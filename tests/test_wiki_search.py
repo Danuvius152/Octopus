@@ -10,7 +10,6 @@ from server.wiki.history import WikiHistory
 from server.wiki.store import WikiError, WikiStore
 from tests import test_wiki_api as wiki_api
 
-HEADERS = wiki_api.HEADERS
 client = wiki_api.client
 configure = wiki_api.configure
 
@@ -369,18 +368,18 @@ async def test_personal_directory_and_search_api_preserve_current_evidence(
     populate(vault)
     await configure(client, vault)
     located = await client.get(
-        "/api/wiki/documents", params={"directory": "Library/Me"}, headers=HEADERS
+        "/api/wiki/documents", params={"directory": "Library/Me"}, headers=client.headers
     )
     assert located.status_code == 200
     assert located.json()["total"] == 1
     doc = located.json()["items"][0]
     read = await client.get(
-        "/api/wiki/read", params={"doc": doc["id"]}, headers=HEADERS
+        "/api/wiki/read", params={"doc": doc["id"]}, headers=client.headers
     )
     assert "合成测试工程师" in read.json()["content"]
     assert "研究方向" not in read.json()["content"]
     response = await client.get(
-        "/api/wiki/search", params={"query": "HCI"}, headers=HEADERS
+        "/api/wiki/search", params={"query": "HCI"}, headers=client.headers
     )
     assert response.status_code == 200, response.text
     assert response.json()["items"][0]["section"]["start"] >= 0

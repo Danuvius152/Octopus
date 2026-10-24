@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 
 from server.database import Database
+from tests.accounts import create_account
 
 CREATED_AT = "2026-10-19T12:00:00+00:00"
 CONTEXT = '{"version":1,"return_binding":{"request_id":"parent-read"}}'
@@ -25,7 +26,10 @@ REQUEST_CONTEXT = {
 async def database(tmp_path):
     db = Database(str(tmp_path / "knowledge.db"))
     await db.initialize()
-    await db.save_session("parent", "Parent", "/tmp", CREATED_AT)
+    owner, _ = await create_account(db, extra_roots=[tmp_path])
+    agent = await db.get_system_agent(owner["id"])
+    await db.save_session("parent", "Parent", "/tmp", CREATED_AT,
+                          agent_id=agent["id"], user_id=owner["id"])
     try:
         yield db
     finally:
@@ -55,9 +59,12 @@ async def test_research_job_retains_context_through_restart_settlement(database)
 
 
 async def test_schedule_keeps_definition_context_when_prompt_is_edited(database):
-    agent = await database.get_system_agent()
+    await database.save_agent(
+        agent_id="storage-agent", name="Storage", created_at=CREATED_AT,
+        updated_at=CREATED_AT, user_id=(await database.get_system_agent())["user_id"],
+    )
     await database.save_schedule(
-        "schedule-one", agent["id"], "Daily", "Read X", CREATED_AT,
+        "schedule-one", "storage-agent", "Daily", "Read X", CREATED_AT,
         interval_seconds=600, wiki_mode="read", knowledge_context=CONTEXT,
     )
     await database.update_schedule("schedule-one", prompt="Read Y")
@@ -118,12 +125,16 @@ import sys
 import time
 from pathlib import Path
 from server.database import Database
+from tests.accounts import create_account
 from tests.test_knowledge_storage import CREATED_AT, REQUEST_CONTEXT
 
 async def main():
     database = Database(sys.argv[1])
     await database.initialize()
-    await database.save_session("parent", "Parent", "/tmp", CREATED_AT)
+    owner, _ = await create_account(database)
+    agent = await database.get_system_agent(owner["id"])
+    await database.save_session("parent", "Parent", "/tmp", CREATED_AT,
+                                agent_id=agent["id"], user_id=owner["id"])
     transaction = database.transaction
     # Keep the real driver stall and transaction deadline with a test budget.
     database.transaction = lambda **kwargs: transaction(**(kwargs | {"timeout": .1}))
@@ -216,8 +227,10 @@ async def test_additive_migration_preserves_legacy_rows_and_does_not_replay(tmp_
     legacy = Database(path)
     await legacy.initialize()
     try:
-        await legacy.save_session("parent", "Parent", "/tmp", CREATED_AT)
+        owner, _ = await create_account(legacy, extra_roots=[tmp_path])
         agent = await legacy.get_system_agent()
+        await legacy.save_session("parent", "Parent", "/tmp", CREATED_AT,
+                                   agent_id=agent["id"], user_id=owner["id"])
         await legacy.create_bg_task("bg-old", "parent", "true", None, "/tmp", CREATED_AT)
         await legacy.create_research_job("research-old", "parent", "Why?", CREATED_AT)
         await legacy.save_schedule(

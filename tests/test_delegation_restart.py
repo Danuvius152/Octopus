@@ -5,14 +5,18 @@ import asyncio
 import json
 import sys
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 import pytest
 
+from server import deps
 from server.agent_manager import AgentManager
 from server.database import Database
 from server.delegations import DelegationManager
 from server.harness import get_harness
 from server.sessions import SessionManager
+from server.users import UserManager
+from tests.accounts import create_account
 
 
 @dataclass
@@ -51,8 +55,14 @@ async def runtime(tmp_path, monkeypatch, short_process_shutdown):
     ))
 
     async def boot(path=None):
-        database = Database(str(path or tmp_path / "restart.db"))
+        database_path = Path(path or tmp_path / "restart.db")
+        fresh = not database_path.exists()
+        database = Database(str(database_path))
         await database.initialize()
+        if fresh:
+            await create_account(database, extra_roots=[tmp_path])
+        else:
+            deps.set_user_manager(UserManager(database))
         manager = SessionManager()
         await manager.initialize(database)
         parents = [row for row in await database.load_sessions() if row["origin"] == "user"]
@@ -60,9 +70,10 @@ async def runtime(tmp_path, monkeypatch, short_process_shutdown):
             parent_id = parents[0]["id"]
         else:
             root = await database.get_system_agent()
+            assert root is not None, "The restart fixture requires an existing owned installation"
             parent = await manager.create_session(root["id"], "Caller", str(tmp_path), backend="codex")
             parent_id = parent.id
-            await AgentManager(database).create_agent(name="Worker", backend="codex")
+            await AgentManager(database).create_agent(name="Worker", backend="codex", user_id=root["user_id"])
         await manager.interrupt(parent_id)
         delegations = DelegationManager()
         delegations.bind(manager, database)
@@ -95,8 +106,11 @@ async def test_completed_delegation_can_follow_up_after_restart_without_replayin
     await asyncio.wait_for(starts.get(), 5)
     await wait_finished(first_boot.manager, first)
     assert first.state == "completed"
+    original_accounts = await first_boot.database.list_users()
+    assert len(original_accounts) == 1 and original_accounts[0]["dek_wrapped"]
     await first_boot.close()
     second_boot = await boot()
+    assert await second_boot.database.list_users() == original_accounts
     assert starts.empty()
     assert second_boot.manager.dispatch_snapshot(second_boot.parent_id)["items"] == []
     second = await second_boot.delegations.follow_up_delegation(
@@ -124,13 +138,13 @@ async def test_malformed_future_snapshot_is_rejected_without_starting_work(runti
     # snapshot, rather than racing a legitimate compare-and-set writer.
     await current.delegations.confirm_recording()
     before = await current.database.load_delegation_state(
-        rec.delegation_id, parent_session_id=current.parent_id, user_id=None,
+        rec.delegation_id, parent_session_id=current.parent_id, user_id=current.manager.get_session(current.parent_id).user_id,
     )
     broken = json.loads(before)
     broken["awaiting_sub_relay"] = "not a boolean"
     assert await current.database.compare_and_set_delegation_state(
         rec.delegation_id, before, json.dumps(broken),
-        target_agent_id=rec.target_agent_id, parent_session_id=current.parent_id, user_id=None,
+        target_agent_id=rec.target_agent_id, parent_session_id=current.parent_id, user_id=current.manager.get_session(current.parent_id).user_id,
     )
     await current.close()
     with pytest.raises(RuntimeError, match="Invalid persisted delegation state"):

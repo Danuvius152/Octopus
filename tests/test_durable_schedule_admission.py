@@ -8,10 +8,13 @@ from pathlib import Path
 
 import pytest
 
+from server import deps
 from server.database import Database
 from server.scheduler import ScheduleRunner
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submission_status
+from server.users import UserManager
+from tests.accounts import create_account
 from tests.test_scheduler import capture_model_runs, save_schedule
 from tests.test_scheduler import setup as setup
 from tests.test_submission_recovery import _submit_paused
@@ -80,6 +83,7 @@ async def test_one_shot_process_loss_keeps_target_input_and_consumption_atomic(t
     saved = json.loads(proof.read_text())
     db = Database(str(proof.with_suffix(".db")))
     await db.initialize()
+    deps.set_user_manager(UserManager(db))
     manager = SessionManager()
     await manager.initialize(db)
     runner = ScheduleRunner(manager, db)
@@ -107,6 +111,7 @@ async def _one_shot_process_loss_child(monkeypatch):
     proof = Path(os.environ["ONE_SHOT_PROOF"])
     db = Database(str(proof.with_suffix(".db")))
     await db.initialize()
+    await create_account(db)
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()

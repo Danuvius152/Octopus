@@ -62,7 +62,6 @@ export type SessionStatus = components["schemas"]["SessionStatus"];
 // Accounts (multi-tenancy.md §3): who you are, who may join, who may stay.
 export type AuthStateResponse = components["schemas"]["AuthStateResponse"];
 export type IdentityResponse = components["schemas"]["IdentityResponse"];
-export type BootstrapResponse = components["schemas"]["BootstrapResponse"];
 export type LoginResponse = components["schemas"]["LoginResponse"];
 export type InviteInfo = components["schemas"]["InviteInfo"];
 export type UserInfo = components["schemas"]["UserInfo"];

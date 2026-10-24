@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from server import deps
 from server.database import Database
 from server.file_viewer import (
     MAX_FILE_BYTES,
@@ -28,10 +29,7 @@ from server.file_viewer import (
 )
 from server.main import app
 from server.session_manager import session_manager
-
-TOKEN = "changeme"
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
-
+from tests.accounts import create_account
 
 # ---------------------------------------------------------------------------
 # resolve_safe_path — security unit tests
@@ -174,11 +172,12 @@ async def client(tmp_path):
     """In-memory DB + ASGI client, mirrors test_attachments.client."""
     db = Database(":memory:")
     await db.initialize()
+    _, bearer = await create_account(db, extra_roots=[tmp_path])
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization": f"Bearer {bearer}"}) as c:
         yield c
     await db.close()
 
@@ -212,7 +211,7 @@ async def test_get_file_markdown(client, session_with_files):
     r = await client.get(
         f"/api/sessions/{sid}/files",
         params={"path": "plan.md"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/markdown")
@@ -224,7 +223,7 @@ async def test_get_file_code(client, session_with_files):
     r = await client.get(
         f"/api/sessions/{sid}/files",
         params={"path": "main.py"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 200
     assert r.headers["content-type"].startswith("text/plain")
@@ -236,7 +235,7 @@ async def test_get_file_image(client, session_with_files):
     r = await client.get(
         f"/api/sessions/{sid}/files",
         params={"path": "logo.png"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 200
     assert r.headers["content-type"] == "image/png"
@@ -247,7 +246,7 @@ async def test_get_file_nested_path(client, session_with_files):
     r = await client.get(
         f"/api/sessions/{sid}/files",
         params={"path": "sub/note.txt"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 200
     assert r.content == b"nested"
@@ -258,7 +257,7 @@ async def test_get_file_meta_returns_kind(client, session_with_files):
     r = await client.get(
         f"/api/sessions/{sid}/files/meta",
         params={"path": "plan.md"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 200
     body = r.json()
@@ -273,7 +272,7 @@ async def test_get_file_rejects_path_escape(client, session_with_files):
     r = await client.get(
         f"/api/sessions/{sid}/files",
         params={"path": "../outside.md"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 403
 
@@ -283,7 +282,7 @@ async def test_get_file_missing_returns_404(client, session_with_files):
     r = await client.get(
         f"/api/sessions/{sid}/files",
         params={"path": "no-such.md"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 404
 
@@ -293,7 +292,7 @@ async def test_get_file_oversize_returns_413(client, session_with_files):
     r = await client.get(
         f"/api/sessions/{sid}/files",
         params={"path": "huge.md"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 413
 
@@ -303,7 +302,7 @@ async def test_get_file_unsupported_type_returns_415(client, session_with_files)
     r = await client.get(
         f"/api/sessions/{sid}/files",
         params={"path": "blob.bin"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 415
 
@@ -313,7 +312,8 @@ async def test_get_file_token_query_param_works(client, session_with_files):
     sid, _ = session_with_files
     r = await client.get(
         f"/api/sessions/{sid}/files",
-        params={"path": "plan.md", "token": TOKEN},
+        params={"path": "plan.md", "token": client.headers["Authorization"].removeprefix("Bearer ")},
+        headers={"Authorization": ""},
     )
     assert r.status_code == 200
 
@@ -323,6 +323,7 @@ async def test_get_file_requires_auth(client, session_with_files):
     r = await client.get(
         f"/api/sessions/{sid}/files",
         params={"path": "plan.md"},
+        headers={"Authorization": ""},
     )
     assert r.status_code == 401
 
@@ -331,7 +332,7 @@ async def test_get_file_session_not_found(client):
     r = await client.get(
         "/api/sessions/no-such-session/files",
         params={"path": "x.md"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 404
 
@@ -378,7 +379,7 @@ async def test_showme_resolve_no_credential_passes_none(
     r = await client.post(
         f"/api/sessions/{sid}/showme/resolve",
         json={"text": "the plan"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 200, r.text
     assert r.json() == {"path": "answer.md", "message": None}
@@ -398,7 +399,7 @@ async def test_showme_resolve_inherits_speed_independently(
     session.service_tier = override
     await session_manager.db.update_agent(session.agent_id, service_tier="fast")
     response = await client.post(
-        f"/api/sessions/{sid}/showme/resolve", json={"text": "the plan"}, headers=HEADERS,
+        f"/api/sessions/{sid}/showme/resolve", json={"text": "the plan"}, headers=client.headers,
     )
     assert response.status_code == 200, response.text
     assert captured["service_tier"] == expected
@@ -421,7 +422,8 @@ async def test_showme_resolve_attached_credential_is_normalized(
     sid, _ = session_with_files
     db = session_manager.db
     now = datetime.now(UTC).isoformat()
-    secret = encrypt("sk-ant-test", TOKEN)
+    agent = await db.get_system_agent()
+    secret = encrypt("sk-ant-test", await deps.get_user_manager().data_key_for(agent["user_id"]))
     await db.save_credential(
         credential_id="cred-1",
         backend="claude-code",
@@ -429,17 +431,17 @@ async def test_showme_resolve_attached_credential_is_normalized(
         auth_type="api_key",
         secret_encrypted=secret,
         created_at=now,
+        user_id=agent["user_id"],
     )
     # Attach the credential at the agent level — matches the production path
     # the bug was filed against.
-    agent = await db.get_system_agent()
     await db.update_agent(agent["id"], credential_id="cred-1")
 
     captured = await _patch_showme(monkeypatch)
     r = await client.post(
         f"/api/sessions/{sid}/showme/resolve",
         json={"text": "the plan"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 200, r.text
 

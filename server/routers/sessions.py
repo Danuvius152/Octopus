@@ -24,7 +24,6 @@ from ..models import (
 )
 from ..session_manager import ForkError, fork_info_fields
 from ..sessions import SessionManager
-from ..sessions.lifecycle import LifecycleAdmissionError
 from ..sessions.runtime_types import QuotaExceeded
 from ..submission_models import (
     ClientSubmissionRefusal,
@@ -610,10 +609,7 @@ async def delete_session(
     _: str = Depends(verify_token),
 ):
     _own_session(session_manager, session_id, user_id)
-    try:
-        deleted = await session_manager.delete_session(session_id)
-    except LifecycleAdmissionError as exc:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(exc)) from exc
+    deleted = await session_manager.delete_session(session_id)
     if not deleted:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
 
@@ -750,8 +746,6 @@ async def archive_session(
     _own_session(session_manager, session_id, user_id)
     try:
         new = await session_manager.archive_session(session_id, replace=replace)
-    except LifecycleAdmissionError as error:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(error))
     except ValueError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     if new is None:
@@ -773,8 +767,6 @@ async def unarchive_session(
     """
     try:
         s = await session_manager.unarchive_session(session_id, user_id)
-    except LifecycleAdmissionError as error:
-        raise HTTPException(status.HTTP_409_CONFLICT, str(error))
     except ValueError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     return _to_session_info(s)

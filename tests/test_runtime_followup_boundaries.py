@@ -96,7 +96,8 @@ async def test_publication_race_keeps_attention_and_unindexed_receipt(client, no
 
     root, store, config = notes
     document = await read(client)
-    jobs = WikiJobs(None)
+    owner = (await test_wiki_api.session_manager.db.get_system_agent())["user_id"]
+    jobs = WikiJobs(owner)
     job = jobs.maintain("race", "", "organize", [NOTE], None, [], "human")
     jobs.update(job["id"], status="running", session_id="worker")
     history = WikiHistory(store)
@@ -110,7 +111,7 @@ async def test_publication_race_keeps_attention_and_unindexed_receipt(client, no
         return row
 
     monkeypatch.setattr(history, "record", racing)
-    with assigned(job, config) as (headers, active):
+    async with assigned(job, config, client=client) as (headers, active):
         task = tasks.call(active, verify(headers["Authorization"].removeprefix("Bearer ")))
         publication = publication_context(task, store, document)
         with history.locked(), pytest.raises(WikiError, match="journal preparation") as conflict:

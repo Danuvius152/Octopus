@@ -27,7 +27,8 @@ async def jobs(client, tmp_path):
     root = tmp_path / "vault"
     root.mkdir()
     await wiki_api.configure(client, root)
-    return WikiJobs(None)
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    return WikiJobs(owner)
 
 
 class Curator:
@@ -156,11 +157,11 @@ async def test_no_change_requires_actual_read_and_survives_worker_restart_withou
     history = WikiHistory(jobs.store)
     history.write("Library/note.md", "# 判断\n\n保留我写的思想和条件。\n".encode(), None, "human", "create")
     job = jobs.maintain("review", "", "检查，已经满足时无需修改", ["Library/note.md"], None, [], "human")
-    session = await wiki_api.session_manager.create_session(registry.config(None)["curator_agent_id"], "真实任务范围", str(tmp_path))
+    session = await wiki_api.session_manager.create_session(registry.config(jobs.user_id)["curator_agent_id"], "真实任务范围", str(tmp_path))
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
-    headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
+    headers = {"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}
     original = jobs.store.path("Library/note.md").read_bytes()
     try:
         locator = (await client.get("/api/wiki/blocks", params={"doc": "Library/note.md", "view": "locators"}, headers=headers)).json()
@@ -178,7 +179,7 @@ async def test_no_change_requires_actual_read_and_survives_worker_restart_withou
         tasks.close(token)
         tasks.unassign(session.id)
     curator = Curator(jobs)
-    restored = await process(WikiJobs(None), job, curator)
+    restored = await process(WikiJobs(jobs.user_id), job, curator)
     assert restored["status"] == "completed"
     assert restored["items"][0]["operation"] == "no_change"
     assert curator.turns == 0
@@ -364,7 +365,7 @@ async def test_publish_conflicts_use_two_durable_reread_attempts(jobs, conflicts
         assert item["retry_count"] == 2
         assert curator.turns == 3
         # Reload from SQLite and manual retry do not grant another model turn.
-        restarted = WikiJobs(None)
+        restarted = WikiJobs(jobs.user_id)
         restarted.retry(job["id"])
         await process(restarted, job, curator)
         assert curator.turns == 3
@@ -463,7 +464,7 @@ async def test_restart_before_prepared_request_keeps_budget_and_marks_unknown_wi
     curator.create_session = crash_before_turn
     with pytest.raises(asyncio.CancelledError):
         await process(jobs, job, curator)
-    assert WikiJobs(None).get(job["id"])["items"][0]["retry_count"] == 1
+    assert WikiJobs(jobs.user_id).get(job["id"])["items"][0]["retry_count"] == 1
     jobs.recover_jobs()
     curator.create_session = original_create
     result = await process(jobs, job, curator)
@@ -534,7 +535,7 @@ async def test_extraction_error_after_publish_recovers_index_without_another_mod
         assert db.execute("SELECT indexed FROM job_publications").fetchone()[0] == 0
     # A fresh queue instance represents restart; retry restores only the index.
     monkeypatch.setattr(store_module, "extract", original_extract)
-    restarted = WikiJobs(None)
+    restarted = WikiJobs(jobs.user_id)
     retried = restarted.retry(job["id"])
     assert retried["items"][0].get("retry_count", 0) == 0
     result = await process(restarted, job, curator)
@@ -614,7 +615,7 @@ async def test_published_item_recovery_never_generates_again_or_consumes_reread_
         with jobs.store.connect() as db:
             db.execute("DELETE FROM search_fts")
     before = jobs.store.path("Library/note.md").read_bytes()
-    restarted = WikiJobs(None)
+    restarted = WikiJobs(jobs.user_id)
     if scenario == "cancelled_source_changed":
         restarted.mark_cancelled(job["id"])
         with pytest.raises(WikiError, match="Confirm the original cancellation"):
@@ -678,7 +679,7 @@ async def test_uncertain_publication_receipt_never_starts_another_model_turn(job
         path.write_bytes(original)
     before_recovery = path.read_bytes()
     history.recover()
-    restarted = WikiJobs(None)
+    restarted = WikiJobs(jobs.user_id)
     restarted.recover_jobs()
     outcome = await process(restarted, job, curator)
     assert outcome["status"] == "completed_with_attention", outcome
@@ -954,7 +955,7 @@ async def shutdown_worker(jobs, monkeypatch):
     from server.wiki.registry import registry
 
     manager = wiki_api.session_manager
-    await manager.db.update_agent(registry.config(None)["curator_agent_id"], backend="codex")
+    await manager.db.update_agent(registry.config(jobs.user_id)["curator_agent_id"], backend="codex")
     ready = asyncio.Event()
     script = (
         "import json,sys\n"
@@ -992,7 +993,7 @@ async def test_shutdown_interrupts_curator_and_preserves_queued_jobs(jobs, shutd
 
     worker.begin_shutdown()
     queued = jobs.maintain("shutdown-later", "Another source", "organize", [], "Library/later.md", [], "human")
-    worker.wake(None)
+    worker.wake(jobs.user_id)
     await worker.stop()
 
     stopped = jobs.get(current["id"])

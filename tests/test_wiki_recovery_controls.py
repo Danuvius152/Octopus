@@ -25,7 +25,7 @@ def handle():
 
 async def stage(client, result, wanted):
     for _ in range(12):
-        status = (await client.get(f"/api/wiki/recovery/{result['recovery_id']}", headers=wiki_api.HEADERS)).json()
+        status = (await client.get(f"/api/wiki/recovery/{result['recovery_id']}", headers=client.headers)).json()
         if status["phase"] == wanted:
             return status
         response = await apply(client, result)
@@ -36,28 +36,29 @@ async def stage(client, result, wanted):
 @pytest.mark.parametrize("complete", [False, True])
 async def test_recovery_receivers_keep_service_health_through_registration_replacement(uncertain, complete):
     client, root, _, original, _ = uncertain
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     result = await plan(client)
     if complete:
         await approve(client, result)
         await finish(client, result)
-        receiver = registry.store(None).events.journal
+        receiver = registry.store(owner).events.journal
     else:
         receiver = handle().observer.journal
     if not complete:
         assert receiver.health is registry.health
         return
-    current = registry.store(None).read(original["path"])
+    current = registry.store(owner).read(original["path"])
     from server.agent_manager import AgentManager
 
-    created = await AgentManager(wiki_api.session_manager.db).create_agent(name="Replacement curator")
-    configured = await client.put("/api/wiki/config", headers=wiki_api.HEADERS,
+    created = await AgentManager(wiki_api.session_manager.db).create_agent(name="Replacement curator", user_id=owner)
+    configured = await client.put("/api/wiki/config", headers=client.headers,
                                   json={"root": str(root), "curator_agent_id": created["id"]})
     assert configured.status_code == 200, configured.text
-    read = await client.get("/api/wiki/read", params={"doc": original["path"]}, headers=wiki_api.HEADERS)
+    read = await client.get("/api/wiki/read", params={"doc": original["path"]}, headers=client.headers)
     assert read.status_code == 200, read.text
     assert read.json()["id"] == current["id"]
     assert read.json()["content"] == "# Original\nKeep this argument and its conditions.\n"
-    assert registry.store(None).events.journal.health is registry.health
+    assert registry.store(owner).events.journal.health is registry.health
 
 
 async def test_offline_body_root_keeps_recovery_diagnostics_and_evidence_available(uncertain):
@@ -70,21 +71,21 @@ async def test_offline_body_root_keeps_recovery_diagnostics_and_evidence_availab
     offline = root.with_name("offline-vault")
     root.rename(offline)
     try:
-        inspected = await client.get("/api/wiki/recovery", headers=wiki_api.HEADERS)
+        inspected = await client.get("/api/wiki/recovery", headers=client.headers)
         assert inspected.status_code == 200, inspected.text
         assert inspected.json()["root_available"] is False
         assert inspected.json()["filesystem"] == before[0]
-        status = await client.get(f"/api/wiki/recovery/{result['recovery_id']}", headers=wiki_api.HEADERS)
+        status = await client.get(f"/api/wiki/recovery/{result['recovery_id']}", headers=client.headers)
         assert status.status_code == 200, status.text
-        saved = await client.get(result["plan_url"], headers=wiki_api.HEADERS)
+        saved = await client.get(result["plan_url"], headers=client.headers)
         assert saved.status_code == 200 and saved.json()["plan_hash"] == result["plan_hash"]
-        exported = await client.post("/api/wiki/recovery/export", headers=wiki_api.HEADERS)
+        exported = await client.post("/api/wiki/recovery/export", headers=client.headers)
         assert exported.status_code == 200, exported.text
         receipt = exported.json()
         raw = Path(receipt["path"]).read_bytes()
         assert len(raw) == receipt["bytes"] and hashlib.sha256(raw).hexdigest() == receipt["sha256"]
         assert json.loads(raw)["root_available"] is False
-        refused = await client.post("/api/wiki/recovery/plan", headers=wiki_api.HEADERS, json={"retain": []})
+        refused = await client.post("/api/wiki/recovery/plan", headers=client.headers, json={"retain": []})
         assert refused.status_code in {409, 503}, refused.text
         refused = await apply(client, result)
         assert refused.status_code in {409, 503}, refused.text
@@ -99,6 +100,7 @@ async def test_offline_body_root_keeps_recovery_diagnostics_and_evidence_availab
 @pytest.mark.parametrize("when", ["prepared", "mapping_applied", "rebuilding", "handoff"])
 async def test_new_after_cutoff_receipt_survives_until_ordinary_application(uncertain, monkeypatch, when):
     client, root, store, original, _ = uncertain
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     result = await plan(client)
     await approve(client, result)
     manager = registry.recoveries()
@@ -107,7 +109,7 @@ async def test_new_after_cutoff_receipt_survives_until_ordinary_application(unce
 
     def receive_new():
         (root / path).write_bytes(raw)
-        manager.flush(None)
+        manager.flush(owner)
 
     if when in {"prepared", "mapping_applied", "handoff"}:
         await stage(client, result, when)
@@ -130,7 +132,7 @@ async def test_new_after_cutoff_receipt_survives_until_ordinary_application(unce
     assert batches and all(row["status"] == "pending" and row["payload"] for row in batches)
     assert any(record.get("path") == path for row in batches for record in json.loads(row["payload"])["records"])
     observed = h.observer
-    current = registry.store(None)
+    current = registry.store(owner)
     assert current.events is observed and not observed._closed and observed.journal.recovery is None
     assert current.read(original["path"])["id"] == result["files"][0]["document_id"]
     assert current.read(path)["revision"] == hashlib.sha256(raw).hexdigest()
@@ -140,6 +142,7 @@ async def test_new_after_cutoff_receipt_survives_until_ordinary_application(unce
 
 async def test_explicit_retention_preserves_identity_aliases_history_and_opaque_origin(uncertain):
     client, root, store, original, _ = uncertain
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     opaque = {"doc_id": original["id"], "revision": original["revision"], "status": "invalid",
               "proof": {"format": "unknown-test-version", "opaque": ["retain", 42]}}
     with sqlite3.connect(store.db_path) as db:
@@ -150,26 +153,27 @@ async def test_explicit_retention_preserves_identity_aliases_history_and_opaque_
     raw = (root / original["path"]).read_bytes()
     result = await plan(client, [{"doc": original["id"], "path": original["path"], "expected_revision": original["revision"]}])
     assert result["files"][0]["document_id"] == original["id"] and result["files"][0]["retained"]
-    full = await client.get(result["plan_url"], headers=wiki_api.HEADERS)
+    full = await client.get(result["plan_url"], headers=client.headers)
     assert full.status_code == 200 and recovery_state.digest(full.json()["plan"]) == result["plan_hash"]
     await approve(client, result)
     await finish(client, result)
-    assert registry.store(None).read(original["id"])["id"] == original["id"]
+    assert registry.store(owner).read(original["id"])["id"] == original["id"]
     assert sql(store, "SELECT * FROM uid_aliases") == aliases
     assert sql(store, "SELECT * FROM changes") == history
-    with registry.store(None).connect() as db:
+    with registry.store(owner).connect() as db:
         after = origins.get(db, original["id"])
     assert after["proof"] == opaque["proof"] and after["status"] == "invalid"
     assert (root / original["path"]).read_bytes() == raw
 
 
 async def test_retained_consumer_never_rebinds_to_replacement_at_old_source_path(client, tmp_path):
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     root = tmp_path / "source-case"
     (root / "Library").mkdir(parents=True)
     (root / "Library/note.md").write_bytes(b"# Source\nThe original condition.\n")
     (root / "Library/consumer.md").write_bytes(source("note.md"))
     await wiki_api.configure(client, root)
-    store = registry.store(None)
+    store = registry.store(owner)
     original, consumer = store.read("Library/note.md"), store.read("Library/consumer.md")
     assert consumer["metadata"]["source_refs"][0]["doc"] == original["id"]
     with store.connect() as db:
@@ -183,7 +187,7 @@ async def test_retained_consumer_never_rebinds_to_replacement_at_old_source_path
     result = await plan(client, [{"doc": consumer["id"], "path": consumer["path"], "expected_revision": consumer["revision"]}])
     await approve(client, result)
     await finish(client, result)
-    current = registry.store(None)
+    current = registry.store(owner)
     assert current.read(original["path"])["id"] != original["id"]
     ref = current.read(consumer["id"])["metadata"]["source_refs"][0]
     assert ref["doc"] == original["id"] and ref["status"] == "missing"
@@ -195,12 +199,13 @@ async def test_retained_consumer_never_rebinds_to_replacement_at_old_source_path
 
 @pytest.mark.parametrize("retain_consumer", [False, True])
 async def test_late_consumer_edit_keeps_source_policy_through_ordinary_handoff(client, tmp_path, retain_consumer):
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     root = tmp_path / "late-source-case"
     (root / "Library").mkdir(parents=True)
     (root / "Library/source.md").write_bytes(b"# Source\nThe original condition.\n")
     (root / "Library/consumer.md").write_bytes(source("source.md"))
     await wiki_api.configure(client, root)
-    store = registry.store(None)
+    store = registry.store(owner)
     original, consumer = store.read("Library/source.md"), store.read("Library/consumer.md")
     with store.connect() as db:
         old_bindings = [dict(row) for row in db.execute("SELECT * FROM source_bindings")]
@@ -216,7 +221,7 @@ async def test_late_consumer_edit_keeps_source_policy_through_ordinary_handoff(c
     with (root / consumer["path"]).open("ab") as target:
         target.write(b"\nA later body qualification; the source field is unchanged.\n")
     assert (root / consumer["path"]).stat().st_ino == inode
-    registry.recoveries().flush(None)
+    registry.recoveries().flush(owner)
     late = sql(store, "SELECT * FROM filesystem_inbox WHERE seq>?", (result["cutoff"],))
     assert late and all(row["status"] == "pending" for row in late)
     await finish(client, result)
@@ -224,7 +229,7 @@ async def test_late_consumer_edit_keeps_source_policy_through_ordinary_handoff(c
     for received in late:
         handed_off = sql(store, "SELECT * FROM filesystem_inbox WHERE seq=?", (received["seq"],))[0]
         assert handed_off == received
-    current = registry.store(None)
+    current = registry.store(owner)
     replacement = current.read(original["path"])
     after = current.read(consumer["path"])
     assert after["id"] == mapped["document_id"]
@@ -247,6 +252,7 @@ async def test_late_consumer_edit_keeps_source_policy_through_ordinary_handoff(c
 @pytest.mark.parametrize("when", ["prepared", "mapping_applied", "handoff"])
 async def test_new_overflow_invalidates_approval_but_preserves_old_receipts(uncertain, when):
     client, _, store, _, _ = uncertain
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     result = await plan(client)
     await approve(client, result)
     await stage(client, result, when)
@@ -255,7 +261,7 @@ async def test_new_overflow_invalidates_approval_but_preserves_old_receipts(unce
     with h.observer._lock:
         h.observer.persist([{"type": "overflow"}])
         h.observer.process_record({"type": "overflow"})
-    registry.recoveries().flush(None)
+    registry.recoveries().flush(owner)
     refused = await apply(client, result)
     assert refused.status_code in {409, 503}, refused.text
     assert sql(store, "SELECT uncertain FROM filesystem_state")[0]["uncertain"]
@@ -270,13 +276,14 @@ async def test_new_overflow_invalidates_approval_but_preserves_old_receipts(unce
 
 async def test_restart_reobserves_same_recovery_with_new_generation_and_never_replays_old_mapping(uncertain):
     client, _, store, original, _ = uncertain
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     result = await plan(client)
     await approve(client, result)
     mapped = await stage(client, result, "mapping_applied")
     old_epoch = handle().observer.epoch
     registry.close()
     registry.resume_access()
-    assert (await client.get("/api/wiki/recovery", headers=wiki_api.HEADERS)).status_code == 200
+    assert (await client.get("/api/wiki/recovery", headers=client.headers)).status_code == 200
     assert (await apply(client, result)).status_code == 409
     revised = await plan(client)
     assert handle().observer.epoch != old_epoch
@@ -285,7 +292,7 @@ async def test_restart_reobserves_same_recovery_with_new_generation_and_never_re
     await finish(client, revised)
     mappings = sql(store, "SELECT sha256 FROM filesystem_recovery_audit WHERE kind='mapping' ORDER BY rowid")
     assert len(mappings) == 2 and mappings[0]["sha256"] == mapped["mapping_receipt"]
-    assert registry.store(None).read(original["path"])["id"] == revised["files"][0]["document_id"]
+    assert registry.store(owner).read(original["path"])["id"] == revised["files"][0]["document_id"]
 
 
 @pytest.mark.parametrize("committed", [False, True])
@@ -320,6 +327,7 @@ async def test_mapping_failure_before_or_after_commit_does_not_repeat_accepted_m
 
 async def test_derived_rebuild_failure_retains_mapping_and_continuous_reception(uncertain, monkeypatch):
     client, root, store, original, _ = uncertain
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     result = await plan(client)
     await approve(client, result)
     mapped = await stage(client, result, "mapping_applied")
@@ -333,14 +341,14 @@ async def test_derived_rebuild_failure_retains_mapping_and_continuous_reception(
         patch.setattr(h.store, "_index", fail_index)
         with pytest.raises(RuntimeError, match="derived rebuild fault"):
             await apply(client, result)
-    registry.recoveries().flush(None)
+    registry.recoveries().flush(owner)
     row = sql(store, "SELECT * FROM filesystem_recoveries")[0]
     assert row["phase"] == "mapping_applied" and row["rebuild_cursor"] == 0
     assert row["mapping_receipt"] == mapped["mapping_receipt"]
     assert not h.observer._closed and sql(store, "SELECT * FROM filesystem_inbox WHERE status='pending'")
     await finish(client, result)
-    assert registry.store(None).read(original["path"])["id"] == result["files"][0]["document_id"]
-    assert registry.store(None).read("Library/while-failing.md")["characters"] > 0
+    assert registry.store(owner).read(original["path"])["id"] == result["files"][0]["document_id"]
+    assert registry.store(owner).read("Library/while-failing.md")["characters"] > 0
 
 
 async def test_completion_commit_before_publish_is_retried_by_its_exact_receipt(uncertain, monkeypatch):
@@ -376,14 +384,15 @@ async def test_initialized_recovery_facts_are_not_rebuilt_empty(uncertain, loss)
         else:
             db.execute("DROP TABLE " + loss)
     identities = sql(store, "SELECT * FROM document_identities")
-    assert (await client.get("/api/wiki/recovery", headers=wiki_api.HEADERS)).status_code == 503
-    assert (await client.post("/api/wiki/recovery/export", headers=wiki_api.HEADERS)).status_code == 503
-    assert (await client.get("/api/wiki/read", params={"doc": original["id"]}, headers=wiki_api.HEADERS)).status_code == 503
+    assert (await client.get("/api/wiki/recovery", headers=client.headers)).status_code == 503
+    assert (await client.post("/api/wiki/recovery/export", headers=client.headers)).status_code == 503
+    assert (await client.get("/api/wiki/read", params={"doc": original["id"]}, headers=client.headers)).status_code == 503
     assert sql(store, "SELECT * FROM document_identities") == identities
 
 
 async def test_changed_root_requires_new_observer_and_owner_plan(uncertain):
     client, root, store, original, _ = uncertain
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     result = await plan(client)
     await approve(client, result)
     old_epoch = handle().observer.epoch
@@ -398,7 +407,7 @@ async def test_changed_root_requires_new_observer_and_owner_plan(uncertain):
     assert revised["generation"] > result["generation"] and not revised["approved"]
     await approve(client, revised)
     await finish(client, revised)
-    assert registry.store(None).read(original["path"])["id"] != original["id"]
+    assert registry.store(owner).read(original["path"])["id"] != original["id"]
     assert (root / original["path"]).read_bytes() == raw
     assert sql(store, "SELECT path FROM document_identities WHERE id=?", (original["id"],)) == [{"path": None}]
 
@@ -412,7 +421,7 @@ async def test_replaced_root_does_not_close_another_captured_observer_lease(unce
         root.rename(root.with_name("old-root-with-captured-lease"))
         (root / "Library").mkdir(parents=True)
         (root / original["path"]).write_bytes(b"# New root after unknown history\n")
-        refused = await client.post("/api/wiki/recovery/plan", headers=wiki_api.HEADERS, json={"retain": []})
+        refused = await client.post("/api/wiki/recovery/plan", headers=client.headers, json={"retain": []})
         assert refused.status_code == 503 and "leases" in refused.text
         assert not old._closed and extra.events is old
         assert sql(store, "SELECT uncertain FROM filesystem_state")[0]["uncertain"]
@@ -448,7 +457,7 @@ async def test_export_rejects_symlink_destination_without_touching_other_files(u
     (outside / "keep.txt").write_bytes(b"Preserve this unrelated file")
     (store.state / "recovery-exports").symlink_to(outside, target_is_directory=True)
     before = sql(store, "SELECT * FROM filesystem_state")
-    refused = await client.post("/api/wiki/recovery/export", headers=wiki_api.HEADERS)
+    refused = await client.post("/api/wiki/recovery/export", headers=client.headers)
     assert refused.status_code == 409
     assert [entry.name for entry in outside.iterdir()] == ["keep.txt"]
     assert (outside / "keep.txt").read_bytes() == b"Preserve this unrelated file"

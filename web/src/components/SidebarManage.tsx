@@ -126,13 +126,8 @@ export function SidebarManage() {
             </>
           }
         />
-        {/* The monitor is the *box's* operations view — resident memory,
-         * sidecars, HTTP latency, error rates across the whole install — so it
-         * belongs to whoever operates the box (multi-tenancy.md §8). Before
-         * accounts exist that is the one operator, and the row shows; after,
-         * only an admin. Hidden rather than disabled: a row that answers 403 is
-         * worse than a row that isn't there. */}
-        {(identity === null || identity.user_id === null || identity.is_admin) && (
+        {/* Installation-wide operations belong to an identified administrator. */}
+        {identity?.user_id && identity.is_admin && (
           <ManageRow
             icon={<IconActivity size={14} />}
             label="Monitor"

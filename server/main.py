@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import deps
 from . import monitor as monitor_pkg
+from .account_baseline import RetainedLegacyInstallation, require_account_installation
 from .agent_manager import AgentManager
 from .aio import complete_cleanup
 from .app_agent import app_agent_manager
@@ -29,7 +30,6 @@ from .connector_manager import ConnectorManager
 from .crypto import master_key
 from .database import Database
 from .delegations import delegation_manager
-from .installation_keys import InstallationKeyRetired
 from .mcp_http import lifespan as mcp_lifespan
 from .mcp_http import mount_all as mount_mcp
 from .monitor import Event as _MonEvent
@@ -78,10 +78,14 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    service_health = ServiceHealth()
     installation = InstallationOwner(settings)
-    installation.acquire()
+    try:
+        installation.acquire()
+    except RetainedLegacyInstallation as error:
+        service_health.fail(error)
     app.state.installation_owner = installation
-    app.state.service_health = service_health = ServiceHealth()
+    app.state.service_health = service_health
     db = Database(settings.db_path, health=service_health)
     started: set[str] = set()
     schedule_runner = metrics = sampler_task = tunnel = None
@@ -94,22 +98,13 @@ async def lifespan(app: FastAPI):
         wiki_registry.bind_health(service_health)
         try:
             await db.reject_unfinished_token_rotation()
+            await asyncio.to_thread(require_account_installation, settings)
             master_key()
         except BaseException as error:
             service_health.fail(error)
         await db.initialize()
-        from .memory_handoff import handoff_agent_memory
-        async with db._bootstrap_lock:
-            await handoff_agent_memory(db)
         from .wiki.app_bridge import reopen as reopen_wiki_app_writers
         reopen_wiki_app_writers()
-        from .wiki.account_upgrade import pending_upgrade
-        if pending := pending_upgrade():
-            session_manager._legacy_transition = True
-            if pending["config"].get("app_id"):
-                backend_supervisor._blocked_apps.add(pending["config"]["app_id"])
-            from .wiki.app_bridge import _blocked_owners
-            _blocked_owners.add(None)
         started.add("sessions")
         # acquire() verified this installation's exclusive managed cgroup.
         # Its prior writers are gone; recovery still preserves their unknown
@@ -131,7 +126,6 @@ async def lifespan(app: FastAPI):
         agents.set_manager(AgentManager(db))
         connectors.set_manager(ConnectorManager(db))
         applications_router.set_manager(application_manager)
-        auth_router.set_db(db)
         # Accounts. Bound like the other managers; `deps.current_user` resolves
         # every request's bearer through it (multi-tenancy.md §5.1).
         deps.set_user_manager(UserManager(db))
@@ -192,13 +186,6 @@ async def lifespan(app: FastAPI):
         ready = asyncio.get_running_loop().create_future()
         mcp_owner = asyncio.create_task(_serve_mcp(app, ready, mcp_stop), name="mcp-lifespan")
         await asyncio.shield(ready)
-        wiki_registry.legacy_enabled = not bool(await db.count_users())
-        from .wiki.account_upgrade import pending_upgrade
-        if pending := pending_upgrade():
-            session_manager._legacy_transition = True
-            wiki_registry.begin_transition(None)
-            if pending.get("user_id"):
-                wiki_registry.begin_transition(pending["user_id"])
         started.add("wiki_registry")
         await wiki_registry.start(paused=True, previous_writers_retired=installation.profile is not None)
         from .wiki.cleanup import sweep as sweep_wiki_history
@@ -375,9 +362,6 @@ async def _session_owner_unavailable(_request: Request, exc: SessionOwnerUnavail
     return JSONResponse(status_code=503, content={"detail": str(exc)})
 
 
-@app.exception_handler(InstallationKeyRetired)
-async def _installation_key_retired(_request: Request, exc: InstallationKeyRetired) -> JSONResponse:
-    return JSONResponse(status_code=401, content={"detail": str(exc)})
 
 
 @app.exception_handler(WikiError)

@@ -1,11 +1,8 @@
 /**
  * Who this browser is signed in as, asked once.
  *
- * It matters that a failure leaves the identity `null` rather than inventing
- * one: `null` means "not known yet", and the sidebar reads it as "show the
- * operator's rows", which is right for an install that has no accounts and for
- * a moment before the answer lands. An invented `is_admin: false` would hide
- * the Monitor page from the operator of a single-user install.
+ * Unknown identity grants no account or administrator controls. A revoked
+ * bearer clears the old account; a temporary network failure preserves it.
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -34,20 +31,20 @@ describe("loadIdentity", () => {
     expect(useSessionStore.getState().identity).toEqual(identity);
   });
 
-  it("clears account data on identity loss and preserves a verified bearer replacement", () => {
+  it("retires account data on bearer replacement and identity loss", () => {
     const store = useSessionStore.getState();
     store.setIdentity({ label: "A", user_id: "a", is_admin: true });
     store.setActiveSessionId("private-a");
     store.setMessages("private-a", [{ role: "user", type: "text", content: "private" }]);
     const generation = useSessionStore.getState().accountGeneration;
-    store.setToken("rotated-a", { sameAccount: true });
-    expect(useSessionStore.getState().accountGeneration).toBe(generation);
-    expect(useSessionStore.getState().messages["private-a"]).toHaveLength(1);
+    store.setToken("replacement-a");
+    expect(useSessionStore.getState().accountGeneration).toBe(generation + 1);
+    expect(useSessionStore.getState().messages).toEqual({});
     store.setToken("");
     expect(useSessionStore.getState().messages).toEqual({});
     expect(useSessionStore.getState().activeSessionId).toBeNull();
     expect(useSessionStore.getState().identity).toBeNull();
-    expect(useSessionStore.getState().accountGeneration).toBe(generation + 1);
+    expect(useSessionStore.getState().accountGeneration).toBe(generation + 2);
   });
   it("stores what the route answers", async () => {
     const body = { label: "archer", user_id: "u1", is_admin: true };
@@ -62,7 +59,7 @@ describe("loadIdentity", () => {
       "fetch",
       vi.fn(async (_url: string, init: RequestInit) => {
         calls.push(init);
-        return { ok: true, json: async () => ({ label: "x", user_id: null, is_admin: false }) };
+        return { ok: true, json: async () => ({ label: "x", user_id: "current-account", is_admin: false }) };
       })
     );
     await loadIdentity();

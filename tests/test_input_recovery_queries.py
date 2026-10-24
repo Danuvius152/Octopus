@@ -4,7 +4,7 @@ import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
 
-from server.config import settings
+from server import deps
 from server.deps import get_session_manager
 from server.routers.sessions import router
 from server.sessions.client_submissions import submission_status, submit_client_message
@@ -30,8 +30,9 @@ async def test_saved_input_page_does_not_fetch_a_terminal_per_item(runtime, monk
         return await execute(sql, parameters)
 
     monkeypatch.setattr(db.conn, "execute", observe)
+    bearer = await deps.get_user_manager().issue_token(session.user_id)
     async with AsyncClient(transport=ASGITransport(app), base_url="http://test",
-                           headers={"Authorization": f"Bearer {settings.auth_token}"}) as client:
+                           headers={"Authorization": f"Bearer {bearer}"}) as client:
         page = await client.get(f"/api/sessions/{session.id}/submissions", params={"limit": 2})
         assert page.status_code == 200
         assert len(page.json()["items"]) == 2 and page.json()["next_cursor"] is not None

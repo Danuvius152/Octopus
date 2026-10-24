@@ -13,7 +13,6 @@ from server.wiki.history import WikiHistory
 from server.wiki.revise import revise
 from server.wiki.store import WikiError
 from tests import test_wiki_jobs as job_tests
-from tests.test_wiki_api import HEADERS
 
 client = job_tests.client
 jobs = job_tests.jobs
@@ -142,11 +141,11 @@ async def test_owner_http_cannot_bypass_markdown_maintenance(jobs, client):
     raw = b"Original words and conditions.\n"
     created = WikiHistory(jobs.store).write(path, raw, None, "human", "legacy source")
     for extra in ({}, {"frontmatter_patch": {"title": "Title"}}):
-        response = await client.post("/api/wiki/organize", headers=HEADERS, json={"path": path, "expected_revision": created["revision"], "key_note": "Summary", "reason": "review", **extra})
+        response = await client.post("/api/wiki/organize", headers=client.headers, json={"path": path, "expected_revision": created["revision"], "key_note": "Summary", "reason": "review", **extra})
         assert response.status_code == 422 and "Markdown" in response.text
-    selected = await client.post("/api/wiki/maintain", headers=HEADERS, json={"idempotency_key": "owner-selection", "paths": [path], "scope": "review"})
+    selected = await client.post("/api/wiki/maintain", headers=client.headers, json={"idempotency_key": "owner-selection", "paths": [path], "scope": "review"})
     assert selected.status_code == 422 and "Markdown" in selected.text
-    unchanged = await client.post("/api/wiki/revise", headers=HEADERS, json={"doc": path, "expected_revision": created["revision"], "operation": "no_change", "reason": "review"})
+    unchanged = await client.post("/api/wiki/revise", headers=client.headers, json={"doc": path, "expected_revision": created["revision"], "operation": "no_change", "reason": "review"})
     assert unchanged.status_code == 422 and "Markdown" in unchanged.text
     assert jobs.store.path(path).read_bytes() == raw
     assert not jobs.store.path(path + ".md").exists()

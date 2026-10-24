@@ -177,7 +177,7 @@ async def test_late_subscriber_gets_current_version_after_prior_delivery_was_ack
     job = enqueue(jobs)
     with jobs.store.connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        first = job_events.subscribe(db, job["id"], job_events.Requester(None, "chat", "original", "request-1"))
+        first = job_events.subscribe(db, job["id"], job_events.Requester(jobs.user_id, "chat", "original", "request-1"))
     completed = jobs.update(job["id"], status="completed")
     with jobs.store.connect() as db:
         for event in job_events.pending(db):
@@ -186,7 +186,7 @@ async def test_late_subscriber_gets_current_version_after_prior_delivery_was_ack
         assert not job_events.pending(db)
     with jobs.store.connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        following = job_events.subscribe(db, job["id"], job_events.Requester(None, "chat", "following", "request-2"))
+        following = job_events.subscribe(db, job["id"], job_events.Requester(jobs.user_id, "chat", "following", "request-2"))
     with jobs.store.connect() as db:
         pending = job_events.pending(db)
         assert len(pending) == 1
@@ -203,7 +203,7 @@ async def test_same_chat_subscribes_once_even_from_a_later_request(jobs):
         with jobs.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
             identifiers.append(job_events.subscribe(
-                db, job["id"], job_events.Requester(None, "chat", "original", request)))
+                db, job["id"], job_events.Requester(jobs.user_id, "chat", "original", request)))
     assert len(set(identifiers)) == 1
     with jobs.store.connect() as db:
         assert db.execute("SELECT count(*) FROM wiki_job_subscribers").fetchone()[0] == 1

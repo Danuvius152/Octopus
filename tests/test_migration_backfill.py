@@ -1,17 +1,13 @@
-"""Migration/backfill tests for the first-class Agents refactor.
+"""Retained pre-account input is refused; fresh storage remains unowned.
 
-Boots a DB created with the *old* (pre-agents) schema — sessions without
-agent_id, schedules with a NOT NULL session_id + FK, and the since-removed
-bridge_mappings — starts the database twice, and asserts the ownership
-graph is rebuilt onto a Default Agent, idempotently. See
-docs/plans/agent-refactor.md §4.5.
-
-The old schema still creates bridge_mappings on purpose: a database made before
-2026-09-25 has that table, and the migration that drops it has to be exercised
-against one that really does.
+The old fixture stays explicit so startup cannot silently adopt it or use an
+orphan schedule to recreate the retired installation's Default Agent.
 """
 
 import sqlite3
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -81,107 +77,49 @@ async def _column_names(db: Database, table: str) -> set[str]:
     return {row[1] for row in await cursor.fetchall()}
 
 
-@pytest.mark.asyncio
-async def test_backfill_from_old_schema(tmp_path):
+@pytest.mark.parametrize("orphan_schedule", [False, True])
+def test_preaccount_database_is_refused_without_adoption(tmp_path, orphan_schedule):
+    """The retired pre-account conversion cannot acquire current ownership."""
     db_path = str(tmp_path / "old.db")
     _seed_old_db(db_path)
-
-    db = Database(db_path)
-    await db.initialize()  # runs _apply_migrations once
-    try:
-        # Exactly one protected Default Agent.
-        agents = await db.load_agents()
-        system = [a for a in agents if a["is_system"]]
-        assert len(system) == 1
-        default = system[0]
-        assert default["name"] == "Octo"
-        # A newly created agent receives the current creation defaults.
-        assert default["mcp_servers"] == [
-            "ask",
-            "bg",
-            "ask_agent",
-            "research",
-            "schedule",
-        ]
-
-        # Session backfilled onto it, origin defaults to 'user', backend to
-        # claude-code (codex-backend.md §4.1 migration).
-        sessions = await db.load_sessions()
-        assert len(sessions) == 1
-        assert sessions[0]["agent_id"] == default["id"]
-        assert sessions[0]["origin"] == "user"
-        assert sessions[0]["backend"] == "claude-code"
-
-        # Schedule re-owned by the agent; session_id column gone.
-        schedules = await db.load_schedules()
-        assert len(schedules) == 1
-        assert schedules[0]["agent_id"] == default["id"]
-        assert "session_id" not in await _column_names(db, "schedules")
-
-        # The Telegram bridge was removed, so its table goes with it — a
-        # table nothing reads is a question every future reader has to answer.
-        assert not await _table_exists(db, "bridge_mappings")
-
-        # Idempotency through the real startup boundary, with no unfinished
-        # migration SQL leaking into public runtime operations.
-        await db.close()
-        db = Database(db_path)
-        await db.initialize()
-        agents2 = await db.load_agents()
-        assert len([a for a in agents2 if a["is_system"]]) == 1
-        assert (await db.get_agent(default["id"]))["id"] == default["id"]
-        assert len(await db.load_schedules()) == 1
-        assert not await _table_exists(db, "bridge_mappings")
-        sessions2 = await db.load_sessions()
-        assert all(s["agent_id"] == default["id"] for s in sessions2)
-    finally:
-        await db.close()
+    if orphan_schedule:
+        with sqlite3.connect(db_path) as writer:
+            writer.execute("DELETE FROM sessions WHERE id='s1'")
+    original = Path(db_path).read_bytes()
+    result = subprocess.run(
+        [sys.executable, "-c", """
+import asyncio,sys
+from server.database import Database
+asyncio.run(Database(sys.argv[1]).initialize())
+""", db_path],
+        cwd=Path(__file__).resolve().parents[1], capture_output=True, text=True, timeout=10,
+    )
+    assert result.returncode == 70, result.stderr
+    assert Path(db_path).read_bytes() == original
+    with sqlite3.connect(Path(db_path).as_uri() + "?mode=ro", uri=True) as reader:
+        assert reader.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == (0 if orphan_schedule else 1)
+        assert reader.execute("SELECT session_id FROM schedules").fetchone()[0] == "s1"
+        assert reader.execute("SELECT COUNT(*) FROM bridge_mappings").fetchone()[0] == 1
+        assert reader.execute("SELECT COUNT(*) FROM sqlite_schema WHERE name IN ('users','agents')").fetchone()[0] == 0
 
 
 @pytest.mark.asyncio
-async def test_fresh_db_gets_default_agent(tmp_path):
-    """A brand-new DB is born with the new shape and one Default Agent."""
+async def test_fresh_db_keeps_agents_empty_until_account_creation(tmp_path):
+    """A brand-new DB has the current schema without ownerless business rows."""
     db = Database(str(tmp_path / "fresh.db"))
     await db.initialize()
     try:
-        system = await db.get_system_agent()
-        assert system is not None
-        assert system["name"] == "Octo"
+        assert await db.get_system_agent() is None
+        assert await db.load_agents(include_archived=True) == []
         # No session_id leftover on the freshly-created tables.
         assert "session_id" not in await _column_names(db, "schedules")
         assert not await _table_exists(db, "bridge_mappings")
 
-        # Second startup no-ops (still exactly one system agent).
+        # Second startup still leaves account creation to the account aggregate.
         await db.close()
         db = Database(str(tmp_path / "fresh.db"))
         await db.initialize()
         agents = await db.load_agents(include_archived=True)
-        assert len([a for a in agents if a["is_system"]]) == 1
-    finally:
-        await db.close()
-
-
-@pytest.mark.asyncio
-async def test_orphan_schedule_falls_back_to_default(tmp_path):
-    """A schedule whose session was deleted still lands on the Default Agent."""
-    db_path = str(tmp_path / "orphan.db")
-    conn = sqlite3.connect(db_path)
-    conn.executescript(_OLD_SCHEMA)
-    # Schedule references a session id that doesn't exist (FK enforcement is
-    # off by default in this raw connection, so the orphan persists).
-    conn.execute(
-        "INSERT INTO schedules (id, session_id, name, prompt, interval_seconds, created_at) "
-        "VALUES ('sch1', 'gone', 'daily', 'do it', 3600, '2025-01-01T00:00:00+00:00')"
-    )
-    conn.commit()
-    conn.close()
-
-    db = Database(db_path)
-    await db.initialize()
-    try:
-        default = await db.get_system_agent()
-        schedules = await db.load_schedules()
-        assert len(schedules) == 1
-        assert schedules[0]["agent_id"] == default["id"]
+        assert agents == []
     finally:
         await db.close()

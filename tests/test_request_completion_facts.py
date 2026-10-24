@@ -87,7 +87,7 @@ async def test_slow_initial_text_cannot_overtake_the_nested_relay(notification_r
         "gate.with_suffix('.input').write_text(sys.stdin.readline())",
         "input_frame=sys.stdin.readline()\ngate.with_suffix('.input').write_text(input_frame)",
     ).replace("'Original body from '+sid", "('FINAL RELAY ANSWER' if '[agent-reply:' in input_frame else 'INITIAL WAITING TEXT')"))
-    await AgentManager(runtime.manager.db).create_agent(name="Leaf worker", backend="codex")
+    await AgentManager(runtime.manager.db).create_agent(name="Leaf worker", backend="codex", user_id=runtime.parent.user_id)
     outer = await runtime.delegations.start_delegation(
         parent_session_id=runtime.parent.id, agent_name="Notification worker", request="Delegate and relay",
     )
@@ -140,7 +140,7 @@ async def test_application_build_finishes_from_its_receipt_when_the_prefix_fails
     applications = ApplicationManager()
     applications.bind(runtime.manager, runtime.manager.db)
     runtime.controls.enabled = not direct_chat
-    agent = await AgentManager(runtime.manager.db).create_agent(name="Original builder", backend="codex")
+    agent = await AgentManager(runtime.manager.db).create_agent(name="Original builder", backend="codex", user_id=runtime.parent.user_id)
     try:
         application = await applications.create_application(
             name="Original build", description="Keep the original application output.", agent_id=agent["id"],
@@ -189,7 +189,7 @@ async def test_an_unavailable_build_is_not_completed_just_because_its_file_exist
     monkeypatch.setattr(settings, "applications_dir", str(runtime.root / "apps"))
     applications = ApplicationManager()
     applications.bind(runtime.manager, runtime.manager.db)
-    agent = await AgentManager(runtime.manager.db).create_agent(name="Interrupted builder", backend="codex")
+    agent = await AgentManager(runtime.manager.db).create_agent(name="Interrupted builder", backend="codex", user_id=runtime.parent.user_id)
     read = runtime.manager.db.has_delivery_notice
 
     async def fail_original_owner(session_id, delivery_id):
@@ -310,7 +310,7 @@ async def test_late_running_notification_cannot_reopen_a_completed_build(notific
     runtime.manager.on_broadcast("hold-original-build-prefix", hold_original_input)
     applications = ApplicationManager()
     applications.bind(runtime.manager, runtime.manager.db)
-    agent = await AgentManager(runtime.manager.db).create_agent(name="Late build prefix", backend="codex")
+    agent = await AgentManager(runtime.manager.db).create_agent(name="Late build prefix", backend="codex", user_id=runtime.parent.user_id)
     sequence = runtime.manager.db.message_sequence_state
     target = {}
 
@@ -378,7 +378,7 @@ async def test_slow_old_build_completion_cannot_finish_the_next_build(notificati
     monkeypatch.setattr(runtime.manager, "on_request_complete", observe_completion)
     applications = ApplicationManager()
     applications.bind(runtime.manager, runtime.manager.db)
-    agent = await AgentManager(runtime.manager.db).create_agent(name="Build order", backend="codex")
+    agent = await AgentManager(runtime.manager.db).create_agent(name="Build order", backend="codex", user_id=runtime.parent.user_id)
     try:
         application = await applications.create_application(name="Build order", description="Keep the second build active.", agent_id=agent["id"])
         sid = application["session_id"]

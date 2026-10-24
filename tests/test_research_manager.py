@@ -23,13 +23,15 @@ from server.research import manager as rm_mod
 from server.research.manager import ResearchManager
 from server.research.orchestrator import ResearchProgress, ResearchReport
 from server.session_manager import SessionManager
+from tests.accounts import create_account
 from tests.submission import accepted_receipt
 
 
 @pytest.fixture
-async def db():
+async def db(tmp_path):
     d = Database(":memory:")
     await d.initialize()
+    await create_account(d, extra_roots=[tmp_path])
     yield d
     await d.close()
 
@@ -50,7 +52,7 @@ async def rm(mgr, db):
 
 async def _session(mgr, db, *, backend="claude-code"):
     agent = await db.get_system_agent()
-    return await mgr.create_session(agent["id"], "S", "/tmp", backend=backend)
+    return await mgr.create_session(agent["id"], "S", backend=backend)
 
 
 async def test_closed_work_cancellation_joins_research_cleanup(rm, mgr, db, monkeypatch):

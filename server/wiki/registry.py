@@ -34,7 +34,6 @@ class Construction:
     config: dict
     owner_epoch: int
     incarnation: int
-    migration: object | None = None
     revoked: bool = False
     done: threading.Event = field(default_factory=threading.Event)
     finished: threading.Event = field(default_factory=threading.Event)
@@ -43,14 +42,6 @@ class Construction:
     failure: BaseException | None = None
 
 
-@dataclass(eq=False)
-class MigrationConstruction:
-    owner: str
-    state: Path
-    generation: str
-    upgrade_id: str
-    owner_epoch: int
-    incarnation: int
 
 
 class WikiRegistry:
@@ -63,11 +54,9 @@ class WikiRegistry:
         self._account_locks: dict[str, threading.RLock] = {}
         self._blocked: set[str | None] = set()
         self._retired_stores: dict[WikiStore, str | None] = {}
-        self._legacy_enabled = True
         self._owner_epochs: dict[str | None, int] = {}
         self._drained: dict[str | None, tuple[int, int]] = {}
         self._constructing: dict[Construction, None] = {}
-        self._migration_caps: set[MigrationConstruction] = set()
         self._incarnation = 0
         self._closing = False
         self._stopped = False
@@ -94,7 +83,7 @@ class WikiRegistry:
                     return
                 self._check_reopen()
                 if (self._stores or self._retired_stores or self._constructing or self._task is not None
-                        or self._migration_caps or self._recoveries is not None and not self._recoveries.is_drained()):
+                        or self._recoveries is not None and not self._recoveries.is_drained()):
                     raise WikiError("Wiki owners must finish cleanup before binding service health", 503)
                 self.health = health
                 # A retained manager keeps its old health and its closed gates.
@@ -104,24 +93,13 @@ class WikiRegistry:
         finally:
             self._close_gate.release()
 
-    @property
-    def legacy_enabled(self):
-        with self._lock:
-            return self._legacy_enabled
 
-    @legacy_enabled.setter
-    def legacy_enabled(self, enabled):
-        with self._lock:
-            if enabled != self._legacy_enabled:
-                self._legacy_enabled = enabled
-                self._advance(None)
 
     def _advance(self, user_id):
         self._owner_epochs[user_id] = self._owner_epochs.get(user_id, 0) + 1
         for permit in self._constructing:
             if permit.owner == user_id:
                 permit.revoked = True
-        self._migration_caps = {cap for cap in self._migration_caps if cap.owner != user_id}
 
     def begin_transition(self, user_id):
         """Stop admission immediately; block() separately confirms the drain."""
@@ -135,8 +113,7 @@ class WikiRegistry:
             return self._account_locks.setdefault(key, threading.RLock())
 
     def states(self):
-        states = [(None, self.state(None))] if self.legacy_enabled else []
-        states.extend((path.parent.name, path) for path in Path(settings.users_root).expanduser().glob("*/wiki"))
+        states = [(path.parent.name, path) for path in Path(settings.users_root).expanduser().glob("*/wiki")]
         return [(user_id, state) for user_id, state in states if user_id not in self._blocked]
 
     def block(self, user_id):
@@ -363,27 +340,15 @@ class WikiRegistry:
             self._advance(user_id)
             self._blocked.discard(user_id)
 
-    def _allowed(self, user_id, capability=None):
-        if capability is not None:
-            from .account_upgrade import pending_upgrade
-
-            journal = pending_upgrade()
-            return (capability in self._migration_caps and capability.owner == user_id
-                    and capability.owner_epoch == self._owner_epochs.get(user_id, 0)
-                    and capability.incarnation == self._incarnation
-                    and self._drained.get(user_id) == (capability.owner_epoch, self._incarnation)
-                    and user_id in self._blocked and not self._closing
-                    and journal is not None and journal["phase"] == "reopening"
-                    and journal.get("user_id") == user_id and journal["upgrade_id"] == capability.upgrade_id)
-        return (user_id not in self._blocked and (user_id is not None or self._legacy_enabled)
-                and not self._closing and not self._stopped)
+    def _allowed(self, user_id):
+        return user_id not in self._blocked and not self._closing and not self._stopped
 
     @staticmethod
     def _key(user_id, state, config):
         return (user_id, str(state), config["root"], config["vault_id"],
                 config.get("curator_agent_id"), config.get("app_id"), config.get("registration_generation"))
 
-    def _store(self, user_id, capability=None):
+    def _store(self, user_id):
         self.health.require_healthy()
         account = self._account_lock(user_id)
         outer_account = account._is_owned()
@@ -393,17 +358,15 @@ class WikiRegistry:
         outer_history = str(state) in getattr(_owners, "held", set())
         with account:
             with self._lock:
-                if not self._allowed(user_id, capability):
+                if not self._allowed(user_id):
                     raise WikiError("Wiki Store unavailable during account transition", 503)
             # Ordinary reads must not create state for an unregistered owner.
             # The actual capture rechecks both gate and config under the lock.
             self.config(user_id)
             with self.registration_lock(user_id), self._lock:
-                if not self._allowed(user_id, capability):
+                if not self._allowed(user_id):
                     raise WikiError("Wiki Store unavailable during account transition", 503)
                 config = self.config(user_id)
-                if capability is not None and (capability.state != state or capability.generation != config.get("registration_generation")):
-                    raise WikiError("Migration registration changed before reopen", 503)
                 key = self._key(user_id, state, config)
                 existing = self._stores.get(key)
                 if existing is not None and not existing._retired:
@@ -417,14 +380,14 @@ class WikiRegistry:
                 waiting = next((entry for entry in self._constructing if entry.owner == user_id
                                 and entry.state == state and entry.config.get("vault_id") == config["vault_id"]), None)
                 if waiting is None:
-                    permit = Construction(user_id, state, config, self._owner_epochs.get(user_id, 0), self._incarnation, capability)
+                    permit = Construction(user_id, state, config, self._owner_epochs.get(user_id, 0), self._incarnation)
                     self._constructing[permit] = None
         if waiting is not None:
             if not waiting.finished.wait(30):
                 raise WikiError("Wiki recovery is still running; ordinary access remains closed", 503)
             if waiting.failure is not None and not waiting.revoked and waiting.config == config:
                 raise WikiError(f"Wiki recovery failed; durable evidence retained: {waiting.failure}", 503) from waiting.failure
-            return self._store(user_id, capability)
+            return self._store(user_id)
         candidate = None
         retire = []
         try:
@@ -438,7 +401,7 @@ class WikiRegistry:
             if "registration_generation" not in config:
                 with account:
                     with self._lock:
-                        if permit.revoked or not self._allowed(user_id, capability):
+                        if permit.revoked or not self._allowed(user_id):
                             raise WikiError("Wiki construction was revoked", 503)
                     with self.registration_lock(user_id, shared=False):
                         if self.config(user_id) != config:
@@ -448,8 +411,8 @@ class WikiRegistry:
                         key = self._key(user_id, state, config)
             def acquired(store):
                 permit.candidate = store
-                # The migration uses this captured binding. Publication still
-                # rechecks the permit and config after construction completes.
+                # Publication rechecks this captured binding and the permit
+                # after construction completes.
                 store.registration_generation = config["registration_generation"]
 
             candidate = WikiStore(Path(config["root"]), state, config["vault_id"], on_construct=acquired,
@@ -494,7 +457,7 @@ class WikiRegistry:
 
     def _require_construction(self, permit):
         if (permit.revoked or permit.owner_epoch != self._owner_epochs.get(permit.owner, 0)
-                or permit.incarnation != self._incarnation or not self._allowed(permit.owner, permit.migration)
+                or permit.incarnation != self._incarnation or not self._allowed(permit.owner)
                 or self.config(permit.owner) != permit.config):
             raise WikiError("Wiki construction or registration changed before admission", 503)
 
@@ -571,31 +534,12 @@ class WikiRegistry:
                 except OSError as exc:
                     raise WikiError("Wiki registration unlock failed; state retained", 503) from exc
 
-    def reopen_for_upgrade(self, user_id, journal):
-        from .account_upgrade import pending_upgrade
-
-        with self._account_lock(user_id), self._lock:
-            actual = pending_upgrade()
-            if (actual is None or actual["phase"] != "reopening" or actual.get("user_id") != user_id
-                    or actual["upgrade_id"] != journal["upgrade_id"] or not user_id
-                    or user_id not in self._blocked or self._drained.get(user_id) != (self._owner_epochs.get(user_id, 0), self._incarnation)):
-                raise WikiError("A drained, durable migration reopen is required", 503)
-            config = self.config(user_id)
-            capability = MigrationConstruction(user_id, self.state(user_id).resolve(), config["registration_generation"],
-                                                actual["upgrade_id"], self._owner_epochs[user_id], self._incarnation)
-            self._migration_caps.add(capability)
-        try:
-            return self._store(user_id, capability)
-        finally:
-            with self._lock:
-                self._migration_caps.discard(capability)
 
     def close(self) -> None:
         with self._close_gate:
             with self._lock:
                 self._closing = True
                 self._incarnation += 1
-                self._migration_caps.clear()
                 pending = list(self._constructing)
                 for permit in pending:
                     permit.revoked = True

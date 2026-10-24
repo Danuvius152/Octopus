@@ -47,15 +47,9 @@ from server.models import MessageContent
 from server.routers import agents as agents_mod
 from server.routers import applications as applications_mod
 from server.session_manager import SessionManager, session_manager
+from server.users import UserManager
+from tests.accounts import create_account
 from tests.submission import accepted_receipt
-
-TOKEN = "changeme"
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
-# How the page inside the iframe authenticates: the app cookie the SPA sets
-# before mounting the frame. Sent as a raw header so httpx keeps it per
-# request rather than in a shared jar.
-APP_COOKIE = {"Cookie": f"{applications_mod.APP_TOKEN_COOKIE}={TOKEN}"}
-
 
 # --------------------------------------------------------------- fixtures
 
@@ -68,9 +62,10 @@ def apps_root(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-async def db():
+async def db(tmp_path):
     d = Database(":memory:")
     await d.initialize()
+    await create_account(d, extra_roots=[tmp_path])
     yield d
     await d.close()
 
@@ -148,7 +143,8 @@ def turns(mgr, monkeypatch):
 
 
 async def _make_app(am, db, *, name="SmartReader") -> dict:
-    agent = await AgentManager(db).create_agent(name=f"{name} Agent")
+    owner = (await db.get_system_agent())["user_id"]
+    agent = await AgentManager(db).create_agent(name=f"{name} Agent", user_id=owner)
     return await am.create_application(
         name=name,
         description="Reads a page and talks about it",
@@ -266,7 +262,7 @@ async def test_agent_is_addressed_by_name_and_defaults_to_the_apps_own(
     aam, am, db, turns
 ):
     row = await _make_app(am, db)
-    other = await AgentManager(db).create_agent(name="Vera")
+    other = await AgentManager(db).create_agent(name="Vera", user_id=(await db.get_system_agent())["user_id"])
 
     out = await aam.ask(row, message="hi")
     assert aam.session_mgr.get_session(out["conversation_id"]).agent_id == row["agent_id"]
@@ -282,7 +278,7 @@ async def test_agent_is_addressed_by_name_and_defaults_to_the_apps_own(
 @pytest.mark.asyncio
 async def test_listing_agents_says_who_can_be_addressed(aam, am, db, turns):
     await _make_app(am, db)
-    await AgentManager(db).create_agent(name="Vera", description="researcher")
+    await AgentManager(db).create_agent(name="Vera", description="researcher", user_id=(await db.get_system_agent())["user_id"])
     listed = await aam.list_agents()
     assert "Vera" in [a["name"] for a in listed]
     # Nothing about how an agent is wired up leaks to an app.
@@ -582,6 +578,7 @@ async def test_request_status_waits_for_the_terminal_transaction_acknowledgment(
 async def test_reading_a_confirmed_request_does_not_commit_another_request(tmp_path):
     database = Database(str(tmp_path / "app-status.db"))
     await database.initialize()
+    await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     agent = await database.get_system_agent()
@@ -660,10 +657,9 @@ async def test_a_question_reaches_the_app(aam, am, db, mgr, turns, monkeypatch):
 
 
 @pytest.fixture
-async def client(apps_root, monkeypatch):
+async def client(apps_root, monkeypatch, db):
     """The real ASGI app, wired to a fresh DB and the singleton managers."""
-    database = Database(":memory:")
-    await database.initialize()
+    database = db
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(database)
@@ -687,11 +683,16 @@ async def client(apps_root, monkeypatch):
 
     app_agent_mod.app_agent_manager.shutdown()
     singleton_application_manager.shutdown()
-    await database.close()
 
 
-async def _api_app(client, name="SmartReader") -> dict:
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+@pytest.fixture
+async def account_token(db):
+    owner = (await db.get_system_agent())["user_id"]
+    return await UserManager(db).issue_token(owner)
+
+
+async def _api_app(client, account_token, name="SmartReader") -> dict:
+    agents = (await client.get("/api/agents", headers={"Authorization": "Bearer " + account_token})).json()
     resp = await client.post(
         "/api/applications",
         json={
@@ -699,15 +700,15 @@ async def _api_app(client, name="SmartReader") -> dict:
             "description": "Reads a page and talks about it",
             "agent_id": agents[0]["id"],
         },
-        headers=HEADERS,
+        headers={"Authorization": "Bearer " + account_token},
     )
     assert resp.status_code == 201, resp.text
     return resp.json()
 
 
 @pytest.mark.asyncio
-async def test_http_requires_a_credential(client):
-    row = await _api_app(client)
+async def test_http_requires_a_credential(client, account_token):
+    row = await _api_app(client, account_token)
     assert (await client.get(f"/apps/{row['id']}/agent/agents")).status_code == 401
     assert (
         await client.post(
@@ -716,8 +717,8 @@ async def test_http_requires_a_credential(client):
     ).status_code == 401
 
 
-async def test_http_first_timeout_returns_app_scoped_original_request_status(client, monkeypatch):
-    a, b = await _api_app(client, "Timeout app"), await _api_app(client, "Other timeout app")
+async def test_http_first_timeout_returns_app_scoped_original_request_status(client, monkeypatch, account_token):
+    a, b = await _api_app(client, account_token, "Timeout app"), await _api_app(client, account_token, "Other timeout app")
     scoped = {"X-Octopus-App-Token": app_scope_token(a["id"])}
     client.turns.emit = False
     monkeypatch.setattr(app_agent_mod, "ASK_TIMEOUT_SECONDS", .01)
@@ -737,9 +738,9 @@ async def test_http_first_timeout_returns_app_scoped_original_request_status(cli
 
 
 @pytest.mark.asyncio
-async def test_http_accepts_the_apps_own_token_and_only_its_own(client):
-    a = await _api_app(client, "SmartReader")
-    b = await _api_app(client, "Other App")
+async def test_http_accepts_the_apps_own_token_and_only_its_own(client, account_token):
+    a = await _api_app(client, account_token, "SmartReader")
+    b = await _api_app(client, account_token, "Other App")
     scoped = {"X-Octopus-App-Token": app_scope_token(a["id"])}
 
     assert (
@@ -759,9 +760,9 @@ async def test_http_accepts_the_apps_own_token_and_only_its_own(client):
 
 
 @pytest.mark.asyncio
-async def test_http_ask_and_conversation_roundtrip(client):
-    row = await _api_app(client)
-    cookies = APP_COOKIE
+async def test_http_ask_and_conversation_roundtrip(client, account_token):
+    row = await _api_app(client, account_token)
+    cookies = {"Cookie": f"{applications_mod.APP_TOKEN_COOKIE}={account_token}"}
 
     resp = await client.post(
         f"/apps/{row['id']}/agent/ask",
@@ -797,13 +798,13 @@ async def test_http_ask_and_conversation_roundtrip(client):
 
 
 @pytest.mark.asyncio
-async def test_http_chat_streams_server_sent_events(client):
-    row = await _api_app(client)
+async def test_http_chat_streams_server_sent_events(client, account_token):
+    row = await _api_app(client, account_token)
     async with client.stream(
         "POST",
         f"/apps/{row['id']}/agent/chat",
         json={"message": "hi"},
-        headers=APP_COOKIE,
+        headers={"Cookie": f"{applications_mod.APP_TOKEN_COOKIE}={account_token}"},
     ) as resp:
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/event-stream")
@@ -822,9 +823,9 @@ async def test_http_chat_streams_server_sent_events(client):
 
 
 @pytest.mark.asyncio
-async def test_http_refusals_carry_their_status(client):
-    row = await _api_app(client)
-    cookies = APP_COOKIE
+async def test_http_refusals_carry_their_status(client, account_token):
+    row = await _api_app(client, account_token)
+    cookies = {"Cookie": f"{applications_mod.APP_TOKEN_COOKIE}={account_token}"}
     assert (
         await client.post(
             f"/apps/{row['id']}/agent/ask",
@@ -849,17 +850,17 @@ async def test_http_refusals_carry_their_status(client):
 
 
 @pytest.mark.asyncio
-async def test_app_conversations_are_marked_on_the_session_api(client):
-    row = await _api_app(client)
+async def test_app_conversations_are_marked_on_the_session_api(client, account_token):
+    row = await _api_app(client, account_token)
     body = (
         await client.post(
             f"/apps/{row['id']}/agent/ask",
             json={"message": "hi"},
-            headers=APP_COOKIE,
+            headers={"Cookie": f"{applications_mod.APP_TOKEN_COOKIE}={account_token}"},
         )
     ).json()
 
-    sessions = (await client.get("/api/sessions", headers=HEADERS)).json()
+    sessions = (await client.get("/api/sessions", headers={"Authorization": "Bearer " + account_token})).json()
     conv = next(s for s in sessions if s["id"] == body["conversation_id"])
     # Both fields are what the sidebar filters on.
     assert conv["origin"] == ORIGIN_APP

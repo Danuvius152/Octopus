@@ -8,11 +8,11 @@ import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 import aiosqlite
 
+from ..account_baseline import persistent_database_file, require_account_database
 from ..config import settings
 from ..service_health import ServiceHealth
 from .schema import _DEFAULT_MCP_SERVERS_JSON, _SCHEMA
@@ -326,9 +326,8 @@ class DatabaseBase:
         # Nullable with no default and no REFERENCES: the column has to exist
         # before the first user does (this runs on a database that predates
         # accounts entirely), and a NOT NULL would have nothing to put there.
-        # `_backfill_owner` fills it in once a user exists; NULL means
-        # "belongs to the install", which is what every row is before the
-        # upgrade and what no row is after it.
+        # Historical NULL values remain storage evidence. Current business
+        # admission requires an account and never assigns these rows an owner.
         ("agents", "user_id", "ALTER TABLE agents ADD COLUMN user_id TEXT"),
         ("sessions", "user_id", "ALTER TABLE sessions ADD COLUMN user_id TEXT"),
         ("applications", "user_id", "ALTER TABLE applications ADD COLUMN user_id TEXT"),
@@ -337,18 +336,6 @@ class DatabaseBase:
         ("connector_installations", "user_id",
          "ALTER TABLE connector_installations ADD COLUMN user_id TEXT"),
         ("notifiers", "user_id", "ALTER TABLE notifiers ADD COLUMN user_id TEXT"),
-    )
-
-    # The tables above, for the backfill and for anything else that has to
-    # treat "every owned table" as one list rather than eight literals.
-    OWNED_TABLES: tuple[str, ...] = (
-        "agents",
-        "sessions",
-        "wiki_job_notifications",
-        "applications",
-        "backend_credentials",
-        "connector_installations",
-        "notifiers",
     )
 
     # Deliberately NOT owned: `connector_oauth_clients` and `custom_connectors`
@@ -365,8 +352,7 @@ class DatabaseBase:
         self._closed: bool = False
         self._close_task: asyncio.Task[None] | None = None
         self._write_lock = asyncio.Lock()
-        self._bootstrap_lock = asyncio.Lock()
-        self.installation_key_lock = asyncio.Lock()
+        self._agent_memory_lock = asyncio.Lock()
         self._write_owner: asyncio.Task[Any] | None = None
         # Work that has to unwind before the connection goes away; see
         # `add_close_hook`.
@@ -423,12 +409,8 @@ class DatabaseBase:
                 self._write_lock.release()
 
     async def reject_unfinished_token_rotation(self) -> None:
-        if self._db_path == ":memory:":
-            return
-        path = Path(self._db_path)
-        try:
-            path.stat()
-        except FileNotFoundError:
+        path = await asyncio.to_thread(persistent_database_file, self._db_path)
+        if path is None:
             return
         # Read the real committed state, including an ownerless WAL, before
         # opening a writer or preparing any storage. Never interpret the intent.
@@ -454,6 +436,7 @@ class DatabaseBase:
                 self._write_owner = asyncio.current_task()
                 try:
                     await self.reject_unfinished_token_rotation()
+                    await asyncio.to_thread(require_account_database, self._db_path)
                     self._conn = await aiosqlite.connect(self._db_path)
                     mode = await self.conn.execute("PRAGMA journal_mode=WAL")
                     mode_value = await mode.fetchone()
@@ -694,7 +677,7 @@ class DatabaseBase:
         # true of all three.
         # Two tables briefly carried `user_id` before it was settled that a
         # connector kind and its OAuth client are install-level (see
-        # OWNED_TABLES). A column nothing reads is a column that will one day be
+        # the installation-level configuration above). A column nothing reads is a column that will one day be
         # read by mistake, so it goes. Guarded on its presence, and after the
         # ADD loop above so the two cannot fight over the same database.
         for table in ("custom_connectors", "connector_oauth_clients"):
@@ -967,12 +950,18 @@ class DatabaseBase:
             if not await self._has_column(table, column):
                 await self.conn.execute(ddl)
 
-        # 2. The protected Default Agent — exactly one, created once.
+        # 2. Retained legacy rows may still need their original default binding.
+        # Empty installs get an owned default only when an account is created.
         cursor = await self.conn.execute(
             "SELECT id FROM agents WHERE is_system = 1 LIMIT 1"
         )
         row = await cursor.fetchone()
-        if row is None:
+        retained = await self.conn.execute(
+            "SELECT 1 FROM agents UNION ALL SELECT 1 FROM sessions "
+            "UNION ALL SELECT 1 FROM schedules LIMIT 1"
+        )
+        default_id = row[0] if row is not None else None
+        if row is None and await retained.fetchone() is not None:
             default_id = uuid.uuid4().hex[:12]
             now = datetime.now(UTC).isoformat()
             await self.conn.execute(
@@ -982,8 +971,6 @@ class DatabaseBase:
                 "VALUES (?, 'Octo', '', '', ?, 1, ?, ?, ?)",
                 (default_id, _DEFAULT_MCP_SERVERS_JSON, now, now, settings.default_backend),
             )
-        else:
-            default_id = row[0]
 
         # 3. Backfill sessions → Default Agent. (origin defaults to 'user'.)
         await self.conn.execute(

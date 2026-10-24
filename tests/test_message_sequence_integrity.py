@@ -9,6 +9,7 @@ from dataclasses import replace
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from server import deps
 from server.database import Database
 from server.deps import get_session_manager
 from server.harness import get_harness
@@ -17,12 +18,15 @@ from server.main import app
 from server.models import MessageContent
 from server.routers.sessions import get_session
 from server.session_manager import ForkError, SessionManager
+from server.users import UserManager
+from tests.accounts import create_account
 
 
 @pytest.fixture
 async def history(tmp_path):
     db = Database(str(tmp_path / "messages.db"))
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
@@ -40,6 +44,7 @@ async def restart(db, manager):
     await db.close()
     reopened = Database(path)
     await reopened.initialize()
+    deps.set_user_manager(UserManager(reopened))
     manager.sessions.clear()
     await manager.initialize(reopened)
     return reopened
@@ -163,8 +168,9 @@ async def test_legacy_ambiguity_is_reported_and_export_retains_every_storage_row
     await db.append_message(session.id, 4, "user", "text", "first row")
     await db.append_message(session.id, 4, "assistant", "text", "second row")
     db = await restart(db, manager)
+    bearer = await UserManager(db).issue_token(session.user_id)
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test",
-                           headers={"Authorization": "Bearer changeme"}) as client:
+                           headers={"Authorization": "Bearer " + bearer}) as client:
         detail = (await client.get(f"/api/sessions/{session.id}")).json()
         assert detail["transcript_integrity"] == "duplicate_seq"
         assert detail["message_count"] == 2 and detail["messages"] == []

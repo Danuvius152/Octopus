@@ -33,10 +33,8 @@ class TestPaths:
         for name in ("agents", "applications", "attachments", "codex_home", "research"):
             assert getattr(a, name) != getattr(b, name)
 
-    def test_before_accounts_the_legacy_layout_is_kept(self):
-        """An install being upgraded must keep reading the agent memory and
-        applications it already has; moving them is §9's job, done once and
-        deliberately, not a surprise from path resolution."""
+    def test_controlled_inspection_can_locate_historical_roots(self):
+        """A path value locates retained data without authorizing business."""
         assert str(paths_for(None).agents) == os.path.expanduser(settings.agents_dir)
         assert str(paths_for(None).research) == os.path.expanduser(
             settings.research_dir
@@ -110,9 +108,8 @@ class TestConfinement:
         with pytest.raises(WorkspaceError):
             confine(str(tmp_path), user_id="u1", extra_roots=[str(repo)])
 
-    def test_before_accounts_nothing_is_confined(self):
-        """Because there is no owner to confine to, and the install's existing
-        sessions point wherever they already point."""
+    def test_controlled_global_paths_do_not_apply_account_confinement(self):
+        """Inspection without an owner is distinct from business admission."""
         assert confine("/etc", user_id=None) == "/etc"
 
     def test_the_error_says_where_work_is_allowed(self):
@@ -122,30 +119,37 @@ class TestConfinement:
 
 
 @pytest.mark.asyncio
-async def test_a_refused_working_dir_is_a_400_not_a_500():
+async def test_a_refused_working_dir_is_a_400_not_a_500(monkeypatch):
     """`confine()` is raised several frames below any route and nothing caught
     it, so naming a directory outside your workspace answered 500 with a
     traceback in the log. One exception handler, because every path that
     resolves a working directory goes through the same check."""
     from httpx import ASGITransport, AsyncClient
 
+    from server import deps
+    from server.database import Database
     from server.main import app
+    from server.sessions import SessionManager
+    from tests.accounts import create_account
 
-    transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as client:
-        res = await client.post(
-            "/api/sessions", json={"name": "x", "working_dir": "/etc"}
-        )
-    # 401 before anything else here (no bearer), which is the point: the handler
-    # exists for the authenticated case, exercised in test_tenant_isolation.
-    assert res.status_code == 401
-
-    from server.workspace import WorkspaceError
-
-    handler = app.exception_handlers[WorkspaceError]
-    reply = await handler(None, WorkspaceError("/etc is outside your workspace"))
-    assert reply.status_code == 400
-    assert b"outside your workspace" in reply.body
+    db = Database(":memory:")
+    await db.initialize()
+    owner, bearer = await create_account(db)
+    manager = SessionManager()
+    await manager.initialize(db)
+    monkeypatch.setitem(app.dependency_overrides, deps.get_session_manager, lambda: manager)
+    try:
+        agent = await db.get_system_agent(owner["id"])
+        body = {"agent_id": agent["id"], "name": "x", "working_dir": "/etc"}
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            assert (await client.post("/api/sessions", json=body)).status_code == 401
+            response = await client.post("/api/sessions", json=body, headers={"Authorization": f"Bearer {bearer}"})
+        assert response.status_code == 400, response.text
+        assert "outside" in response.text
+        assert manager.list_sessions() == []
+        assert await db.load_sessions() == []
+    finally:
+        await db.close()
 
 
 class TestExtraRootValidation:

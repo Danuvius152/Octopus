@@ -8,7 +8,10 @@ from server.wiki import job_execution
 from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiJobs
 from server.wiki.registry import WikiRegistry
+from tests import test_wiki_sync as sync_tests
 from tests.test_wiki_registry_lifecycle import registered as registered
+
+owned_registration = sync_tests.registered
 
 
 def test_simultaneous_borrow_cannot_escape_unfinished_recovery(registered, monkeypatch):
@@ -69,8 +72,8 @@ def test_failed_recovery_stays_closed_until_explicit_recovery_or_new_generation(
         registry.close()
 
 
-async def test_registration_change_waits_for_old_vault_recovery_before_new_work(registered, monkeypatch):
-    original, root, _ = registered
+async def test_registration_change_waits_for_old_vault_recovery_before_new_work(owned_registration, monkeypatch):
+    original, root, owner = owned_registration
     original.close()
     registry = WikiRegistry()
     entered, second, release = threading.Event(), threading.Event(), threading.Event()
@@ -96,9 +99,9 @@ async def test_registration_change_waits_for_old_vault_recovery_before_new_work(
     changing = None
     try:
         assert await asyncio.to_thread(entered.wait, 2)
-        changing = asyncio.create_task(asyncio.to_thread(registry.configure, None, root, "replacement-curator", "app-a"))
+        changing = asyncio.create_task(asyncio.to_thread(registry.configure, owner, root, "replacement-curator", "app-a"))
         async with asyncio.timeout(3):
-            while (await asyncio.to_thread(registry.config, None))["curator_agent_id"] != "replacement-curator":
+            while (await asyncio.to_thread(registry.config, owner))["curator_agent_id"] != "replacement-curator":
                 await asyncio.sleep(0.005)
         assert not await asyncio.to_thread(second.wait, 0.2), "A registration change started overlapping vault recovery"
         assert not changing.done()
@@ -106,7 +109,7 @@ async def test_registration_change_waits_for_old_vault_recovery_before_new_work(
         await starting
         config = await changing
         assert recovered_bindings == [config], "Only the valid captured binding may classify jobs"
-        jobs = WikiJobs(None, store=registry.store(None), registration=config)
+        jobs = WikiJobs(owner, store=registry.store(owner), registration=config)
         job = jobs.maintain("fresh-after-recovery", "", "Review", ["note.md"], None, [], "human")
         assert jobs.next_queued() == job["id"]
         job = jobs.get(job["id"])

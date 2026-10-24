@@ -11,12 +11,10 @@ def startup_env_file() -> str:
 
 
 class Settings(BaseSettings):
-    auth_token: str = "changeme"
-    # The handle the sidebar's account row shows. It used to show `auth_token`
-    # itself — on the reasoning that in single-user mode the token *is* the
-    # identity — which meant anyone who saw the screen had the credential: a
-    # screenshot, a shared window, someone walking past. A label identifies the
-    # operator without being a secret, so it can be read out loud.
+    # Setup proof only. An unconfigured installation keeps setup closed.
+    auth_token: str = ""
+    # Retain the saved display setting when strictly parsing existing dotenv
+    # files. Business identity never reads it or treats it as an account.
     user_label: str = "octopus"
     # New agents use the install's preferred harness; saved agents and explicit
     # per-session choices retain their own backend.

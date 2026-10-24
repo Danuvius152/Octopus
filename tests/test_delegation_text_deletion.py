@@ -117,7 +117,7 @@ async def test_deleted_leaf_reply_still_finishes_the_original_nested_parent(
     runtime.controls.enabled = False
     database = runtime.manager.db
     deliveries = observe_terminal_deliveries(runtime, monkeypatch)
-    await AgentManager(database).create_agent(name="Leaf worker", backend="codex")
+    await AgentManager(database).create_agent(name="Leaf worker", backend="codex", user_id=runtime.parent.user_id)
     outer = await runtime.delegations.start_delegation(
         parent_session_id=runtime.parent.id, agent_name="Notification worker",
         request="Delegate and wait for exactly one leaf delivery result",

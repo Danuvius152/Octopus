@@ -180,15 +180,6 @@ async def test_cancelled_stop_joins_an_unpublished_constructor(registered, monke
         registry.store(None)
 
 
-def test_migration_reopen_requires_a_real_owned_transition(registered):
-    registry, _, _ = registered
-    registry.block(None)
-    with pytest.raises(WikiError):
-        registry.reopen_for_upgrade(None, {"upgrade_id": "model-supplied"})
-    with pytest.raises(WikiError):
-        registry._store(None)
-
-
 def test_unblock_cannot_revive_an_old_drain_after_registry_close(registered):
     registry, _, _ = registered
     registry.block(None)

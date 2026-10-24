@@ -47,7 +47,9 @@ async def test_nested_first_turn_success_is_interrupted_when_its_relay_never_fin
 ):
     boot, starts = runtime
     first_boot = await boot()
-    await AgentManager(first_boot.database).create_agent(name="Grandchild", backend="codex")
+    await AgentManager(first_boot.database).create_agent(
+        name="Grandchild", backend="codex", user_id=first_boot.manager.get_session(first_boot.parent_id).user_id,
+    )
     outer_ready, child_ready = asyncio.Event(), asyncio.Event()
 
     async def observe(event):

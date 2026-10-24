@@ -19,9 +19,7 @@ from server.oauth_providers import OAuthTokenSet
 from server.routers import agents as agents_mod
 from server.routers import connectors as connectors_mod
 from server.session_manager import session_manager
-
-TOKEN = "changeme"
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
+from tests.accounts import create_account
 
 
 class FakeProvider:
@@ -59,6 +57,7 @@ class FakeConnector(ConnectorBase):
 async def client():
     db = Database(":memory:")
     await db.initialize()
+    _, bearer = await create_account(db)
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
@@ -70,7 +69,8 @@ async def client():
     register(FakeConnector())
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://test",
+                           headers={"Authorization": f"Bearer {bearer}"}) as c:
         yield c
 
     KIND_REGISTRY.clear()
@@ -82,7 +82,7 @@ async def _configure(client, kind="fakekind"):
     r = await client.put(
         f"/api/connectors/{kind}/oauth-client",
         json={"client_id": "cid", "client_secret": "csec"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 200, r.text
     return r.json()
@@ -90,7 +90,7 @@ async def _configure(client, kind="fakekind"):
 
 async def _start(client, kind="fakekind", **body):
     return await client.post(
-        "/api/connectors/oauth/start", json={"kind": kind, **body}, headers=HEADERS
+        "/api/connectors/oauth/start", json={"kind": kind, **body}, headers=client.headers
     )
 
 
@@ -106,12 +106,12 @@ async def _install(client, code="abc"):
         params={"code": code, "state": f"{login_id}:{raw_state}"},
     )
     assert cb.status_code == 200
-    insts = (await client.get("/api/connectors", headers=HEADERS)).json()
+    insts = (await client.get("/api/connectors", headers=client.headers)).json()
     return insts[-1], login_id
 
 
 async def _new_agent(client, name="Researcher"):
-    r = await client.post("/api/agents", json={"name": name}, headers=HEADERS)
+    r = await client.post("/api/agents", json={"name": name}, headers=client.headers)
     assert r.status_code == 201, r.text
     return r.json()["id"]
 
@@ -121,6 +121,7 @@ async def _new_agent(client, name="Researcher"):
 
 @pytest.mark.asyncio
 async def test_requires_auth(client):
+    client.headers.clear()
     assert (await client.get("/api/connectors")).status_code in (401, 403)
 
 
@@ -128,7 +129,7 @@ async def test_requires_auth(client):
 async def test_catalog_lists_registered_kinds(client):
     cat = {
         c["kind"]: c
-        for c in (await client.get("/api/connectors/catalog", headers=HEADERS)).json()
+        for c in (await client.get("/api/connectors/catalog", headers=client.headers)).json()
     }
     assert cat["fakekind"]["display_name"] == "Fake"
     assert cat["fakekind"]["available"] is False  # not configured yet
@@ -139,7 +140,7 @@ async def test_catalog_lists_registered_kinds(client):
 
 @pytest.mark.asyncio
 async def test_oauth_client_set_get_delete(client):
-    g = await client.get("/api/connectors/fakekind/oauth-client", headers=HEADERS)
+    g = await client.get("/api/connectors/fakekind/oauth-client", headers=client.headers)
     assert g.status_code == 200
     assert g.json()["configured"] is False
     assert g.json()["redirect_uri"].endswith("/api/connectors/oauth/callback")
@@ -151,20 +152,20 @@ async def test_oauth_client_set_get_delete(client):
     # Catalog availability flips on.
     cat = {
         c["kind"]: c
-        for c in (await client.get("/api/connectors/catalog", headers=HEADERS)).json()
+        for c in (await client.get("/api/connectors/catalog", headers=client.headers)).json()
     }
     assert cat["fakekind"]["available"] is True
 
     d = await client.delete(
-        "/api/connectors/fakekind/oauth-client", headers=HEADERS
+        "/api/connectors/fakekind/oauth-client", headers=client.headers
     )
     assert d.status_code == 204
-    g2 = await client.get("/api/connectors/fakekind/oauth-client", headers=HEADERS)
+    g2 = await client.get("/api/connectors/fakekind/oauth-client", headers=client.headers)
     assert g2.json()["configured"] is False
 
     # Unknown kind.
     assert (
-        await client.get("/api/connectors/ghost/oauth-client", headers=HEADERS)
+        await client.get("/api/connectors/ghost/oauth-client", headers=client.headers)
     ).status_code == 404
 
 
@@ -186,7 +187,7 @@ async def test_create_and_delete_custom_connector(client):
             "client_id": "cid",
             "client_secret": "csec",
         },
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 201, r.text
     body = r.json()
@@ -195,20 +196,20 @@ async def test_create_and_delete_custom_connector(client):
 
     cat = {
         c["kind"]: c
-        for c in (await client.get("/api/connectors/catalog", headers=HEADERS)).json()
+        for c in (await client.get("/api/connectors/catalog", headers=client.headers)).json()
     }
     assert cat["linear"]["custom"] is True
 
     assert (
-        await client.delete("/api/connectors/custom/linear", headers=HEADERS)
+        await client.delete("/api/connectors/custom/linear", headers=client.headers)
     ).status_code == 204
     cat = {
         c["kind"]: c
-        for c in (await client.get("/api/connectors/catalog", headers=HEADERS)).json()
+        for c in (await client.get("/api/connectors/catalog", headers=client.headers)).json()
     }
     assert "linear" not in cat
     assert (
-        await client.delete("/api/connectors/custom/ghost", headers=HEADERS)
+        await client.delete("/api/connectors/custom/ghost", headers=client.headers)
     ).status_code == 404
 
 
@@ -233,7 +234,7 @@ async def test_oauth_flow_installs_and_reports_success(client):
     assert inst["label"] == "me@example.com"
     assert inst["external_account_id"] == "ext-1"
     st = await client.get(
-        f"/api/connectors/oauth/status/{login_id}", headers=HEADERS
+        f"/api/connectors/oauth/status/{login_id}", headers=client.headers
     )
     assert st.status_code == 200
     assert st.json()["status"] == "success"
@@ -251,12 +252,12 @@ async def test_oauth_callback_rejects_bad_state(client):
     )
     assert cb.status_code == 200  # HTML page either way
     assert "failed" in cb.text.lower()
-    assert (await client.get("/api/connectors", headers=HEADERS)).json() == []
+    assert (await client.get("/api/connectors", headers=client.headers)).json() == []
 
 
 @pytest.mark.asyncio
 async def test_oauth_status_unknown_login(client):
-    r = await client.get("/api/connectors/oauth/status/nope", headers=HEADERS)
+    r = await client.get("/api/connectors/oauth/status/nope", headers=client.headers)
     assert r.status_code == 404
 
 
@@ -270,24 +271,24 @@ async def test_patch_and_delete_installation(client):
     p = await client.patch(
         f"/api/connectors/{iid}",
         json={"label": "Work", "enable_by_default": True},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert p.status_code == 200
     assert p.json()["label"] == "Work"
     assert p.json()["enable_by_default"] is True
 
-    assert (await client.delete(f"/api/connectors/{iid}", headers=HEADERS)).status_code == 204
-    assert (await client.delete(f"/api/connectors/{iid}", headers=HEADERS)).status_code == 404
+    assert (await client.delete(f"/api/connectors/{iid}", headers=client.headers)).status_code == 204
+    assert (await client.delete(f"/api/connectors/{iid}", headers=client.headers)).status_code == 404
 
 
 @pytest.mark.asyncio
 async def test_token_route(client):
     inst, _ = await _install(client, code="xyz")
-    r = await client.get(f"/api/connectors/{inst['id']}/token", headers=HEADERS)
+    r = await client.get(f"/api/connectors/{inst['id']}/token", headers=client.headers)
     assert r.status_code == 200
     assert r.json()["access_token"] == "at-xyz"
     assert (
-        await client.get("/api/connectors/ghost/token", headers=HEADERS)
+        await client.get("/api/connectors/ghost/token", headers=client.headers)
     ).status_code == 404
 
 
@@ -297,10 +298,10 @@ async def test_mark_needs_reconnect_route(client):
     r = await client.post(
         f"/api/connectors/{inst['id']}/mark-needs-reconnect",
         params={"error_code": "invalid_grant"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 204
-    rows = (await client.get("/api/connectors", headers=HEADERS)).json()
+    rows = (await client.get("/api/connectors", headers=client.headers)).json()
     assert rows[0]["needs_reconnect"] is True
     assert rows[0]["last_refresh_error_code"] == "invalid_grant"
 
@@ -313,22 +314,22 @@ async def test_agent_enable_disable_and_replace(client):
     inst, _ = await _install(client)
     agent_id = await _new_agent(client)
 
-    g = await client.get(f"/api/agents/{agent_id}/connectors", headers=HEADERS)
+    g = await client.get(f"/api/agents/{agent_id}/connectors", headers=client.headers)
     assert g.json()["installation_ids"] == []
 
     t = await client.patch(
         f"/api/agents/{agent_id}/connectors/{inst['id']}",
         json={"enabled": True},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert t.status_code == 204
-    g = await client.get(f"/api/agents/{agent_id}/connectors", headers=HEADERS)
+    g = await client.get(f"/api/agents/{agent_id}/connectors", headers=client.headers)
     assert g.json()["installation_ids"] == [inst["id"]]
 
     p = await client.put(
         f"/api/agents/{agent_id}/connectors",
         json={"installation_ids": []},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert p.status_code == 200
     assert p.json()["installation_ids"] == []
@@ -340,6 +341,6 @@ async def test_agent_enable_unknown_installation(client):
     t = await client.patch(
         f"/api/agents/{agent_id}/connectors/ghost",
         json={"enabled": True},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert t.status_code == 404

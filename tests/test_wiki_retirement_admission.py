@@ -22,11 +22,12 @@ async def test_terminal_job_requires_confirmed_writer_exit(client, tmp_path, mon
     root = tmp_path / "vault"
     root.mkdir()
     job, _ = await proposed(client, root, paths=["Library/new.md"])
-    await client.post(f"/api/wiki/jobs/{job['id']}/cancel", headers=wiki_api.HEADERS)
-    jobs = WikiJobs(None)
+    await client.post(f"/api/wiki/jobs/{job['id']}/cancel", headers=client.headers)
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    jobs = WikiJobs(owner)
     await jobs.settle_cancelled(job["id"], wiki_api.session_manager)
     manager = SessionManager()
-    session = Session(id="retirement-session", name="retiring", working_dir=str(tmp_path))
+    session = Session(id="retirement-session", name="retiring", working_dir=str(tmp_path), user_id=owner)
     manager.sessions[session.id] = session
     jobs.update(job["id"], session_id=session.id)
     entered, release = asyncio.Event(), asyncio.Event()
@@ -62,8 +63,8 @@ async def test_terminal_job_requires_confirmed_writer_exit(client, tmp_path, mon
     monkeypatch.setattr(worker, "wake", lambda *args: None)
     assert session._run.request is None and not session._pending_queue
     if operation == "readmit":
-        registry.configure(None, root, "new-curator")
-    response = await client.post(f"/api/wiki/jobs/{job['id']}/{operation}", headers=wiki_api.HEADERS,
+        registry.configure(owner, root, "new-curator")
+    response = await client.post(f"/api/wiki/jobs/{job['id']}/{operation}", headers=client.headers,
         json={"creation": {"purpose": "requested_knowledge_page", "paths": ["Library/new.md"]}} if operation == "readmit" else None)
     try:
         if outcome == "success":
@@ -85,9 +86,10 @@ async def test_retirement_check_preserves_exact_request_scope(client, tmp_path, 
     root = tmp_path / "vault"
     root.mkdir()
     job, _ = await proposed(client, root, paths=["Library/new.md"])
-    jobs = WikiJobs(None)
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    jobs = WikiJobs(owner)
     manager = SessionManager()
-    session = Session(id="original-session", name="worker", working_dir=str(tmp_path))
+    session = Session(id="original-session", name="worker", working_dir=str(tmp_path), user_id=owner)
     manager.sessions[session.id] = session
     job["items"][0]["worker_request"] = {"session_id": session.id, "request_id": "original-worker"}
     job = jobs.update(job["id"], session_id=session.id, items=job["items"])

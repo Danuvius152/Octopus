@@ -17,15 +17,16 @@ from server.harness import get_harness
 from server.mcp_identity import McpScope, mint, scope_is_live, verify
 from server.routers import questions, sessions
 from server.sessions import SessionManager
+from tests.accounts import create_account
 
 QUESTIONS = [{"question": "Choose", "options": [{"label": "A"}, {"label": "B"}]}]
-HUMAN_HEADERS = {"Authorization": "Bearer changeme"}
 
 
 @pytest.fixture
 async def question_runtime(monkeypatch, tmp_path, short_process_shutdown):
     database = Database(":memory:")
     await database.initialize()
+    _, bearer = await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     agent = await database.get_system_agent()
@@ -53,7 +54,8 @@ async def question_runtime(monkeypatch, tmp_path, short_process_shutdown):
     app.include_router(questions.router)
     app.include_router(sessions.router)
     app.dependency_overrides[get_session_manager] = lambda: manager
-    async with AsyncClient(transport=ASGITransport(app), base_url="http://test") as client:
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://test",
+                           headers={"Authorization": "Bearer " + bearer}) as client:
         try:
             yield manager, session, client, events, starts
         finally:
@@ -67,13 +69,13 @@ async def test_signed_scope_without_selected_run_cannot_create_question(question
     _, session, client, events, _ = question_runtime
     response = await client.post(
         f"/api/sessions/{session.id}/questions",
-        headers={"Authorization": f"Bearer {mint(session.id)}"},
+        headers={"Authorization": f"Bearer {mint(session.id, user_id=session.user_id)}"},
         json={"questions": QUESTIONS},
     )
     assert response.status_code == 400
     assert response.json() == {"detail": "Model run is no longer active"}
     assert not [event for event in events if event["type"] == "question_request"]
-    detail = await client.get(f"/api/sessions/{session.id}", headers=HUMAN_HEADERS)
+    detail = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
     assert detail.json()["pending_questions"] == []
     assert not [message for message in detail.json()["messages"] if message["type"] == "question_request"]
 
@@ -102,7 +104,7 @@ async def test_live_run_question_has_captured_work_in_history_and_broadcast(ques
     event = next(event for event in events if event.get("question_id") == question_id)
     assert event["work_id"] == "question-work"
     assert event["request_id"] and event["attempt_id"]
-    detail = await client.get(f"/api/sessions/{session.id}", headers=HUMAN_HEADERS)
+    detail = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
     history = next(message for message in detail.json()["messages"] if message["tool_use_id"] == question_id)
     assert history["tool_input"]["work_id"] == "question-work"
     assert history["tool_input"]["request_id"] == event["request_id"]
@@ -158,11 +160,13 @@ async def test_manager_and_rest_recheck_invalid_run_owner(question_runtime, inva
     assert not [event for event in events if event["type"] == "question_request"]
 
 
-async def test_live_lease_for_previous_account_owner_cannot_create_question(question_runtime):
+async def test_revoked_run_lease_cannot_create_question(question_runtime):
     manager, session, client, events, _ = question_runtime
     token, scope = await begin_run(question_runtime)
-    assert await manager.adopt_orphan_sessions("new-account-owner") == 1
-    assert not scope_is_live(scope)  # Adoption retires the previous owner's authority.
+    from server.mcp_identity import revoke_run
+
+    revoke_run(scope.run_lease_id)
+    assert not scope_is_live(scope)
     response = await client.post(
         f"/api/sessions/{session.id}/questions",
         headers={"Authorization": f"Bearer {token}"}, json={"questions": QUESTIONS},
@@ -209,7 +213,7 @@ async def test_idle_held_process_cannot_open_a_new_question(question_runtime, mo
 async def test_human_and_internal_question_creation_remain_compatible(question_runtime):
     manager, session, client, _, _ = question_runtime
     response = await client.post(
-        f"/api/sessions/{session.id}/questions", headers=HUMAN_HEADERS,
+        f"/api/sessions/{session.id}/questions", headers=client.headers,
         json={"questions": QUESTIONS},
     )
     assert response.status_code == 201

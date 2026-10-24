@@ -20,18 +20,21 @@ import sqlite3
 import sys
 from pathlib import Path
 from server.database import Database
+from server.users import UserManager
 
 async def main():
     database = Database(sys.argv[1])
     await database.initialize()
+    owner = await UserManager(database).create_user(username="storage-owner", password="storage-password")
     stamp = "2026-10-21T00:00:00+00:00"
     await database.save_agent(
         agent_id="target", name="Target", created_at=stamp, updated_at=stamp,
+        user_id=owner["id"],
     )
-    await database.save_session("parent", "Parent", "/tmp", stamp, agent_id="target")
+    await database.save_session("parent", "Parent", "/tmp", stamp, agent_id="target", user_id=owner["id"])
     await database.save_session(
         "child", "Child", "/tmp", stamp, agent_id="target",
-        origin="delegation", parent_session_id="parent",
+        origin="delegation", parent_session_id="parent", user_id=owner["id"],
     )
     await database.append_message(
         "child", 0, "user", "text", "Keep the original request",
@@ -45,7 +48,7 @@ async def main():
     running = '{"work_id":"round-original","state":"running"}'
     completed = '{"work_id":"round-original","state":"completed"}'
     previous = running if sys.argv[5] == "True" else None
-    scope = {"parent_session_id": "parent", "user_id": None, "target_agent_id": "target"}
+    scope = {"parent_session_id": "parent", "user_id": owner["id"], "target_agent_id": "target"}
     if previous is not None:
         assert await database.compare_and_set_delegation_state("child", None, running, **scope)
 
@@ -88,7 +91,7 @@ async def main():
     else:
         Path(sys.argv[6]).write_text("unconfirmed storage success was published")
     # Neither reads nor a second write may run in the untrusted generation.
-    await database.load_delegation_state("child", parent_session_id="parent", user_id=None)
+    await database.load_delegation_state("child", parent_session_id="parent", user_id=owner["id"])
     await database.compare_and_set_delegation_state("child", previous, completed, **scope)
     await database.close()
 
@@ -126,11 +129,13 @@ async def test_unconfirmed_round_finish_exits_and_cold_reopen_preserves_actual_f
         reopened = Database(str(path))
         await reopened.initialize()
         try:
-            scope = {"parent_session_id": "parent", "user_id": None}
+            owner = await reopened.get_user_by_username("storage-owner")
+            assert owner is not None
+            scope = {"parent_session_id": "parent", "user_id": owner["id"]}
             stored = await reopened.load_delegation_state("child", **scope)
             assert stored == expected
             assert await reopened.load_delegation_states() == ([] if expected is None else [{
-                "id": "child", "parent_session_id": "parent", "user_id": None,
+                "id": "child", "parent_session_id": "parent", "user_id": owner["id"],
                 "agent_id": "target", "delegation_state": expected,
             }])
             if stored is not None:
@@ -155,16 +160,18 @@ async def test_cancelling_cas_waiter_keeps_a_confirmed_commit_and_its_original_w
 import asyncio
 import sys
 from server.database import Database
+from server.users import UserManager
 
 async def main():
     database = Database(sys.argv[1])
     await database.initialize()
+    owner = await UserManager(database).create_user(username="storage-owner", password="storage-password")
     stamp = "2026-10-21T00:00:00+00:00"
-    await database.save_agent(agent_id="target", name="Target", created_at=stamp, updated_at=stamp)
-    await database.save_session("parent", "Parent", "/tmp", stamp, agent_id="target")
+    await database.save_agent(agent_id="target", name="Target", created_at=stamp, updated_at=stamp, user_id=owner["id"])
+    await database.save_session("parent", "Parent", "/tmp", stamp, agent_id="target", user_id=owner["id"])
     await database.save_session(
         "child", "Child", "/tmp", stamp, agent_id="target",
-        origin="delegation", parent_session_id="parent",
+        origin="delegation", parent_session_id="parent", user_id=owner["id"],
     )
     await database.append_message("child", 0, "user", "text", "Original request")
     commit = database.conn.commit
@@ -179,7 +186,7 @@ async def main():
     database.conn.commit = confirmed_commit
     command = asyncio.create_task(database.compare_and_set_delegation_state(
         "child", None, '{"work_id":"round-original","state":"running"}',
-        parent_session_id="parent", user_id=None, target_agent_id="target",
+        parent_session_id="parent", user_id=owner["id"], target_agent_id="target",
     ))
     await entered.wait()
     command.cancel("first caller cancellation")
@@ -205,7 +212,9 @@ asyncio.run(main())
     reopened = Database(str(path))
     await reopened.initialize()
     try:
-        assert await reopened.load_delegation_state("child", parent_session_id="parent", user_id=None) == RUNNING
+        owner = await reopened.get_user_by_username("storage-owner")
+        assert owner is not None
+        assert await reopened.load_delegation_state("child", parent_session_id="parent", user_id=owner["id"]) == RUNNING
         assert [row["content"] for row in await reopened.load_messages("child")] == ["Original request"]
     finally:
         await reopened.close()

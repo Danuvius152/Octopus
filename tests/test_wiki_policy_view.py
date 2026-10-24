@@ -25,9 +25,10 @@ async def test_operation_card_and_actual_tools_guides_share_one_current_policy(c
     vault = tmp_path / "vault"
     vault.mkdir()
     config = await wiki_api.configure(client, vault)
-    session = SimpleNamespace(id="policy-reader", user_id=None, agent_id="ordinary")
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    session = SimpleNamespace(id="policy-reader", user_id=owner, agent_id="ordinary")
     token = tasks.open(session, mode, request_id="original-user-input")
-    bearer = mint(session.id, wiki_task_id=token)
+    bearer = mint(session.id, user_id=session.user_id, wiki_task_id=token)
     scope = set_current_scope(verify(bearer))
     try:
         card = operation(token, mode)
@@ -57,13 +58,14 @@ async def test_cancelled_worker_card_and_tools_revoke_together_without_trusting_
     vault.mkdir()
     (vault / "note.md").write_text("# Note\nPreserve the original argument.\n")
     config = await wiki_api.configure(client, vault)
-    session = SimpleNamespace(id="policy-worker", user_id=None, agent_id=config["curator_agent_id"])
-    jobs = WikiJobs(None)
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    session = SimpleNamespace(id="policy-worker", user_id=owner, agent_id=config["curator_agent_id"])
+    jobs = WikiJobs(owner)
     job = jobs.maintain("policy-cancel", "", "Review this note", ["note.md"], None, [], "human")
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], job["items"], registration=config)
     token = tasks.open(session, "maintain")
-    bearer = mint(session.id, wiki_task_id=token)
+    bearer = mint(session.id, user_id=session.user_id, wiki_task_id=token)
     scope = set_current_scope(verify(bearer))
     try:
         old = operation(token, "maintain")
@@ -92,9 +94,10 @@ async def test_large_exact_batch_is_bounded_without_shortening_any_identity_or_p
         target.parent.mkdir(parents=True)
         target.write_text("# Note\nKeep the complete current text.\n")
     config = await wiki_api.configure(client, vault)
-    jobs = WikiJobs(None)
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    jobs = WikiJobs(owner)
     job = jobs.maintain("policy-large", "", "Review these exact paths", paths, None, [], "human")
-    session = SimpleNamespace(id="large-worker", user_id=None, agent_id=config["curator_agent_id"])
+    session = SimpleNamespace(id="large-worker", user_id=owner, agent_id=config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], job["items"], registration=config)
     token = tasks.open(session, "maintain")
@@ -114,7 +117,8 @@ async def test_guide_hash_changes_with_the_actual_guide_bundle_but_never_enables
     vault = tmp_path / "vault"
     vault.mkdir()
     await wiki_api.configure(client, vault)
-    token = tasks.open(SimpleNamespace(id="hash-reader", user_id=None, agent_id="ordinary"), "read")
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    token = tasks.open(SimpleNamespace(id="hash-reader", user_id=owner, agent_id="ordinary"), "read")
     try:
         before = operation(token, "read")
         original = workflow.guide
@@ -134,7 +138,8 @@ async def test_mode_dependent_entry_has_its_own_body_digest_and_bootstrap_stays_
     vault = tmp_path / "vault"
     vault.mkdir()
     await wiki_api.configure(client, vault)
-    session = SimpleNamespace(id="entry-variant", user_id=None, agent_id="ordinary")
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    session = SimpleNamespace(id="entry-variant", user_id=owner, agent_id="ordinary")
     auto = tasks.open(session, "auto")
     maintain = tasks.open(session, "maintain")
     try:
@@ -145,7 +150,7 @@ async def test_mode_dependent_entry_has_its_own_body_digest_and_bootstrap_stays_
         assert workflow.instructions("auto", auto) == workflow.instructions("maintain", maintain)
         for token, expected in ((auto, "auto-entry"), (maintain, "entry")):
             response = await client.get("/api/wiki/guide", params={"module": "entry"},
-                headers={"Authorization": "Bearer " + mint(session.id, wiki_task_id=token)})
+                headers={"Authorization": "Bearer " + mint(session.id, user_id=session.user_id, wiki_task_id=token)})
             assert response.status_code == 200, response.text
             assert response.json()["content"] == workflow.guide(expected)
             assert response.json()["guide_digest"] == operation(token, "auto")["guide_digests"]["entry"]

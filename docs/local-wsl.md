@@ -50,8 +50,16 @@ Windows 浏览器访问 <http://localhost:8000>。
 DNS 隧道和防火墙分别控制域名解析与流量过滤，不会影响项目对安装令牌的校验。
 参见 [WSL 配置说明](https://learn.microsoft.com/en-us/windows/wsl/wsl-config)。
 
-首次进入时，使用 `.env` 中的 `OCTOPUS_AUTH_TOKEN` 登录，再在账户页面创建
-自己的管理员账户；此后用账户名和密码登录。不要把 `.env` 提交到 Git。
+空安装首次进入时，在开户页填写 `.env` 中的 `OCTOPUS_AUTH_TOKEN` 作为 setup
+证明，并设置管理员账户名和密码；此后用账户名和密码登录。证明未配置或存在
+留存业务资料时拒绝开户，证明不能用于业务 API 或 WebSocket。开户响应丢失后
+使用原账户登录；不要反复开户或更换密钥。不要把 `.env` 提交到 Git。
+
+启动诊断 `RetainedLegacyInstallation` 表示发现无账户业务资料、旧交接凭据或
+异常的状态容器。服务会在密钥与业务存储准备前拒绝；保全原数据库及其 WAL/
+journal、配置、密钥和目录，使用原协议版本诊断现场。`complete` journal 也可能
+是旧成功路径留下的记录，不能承诺再执行一次 resume 就会消失。新版本不搬移、
+认领或清空这些输入。已有账户的正常重启保留其 memory、DEK、凭据与显式访问根。
 
 ## 环境重建
 

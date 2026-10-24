@@ -21,7 +21,7 @@ async def active_account():
         await db.close()
 
 
-@pytest.mark.parametrize("reason", ["missing_bearer", "invalid_signature", "closed_work", "missing_run_lease", "retired_run_lease", "mismatched_run_lease", "legacy_era", "live"])
+@pytest.mark.parametrize("reason", ["missing_bearer", "invalid_signature", "closed_work", "missing_run_lease", "retired_run_lease", "mismatched_run_lease", "owner_unavailable", "live"])
 async def test_rejection_reason_keeps_authority_and_logs_only_verified_correlation(monkeypatch, caplog, reason, active_account):
     monkeypatch.setattr(mcp_identity, "_run_leases", {})
     monkeypatch.setattr(mcp_identity, "_closed_works", set())
@@ -37,7 +37,7 @@ async def test_rejection_reason_keeps_authority_and_logs_only_verified_correlati
         token = mcp_identity.mint(session, user_id=owner, work_id=work)
     elif reason == "mismatched_run_lease":
         mcp_identity.register_run(lease, "another-session", "another-owner", work)
-    elif reason == "legacy_era":
+    elif reason == "owner_unavailable":
         token = mcp_identity.mint(session)
     elif reason == "live":
         mcp_identity.register_run(lease, session, owner, work)

@@ -14,6 +14,7 @@ from server.sessions import SessionManager
 from server.sessions.owner import SessionOwnerUnavailable
 from tests import test_session_fork_installation as fork_tests
 from tests import test_session_owner_rewind_retirement as rewind_tests
+from tests.accounts import create_account
 
 installation = fork_tests.installation
 held_rewind = rewind_tests.held_rewind
@@ -123,6 +124,7 @@ async def test_parent_writer_failure_during_preparation_preserves_the_ready_chil
 async def test_failed_auto_archive_drains_original_publication_before_reporting_its_error(tmp_path, monkeypatch):
     database = Database(str(tmp_path / "failed-auto-archive.sqlite3"))
     await database.initialize()
+    await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     agent = await database.get_system_agent()
@@ -194,6 +196,7 @@ async def test_archive_release_hands_off_when_the_original_deadline_writer_fails
     monkeypatch.setattr(settings, "ask_user_question_timeout_seconds", .2)
     database = Database(str(tmp_path / "archive-release-death.sqlite3"))
     await database.initialize()
+    await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     agent = await database.get_system_agent()

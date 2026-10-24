@@ -19,16 +19,18 @@ from server.harness.profile import StdinMode
 from server.mcp_identity import verify
 from server.sessions import SessionManager
 from server.sessions.owner import SessionOwnerUnavailable
+from tests.accounts import create_account
 
 
 @pytest.fixture
 async def notification_runtime(tmp_path, monkeypatch):
     database = Database(str(tmp_path / "delegations.sqlite3"))
     await database.initialize()
+    owner, _ = await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     root = await database.get_system_agent()
-    await AgentManager(database).create_agent(name="Notification worker", backend="codex")
+    await AgentManager(database).create_agent(name="Notification worker", backend="codex", user_id=owner["id"])
     parent = await manager.create_session(root["id"], "Original caller", str(tmp_path), backend="codex")
     await manager.interrupt(parent.id)
     model = tmp_path / "notification_model.py"
@@ -254,7 +256,7 @@ async def test_old_unavailable_completion_cannot_finish_the_followup_round(notif
 
 async def test_nested_round_waits_for_its_relay_after_both_original_prefixes_fail(notification_runtime):
     runtime = notification_runtime
-    await AgentManager(runtime.manager.db).create_agent(name="Leaf worker", backend="codex")
+    await AgentManager(runtime.manager.db).create_agent(name="Leaf worker", backend="codex", user_id=runtime.parent.user_id)
     outer = await runtime.delegations.start_delegation(
         parent_session_id=runtime.parent.id, agent_name="Notification worker", request="Delegate then relay the answer",
     )

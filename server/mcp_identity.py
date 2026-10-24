@@ -55,11 +55,6 @@ def revoke_run(run_lease_id: str | None) -> None:
         _run_leases.pop(run_lease_id, None)
 
 
-def revoke_ownerless_runs() -> None:
-    """Retire the pre-accounts authority at the install's one-way upgrade."""
-    for lease, (_, user_id, _) in list(_run_leases.items()):
-        if user_id is None:
-            _run_leases.pop(lease, None)
 
 
 @dataclass(frozen=True)
@@ -99,7 +94,7 @@ async def scope_is_authorized(scope: McpScope) -> bool:
 
 async def scope_rejection_reason(scope: McpScope) -> str | None:
     """Only call with a verified signature; never diagnose untrusted claims."""
-    from .deps import accounts_exist, owner_is_available
+    from .deps import owner_is_available
 
     if not work_is_open(scope.work_id):
         return "closed_work"
@@ -112,8 +107,6 @@ async def scope_rejection_reason(scope: McpScope) -> str | None:
             return "retired_run_lease"
         if lease != (scope.session_id, scope.user_id, scope.work_id):
             return "mismatched_run_lease"
-    if scope.user_id is None:
-        return "legacy_era" if await accounts_exist() else None
     if not await owner_is_available(scope.user_id):
         return "owner_unavailable"
     return None

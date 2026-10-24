@@ -105,14 +105,23 @@ def isolated_unit(tmp_path, *, program=None, precheck=None, configuration=None, 
         systemctl("daemon-reload")
 
 
-def request(config, path, body=None):
+def request(config, path, body=None, *, bearer=None):
+    headers = {"Content-Type": "application/json"}
+    if bearer is not None:
+        headers["Authorization"] = f"Bearer {bearer}"
     req = urllib.request.Request(
         f"http://127.0.0.1:{config.port}{path}",
         data=json.dumps(body).encode() if body is not None else None,
-        headers={"Authorization": f"Bearer {config.auth_token}", "Content-Type": "application/json"},
+        headers=headers,
     )
     with urllib.request.urlopen(req, timeout=1) as response:
         return json.load(response)
+
+
+def setup_account(config):
+    return request(config, "/api/auth/setup", {
+        "username": "supervisor", "password": "owned-supervisor-password",
+    }, bearer=config.auth_token)["token"]
 
 
 def ready(config):
@@ -131,18 +140,21 @@ def test_generated_service_preserves_shell_configuration_without_a_project_env(t
         wait_for(lambda: ready(config))
         assert not (project / ".env").exists()
         assert config.auth_token == token
-        assert request(config, "/api/agents")
+        bearer = setup_account(config)
+        assert request(config, "/api/agents", bearer=bearer)
         assert environment_path(config).stat().st_mode & 0o777 == 0o600
-        bad = urllib.request.Request(f"http://127.0.0.1:{config.port}/api/agents",
-                                     headers={"Authorization": "Bearer changeme"})
-        with pytest.raises(urllib.error.HTTPError) as error:
-            urllib.request.urlopen(bad, timeout=1)
-        assert error.value.code == 401
+        for rejected in ("changeme", config.auth_token):
+            bad = urllib.request.Request(f"http://127.0.0.1:{config.port}/api/agents",
+                                         headers={"Authorization": f"Bearer {rejected}"})
+            with pytest.raises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(bad, timeout=1)
+            assert error.value.code == 401
 
 
 def test_a_second_real_unit_cannot_enter_the_owned_installation(tmp_path):
     with isolated_unit(tmp_path) as (unit, config, _):
         wait_for(lambda: ready(config))
+        bearer = setup_account(config)
         original_pid = properties(unit)["MainPID"]
         directory = Path(os.environ["XDG_RUNTIME_DIR"]) / "systemd/user"
         contender = "octopus-check-" + uuid.uuid4().hex + ".service"
@@ -162,7 +174,7 @@ def test_a_second_real_unit_cannot_enter_the_owned_installation(tmp_path):
             assert "Installation is already owned by another service process" in diagnostic
             assert properties(unit)["MainPID"] == original_pid
             assert ready(config)
-            assert request(config, "/api/agents")
+            assert request(config, "/api/agents", bearer=bearer)
         finally:
             systemctl("stop", contender, check=False)
             systemctl("reset-failed", contender, check=False)
@@ -193,12 +205,12 @@ def test_optional_configuration_can_be_cleared_without_republishing_the_unit(tmp
 def test_systemd_retires_detached_forked_writers_before_the_next_server(tmp_path):
     with isolated_unit(tmp_path) as (unit, config, project):
         wait_for(lambda: ready(config))
+        bearer = setup_account(config)
         previous = properties(unit)["MainPID"]
-        agents = request(config, "/api/agents")
+        agents = request(config, "/api/agents", bearer=bearer)
         session = request(config, "/api/sessions", {
             "name": "Supervisor probe", "agent_id": agents[0]["id"],
-            "working_dir": config.default_working_dir,
-        })
+        }, bearer=bearer)
         writer = project / "writer.py"
         writer.write_text(
             "import os,signal,time\nfrom pathlib import Path\n"
@@ -214,7 +226,7 @@ def test_systemd_retires_detached_forked_writers_before_the_next_server(tmp_path
 
         task = request(config, f"/api/sessions/{session['id']}/bg-tasks", {
             "command": shlex.join([sys.executable, str(writer)]), "description": "isolated writer probe",
-        })
+        }, bearer=bearer)
         wait_for(lambda: len(list(project.glob("writer-*"))) == 2)
         started = time.monotonic()
         systemctl("kill", "--kill-whom=main", "--signal=SIGKILL", unit)
@@ -223,15 +235,15 @@ def test_systemd_retires_detached_forked_writers_before_the_next_server(tmp_path
         effects = (project / "effects").read_bytes()
         time.sleep(.2)
         assert (project / "effects").read_bytes() == effects
-        result = request(config, f"/api/sessions/{session['id']}/bg-tasks/{task['id']}")
+        result = request(config, f"/api/sessions/{session['id']}/bg-tasks/{task['id']}", bearer=bearer)
         assert result["status"] == "interrupted"
         print(f"Detached forked writers stopped and successor ready in {elapsed:.3f}s")
 
 
-def submit_message(config, session_id, content, client_id):
+def submit_message(config, session_id, content, client_id, *, bearer):
     from websockets.sync.client import connect
 
-    with connect(f"ws://127.0.0.1:{config.port}/ws?token={config.auth_token}", open_timeout=3) as connection:
+    with connect(f"ws://127.0.0.1:{config.port}/ws?token={bearer}", open_timeout=3) as connection:
         connection.send(json.dumps({"type": "send_message", "session_id": session_id,
                                    "content": content, "client_request_id": client_id}))
         while True:
@@ -291,14 +303,15 @@ def test_managed_restart_retires_claim_without_a_recorded_process_group(tmp_path
 
     with isolated_unit(tmp_path, program=claim_window_program(window)) as (unit, config, project):
         wait_for(lambda: ready(config))
+        bearer = setup_account(config)
         previous = properties(unit)["MainPID"]
         session = request(config, "/api/sessions", {
-            "name": "Claim before registration", "agent_id": request(config, "/api/agents")[0]["id"],
-            "working_dir": config.default_working_dir, "backend": "codex",
-        })
+            "name": "Claim before registration", "agent_id": request(config, "/api/agents", bearer=bearer)[0]["id"],
+            "backend": "codex",
+        }, bearer=bearer)
         # The transport may lose either the response or just its completion.
         try:
-            submit_message(config, session["id"], "original effects", "original")
+            submit_message(config, session["id"], "original effects", "original", bearer=bearer)
         except ConnectionClosed:
             pass
         loss = project / "loss.json"
@@ -310,16 +323,16 @@ def test_managed_restart_retires_claim_without_a_recorded_process_group(tmp_path
         wait_for(lambda: properties(unit)["MainPID"] not in {"0", previous} and ready(config))
         if old_pid is not None:
             assert not Path(f"/proc/{old_pid}").exists(), "The old unit's writer survived recovery"
-        status = request(config, f"/api/sessions/{session['id']}/submissions/original")
+        status = request(config, f"/api/sessions/{session['id']}/submissions/original", bearer=bearer)
         assert status["request_id"] == evidence[1]
         assert status["execution"]["state"] == "unknown"
-        duplicate = submit_message(config, session["id"], "original effects", "original")
+        duplicate = submit_message(config, session["id"], "original effects", "original", bearer=bearer)
         assert duplicate["request_id"] == evidence[1] and duplicate["execution"]["state"] == "unknown"
-        successor = submit_message(config, session["id"], "new effects", "successor")
+        successor = submit_message(config, session["id"], "new effects", "successor", bearer=bearer)
         assert successor["accepted"] is True, successor
-        wait_for(lambda: request(config, f"/api/sessions/{session['id']}/submissions/successor").get("outcome"))
+        wait_for(lambda: request(config, f"/api/sessions/{session['id']}/submissions/successor", bearer=bearer).get("outcome"))
         assert (project / "executed").read_text().splitlines() == ["new effects"]
-        assert request(config, f"/api/sessions/{session['id']}/submissions/original")["execution"]["state"] == "unknown"
+        assert request(config, f"/api/sessions/{session['id']}/submissions/original", bearer=bearer)["execution"]["state"] == "unknown"
 
 
 def test_managed_startup_proof_does_not_release_a_current_generations_late_spawn(tmp_path):
@@ -327,17 +340,18 @@ def test_managed_startup_proof_does_not_release_a_current_generations_late_spawn
 
     with isolated_unit(tmp_path, program=claim_window_program("late_spawn")) as (unit, config, project):
         wait_for(lambda: ready(config))
+        bearer = setup_account(config)
         previous = properties(unit)["MainPID"]
         session = request(config, "/api/sessions", {
-            "name": "Current generation retirement", "agent_id": request(config, "/api/agents")[0]["id"],
-            "working_dir": config.default_working_dir, "backend": "codex",
-        })
-        original = submit_message(config, session["id"], "original effects", "original")
+            "name": "Current generation retirement", "agent_id": request(config, "/api/agents", bearer=bearer)[0]["id"],
+            "backend": "codex",
+        }, bearer=bearer)
+        original = submit_message(config, session["id"], "original effects", "original", bearer=bearer)
         wait_for(lambda: (project / "loss.json").exists())
         pid = int((project / "spawned").read_text())
-        current = request(config, f"/api/sessions/{session['id']}")
+        current = request(config, f"/api/sessions/{session['id']}", bearer=bearer)
         dispatch = current["dispatch_state"]
-        with connect(f"ws://127.0.0.1:{config.port}/ws?token={config.auth_token}") as connection:
+        with connect(f"ws://127.0.0.1:{config.port}/ws?token={bearer}") as connection:
             connection.send(json.dumps({"type": "interrupt", "session_id": session["id"],
                                         "client_command_id": "stop-late-spawn", "request_id": dispatch["active_request_id"],
                                         "attempt_id": (current.get("active_attempt") or {}).get("attempt_id"),
@@ -346,18 +360,18 @@ def test_managed_startup_proof_does_not_release_a_current_generations_late_spawn
                 event = json.loads(connection.recv(timeout=3))
                 if event.get("type") == "dispatch_state" and event["dispatch_state"]["paused"]:
                     break
-        successor = submit_message(config, session["id"], "new effects", "successor")
+        successor = submit_message(config, session["id"], "new effects", "successor", bearer=bearer)
         assert successor["accepted"] is True
-        snapshot = request(config, f"/api/sessions/{session['id']}")["dispatch_state"]
+        snapshot = request(config, f"/api/sessions/{session['id']}", bearer=bearer)["dispatch_state"]
         assert snapshot["active_request_id"] == original["request_id"]
         assert [item["request_id"] for item in snapshot["items"]] == [successor["request_id"]]
         assert not (project / "executed").exists(), "Successor bypassed the original spawn's retirement"
         assert Path(f"/proc/{pid}").exists(), "The delayed original spawn was not exercised"
         (project / "release").touch()
-        wait_for(lambda: request(config, f"/api/sessions/{session['id']}/submissions/successor").get("outcome"))
+        wait_for(lambda: request(config, f"/api/sessions/{session['id']}/submissions/successor", bearer=bearer).get("outcome"))
         assert not Path(f"/proc/{pid}").exists()
         assert (project / "executed").read_text().splitlines() == ["new effects"]
-        assert request(config, f"/api/sessions/{session['id']}/submissions/original")["outcome"]["status"] == "interrupted"
+        assert request(config, f"/api/sessions/{session['id']}/submissions/original", bearer=bearer)["outcome"]["status"] == "interrupted"
         assert properties(unit)["MainPID"] == previous, "Same-generation retirement required a restart"
 
 

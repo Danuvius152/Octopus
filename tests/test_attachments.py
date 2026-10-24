@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from httpx import ASGITransport, AsyncClient
 
+from server import deps
 from server.attachments import (
     MAX_FILE_BYTES,
     AttachmentError,
@@ -28,9 +29,7 @@ from server.harness import get_harness
 from server.harness.profile import StdinMode
 from server.main import app
 from server.session_manager import session_manager
-
-TOKEN = "changeme"
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
+from server.users import UserManager
 
 
 @pytest.fixture
@@ -51,12 +50,16 @@ async def client(attachments_root):
     """In-memory DB + ASGI client, same shape as test_api.client."""
     db = Database(":memory:")
     await db.initialize()
+    users = UserManager(db)
+    user = await users.create_user(username="attachment-owner", password="password-for-files")
+    deps.set_user_manager(users)
+    headers = {"Authorization": "Bearer " + await users.issue_token(user["id"])}
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://test", headers=headers) as c:
         yield c
 
     await db.close()
@@ -181,13 +184,13 @@ async def test_upload_and_download_roundtrip(client):
     agent = await session_manager.db.get_system_agent()
     assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "U"}
+        "/api/sessions", headers=client.headers, json={"agent_id": agent["id"], "name": "U"}
     )
     sid = create.json()["id"]
 
     files = {"file": ("hello.txt", b"world", "text/plain")}
     up = await client.post(
-        f"/api/sessions/{sid}/attachments", headers=HEADERS, files=files
+        f"/api/sessions/{sid}/attachments", headers=client.headers, files=files
     )
     assert up.status_code == 201
     meta = up.json()
@@ -198,14 +201,16 @@ async def test_upload_and_download_roundtrip(client):
 
     # Bearer-header download
     dn = await client.get(
-        f"/api/sessions/{sid}/attachments/{aid}", headers=HEADERS
+        f"/api/sessions/{sid}/attachments/{aid}", headers=client.headers
     )
     assert dn.status_code == 200
     assert dn.content == b"world"
 
     # Query-token download (the path <img src> takes)
     dn_q = await client.get(
-        f"/api/sessions/{sid}/attachments/{aid}?token={TOKEN}"
+        f"/api/sessions/{sid}/attachments/{aid}",
+        params={"token": client.headers["Authorization"].removeprefix("Bearer ")},
+        headers={"Authorization": ""}
     )
     assert dn_q.status_code == 200
     assert dn_q.content == b"world"
@@ -216,11 +221,11 @@ async def test_upload_requires_auth(client):
     agent = await session_manager.db.get_system_agent()
     assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Auth"}
+        "/api/sessions", headers=client.headers, json={"agent_id": agent["id"], "name": "Auth"}
     )
     sid = create.json()["id"]
     files = {"file": ("x.txt", b"x", "text/plain")}
-    resp = await client.post(f"/api/sessions/{sid}/attachments", files=files)
+    resp = await client.post(f"/api/sessions/{sid}/attachments", files=files, headers={"Authorization": ""})
     assert resp.status_code in (401, 403)
 
 
@@ -228,7 +233,7 @@ async def test_upload_requires_auth(client):
 async def test_upload_unknown_session_404(client):
     files = {"file": ("x.txt", b"x", "text/plain")}
     resp = await client.post(
-        "/api/sessions/nope/attachments", headers=HEADERS, files=files
+        "/api/sessions/nope/attachments", headers=client.headers, files=files
     )
     assert resp.status_code == 404
 
@@ -238,11 +243,11 @@ async def test_download_missing_404(client):
     agent = await session_manager.db.get_system_agent()
     assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "M"}
+        "/api/sessions", headers=client.headers, json={"agent_id": agent["id"], "name": "M"}
     )
     sid = create.json()["id"]
     resp = await client.get(
-        f"/api/sessions/{sid}/attachments/doesnotexist", headers=HEADERS
+        f"/api/sessions/{sid}/attachments/doesnotexist", headers=client.headers
     )
     assert resp.status_code == 404
 
@@ -252,21 +257,21 @@ async def test_download_wrong_token_401(client):
     agent = await session_manager.db.get_system_agent()
     assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "WT"}
+        "/api/sessions", headers=client.headers, json={"agent_id": agent["id"], "name": "WT"}
     )
     sid = create.json()["id"]
     files = {"file": ("x.txt", b"x", "text/plain")}
     up = await client.post(
-        f"/api/sessions/{sid}/attachments", headers=HEADERS, files=files
+        f"/api/sessions/{sid}/attachments", headers=client.headers, files=files
     )
     aid = up.json()["id"]
     # Wrong query token
     resp = await client.get(
-        f"/api/sessions/{sid}/attachments/{aid}?token=wrong"
+        f"/api/sessions/{sid}/attachments/{aid}?token=wrong", headers={"Authorization": ""}
     )
     assert resp.status_code == 401
     # No token at all
-    resp = await client.get(f"/api/sessions/{sid}/attachments/{aid}")
+    resp = await client.get(f"/api/sessions/{sid}/attachments/{aid}", headers={"Authorization": ""})
     assert resp.status_code == 401
 
 
@@ -275,17 +280,17 @@ async def test_delete_session_cleans_up_attachments(client, attachments_root):
     agent = await session_manager.db.get_system_agent()
     assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Cleanup"}
+        "/api/sessions", headers=client.headers, json={"agent_id": agent["id"], "name": "Cleanup"}
     )
     sid = create.json()["id"]
     files = {"file": ("a.txt", b"hi", "text/plain")}
     await client.post(
-        f"/api/sessions/{sid}/attachments", headers=HEADERS, files=files
+        f"/api/sessions/{sid}/attachments", headers=client.headers, files=files
     )
     session_dir = Path(attachments_root) / sid
     assert session_dir.is_dir()
 
-    await client.delete(f"/api/sessions/{sid}", headers=HEADERS)
+    await client.delete(f"/api/sessions/{sid}", headers=client.headers)
     assert not session_dir.exists()
 
 
@@ -306,12 +311,12 @@ async def test_send_message_prepends_attachment_header(
     agent = await session_manager.db.get_system_agent()
     assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "P", "backend": "codex"}
+        "/api/sessions", headers=client.headers, json={"agent_id": agent["id"], "name": "P", "backend": "codex"}
     )
     sid = create.json()["id"]
     files = {"file": ("notes.txt", b"hello", "text/plain")}
     up = await client.post(
-        f"/api/sessions/{sid}/attachments", headers=HEADERS, files=files
+        f"/api/sessions/{sid}/attachments", headers=client.headers, files=files
     )
     aid = up.json()["id"]
 
@@ -338,7 +343,7 @@ async def test_send_message_no_attachments_unchanged(client, runtime_input):
     agent = await session_manager.db.get_system_agent()
     assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Plain", "backend": "codex"}
+        "/api/sessions", headers=client.headers, json={"agent_id": agent["id"], "name": "Plain", "backend": "codex"}
     )
     sid = create.json()["id"]
 
@@ -355,12 +360,12 @@ async def test_send_message_missing_attachment_id_rejects_complete_input(
     agent = await session_manager.db.get_system_agent()
     assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Drop", "backend": "codex"}
+        "/api/sessions", headers=client.headers, json={"agent_id": agent["id"], "name": "Drop", "backend": "codex"}
     )
     sid = create.json()["id"]
 
     uploaded = await client.post(
-        f"/api/sessions/{sid}/attachments", headers=HEADERS,
+        f"/api/sessions/{sid}/attachments", headers=client.headers,
         files={"file": ("vanishing.txt", b"Required original bytes", "text/plain")},
     )
     aid = uploaded.json()["id"]
@@ -400,12 +405,12 @@ async def test_user_message_persists_attachments_metadata(
     agent = await session_manager.db.get_system_agent()
     assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Persist", "backend": "codex"}
+        "/api/sessions", headers=client.headers, json={"agent_id": agent["id"], "name": "Persist", "backend": "codex"}
     )
     sid = create.json()["id"]
     files = {"file": ("doc.md", b"x", "text/markdown")}
     up = await client.post(
-        f"/api/sessions/{sid}/attachments", headers=HEADERS, files=files
+        f"/api/sessions/{sid}/attachments", headers=client.headers, files=files
     )
     aid = up.json()["id"]
 
@@ -428,7 +433,7 @@ async def test_start_message_caps_attachment_count(client):
     agent = await session_manager.db.get_system_agent()
     assert agent is not None
     create = await client.post(
-        "/api/sessions", headers=HEADERS, json={"agent_id": agent["id"], "name": "Cap"}
+        "/api/sessions", headers=client.headers, json={"agent_id": agent["id"], "name": "Cap"}
     )
     sid = create.json()["id"]
     too_many = [f"id{i}" for i in range(50)]
@@ -446,45 +451,24 @@ async def test_attachments_column_migration(tmp_path):
     """An old DB created before the attachments column existed gets the
     column added on next initialize and reads back []."""
     db_path = tmp_path / "legacy.db"
-    import aiosqlite
-
-    # Create the legacy messages table (no `attachments` column).
-    conn = await aiosqlite.connect(str(db_path))
-    await conn.execute(
-        "CREATE TABLE sessions (id TEXT PRIMARY KEY, name TEXT, "
-        "working_dir TEXT, created_at TEXT, claude_session_id TEXT)"
-    )
-    await conn.execute(
-        "CREATE TABLE messages ("
-        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "session_id TEXT NOT NULL, "
-        "seq INTEGER NOT NULL, "
-        "role TEXT NOT NULL, "
-        "type TEXT NOT NULL, "
-        "content TEXT, "
-        "tool_name TEXT, "
-        "tool_input TEXT, "
-        "tool_use_id TEXT, "
-        "is_error INTEGER, "
-        "session_id_ref TEXT, "
-        "cost REAL"
-        ")"
-    )
-    await conn.execute(
-        "INSERT INTO sessions (id, name, working_dir, created_at) "
-        "VALUES ('legacy', 'L', '/tmp', '2024-01-01T00:00:00Z')"
-    )
-    await conn.execute(
-        "INSERT INTO messages (session_id, seq, role, type, content) "
-        "VALUES ('legacy', 0, 'user', 'text', '\"hi\"')"
-    )
-    await conn.commit()
-    await conn.close()
+    seed = Database(str(db_path))
+    await seed.initialize()
+    users = UserManager(seed)
+    owner = await users.create_user(username="attachment-upgrade", password="attachment-password")
+    agent = await seed.get_system_agent(owner["id"])
+    await seed.save_session("legacy", "L", str(tmp_path), "2024-01-01T00:00:00Z",
+                            agent_id=agent["id"], user_id=owner["id"])
+    await seed.append_message("legacy", 0, "user", "text", "hi")
+    await seed.conn.execute("ALTER TABLE messages DROP COLUMN attachments")
+    await seed.conn.commit()
+    await seed.close()
 
     # Open via the real Database — migration should add the column.
     db = Database(str(db_path))
     await db.initialize()
     msgs = await db.load_messages("legacy")
     assert len(msgs) == 1
+    assert msgs[0]["content"] == "hi"
     assert msgs[0]["attachments"] == []  # default for legacy rows
+    assert (await db.get_session_binding("legacy"))["user_id"] == owner["id"]
     await db.close()

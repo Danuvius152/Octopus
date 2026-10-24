@@ -197,22 +197,19 @@ def _account_state_stays_in_tmp(request, tmp_path_factory, monkeypatch):
                 for name in ("auth.json", "config.toml"):
                     if (source / name).is_file():
                         (destination / name).symlink_to(source / name)
-    # Each temporary installation starts in the legacy era with open writers.
+    # Each temporary installation starts with its own healthy storage boundary.
     # Keep resource-owner collections intact so teardown leaks remain visible.
     from server.service_health import ServiceHealth
-    from server.session_manager import session_manager
     from server.wiki import app_bridge
     from server.wiki.registry import registry
     # This fixture owns a complete temporary installation. Confirm that the
     # preceding owner retired before opening this installation's health.
     registry.bind_health(ServiceHealth())
-    monkeypatch.setattr(registry, "legacy_enabled", True)
     monkeypatch.setattr(registry, "_blocked", set())
     # Lifespan tests stop the shared registry. A fresh test installation must
     # reopen through the real drain checks, without clearing resource owners.
     if registry._stopped:
         registry.resume_access()
-    monkeypatch.setattr(session_manager, "_legacy_transition", False)
     monkeypatch.setattr(app_bridge, "_stopping", False)
     monkeypatch.setattr(app_bridge, "_blocked_owners", set())
     try:
@@ -224,23 +221,12 @@ def _account_state_stays_in_tmp(request, tmp_path_factory, monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _accounts_start_empty():
-    """Every test begins in the pre-accounts era.
-
-    `deps._user_manager` and the cached "does this install have accounts"
-    answer are module globals, so a test that creates an account would
-    otherwise decide, for every test after it in the process, that the legacy
-    `OCTOPUS_AUTH_TOKEN` no longer opens anything — and leave a manager bound
-    to a database that has since been closed. Reset for the same reason
-    `session_manager.sessions.clear()` appears everywhere: shared state that
-    outlives a test is not state, it is a haunting.
-    """
+    """A test cannot inherit an account service bound to a closed database."""
     from server import deps
 
     deps._user_manager = None
-    deps.forget_accounts_exist()
     yield
     deps._user_manager = None
-    deps.forget_accounts_exist()
 
 
 @pytest.fixture(autouse=True)

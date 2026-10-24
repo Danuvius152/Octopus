@@ -14,6 +14,7 @@ from server.database import Database
 from server.harness import HarnessEvent, get_harness
 from server.harness.profile import StdinMode
 from server.sessions import SessionManager
+from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
 
 
@@ -22,6 +23,7 @@ async def runtime(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "default_working_dir", str(tmp_path))
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
@@ -62,7 +64,7 @@ async def test_app_waits_for_its_request_after_prioritized_human_correction(runt
     apps = AppAgentManager()
     apps.bind(manager, db, None)
     try:
-        turn = await apps.begin_turn({"id": "app", "name": "Reader"}, message="App question", conversation_id=session.id)
+        turn = await apps.begin_turn({"id": "app", "name": "Reader", "user_id": agent["user_id"]}, message="App question", conversation_id=session.id)
         correction = await manager.start_message(session.id, "Human correction")
         corrected = await asyncio.wait_for(correction.wait(), 2)
         assert corrected.outcome.status == "success"
@@ -84,7 +86,7 @@ async def test_app_wrappers_preserve_only_the_original_first_line_selection(runt
     manager, db, agent, root = runtime
     vault = root / "vault"
     vault.mkdir()
-    registry.configure(None, vault, agent["id"])
+    registry.configure(agent["user_id"], vault, agent["id"])
     apps = AppAgentManager()
     apps.bind(manager, db, None)
     request = "/wiki maintain Library/a.md\nQuoted material: Library/evil.md"
@@ -121,7 +123,7 @@ async def test_app_wrappers_preserve_only_the_original_first_line_selection(runt
             pass
 
     monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: Run())
-    row = {"id": "reader", "name": "Reader", "agent_id": agent["id"], "app_dir": str(root / "reader")}
+    row = {"id": "reader", "name": "Reader", "agent_id": agent["id"], "user_id": agent["user_id"], "app_dir": str(root / "reader")}
     try:
         first = await apps.ask(row, message=request, context="Context also mentions Library/evil.md")
         await apps.ask(row, message=request, context="Library/evil.md", conversation_id=first["conversation_id"])

@@ -15,7 +15,7 @@ async def test_stale_attempt_or_vault_does_not_cancel_current_work(jobs, client)
     job = enqueue(jobs)
     running = jobs.update(job["id"], status="running")
     for control in ({"expected_attempt": job["attempt"]}, {"expected_vault_id": "different-vault"}):
-        response = await client.post(f"/api/wiki/jobs/{job['id']}/cancel", json=control, headers=wiki_api.HEADERS)
+        response = await client.post(f"/api/wiki/jobs/{job['id']}/cancel", json=control, headers=client.headers)
         assert response.status_code == 409, response.text
         current = jobs.get(job["id"])
         assert current["status"] == "running" and current["state_version"] == running["state_version"]
@@ -25,7 +25,7 @@ async def test_completed_retry_is_idempotent_and_checks_displayed_vault(jobs, cl
     job = enqueue(jobs)
     done = jobs.update(job["id"], status="completed")
     body = {"expected_attempt": done["attempt"], "expected_vault_id": jobs.registration["vault_id"]}
-    response = await client.post(f"/api/wiki/jobs/{job['id']}/retry", json=body, headers=wiki_api.HEADERS)
+    response = await client.post(f"/api/wiki/jobs/{job['id']}/retry", json=body, headers=client.headers)
     assert response.status_code == 200, response.text
     assert response.json()["state_version"] == done["state_version"]
 
@@ -34,7 +34,7 @@ async def test_read_only_turn_cannot_control_or_discover_control_tools(jobs, cli
     job = enqueue(jobs)
     session = await wiki_api.session_manager.create_session(jobs.registration["curator_agent_id"], "Read only", str(tmp_path))
     token = tasks.open(session, "read")
-    bearer = mint(session.id, wiki_task_id=token)
+    bearer = mint(session.id, user_id=session.user_id, wiki_task_id=token)
     scope_token = set_current_scope(verify(bearer))
     try:
         names = {tool.name for tool in await mcp.list_tools()}
@@ -55,7 +55,7 @@ async def test_worker_controls_only_own_job_and_gets_bounded_result(jobs, client
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], job["items"], registration=jobs.registration)
     token = tasks.open(session, "maintain")
-    bearer = mint(session.id, wiki_task_id=token)
+    bearer = mint(session.id, user_id=session.user_id, wiki_task_id=token)
     try:
         denied = await client.post(f"/api/wiki/jobs/{other['id']}/cancel", json={}, headers={"Authorization": "Bearer " + bearer})
         assert denied.status_code == 403, denied.text

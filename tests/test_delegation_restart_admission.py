@@ -98,7 +98,9 @@ async def test_repeated_cancel_of_ask_waiter_keeps_one_owned_round(runtime, monk
 async def test_nested_caller_refusal_rolls_back_only_unadmitted_child(runtime, gated_cli, monkeypatch):
     boot, starts = runtime
     current = await boot()
-    await AgentManager(current.database).create_agent(name="Leaf", backend="codex")
+    await AgentManager(current.database).create_agent(
+        name="Leaf", backend="codex", user_id=current.manager.get_session(current.parent_id).user_id,
+    )
     outer = await current.delegations.start_delegation(
         parent_session_id=current.parent_id, agent_name="Worker", request="outer gate review",
     )

@@ -8,6 +8,7 @@ from server.database import Database
 from server.knowledge import encode, for_account
 from server.scheduler import ScheduleRunner
 from server.session_manager import SessionManager
+from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
 from tests.submission import accepted_receipt
 
@@ -53,9 +54,10 @@ def capture_model_runs(manager, monkeypatch, *, hold=False):
 
 
 @pytest.fixture
-async def setup():
+async def setup(tmp_path):
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     mgr = SessionManager()
     await mgr.initialize(db)
     runner = ScheduleRunner(mgr, db)
@@ -560,6 +562,7 @@ async def test_repoint_schedules_origin():
     and returns those (post-update) rows; unrelated schedules stay put."""
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db)
     try:
         agent = await db.get_system_agent()
         await save_schedule(db,
@@ -601,6 +604,7 @@ async def test_schedule_recurrence_columns_roundtrip():
     for a cron schedule."""
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db)
     try:
         agent = await db.get_system_agent()
         await save_schedule(db,
@@ -628,6 +632,7 @@ async def test_run_at_column_roundtrip():
     """run_at persists and loads correctly; cron/interval stay NULL."""
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db)
     try:
         agent = await db.get_system_agent()
         run_at = "2030-01-15T09:00:00+00:00"
@@ -654,6 +659,7 @@ async def test_migrate_schedule_recurrence_from_legacy_shape():
     (NOT NULL interval, no cron column), preserving existing interval rows."""
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db)
     try:
         agent = await db.get_system_agent()
         conn = db._conn
@@ -717,6 +723,7 @@ async def test_migrate_schedule_run_at_from_legacy_shape():
     it, preserving existing rows, and is idempotent on re-run."""
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db)
     try:
         agent = await db.get_system_agent()
         conn = db._conn
@@ -906,10 +913,10 @@ async def test_fresh_fire_is_admitted_and_owned_by_dispatch(setup, monkeypatch):
         context = original[0]["tool_input"]["request_context"]
         assert context["source"] == "schedule" and context["request_id"] == captured["request_id"]
         assert captured["attempt_id"]
-        assert mgr.running_turns_for(None) == 1
+        assert mgr.running_turns_for(agent["user_id"]) == 1
         await mgr.drain_turns()
         await asyncio.wait_for(firing, 2)
-        assert mgr.running_turns_for(None) == 0
+        assert mgr.running_turns_for(agent["user_id"]) == 0
         assert len(runs) == 1
         outcomes = [row["content"] for row in await db.load_messages(captured["session_id"]) if row["type"] == "result"]
         assert len(outcomes) == 1 and outcomes[0]["request_id"] == captured["request_id"]

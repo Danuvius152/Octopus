@@ -1,3 +1,4 @@
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { expect, test, type Page, type WebSocketRoute } from "@playwright/test";
 import { systemAgentId } from "./system-agent";
 
@@ -43,8 +44,9 @@ test("Stop keeps returns paused through correction and reconnect until explicit 
       return;
     }
     let data: unknown = [];
-    if (path === "/api/auth/state") data = { accounts_exist: false };
-    else if (path === "/api/auth/identity") data = { kind: "legacy", label: "Operator", is_admin: true };
+    if (path === "/api/auth/state") data = { accounts_exist: true };
+    else if (path === "/api/auth/login") data = { token: "browser-token" };
+    else if (path === "/api/auth/identity") data = { user_id: "browser-user", label: "Operator", is_admin: true };
     else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", is_system: true, pinned: true, archived: false }];
     else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
     else if (path === "/api/sessions") data = [{ ...session, status: phase === "initial" || phase === "correcting" || phase === "resumed" ? "running" : "idle" }];
@@ -89,8 +91,7 @@ test("Stop keeps returns paused through correction and reconnect until explicit 
   });
 
   await page.goto("/");
-  await page.locator('input[type="password"]').fill("browser-token");
-  await page.locator(".btn-login").click();
+  await enterAccountCredentials(page);
   await page.locator(".agent-item", { hasText: "Octo" }).click();
   await page.locator(".session-item", { hasText: session.name }).click();
   await expect(page.locator(".queue-content")).toHaveText(["Background command finished", "Child agent returned"]);
@@ -123,20 +124,16 @@ test("Stop keeps returns paused through correction and reconnect until explicit 
 
 test("real idle Stop and Resume synchronize dispatch pause across browser clients", async ({ page, context, request }) => {
   const api = "http://localhost:8765/api";
-  const headers = { Authorization: "Bearer changeme" };
+  const headers = { Authorization: `Bearer ${TEST_BEARER}` };
   const created = await request.post(`${api}/sessions`, {
-    headers, data: { agent_id: await systemAgentId(request, `${api}/sessions`, headers), name: `Idle remote dispatch ${Date.now()}`, working_dir: "/tmp", backend: "codex" },
+    headers, data: { agent_id: await systemAgentId(request, `${api}/sessions`, headers), name: `Idle remote dispatch ${Date.now()}`, backend: "codex" },
   });
   expect(created.ok()).toBeTruthy();
   const session = await created.json();
   const observer = await context.newPage();
   const openSession = async (client: Page) => {
     await client.goto("/");
-    const login = client.locator('input[type="password"]');
-    if (await login.isVisible()) {
-      await login.fill("changeme");
-      await client.locator(".btn-login").click();
-    }
+    if (!await client.evaluate(() => localStorage.getItem("octopus_token"))) await enterAccountCredentials(client);
     await client.locator(".agent-item", { hasText: "Octo" }).click();
     await client.locator(".session-item", { hasText: session.name }).click();
     await expect(client.locator(".conn-status.on")).toBeVisible();
@@ -149,7 +146,7 @@ test("real idle Stop and Resume synchronize dispatch pause across browser client
     const snapshot = (await current.json()).dispatch_state;
     expect(snapshot.active_request_id).toBeNull();
     await page.evaluate(({ sessionId, snapshot }) => new Promise<void>((resolve, reject) => {
-      const socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws?token=changeme`);
+      const socket = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws?token=${encodeURIComponent(localStorage.getItem("octopus_token") ?? "")}`);
       const probe = { socket, frames: [] as Record<string, unknown>[] };
       (window as unknown as { dispatchProbe: typeof probe }).dispatchProbe = probe;
       socket.onmessage = (event) => probe.frames.push(JSON.parse(event.data));

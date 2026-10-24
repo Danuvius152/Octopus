@@ -19,9 +19,7 @@ async def test_startup_preserves_saved_agent_configuration(tmp_path, name, tools
     try:
         owner = await UserManager(db).create_user(username="owner", password="password1")
         system = await db.get_system_agent()
-        # Existing account baseline; this is fixture ownership, not adoption.
-        async with db.transaction(write=True) as tx:
-            await tx.execute("UPDATE agents SET user_id=? WHERE id=?", (owner["id"], system["id"]))
+        assert system["user_id"] == owner["id"]
         await db.save_credential(
             credential_id="saved-credential", backend="codex", label="Saved API",
             auth_type="api_key", secret_encrypted="test-ciphertext",

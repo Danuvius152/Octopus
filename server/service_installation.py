@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, BinaryIO, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from .account_baseline import persistent_database_file
 from .service_health import ServiceHealth, file_effect
 from .service_scope import ScopeError, current_scope
 
@@ -99,8 +100,8 @@ def _markers(paths: dict[str, str]):
 
 
 def _account_work_roots(config: Settings) -> list[Path] | None:
-    database = Path(config.db_path).expanduser().resolve()
-    if config.db_path == ":memory:" or not database.exists():
+    database = persistent_database_file(config.db_path)
+    if database is None:
         return None
     try:
         with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as connection:
@@ -362,28 +363,6 @@ def _claim_vault(config: Settings, root: Path, state: Path, target: Path | None,
             _claim(root / ".octopus-installation", target, health=health)
 
 
-def transfer_vault(config: Settings, root: Path, source: Path, destination: Path, *,
-                   health: ServiceHealth | None = None) -> None:
-    """Complete the existing adoption journal's drained, durable handoff."""
-    root, source, destination = (path.expanduser().resolve() for path in (root, source, destination))
-    profile = read_service_profile(config)
-    target = profile_path(config) if profile is not None else None
-    with _claim_range(root):
-        _check_installation_range(root, target)
-        for registered_root, state in _registered_vaults(config):
-            if _overlaps(root, registered_root) and state not in {source, destination}:
-                raise InstallationError("Wiki adoption conflicts with another registered state")
-        for marker in _vault_markers(root):
-            if marker.parent != root or not _references([marker]) <= {source, destination}:
-                raise InstallationError("Wiki adoption conflicts with another authoritative state")
-        marker = root / ".octopus-vault"
-        if not marker.exists():
-            _claim(marker, destination, health=health)
-        elif _references([marker]) == {source}:
-            _publish(marker, str(destination) + "\n", health=health)
-        else:
-            # A previous replace may have lost only its directory-sync receipt.
-            _claim(marker, destination, health=health)
 
 
 def _registered_vaults(config: Settings):

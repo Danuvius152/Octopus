@@ -112,7 +112,8 @@ async def test_real_idempotent_and_pending_alias_receipts_keep_job_facts(client,
     (vault / "Library").mkdir(parents=True)
     (vault / "Library/note.md").write_text("# Source\nPreserve this material.\n")
     await wiki_api.configure(client, vault)
-    jobs = WikiJobs(None)
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    jobs = WikiJobs(owner)
 
     def call(method, path, *, body):
         assert (method, path) == ("POST", "maintain")

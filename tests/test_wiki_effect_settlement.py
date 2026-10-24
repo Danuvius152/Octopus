@@ -40,7 +40,7 @@ async def test_applied_output_with_failed_terminal_stays_attention_on_reentry(jo
 async def test_creation_cannot_borrow_a_receipt_without_its_original_execution(jobs, client):
     job = jobs.maintain("creation-exact-receipt", "", "Create one requested page", [], None, [], "human",
                         creation={"purpose": "requested_knowledge_page", "paths": ["Library/new.md"]})
-    with assigned(job, jobs.registration) as (headers, _):
+    async with assigned(job, jobs.registration, client=client) as (headers, _):
         item = job["items"][0]
         result = await publish(client, headers, item["path"], item["reservation_id"])
         assert result.status_code == 200, result.text
@@ -63,7 +63,7 @@ async def test_creation_with_changed_source_stays_attention_on_completion_and_ve
             self.turns += 1
             session = SimpleNamespace(id=session_id, user_id=jobs.user_id, agent_id=jobs.registration["curator_agent_id"])
             token = tasks.open(session, "maintain", request_id=kwargs["request_id"])
-            headers = {"Authorization": f"Bearer {mint(session_id, wiki_task_id=token)}"}
+            headers = {"Authorization": f"Bearer {mint(session_id, user_id=jobs.user_id, wiki_task_id=token)}"}
             try:
                 source = (await client.get("/api/wiki/read", params={"doc": "Library/source.md"}, headers=headers)).json()
                 item = jobs.get(job["id"])["items"][0]

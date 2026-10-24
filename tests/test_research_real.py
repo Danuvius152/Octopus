@@ -26,6 +26,7 @@ from server.research.manager import ResearchManager
 from server.research.orchestrator import ResearchLimits
 from server.research.orchestrator import run_research as _real_run
 from server.session_manager import SessionManager
+from tests.accounts import create_account
 from tests.cli_gate import codex_home_works
 from tests.submission import accepted_receipt
 
@@ -66,10 +67,11 @@ async def test_real_codex_deep_research_end_to_end(tmp_path, monkeypatch):
     cred_id = _usable_codex_credential()
     db = Database(":memory:")
     await db.initialize()
+    owner, _ = await create_account(db, extra_roots=[tmp_path])
     try:
         await db.save_credential(
             cred_id, "codex", "Configured Codex", "oauth", "",
-            datetime.now(UTC).isoformat(),
+            datetime.now(UTC).isoformat(), user_id=owner["id"],
         )
         mgr = SessionManager()
         await mgr.initialize(db)

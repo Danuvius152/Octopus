@@ -16,10 +16,10 @@ from typing import Any
 
 from ..crypto import decrypt, encrypt
 from ..harness import HarnessCredential
-from ..installation_keys import secret_key_scope
 from ..models import CredentialStatus
 from ..oauth_errors import RefreshErrorCode
 from ..oauth_providers import OAuthTokenSet, get_provider
+from ..users import UserManager
 from .base import (
     Session,
     SessionManagerBase,
@@ -60,8 +60,8 @@ class CredentialsMixin(SessionManagerBase):
         harness needs (`style`). Returns None when there's no id, the row is
         missing/needs_reconnect, or it can't be resolved — the caller then runs
         with whatever auth the CLI finds on its own. `context` labels log lines.
-        `user_id` is the captured caller owner; None names the legacy install,
-        never an unscoped lookup of a later account's encryption key.
+        `user_id` is the captured caller owner; secret-backed resolution
+        requires an account and never uses an installation encryption key.
 
         - ``home_dir`` (Codex): the credential is directory-backed; its dir is
           deterministic (`<codex_home_dir>/<credential_id>/`), so we resolve it
@@ -93,20 +93,20 @@ class CredentialsMixin(SessionManagerBase):
 
         if self.db is None:
             return None
-        async with secret_key_scope(self.db, user_id) as secret_key:
-            row = await self.db.get_credential(cred_id, user_id)
-            if row is None or row.get("user_id") != user_id:
-                logger.warning(
-                    "%s references unavailable credential %s; running without auth override",
-                    context or "caller", cred_id,
-                )
-                return None
-            return await self._resolve_secret_credential(cred_id, row, secret_key)
+        secret_key = await UserManager(self.db).data_key_for(user_id)
+        row = await self.db.get_credential(cred_id, user_id)
+        if row is None or row.get("user_id") != user_id:
+            logger.warning(
+                "%s references unavailable credential %s; running without auth override",
+                context or "caller", cred_id,
+            )
+            return None
+        return await self._resolve_secret_credential(cred_id, row, secret_key)
 
     async def _resolve_secret_credential(
         self, cred_id: str, row: dict[str, Any], secret_key: str,
     ) -> HarnessCredential | None:
-        """Read and refresh while the caller owns the applicable key scope."""
+        """Read and refresh with the caller's captured account DEK."""
         if row.get("needs_reconnect"):
             logger.warning(
                 "Credential %s is in needs_reconnect state (%s); running without auth override",

@@ -8,7 +8,7 @@ One install can serve more than one person. Each **account** is a completely
 separate Octopus — its own agents, sessions, applications, credentials, memory,
 and a workspace it cannot see out of — so a household or a few trusted people
 share the machine without sharing anything else. Signup is invite-only, and the
-first account (created with the install's own token) is the admin who mints the
+first account (created with the installation's setup proof) is the admin who mints the
 invites. It stays a *personal* product either way: there is no cross-account
 collaboration, no shared team space — just several private ones side by side.
 
@@ -55,9 +55,10 @@ Phone / Browser
   can't cross the line. A session's working directory is **confined** to the
   account's own workspace (a relative path means "inside my workspace"; admins
   can grant extra roots), and each account gets its own concurrency quota.
-  Admin surface: invites, disable/enable people, operator-only Monitor. Before
-  the first account exists the install runs on its **install token**; creating
-  that first account adopts whatever is already there.
+  Admin surface: invites, disable/enable people, operator-only Monitor. An empty
+  installation creates its first administrator and owned default agent through
+  **setup**. User business stays closed until an account bearer is available;
+  setup refuses retained business data.
   Design: [`docs/plans/multi-tenancy.md`](docs/plans/multi-tenancy.md).
 - **Run from anywhere** — One command serves the API and web UI on a single
   port; reach it from any browser or phone. `octopus serve --tunnel` gives
@@ -166,18 +167,9 @@ Phone / Browser
   panel reads as a clean bill of health.
 - **Encryption at rest** — Secrets ride a key hierarchy: a server-held **master
   key** wraps each account's data-encryption key (DEK), which encrypts that
-  account's credentials and connector tokens. A password only authenticates —
-  changing it re-wraps just that account's DEK, and dropping the DEK
-  crypto-shreds the account (its ciphertext becomes noise). Install-era secrets,
-  from before the first account, are keyed by the access token instead.
-- **Token rotation** — The access token is the credential clients present *and*
-  the key for those install-era secrets, so changing it is one operation from
-  Settings (`POST /api/auth/rotate`), with no restart and nothing to edit by
-  hand: editing `.env` yourself changes what the server checks while leaving
-  those secrets keyed to a token nobody has. Rotation re-keys them, rewrites the
-  env files, swaps the live setting, drops the processes carrying the old token,
-  and hands the new one to tabs already open.
-  Design: [`docs/plans/token-rotation.md`](docs/plans/token-rotation.md).
+  account's credentials and connector tokens. A password only authenticates;
+  changing it preserves the DEK and can revoke other devices' bearers. Losing
+  the master key or the wrapped DEK makes the account's secrets unreadable.
 - **Local handoff** — `octopus handoff` imports local Claude Code sessions;
   `octopus pull` exports a session as JSONL for local `claude --resume`.
 - **Persistence** — SQLite (WAL, batched commits per turn); accounts, invites,
@@ -190,7 +182,7 @@ Phone / Browser
 # Clone and set up
 git clone https://github.com/Danuvius152/Octopus.git && cd Octopus
 python3 -m venv .venv && .venv/bin/pip install -e "."
-cp .env.example .env          # edit OCTOPUS_AUTH_TOKEN
+cp .env.example .env          # set your own OCTOPUS_AUTH_TOKEN setup proof
 
 # Build the frontend (the server serves web/dist/)
 cd web && bun install && bun run build && cd ..
@@ -199,14 +191,19 @@ cd web && bun install && bun run build && cd ..
 octopus serve
 ```
 
-Open `http://localhost:8000` and enter the install token from your `.env`. On a
-fresh install that first token gets you to **Create the first account** —
-pick a username and password, and that account becomes the admin (it also
-adopts any agents/sessions already on disk). From then on you sign in with that
-username and password, and the admin mints **invite codes** for anyone else who
-should have their own account. Then pick the default **Octo** agent, create a
-session, and start chatting. For phone access, `octopus serve --tunnel` gives
-you a public HTTPS URL.
+Open `http://localhost:8000`. On an empty installation, **Create the first
+account** asks for the setup proof from your `.env`, a username and a password.
+It creates one administrator, an owned **Octo** agent and the account's
+directories. Missing setup configuration or retained business data blocks
+setup. The setup proof grants no API or WebSocket business access and is not
+saved as a browser login.
+
+From then on, sign in with your username and password; the admin mints **invite
+codes** for anyone else who should have their own account. If setup committed
+but its response was lost, sign in with the same credentials. Login also
+completes missing account directories after a filesystem failure; it preserves
+the original account and DEK. Then pick **Octo**, create a session and start
+chatting. For phone access, `octopus serve --tunnel` gives you a public HTTPS URL.
 
 Auth for the agent's backend uses your existing CLI login (`claude login` /
 `codex login`) by default — or add an API key under **Credentials** and attach
@@ -241,8 +238,9 @@ usual home-directory locations), as well as per-credential homes. A vault body
 range has one authoritative state directory; another account or installation
 cannot register the same root, an ancestor, or a descendant. Existing conflicting
 registrations block those writers before creating ownership references; opening
-order never selects an owner. First-account adoption transfers this ownership
-through its existing migration journal after the old writer has drained.
+order never selects an owner. Startup rejects retained first-account handoff
+evidence before preparing keys or business storage; preserve it for diagnosis
+using its original protocol version. Current startup does not adopt or move it.
 Range ownership assumes one mount namespace and canonical directory tree;
 bind-mount aliases and separate mount namespaces are outside this guarantee.
 If a vault root is offline, retained recovery status, saved plans and evidence

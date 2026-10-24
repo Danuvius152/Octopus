@@ -21,7 +21,6 @@ from tests.test_wiki_jobs import sapphire_delete
 
 client = wiki_api.client
 sapphire = wiki_history.sapphire
-HEADERS = wiki_api.HEADERS
 PATHS = [
     "Library/pika_vault/思考随笔/assets/人类与AI共同写作动画/项目说明.md",
     "Library/pika_vault/思考随笔/assets/写作是一种认知编码/项目说明.md",
@@ -38,10 +37,12 @@ async def asset_notes(client, tmp_path):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(ORIGINAL, encoding="utf-8")
     config = await wiki_api.configure(client, root)
-    return root, config, WikiJobs(None)
+    return root, config, WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
 
 
-async def read(client, doc, headers=HEADERS, **params):
+async def read(client, doc, headers=None, **params):
+    if headers is None:
+        headers = client.headers
     result = await client.get("/api/wiki/read", params={"doc": doc, **params}, headers=headers)
     assert result.status_code == 200, result.text
     return result.json()
@@ -63,12 +64,12 @@ def organize_body(document, modern=True):
 @contextmanager
 def assignment(jobs, config, paths, *, agent_id=None, job_id=None):
     job = jobs.get(job_id) if job_id else jobs.maintain("asset-test", "", "原位维护", paths, None, [], "human")
-    session = SimpleNamespace(id="asset-worker", user_id=None, agent_id=agent_id or config["curator_agent_id"])
+    session = SimpleNamespace(id="asset-worker", user_id=jobs.user_id, agent_id=agent_id or config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], [item for item in job["items"] if item["path"] in paths])
     token = tasks.open(session, "maintain")
     try:
-        yield {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}, job, tasks.active[token]
+        yield {"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}, job, tasks.active[token]
     finally:
         tasks.close(token)
         tasks.unassign(session.id)
@@ -110,7 +111,7 @@ class AssetCurator:
         session = next(session for session in self.sessions if session.id == session_id)
         assert kwargs["wiki_mode"] == "maintain"
         token = tasks.open(session, "maintain", prompt, request_id=kwargs["request_id"])
-        headers = {"Authorization": f"Bearer {mint(session_id, wiki_task_id=token)}"}
+        headers = {"Authorization": f"Bearer {mint(session_id, user_id=session.user_id, wiki_task_id=token)}"}
         task = tasks.active[token]
         try:
             job = self.jobs.get(task.job_id)
@@ -165,7 +166,7 @@ async def test_explicit_asset_markdown_durable_worker_receipts_index_and_restore
     root, _, jobs = asset_notes
     before = await read(client, path)
     assert before["kind"] == "asset"
-    created = await client.post("/api/wiki/maintain", headers=HEADERS, json={"idempotency_key": "first-assets", "paths": [path], "scope": "完整阅读并原位维护，不改变正文"})
+    created = await client.post("/api/wiki/maintain", headers=client.headers, json={"idempotency_key": "first-assets", "paths": [path], "scope": "完整阅读并原位维护，不改变正文"})
     assert created.status_code == 200, created.text
     job = created.json()
     assert job["items"][0]["doc"] == before["id"]
@@ -176,7 +177,7 @@ async def test_explicit_asset_markdown_durable_worker_receipts_index_and_restore
     worker.manager = curator
     await worker.process(jobs, job["id"])
     # Reopening the durable store must retain the receipts and completed item.
-    finished = WikiJobs(None).get(job["id"])
+    finished = WikiJobs(jobs.user_id).get(job["id"])
     assert finished["status"] == "completed", finished
     assert finished["items"][0]["index_complete"] is True
     assert len(curator.sessions) == 1
@@ -201,17 +202,17 @@ async def test_explicit_asset_markdown_durable_worker_receipts_index_and_restore
         assert db.execute("SELECT count(*),sum(indexed) FROM job_publications WHERE job_id=?", (job["id"],)).fetchone()[:] == (2, 2)
     # Navigation policy remains unchanged even after successful maintenance.
     for operation, params in [("documents", {}), ("search", {"query": path, "intent": "lookup"})]:
-        default = await client.get(f"/api/wiki/{operation}", params=params, headers=HEADERS)
+        default = await client.get(f"/api/wiki/{operation}", params=params, headers=client.headers)
         assert before["id"] not in {item["id"] for item in default.json()["items"]}
-        explicit = await client.get(f"/api/wiki/{operation}", params={**params, "include_assets": True}, headers=HEADERS)
+        explicit = await client.get(f"/api/wiki/{operation}", params={**params, "include_assets": True}, headers=client.headers)
         assert before["id"] in {item["id"] for item in explicit.json()["items"]}
-    restored = await client.post("/api/wiki/restore", headers=HEADERS, json={"change_id": curator.results[0]["change_id"], "expected_revision": curator.results[-1]["revision"], "side": "before"})
+    restored = await client.post("/api/wiki/restore", headers=client.headers, json={"change_id": curator.results[0]["change_id"], "expected_revision": curator.results[-1]["revision"], "side": "before"})
     assert restored.status_code == 200, restored.text
     assert (root / path).read_bytes() == ORIGINAL.encode()
     assert (await read(client, before["id"]))["id"] == before["id"]
     human = ORIGINAL + "\n后来人工编辑，必须保留。\n"
     (root / path).write_text(human)
-    stale = await client.post("/api/wiki/restore", headers=HEADERS, json={"change_id": curator.results[0]["change_id"], "expected_revision": restored.json()["revision"], "side": "after"})
+    stale = await client.post("/api/wiki/restore", headers=client.headers, json={"change_id": curator.results[0]["change_id"], "expected_revision": restored.json()["revision"], "side": "after"})
     assert stale.status_code == 409, stale.text
     assert (root / path).read_text() == human
     assert not list(root.rglob("*.source.md.txt"))
@@ -246,9 +247,9 @@ async def test_asset_exception_does_not_grant_write_authority(client, asset_note
 
 async def test_asset_job_submission_still_requires_trusted_selection(client, asset_notes):
     _, config, jobs = asset_notes
-    session = SimpleNamespace(id="asset-submit", user_id=None, agent_id=config["curator_agent_id"])
+    session = SimpleNamespace(id="asset-submit", user_id=jobs.user_id, agent_id=config["curator_agent_id"])
     token = tasks.open(session, "maintain", "/wiki maintain some unrelated material")
-    headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
+    headers = {"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}
     try:
         denied = await client.post("/api/wiki/maintain", headers=headers, json={"idempotency_key": "unselected-asset", "paths": [PATHS[0]]})
         assert denied.status_code == 403 and "explicitly" in denied.text
@@ -314,12 +315,12 @@ async def test_other_assets_remain_unmaintainable_and_batch_excluded(client, ass
         target.write_text(ORIGINAL)
         document = await read(client, path)
         assert document["kind"] == "asset"
-        submitted = await client.post("/api/wiki/maintain", headers=HEADERS, json={"idempotency_key": "excluded", "paths": [path]})
+        submitted = await client.post("/api/wiki/maintain", headers=client.headers, json={"idempotency_key": "excluded", "paths": [path]})
         assert submitted.status_code == 422, (path, submitted.text)
         for modern in (True, False):
-            organized = await client.post("/api/wiki/organize", headers=HEADERS, json=organize_body(document, modern))
+            organized = await client.post("/api/wiki/organize", headers=client.headers, json=organize_body(document, modern))
             assert organized.status_code == 422, (path, organized.text)
-        batch = await client.post("/api/wiki/read_many", headers=HEADERS, json={"items": [{"doc": document["id"]}]})
+        batch = await client.post("/api/wiki/read_many", headers=client.headers, json={"items": [{"doc": document["id"]}]})
         assert batch.status_code == 200, batch.text
         assert batch.json()["items"][0]["status"] == "excluded"
         assert not batch.json()["ranges"]
@@ -330,7 +331,7 @@ async def test_other_assets_remain_unmaintainable_and_batch_excluded(client, ass
 async def test_asset_new_page_targets_and_media_stay_excluded(client, asset_notes):
     root, config, jobs = asset_notes
     target = "Library/assets/new.md"
-    rejected = await client.post("/api/wiki/maintain", headers=HEADERS, json={"idempotency_key": "new-assets", "material": ORIGINAL, "target": target})
+    rejected = await client.post("/api/wiki/maintain", headers=client.headers, json={"idempotency_key": "new-assets", "material": ORIGINAL, "target": target})
     assert rejected.status_code == 422, rejected.text
     with assignment(jobs, config, [PATHS[0]]) as (headers, _, _):
         await read(client, PATHS[0], headers)
@@ -340,7 +341,7 @@ async def test_asset_new_page_targets_and_media_stay_excluded(client, asset_note
     media = "Library/assets/image.png"
     (root / media).parent.mkdir(parents=True, exist_ok=True)
     (root / media).write_bytes(b"not markdown")
-    denied = await client.post("/api/wiki/maintain", headers=HEADERS, json={"idempotency_key": "media", "paths": [media]})
+    denied = await client.post("/api/wiki/maintain", headers=client.headers, json={"idempotency_key": "media", "paths": [media]})
     assert denied.status_code == 404, denied.text
     assert (root / media).read_bytes() == b"not markdown"
     assert not WikiHistory(jobs.store).capture_external([media])
@@ -387,7 +388,7 @@ async def test_ordinary_text_keeps_explicit_reads_and_markdown_only_maintenance(
     original = await read(client, path)
     assert original["kind"] != "asset"
     if suffix not in {".md", ".markdown"}:
-        returned = await client.post("/api/wiki/read_many", headers=HEADERS, json={"items": [{"doc": original["id"], "expected_revision": original["revision"]}]})
+        returned = await client.post("/api/wiki/read_many", headers=client.headers, json={"items": [{"doc": original["id"], "expected_revision": original["revision"]}]})
         assert returned.status_code == 200, returned.text
         assert returned.json()["items"][0]["status"] == "ok"
         assert returned.json()["ranges"][0]["content"] == original["content"]
@@ -395,7 +396,7 @@ async def test_ordinary_text_keeps_explicit_reads_and_markdown_only_maintenance(
             with assignment(jobs, config, [path]):
                 pytest.fail("Non-Markdown maintenance was assigned")
         assert rejected.value.status == 422
-        result = await client.post("/api/wiki/organize", headers=HEADERS, json=organize_body(original, modern))
+        result = await client.post("/api/wiki/organize", headers=client.headers, json=organize_body(original, modern))
         assert result.status_code == 422 and "Markdown" in result.text
         assert (root / path).read_text() == raw
         assert (await read(client, path))["id"] == original["id"]
@@ -438,7 +439,7 @@ async def test_asset_exception_does_not_bypass_path_confinement(client, asset_no
         (root / path).parent.mkdir(parents=True, exist_ok=True)
         (root / path).symlink_to(outside)
     before = outside.read_bytes()
-    denied = await client.post("/api/wiki/maintain", headers=HEADERS, json={"idempotency_key": "confined", "paths": [path]})
+    denied = await client.post("/api/wiki/maintain", headers=client.headers, json={"idempotency_key": "confined", "paths": [path]})
     assert denied.status_code == 404, denied.text
     assert jobs.list()["items"] == []
     with assignment(jobs, config, [PATHS[0]]) as (headers, job, _):

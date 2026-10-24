@@ -19,14 +19,16 @@ from server.harness import BackendForkNotSupported, get_harness
 from server.harness.events import HarnessEvent
 from server.session_manager import ForkError, SessionManager
 from server.sessions import forking as sm_forking
+from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
 
 
 @pytest.fixture
-async def manager():
+async def manager(tmp_path):
     mgr = SessionManager()
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     await mgr.initialize(db)
     try:
         yield mgr
@@ -34,7 +36,7 @@ async def manager():
         await db.close()
 
 
-async def _seed_parent(mgr, *, backend="claude-code", working_dir="/repo",
+async def _seed_parent(mgr, *, backend="claude-code", working_dir=None,
                        n_user=3, git=(None, None)):
     """Parent with n_user user/assistant turn pairs; user rows carry the git
     anchor tuple so revert preflight has data."""
@@ -635,7 +637,7 @@ async def test_a_fork_inherits_the_model_and_the_copied_times(manager):
     from server.models import MessageContent, MessageRole
 
     agent = await manager.db.get_system_agent()
-    parent = await manager.create_session(agent["id"], "Modelled Parent", "/repo")
+    parent = await manager.create_session(agent["id"], "Modelled Parent")
     parent.model = "opus"
     await manager.db.update_session_field(parent.id, model="opus")
     await manager._persist_message(

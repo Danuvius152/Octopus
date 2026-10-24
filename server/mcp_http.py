@@ -180,10 +180,8 @@ class _ScopeMiddleware:
         owns_transport = transport is not None and self._owners.get(transport) == resolved
         reason = await scope_rejection_reason(resolved) if resolved is not None else "invalid_signature" if bearer else "missing_bearer"
         authorized = reason is None
-        cleanup = scope.get("method") == "DELETE" and resolved is not None and owns_transport
-        if cleanup and not authorized:
-            from .deps import accounts_exist
-            cleanup = resolved.user_id is not None or not await accounts_exist()
+        cleanup = (scope.get("method") == "DELETE" and resolved is not None
+                   and resolved.user_id is not None and owns_transport)
         if not authorized and not cleanup:
             logger.warning("mcp/%s: %s rejected reason=%s session=%s run=%s", self.name, scope.get("method"),
                            reason, resolved.session_id if resolved else "-", resolved.run_lease_id if resolved else "-")

@@ -126,7 +126,7 @@ async def test_frontmatter_diagnostic_is_shared_by_reads_and_checked_maintenance
         "Library/good.md": "# Healthy\nReadable unrelated evidence.\n",
         "Library/bad.md": "---\ntitle: Known metadata\n---\n# Original\n",
     })
-    with entry() as (headers, _task):
+    async with entry(client) as (headers, _task):
         observed = await state(client, headers=headers)
         good = next(item for item in observed["items"] if item["current"]["path"] == "Library/good.md")
         assert observed["ready"] is True
@@ -137,8 +137,8 @@ async def test_frontmatter_diagnostic_is_shared_by_reads_and_checked_maintenance
         assert bad.json()["metadata"]["frontmatter_error"]
         assert bad.json()["metadata"]["frontmatter_retained_from"]
         good_read = await current_read(client, "Library/good.md")
-        found = await client.get("/api/wiki/search", headers=wiki_api.HEADERS, params={"query": "Healthy"})
-        info = await client.get("/api/wiki/info", headers=wiki_api.HEADERS)
+        found = await client.get("/api/wiki/search", headers=client.headers, params={"query": "Healthy"})
+        info = await client.get("/api/wiki/info", headers=client.headers)
         assert all(response.json()["index_status"] == "partial" for response in (bad, good_read, found, info))
         assert found.json()["items"] and good_read.json()["content"].startswith("# Healthy")
         observed_bad = await state(client, "Library/bad.md", headers=headers)

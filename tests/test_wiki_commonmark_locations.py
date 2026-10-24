@@ -243,15 +243,15 @@ async def test_setext_source_section_requires_the_complete_current_cited_read(cl
     source_file = root / "Library/source.md"
     source_file.write_bytes(original)
     config = await wiki_api.configure(client, root)
-    target = (await client.get("/api/wiki/read", params={"doc": "Library/note.md"}, headers=wiki_api.HEADERS)).json()
-    source = (await client.get("/api/wiki/read", params={"doc": "Library/source.md"}, headers=wiki_api.HEADERS)).json()
-    jobs = WikiJobs(None)
+    target = (await client.get("/api/wiki/read", params={"doc": "Library/note.md"}, headers=client.headers)).json()
+    source = (await client.get("/api/wiki/read", params={"doc": "Library/source.md"}, headers=client.headers)).json()
+    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     job = jobs.maintain("commonmark-source", "", "organize", [target["path"]], None, [], "human")
-    session = SimpleNamespace(id="commonmark-worker", user_id=None, agent_id=config["curator_agent_id"])
+    session = SimpleNamespace(id="commonmark-worker", user_id=jobs.user_id, agent_id=config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
-    headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
+    headers = {"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}
     body = {
         "path": target["path"], "expected_revision": target["revision"],
         "key_note": "The condition and exception remain linked.", "reason": "Cite the current section",
@@ -288,18 +288,18 @@ async def test_nested_source_requires_the_complete_current_section_but_no_outsid
     original = text.encode()
     source_file.write_bytes(original)
     config = await wiki_api.configure(client, root)
-    target_response = await client.get("/api/wiki/read", params={"doc": "Library/note.md"}, headers=wiki_api.HEADERS)
-    source_response = await client.get("/api/wiki/read", params={"doc": "Library/source.md"}, headers=wiki_api.HEADERS)
+    target_response = await client.get("/api/wiki/read", params={"doc": "Library/note.md"}, headers=client.headers)
+    source_response = await client.get("/api/wiki/read", params={"doc": "Library/source.md"}, headers=client.headers)
     assert target_response.status_code == 200, target_response.text
     assert source_response.status_code == 200, source_response.text
     target, source = target_response.json(), source_response.json()
-    jobs = WikiJobs(None)
+    jobs = WikiJobs((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     job = jobs.maintain("commonmark-nested-source", "", "organize", [target["path"]], None, [], "human")
-    session = SimpleNamespace(id="commonmark-nested-worker", user_id=None, agent_id=config["curator_agent_id"])
+    session = SimpleNamespace(id="commonmark-nested-worker", user_id=jobs.user_id, agent_id=config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
-    headers = {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
+    headers = {"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}
     location, (start, end), expected_passage = sections[-1]
     body = {
         "path": target["path"], "expected_revision": target["revision"],

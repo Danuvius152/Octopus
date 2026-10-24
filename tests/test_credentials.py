@@ -9,6 +9,7 @@ import pytest
 
 from server.crypto import decrypt, encrypt
 from server.database import Database
+from tests.accounts import create_account
 
 # ---------------------------------------------------------------------------
 # crypto
@@ -156,15 +157,21 @@ async def test_load_prefers_split_secret_over_legacy_column(db):
 
 async def test_upgrade_preserves_legacy_only_secrets_and_retires_stale_copies(tmp_path):
     path = tmp_path / "legacy.db"
+    seed = Database(str(path))
+    await seed.initialize()
+    owner, _ = await create_account(seed)
+    await seed.close()
     original = encrypt("legacy only", "original key")
     stale = encrypt("obsolete value", "retired key")
     current = encrypt("rotated value", "current key")
     with sqlite3.connect(path) as stored:
         stored.executescript("""
+            DROP TABLE credential_secrets;
+            DROP TABLE backend_credentials;
             CREATE TABLE backend_credentials (
                 id TEXT PRIMARY KEY, backend TEXT NOT NULL, label TEXT NOT NULL,
                 auth_type TEXT NOT NULL, secret_encrypted TEXT NOT NULL,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL, user_id TEXT
             );
             CREATE TABLE credential_secrets (
                 credential_id TEXT PRIMARY KEY, secret_encrypted TEXT NOT NULL,
@@ -172,8 +179,8 @@ async def test_upgrade_preserves_legacy_only_secrets_and_retires_stale_copies(tm
             );
         """)
         stored.executemany(
-            "INSERT INTO backend_credentials VALUES (?, 'codex', 'Personal', 'api_key', ?, 't')",
-            [("legacy", original), ("rotated", stale)],
+            "INSERT INTO backend_credentials VALUES (?, 'codex', 'Personal', 'api_key', ?, 't', ?)",
+            [("legacy", original, owner["id"]), ("rotated", stale, owner["id"])],
         )
         stored.execute("INSERT INTO credential_secrets VALUES ('rotated', ?)", (current,))
 
@@ -183,6 +190,7 @@ async def test_upgrade_preserves_legacy_only_secrets_and_retires_stale_copies(tm
         try:
             legacy = await upgraded.get_credential("legacy")
             rotated = await upgraded.get_credential("rotated")
+            assert legacy["user_id"] == rotated["user_id"] == owner["id"]
             assert decrypt(legacy["secret_encrypted"], "original key") == "legacy only"
             assert decrypt(rotated["secret_encrypted"], "current key") == "rotated value"
         finally:

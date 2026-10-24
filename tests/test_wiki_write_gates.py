@@ -1,35 +1,40 @@
 """Current document identities and human prose remain protected at write time."""
 
-from contextlib import contextmanager
+from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
 
+from server import deps
 from server.mcp_identity import mint
 from server.wiki.curation import WikiCuration
 from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiJobs
 from server.wiki.registry import registry
 from server.wiki.tasks import tasks
+from tests import test_wiki_api as wiki_api
 from tests import test_wiki_curation as wiki_tests
 from tests.test_wiki_jobs import sapphire_delete
 
-HEADERS = wiki_tests.HEADERS
 client = wiki_tests.client
 notes = wiki_tests.notes
 read = wiki_tests.read
 
 
-@contextmanager
-def active_worker(config, paths):
-    jobs = WikiJobs(None)
+@asynccontextmanager
+async def active_worker(config, paths, *, client):
+    owner = await deps.get_user_manager().resolve_token(
+        client.headers["Authorization"].removeprefix("Bearer "), touch=False,
+    )
+    assert owner is not None
+    jobs = WikiJobs(owner["id"])
     job = jobs.maintain("write-gate", "", "organize", paths, None, [], "human")
-    session = SimpleNamespace(id="write-gate-worker", user_id=None, agent_id=config["curator_agent_id"])
+    session = SimpleNamespace(id="write-gate-worker", user_id=owner["id"], agent_id=config["curator_agent_id"])
     jobs.update(job["id"], status="running", session_id=session.id)
     tasks.assign(session.id, job["id"], job["items"])
     token = tasks.open(session, "maintain")
     try:
-        yield {"Authorization": f"Bearer {mint(session.id, wiki_task_id=token)}"}
+        yield {"Authorization": f"Bearer {mint(session.id, user_id=session.user_id, wiki_task_id=token)}"}
     finally:
         tasks.close(token)
         tasks.unassign(session.id)
@@ -40,13 +45,13 @@ async def test_worker_publish_preserves_human_changes_to_existing_derived_page(c
     source = await read(client, "Library/source.md")
     body = {"path": "Library/concept.md", "kind": "concept", "content": "# Concept\nA derived claim.", "expected_revision": None,
             "sources": [{"doc": source["id"], "revision": source["revision"], "location": "L3-L4"}], "reason": "new concept"}
-    result = await client.post("/api/wiki/publish", headers=HEADERS, json=body)
+    result = await client.post("/api/wiki/publish", headers=client.headers, json=body)
     assert result.status_code == 200, result.text
     path = root / body["path"]
     path.write_text(path.read_text() + "\n人工补充：必须保留重要条件 A。\n")
     before = path.read_bytes()
     current = await read(client, body["path"])
-    with active_worker(config, [body["path"]]) as headers:
+    async with active_worker(config, [body["path"]], client=client) as headers:
         await client.get("/api/wiki/read", params={"doc": current["id"]}, headers=headers)
         await client.get("/api/wiki/read", params={"doc": source["id"]}, headers=headers)
         body.update(content="# Replacement\nNo conditions.", expected_revision=current["revision"])
@@ -59,7 +64,7 @@ async def test_worker_publish_preserves_human_changes_to_existing_derived_page(c
 @pytest.mark.parametrize("replace_after_read_gate", [False, True])
 async def test_assignment_rejects_same_hash_replacement_before_actual_write(client, notes, monkeypatch, operation, replace_after_read_gate):
     root, config = notes
-    store = registry.store(None)
+    store = registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     original = await read(client, "Library/note.md")
     raw = (root / original["path"]).read_bytes()
     history = WikiHistory(store)
@@ -69,7 +74,7 @@ async def test_assignment_rejects_same_hash_replacement_before_actual_write(clie
         history.write(original["path"], raw, None, "human", "new identity")
         assert store.read(original["path"])["id"] != original["id"]
 
-    with active_worker(config, [original["path"]]) as headers:
+    async with active_worker(config, [original["path"]], client=client) as headers:
         await client.get("/api/wiki/read", params={"doc": original["id"]}, headers=headers)
         if replace_after_read_gate:
             original_gate = tasks.require_read
@@ -97,13 +102,13 @@ async def test_assignment_rejects_same_hash_replacement_before_actual_write(clie
 
 async def test_existing_paired_reading_page_cannot_be_replaced_after_assignment(client, notes):
     root, config = notes
-    store = registry.store(None)
+    store = registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"])
     history = WikiHistory(store)
     history.write("Library/source.txt", b"A full original source.", None, "human", "create")
     paired_path = "Library/source.txt.md"
     created = history.write(paired_path, b"# Existing legacy reading page\nPreserve this page.\n", None, "human", "legacy page")
     raw = store.path(paired_path).read_bytes()
-    with active_worker(config, [paired_path]) as headers:
+    async with active_worker(config, [paired_path], client=client) as headers:
         await client.get("/api/wiki/read", params={"doc": "Library/source.txt"}, headers=headers)
         await client.get("/api/wiki/read", params={"doc": paired_path}, headers=headers)
         sapphire_delete(history, paired_path)
@@ -117,10 +122,10 @@ async def test_relation_read_coverage_cannot_transfer_to_same_hash_new_identity(
     root, config = notes
     source = await read(client, "Library/source.md")
     target = await read(client, "Library/note.md")
-    history = WikiHistory(registry.store(None))
+    history = WikiHistory(registry.store((await wiki_api.session_manager.db.get_system_agent())["user_id"]))
     before = (root / target["path"]).read_bytes()
     source_raw = (root / source["path"]).read_bytes()
-    with active_worker(config, [target["path"]]) as headers:
+    async with active_worker(config, [target["path"]], client=client) as headers:
         await client.get("/api/wiki/read", params={"doc": target["id"]}, headers=headers)
         await client.get("/api/wiki/read", params={"doc": source["id"]}, headers=headers)
         sapphire_delete(history, source["path"])
@@ -144,7 +149,7 @@ async def test_block_relation_reads_conditions_in_earlier_lines(client, notes, t
     (root / "Library/source.md").write_text(text)
     source = await read(client, "Library/source.md")
     target = await read(client, "Library/note.md")
-    with active_worker(config, [target["path"]]) as headers:
+    async with active_worker(config, [target["path"]], client=client) as headers:
         await client.get("/api/wiki/read", params={"doc": target["id"]}, headers=headers)
         last_line = text.index("Conclusion follows")
         await client.get("/api/wiki/read", params={"doc": source["id"], "start": last_line, "length": len(text) - last_line}, headers=headers)

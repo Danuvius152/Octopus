@@ -35,10 +35,7 @@ from server.bg_tasks import (
 from server.database import Database
 from server.main import app
 from server.session_manager import SessionManager, session_manager
-
-TOKEN = "changeme"
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
-
+from tests.accounts import create_account
 
 # ---------------------------------------------------------------------------
 # BgTaskManager unit tests
@@ -909,6 +906,7 @@ async def api_client(tmp_path, monkeypatch):
     as production's lifespan. Mirrors test_attachments.client."""
     db = Database(":memory:")
     await db.initialize()
+    _, bearer = await create_account(db, extra_roots=[tmp_path])
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
@@ -937,7 +935,8 @@ async def api_client(tmp_path, monkeypatch):
     await bg_task_manager.start()
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    async with AsyncClient(transport=transport, base_url="http://test",
+                           headers={"Authorization": "Bearer " + bearer}) as c:
         yield c, tmp_path
 
     await bg_task_manager.shutdown()
@@ -952,7 +951,7 @@ async def test_rest_start_and_get_bg_task(api_client):
     r = await client.post(
         f"/api/sessions/{sess.id}/bg-tasks",
         json={"command": "echo hello", "description": "say hi"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 201
     body = r.json()
@@ -963,7 +962,7 @@ async def test_rest_start_and_get_bg_task(api_client):
     # Wait for the task to finish.
     for _ in range(100):
         g = await client.get(
-            f"/api/sessions/{sess.id}/bg-tasks/{task_id}", headers=HEADERS
+            f"/api/sessions/{sess.id}/bg-tasks/{task_id}", headers=client.headers
         )
         assert g.status_code == 200
         if g.json()["status"] != "running":
@@ -981,7 +980,7 @@ async def test_rest_rejects_client_supplied_knowledge_context(api_client):
         (await session_manager.db.get_system_agent())["id"], name="contract", working_dir=str(wd),
     )
     response = await client.post(
-        f"/api/sessions/{session.id}/bg-tasks", headers=HEADERS,
+        f"/api/sessions/{session.id}/bg-tasks", headers=client.headers,
         json={"command": "touch must-not-run", "knowledge_context": '{"version":1}'},
     )
     assert response.status_code == 422
@@ -1013,14 +1012,14 @@ async def test_rest_task_keeps_its_explicit_limits_in_details_and_results(api_cl
         f"/api/sessions/{sess.id}/bg-tasks",
         json={"command": "echo started; sleep 0.05; echo finished",
               "idle_timeout_seconds": 0, "timeout_seconds": 2},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert response.status_code == 201
     started = response.json()
     assert (started["idle_timeout_seconds"], started["timeout_seconds"]) == (0, 2)
     await _wait_for(lambda: bool(delivered))
     details = await client.get(
-        f"/api/sessions/{sess.id}/bg-tasks/{started['id']}", headers=HEADERS,
+        f"/api/sessions/{sess.id}/bg-tasks/{started['id']}", headers=client.headers,
     )
     body = details.json()
     assert (body["idle_timeout_seconds"], body["timeout_seconds"]) == (0, 2)
@@ -1031,7 +1030,7 @@ async def test_rest_task_keeps_its_explicit_limits_in_details_and_results(api_cl
     assert "total timeout: 2s" in prompt
     assert [e["type"] for e in events] == ["bg_started", "bg_completed"]
     assert all((e["idle_timeout_seconds"], e["timeout_seconds"]) == (0, 2) for e in events)
-    listing = await client.get(f"/api/sessions/{sess.id}/bg-tasks", headers=HEADERS)
+    listing = await client.get(f"/api/sessions/{sess.id}/bg-tasks", headers=client.headers)
     assert listing.json()[0] == body
 
 
@@ -1055,11 +1054,11 @@ async def test_rest_rejects_invalid_limits_before_starting_a_command(api_client,
     )
     response = await client.post(
         f"/api/sessions/{sess.id}/bg-tasks",
-        json={"command": "touch spawned", field: value}, headers=HEADERS,
+        json={"command": "touch spawned", field: value}, headers=client.headers,
     )
     assert response.status_code == 422
     assert not (wd / "spawned").exists()
-    tasks = await client.get(f"/api/sessions/{sess.id}/bg-tasks", headers=HEADERS)
+    tasks = await client.get(f"/api/sessions/{sess.id}/bg-tasks", headers=client.headers)
     assert tasks.json() == []
 
 
@@ -1085,7 +1084,7 @@ async def test_rest_rejects_empty_command(api_client):
     r = await client.post(
         f"/api/sessions/{sess.id}/bg-tasks",
         json={"command": "  "},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 400
 
@@ -1098,9 +1097,9 @@ async def test_rest_list(api_client):
     await client.post(
         f"/api/sessions/{sess.id}/bg-tasks",
         json={"command": "true"},
-        headers=HEADERS,
+        headers=client.headers,
     )
-    r = await client.get(f"/api/sessions/{sess.id}/bg-tasks", headers=HEADERS)
+    r = await client.get(f"/api/sessions/{sess.id}/bg-tasks", headers=client.headers)
     assert r.status_code == 200
     assert len(r.json()) == 1
 
@@ -1113,13 +1112,13 @@ async def test_rest_cancel_running(api_client):
     start = await client.post(
         f"/api/sessions/{sess.id}/bg-tasks",
         json={"command": "sleep 30"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     task_id = start.json()["id"]
     # Give it a moment to enter `running` state.
     await asyncio.sleep(0.05)
     r = await client.post(
-        f"/api/sessions/{sess.id}/bg-tasks/{task_id}/cancel", headers=HEADERS
+        f"/api/sessions/{sess.id}/bg-tasks/{task_id}/cancel", headers=client.headers
     )
     assert r.status_code == 200
     assert r.json()["cancelled"] is True
@@ -1133,19 +1132,19 @@ async def test_rest_cancel_already_finished(api_client):
     start = await client.post(
         f"/api/sessions/{sess.id}/bg-tasks",
         json={"command": "true"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     task_id = start.json()["id"]
     # Let it complete.
     for _ in range(40):
         g = await client.get(
-            f"/api/sessions/{sess.id}/bg-tasks/{task_id}", headers=HEADERS
+            f"/api/sessions/{sess.id}/bg-tasks/{task_id}", headers=client.headers
         )
         if g.json()["status"] != "running":
             break
         await asyncio.sleep(0.05)
     r = await client.post(
-        f"/api/sessions/{sess.id}/bg-tasks/{task_id}/cancel", headers=HEADERS
+        f"/api/sessions/{sess.id}/bg-tasks/{task_id}/cancel", headers=client.headers
     )
     assert r.status_code == 200
     # Already finished → cancelled=False (no live handle).
@@ -1157,7 +1156,7 @@ async def test_rest_session_required(api_client):
     r = await client.post(
         "/api/sessions/no-such/bg-tasks",
         json={"command": "true"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 404
 

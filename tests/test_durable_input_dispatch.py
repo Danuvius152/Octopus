@@ -12,7 +12,7 @@ async def test_http_reuses_the_same_durable_admission_as_socket_input(runtime):
     from tests.test_runtime_review_races import session_client, wait_dispatch_idle
 
     manager, db, session, _, starts, _ = runtime
-    async with session_client(manager, session) as client:
+    async with await session_client(manager, session) as client:
         endpoint = f"/api/sessions/{session.id}/submissions"
         payload = {"client_request_id": "http-original", "content": "One HTTP input", "attachment_ids": []}
         first = await client.post(endpoint, json=payload)

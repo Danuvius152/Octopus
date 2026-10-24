@@ -9,19 +9,33 @@ import sys
 from dataclasses import replace
 from pathlib import Path
 
+import pytest
+
+from server import deps
 from server.agent_manager import AgentManager
 from server.config import settings
 from server.harness import get_harness
 from server.routers import credentials as credentials_api
 from server.session_manager import session_manager
+from server.users import UserManager
 from tests import test_auth_routes as auth_api
+from tests.accounts import create_account
 from tests.test_service_shutdown import synthetic_cli
 
-client = auth_api.client
+auth_client = auth_api.client
+
+
+@pytest.fixture
+async def client(auth_client, tmp_path):
+    http, users, db = auth_client
+    _, bearer = await create_account(db, extra_roots=[tmp_path])
+    http.headers.update({"Authorization": f"Bearer {bearer}"})
+    yield http, users, db
 
 
 async def test_spawn_failure_keeps_local_traceback_and_details_without_credentials(client, monkeypatch, caplog):
     http, _users, db = client
+    owner = (await db.get_system_agent())["user_id"]
     prompt = "ORIGINAL-LOCAL-DEBUG-PROMPT-46"
     token = "synthetic-local-diagnostic-token-46"
     monkeypatch.setattr(settings, "auth_token", token)
@@ -34,7 +48,7 @@ async def test_spawn_failure_keeps_local_traceback_and_details_without_credentia
         raise failure
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", refused)
-    agent = await AgentManager(db).create_agent(name="Diagnostic owner", backend="codex")
+    agent = await AgentManager(db).create_agent(name="Diagnostic owner", backend="codex", user_id=owner)
     session = await session_manager.create_session(agent["id"], "Private diagnostics", backend="codex")
     try:
         with caplog.at_level(logging.DEBUG, logger="server"):
@@ -54,7 +68,7 @@ async def test_spawn_failure_keeps_local_traceback_and_details_without_credentia
         assert "owner_runtime.py" in diagnostic and "_start_original" in diagnostic
         assert prompt in diagnostic and detail in diagnostic
         assert token not in diagnostic and "[redacted]" in diagnostic
-        detail = await http.get(f"/api/sessions/{session.id}", headers={"Authorization": "Bearer " + settings.auth_token})
+        detail = await http.get(f"/api/sessions/{session.id}", headers=http.headers)
         assert detail.status_code == 200, detail.text
         assert any(message["role"] == "user" and message["content"] == prompt for message in detail.json()["messages"])
     finally:
@@ -65,6 +79,7 @@ async def test_bound_credential_spawn_failure_masks_all_local_logs_without_chang
     client, monkeypatch, caplog,
 ):
     http, _users, db = client
+    owner = (await db.get_system_agent())["user_id"]
     token = "synthetic-installation-diagnostic-key-46"
     credential_secret = "quietmarble46sharedproofvalue"
     prompt = "ORIGINAL-BOUND-CREDENTIAL-PROMPT-46"
@@ -101,10 +116,10 @@ async def test_bound_credential_spawn_failure_masks_all_local_logs_without_chang
             "/api/credentials",
             json={"backend": "claude-code", "label": "Diagnostic credential",
                   "auth_type": "api_key", "secret": credential_secret},
-            headers={"Authorization": "Bearer " + token},
+            headers=http.headers,
         )
         assert created.status_code == 201, created.text
-        agent = await AgentManager(db).create_agent(name="Bound diagnostic owner", backend="claude-code")
+        agent = await AgentManager(db).create_agent(name="Bound diagnostic owner", backend="claude-code", user_id=owner)
         session = await session_manager.create_session(
             agent["id"], "Bound private diagnostics", backend="claude-code",
             credential_id=created.json()["id"],
@@ -132,7 +147,7 @@ async def test_bound_credential_spawn_failure_masks_all_local_logs_without_chang
         assert prompt in diagnostic and detail in diagnostic and cause_detail in diagnostic
         assert credential_secret not in diagnostic and "[redacted]" in diagnostic
         transcript = await http.get(
-            f"/api/sessions/{session.id}", headers={"Authorization": "Bearer " + token},
+            f"/api/sessions/{session.id}", headers=http.headers,
         )
         assert transcript.status_code == 200, transcript.text
         assert any(message["role"] == "user" and message["content"] == prompt
@@ -177,6 +192,7 @@ async def test_failed_retirement_keeps_its_original_credential_diagnostics_after
         assert "[redacted]" in diagnostic
         db = Database(proof["database"])
         await db.initialize()
+        deps.set_user_manager(UserManager(db))
         restored = SessionManager()
         try:
             await restored.initialize(db)
@@ -204,7 +220,7 @@ async def _retirement_diagnostic_child(tmp_path, tmp_path_factory, monkeypatch):
     from httpx import ASGITransport, AsyncClient
 
     from server.database import Database
-    from server.deps import get_session_manager, scope_user_id
+    from server.deps import get_session_manager
     from server.routers.sessions import router
     from server.sessions import SessionManager
 
@@ -212,13 +228,13 @@ async def _retirement_diagnostic_child(tmp_path, tmp_path_factory, monkeypatch):
     database_path = tmp_path / "diagnostic-owner.db"
     db = Database(str(database_path))
     await db.initialize()
+    owner, bearer = await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     application = FastAPI()
     application.include_router(credentials_api.router)
     application.include_router(router)
     application.dependency_overrides[get_session_manager] = lambda: manager
-    application.dependency_overrides[scope_user_id] = lambda: None
     token = "synthetic-installation-retirement-key-46"
     original_secret = "retiredmarble46originalvalue"
     replacement_secret = "newmarble46replacementvalue"
@@ -249,18 +265,19 @@ async def _retirement_diagnostic_child(tmp_path, tmp_path_factory, monkeypatch):
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", late_refusal)
     credentials_api.set_db(db)
-    async with AsyncClient(transport=ASGITransport(app=application), base_url="http://test") as http:
+    async with AsyncClient(transport=ASGITransport(app=application), base_url="http://test",
+                           headers={"Authorization": f"Bearer {bearer}"}) as http:
         credentials = []
         for secret in (original_secret, replacement_secret):
             created = await http.post(
                 "/api/credentials",
                 json={"backend": "claude-code", "label": "Retirement diagnostic credential",
                       "auth_type": "api_key", "secret": secret},
-                headers={"Authorization": "Bearer " + token},
+                headers=http.headers,
             )
             assert created.status_code == 201, created.text
             credentials.append(created.json()["id"])
-        agent = await AgentManager(db).create_agent(name="Retirement diagnostic owner", backend="claude-code")
+        agent = await AgentManager(db).create_agent(name="Retirement diagnostic owner", backend="claude-code", user_id=owner["id"])
         session = await manager.create_session(
             agent["id"], "Retirement diagnostics", backend="claude-code", credential_id=credentials[0],
         )
@@ -290,7 +307,7 @@ async def _retirement_diagnostic_child(tmp_path, tmp_path_factory, monkeypatch):
         assert await manager.interrupt(session.id)
         rebound = await http.patch(
             f"/api/sessions/{session.id}", json={"credential_id": credentials[1]},
-            headers={"Authorization": "Bearer " + token},
+            headers=http.headers,
         )
         assert rebound.status_code == 200, rebound.text
         assert rebound.json()["credential_id"] == credentials[1]
@@ -311,6 +328,7 @@ async def test_steer_pipe_failure_preserves_local_details_without_the_bound_cred
     client, monkeypatch, caplog,
 ):
     http, _users, db = client
+    owner = (await db.get_system_agent())["user_id"]
     token = "synthetic-installation-steer-key-46"
     credential_secret = "steermarble46boundvalue"
     prompt = "ORIGINAL-STEER-PIPE-PROMPT-46"
@@ -355,10 +373,10 @@ async def test_steer_pipe_failure_preserves_local_details_without_the_bound_cred
             "/api/credentials",
             json={"backend": "claude-code", "label": "Steer diagnostic credential",
                   "auth_type": "api_key", "secret": credential_secret},
-            headers={"Authorization": "Bearer " + token},
+            headers=http.headers,
         )
         assert created.status_code == 201, created.text
-        agent = await AgentManager(db).create_agent(name="Steer diagnostic owner", backend="claude-code")
+        agent = await AgentManager(db).create_agent(name="Steer diagnostic owner", backend="claude-code", user_id=owner)
         session = await session_manager.create_session(
             agent["id"], "Steer diagnostics", backend="claude-code", credential_id=created.json()["id"],
         )
@@ -382,7 +400,7 @@ async def test_steer_pipe_failure_preserves_local_details_without_the_bound_cred
         assert detail in diagnostic and "pipe inspection" in diagnostic
         assert credential_secret not in diagnostic and "[redacted]" in diagnostic
         transcript = await http.get(
-            f"/api/sessions/{session.id}", headers={"Authorization": "Bearer " + token},
+            f"/api/sessions/{session.id}", headers=http.headers,
         )
         assert transcript.status_code == 200, transcript.text
         assert any(message["role"] == "user" and message["content"] == prompt

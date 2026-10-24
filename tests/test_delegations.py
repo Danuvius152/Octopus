@@ -48,11 +48,9 @@ from server.routers import schedules as schedules_mod
 from server.scheduler import ScheduleRunner
 from server.session_manager import session_manager
 from server.sessions.turns import _Settlement
+from server.users import UserManager
+from tests.accounts import create_account
 from tests.completion_models import CompletionModels
-
-TOKEN = "changeme"
-HEADERS = {"Authorization": f"Bearer {TOKEN}"}
-
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -65,9 +63,10 @@ def models():
 
 
 @pytest.fixture
-async def db():
+async def db(tmp_path):
     d = Database(":memory:")
     await d.initialize()
+    await create_account(d, extra_roots=[tmp_path])
     yield d
     await d.close()
 
@@ -94,7 +93,8 @@ async def dm(mgr, db):
 
 async def _make_agent(db, name: str) -> dict:
     am = AgentManager(db)
-    return await am.create_agent(name=name)
+    owner = (await db.get_system_agent())["user_id"]
+    return await am.create_agent(name=name, user_id=owner)
 
 
 async def _make_session(
@@ -104,7 +104,7 @@ async def _make_session(
     return await mgr.create_session(
         agent_id=agent_id,
         name=name,
-        working_dir="/tmp",
+        working_dir=None,
         origin=origin,
         parent_session_id=parent_session_id,
     )
@@ -165,7 +165,7 @@ async def test_origin_delegation_round_trips(mgr, db):
     child = await mgr.create_session(
         agent_id=child_agent["id"],
         name="vera-child",
-        working_dir="/tmp",
+        working_dir=None,
         origin="delegation",
         parent_session_id=parent.id,
         delegation_request="please review",
@@ -190,7 +190,7 @@ async def test_parent_delete_sets_null_on_child(mgr, db):
     child = await mgr.create_session(
         agent_id=child_agent["id"],
         name="c",
-        working_dir="/tmp",
+        working_dir=None,
         origin="delegation",
         parent_session_id=parent.id,
         delegation_request="r",
@@ -340,7 +340,7 @@ async def test_delegation_conversation_remains_open_on_restart(db):
     vera = await _make_agent(db, "Vera")
     parent = await _make_session(m1, octo["id"], name="parent")
     child = await m1.create_session(
-        agent_id=vera["id"], name="vera-child", working_dir="/tmp",
+        agent_id=vera["id"], name="vera-child", working_dir=None,
         origin="delegation", parent_session_id=parent.id,
         delegation_request="r",
     )
@@ -602,7 +602,7 @@ async def test_cycle_rejected(models, dm, mgr, db, monkeypatch):
     vera_sess = await mgr.create_session(
         agent_id=vera["id"],
         name="vera",
-        working_dir="/tmp",
+        working_dir=None,
         origin="delegation",
         parent_session_id=octo_sess.id,
         delegation_request="r",
@@ -633,7 +633,7 @@ async def test_chain_walk_rejects_session_id_cycle(models, dm, mgr, db, monkeypa
     # Build a valid 2-session chain first so the FK is satisfied.
     sess_a = await _make_session(mgr, octo["id"], name="a")
     sess_b = await mgr.create_session(
-        agent_id=a["id"], name="b", working_dir="/tmp",
+        agent_id=a["id"], name="b", working_dir=None,
         origin="delegation", parent_session_id=sess_a.id,
         delegation_request="r",
     )
@@ -667,7 +667,7 @@ async def test_chain_walk_falls_back_to_db_for_archived_ancestor(
     # Build a valid chain Octo (root) → Vera-child (delegation).
     octo_sess = await _make_session(mgr, octo["id"], name="octo")
     vera_child = await mgr.create_session(
-        agent_id=vera["id"], name="vera-child", working_dir="/tmp",
+        agent_id=vera["id"], name="vera-child", working_dir=None,
         origin="delegation", parent_session_id=octo_sess.id,
         delegation_request="r",
     )
@@ -697,7 +697,7 @@ async def test_chain_walk_rejects_truly_missing_ancestor(
     await _make_agent(db, "Vera")
     ancestor = await _make_session(mgr, octo["id"], name="ancestor")
     child = await mgr.create_session(
-        agent_id=octo["id"], name="orphan", working_dir="/tmp",
+        agent_id=octo["id"], name="orphan", working_dir=None,
         origin="delegation", parent_session_id=ancestor.id,
         delegation_request="r",
     )
@@ -724,15 +724,15 @@ async def test_depth_cap_rejected(models, dm, mgr, db, monkeypatch):
 
     root = await _make_session(mgr, octo["id"], name="root")
     s_a = await mgr.create_session(
-        agent_id=a["id"], name="a", working_dir="/tmp",
+        agent_id=a["id"], name="a", working_dir=None,
         origin="delegation", parent_session_id=root.id, delegation_request="r",
     )
     s_b = await mgr.create_session(
-        agent_id=b["id"], name="b", working_dir="/tmp",
+        agent_id=b["id"], name="b", working_dir=None,
         origin="delegation", parent_session_id=s_a.id, delegation_request="r",
     )
     s_c = await mgr.create_session(
-        agent_id=c["id"], name="c", working_dir="/tmp",
+        agent_id=c["id"], name="c", working_dir=None,
         origin="delegation", parent_session_id=s_b.id, delegation_request="r",
     )
     # Chain so far: 3 delegation hops (A, B, C). Adding D would make 4.
@@ -1408,14 +1408,14 @@ async def test_route_follow_up_requires_live_parent(models, client, monkeypatch)
 
     monkeypatch.setattr(session_manager, "start_message", noop)
 
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+    agents = (await client.get("/api/agents", headers=client.headers)).json()
     octo = next(a for a in agents if a["is_system"])
     await _post_agent(client, "Vera")
     parent = await _post_session(client, octo["id"])
     create = await client.post(
         f"/api/sessions/{parent['id']}/delegations",
         json={"agent_name": "vera", "request": "round 1"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     did = create.json()["delegation_id"]
     await models.emit(singleton_delegation_manager, {
@@ -1428,7 +1428,7 @@ async def test_route_follow_up_requires_live_parent(models, client, monkeypatch)
     r = await client.post(
         f"/api/sessions/{parent['id']}/delegations/{did}/follow-up",
         json={"request": "round 2"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 404
     # The record must still be in its terminal state — the route
@@ -1448,14 +1448,14 @@ async def test_route_follow_up(models, client, monkeypatch):
 
     monkeypatch.setattr(session_manager, "start_message", noop)
 
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+    agents = (await client.get("/api/agents", headers=client.headers)).json()
     octo = next(a for a in agents if a["is_system"])
     await _post_agent(client, "Vera")
     parent = await _post_session(client, octo["id"])
     create = await client.post(
         f"/api/sessions/{parent['id']}/delegations",
         json={"agent_name": "vera", "request": "round 1"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     did = create.json()["delegation_id"]
 
@@ -1468,7 +1468,7 @@ async def test_route_follow_up(models, client, monkeypatch):
     r = await client.post(
         f"/api/sessions/{parent['id']}/delegations/{did}/follow-up",
         json={"request": "round 2"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code in (200, 201), r.text
     body = r.json()
@@ -1695,7 +1695,10 @@ async def client(db):
     singleton_delegation_manager.bind(session_mgr=session_manager, db=db)
 
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as c:
+    owner = (await db.get_system_agent())["user_id"]
+    token = await UserManager(db).issue_token(owner)
+    async with AsyncClient(transport=transport, base_url="http://test",
+                           headers={"Authorization": "Bearer " + token}) as c:
         yield c
 
     singleton_delegation_manager.shutdown()
@@ -1707,7 +1710,7 @@ async def client(db):
 
 async def _post_agent(client, name, **extra):
     r = await client.post(
-        "/api/agents", json={"name": name, **extra}, headers=HEADERS
+        "/api/agents", json={"name": name, **extra}, headers=client.headers
     )
     assert r.status_code == 201, r.text
     return r.json()
@@ -1716,8 +1719,8 @@ async def _post_agent(client, name, **extra):
 async def _post_session(client, agent_id, name="parent"):
     r = await client.post(
         "/api/sessions",
-        json={"name": name, "working_dir": "/tmp", "agent_id": agent_id},
-        headers=HEADERS,
+        json={"name": name, "agent_id": agent_id},
+        headers=client.headers,
     )
     assert r.status_code == 201, r.text
     return r.json()
@@ -1729,7 +1732,7 @@ async def test_route_start_delegation(models, client, monkeypatch):
     up via GET /sessions/{child_sid}."""
     monkeypatch.setattr(session_manager, "start_message", models.start_for(session_manager))
 
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+    agents = (await client.get("/api/agents", headers=client.headers)).json()
     octo = next(a for a in agents if a["is_system"])
     await _post_agent(client, "Vera")
     parent = await _post_session(client, octo["id"])
@@ -1737,7 +1740,7 @@ async def test_route_start_delegation(models, client, monkeypatch):
     r = await client.post(
         f"/api/sessions/{parent['id']}/delegations",
         json={"agent_name": "vera", "request": "review the dashboard"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 201, r.text
     body = r.json()
@@ -1748,7 +1751,7 @@ async def test_route_start_delegation(models, client, monkeypatch):
 
     # Child session is visible via the normal GET route.
     cid = body["delegation_id"]
-    detail = (await client.get(f"/api/sessions/{cid}", headers=HEADERS)).json()
+    detail = (await client.get(f"/api/sessions/{cid}", headers=client.headers)).json()
     assert detail["origin"] == "delegation"
     assert detail["parent_session_id"] == parent["id"]
     assert detail["delegation_request"] == "review the dashboard"
@@ -1763,7 +1766,7 @@ async def test_route_list_and_cancel(models, client, monkeypatch):
 
     monkeypatch.setattr(session_manager, "interrupt", fake_interrupt)
 
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+    agents = (await client.get("/api/agents", headers=client.headers)).json()
     octo = next(a for a in agents if a["is_system"])
     await _post_agent(client, "Vera")
     parent = await _post_session(client, octo["id"])
@@ -1771,12 +1774,12 @@ async def test_route_list_and_cancel(models, client, monkeypatch):
     create = await client.post(
         f"/api/sessions/{parent['id']}/delegations",
         json={"agent_name": "vera", "request": "go"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     did = create.json()["delegation_id"]
 
     listing = await client.get(
-        f"/api/sessions/{parent['id']}/delegations", headers=HEADERS
+        f"/api/sessions/{parent['id']}/delegations", headers=client.headers
     )
     assert listing.status_code == 200
     rows = listing.json()
@@ -1785,7 +1788,7 @@ async def test_route_list_and_cancel(models, client, monkeypatch):
     cancel = await client.post(
         f"/api/sessions/{parent['id']}/delegations/{did}/cancel",
         json={"reason": "test"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert cancel.status_code == 200, cancel.text
     assert cancel.json()["state"] == "cancelled"
@@ -1798,18 +1801,18 @@ async def test_route_404s(models, client, monkeypatch):
     r = await client.post(
         "/api/sessions/ghost/delegations",
         json={"agent_name": "vera", "request": "go"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 404
 
     # Known parent, unknown agent.
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+    agents = (await client.get("/api/agents", headers=client.headers)).json()
     octo = next(a for a in agents if a["is_system"])
     parent = await _post_session(client, octo["id"])
     r = await client.post(
         f"/api/sessions/{parent['id']}/delegations",
         json={"agent_name": "ghost", "request": "go"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 404
 
@@ -1817,7 +1820,7 @@ async def test_route_404s(models, client, monkeypatch):
     r = await client.post(
         f"/api/sessions/{parent['id']}/delegations/nope/cancel",
         json={},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 404
 
@@ -1825,13 +1828,13 @@ async def test_route_404s(models, client, monkeypatch):
 @pytest.mark.asyncio
 async def test_route_self_delegation_409(models, client, monkeypatch):
     monkeypatch.setattr(session_manager, "start_message", models.start_for(session_manager))
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+    agents = (await client.get("/api/agents", headers=client.headers)).json()
     octo = next(a for a in agents if a["is_system"])
     parent = await _post_session(client, octo["id"])
     r = await client.post(
         f"/api/sessions/{parent['id']}/delegations",
         json={"agent_name": octo["name"], "request": "x"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 409
 
@@ -2170,7 +2173,7 @@ async def test_answer_pending_question_human_race_409(
 async def test_route_answer_happy(models, client, monkeypatch):
     monkeypatch.setattr(session_manager, "start_message", models.start_for(session_manager))
 
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+    agents = (await client.get("/api/agents", headers=client.headers)).json()
     octo = next(a for a in agents if a["is_system"])
     await _post_agent(client, "Vera")
     parent = await _post_session(client, octo["id"])
@@ -2178,7 +2181,7 @@ async def test_route_answer_happy(models, client, monkeypatch):
     create = await client.post(
         f"/api/sessions/{parent['id']}/delegations",
         json={"agent_name": "vera", "request": "go"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     did = create.json()["delegation_id"]
 
@@ -2199,7 +2202,7 @@ async def test_route_answer_happy(models, client, monkeypatch):
     r = await client.post(
         f"/api/sessions/{parent['id']}/delegations/{did}/answer",
         json={"choice": "Yes"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 200, r.text
     body = r.json()
@@ -2210,13 +2213,13 @@ async def test_route_answer_happy(models, client, monkeypatch):
 @pytest.mark.asyncio
 async def test_route_answer_404_for_unknown_delegation(models, client, monkeypatch):
     monkeypatch.setattr(session_manager, "start_message", models.start_for(session_manager))
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+    agents = (await client.get("/api/agents", headers=client.headers)).json()
     octo = next(a for a in agents if a["is_system"])
     parent = await _post_session(client, octo["id"])
     r = await client.post(
         f"/api/sessions/{parent['id']}/delegations/nope/answer",
         json={"choice": "X"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 404
 
@@ -2224,20 +2227,20 @@ async def test_route_answer_404_for_unknown_delegation(models, client, monkeypat
 @pytest.mark.asyncio
 async def test_route_answer_409_when_no_pending(models, client, monkeypatch):
     monkeypatch.setattr(session_manager, "start_message", models.start_for(session_manager))
-    agents = (await client.get("/api/agents", headers=HEADERS)).json()
+    agents = (await client.get("/api/agents", headers=client.headers)).json()
     octo = next(a for a in agents if a["is_system"])
     await _post_agent(client, "Vera")
     parent = await _post_session(client, octo["id"])
     create = await client.post(
         f"/api/sessions/{parent['id']}/delegations",
         json={"agent_name": "vera", "request": "go"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     did = create.json()["delegation_id"]
     r = await client.post(
         f"/api/sessions/{parent['id']}/delegations/{did}/answer",
         json={"choice": "X"},
-        headers=HEADERS,
+        headers=client.headers,
     )
     assert r.status_code == 409
 

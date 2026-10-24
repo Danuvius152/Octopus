@@ -1,8 +1,9 @@
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { expect, test } from "@playwright/test";
 import { systemAgentId } from "./system-agent";
 
 const API = "http://localhost:8765/api";
-const headers = { Authorization: "Bearer changeme" };
+const headers = { Authorization: `Bearer ${TEST_BEARER}` };
 
 for (const width of [1280, 390]) {
   test.describe(`Shared Wiki composer at ${width}px`, () => {
@@ -24,14 +25,13 @@ for (const width of [1280, 390]) {
         });
       });
       const created = await request.post(`${API}/sessions`, {
-        headers, data: { agent_id: await systemAgentId(request, `${API}/sessions`, headers), name: `Shared Wiki Composer ${width}`, working_dir: "/tmp" },
+        headers, data: { agent_id: await systemAgentId(request, `${API}/sessions`, headers), name: `Shared Wiki Composer ${width}`, },
       });
       expect(created.ok()).toBeTruthy();
       const session = await created.json();
       try {
         await page.goto("/");
-        await page.locator('input[type="password"]').fill("changeme");
-        await page.locator(".btn-login").click();
+        await enterAccountCredentials(page);
         if (width < 768) {
           await page.getByRole("button", { name: "Toggle sidebar" }).click();
           await expect(page.locator(".sidebar")).toHaveClass(/open/);

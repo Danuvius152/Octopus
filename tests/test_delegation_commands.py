@@ -195,7 +195,7 @@ async def test_followup_rolls_back_confirmed_round_when_real_session_refuses_arc
     confirmed = current.delegations.get_delegation(original.delegation_id)
     previous = confirmed.to_public_dict()
     snapshot = await current.database.load_delegation_state(
-        original.delegation_id, parent_session_id=current.parent_id, user_id=None,
+        original.delegation_id, parent_session_id=current.parent_id, user_id=current.manager.get_session(current.parent_id).user_id,
     )
     messages = await current.database.load_messages(original.delegation_id)
     agents = AgentManager(current.database)
@@ -220,10 +220,10 @@ async def test_followup_rolls_back_confirmed_round_when_real_session_refuses_arc
     assert len(committed_rounds) == 1 and committed_rounds[0] != original.work_id
     assert current.delegations.get_delegation(original.delegation_id).to_public_dict() == previous
     assert await current.database.load_delegation_state(
-        original.delegation_id, parent_session_id=current.parent_id, user_id=None,
+        original.delegation_id, parent_session_id=current.parent_id, user_id=current.manager.get_session(current.parent_id).user_id,
     ) == snapshot
     assert await current.database.get_latest_delegation_request(
-        original.delegation_id, committed_rounds[0], parent_session_id=current.parent_id, user_id=None,
+        original.delegation_id, committed_rounds[0], parent_session_id=current.parent_id, user_id=current.manager.get_session(current.parent_id).user_id,
     ) is None
     assert await current.database.load_messages(original.delegation_id) == messages
     assert current.manager.dispatch_snapshot(original.delegation_id)["items"] == []

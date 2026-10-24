@@ -9,18 +9,20 @@ import pytest
 from fastapi import FastAPI
 
 from server.database import Database
-from server.deps import get_session_manager, scope_user_id
+from server.deps import get_session_manager
 from server.harness import HarnessEvent
 from server.routers.sessions import router
 from server.session_manager import ForkError, SessionManager
+from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
 
 
 @pytest.fixture
-async def dispatch(monkeypatch, request):
+async def dispatch(monkeypatch, request, tmp_path):
     manager = SessionManager()
     database = Database(":memory:")
     await database.initialize()
+    await create_account(database, extra_roots=[tmp_path])
     await manager.initialize(database)
     agent = await database.get_system_agent()
     session = await manager.create_session(agent["id"], "Dispatch")
@@ -237,25 +239,29 @@ async def test_concurrent_returns_are_preserved_once_across_correction_and_resum
 
 
 async def test_http_snapshot_and_resume_are_scoped_to_session_owner(dispatch):
+    from server.users import UserManager
+
     manager, session, started, _ = dispatch
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_session_manager] = lambda: manager
-    app.dependency_overrides[scope_user_id] = lambda: session.user_id
+    users = UserManager(manager.db)
+    token = await users.issue_token(session.user_id)
+    other = await users.create_user(username="other-account", password="other-account-password")
+    other_token = await users.issue_token(other["id"])
     await manager.interrupt(session.id)
     await manager.start_message(session.id, "report", source="research", delivery_id="research:one")
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app), base_url="http://test",
-        headers={"Authorization": "Bearer changeme"},
+        headers={"Authorization": "Bearer " + token},
     ) as client:
         snapshot = (await client.get(f"/api/sessions/{session.id}")).json()
         assert snapshot["dispatch_state"] == manager.dispatch_snapshot(session.id)
         assert snapshot["messages"] == []
-        app.dependency_overrides[scope_user_id] = lambda: "different-account"
-        denied = await client.post(f"/api/sessions/{session.id}/dispatch/resume")
+        denied = await client.post(f"/api/sessions/{session.id}/dispatch/resume",
+                                   headers={"Authorization": "Bearer " + other_token})
         assert denied.status_code == 404
         assert manager.dispatch_snapshot(session.id)["paused"] is True
-        app.dependency_overrides[scope_user_id] = lambda: session.user_id
         resumed = await client.post(f"/api/sessions/{session.id}/dispatch/resume")
         assert resumed.status_code == 200 and resumed.json()["paused"] is False
         assert resumed.json()["revision"] > snapshot["dispatch_state"]["revision"]

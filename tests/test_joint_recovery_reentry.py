@@ -1,4 +1,4 @@
-"""Mixed old inputs, Wiki effects and account ownership survive repeated exits."""
+"""Current account input, Wiki effects and memory survive repeated recovery exits."""
 
 import json
 import os
@@ -9,11 +9,11 @@ from pathlib import Path
 from tests.test_service_runtime import installation_settings
 
 
-def test_joint_upgrade_can_be_interrupted_again_without_replaying_effects(tmp_path):
+def test_owned_storage_recovery_can_be_interrupted_again_without_replaying_effects(tmp_path):
     config, configuration = installation_settings(tmp_path / "install")
     root = configuration.parent
     environment = dict(os.environ, CODEX_HOME=str(root / "provider-codex"), CLAUDE_CONFIG_DIR=str(root / "provider-claude"))
-    program = Path(__file__).with_name("joint_upgrade_process.py")
+    program = Path(__file__).with_name("joint_recovery_process.py")
     project = program.parent.parent
     environment["PYTHONPATH"] = str(project)
 
@@ -30,15 +30,13 @@ def test_joint_upgrade_can_be_interrupted_again_without_replaying_effects(tmp_pa
     run("input", 71)
     run("wiki", 72)
     assert note.read_bytes() == applied
-    run("account", 73)
-    # A later user version is outside both DB transactions. Publishing a
-    # prepared account snapshot must never restore the old article bytes.
-    later = applied + b"\nLater human condition after account commit.\n"
+    run("input", 71)
+    # A later user version is outside both databases. Another recovery exit
+    # must preserve it, together with the original unknown execution evidence.
+    later = applied + b"\nLater human condition during recovery.\n"
     note.write_bytes(later)
-    journal = Path(config.users_root) / ".first-account-upgrade.json"
-    identity = json.loads(journal.read_text())["upgrade_id"]
-    run("reentry", 74)
-    assert json.loads(journal.read_text())["upgrade_id"] == identity
+    run("wiki", 72)
+    assert not (Path(config.users_root) / ".first-account-upgrade.json").exists()
     assert note.read_bytes() == later
     run("finish")
     run("reopen")

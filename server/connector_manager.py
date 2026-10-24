@@ -23,10 +23,10 @@ from .connectors.custom import CustomConnector, resolve_connector
 from .connectors.registry import all_connectors, get_connector
 from .crypto import decrypt, encrypt, master_key
 from .database import Database
-from .installation_keys import secret_key_scope
 from .monitor import Event as _MonEvent
 from .monitor import record as _mon_record
 from .oauth_providers import OAuthTokenSet
+from .users import UserManager
 
 # Slugs reserved by routes / built-ins; a custom kind can't take these.
 _KIND_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,31}$")
@@ -252,14 +252,14 @@ class ConnectorManager:
             token_set
         )
         label = requested_label or identity_label
-        async with secret_key_scope(self.db, user_id) as secret_key:
-            return await self._store_installation(kind, token_set, external_id, label, user_id, secret_key)
+        secret_key = await UserManager(self.db).data_key_for(user_id)
+        return await self._store_installation(kind, token_set, external_id, label, user_id, secret_key)
 
     async def _store_installation(
         self, kind: str, token_set: OAuthTokenSet, external_id: str, label: str,
         user_id: str | None, secret_key: str,
     ) -> dict[str, Any]:
-        """Persist an authorization under the key scope that owns its owner."""
+        """Persist an authorization under its captured account DEK."""
         blob = encrypt(_serialize_token_set(token_set), secret_key)
         token_expires_at = _expires_iso(token_set.expires_at_epoch)
 
@@ -354,10 +354,11 @@ class ConnectorManager:
         """Return {access_token, expires_at_epoch}, refreshing server-side if
         near expiry. On refresh failure marks needs_reconnect and raises.
 
-        The caller supplies its captured owner. None names the legacy install;
-        it cannot become an unscoped read of an adopted account's secret.
+        The caller supplies its captured current account; a missing owner
+        cannot become an unscoped read of a stored secret.
         """
-        async with secret_key_scope(self.db, user_id) as secret_key, self._lock(installation_id):
+        secret_key = await UserManager(self.db).data_key_for(user_id)
+        async with self._lock(installation_id):
             inst = await self.db.get_connector_installation(installation_id, user_id)
             if inst is None or inst.get("user_id") != user_id:
                 raise ConnectorError("connector installation not found")

@@ -8,7 +8,6 @@ import pytest
 
 from server.wiki import app_bridge, catalog, maintenance_inputs, schema
 from server.wiki.history import WikiHistory
-from tests.test_wiki_api import HEADERS
 from tests.test_wiki_history import history as history
 from tests.test_wiki_maintenance_input_boundaries import facts
 from tests.test_wiki_maintenance_inputs import (
@@ -111,7 +110,7 @@ async def test_storage_simplification_preserves_reviews_and_frozen_selection(cli
         from server.wiki.registry import registry
 
         registry.close()
-        jobs.store = registry.store(None)
+        jobs.store = registry.store(jobs.user_id)
         jobs.store.refresh()
     else:
         schema.initialize(jobs.store)
@@ -127,14 +126,14 @@ async def test_storage_simplification_preserves_reviews_and_frozen_selection(cli
     assert facts(jobs.store) == original_facts
     if repair == "legacy_role_cache":
         assert after["generation"] != before["generation"]
-        stale = await client.get("/api/wiki/maintenance-status", headers=HEADERS,
+        stale = await client.get("/api/wiki/maintenance-status", headers=client.headers,
                                  params={"limit": 1, "cursor": before["next_cursor"]})
         assert stale.status_code == 409
         assert not publish(jobs.store, old_calculation, a)
     equivalent = await select(client, limit=1)
     accepted = []
     for selected in (selection, equivalent, selection):
-        result = await client.post("/api/wiki/maintain", headers=HEADERS,
+        result = await client.post("/api/wiki/maintain", headers=client.headers,
                                    json=submission(selected, selected["items"][0]))
         assert result.status_code == 200, result.text
         accepted.append(result.json()["id"])

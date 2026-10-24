@@ -1,7 +1,8 @@
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { expect, test } from "@playwright/test";
 
 const API = "http://localhost:8765/api";
-const headers = { Authorization: "Bearer changeme" };
+const headers = { Authorization: `Bearer ${TEST_BEARER}` };
 
 test("schedule text retains read permission until a human chooses a new control", async ({ page, request }) => {
   const agents = await (await request.get(`${API}/agents`, { headers })).json();
@@ -19,8 +20,7 @@ test("schedule text retains read permission until a human chooses a new control"
     expect((await edited.json()).wiki_mode).toBe("read");
 
     await page.goto("/");
-    await page.locator('input[type="password"]').fill("changeme");
-    await page.locator(".btn-login").click();
+    await enterAccountCredentials(page);
     await expect(page.locator(".agent-list-header")).toBeVisible();
     await page.locator(".btn-manage-schedules").click();
     const row = page.locator(".schedule-item", { hasText: name });

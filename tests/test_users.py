@@ -265,9 +265,10 @@ class TestInvites:
     @pytest.mark.asyncio
     async def test_revoked_and_expired_codes_are_refused(self, users):
         mgr, db = users
-        revoked = await mgr.create_invite(created_by=None)
+        admin = await mgr.create_user(username="owner", password="password1", is_admin=True)
+        revoked = await mgr.create_invite(created_by=admin["id"])
         await db.revoke_invite(revoked["code"], at=datetime.now(UTC).isoformat())
-        expired = await mgr.create_invite(created_by=None)
+        expired = await mgr.create_invite(created_by=admin["id"])
         await db.conn.execute(
             "UPDATE invites SET expires_at = ? WHERE code = ?",
             ((datetime.now(UTC) - timedelta(days=1)).isoformat(), expired["code"]),
@@ -295,6 +296,19 @@ class TestInvites:
 
 
 class TestDataKeys:
+    @pytest.mark.parametrize("resolver", ["manager", "background"])
+    async def test_ownerless_secrets_never_use_setup_proof_as_a_data_key(self, users, resolver):
+        from server import deps
+
+        manager, database = users
+        deps.set_user_manager(manager)
+        resolve = manager.data_key_for if resolver == "manager" else deps.data_key_for
+        with pytest.raises(UserError) as refused:
+            await resolve(None)
+        assert refused.value.status_code == 401
+        assert await database.count_users() == 0
+        assert await database.load_credentials() == []
+
     """Every user gets a data key at creation, wrapped by the server's master
     key (multi-tenancy.md §4). The password is not involved, and that is the
     point: a schedule fires while its owner is asleep, and the server still has
@@ -331,7 +345,8 @@ class TestDataKeys:
         """The two creation paths mint it through one helper, so they cannot
         drift into one of them forgetting."""
         mgr, _db = users
-        invite = await mgr.create_invite(created_by=None)
+        admin = await mgr.create_user(username="owner", password="password1", is_admin=True)
+        invite = await mgr.create_invite(created_by=admin["id"])
         user = await mgr.register(
             invite_code=invite["code"], username="vera", password="password2"
         )
@@ -353,53 +368,6 @@ class TestDataKeys:
         assert after == before
 
 
-class TestOwnership:
-    """Rows written before accounts existed have no owner. The upgrade gives
-    them to user #1 (multi-tenancy.md §9), and the same call is a no-op on
-    every boot after that."""
-
-    @pytest.mark.asyncio
-    async def test_existing_rows_are_adopted_once(self, users):
-        mgr, db = users
-        # A pre-accounts install: an agent, a session and a credential, none of
-        # which knows about users.
-        agent = await db.get_system_agent()
-        await db.save_session(
-            session_id="s1",
-            name="old work",
-            working_dir="/tmp",
-            created_at="2026-01-01T00:00:00Z",
-            agent_id=agent["id"],
-        )
-        orphans = await db.count_orphan_rows()
-        assert orphans.get("agents", 0) >= 1 and orphans.get("sessions", 0) == 1
-
-        user = await mgr.create_user(username="archer", password="password1")
-        moved = await db.adopt_orphan_rows(user["id"])
-        assert moved.get("agents", 0) >= 1 and moved.get("sessions", 0) == 1
-        assert await db.count_orphan_rows() == {}
-
-        # The row itself, not just the counter.
-        loaded = {r["id"]: r for r in await db.load_sessions()}
-        assert loaded["s1"]["user_id"] == user["id"]
-
-        # A second run moves nothing: the predicate is "unowned", not a stamp.
-        assert await db.adopt_orphan_rows(user["id"]) == {}
-
-    @pytest.mark.asyncio
-    async def test_a_later_arrival_does_not_take_someone_elses_rows(self, users):
-        """Adoption only ever touches *unowned* rows, so running it for a
-        second user cannot quietly transfer the first user's install."""
-        mgr, db = users
-        first = await mgr.create_user(username="archer", password="password1")
-        await db.adopt_orphan_rows(first["id"])
-
-        second = await mgr.create_user(username="vera", password="password2")
-        assert await db.adopt_orphan_rows(second["id"]) == {}
-
-        cursor = await db.conn.execute("SELECT DISTINCT user_id FROM agents")
-        owners = {r[0] for r in await cursor.fetchall()}
-        assert owners == {first["id"]}
 
 
 @pytest.mark.asyncio
@@ -428,7 +396,7 @@ async def test_a_registered_account_gets_its_workspace_provisioned(users):
     directory, so its first session spawned the CLI with a cwd that did not
     exist and the turn died on FileNotFoundError. Bootstrap provisioned the
     first account's dirs; registration did not. `_insert` now does it for every
-    account, so this holds for register, bootstrap and admin-created alike."""
+    account, so this holds for register, setup and admin-created alike."""
     from server.workspace import paths_for
 
     mgr, db = users

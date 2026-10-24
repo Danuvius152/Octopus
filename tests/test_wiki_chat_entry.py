@@ -8,7 +8,6 @@ from types import SimpleNamespace
 
 import pytest
 
-from server import deps
 from server.config import settings
 from server.database import Database
 from server.deps import get_session_manager
@@ -16,6 +15,7 @@ from server.harness import get_harness
 from server.routers.ws import router
 from server.sessions import SessionManager
 from tests import cli_gate, conftest
+from tests.accounts import create_account
 from tests.callback_api import start_callback_api
 from tests.test_wiki_chat_real import OrdinaryChatProbe, guarded_chat_credential
 from tests.wiki_query_evidence import collect_evaluation
@@ -49,10 +49,9 @@ def test_knowledge_execution_does_not_pay_for_an_unrecorded_default_cli_probe(mo
 async def test_raw_question_real_websocket_identity_and_terminal_control(tmp_path, monkeypatch, outcome):
     monkeypatch.setattr(settings, "auth_token", "ephemeral-wiki-chat-host")
     monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "agents"))
-    monkeypatch.setattr(deps, "_user_manager", None)
-    monkeypatch.setattr(deps, "_accounts_exist", None)
     db = Database(":memory:")
     await db.initialize()
+    _, bearer = await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     default = await db.get_system_agent()
@@ -94,7 +93,7 @@ async def test_raw_question_real_websocket_identity_and_terminal_control(tmp_pat
 
     monkeypatch.setattr(manager, "start_message", start_message)
     api = await start_callback_api(router, mcp=False, websocket=True, overrides={get_session_manager: lambda: manager})
-    probe = OrdinaryChatProbe(manager, default["id"], tmp_path, tmp_path, api.port, settings.auth_token)
+    probe = OrdinaryChatProbe(manager, default["id"], tmp_path, tmp_path, api.port, bearer)
     question = "为什么最大值和最小值都要保留？"
     try:
         if outcome == "success":

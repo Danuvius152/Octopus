@@ -20,12 +20,14 @@ from server.harness.model_settings import ModelSettings
 from server.harness.profile import StdinMode
 from server.routers import agents, credentials, sessions
 from server.sessions import SessionManager
+from tests.accounts import create_account
 
 
 @pytest.fixture
 async def configuration_host(tmp_path, monkeypatch):
     db = Database(":memory:")
     await db.initialize()
+    _, bearer = await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     monkeypatch.setattr(agents, "_manager", AgentManager(db))
@@ -55,7 +57,7 @@ async def configuration_host(tmp_path, monkeypatch):
         model_settings=lambda credential: ModelSettings(reasoning_efforts=["low", "high"], service_tiers=["default", "fast"]),
     ))
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test",
-                           headers={"Authorization": "Bearer changeme"}) as client:
+                           headers={"Authorization": f"Bearer {bearer}"}) as client:
         credential_ids = []
         for label in ("old", "new"):
             created = await client.post("/api/credentials", json={"backend": "codex", "label": label, "secret": "test-only"})

@@ -8,6 +8,7 @@ from server.config import settings
 from server.database import Database
 from server.harness import HarnessEvent
 from server.sessions import SessionManager
+from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
 
 
@@ -19,6 +20,7 @@ async def recovery_host(monkeypatch):
     monkeypatch.setattr(SessionManager, "_TRANSIENT_RETRY_BASE_DELAY", 0.0)
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db)
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()

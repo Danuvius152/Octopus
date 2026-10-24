@@ -11,14 +11,18 @@ import pytest
 from server.database import Database
 from server.models import SessionStatus
 from server.session_manager import SessionManager
+from server.users import UserManager
+from server.workspace import paths_for
+from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
 
 
 @pytest.fixture
-async def manager():
+async def manager(tmp_path):
     mgr = SessionManager()
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     await mgr.initialize(db)
     try:
         yield mgr
@@ -35,7 +39,7 @@ async def manager():
 
 
 async def _new(manager, name="S", working_dir=None, credential_id=None, origin="user"):
-    """Create a session under the Default Agent (created by migration)."""
+    """Create a session under the fixture account's protected default agent."""
     agent = await manager.db.get_system_agent()
     _create = manager.create_session
     return await _create(
@@ -43,20 +47,19 @@ async def _new(manager, name="S", working_dir=None, credential_id=None, origin="
     )
 
 
-def _session_client(manager, session):
+async def _session_client(manager, session):
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
 
-    from server.config import settings
-    from server.deps import get_session_manager, scope_user_id
+    from server.deps import get_session_manager
     from server.routers.sessions import router
 
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_session_manager] = lambda: manager
-    app.dependency_overrides[scope_user_id] = lambda: session.user_id
+    token = await UserManager(manager.db).issue_token(session.user_id)
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test",
-                       headers={"Authorization": f"Bearer {settings.auth_token}"})
+                       headers={"Authorization": "Bearer " + token})
 
 
 async def _request_events(manager, session, prompt):
@@ -124,10 +127,12 @@ class _QueuedRun(FakeRunBase):
 
 
 @pytest.mark.asyncio
-async def test_create_session(manager):
-    session = await _new(manager,"Test Session", "/tmp")
+async def test_create_session(manager, tmp_path):
+    directory = tmp_path / "project"
+    directory.mkdir()
+    session = await _new(manager, "Test Session", str(directory))
     assert session.name == "Test Session"
-    assert session.working_dir == "/tmp"
+    assert session.working_dir == str(directory)
     assert session.status == SessionStatus.idle
     assert len(session.id) == 12
     assert session.id in manager.sessions
@@ -137,11 +142,10 @@ async def test_create_session(manager):
 async def test_create_session_default_dir(manager):
     # working_dir is frozen to an ABSOLUTE path at creation so the session's
     # storage location never depends on the server's runtime cwd. The default
-    # ("." per settings) resolves to the cwd once, here, then stays fixed.
-    from server.session_manager import resolve_working_dir
+    # is the account workspace, resolved once and retained by the session.
 
     session = await _new(manager, "Default Dir")
-    assert session.working_dir == resolve_working_dir(None)
+    assert session.working_dir == str(paths_for(session.user_id).workspace)
     assert os.path.isabs(session.working_dir)
 
 
@@ -215,14 +219,14 @@ async def test_broadcast_registration(manager):
 
 @pytest.mark.asyncio
 async def test_create_session_persists_to_db(manager):
-    session = await _new(manager,"Persisted", "/home")
+    session = await _new(manager,"Persisted")
     rows = await manager.db.load_sessions()
     assert any(r["id"] == session.id for r in rows)
 
 
 @pytest.mark.asyncio
 async def test_delete_session_removes_from_db(manager):
-    session = await _new(manager,"To Delete", "/tmp")
+    session = await _new(manager,"To Delete")
     sid = session.id
     await manager.delete_session(sid)
     rows = await manager.db.load_sessions()
@@ -230,14 +234,17 @@ async def test_delete_session_removes_from_db(manager):
 
 
 @pytest.mark.asyncio
-async def test_initialize_restores_sessions():
+async def test_initialize_restores_sessions(tmp_path):
     """Create a session with one manager, then load into a fresh manager."""
     db = Database(":memory:")
     await db.initialize()
     try:
+        await create_account(db, extra_roots=[tmp_path])
         mgr1 = SessionManager()
         await mgr1.initialize(db)
-        session = await _new(mgr1, "Restored", "/tmp")
+        directory = tmp_path / "restored-project"
+        directory.mkdir()
+        session = await _new(mgr1, "Restored", str(directory))
         sid = session.id
 
         # Create a fresh manager, initialize with the same DB
@@ -246,7 +253,7 @@ async def test_initialize_restores_sessions():
         restored = mgr2.get_session(sid)
         assert restored is not None
         assert restored.name == "Restored"
-        assert restored.working_dir == "/tmp"
+        assert restored.working_dir == str(directory)
         assert restored.status == SessionStatus.idle
     finally:
         await db.close()
@@ -600,11 +607,11 @@ async def test_resolve_credential_returns_decrypted_secret(manager):
     and decrypt the row."""
     from datetime import datetime
 
-    from server.config import settings
     from server.crypto import encrypt
 
     now = datetime.now(UTC).isoformat()
-    enc = encrypt("sk-ant-secret", settings.auth_token)
+    owner = (await manager.db.get_system_agent())["user_id"]
+    enc = encrypt("sk-ant-secret", await UserManager(manager.db).data_key_for(owner))
     await manager.db.save_credential(
         credential_id="c-1",
         backend="claude-code",
@@ -612,6 +619,7 @@ async def test_resolve_credential_returns_decrypted_secret(manager):
         auth_type="api_key",
         secret_encrypted=enc,
         created_at=now,
+        user_id=owner,
     )
     session = await _new(manager,"S", credential_id="c-1")
     from server.harness import get_harness
@@ -642,7 +650,6 @@ async def test_resolve_credential_oauth_bundle_returns_oauth_credential(manager)
     import time
     from datetime import datetime
 
-    from server.config import settings
     from server.crypto import encrypt
 
     bundle = json.dumps(
@@ -655,7 +662,8 @@ async def test_resolve_credential_oauth_bundle_returns_oauth_credential(manager)
             "token_type": "Bearer",
         }
     )
-    enc = encrypt(bundle, settings.auth_token)
+    owner = (await manager.db.get_system_agent())["user_id"]
+    enc = encrypt(bundle, await UserManager(manager.db).data_key_for(owner))
     await manager.db.save_credential(
         credential_id="c-oauth",
         backend="claude-code",
@@ -663,6 +671,7 @@ async def test_resolve_credential_oauth_bundle_returns_oauth_credential(manager)
         auth_type="oauth",
         secret_encrypted=enc,
         created_at=datetime.now(UTC).isoformat(),
+        user_id=owner,
     )
     session = await _new(manager,"S-oauth", credential_id="c-oauth")
     from server.harness import get_harness
@@ -683,7 +692,6 @@ async def test_resolve_credential_refreshes_expired_oauth_token(manager, monkeyp
     from datetime import datetime
 
     from server import oauth_providers as op
-    from server.config import settings
     from server.crypto import decrypt, encrypt
     from server.oauth_providers import OAuthTokenSet
 
@@ -697,7 +705,8 @@ async def test_resolve_credential_refreshes_expired_oauth_token(manager, monkeyp
             "token_type": "Bearer",
         }
     )
-    enc = encrypt(expired_bundle, settings.auth_token)
+    owner = (await manager.db.get_system_agent())["user_id"]
+    enc = encrypt(expired_bundle, await UserManager(manager.db).data_key_for(owner))
     await manager.db.save_credential(
         credential_id="c-stale",
         backend="claude-code",
@@ -705,6 +714,7 @@ async def test_resolve_credential_refreshes_expired_oauth_token(manager, monkeyp
         auth_type="oauth",
         secret_encrypted=enc,
         created_at=datetime.now(UTC).isoformat(),
+        user_id=owner,
     )
 
     captured_refresh: list[str] = []
@@ -741,7 +751,7 @@ async def test_resolve_credential_refreshes_expired_oauth_token(manager, monkeyp
 
     # And the stored bundle decrypts to the new access_token.
     row = await manager.db.get_credential("c-stale")
-    new_bundle = json.loads(decrypt(row["secret_encrypted"], settings.auth_token))
+    new_bundle = json.loads(decrypt(row["secret_encrypted"], await UserManager(manager.db).data_key_for(owner)))
     assert new_bundle["access_token"] == "oat-brand-new"
     assert row.get("needs_reconnect") is False
 
@@ -758,7 +768,6 @@ async def test_resolve_credential_marks_needs_reconnect_on_refresh_failure(
     from datetime import datetime
 
     from server import oauth_providers as op
-    from server.config import settings
     from server.crypto import encrypt
 
     expired_bundle = json.dumps(
@@ -770,7 +779,8 @@ async def test_resolve_credential_marks_needs_reconnect_on_refresh_failure(
             "token_type": "Bearer",
         }
     )
-    enc = encrypt(expired_bundle, settings.auth_token)
+    owner = (await manager.db.get_system_agent())["user_id"]
+    enc = encrypt(expired_bundle, await UserManager(manager.db).data_key_for(owner))
     await manager.db.save_credential(
         credential_id="c-dead",
         backend="claude-code",
@@ -778,6 +788,7 @@ async def test_resolve_credential_marks_needs_reconnect_on_refresh_failure(
         auth_type="oauth",
         secret_encrypted=enc,
         created_at=datetime.now(UTC).isoformat(),
+        user_id=owner,
     )
 
     async def fake_refresh(refresh_token):
@@ -814,7 +825,6 @@ async def test_oauth_credential_env_var_reaches_subprocess(manager, monkeypatch)
     import time
     from datetime import datetime
 
-    from server.config import settings
     from server.crypto import encrypt
 
     bundle = json.dumps(
@@ -826,7 +836,8 @@ async def test_oauth_credential_env_var_reaches_subprocess(manager, monkeypatch)
             "token_type": "Bearer",
         }
     )
-    enc = encrypt(bundle, settings.auth_token)
+    owner = (await manager.db.get_system_agent())["user_id"]
+    enc = encrypt(bundle, await UserManager(manager.db).data_key_for(owner))
     await manager.db.save_credential(
         credential_id="c-env-oauth",
         backend="claude-code",
@@ -834,6 +845,7 @@ async def test_oauth_credential_env_var_reaches_subprocess(manager, monkeypatch)
         auth_type="oauth",
         secret_encrypted=enc,
         created_at=datetime.now(UTC).isoformat(),
+        user_id=owner,
     )
     session = await _new(manager,
         "EnvSessionOAuth", credential_id="c-env-oauth"
@@ -866,11 +878,11 @@ async def test_credential_env_var_reaches_spawned_subprocess(manager):
     """
     from datetime import datetime
 
-    from server.config import settings
     from server.crypto import encrypt
 
     # Seed a credential
-    enc = encrypt("sk-real-secret", settings.auth_token)
+    owner = (await manager.db.get_system_agent())["user_id"]
+    enc = encrypt("sk-real-secret", await UserManager(manager.db).data_key_for(owner))
     await manager.db.save_credential(
         credential_id="c-env",
         backend="claude-code",
@@ -878,6 +890,7 @@ async def test_credential_env_var_reaches_spawned_subprocess(manager):
         auth_type="api_key",
         secret_encrypted=enc,
         created_at=datetime.now(UTC).isoformat(),
+        user_id=owner,
     )
     session = await _new(manager,"EnvSession", credential_id="c-env")
 
@@ -934,6 +947,7 @@ async def test_make_run_applies_agent_config(manager):
     await manager.db.save_agent(
         agent_id=aid,
         name="Configured",
+        user_id=(await manager.db.get_system_agent())["user_id"],
         created_at=now,
         updated_at=now,
         system_prompt="You are a pirate.",
@@ -1306,14 +1320,18 @@ async def test_delete_session_clears_queue(manager, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_archive_creates_new_session_with_same_settings(manager):
+    owner = (await manager.db.get_system_agent())["user_id"]
+    directory = paths_for(owner).workspace / "work"
+    directory.mkdir()
     await manager.db.save_credential(
         credential_id="c-1", backend="claude-code", label="synthetic",
         auth_type="api_key", secret_encrypted="not-used-by-this-test",
         created_at="2026-10-17T00:00:00+00:00",
+        user_id=owner,
     )
     old = await _new(manager,
         name="Work",
-        working_dir="/tmp/work",
+        working_dir=str(directory),
         credential_id="c-1",
     )
     # Simulate prior conversation: 3 persisted messages, a resume id.
@@ -1327,7 +1345,7 @@ async def test_archive_creates_new_session_with_same_settings(manager):
 
     assert new.id != old.id
     assert new.name == "Work"
-    assert new.working_dir == "/tmp/work"
+    assert new.working_dir == str(directory)
     assert new.credential_id == "c-1"
     # Brand-new conversation — no resume id, no message history.
     assert new.claude_session_id is None
@@ -1336,7 +1354,7 @@ async def test_archive_creates_new_session_with_same_settings(manager):
 
 @pytest.mark.asyncio
 async def test_archive_hides_old_session_from_list_but_keeps_db_row(manager):
-    old = await _new(manager,name="Hide Me", working_dir="/tmp")
+    old = await _new(manager,name="Hide Me", working_dir=None)
     new = await manager.archive_session(old.id)
 
     listed = [s.id for s in manager.list_sessions()]
@@ -1355,7 +1373,7 @@ async def test_archive_leaves_agent_schedules_alone(manager):
     archiving a session doesn't change a schedule's owning agent. The schedule
     here has no origin session, so it isn't repointed either — that path is
     covered by test_archive_repoints_origin_session_schedules."""
-    old = await _new(manager, name="Auto", working_dir="/tmp")
+    old = await _new(manager, name="Auto", working_dir=None)
     agent_id = old.agent_id
     await manager.db.save_schedule(
         schedule_id="s-1",
@@ -1380,7 +1398,7 @@ async def test_archive_repoints_origin_session_schedules(manager):
     """A schedule created from a session (origin_session_id == that session)
     follows the live successor when the session is archived: the DB row is
     repointed onto the new session and the live job is re-registered."""
-    old = await _new(manager, name="Origin", working_dir="/tmp")
+    old = await _new(manager, name="Origin", working_dir=None)
     agent_id = old.agent_id
 
     rescheduled: list[dict] = []
@@ -1426,7 +1444,7 @@ async def test_archive_repoints_origin_session_schedules(manager):
 async def test_archive_repoints_origin_schedules_without_runner(manager):
     """The DB repoint happens even if no ScheduleRunner is wired (e.g. a
     headless context) — only the live re-register is skipped."""
-    old = await _new(manager, name="Origin2", working_dir="/tmp")
+    old = await _new(manager, name="Origin2", working_dir=None)
     await manager.db.save_schedule(
         schedule_id="s-db-only",
         agent_id=old.agent_id,
@@ -1458,7 +1476,7 @@ async def test_archive_broadcasts_session_archived_event(manager, overrides):
     received: list[dict] = []
     manager.on_broadcast("test", lambda m: asyncio.sleep(0, result=received.append(m)))
 
-    old = await _new(manager,name="X", working_dir="/tmp")
+    old = await _new(manager,name="X", working_dir=None)
     old.model, old.reasoning_effort, old.service_tier = overrides
     await manager.db.update_session_field(
         old.id, model=old.model, reasoning_effort=old.reasoning_effort,
@@ -1509,17 +1527,18 @@ class _FakeBackend(FakeRunBase):
 async def _bind_credential(manager, backend, secret="sk-ant-x"):
     from datetime import datetime
 
-    from server.config import settings
     from server.crypto import encrypt
 
+    owner = (await manager.db.get_system_agent())["user_id"]
     cid = f"cred-{backend}"
     await manager.db.save_credential(
         credential_id=cid,
         backend=backend,
         label="Bound",
         auth_type="api_key" if backend == "claude-code" else "oauth",
-        secret_encrypted=encrypt(secret, settings.auth_token),
+        secret_encrypted=encrypt(secret, await UserManager(manager.db).data_key_for(owner)),
         created_at=datetime.now(UTC).isoformat(),
+        user_id=owner,
     )
     return cid
 
@@ -2282,7 +2301,7 @@ async def test_setting_saved_during_recovery_applies_on_the_next_turn(manager, m
         return Scripted([])
 
     monkeypatch.setattr(manager, "_make_run", factory)
-    async with _session_client(manager, session) as client:
+    async with await _session_client(manager, session) as client:
         configured = await client.patch(f"/api/sessions/{session.id}", json={field: before})
         assert configured.status_code == 200, configured.text
         events = await _request_events(manager, session, "work")
@@ -2903,6 +2922,7 @@ async def test_a_session_model_overrides_the_agents(manager):
     await manager.db.save_agent(
         agent_id=aid,
         name="Tiered",
+        user_id=(await manager.db.get_system_agent())["user_id"],
         created_at=now,
         updated_at=now,
         model="sonnet",
@@ -3189,6 +3209,7 @@ async def _failed_retirement_child(tmp_path, tmp_path_factory, monkeypatch):
     database_path = tmp_path / "original-writer.db"
     database = Database(str(database_path))
     await database.initialize()
+    await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     retirement_error = RuntimeError("writer exit unconfirmed")

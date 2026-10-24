@@ -37,7 +37,6 @@ async def client(tmp_path, monkeypatch):
     session_manager.sessions.clear()
     session_manager._admission_closed = False
     await session_manager.initialize(db)
-    auth_router.set_db(db)
     # The routes these tests reach through, bound the way main.py binds them.
     agents_router.set_manager(AgentManager(db))
     users = UserManager(db)
@@ -188,11 +187,15 @@ async def test_changing_a_password_needs_the_current_one(client):
 
 @pytest.mark.asyncio
 async def test_registration_needs_an_invite_and_signs_you_in(client):
+    from server.config import settings
+
     c, users, _db = client
-    admin = await users.create_user(
-        username="archer", password="password1", is_admin=True
+    setup = await c.post(
+        "/api/auth/setup", headers=_bearer(settings.auth_token),
+        json={"username": "archer", "password": "password1"},
     )
-    admin_token = await users.issue_token(admin["id"])
+    assert setup.status_code == 200 and setup.json()["is_admin"] is True
+    admin_token = setup.json()["token"]
 
     made = await c.post(
         "/api/auth/invites", json={"max_uses": 1}, headers=_bearer(admin_token)
@@ -223,6 +226,30 @@ async def test_registration_needs_an_invite_and_signs_you_in(client):
             json={"invite_code": code, "username": "pete", "password": "password3"},
         )
     ).status_code == 403
+
+
+async def test_retained_invite_cannot_create_the_first_account(client, monkeypatch):
+    from pathlib import Path
+
+    from server.config import settings
+
+    c, users, db = client
+    monkeypatch.setattr(settings, "master_key", "")
+    invite = await users.create_invite(created_by=None)
+    before = await db.list_invites()
+    assert not Path(settings.master_key_file).exists()
+    assert not Path(settings.users_root).exists()
+    response = await c.post("/api/auth/register", json={
+        "invite_code": invite["code"], "username": "first-invite", "password": "registered-password",
+    })
+    assert response.status_code == 409
+    assert await db.list_invites() == before
+    assert await db.list_users() == []
+    assert await db.load_agents(include_archived=True) == []
+    async with db.transaction(write=False) as tx:
+        assert await tx.fetch_one("SELECT COUNT(*) FROM auth_tokens") == (0,)
+    assert not Path(settings.master_key_file).exists()
+    assert not Path(settings.users_root).exists()
 
 
 # ---------------------------------------------------------------------------
@@ -289,59 +316,58 @@ async def test_disabling_an_account_ends_its_sessions_now(client):
 
 
 # ---------------------------------------------------------------------------
-# The two eras (multi-tenancy.md §9)
+# Setup proof is never an ordinary account credential.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_the_legacy_token_opens_an_install_with_no_accounts(client):
-    """Before the first account exists this is still the single-user install
-    it has always been, and its token is how an upgrade gets in to create that
-    account. Without this, upgrading would lock the box."""
+async def test_setup_proof_cannot_open_business_before_accounts(client):
     from server.config import settings
 
     c, _users, _db = client
     res = await c.get("/api/sessions", headers=_bearer(settings.auth_token))
-    assert res.status_code == 200
+    assert res.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_identity_identifies_the_operator_before_accounts(client, monkeypatch):
-    """A successful install-token sign-in must survive the sidebar's identity
-    fetch, which otherwise signs the browser straight back out."""
+async def test_setup_proof_does_not_invent_an_operator_identity(client):
     from server.config import settings
 
-    monkeypatch.setattr(settings, "user_label", "local-operator")
     c, _users, _db = client
     res = await c.get("/api/auth/identity", headers=_bearer(settings.auth_token))
-    assert res.status_code == 200
-    assert res.json() == {
-        "label": "local-operator", "user_id": None, "is_admin": False,
-    }
+    assert res.status_code == 401
     assert settings.auth_token not in res.text
+
+
+async def test_setup_proof_has_no_installation_administrator_authority(client):
+    from server.config import settings
+
+    http, users, _ = client
+    response = await http.put("/api/auth/users/missing/extra-roots", headers=_bearer(settings.auth_token),
+                              json={"extra_roots": []})
+    assert response.status_code == 401
+    assert await users.db.count_users() == 0
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("token", [None, "wrong-install-token"])
-async def test_identity_requires_the_install_token_before_accounts(client, token):
+async def test_identity_rejects_missing_or_invalid_bearer_before_accounts(client, token):
     c, _users, _db = client
     res = await c.get("/api/auth/identity", headers=_bearer(token) if token else {})
     assert res.status_code == 401
 
 
 @pytest.mark.asyncio
-async def test_the_legacy_token_dies_the_moment_an_account_exists(client):
-    """The whole defence of keeping it at all: it is self-limiting. There is
-    no setting that brings it back, and no account it can impersonate."""
+async def test_setup_proof_cannot_open_business_after_account_creation_either(client):
     from server.config import settings
 
     c, users, _db = client
     assert (
         await c.get("/api/sessions", headers=_bearer(settings.auth_token))
-    ).status_code == 200
+    ).status_code == 401
     assert (
         await c.get("/api/auth/identity", headers=_bearer(settings.auth_token))
-    ).status_code == 200
+    ).status_code == 401
 
     await users.create_user(username="archer", password="password1")
 
@@ -373,17 +399,30 @@ async def test_a_personal_access_token_works_where_a_session_does(client):
     assert (await c.get("/api/sessions", headers=_bearer(pat))).status_code == 200
 
 
-@pytest.mark.asyncio
-async def test_workspace_says_what_it_is_before_accounts(client):
-    """Nothing has ever been confined on an install with no accounts, and
-    saying otherwise would invite somebody to fix a restriction that is not
-    there."""
+@pytest.mark.parametrize("credential", ["missing", "wrong", "setup", "ownerless"])
+async def test_workspace_requires_current_business_identity_before_setup(client, credential):
+    from server.config import settings
+    from server.mcp_identity import mint
+
     c, _users, _db = client
-    res = await c.get("/api/auth/workspace", headers=_bearer("changeme"))
-    assert res.status_code == 200, res.text
-    body = res.json()
-    assert body["confined"] is False
-    assert body["extra_roots"] == []
+    tokens = {"wrong": "wrong-workspace-token", "setup": settings.auth_token,
+              "ownerless": mint("retained-workspace-session")}
+    headers = {} if credential == "missing" else _bearer(tokens[credential])
+    response = await c.get("/api/auth/workspace", headers=headers)
+    assert response.status_code == 401, response.text
+    assert "workspace" not in response.json() and "confined" not in response.json()
+
+
+async def test_workspace_reports_only_the_signed_in_accounts_roots(client):
+    from server.workspace import paths_for
+
+    c, users, _db = client
+    owner = await users.create_user(username="workspace-owner", password="password1")
+    token = await users.issue_token(owner["id"])
+    response = await c.get("/api/auth/workspace", headers=_bearer(token))
+    assert response.status_code == 200, response.text
+    assert response.json() == {"workspace": str(paths_for(owner["id"]).workspace),
+                               "extra_roots": [], "confined": True}
 
 
 @pytest.mark.asyncio

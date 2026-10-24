@@ -12,20 +12,20 @@ from pathlib import Path
 
 import pytest
 
-from server.config import settings
 from server.crypto import encrypt
 from server.database import Database
 from server.harness import get_harness
 from server.harness.run import HarnessRun
 from server.sessions import SessionManager
 from server.sessions.owner import SessionMailboxFull, SessionOwnerUnavailable
+from server.users import UserManager
 from tests import test_question_lifecycle as question_tests
+from tests.accounts import create_account
 from tests.test_session_retirement import _retire_original_test_process
 from tests.test_submission_recovery import _submit_paused
 
 question_host = question_tests.question_host
 owned_question_host = question_tests.owned_question_host
-HEADERS = question_tests.HEADERS
 
 
 async def held_python(manager, original, directory, monkeypatch, *, credential=None):
@@ -83,7 +83,7 @@ async def test_recovery_dismissal_keeps_the_original_publication_order(question_
     assert await manager.retain_result_notice(session.id, "dismiss-prefix", "Original prefix")
     try:
         await asyncio.wait_for(entered.wait(), 2)
-        response = await client.delete(f"/api/sessions/{session.id}/submissions/dismiss-owned/recovery", headers=HEADERS)
+        response = await client.delete(f"/api/sessions/{session.id}/submissions/dismiss-owned/recovery", headers=client.headers)
         assert response.status_code == 204
         assert order == [], "Recovery dismissal bypassed the original session publisher"
         assert (await manager.db.get_client_submission(session.id, "dismiss-owned"))["dismissed"]
@@ -110,7 +110,7 @@ async def test_recovery_dismissal_stays_available_after_runtime_retirement(quest
         monkeypatch.setattr(manager.db, "has_delivery_notice", original_read_failure)
         with pytest.raises(SessionOwnerUnavailable):
             await manager.retain_result_notice(session.id, "original-failure", "Unconfirmed material")
-    response = await client.delete(f"/api/sessions/{session.id}/submissions/retired-dismiss/recovery", headers=HEADERS)
+    response = await client.delete(f"/api/sessions/{session.id}/submissions/retired-dismiss/recovery", headers=client.headers)
     assert response.status_code == 204
     assert (await manager.db.get_client_submission(session.id, "retired-dismiss"))["dismissed"]
     if disposition == "failed":
@@ -154,7 +154,8 @@ async def test_late_held_publication_uses_its_original_credential(question_host,
     secret = "originalheldpublicationcredential"
     await manager.db.save_credential(
         "review-held-credential", "claude-code", "Held diagnostic", "api_key",
-        encrypt(secret, settings.auth_token), "2026-10-21T00:00:00+00:00",
+        encrypt(secret, await UserManager(manager.db).data_key_for(original.user_id)), "2026-10-21T00:00:00+00:00",
+        user_id=original.user_id,
     )
     session, gate, _identity, _receipt = await held_python(manager, original, tmp_path, monkeypatch, credential="review-held-credential")
     detail = "Original held subscriber transport cancellation"
@@ -309,6 +310,7 @@ async def _idle_retirement_failure_child(tmp_path, tmp_path_factory, monkeypatch
     database_path = tmp_path / "original.db"
     database = Database(str(database_path))
     await database.initialize()
+    await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     agent = await database.get_system_agent()

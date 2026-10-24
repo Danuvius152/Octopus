@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -98,7 +99,7 @@ async def test_stopped_blocked_worker_does_not_reopen_when_root_returns(jobs, mo
     reading, release, finished = threading.Event(), threading.Event(), threading.Event()
     try:
         await worker.start(test_wiki_jobs.wiki_api.session_manager)
-        task = worker.tasks[None]
+        task = worker.tasks[jobs.user_id]
         await asyncio.wait_for(asyncio.shield(task), 1)
         is_dir = Path.is_dir
 
@@ -129,7 +130,7 @@ async def test_stopped_blocked_worker_does_not_reopen_when_root_returns(jobs, mo
         release.set()
         moved.rename(root)
         await worker.stop()
-    worker.wake(None)
+    worker.wake(jobs.user_id)
     assert not worker.tasks
 
 
@@ -197,14 +198,14 @@ async def test_live_registration_change_settles_old_worker_and_allows_retry(jobs
     await worker.start(manager)
     try:
         await asyncio.wait_for(entered.wait(), 2)
-        old_config = registry.config(None)
+        old_config = registry.config(jobs.user_id)
         config = dict(old_config)
         if binding == "curator_agent_id":
-            config[binding] = (await AgentManager(manager.db).create_agent(name="new curator", backend="codex"))["id"]
+            config[binding] = (await AgentManager(manager.db).create_agent(name="new curator", backend="codex", user_id=jobs.user_id))["id"]
         else:
             config[binding] = "new-application-binding"
-        registry.configure(None, Path(config["root"]), config["curator_agent_id"], config["app_id"])
-        current = WikiJobs(None)
+        registry.configure(jobs.user_id, Path(config["root"]), config["curator_agent_id"], config["app_id"])
+        current = WikiJobs(jobs.user_id)
         # Registration retires the old observer. Finish the existing background
         # reconciliation before expecting a new maintenance execution to run.
         await registry.reconcile()
@@ -213,13 +214,13 @@ async def test_live_registration_change_settles_old_worker_and_allows_retry(jobs
             jobs.get(job["id"])
         # The old process cannot inherit publication authority even when only
         # the optional application binding (not the agent id) changed.
-        scope = SimpleNamespace(wiki_task_id=tokens[0], session_id=grants.active[tokens[0]].session_id, user_id=None)
+        scope = SimpleNamespace(wiki_task_id=tokens[0], session_id=grants.active[tokens[0]].session_id, user_id=jobs.user_id)
         with pytest.raises(WikiError) as denied:
             grants.require(scope, write=True, publish=True)
         assert denied.value.status == 403
         original = current.store.path("Library/source.md").read_bytes()
         response = await client.post("/api/wiki/publish", headers={"Authorization": "Bearer " + mcp_identity.mint(
-            scope.session_id, wiki_task_id=tokens[0])}, json={
+            scope.session_id, user_id=jobs.user_id, wiki_task_id=tokens[0])}, json={
                 "path": "Library/source.md", "content": "forbidden overwrite", "kind": "original",
                 "expected_revision": current.store.read("Library/source.md")["revision"], "reason": "stale worker",
             })
@@ -230,7 +231,7 @@ async def test_live_registration_change_settles_old_worker_and_allows_retry(jobs
         if ending == "shutdown":
             worker.begin_shutdown()
         release.set()
-        await asyncio.wait_for(asyncio.shield(worker.tasks[None]), 3) if ending != "shutdown" else await worker.stop()
+        await asyncio.wait_for(asyncio.shield(worker.tasks[jobs.user_id]), 3) if ending != "shutdown" else await worker.stop()
         result = current.get(job["id"])
         assert result["status"] == {"complete": "failed", "cancel": "cancelled", "shutdown": "interrupted"}[ending]
         assert not grants.assignments
@@ -253,7 +254,7 @@ async def test_live_registration_change_settles_old_worker_and_allows_retry(jobs
         assert trusted_readmit(current, job["id"])["status"] == "queued"
         resumed = WikiWorker()
         resumed.manager = test_wiki_jobs.Curator(current)
-        await resumed.run(None)
+        await resumed.run(jobs.user_id)
         assert current.get(job["id"])["status"] == "completed"
         assert current.store.path("Library/source.md").read_text().count("Retain source.") == 1
     finally:
@@ -272,9 +273,9 @@ async def test_publication_survives_registration_change_without_another_model_ru
         async def _events(self, *args, **kwargs):
             async for event in super()._events(*args, **kwargs):
                 if event["type"] == "result":
-                    config = registry.config(None)
+                    config = registry.config(jobs.user_id)
                     config[binding] = "replacement-binding"
-                    registry.configure(None, Path(config["root"]), config["curator_agent_id"], config["app_id"])
+                    registry.configure(jobs.user_id, Path(config["root"]), config["curator_agent_id"], config["app_id"])
                 yield event
 
     job = jobs.maintain("published-rebind", "# Published\nPreserved original.\n", "organize", [], "Library/published.md", [], "human")
@@ -282,14 +283,14 @@ async def test_publication_survives_registration_change_without_another_model_ru
     worker = WikiWorker()
     await worker.start(manager)
     try:
-        await asyncio.wait_for(worker.tasks[None], 3)
-        current = WikiJobs(None)
+        await asyncio.wait_for(worker.tasks[jobs.user_id], 3)
+        current = WikiJobs(jobs.user_id)
         assert current.get(job["id"])["status"] == "failed"
         published = current.store.path("Library/published.md").read_bytes()
         trusted_readmit(current, job["id"])
         resumed = WikiWorker()
         resumed.manager = test_wiki_jobs.Curator(current)
-        await resumed.run(None)
+        await resumed.run(jobs.user_id)
         assert current.get(job["id"])["status"] == "completed"
         assert current.store.path("Library/published.md").read_bytes() == published
         assert resumed.manager.turns == 0
@@ -314,9 +315,9 @@ async def test_unconfirmed_recording_survives_rebinding_without_regeneration(job
         async def start_message(self, session_id, prompt, **kwargs):
             async for _ in self._events(session_id, prompt, **kwargs):
                 pass
-            config = registry.config(None)
+            config = registry.config(jobs.user_id)
             config[binding] = "replacement-binding"
-            registry.configure(None, Path(config["root"]), config["curator_agent_id"], config["app_id"])
+            registry.configure(jobs.user_id, Path(config["root"]), config["curator_agent_id"], config["app_id"])
             request_id = self.original_request_id = kwargs["request_id"]
             completion = asyncio.get_running_loop().create_future()
             completion.set_result(RequestCompletion(input_request_id=request_id, request_id=request_id,
@@ -329,8 +330,8 @@ async def test_unconfirmed_recording_survives_rebinding_without_regeneration(job
     worker = WikiWorker()
     await worker.start(manager)
     try:
-        await asyncio.wait_for(worker.tasks[None], 3)
-        current = WikiJobs(None)
+        await asyncio.wait_for(worker.tasks[jobs.user_id], 3)
+        current = WikiJobs(jobs.user_id)
         first = current.get(job["id"])
         assert first["status"] == "failed"
         reference = first["items"][0]["worker_request"]
@@ -368,7 +369,8 @@ async def test_rebinding_terminal_commit_failure_preserves_original_without_rege
     assert proof["calls"] == ["model"]
     assert not proof_path.with_suffix(".published").exists()
     monkeypatch.setattr(settings, "wiki_dir", proof["wiki_state"])
-    current = WikiJobs(None)
+    monkeypatch.setattr(settings, "users_root", proof["users_root"])
+    current = WikiJobs(proof["user_id"])
     assert current.registration["app_id"] == "replacement-app"
     assert current.store.path("Library/blocked.md").read_bytes() == bytes.fromhex(proof["published_hex"])
     assert b"Keep this source." in current.store.path("Library/blocked.md").read_bytes()
@@ -432,10 +434,14 @@ async def _wiki_terminal_commit_child(jobs, monkeypatch, tmp_path):
     proof_path = Path(os.environ["OCTOPUS_TEST_WIKI_TERMINAL_PROOF"])
     committed = os.environ["OCTOPUS_TEST_WIKI_TERMINAL_COMMITTED"] == "1"
     path = str(proof_path.with_suffix(".db"))
+    # Preserve the original account, DEK and curator in the fault child's DB.
+    target = sqlite3.connect(path, check_same_thread=False)
+    try:
+        await test_wiki_jobs.wiki_api.session_manager.db.conn.backup(target)
+    finally:
+        target.close()
     database = Database(path)
     await database.initialize()
-    agent_id = jobs.registration["curator_agent_id"]
-    await database.save_agent(agent_id=agent_id, name="Original curator", created_at="time", updated_at="time", backend="codex")
     manager = SessionManager()
     await manager.initialize(database)
     calls = []
@@ -458,7 +464,7 @@ async def _wiki_terminal_commit_child(jobs, monkeypatch, tmp_path):
             session = manager.get_session(session_id)
             token = tasks.open(session, "maintain", request_id=session._run.request.request_id)
             try:
-                task = tasks.call(tasks.active[token], verify(mint(session_id, wiki_task_id=token)))
+                task = tasks.call(tasks.active[token], verify(mint(session_id, user_id=jobs.user_id, wiki_task_id=token)))
                 tasks.record_read(task, doc)
                 await asyncio.to_thread(WikiCuration(jobs.store).organize, doc["path"], doc["revision"],
                     "Original conclusion and conditions.", [], [], [], "curator", "publish", task=task)
@@ -491,10 +497,11 @@ async def _wiki_terminal_commit_child(jobs, monkeypatch, tmp_path):
         if committed:
             await commit()
         original = jobs.get(job["id"])
-        config = registry.config(None)
-        registry.configure(None, Path(config["root"]), config["curator_agent_id"], "replacement-app")
+        config = registry.config(jobs.user_id)
+        registry.configure(jobs.user_id, Path(config["root"]), config["curator_agent_id"], "replacement-app")
         proof_path.write_text(json.dumps({
             "database": path, "wiki_state": str(settings.wiki_dir), "job_id": job["id"],
+            "users_root": settings.users_root, "user_id": jobs.user_id,
             "session_id": original["session_id"], "request_id": selected["request_id"],
             "original_attempt": original["attempt"],
             "input": input_content,
@@ -512,7 +519,7 @@ async def _wiki_terminal_commit_child(jobs, monkeypatch, tmp_path):
     monkeypatch.setattr(database.conn, "commit", uncertain_commit)
     worker = WikiWorker()
     await worker.start(manager)
-    await asyncio.wait_for(asyncio.shield(worker.tasks[None]), 10)
+    await asyncio.wait_for(asyncio.shield(worker.tasks[jobs.user_id]), 10)
     raise AssertionError("An uncertain terminal commit returned to the Wiki worker")
 
 
@@ -525,10 +532,10 @@ async def test_recording_reference_survives_a_cancellation_between_control_read_
     job = jobs.maintain("cancel-recording-race", "", "organize", ["Library/cancel-race.md"], None, [], "human")
     captured = jobs.update(job["id"], status="running", session_id="original-session")
     reference = job_execution.prepare(jobs, captured, captured["items"], "original-session", "original-request")
-    config = registry.config(None)
+    config = registry.config(jobs.user_id)
     config[binding] = "replacement-binding"
-    registry.configure(None, Path(config["root"]), config["curator_agent_id"], config["app_id"])
-    current = WikiJobs(None)
+    registry.configure(jobs.user_id, Path(config["root"]), config["curator_agent_id"], config["app_id"])
+    current = WikiJobs(jobs.user_id)
     transition = job_execution.transition
     raced = False
 
@@ -810,7 +817,8 @@ async def test_memory_fork_bootstrap_cannot_emit_production_mcp_entries(tmp_path
 
     db, mgr, agents = await _bootstrap(tmp_path, monkeypatch)
     try:
-        agent = await agents.create_agent(name="memory-only", backend="codex")
+        owner = (await db.get_system_agent())["user_id"]
+        agent = await agents.create_agent(name="memory-only", backend="codex", user_id=owner)
         session = await mgr.create_session(agent["id"], "memory", str(tmp_path), backend="codex")
         config = mgr._run_config(session, agent)
         run = HarnessRun(CODEX, config)

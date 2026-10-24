@@ -98,7 +98,7 @@ async def test_warm_raw_coordinates_grant_only_returned_text_and_require_live_au
     text = "# Topic\n\n" + "".join(f"## Section {index}\n\nEvidence and conditions {index}.\n\n" for index in range(30))
     root, config = await setup_note(client, tmp_path, text)
     path = "Library/note.md"
-    with active_worker(config, [path]) as headers:
+    async with active_worker(config, [path], client=client) as headers:
         first = await client.get("/api/wiki/blocks", headers=headers, params={"doc": path, "view": "locators", "limit": 3})
         assert first.status_code == 200, first.text
         body = {"operation": "no_change", "doc": first.json()["id"], "expected_revision": first.json()["revision"], "reason": "Review"}

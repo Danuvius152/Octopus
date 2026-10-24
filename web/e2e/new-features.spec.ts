@@ -1,3 +1,4 @@
+import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import * as http from "node:http";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -5,7 +6,7 @@ import * as path from "node:path";
 import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
 import { systemAgentId } from "./system-agent";
 
-const TOKEN = "changeme";
+const TOKEN = TEST_BEARER;
 const SERVER_URL = "http://localhost:8765";
 const API = `${SERVER_URL}/api`;
 
@@ -79,8 +80,7 @@ test.afterAll(async ({ request }) => {
 
 async function login(page: Page) {
   await page.goto("/");
-  await page.locator('input[type="password"]').fill(TOKEN);
-  await page.locator("button.btn-login").click();
+  await enterAccountCredentials(page);
   await expect(page.locator(".agent-list-header")).toBeVisible();
   // Messages are sent over the WebSocket, and the client drops a send when
   // the socket isn't OPEN yet. Under load the connect can lag the first
@@ -112,7 +112,7 @@ async function createSessionApi(
 ): Promise<{ id: string }> {
   const res = await request.post(`${API}/sessions`, {
     headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-    data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name, working_dir: "/tmp" },
+    data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name, },
   });
   expect(res.ok()).toBeTruthy();
   return res.json();
@@ -125,7 +125,7 @@ async function importSessionApi(
 ): Promise<{ id: string }> {
   const res = await request.post(`${API}/sessions/import`, {
     headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-    data: { name, working_dir: "/tmp", messages },
+    data: { name, messages },
   });
   expect(res.ok()).toBeTruthy();
   return res.json();
@@ -923,7 +923,7 @@ test.describe("Session credential picker", () => {
 
     const made = await request.post(`${API}/sessions`, {
       headers: { Authorization: `Bearer ${TOKEN}`, "Content-Type": "application/json" },
-      data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Credential Swap", working_dir: "/tmp", credential_id: oldId },
+      data: { agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }), name: "Credential Swap", credential_id: oldId },
     });
     expect(made.ok()).toBeTruthy();
     const sessionId = (await made.json()).id as string;
@@ -1112,7 +1112,6 @@ test.describe("Real CLI end-to-end @llm", () => {
       data: {
         agent_id: await systemAgentId(request, `${API}/sessions`, { Authorization: `Bearer ${TOKEN}` }),
         name: "Bad Cred Session",
-        working_dir: "/tmp",
         credential_id: credId,
       },
     });
@@ -1568,7 +1567,9 @@ test.describe("Settings dialog", () => {
     // Account — shows the full token (no truncation) + Copy / Sign out
     await page.locator('[role="tab"]', { hasText: "Account" }).click();
     const account = page.locator('[role="tabpanel"]:visible');
-    await expect(account).toContainText(TOKEN);
+    const browserBearer = await page.evaluate(() => localStorage.getItem("octopus_token") ?? "");
+    expect(browserBearer).toBeTruthy();
+    await expect(account).toContainText(browserBearer);
     await expect(account).toContainText("Sign out");
     await expect(account.locator(".btn-copy-token")).toBeVisible();
 
@@ -2726,7 +2727,7 @@ test.describe("/model", () => {
     }));
     const imported = await request.post(`${API}/sessions/import`, {
       headers, data: {
-        name: "Archive Settings Probe", working_dir: "/tmp", backend: "codex",
+        name: "Archive Settings Probe", backend: "codex",
         messages: [{ role: "user", type: "text", content: "Old archive history" }],
       },
     });
@@ -2774,7 +2775,7 @@ test.describe("/model", () => {
     const imported = await request.post(`${API}/sessions/import`, {
       headers: { Authorization: `Bearer ${TOKEN}` },
       data: {
-        name: "Speed Session", working_dir: "/tmp", backend: "codex", claude_session_id: "speed-thread",
+        name: "Speed Session", backend: "codex", claude_session_id: "speed-thread",
         messages: [{ role: "user", type: "text", content: "Keep this speed conversation" }],
       },
     });
@@ -2826,7 +2827,7 @@ test.describe("/model", () => {
     const imported = await request.post(`${API}/sessions/import`, {
       headers: { Authorization: `Bearer ${TOKEN}` },
       data: {
-        name: "Reasoning Session", working_dir: "/tmp", backend: "codex",
+        name: "Reasoning Session", backend: "codex",
         claude_session_id: "existing-thread",
         messages: [{ role: "user", type: "text", content: "Remember the existing history" }],
       },

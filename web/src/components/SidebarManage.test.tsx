@@ -59,6 +59,7 @@ const installation = (o: Partial<ConnectorInstallationInfo> = {}) =>
 beforeEach(() => {
   useSessionStore.setState({
     token: "tok",
+    identity: null,
     mainView: "chat",
     schedules: [],
     credentials: [],
@@ -68,6 +69,18 @@ beforeEach(() => {
     "fetch",
     vi.fn(async () => new Response("[]", { status: 200 }))
   );
+});
+
+it.each([
+  { identity: null, visible: false },
+  { identity: { label: "old operator", user_id: null, is_admin: true }, visible: false },
+  { identity: { label: "member", user_id: "member", is_admin: false }, visible: false },
+  { identity: { label: "admin", user_id: "admin", is_admin: true }, visible: true },
+])("shows Monitor only for an identified administrator: $identity", async ({ identity, visible }) => {
+  useSessionStore.setState({ identity });
+  render(<SidebarManage />);
+  await screen.findByText("Schedules");
+  expect(screen.queryByText("Monitor") !== null).toBe(visible);
 });
 
 afterEach(() => {

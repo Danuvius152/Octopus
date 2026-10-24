@@ -24,6 +24,7 @@ from server.sessions import SessionManager
 from server.sessions.owner import SessionMailboxFull
 from server.sessions.owner_runtime import RuntimeReader
 from server.sessions.publication import _MAX_PUBLICATION_BYTES
+from tests.accounts import create_account
 
 _FIRST_PAYLOAD_BYTES = 1024 * 1024 + 256
 _FOLLOWING_PAYLOAD_BYTES = 64 * 1024
@@ -131,6 +132,7 @@ async def test_active_stdout_backpressure_refuses_submit_and_preserves_the_origi
     monkeypatch.setattr(RuntimeReader, "take", observe_original_take)
     database = Database(str(tmp_path / "pressure.sqlite3"))
     await database.initialize()
+    await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     agent = await database.get_system_agent()

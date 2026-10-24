@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from server import deps
 from server.agent_manager import AgentManager
 from server.database import Database
 from server.delegations import DelegationManager
@@ -20,6 +21,8 @@ from server.harness import get_harness
 from server.harness.profile import StdinMode
 from server.mcp_identity import revoke_run, scope_is_live, verify
 from server.sessions import SessionManager
+from server.users import UserManager
+from tests.accounts import create_account
 
 
 async def _finished(manager, rec):
@@ -55,17 +58,18 @@ async def _seed_running_round(path: Path, request: str, agents_dir: Path) -> Non
     from server.config import settings
 
     settings.agents_dir = str(agents_dir)
-    settings.master_key_file = str(path.parent / "master.key")
+    assert os.environ.get("OCTOPUS_USERS_ROOT") and os.environ.get("OCTOPUS_MASTER_KEY_FILE"), "Seed requires the isolated test environment"
     settings.default_working_dir = str(path.parent)
     database = Database(str(path))
     await database.initialize()
+    owner, _ = await create_account(database, extra_roots=[path.parent])
     manager = SessionManager()
     await manager.initialize(database)
     parent = await manager.create_session(
         (await database.get_system_agent())["id"], "Crash seed caller", str(path.parent), backend="codex",
     )
     await manager.interrupt(parent.id)
-    await AgentManager(database).create_agent(name="Worker", backend="codex")
+    await AgentManager(database).create_agent(name="Worker", backend="codex", user_id=owner["id"])
     ready = asyncio.Event()
     model_pid = path.with_suffix(".model-pid")
     body = "Original unfinished review prefix"
@@ -96,7 +100,7 @@ async def _seed_running_round(path: Path, request: str, agents_dir: Path) -> Non
     )
     await asyncio.wait_for(ready.wait(), 5)
     stored = json.loads(await database.load_delegation_state(
-        rec.delegation_id, parent_session_id=parent.id, user_id=None,
+        rec.delegation_id, parent_session_id=parent.id, user_id=parent.user_id,
     ))
     assert stored["state"] == "running" and stored["work_id"] == rec.work_id
     rows = await database.load_messages(rec.delegation_id)
@@ -124,6 +128,7 @@ async def _crash_scenario(directory: Path, mode: str, applied: bool) -> None:
     from server.config import settings
 
     settings.agents_dir = str(directory / "agents")
+    assert os.environ.get("OCTOPUS_USERS_ROOT") and os.environ.get("OCTOPUS_MASTER_KEY_FILE"), "Crash scenario requires the isolated test environment"
     path = directory / "rounds.db"
     unfinished = seed_unfinished_round(
         path, request="held before cold restore", agents_dir=directory / "agents",
@@ -154,6 +159,10 @@ async def _crash_scenario(directory: Path, mode: str, applied: bool) -> None:
     harness.profile = replace(harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None)
     database = Database(str(path))
     await database.initialize()
+    if unfinished is None:
+        await create_account(database, extra_roots=[directory])
+    else:
+        deps.set_user_manager(UserManager(database))
     manager = SessionManager()
     await manager.initialize(database)
     parent = manager.get_session(unfinished["parent_id"]) if unfinished else await manager.create_session(
@@ -161,8 +170,8 @@ async def _crash_scenario(directory: Path, mode: str, applied: bool) -> None:
     )
     await manager.interrupt(parent.id)
     if unfinished is None:
-        await AgentManager(database).create_agent(name="Worker", backend="codex")
-        await AgentManager(database).create_agent(name="Leaf", backend="codex")
+        await AgentManager(database).create_agent(name="Worker", backend="codex", user_id=parent.user_id)
+        await AgentManager(database).create_agent(name="Leaf", backend="codex", user_id=parent.user_id)
     delegations = DelegationManager()
     delegations.bind(manager, database)
     metadata = {"parent_id": parent.id}
@@ -300,6 +309,7 @@ async def test_complete_manager_command_fails_stop_then_cold_reopen_preserves_fa
     for _ in range(2):
         database = Database(str(tmp_path / "rounds.db"))
         await database.initialize()
+        deps.set_user_manager(UserManager(database))
         manager = SessionManager()
         await manager.initialize(database)
         starts = []

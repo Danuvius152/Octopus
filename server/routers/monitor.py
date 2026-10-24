@@ -20,7 +20,7 @@ import aiosqlite
 from fastapi import APIRouter, HTTPException, Query, status
 
 from ..config import settings
-from ..deps import OperatorUser
+from ..deps import AdminUser
 from ..monitor import query
 
 router = APIRouter(prefix="/api/monitor", tags=["monitor"])
@@ -36,7 +36,7 @@ async def _connect() -> aiosqlite.Connection:
 
 
 @router.get("/overview")
-async def overview(window: str = Query("24h"), _operator: OperatorUser = None):
+async def overview(_operator: AdminUser, window: str = Query("24h")):
     conn = await _connect()
     try:
         return await query.overview(conn, window)
@@ -46,7 +46,7 @@ async def overview(window: str = Query("24h"), _operator: OperatorUser = None):
 
 @router.get("/{report}")
 async def report(
-    report: str, window: str = Query("7d"), _operator: OperatorUser = None
+    report: str, _operator: AdminUser, window: str = Query("7d")
 ):
     fn = query.REPORTS.get(report)
     if fn is None:

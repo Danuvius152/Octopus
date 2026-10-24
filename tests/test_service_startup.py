@@ -13,7 +13,9 @@ from server.config import settings
 from server.database import Database
 from server.knowledge import encode, for_account
 from server.service_installation import InstallationError, InstallationOwner
+from server.wiki.registry import registry
 from tests import test_api as api
+from tests.accounts import create_account
 from tests.test_service_shutdown import service as service
 from tests.test_service_shutdown import synthetic_cli
 
@@ -54,11 +56,12 @@ async def test_due_schedules_wait_for_the_service_recovery_gate(service, tmp_pat
     synthetic_cli(monkeypatch, starts)
     db = Database(settings.db_path)
     await db.initialize()
+    user, _ = await create_account(db)
     agent = await db.get_system_agent()
     await db.update_agent(agent["id"], backend="codex")
     now = datetime.now(UTC)
     context = for_account(session_id="schedule-entry", request_id="due-at-startup",
-                          user_id=None, prompt="Run after recovery")
+                          user_id=user["id"], prompt="Run after recovery")
     await db.save_schedule(
         schedule_id="due-at-startup", agent_id=agent["id"], name="Startup gate",
         prompt="Run after recovery", created_at=now.isoformat(),
@@ -95,7 +98,11 @@ async def test_due_schedules_wait_for_the_service_recovery_gate(service, tmp_pat
 
 @pytest.mark.parametrize("config", ['{"invalid":', '{"root":"/unavailable-test-vault","curator_agent_id":"curator","vault_id":"00000000-0000-0000-0000-000000000001"}'])
 async def test_invalid_wiki_registration_keeps_the_workbench_and_diagnostic_endpoint_available(service, config):
-    path = Path(settings.wiki_dir) / "config.json"
+    db = Database(settings.db_path)
+    await db.initialize()
+    user, bearer = await create_account(db)
+    await db.close()
+    path = registry.state(user["id"]) / "config.json"
     path.parent.mkdir(parents=True)
     path.write_text(config)
     main.app.add_api_route("/ready", main.readiness)
@@ -104,7 +111,7 @@ async def test_invalid_wiki_registration_keeps_the_workbench_and_diagnostic_endp
     async with main.app.router.lifespan_context(main.app):
         async with AsyncClient(transport=ASGITransport(app=main.app), base_url="http://test") as client:
             assert (await client.get("/ready")).status_code == 200
-            diagnostic = await client.get("/api/wiki/config", headers=api.HEADERS)
+            diagnostic = await client.get("/api/wiki/config", headers={"Authorization": f"Bearer {bearer}"})
             assert diagnostic.status_code == 503
             assert "registration is invalid" in diagnostic.json()["detail"]
             assert path.read_text() == config

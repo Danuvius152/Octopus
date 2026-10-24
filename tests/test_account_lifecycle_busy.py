@@ -1,4 +1,4 @@
-"""A busy fork cannot prevent account adoption from retiring the live turn."""
+"""Busy fork refusal does not block the current account's actual turn retirement."""
 
 import asyncio
 import sys
@@ -13,25 +13,22 @@ from server.database import Database
 from server.harness import get_harness
 from server.harness.profile import StdinMode
 from server.main import app
-from server.routers import auth as auth_router
 from server.session_manager import SessionManager
-from server.users import UserManager
+from tests.accounts import create_account
 
 
 @pytest.mark.parametrize("operation", ["fork", "duplicate"])
-async def test_busy_fork_refuses_before_adoption_waits_for_lifecycle_commands(
-    tmp_path, monkeypatch, operation,
+async def test_busy_fork_refuses_without_blocking_owned_stop(
+    tmp_path, monkeypatch, operation, short_process_shutdown,
 ):
     monkeypatch.setattr(settings, "master_key", "busy-lifecycle-master")
-    monkeypatch.setattr(settings, "auth_token", "busy-lifecycle-legacy-token")
-    monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "legacy-agents"))
+    monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "unused-global-agents"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     database = Database(str(tmp_path / "busy-lifecycle.db"))
     await database.initialize()
+    owner, token = await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
-    monkeypatch.setattr(auth_router, "_db", database)
-    deps.set_user_manager(UserManager(database))
     app.dependency_overrides[deps.get_session_manager] = lambda: manager
 
     model = tmp_path / "busy_turn.py"
@@ -74,15 +71,15 @@ async def test_busy_fork_refuses_before_adoption_waits_for_lifecycle_commands(
     workspace.mkdir()
     original = b"Keep these original workspace bytes.\x00\xff\n"
     (workspace / "original.bin").write_bytes(original)
-    agent = await database.get_system_agent()
+    agent = await database.get_system_agent(owner["id"])
     parent = await manager.create_session(
         agent["id"], "Continuous original turn", str(workspace), backend="codex",
     )
-    branch = claim = None
+    branch = stopping = None
     try:
         async with AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test",
-            headers={"Authorization": "Bearer busy-lifecycle-legacy-token"},
+            headers={"Authorization": "Bearer " + token},
         ) as client:
             receipt = await manager.start_message(parent.id, "Keep working until I stop this turn.")
             assert receipt.accepted
@@ -94,43 +91,38 @@ async def test_busy_fork_refuses_before_adoption_waits_for_lifecycle_commands(
                 json={"rewind_to_msg_seq": 0} if operation == "fork" else {},
             ))
             done, _ = await asyncio.wait({branch}, timeout=.25)
-            claim = asyncio.create_task(client.post(
-                "/api/auth/bootstrap", json={"username": "owner", "password": "password1"},
-            ))
-            await asyncio.wait({claim}, timeout=.25)
-            assert done, "Busy fork waited on the live turn and blocked account retirement."
+            stopping = asyncio.create_task(manager.interrupt(parent.id))
+            await asyncio.wait({stopping}, timeout=.25)
+            assert done, "Busy fork waited on the live turn instead of refusing."
             refused = await branch
             assert refused.status_code == 409, refused.text
             assert refused.json()["detail"]["reason"] == "fork_blocked_parent_turn_active"
 
-            response = await asyncio.wait_for(asyncio.shield(claim), 5)
-            assert response.status_code == 200, response.text
-            owner = response.json()["user_id"]
-            assert manager.get_session(parent.id, owner) is parent
-            assert parent.user_id == await database.get_session_owner(parent.id) == owner
+            await asyncio.wait_for(asyncio.shield(stopping), 5)
+            await manager.await_session_execution(parent.id, timeout=5)
+            assert manager.get_session(parent.id, owner["id"]) is parent
+            assert parent.user_id == await database.get_session_owner(parent.id) == owner["id"]
             assert processes[0].returncode == 0
             assert retired.read_text() == "The original process reached stdin EOF."
             assert (await asyncio.wait_for(receipt.wait(), 3)).outcome.status == "interrupted"
-            owner_headers = {"Authorization": "Bearer " + response.json()["token"]}
-            listed = await client.get("/api/sessions", headers=owner_headers)
+            listed = await client.get("/api/sessions")
             assert listed.status_code == 200, listed.text
             assert [row["id"] for row in listed.json()] == [parent.id]
             assert [row["id"] for row in await database.load_sessions(include_archived=True)] == [parent.id]
-            detail = await client.get(f"/api/sessions/{parent.id}", headers=owner_headers)
+            detail = await client.get(f"/api/sessions/{parent.id}")
             assert detail.status_code == 200, detail.text
             assert any(message["content"] == "Keep working until I stop this turn."
                        for message in detail.json()["messages"])
             assert (workspace / "original.bin").read_bytes() == original
     finally:
-        # The unfixed implementation leaves adoption waiting for the fork's
-        # lock. Stop the real turn before joining either original command.
+        # Retire the original real process before joining either command.
         await asyncio.wait_for(manager.interrupt(parent.id), 5)
         for process in processes:
             if process.returncode is None:
                 process.kill()
             await process.wait()
         await asyncio.wait_for(asyncio.gather(
-            *(task for task in (branch, claim) if task is not None), return_exceptions=True,
+            *(task for task in (branch, stopping) if task is not None), return_exceptions=True,
         ), 5)
         await manager.drain_turns()
         manager.remove_broadcast("busy-lifecycle-output")

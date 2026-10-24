@@ -10,10 +10,13 @@ from pathlib import Path
 
 import pytest
 
+from server import deps
 from server.database import Database
 from server.harness import get_harness
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
+from server.users import UserManager
+from tests.accounts import create_account
 
 
 @pytest.fixture(autouse=True)
@@ -61,6 +64,7 @@ async def test_queued_input_is_recoverable_after_shutdown_and_database_reopen(tm
     path = str(tmp_path / "recovery.db")
     db = Database(path)
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
@@ -71,6 +75,7 @@ async def test_queued_input_is_recoverable_after_shutdown_and_database_reopen(tm
 
     reopened = Database(path)
     await reopened.initialize()
+    deps.set_user_manager(UserManager(reopened))
     restored = SessionManager()
     await restored.initialize(reopened)
     try:
@@ -108,6 +113,7 @@ async def _submission_process_loss_child(tmp_path):
     path = str(proof.with_suffix(".db"))
     db = Database(path)
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
@@ -130,6 +136,7 @@ async def test_claimed_input_is_unknown_and_never_replayed_after_restart(tmp_pat
     evidence = _lose_submission_process(tmp_path, "claimed")
     reopened = Database(evidence["database"])
     await reopened.initialize()
+    deps.set_user_manager(UserManager(reopened))
     restored = SessionManager()
     await restored.initialize(reopened)
     try:
@@ -152,6 +159,7 @@ async def test_startup_retirement_does_not_cover_later_unknown_inputs_even_after
     evidence = _lose_submission_process(tmp_path, "claimed")
     db = Database(evidence["database"])
     await db.initialize()
+    deps.set_user_manager(UserManager(db))
     manager = SessionManager()
     await manager.initialize(db, previous_writers_retired=True)
     session_id = evidence["session_id"]
@@ -188,6 +196,7 @@ async def test_startup_retirement_does_not_cover_later_unknown_inputs_even_after
 async def test_manual_resubmission_has_new_identity_and_one_recovery_owner(tmp_path, monkeypatch):
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
@@ -227,6 +236,7 @@ async def test_manual_resubmission_has_new_identity_and_one_recovery_owner(tmp_p
 async def test_input_persistence_failure_never_opens_dispatch(tmp_path, monkeypatch):
     db = Database(":memory:")
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
@@ -250,12 +260,12 @@ async def test_recovery_listing_is_paginated_private_and_dismissible(tmp_path, m
     from fastapi import FastAPI
     from httpx import ASGITransport, AsyncClient
 
-    from server.config import settings
-    from server.deps import get_session_manager, scope_user_id
+    from server.deps import get_session_manager
     from server.routers.sessions import router
 
     db = Database(":memory:")
     await db.initialize()
+    _, bearer = await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
@@ -266,7 +276,7 @@ async def test_recovery_listing_is_paginated_private_and_dismissible(tmp_path, m
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_session_manager] = lambda: manager
-    async with AsyncClient(transport=ASGITransport(app), base_url="http://test", headers={"Authorization": f"Bearer {settings.auth_token}"}) as client:
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://test", headers={"Authorization": f"Bearer {bearer}"}) as client:
         try:
             base = f"/api/sessions/{session.id}/submissions"
             first = (await client.get(base, params={"limit": 2})).json()
@@ -278,7 +288,8 @@ async def test_recovery_listing_is_paginated_private_and_dismissible(tmp_path, m
             assert (await client.get(base, params={"limit": 101})).status_code == 422
             assert (await client.delete(f"{base}/input-0/recovery")).status_code == 204
             assert len((await client.get(base)).json()["items"]) == 2
-            app.dependency_overrides[scope_user_id] = lambda: "another-owner"
+            _, foreign_bearer = await create_account(db, username="another-owner")
+            client.headers["Authorization"] = f"Bearer {foreign_bearer}"
             assert (await client.get(base)).status_code == 404
             assert (await client.get(f"{base}/input-1")).status_code == 404
             assert (await client.delete(f"{base}/input-1/recovery")).status_code == 404
@@ -298,6 +309,7 @@ async def runtime(monkeypatch, tmp_path):
     monkeypatch.setattr(settings, "users_root", str(tmp_path / "users"))
     db = Database(":memory:")
     await db.initialize()
+    _, bearer = await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
@@ -362,6 +374,7 @@ async def test_lost_claim_commit_ack_never_starts_a_model_and_retains_input(tmp_
     evidence = _crash_submission_commit(tmp_path, "claim", committed_before_error)
     db = Database(evidence["database"])
     await db.initialize()
+    deps.set_user_manager(UserManager(db))
     try:
         original = await db.get_client_submission(evidence["session_id"], "confirm")
         assert original["execution_state"] == ("running" if committed_before_error else "pending")
@@ -391,12 +404,13 @@ async def test_recovery_attachments_are_bound_to_saved_bytes_and_owner(tmp_path,
 
     from server.attachments import save_upload
     from server.config import settings
-    from server.deps import get_session_manager, scope_user_id
+    from server.deps import get_session_manager
     from server.routers.sessions import router
 
     monkeypatch.setattr(settings, "attachments_dir", str(tmp_path / "attachments"))
     db = Database(":memory:")
     await db.initialize()
+    _, bearer = await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
@@ -407,7 +421,7 @@ async def test_recovery_attachments_are_bound_to_saved_bytes_and_owner(tmp_path,
     app = FastAPI()
     app.include_router(router)
     app.dependency_overrides[get_session_manager] = lambda: manager
-    async with AsyncClient(transport=ASGITransport(app), base_url="http://test", headers={"Authorization": f"Bearer {settings.auth_token}"}) as client:
+    async with AsyncClient(transport=ASGITransport(app), base_url="http://test", headers={"Authorization": f"Bearer {bearer}"}) as client:
         try:
             endpoint = f"/api/sessions/{session.id}/submissions/with-file/attachments/{file.id}"
             response = await client.get(endpoint)
@@ -416,7 +430,8 @@ async def test_recovery_attachments_are_bound_to_saved_bytes_and_owner(tmp_path,
             assert (await client.get(endpoint)).status_code == 409
             file.path.unlink()
             assert (await client.get(endpoint)).status_code == 409
-            app.dependency_overrides[scope_user_id] = lambda: "another-owner"
+            _, foreign_bearer = await create_account(db, username="another-owner")
+            client.headers["Authorization"] = f"Bearer {foreign_bearer}"
             assert (await client.get(endpoint)).status_code == 404
         finally:
             await db.close()
@@ -428,6 +443,7 @@ async def test_legacy_submission_migration_preserves_receipt_without_inventing_i
     path = str(tmp_path / "legacy.db")
     db = Database(path)
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
@@ -439,6 +455,7 @@ async def test_legacy_submission_migration_preserves_receipt_without_inventing_i
         legacy.execute("INSERT INTO client_submissions VALUES(?,?,?,?,?)", (session.id, "legacy", "digest", "legacy-request", '{"accepted":true,"disposition":"accepted"}'))
     reopened = Database(path)
     await reopened.initialize()
+    deps.set_user_manager(UserManager(reopened))
     restored = SessionManager()
     await restored.initialize(reopened)
     try:
@@ -511,6 +528,7 @@ async def test_restart_keeps_uncertain_steer_unknown_even_when_its_parent_has_a_
     evidence = _lose_submission_process(tmp_path, "steer")
     db = Database(evidence["database"])
     await db.initialize()
+    deps.set_user_manager(UserManager(db))
     manager = SessionManager()
     await manager.initialize(db)
     try:
@@ -549,6 +567,7 @@ async def test_submission_commit_failure_stops_the_process_and_restart_reads_act
     evidence = _crash_submission_commit(tmp_path, operation, committed_before_error)
     db = Database(evidence["database"])
     await db.initialize()
+    deps.set_user_manager(UserManager(db))
     try:
         # Inspect the cold committed fact before SessionManager performs restart recovery.
         row = await db.get_client_submission(evidence["session_id"], "confirm")
@@ -597,6 +616,7 @@ async def _submission_commit_failure_child(tmp_path, monkeypatch):
     path = str(proof.with_suffix(".db"))
     db = Database(path)
     await db.initialize()
+    await create_account(db, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()

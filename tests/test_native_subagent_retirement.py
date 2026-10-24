@@ -21,6 +21,7 @@ from server.harness import get_harness
 from server.harness.run import HarnessRun
 from server.routers.sessions import router
 from server.sessions import SessionManager
+from tests.accounts import create_account
 
 
 @pytest.mark.parametrize("action", ["stop", "auto_archive"])
@@ -77,6 +78,7 @@ async def test_idle_native_parent_retires_original_process_and_delivers_its_endi
 async def native_runtime(tmp_path, monkeypatch, short_process_shutdown):
     database = Database(str(tmp_path / "native.db"))
     await database.initialize()
+    _, bearer = await create_account(database, extra_roots=[tmp_path])
     manager = SessionManager()
     await manager.initialize(database)
     agent = await database.get_system_agent()
@@ -93,10 +95,9 @@ async def native_runtime(tmp_path, monkeypatch, short_process_shutdown):
     application = FastAPI()
     application.include_router(router)
     application.dependency_overrides[deps.get_session_manager] = lambda: manager
-    monkeypatch.setattr(settings, "auth_token", "native-test-token")
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=application), base_url="http://test",
-        headers={"Authorization": "Bearer native-test-token"},
+        headers={"Authorization": "Bearer " + bearer},
     ) as client:
         try:
             yield manager, session, client, events, helper_seen

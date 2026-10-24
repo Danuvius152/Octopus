@@ -97,7 +97,7 @@ class WikiTasks:
             raise WikiError("Unknown wiki task mode")
         from .registry import registry
         if (session.user_id in registry._blocked
-                or (session.user_id is None and not registry.legacy_enabled)
+                or session.user_id is None
                 or not (registry.state(session.user_id) / "config.json").is_file()):
             return None
         assignment = self.assignments.get(session.id)

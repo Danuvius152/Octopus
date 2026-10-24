@@ -21,13 +21,16 @@ from server.users import UserManager
 async def domain(monkeypatch):
     db = Database(":memory:")
     await db.initialize()
+    users = UserManager(db)
+    owner = await users.create_user(username="schedule-owner", password="test-password")
+    set_user_manager(users)
     manager = SessionManager()
     await manager.initialize(db)
     runner = ScheduleRunner(manager, db)
     manager.set_schedule_runner(runner)
     agent_manager = AgentManager(db)
-    agent = await agent_manager.create_agent(name="Scheduled Codex", backend="codex")
-    other = await agent_manager.create_agent(name="Other agent")
+    agent = await agent_manager.create_agent(name="Scheduled Codex", backend="codex", user_id=owner["id"])
+    other = await agent_manager.create_agent(name="Other agent", user_id=owner["id"])
     monkeypatch.setattr(schedules, "_db", db)
     monkeypatch.setattr(schedules, "_runner", runner)
     monkeypatch.setattr(agents, "_manager", agent_manager)
@@ -136,8 +139,9 @@ async def test_http_rejects_other_agents_origin_before_parsing(domain, monkeypat
     if entry == "from_text":
         url += "/from_text"
         body = {"session_id": wrong.id, "text": "every morning check"}
+    token = await UserManager(db).issue_token(agent["user_id"])
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-        response = await client.post(url, json=body, headers={"Authorization": "Bearer changeme"})
+        response = await client.post(url, json=body, headers={"Authorization": f"Bearer {token}"})
     assert response.status_code == 409
     parse.assert_not_called()
     assert await db.load_schedules() == []
@@ -214,7 +218,7 @@ async def test_archive_closes_creation_restore_and_existing_session_sends(domain
         with pytest.raises(ValueError, match="closed"):
             await manager.start_message(origin.id, "too late", steerable=True)
         with pytest.raises(ValueError, match="not confirmed"):
-            await manager.unarchive_agent(agent["id"], None)
+            await manager.unarchive_agent(agent["id"], agent["user_id"])
         create = AsyncMock(side_effect=AssertionError("closed agent must not run"))
         monkeypatch.setattr(manager, "create_session", create)
         await runner._fire("schedule")
@@ -224,7 +228,7 @@ async def test_archive_closes_creation_restore_and_existing_session_sends(domain
         release.set()
         await closing
     assert (await db.get_agent(agent["id"]))["archived"] is True
-    await manager.unarchive_agent(agent["id"], None)
+    await manager.unarchive_agent(agent["id"], agent["user_id"])
     assert runner._scheduler.get_job("schedule") is not None
 
 
@@ -302,7 +306,7 @@ async def test_archived_agent_stays_closed_after_restart_and_retains_disabled_pr
     assert runner._scheduler.get_job("schedule") is None
     with pytest.raises(ValueError, match="archived"):
         await manager.unarchive_session(session.id)
-    await manager.unarchive_agent(agent["id"], None)
+    await manager.unarchive_agent(agent["id"], agent["user_id"])
     assert (await db.load_schedules())[0]["enabled"] is False
     assert runner._scheduler.get_job("schedule") is None
 
@@ -314,10 +318,10 @@ async def test_unconfirmed_archive_cannot_be_reopened(domain, monkeypatch):
     with pytest.raises(ValueError, match="unconfirmed"):
         await manager.archive_agent(agent["id"])
     with pytest.raises(ValueError, match="not confirmed"):
-        await manager.unarchive_agent(agent["id"], None)
+        await manager.unarchive_agent(agent["id"], agent["user_id"])
     monkeypatch.setattr(manager, "evict_agent_sessions", evict)
     await manager.archive_agent(agent["id"])
-    await manager.unarchive_agent(agent["id"], None)
+    await manager.unarchive_agent(agent["id"], agent["user_id"])
 
 
 async def test_startup_quarantines_orphans_and_bad_relationships_without_hiding_them(domain):
@@ -330,12 +334,16 @@ async def test_startup_quarantines_orphans_and_bad_relationships_without_hiding_
     )
     await db.conn.commit()
     await runner.initialize()
+    token = await UserManager(db).issue_token(agent["user_id"])
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test",
-                           headers={"Authorization": "Bearer changeme"}) as client:
+                           headers={"Authorization": f"Bearer {token}"}) as client:
         response = await client.get("/api/schedules")
         assert response.status_code == 200
         rows = {row["id"]: row for row in response.json()}
-        assert rows["orphan"]["invalid_reason"] == "agent_not_found"
+        assert "orphan" not in rows  # No account owns an unbound schedule.
+        orphan = next(row for row in await db.load_schedules() if row["id"] == "orphan")
+        assert orphan["invalid_reason"] == "agent_not_found" and orphan["enabled"] is False
+        assert runner._scheduler.get_job("orphan") is None
         assert rows["schedule"]["invalid_reason"] == "origin_agent_mismatch"
         for row in rows.values():
             assert row["enabled"] is False

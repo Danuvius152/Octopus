@@ -16,7 +16,6 @@ from server.harness.run import HarnessRun
 from tests import test_question_lifecycle as question_tests
 
 question_host = question_tests.question_host
-HEADERS = question_tests.HEADERS
 
 
 @pytest.mark.parametrize("write_result", ["confirmed", "exception", "cancelled"])
@@ -148,7 +147,7 @@ async def test_closing_inline_work_waits_for_its_original_write_and_preserves_th
         delivered = [json.loads(line)["message"]["content"] for line in frames.read_text().splitlines()]
         assert delivered == [prompt, correction]
         assert drain_calls == 2 and len(processes) == 1
-        detail = await client.get(f"/api/sessions/{session.id}", headers=HEADERS)
+        detail = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
         assert detail.status_code == 200
         messages = detail.json()["messages"]
         assert [row["content"] for row in messages if row["role"] == "user"] == [prompt, correction]

@@ -4,13 +4,17 @@ import json
 import sqlite3
 
 from server.database import Database
+from tests.accounts import create_account
 
 
 async def test_legacy_stages_and_forward_recovery_links_survive_repeated_open(tmp_path):
     path = tmp_path / "legacy-inputs.db"
     db = Database(str(path))
     await db.initialize()
-    await db.save_session("legacy", "Legacy input", str(tmp_path), "2026-10-20T00:00:00Z")
+    owner, _ = await create_account(db, extra_roots=[tmp_path])
+    agent = await db.get_system_agent(owner["id"])
+    await db.save_session("legacy", "Legacy input", str(tmp_path), "2026-10-20T00:00:00Z",
+                          agent_id=agent["id"], user_id=owner["id"])
     await db.close()
     payload = json.dumps({"content": "Original content", "attachment_ids": [], "attachments": [], "wiki_mode": None})
     accepted = '{"accepted":true,"disposition":"accepted"}'
