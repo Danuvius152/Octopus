@@ -918,7 +918,55 @@ async def test_curator_restructures_losslessly_and_publishes_only_current_source
     assert found["items"][0]["stale"] is True
 
 
-async def test_explicit_submissions_are_idempotent_and_jobs_can_be_cancelled_and_retried(
+@pytest.mark.parametrize("operation", ["read_many", "submit"])
+@pytest.mark.parametrize("caller", ["http", "app"])
+async def test_retired_wiki_urls_are_unregistered_without_effects(
+    client, tmp_path, monkeypatch, operation, caller
+):
+    from datetime import UTC, datetime
+
+    from server.applications import ApplicationManager, app_scope_token
+    from server.routers import applications as app_routes
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    original = "# 当前资料\n旧URL不能创建任务或改写来源。\n"
+    (vault / "note.md").write_text(original)
+    config = await configure(client, vault)
+    prefix, headers = "/api/wiki", client.headers
+    if caller == "app":
+        manager = ApplicationManager()
+        manager.bind(session_mgr=session_manager, db=session_manager.db)
+        monkeypatch.setattr(app_routes, "_manager", manager)
+        now = datetime.now(UTC).isoformat()
+        await session_manager.db.save_application(
+            app_id="sapphire", name="sapphire", app_dir=str(tmp_path / "sapphire"),
+            created_at=now, updated_at=now, agent_id=config["curator_agent_id"],
+            user_id=(await session_manager.db.get_agent(config["curator_agent_id"]))["user_id"],
+        )
+        bound = await client.put("/api/wiki/config", json={
+            "root": str(vault), "curator_agent_id": config["curator_agent_id"], "app_id": "sapphire",
+        })
+        assert bound.status_code == 200, bound.text
+        prefix = "/apps/sapphire/wiki"
+        headers = {"Authorization": f"Bearer {app_scope_token('sapphire')}"}
+    before = (await client.get("/api/wiki/jobs")).json()
+    original_files = {path.relative_to(vault).as_posix(): path.read_bytes()
+                      for path in vault.rglob("*") if path.is_file()}
+    body = {"items": [{"doc": "note.md"}]} if operation == "read_many" else {
+        "idempotency_key": "retired-entry", "material": "不能受理旧入口", "scope": "旧操作",
+    }
+    result = await client.post(f"{prefix}/{operation}", json=body, headers=headers)
+    assert result.status_code == 404, result.text
+    assert (await client.get("/api/wiki/jobs")).json() == before
+    assert (vault / "note.md").read_text() == original
+    assert {path.relative_to(vault).as_posix(): path.read_bytes()
+            for path in vault.rglob("*") if path.is_file()} == original_files
+    assert not any(getattr(route, "path", None) in {"/api/wiki/read_many", "/api/wiki/submit"}
+                   for route in app.routes)
+
+
+async def test_current_maintenance_is_idempotent_and_can_be_cancelled_verified_and_retried(
     client, tmp_path
 ):
     vault = tmp_path / "vault"
@@ -941,10 +989,12 @@ async def test_explicit_submissions_are_idempotent_and_jobs_can_be_cancelled_and
             }
         ],
     }
-    first = await client.post("/api/wiki/submit", json=submission, headers=client.headers)
+    first = await client.post("/api/wiki/maintain", json=submission, headers=client.headers)
     assert first.status_code == 200, first.text
-    second = await client.post("/api/wiki/submit", json=submission, headers=client.headers)
+    second = await client.post("/api/wiki/maintain", json=submission, headers=client.headers)
     assert second.json()["id"] == first.json()["id"]
+    conflict = await client.post("/api/wiki/maintain", json={**submission, "material": "改变原请求"}, headers=client.headers)
+    assert conflict.status_code == 409, conflict.text
     job_id = first.json()["id"]
     cancelled = await client.post(f"/api/wiki/jobs/{job_id}/cancel", headers=client.headers)
     assert cancelled.json()["status"] == "cancelled"
@@ -1254,6 +1304,18 @@ async def test_bound_app_token_can_edit_only_its_registered_wiki(
         assert compact_batch.status_code == 200, compact_batch.text
         assert compact_batch.json()["ranges"] == batch.json()["ranges"]
         assert "metadata" not in compact_batch.json()["documents"][0]
+        maintenance = {"idempotency_key": "bound-app-maintain", "paths": ["note.md"]}
+        queued = await client.post("/apps/sapphire/wiki/maintain", json=maintenance, headers=app_headers)
+        assert queued.status_code == 200, queued.text
+        again = await client.post("/apps/sapphire/wiki/maintain", json=maintenance, headers=app_headers)
+        assert again.status_code == 200 and again.json()["id"] == queued.json()["id"]
+        conflict = await client.post("/apps/sapphire/wiki/maintain", json={**maintenance, "scope": "不同请求"}, headers=app_headers)
+        assert conflict.status_code == 409, conflict.text
+        before_denial = (await client.get("/api/wiki/jobs")).json()
+        blocked = await client.post("/apps/other/wiki/maintain", json=maintenance,
+                                    headers={"Authorization": f"Bearer {app_scope_token('other')}"})
+        assert blocked.status_code == 403, blocked.text
+        assert (await client.get("/api/wiki/jobs")).json() == before_denial
         denied = await client.get(
             "/apps/other/wiki/read?doc=note.md",
             headers={"Authorization": f"Bearer {app_scope_token('other')}"},

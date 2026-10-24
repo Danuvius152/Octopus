@@ -125,14 +125,14 @@ class AssetCurator:
                 # An explicit asset batch returns real text; the missing middle
                 # still prevents this worker from claiming it read the article.
                 request = {"doc": document["id"], "expected_revision": document["revision"]}
-                partial = await self.client.post("/api/wiki/read_many", json={"items": [request], "budget_chars": 5}, headers=headers)
+                partial = await self.client.post("/api/wiki/read-many", json={"items": [request], "budget_chars": 5}, headers=headers)
                 assert partial.status_code == 200, partial.text
                 assert partial.json()["items"][0]["status"] == "partial"
                 assert partial.json()["ranges"][0]["content"] == ORIGINAL[:5]
                 await read(self.client, document["id"], headers, start=document["characters"] - 1)
                 gap = await self.client.post("/api/wiki/organize", json=body, headers=headers)
                 assert gap.status_code == 422 and "full current note" in gap.text
-                complete = await self.client.post("/api/wiki/read_many", json={"items": [request], "budget_chars": 24000}, headers=headers)
+                complete = await self.client.post("/api/wiki/read-many", json={"items": [request], "budget_chars": 24000}, headers=headers)
                 assert complete.status_code == 200, complete.text
                 assert complete.json()["items"][0]["status"] == "ok"
                 assert complete.json()["ranges"][0]["content"] == ORIGINAL
@@ -267,7 +267,7 @@ async def test_asset_no_change_requires_full_read_and_preserves_history(client, 
         body = {"doc": original["id"], "expected_revision": original["revision"], "operation": "no_change", "reason": "当前项目说明完整复核符合用途"}
         denied = await client.post("/api/wiki/revise", json=body, headers=headers)
         assert denied.status_code == 422 and "full current note" in denied.text
-        returned = await client.post("/api/wiki/read_many", json={"items": [{"doc": original["id"], "expected_revision": original["revision"]}]}, headers=headers)
+        returned = await client.post("/api/wiki/read-many", json={"items": [{"doc": original["id"], "expected_revision": original["revision"]}]}, headers=headers)
         assert returned.status_code == 200 and returned.json()["ranges"][0]["content"] == ORIGINAL
         result = await client.post("/api/wiki/revise", json=body, headers=headers)
         assert result.status_code == 200, result.text
@@ -320,7 +320,7 @@ async def test_other_assets_remain_unmaintainable_and_batch_excluded(client, ass
         for modern in (True, False):
             organized = await client.post("/api/wiki/organize", headers=client.headers, json=organize_body(document, modern))
             assert organized.status_code == 422, (path, organized.text)
-        batch = await client.post("/api/wiki/read_many", headers=client.headers, json={"items": [{"doc": document["id"]}]})
+        batch = await client.post("/api/wiki/read-many", headers=client.headers, json={"items": [{"doc": document["id"]}]})
         assert batch.status_code == 200, batch.text
         assert batch.json()["items"][0]["status"] == "excluded"
         assert not batch.json()["ranges"]
@@ -388,7 +388,7 @@ async def test_ordinary_text_keeps_explicit_reads_and_markdown_only_maintenance(
     original = await read(client, path)
     assert original["kind"] != "asset"
     if suffix not in {".md", ".markdown"}:
-        returned = await client.post("/api/wiki/read_many", headers=client.headers, json={"items": [{"doc": original["id"], "expected_revision": original["revision"]}]})
+        returned = await client.post("/api/wiki/read-many", headers=client.headers, json={"items": [{"doc": original["id"], "expected_revision": original["revision"]}]})
         assert returned.status_code == 200, returned.text
         assert returned.json()["items"][0]["status"] == "ok"
         assert returned.json()["ranges"][0]["content"] == original["content"]
@@ -404,7 +404,7 @@ async def test_ordinary_text_keeps_explicit_reads_and_markdown_only_maintenance(
         assert jobs.list()["items"] == []
         return
     with assignment(jobs, config, [path]) as (headers, job, _):
-        returned = await client.post("/api/wiki/read_many", headers=headers, json={"items": [{"doc": original["id"], "expected_revision": original["revision"]}]})
+        returned = await client.post("/api/wiki/read-many", headers=headers, json={"items": [{"doc": original["id"], "expected_revision": original["revision"]}]})
         assert returned.status_code == 200, returned.text
         assert returned.json()["items"][0]["status"] == "ok"
         assert returned.json()["ranges"][0]["content"] == original["content"]

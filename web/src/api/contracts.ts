@@ -1770,23 +1770,6 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
-    "/api/wiki/submit": {
-        parameters: {
-            query?: never;
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        get?: never;
-        put?: never;
-        /** Submit */
-        post: operations["submit_api_wiki_submit_post"];
-        delete?: never;
-        options?: never;
-        head?: never;
-        patch?: never;
-        trace?: never;
-    };
     "/api/wiki/curate": {
         parameters: {
             query?: never;
@@ -5369,20 +5352,6 @@ export interface components {
              * @default []
              */
             steps: string[];
-        };
-        /** Submission */
-        Submission: {
-            /** Idempotency Key */
-            idempotency_key: string;
-            /** Material */
-            material: string;
-            /** Scope */
-            scope: string;
-            /**
-             * Sources
-             * @default []
-             */
-            sources: components["schemas"]["Source"][];
         };
         /** SubmissionExecution */
         SubmissionExecution: {
@@ -9330,41 +9299,6 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["Maintenance"];
-            };
-        };
-        responses: {
-            /** @description Successful Response */
-            200: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": unknown;
-                };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    submit_api_wiki_submit_post: {
-        parameters: {
-            query?: {
-                token?: string | null;
-            };
-            header?: never;
-            path?: never;
-            cookie?: never;
-        };
-        requestBody: {
-            content: {
-                "application/json": components["schemas"]["Submission"];
             };
         };
         responses: {

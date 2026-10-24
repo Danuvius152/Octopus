@@ -325,9 +325,6 @@ class WikiJobs:
             )
         return self.get(job_id)
 
-    def submit(self, key, material, scope, sources, actor):
-        return self.maintain(key, material, scope, [], None, sources, actor)
-
     def maintain(
         self, key, material, scope, paths, target, sources, actor, created_changes=None, *, review=None, selection_task=None,
         selection_id=None, selection_ordinal=None, mcp_scope: McpScope | None = None, creation=None, requester=None

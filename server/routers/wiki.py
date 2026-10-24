@@ -62,7 +62,6 @@ async def app_wiki(request: Request, app_id: str, operation: str):
         ("GET", "image"): (image, None),
         ("GET", "search"): (search, None),
         ("GET", "read"): (read, None),
-        ("POST", "read_many"): (read_many, ReadBatch),
         ("POST", "read-many"): (read_many, ReadBatch),
         ("GET", "blocks"): (get_blocks, None),
         ("GET", "history"): (history, None),
@@ -76,7 +75,6 @@ async def app_wiki(request: Request, app_id: str, operation: str):
     }
     handlers |= {
         ("POST", "maintain"): (maintain, Maintenance),
-        ("POST", "submit"): (submit, Submission),
         ("POST", "curate"): (curate, Curate),
         ("GET", "jobs"): (list_jobs, None),
         ("GET", "documents"): (documents, None),
@@ -548,7 +546,6 @@ def read(
     return result
 
 
-@router.post("/read_many", include_in_schema=False)
 @router.post("/read-many", operation_id="wiki_read_many")
 def read_many(body: ReadBatch, request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
     from ..wiki.batch_read import read_many
@@ -855,13 +852,6 @@ def restructure(
     )
 
 
-class Submission(BaseModel):
-    idempotency_key: str
-    material: str
-    scope: str
-    sources: list[Source] = []
-
-
 class Maintenance(BaseModel):
     model_config = ConfigDict(extra="forbid")
     idempotency_key: str
@@ -907,31 +897,6 @@ def maintain(
         creation=body.creation.model_dump() if body.creation is not None else None,
         requester=requester_for(request, user_id, task),
     )
-
-
-@router.post("/submit")
-def submit(
-    body: Submission,
-    request: Request,
-    user_id: ScopeUser = None,
-    _: str = Depends(verify_token),
-):
-    task = access(request, write=True)
-    if task and task.job_id:
-        raise WikiError("Workers cannot enqueue more maintenance", 403)
-    result = WikiJobs(user_id).maintain(
-        body.idempotency_key,
-        body.material,
-        body.scope,
-        [],
-        None,
-        [s.model_dump() for s in body.sources],
-        actor_for(task, request.path_params.get("app_id")),
-        selection_task=task,
-        mcp_scope=_mcp_scope(request),
-        requester=requester_for(request, user_id, task),
-    )
-    return result
 
 
 class Curate(BaseModel):

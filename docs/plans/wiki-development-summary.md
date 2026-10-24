@@ -90,6 +90,13 @@ F12 当时的两环境完整 Wiki/MCP/accounts 离线组各 **2040 passed / 13 d
 
 worker 写前读当前任务所需范围；整体整理和复核读全文，局部修订读相关位置与必要上下文。终稿冷读覆盖该 job 的全部最终新增/修改区段、标题和必要邻接上下文，后续再改正文便重新覆盖，旧任务阅读不跨任务继承。未选字节由程序保全，含义与表达仍由模型检查。
 
+当前代码的 HTTP 批读和维护入口分别是 `/api/wiki/read-many`、`/api/wiki/maintain`；
+绑定 App 使用 `/apps/{id}/wiki/read-many`、`/apps/{id}/wiki/maintain`，复用相同授权
+和受理检查。旧 HTTP/App `read_many`、`submit` URL 不再注册，不提供重定向；MCP
+工具及能力名称仍为 `read_many`，调用当前 `read-many` 路径。维护继续核对当前身份、
+选择和 scope，同一幂等键及原载荷返回原 job，改变载荷返回409。入口退出不删除
+当前任务、文章或来源证明，也不表示相应代码已经发布到正在运行的安装。
+
 普通会话启动时只常驻简短 Wiki 能力入口；使用 Wiki 时按需取得 query/entry/retrieval 指南及当前操作卡。load_guide 在同一次授权视图中返回公共规则、模块正文、操作卡和实际正文 digest；已有完整指南先按当前操作卡的 guide_digests 核验后复用。整包 guide_hash 不能区分 auto-entry 与显式 entry，不作为正文缓存键，也不授予权限。未使用 Wiki 的任务不预装查询或入库指南。
 
 worker 先按需加载 worker 基础合同，再按需加载 maintenance/article/writing 指南；只有有效当前 assignment 才开放这些维护模块。取消、结束或注册失效后，旧卡与旧 digest 不能恢复授权。worker 根据服务回执、输出版本和索引结束本轮，框架在模型返回后确认 job 终态，不能在任务内等待自己的 job 完成。
