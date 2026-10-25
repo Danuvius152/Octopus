@@ -190,7 +190,7 @@ async def test_real_codex_schedules_an_interval_run(tmp_path, monkeypatch):
 
         am = AgentManager(db)
         owner = (await db.get_system_agent())["user_id"]
-        agent = await am.create_agent(name="Codexy", backend="codex", user_id=owner)
+        agent = await am.create_agent(name="Codexy", backend="codex", mcp_servers=["schedule"], user_id=owner)
         session = await session_manager.create_session(
             agent_id=agent["id"], name="sched", working_dir=wd, backend="codex"
         )

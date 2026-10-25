@@ -131,16 +131,39 @@ def populate(vault):
         path.write_text(content)
 
 
-@pytest.fixture
-def store(tmp_path):
-    root = tmp_path / "vault"
+def populated_store(directory):
+    root = directory / "vault"
     root.mkdir()
     populate(root)
-    return WikiStore(root, tmp_path / "state", str(uuid.uuid4()), create=True)
+    return WikiStore(root, directory / "state", str(uuid.uuid4()), create=True)
+
+
+@pytest.fixture
+def store(tmp_path):
+    current = populated_store(tmp_path)
+    try:
+        yield current
+    finally:
+        current.close()
+
+
+@pytest.fixture(scope="module")
+def readonly_store(tmp_path_factory):
+    """Only the query matrix shares this unchanged corpus and real index.
+
+    Tests that edit files, indexes or fault hooks use the function-scoped store.
+    Each query still performs its own current-revision content read.
+    """
+    current = populated_store(tmp_path_factory.mktemp("search-query-corpus"))
+    try:
+        yield current
+    finally:
+        current.close()
 
 
 @pytest.mark.parametrize("query,expected", CASES)
-def test_relevance_and_current_chapter_evidence(store, query, expected):
+def test_relevance_and_current_chapter_evidence(readonly_store, query, expected):
+    store = readonly_store
     result = store.search(query)
     assert result["index_status"] == "ready"
     assert result["items"][0]["path"] == expected

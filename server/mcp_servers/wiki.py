@@ -337,7 +337,8 @@ def organize(
     for a specific correction or addition to existing points. aliases are a few
     reliable names; native frontmatter stays intact. relations have doc,
     revision, location (L1-L3 or an actual heading), explanation; read their
-    cited current passages first. New links use unique vault-path wikilinks.
+    cited current passages first. Omit relations to preserve existing managed
+    relations; [] explicitly clears them. New links use unique vault-path wikilinks.
     For an existing navigation page outside the assigned body targets, pass
     only relations to current batch documents: the host appends fixed links,
     preserving its body and metadata. This does not complete a batch item.
@@ -353,7 +354,7 @@ def organize(
             "reason": reason,
             "key_note": key_note,
             "tags": tags,
-            "relations": relations or [],
+            "relations": relations,
             "sources": sources,
             "aliases": aliases,
             "reuse_existing_summary": reuse_existing_summary,

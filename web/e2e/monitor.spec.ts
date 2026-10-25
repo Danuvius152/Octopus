@@ -14,7 +14,7 @@ import { enterAccountCredentials } from "./current-account";
  * spawned seven-per-session.
  */
 
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Page } from "./test";
 
 async function login(page: Page) {
   await page.goto("/");

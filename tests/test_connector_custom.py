@@ -147,7 +147,7 @@ def test_custom_connector_shape():
     entry = c.mcp_entry(inst, {"OCTOPUS_API_BASE": "x", "PYTHONPATH": "p"})
     assert entry["args"] == ["-m", "server.mcp_servers.connectors.custom"]
     assert entry["env"]["OCTOPUS_INSTALLATION_ID"] == "abcdef123456"
-    assert entry["env"]["OCTOPUS_CONNECTOR_API_BASE"] == "https://api.linear.app/graphql"
+    assert "OCTOPUS_CONNECTOR_API_BASE" not in entry["env"]
     assert c.mcp_key(inst) == "linear_abcdef"
 
 

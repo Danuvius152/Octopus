@@ -1,7 +1,7 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import {
   test, expect, type Page, type APIRequestContext, type WebSocketRoute,
-} from "@playwright/test";
+} from "./test";
 
 // The research UI uses controlled REST responses and WS events so cancellation
 // cannot race a real model finishing (or an unavailable CLI failing). Sessions

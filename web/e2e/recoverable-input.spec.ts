@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./test";
 import { enterAccountCredentials } from "./current-account";
 
 /** Browser recovery contract; real SQLite reopen is covered in backend tests. */

@@ -93,6 +93,7 @@ def _latest_checkpoint(path: str, thread_id: str) -> str | None:
 async def refresh_instructions(ctx: TurnContext, argv: list[str], options: dict[str, Any]) -> None:
     if not ctx.resume_id:
         return
+    from ..process_groups import wait_group_exit
     from .run import _terminate_process_group
 
     spawn = asyncio.create_task(asyncio.create_subprocess_exec(
@@ -118,9 +119,9 @@ async def refresh_instructions(ctx: TurnContext, argv: list[str], options: dict[
             stderr = asyncio.create_task(drain(process.stderr))
         if stdout is None and process.stdout is not None:
             stdout = asyncio.create_task(drain(process.stdout))
-        if process.returncode is None:
-            _terminate_process_group(process, signal.SIGKILL)
+        _terminate_process_group(process, signal.SIGKILL)
         await process.wait()
+        await wait_group_exit(process.pid, timeout=2.0, after_kill=True)
         await drain_cancelled(stderr, "Codex controller stderr")
         await drain_cancelled(stdout, "Codex controller stdout")
 

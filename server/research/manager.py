@@ -17,9 +17,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import uuid
+from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
@@ -37,7 +39,12 @@ from ..knowledge import (
 from ..mcp_identity import McpScope, work_is_open
 from ..sessions.runtime_types import SessionOwnerUnavailable
 from ..workspace import paths_for
-from .orchestrator import ResearchLimits, ResearchProgress, run_research
+from .orchestrator import (
+    ResearchLimits,
+    ResearchProgress,
+    ResearchSynthesisError,
+    run_research,
+)
 
 if TYPE_CHECKING:
     from ..database import Database
@@ -261,6 +268,11 @@ class ResearchManager:
             ))
         except asyncio.CancelledError:
             raise
+        except ResearchSynthesisError as exc:
+            evidence = os.path.join(_research_dir(session.user_id), job_id, "synthesis-failure.json")
+            with open(evidence, "w", encoding="utf-8") as handle:
+                json.dump({"error": str(exc), **asdict(exc.partial)}, handle, ensure_ascii=False, indent=2)
+            await self._finalize_failed(job_id, session_id, "failed", str(exc))
         except TimeoutError:
             if report is not None or self._closing:
                 raise

@@ -12,6 +12,7 @@ import {
 import { reorderAgentPins, setAgentPinned } from "../api/agents";
 import { fetchInstallations } from "../api/connectors";
 import { selectSession } from "../lib/selectSession";
+import { loadSessionSnapshot, sessionInfoFromDetail } from "../lib/hydrateSession";
 import { sidebarAgents, withPinOrder } from "../lib/sidebarPins";
 import { useSessionStore, type Agent, type SessionInfo } from "../stores/sessionStore";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
@@ -70,6 +71,7 @@ export function SidebarAgents() {
   const [formBackend, setFormBackend] = useState("");
   const [formCredentialId, setFormCredentialId] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
+  const [archiveError, setArchiveError] = useState("");
   const credentials = useSessionStore((s) => s.credentials);
   const availableBackends = useSessionStore((s) => s.availableBackends);
 
@@ -227,25 +229,48 @@ export function SidebarAgents() {
   // its place, and its history stays — the archived-sessions page restores it
   // (sidebar-pins.md §6). Nothing in the sidebar destroys anything.
   const archiveSession = async (id: string) => {
+    const start = useSessionStore.getState();
+    const current = () => {
+      const store = useSessionStore.getState();
+      return store.accountGeneration === start.accountGeneration && store.dispatchGeneration === start.dispatchGeneration;
+    };
+    const adoptArchived = (archived?: SessionInfo) => {
+      if (!current()) return;
+      const store = useSessionStore.getState();
+      const info = archived ?? store.sessions.find((s) => s.id === id);
+      store.setSessions(store.sessions.filter((s) => s.id !== id));
+      if (info) store.setArchivedSessions([
+        { ...info, archived: true }, ...store.archivedSessions.filter((s) => s.id !== id),
+      ]);
+      if (store.activeSessionId === id) store.setActiveSessionId(null);
+      setArchiveError("");
+    };
+    setArchiveError("");
     try {
-      await fetch(`${API}/api/sessions/${id}/archive?replace=false`, {
+      const res = await fetch(`${API}/api/sessions/${id}/archive?replace=false`, {
         method: "POST",
         headers,
       });
-    } catch {
-      // ignore — the list refresh below is what the user sees
-    }
-    const store = useSessionStore.getState();
-    const archived = store.sessions.find((s) => s.id === id);
-    setSessions(store.sessions.filter((s) => s.id !== id));
-    if (archived) {
-      store.setArchivedSessions([
-        { ...archived, archived: true },
-        ...store.archivedSessions.filter((s) => s.id !== id),
-      ]);
-    }
-    if (useSessionStore.getState().activeSessionId === id) {
-      useSessionStore.getState().setActiveSessionId(null);
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        if (current()) setArchiveError(typeof body?.detail === "string" ? body.detail : `Could not archive session (HTTP ${res.status}).`);
+        return;
+      }
+      adoptArchived();
+    } catch (failure) {
+      if (!current()) return;
+      // The POST may have succeeded before its response was lost. Confirm the
+      // server's session state before changing the local list or selection.
+      try {
+        const detail = await loadSessionSnapshot(id, start);
+        if (detail?.archived === true) {
+          adoptArchived(sessionInfoFromDetail(detail));
+          return;
+        }
+      } catch {
+        // Retain the current selection when the outcome cannot be confirmed.
+      }
+      if (current()) setArchiveError(failure instanceof Error ? failure.message : "Could not confirm session archival. Refresh and try again.");
     }
   };
 
@@ -541,6 +566,7 @@ export function SidebarAgents() {
           className: "btn-agent-add",
         }}
       />
+      {archiveError && <p role="alert" className="px-2 text-xs text-destructive">{archiveError}</p>}
 
       <div className="agent-list-items flex flex-col">
         <SortablePins

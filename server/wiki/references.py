@@ -137,19 +137,10 @@ def local_references(text, *, body_start=None, parsed=None):
     else:
         stream = (parsed if parsed is not None else parse(text)).tokens
     for token in stream:
-        for child in token.children or []:
-            if child.type in {"link_open", "image"}:
-                resource = child.attrGet("href" if child.type == "link_open" else "src")
-                if resource:
-                    reference = uri_reference(resource, "markdown_link")
-                    if reference.namespace != "external":
-                        yield reference
-            elif child.type == "text":
-                for match in re.finditer(r"\[\[([^\]\n]+)\]\]", child.content):
-                    resource = match[1].split("|", 1)[0]
-                    reference = uri_reference(resource, "wikilink", wiki=True)
-                    if reference.namespace != "external":
-                        yield reference
+        for relation, resource in token.meta.get("local_reference_inputs", []):
+            reference = uri_reference(resource, relation, wiki=relation == "wikilink")
+            if reference.namespace != "external":
+                yield reference
 
 
 def candidate_keys(reference, parent, source_doc=None):

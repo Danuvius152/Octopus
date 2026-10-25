@@ -406,9 +406,11 @@ class ConnectorManager:
                     last_refresh_error_code=None,
                 )
 
+            connector = await resolve_connector(self.db, inst["kind"])
             return {
                 "access_token": ts.access_token,
                 "expires_at_epoch": ts.expires_at_epoch,
+                "api_base": getattr(connector, "api_base", None),
             }
 
     # --- agent-scoped enablement -----------------------------------------

@@ -110,7 +110,7 @@ async def test_shutdown_retains_backend_when_kill_does_not_confirm_exit(tmp_path
     try:
         with pytest.raises(RuntimeError, match="process exit unconfirmed"):
             await asyncio.wait_for(supervisor.shutdown(), timeout=0.3)
-        assert signals == [signal.SIGTERM, signal.SIGKILL]
+        assert [sig for sig in signals if sig != 0] == [signal.SIGTERM, signal.SIGKILL]
         assert supervisor.get(state.app_id).process is proc
         assert state.pid == proc.pid and state.state != STOPPED
         proc.returncode = -9

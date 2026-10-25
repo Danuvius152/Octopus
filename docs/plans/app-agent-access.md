@@ -63,6 +63,12 @@ and its delivered notification prefix. Failed or unavailable notification
 ends the app request with an explicit delivery error, preserving any already
 committed transcript/outcome for the original status lookup; it never replays
 the operation. Cancelling an app waiter does not cancel an admitted command.
+HTTP timeouts, caller cancellation and SSE disconnection detach only that
+response consumer. The application keeps the original execution in its active
+count and conversation list until its receipt and resource retirement finish,
+including cleanup after a failed SessionOwner. Admission is serialized per app
+through conversation creation and turn registration, so concurrent requests
+cannot exceed either the execution or conversation cap.
 This is distinct from `ApplicationManager`'s build-status consumer, which also
 observes the original completion, including direct chat in the build session.
 See the [architecture execution plan](minimal-architecture-execution-20261020.md),

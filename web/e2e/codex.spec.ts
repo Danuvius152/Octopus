@@ -1,4 +1,4 @@
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "./test";
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 
 // Full-stack Codex proof: the backend selector appears when codex is

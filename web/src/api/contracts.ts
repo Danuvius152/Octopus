@@ -3674,6 +3674,8 @@ export interface components {
             access_token: string;
             /** Expires At Epoch */
             expires_at_epoch: number;
+            /** Api Base */
+            api_base?: string | null;
         };
         /** CreateAgentScheduleRequest */
         CreateAgentScheduleRequest: {
@@ -4528,11 +4530,8 @@ export interface components {
             key_note?: string | null;
             /** Tags */
             tags?: string[] | null;
-            /**
-             * Relations
-             * @default []
-             */
-            relations: components["schemas"]["Relation"][];
+            /** Relations */
+            relations?: components["schemas"]["Relation"][] | null;
             /** Sources */
             sources?: components["schemas"]["Source"][] | null;
             /** Aliases */

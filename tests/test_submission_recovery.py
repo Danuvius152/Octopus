@@ -339,7 +339,7 @@ async def runtime(monkeypatch, tmp_path):
         await db.close()
 
 
-async def test_real_dispatch_withdraws_second_input_without_erasing_first_history(runtime):
+async def test_real_dispatch_withdraws_second_input_without_erasing_first_history(runtime, short_process_shutdown):
     import asyncio
 
     manager, db, session, _, starts, _ = runtime

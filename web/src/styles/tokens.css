@@ -102,10 +102,10 @@
    * technical string — ids, counts, cron, costs, command names — in IBM
    * Plex Mono. Noto Sans SC carries CJK in both. */
   --font-family-sans:
-    "Hanken Grotesk", "Noto Sans SC", system-ui, -apple-system, "Segoe UI",
+    "Hanken Grotesk Variable", "Noto Sans SC Variable", system-ui, -apple-system, "Segoe UI",
     Roboto, sans-serif;
   --font-family-mono:
-    "IBM Plex Mono", "Noto Sans SC", ui-monospace, "SF Mono", Menlo, Monaco,
+    "IBM Plex Mono", "Noto Sans SC Variable", ui-monospace, "SF Mono", Menlo, Monaco,
     Consolas, monospace;
 
   /* Tabler icons — consistent stroke weight across the app */

@@ -13,6 +13,7 @@ parameter (login_id + random half) is the trust anchor instead.
 from __future__ import annotations
 
 import logging
+from html import escape
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import HTMLResponse
@@ -94,6 +95,7 @@ def _public_base(request: Request) -> str:
 
 
 def _callback_page(title: str, body: str) -> HTMLResponse:
+    title, body = escape(title), escape(body)
     return HTMLResponse(
         f"""<!doctype html><html><head><meta charset="utf-8">
 <title>{title}</title></head>

@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useSessionStore, type BgTask, type SubagentRun } from "../stores/sessionStore";
 import { handleWsMessage } from "../hooks/useWebSocket";
-import { hydrateSession, loadBgTaskSnapshot, loadSessionAndBgSnapshots, loadSessionSnapshot } from "./hydrateSession";
+import { hydrateSession, loadBgTaskSnapshot, loadSessionSnapshots, loadSessionSnapshot } from "./hydrateSession";
 import { selectSession } from "./selectSession";
 
 function deferred() {
@@ -129,7 +129,7 @@ it("keeps paired request failure atomic and leaves archived detail out of the li
   const detail = deferred();
   const background = deferred();
   vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("bg-tasks") ? background.promise : detail.promise));
-  const loaded = loadSessionAndBgSnapshots("archived");
+  const loaded = loadSessionSnapshots("archived");
   const rejection = expect(loaded).rejects.toThrow("offline");
   detail.resolve(json({ id: "archived", archived: true, messages: [], dispatch_state: null }));
   background.reject(new Error("offline"));
@@ -137,7 +137,7 @@ it("keeps paired request failure atomic and leaves archived detail out of the li
   expect(useSessionStore.getState().messages.archived).toBeUndefined();
 
   vi.stubGlobal("fetch", vi.fn(async (url: string) => json(url.endsWith("bg-tasks") ? [] : { id: "archived", archived: true, messages: [], dispatch_state: null })));
-  await loadSessionAndBgSnapshots("archived");
+  await loadSessionSnapshots("archived");
   expect(useSessionStore.getState().messages.archived).toEqual([]);
   expect(useSessionStore.getState().sessions).toEqual([]);
 });

@@ -1,4 +1,4 @@
-import { addSessionInfo, loadSessionAndBgSnapshots, sessionInfoFromDetail } from "./hydrateSession";
+import { addSessionInfo, loadSessionSnapshots, sessionInfoFromDetail } from "./hydrateSession";
 import { useSessionStore } from "../stores/sessionStore";
 
 /** Make `sessionId` the active chat session and load its snapshot.
@@ -19,7 +19,7 @@ export async function selectSession(
   store.setActiveSessionId(sessionId);
 
   try {
-    await loadSessionAndBgSnapshots(sessionId, store, (data) => {
+    await loadSessionSnapshots(sessionId, store, (data) => {
       // A session created server-side (an application's build session, a
       // delegation child) may not be in the sidebar list yet. We already have
       // its detail in hand — adopt it rather than spending another request.

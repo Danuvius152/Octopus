@@ -72,7 +72,9 @@ async def test_worker_controls_only_own_job_and_gets_bounded_result(jobs, client
 async def test_each_queued_cancellation_finishes_without_a_settlement_poller(jobs):
     first = enqueue(jobs)
     identifiers = [first["id"]]
-    for index in range(10):
+    # Several independent jobs exercise concurrent settlement; volume is not
+    # part of the cancellation contract.
+    for index in range(2):
         identifiers.append(jobs.maintain(f"pending-{index}", "", "Review", ["Library/note.md"], None, [], "human")["id"])
     await asyncio.gather(*(jobs.cancel(job_id, None) for job_id in identifiers))
     await asyncio.gather(*(jobs.settle_cancelled(job_id, None) for job_id in identifiers))

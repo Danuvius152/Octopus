@@ -100,6 +100,7 @@ export default defineConfig({
   use: {
     baseURL: "http://localhost:5174",
     headless: true,
+    serviceWorkers: offline ? "block" : "allow",
   },
   projects: [
     {

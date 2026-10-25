@@ -30,6 +30,7 @@ from typing import Any
 
 from ..config import settings
 from ..diagnostics import diagnostic_text, exception_diagnostic
+from ..process_groups import group_exists, wait_group_exit
 from . import assembly
 from .events import HarnessCredential, HarnessEvent
 from .profile import ActivityObserver, RuntimeProfile, StdinMode, TurnContext
@@ -128,27 +129,12 @@ def prepare_spawn(
 
 
 def _terminate_process_group(proc: asyncio.subprocess.Process, sig: int) -> bool:
-    """Signal the whole process group led by `proc` (so nested CLI children die
-    with it), falling back to the direct child if the group can't be resolved.
-    Returns True if a group signal was sent. Idempotent / best-effort —
-    swallows the races where the process already exited (turn-safety.md §2)."""
-    if proc.returncode is not None:
+    """Signal the captured group, including after its leader has exited."""
+    try:
+        os.killpg(proc.pid, sig)
+        return True
+    except ProcessLookupError:
         return False
-    try:
-        pgid = os.getpgid(proc.pid)
-    except (ProcessLookupError, PermissionError):
-        pgid = None
-    if pgid is not None:
-        try:
-            os.killpg(pgid, sig)
-            return True
-        except (ProcessLookupError, PermissionError):
-            return False
-    try:
-        proc.send_signal(sig)
-    except (ProcessLookupError, PermissionError):
-        pass
-    return False
 
 
 async def _await_owned_task[T](task: asyncio.Task[T]) -> T:
@@ -464,6 +450,7 @@ class HarnessRun:
                     if abandoned is not None:
                         _terminate_process_group(abandoned, signal.SIGKILL)
                         await asyncio.wait_for(abandoned.wait(), timeout=4.0)
+                        await wait_group_exit(abandoned.pid, timeout=2.0, after_kill=True)
                 except Exception as error:
                     logger.error("Harness startup retirement failed provider=%s run=%s error_type=%s\n%s",
                                  self._profile.backend, self.run_lease_id, type(error).__name__,
@@ -492,6 +479,7 @@ class HarnessRun:
             self._process = process
             _terminate_process_group(process, signal.SIGKILL)
             await asyncio.wait_for(process.wait(), timeout=4.0)
+            await wait_group_exit(process.pid, timeout=2.0, after_kill=True)
             raise asyncio.CancelledError
         self._process = process
         self._spawn_identity = spawn_identity
@@ -738,6 +726,7 @@ class HarnessRun:
             if pending is not None and self._process is None:
                 _terminate_process_group(pending, signal.SIGKILL)
                 await pending.wait()
+                await wait_group_exit(pending.pid, timeout=2.0, after_kill=True)
         proc = self._process
         if proc is None:
             self._close_stream()
@@ -761,20 +750,20 @@ class HarnessRun:
             try:
                 await asyncio.wait_for(proc.wait(), timeout=2.0)
             except TimeoutError:
-                # Escalate to the whole process GROUP so nested CLI children
-                # (MCP servers, subagents) die too, not just the direct child
-                # (turn-safety.md §2).
-                logger.warning("Harness retirement escalation provider=%s run=%s signal=SIGTERM",
+                pass
+        # The leader's wait and pipe EOF cannot prove its redirected children
+        # stopped. Keep the captured group until every writer has retired.
+        if await asyncio.to_thread(group_exists, proc.pid):
+            logger.warning("Harness retirement escalation provider=%s run=%s signal=SIGTERM",
+                           self._profile.backend, self.run_lease_id)
+            _terminate_process_group(proc, signal.SIGTERM)
+            try:
+                await wait_group_exit(proc.pid, timeout=2.0)
+            except TimeoutError:
+                logger.warning("Harness retirement escalation provider=%s run=%s signal=SIGKILL",
                                self._profile.backend, self.run_lease_id)
-                _terminate_process_group(proc, signal.SIGTERM)
-                try:
-                    await asyncio.wait_for(proc.wait(), timeout=2.0)
-                except TimeoutError:
-                    logger.warning("Harness retirement escalation provider=%s run=%s signal=SIGKILL",
-                                   self._profile.backend, self.run_lease_id)
-                    _terminate_process_group(proc, signal.SIGKILL)
-                    # asyncio's pending wait also needs pipe EOF. A paused
-                    # output transport must be drained before joining it.
+                _terminate_process_group(proc, signal.SIGKILL)
+                await wait_group_exit(proc.pid, timeout=2.0, after_kill=True)
         for task, name in (
             (self._stdout_task, "stdout reader"),
             (self._stderr_task, "stderr reader"),

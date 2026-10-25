@@ -1,11 +1,21 @@
 """Untrusted portable comments supply data, never extractor/index state."""
 
 import json
+import re
 
-VERSION = 1
+VERSION = 2
 _STRINGS = {"title", "description", "type", "status", "resource", "uid"}
 _KINDS = {"original", "source", "concept", "topic", "submission"}
 _REF_FIELDS = {"resource", "doc", "path", "revision", "location", "id"}
+
+
+def from_document(parsed):
+    """Only actual Markdown HTML comments can supply portable metadata."""
+    for comment in parsed.html_comments:
+        match = re.fullmatch(r"\s*octopus-wiki\s+(.*?)\s*", comment, re.S)
+        if match is not None:
+            return validate(json.loads(match[1]))
+    return {}
 
 
 def validate(value):

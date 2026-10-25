@@ -1,12 +1,16 @@
 import { useEffect, useRef, useState } from "react";
 import type { WikiJobCard, WikiJobDetail, WikiJobOutput } from "../api";
 import { controlWikiJob, loadWikiJobDetail, loadWikiJobOutput } from "../lib/wikiJobs";
+import { newSubmissionId } from "../lib/submission";
 import { useSessionStore } from "../stores/sessionStore";
 
 export function WikiJobDetails({ card, sessionId, close, setUnavailable }: {
   card: WikiJobCard; sessionId: string; close: () => void; setUnavailable: (value: boolean) => void;
 }) {
-  const [attempt, setAttempt] = useState(card.attempt);
+  // An explicit historical selection stays put; the current selection follows
+  // a new attempt when a retry updates the card.
+  const [selectedAttempt, setSelectedAttempt] = useState<number | null>(null);
+  const attempt = selectedAttempt ?? card.attempt;
   const [detail, setDetail] = useState<WikiJobDetail | null>(null);
   const [output, setOutput] = useState<WikiJobOutput | null>(null);
   const [error, setError] = useState("");
@@ -18,7 +22,7 @@ export function WikiJobDetails({ card, sessionId, close, setUnavailable }: {
   const reading = useRef(0);
   const token = useSessionStore((state) => state.token);
   const generation = useSessionStore((state) => state.dispatchGeneration);
-  const { job_id, vault_id } = card;
+  const { job_id, vault_id, state_version } = card;
   useEffect(() => {
     let active = true;
     const reads = reading;
@@ -33,17 +37,19 @@ export function WikiJobDetails({ card, sessionId, close, setUnavailable }: {
       }
     }).catch((failure) => { if (active) setError(String(failure.message)); });
     return () => { active = false; reads.current++; };
-  }, [job_id, vault_id, attempt, token, generation, refresh, setUnavailable]);
+  }, [job_id, vault_id, state_version, attempt, token, generation, refresh, setUnavailable]);
 
   const more = async () => {
     if (!detail || detail.next_offset === null) return;
+    const identity = reading.current;
     setBusy(true);
     try {
       const page = await loadWikiJobDetail(card, attempt, detail.next_offset);
+      if (reading.current !== identity) return;
       if (page === null) setUnavailable(true);
       else setDetail({ ...page, items: [...detail.items, ...page.items], outputs: [...detail.outputs, ...page.outputs] });
-    } catch (failure) { setError(failure instanceof Error ? failure.message : "Could not load task details."); }
-    finally { setBusy(false); }
+    } catch (failure) { if (reading.current === identity) setError(failure instanceof Error ? failure.message : "Could not load task details."); }
+    finally { if (reading.current === identity) setBusy(false); }
   };
   const read = async (receipt: string, view: "history" | "current", more = false) => {
     const identity = ++reading.current;
@@ -62,20 +68,23 @@ export function WikiJobDetails({ card, sessionId, close, setUnavailable }: {
         paths: newPaths.split("\n").map((path) => path.trim()).filter(Boolean) } } : {}),
     } : {};
     const key = JSON.stringify([action, attempt, scope]);
-    if (!operations.current.has(key)) operations.current.set(key, crypto.randomUUID());
+    const identity = reading.current;
     setBusy(true); setError("");
     try {
+      if (!operations.current.has(key)) operations.current.set(key, newSubmissionId());
       await controlWikiJob(sessionId, { ...card, attempt }, action, { ...scope, operation_id: operations.current.get(key)! });
       operations.current.delete(key);
-      setRefresh((value) => value + 1);
-    } catch (failure) { setError(failure instanceof Error ? failure.message : "Could not update the task."); }
-    finally { setBusy(false); }
+      if (reading.current === identity) setRefresh((value) => value + 1);
+    } catch (failure) { if (reading.current === identity) setError(failure instanceof Error ? failure.message : "Could not update the task."); }
+    finally { if (reading.current === identity) setBusy(false); }
   };
   return <section role="dialog" aria-label="Wiki task details" className="mt-2 space-y-2 rounded border border-border p-3 text-xs">
     <div className="flex justify-between gap-2"><strong>Task details</strong><button onClick={close}>Close details</button></div>
     {detail && <>
       <label>Attempt <select aria-label="Maintenance attempt" value={attempt} disabled={busy} onChange={(event) => {
-        setDetail(null); setAttempt(Number(event.target.value));
+        setDetail(null);
+        const next = Number(event.target.value);
+        setSelectedAttempt(next === card.attempt ? null : next);
       }}>{detail.attempts.map((value) => <option key={value} value={value}>{value}{value === detail.current_attempt ? " (current)" : " (historical)"}</option>)}</select></label>
       {detail.error && <pre className="whitespace-pre-wrap break-words text-destructive">{detail.error}</pre>}
       {detail.items.map((item) => <div key={item.key}><p>{item.path} · {item.status}</p>

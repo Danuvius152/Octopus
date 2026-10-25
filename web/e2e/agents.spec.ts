@@ -1,5 +1,5 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "./test";
 
 const TOKEN = TEST_BEARER;
 const AGENTS_API = "http://localhost:8765/api/agents";

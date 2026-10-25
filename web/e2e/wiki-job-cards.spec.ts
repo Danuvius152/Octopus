@@ -1,5 +1,5 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
-import { expect, test, type WebSocketRoute } from "@playwright/test";
+import { expect, test, type WebSocketRoute } from "./test";
 import { systemAgentId } from "./system-agent";
 
 const API = "http://localhost:8765/api";

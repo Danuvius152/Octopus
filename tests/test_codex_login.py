@@ -7,6 +7,7 @@ same URL + code shape and writes auth.json on the success path."""
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -298,3 +299,176 @@ async def test_codex_login_cancel_route(client, monkeypatch):
     assert cancel.status_code == 204
     st = await c.get(f"/api/credentials/codex/{login_id}/status", headers=c.headers)
     assert st.json()["state"] == "cancelled"
+
+
+@pytest.mark.parametrize("outcome", ["cancel", "failure", "spawn_failure", "invalid_auth", "success"])
+async def test_reauthorization_preserves_existing_home_and_only_publishes_valid_auth(tmp_path, monkeypatch, outcome):
+    credential_id = "existing"
+    home = Path(codex_login.codex_home_for(credential_id))
+    home.mkdir(parents=True)
+    originals = {
+        "auth.json": b'{"tokens":{"access_token":"existing-auth"}}',
+        "config.toml": b'model = "existing-model"\n',
+        "sessions/2026/10/25/rollout-existing.jsonl": b'{"original":"native-record"}\n',
+    }
+    for relative, contents in originals.items():
+        target = home / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(contents)
+
+    # A failing or cancelled CLI may already have written files. Its write
+    # authority must be confined to this login's staging home.
+    script = tmp_path / "reauth.py"
+    script.write_text(
+        "import os, pathlib, sys, time\n"
+        "home = pathlib.Path(os.environ['CODEX_HOME'])\n"
+        "(home / 'auth.json').write_text('{\"tokens\":{\"access_token\":\"new-auth\"}}')\n"
+        "(home / 'config.toml').write_text('damaged config')\n"
+        "(home / 'sessions').mkdir(exist_ok=True)\n"
+        "(home / 'sessions' / 'replacement.jsonl').write_text('wrong record')\n"
+        "print('https://auth.example/device TEST-CODE9', flush=True)\n"
+        + ("time.sleep(30)\n" if outcome == "cancel" else
+           "sys.exit(1)\n" if outcome == "failure" else
+           "(home / 'auth.json').write_text('not-json')\n" if outcome == "invalid_auth" else "")
+    )
+    monkeypatch.setattr(codex_login, "build_codex_login_argv", lambda: [sys.executable, str(script)])
+    if outcome == "spawn_failure":
+        async def fail_spawn(*args, **kwargs):
+            raise OSError("synthetic spawn failure")
+
+        monkeypatch.setattr(codex_login.asyncio, "create_subprocess_exec", fail_spawn)
+
+    mgr = codex_login.CodexLoginManager()
+    try:
+        if outcome == "spawn_failure":
+            with pytest.raises(RuntimeError, match="synthetic spawn failure"):
+                await mgr.start("Reauthorize", reauth_credential_id=credential_id)
+        else:
+            session = await mgr.start("Reauthorize", reauth_credential_id=credential_id)
+            assert session.codex_home == str(home)
+            assert session._login_home != str(home)
+            if outcome == "cancel":
+                await asyncio.wait_for(session._scraped.wait(), 2)
+                await mgr.cancel(session.id)
+            else:
+                await asyncio.wait_for(session._task, 2)
+            assert session.state.value == (
+                "success" if outcome == "success" else "cancelled" if outcome == "cancel" else "error"
+            )
+        for relative, contents in originals.items():
+            if outcome == "success" and relative == "auth.json":
+                assert b"new-auth" in (home / relative).read_bytes()
+                assert (home / relative).stat().st_mode & 0o777 == 0o600
+            else:
+                assert (home / relative).read_bytes() == contents
+        assert not (home / "sessions/replacement.jsonl").exists()
+        assert sorted(path.name for path in home.parent.iterdir()) == [credential_id]
+    finally:
+        await mgr.shutdown()
+
+
+async def test_codex_status_retries_and_concurrent_pollers_return_one_owned_credential(client, tmp_path):
+    c, db = client
+    owner = (await db.get_system_agent())["user_id"]
+    session = codex_login.CodexLoginSession(
+        id="successful-login", credential_id="one-credential", codex_home=str(tmp_path / "login-home"),
+        label="Retryable login", state=codex_login.CodexLoginState.success, user_id=owner,
+    )
+    codex_login.codex_login_manager._sessions[session.id] = session
+    path = f"/api/credentials/codex/{session.id}/status"
+    replies = await asyncio.gather(*(c.get(path) for _ in range(5)))
+    assert all(reply.status_code == 200 for reply in replies)
+    assert all(reply.json()["credential"]["id"] == session.credential_id for reply in replies)
+    assert len(await db.load_credentials(owner)) == 1
+    # Discard all prior responses and retry after persistence.
+    assert (await c.get(path)).json()["credential"]["id"] == session.credential_id
+    await db.delete_credential(session.credential_id)
+    deleted = await c.get(path)
+    assert deleted.status_code == 200
+    assert deleted.json()["state"] == "error"
+    assert deleted.json()["credential"] is None
+    assert "no longer available" in deleted.json()["message"]
+    assert await db.load_credentials(owner) == []
+
+
+async def test_codex_status_is_not_readable_by_another_account(client, tmp_path):
+    c, db = client
+    owner = (await db.get_system_agent())["user_id"]
+    other, other_bearer = await create_account(db, username="other-status-owner")
+    assert other["id"] != owner
+    session = codex_login.CodexLoginSession(
+        id="private-login", credential_id="private-credential", codex_home=str(tmp_path / "private-home"),
+        label="Private", state=codex_login.CodexLoginState.success, user_id=owner,
+    )
+    codex_login.codex_login_manager._sessions[session.id] = session
+    response = await c.get(f"/api/credentials/codex/{session.id}/status", headers={"Authorization": f"Bearer {other_bearer}"})
+    assert response.status_code == 404
+    assert not session.persisted
+
+
+async def test_new_login_launch_failure_removes_only_its_owned_home(monkeypatch):
+    async def fail_spawn(*args, **kwargs):
+        raise OSError("synthetic launch failure")
+
+    monkeypatch.setattr(codex_login.asyncio, "create_subprocess_exec", fail_spawn)
+    mgr = codex_login.CodexLoginManager()
+    try:
+        with pytest.raises(RuntimeError, match="synthetic launch failure"):
+            await mgr.start("new login")
+        assert list(Path(codex_login.codex_home_root()).iterdir()) == []
+    finally:
+        await mgr.shutdown()
+
+
+async def test_deleted_reauthorization_target_is_not_recreated_on_status(client, tmp_path):
+    c, db = client
+    owner = (await db.get_system_agent())["user_id"]
+    session = codex_login.CodexLoginSession(
+        id="deleted-reauth", credential_id="deleted-credential", codex_home=str(tmp_path / "deleted-home"),
+        label="Deleted target", state=codex_login.CodexLoginState.success, user_id=owner, _reauth=True,
+    )
+    codex_login.codex_login_manager._sessions[session.id] = session
+    response = await c.get(f"/api/credentials/codex/{session.id}/status")
+    assert response.status_code == 200
+    assert response.json()["state"] == "error"
+    assert response.json()["credential"] is None
+    assert await db.get_credential(session.credential_id, owner) is None
+
+
+@pytest.mark.parametrize("outcome", ["cancel", "failure"])
+async def test_reauthorization_failure_keeps_credential_row_and_agent_binding(client, monkeypatch, outcome):
+    from server.crypto import encrypt
+    from server.users import UserManager
+
+    c, db = client
+    agent = await db.get_system_agent()
+    owner = agent["user_id"]
+    credential_id = "bound-reauth"
+    home = Path(codex_login.codex_home_for(credential_id))
+    home.mkdir(parents=True)
+    original_auth = b'{"tokens":{"access_token":"original"}}'
+    (home / "auth.json").write_bytes(original_auth)
+    await db.save_credential(
+        credential_id=credential_id, backend="codex", label="Existing", auth_type="oauth",
+        secret_encrypted=encrypt(str(home), await UserManager(db).data_key_for(owner)),
+        created_at="2026-10-25T00:00:00+00:00", user_id=owner,
+    )
+    await db.update_credential(credential_id, needs_reconnect=True, last_refresh_error_code="expired")
+    await db.update_agent(agent["id"], credential_id=credential_id)
+    original_row = await db.get_credential(credential_id, owner)
+    monkeypatch.setenv("CODEX_FAKE_LOGIN_MODE", "hang" if outcome == "cancel" else "fail")
+    response = await c.post("/api/credentials/codex/start", json={
+        "label": "Replacement", "reauth_credential_id": credential_id,
+    })
+    assert response.status_code == 201
+    login_id = response.json()["login_id"]
+    session = codex_login.codex_login_manager.get(login_id)
+    if outcome == "cancel":
+        await c.post("/api/credentials/codex/cancel", json={"login_id": login_id})
+    else:
+        await asyncio.wait_for(session._task, 2)
+    status = await c.get(f"/api/credentials/codex/{login_id}/status")
+    assert status.json()["state"] == ("cancelled" if outcome == "cancel" else "error")
+    assert await db.get_credential(credential_id, owner) == original_row
+    assert (await db.get_agent(agent["id"], owner))["credential_id"] == credential_id
+    assert (home / "auth.json").read_bytes() == original_auth

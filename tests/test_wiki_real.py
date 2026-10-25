@@ -136,7 +136,9 @@ async def test_codex_explicit_wiki_and_native_helper(
     manager = SessionManager()
     await manager.initialize(db)
     agent = await db.get_system_agent()
-    await db.update_agent(agent["id"], reasoning_effort="low")
+    # The task grants add the real Wiki namespace; native helpers do not need
+    # the unrelated bg/ask/research/schedule namespaces.
+    await db.update_agent(agent["id"], reasoning_effort="low", mcp_servers=[])
     vault = tmp_path / "vault"
     vault.mkdir()
     (vault / "证据.md").write_text(

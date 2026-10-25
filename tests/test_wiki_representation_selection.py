@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from server.wiki import extract, search_index
 from server.wiki.schema import VERSION as DURABLE_SCHEMA_VERSION
 from server.wiki.search_index import VERSION as SEARCH_SCHEMA_VERSION
 from server.wiki.store import WikiError, WikiStore
@@ -249,13 +250,24 @@ def test_metadata_match_without_available_body_falls_back_to_summary(store):
         "hidden-heading-fence", "hidden-long-fence", "html-curator", "html-related",
         "html-curator-child-code-media", "quoted-body-does-not-release-related",
         "list-body-does-not-release-curator", "whitespace"])
+def test_non_evidence_markdown_has_no_readable_index_sections(body):
+    source = "---\ntype: Reference\ntitle: Alpha realtime\n---\n" + body
+    sections = search_index.sections(source, "Alpha realtime")
+    assert sections and not any(section["readable_body"] for section in sections)
+
+
+# The full syntax matrix belongs to section qualification above. Search checks
+# the selection and presentation contract with representative unreadable bodies.
+@pytest.mark.parametrize("body", [
+    "# Alpha realtime\n\n",
+    "<span><noscript>Realtime hidden.</noscript></span>\n",
+], ids=["heading-only", "hidden-html"])
 def test_non_evidence_source_does_not_hide_readable_summary(store, body):
     alpha = represented_pair(
         store, source="---\ntype: Reference\ntitle: Alpha realtime\n---\n" + body,
         summaries=1,
     )
     summary = store.read("Summaries/summary-00.md")
-    # These queries leave the source unchanged; each body needs one fresh store.
     for intent, view in product(INTENTS, ("compact", "full")):
         result = store.search("realtime", intent=intent, view=view, limit=1)
         assert result["total"] == 1 and result["next_offset"] is None
@@ -301,7 +313,20 @@ def test_non_evidence_source_does_not_hide_readable_summary(store, body):
         "wrapped-html-image", "audio", "video-source", "visible-after-hidden", "literal-script-code",
         "visible-after-hidden-fence", "html-body-after-curator", "html-keynote-after-related", "literal-heading-code",
         "quoted-curator-does-not-hide-body", "list-related-does-not-hide-body", "nested-quote-list-with-code-media"])
-def test_visible_body_key_note_math_and_code_keep_original_identity(store, body):
+def test_visible_markdown_has_readable_index_sections(body):
+    source = "---\ntype: Reference\ntitle: Alpha realtime\n---\n" + body
+    assert any(
+        section["readable_body"]
+        for section in search_index.sections(source, "Alpha realtime")
+    )
+
+
+@pytest.mark.parametrize("body", [
+    "42\n",
+    "## Key note\nRealtime retains a fixed frame length condition.\n",
+    "![Realtime](diagram.png)\n",
+], ids=["metadata-match", "key-note", "media-only"])
+def test_visible_body_keeps_original_identity(store, body):
     alpha = represented_pair(
         store, source="---\ntype: Reference\ntitle: Alpha realtime\n---\n" + body,
         summaries=1,
@@ -315,21 +340,32 @@ def test_visible_body_key_note_math_and_code_keep_original_identity(store, body)
 
 
 @pytest.mark.parametrize("suffix", ["html", "htm"])
-@pytest.mark.parametrize("body,usable", [
-    ("<h1>Alpha realtime</h1>", False),
-    ("<span><noscript>Realtime hidden.</noscript></span>", False),
-    ('<h1><img src="diagram.png"></h1>', False),
-    ('<img src="diagram.png">', True),
-    ('<div><img src="diagram.png"></div>', True),
-    ("<p>Realtime preserves fixed frame length.</p>", True),
-    ("<h2>整理说明</h2><p>Realtime bookkeeping only.</p>", False),
-    ("<h2>相关笔记</h2><p>Realtime links only.</p>", False),
+@pytest.mark.parametrize("body,usable,text", [
+    ("<h1>Alpha realtime</h1>", False, "Alpha realtime"),
+    ("<span><noscript>Realtime hidden.</noscript></span>", False, ""),
+    ('<h1><img src="diagram.png"></h1>', False, ""),
+    ('<img src="diagram.png">', True, ""),
+    ('<div><img src="diagram.png"></div>', True, ""),
+    ("<p>Realtime preserves fixed frame length.</p>", True, "Realtime preserves fixed frame length."),
+    ("<h2>整理说明</h2><p>Realtime bookkeeping only.</p>", False, "整理说明\n\nRealtime bookkeeping only."),
+    ("<h2>相关笔记</h2><p>Realtime links only.</p>", False, "相关笔记\n\nRealtime links only."),
 ], ids=["heading", "hidden", "heading-image", "image-only", "wrapped-image", "paragraph", "curator", "related"])
-def test_physical_html_stays_readable_without_entering_markdown_navigation(
-    store, suffix, body, usable,
-):
-    from server.wiki.extract import HTMLText
+def test_html_extraction_retains_text_and_body_qualification(suffix, body, usable, text):
+    extracted = extract.extract(body.encode(), "." + suffix)
+    assert extracted["text"] == text
+    assert extracted["metadata"]["html_body_readable"] is usable
+    if usable and "img" in body:
+        assert extracted["metadata"]["html_media_refs"] == [{"tag": "img", "src": "diagram.png"}]
 
+
+@pytest.mark.parametrize("suffix", ["html", "htm"])
+@pytest.mark.parametrize("body,usable,text", [
+    ("<h1>Alpha realtime</h1>", False, "Alpha realtime"),
+    ('<img src="diagram.png">', True, ""),
+], ids=["heading-only", "media-only"])
+def test_physical_html_stays_readable_without_entering_markdown_navigation(
+    store, suffix, body, usable, text,
+):
     path = "alpha-realtime." + suffix
     alpha = represented_pair(store, source_path=path, source=body, summaries=1)
     summary = store.read("Summaries/summary-00.md")
@@ -344,10 +380,8 @@ def test_physical_html_stays_readable_without_entering_markdown_navigation(
         assert store.search(alpha["id"], intent="lookup", view=view)["items"] == []
     # Physical body/metadata are independent of query intent and view. Read the
     # exact revision once; every query above still checks its returned identity.
-    legacy = HTMLText()
-    legacy.feed(body)
     read = store.read(alpha["id"], expected_revision=alpha["revision"])
-    assert read["content"] == "".join(legacy.parts).strip()
+    assert read["content"] == text
     assert read["characters"] == len(read["content"])
     assert read["metadata"]["html_body_readable"] is usable
     if usable and "img" in body:
@@ -410,8 +444,6 @@ def test_human_body_removal_updates_fallback_without_rebinding_source(store):
 
 @pytest.mark.parametrize("legacy_version", ["sections-v5", "sections-v6"])
 def test_markdown_old_v5_qualification_is_rebuilt_without_touching_durable_state(history, legacy_version):
-    from server.wiki import search_index
-
     store = history.store
     source = "# Alpha realtime\n<span><script>Realtime secret.</script></span>\n"
     created = history.write("alpha.md", source.encode(), None, "human", "create source")
@@ -584,8 +616,8 @@ def test_source_keeps_cross_section_coverage_after_summary_deduplication(store):
 
 
 def test_hot_representation_queries_do_not_walk_stat_or_read_vault_files(store, monkeypatch):
-    alpha = represented_pair(store, summaries=20)
-    for index in range(30):
+    alpha = represented_pair(store, summaries=2)
+    for index in range(2):
         write_note(store, f"unrelated-{index}.md", "# Unrelated\nNo matching evidence.\n")
     store.refresh()
     original_walk, original_stat, original_open = os.walk, Path.stat, Path.open

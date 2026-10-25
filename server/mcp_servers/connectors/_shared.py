@@ -47,7 +47,8 @@ class ConnectorContext:
 
     @property
     def installation_id(self) -> str | None:
-        return _host.resolve("OCTOPUS_INSTALLATION_ID")
+        scope = _host.scope()
+        return scope.installation_id if scope else _host.resolve("OCTOPUS_INSTALLATION_ID")
 
     def ready(self) -> bool:
         return bool(self.api_base and self.auth_token and self.installation_id)
@@ -57,6 +58,11 @@ class ConnectorContext:
 
     def access_token(self) -> str | None:
         """Read the current installation's authoritative token from the host."""
+        body = self.token_info()
+        return body["access_token"] if body else None
+
+    def token_info(self) -> dict[str, Any] | None:
+        """Read token and definition together, scoped to the same installation."""
         if not self.ready():
             logger.error("connector MCP misconfigured: missing callback env")
             return None
@@ -74,8 +80,7 @@ class ConnectorContext:
             _record_connector(self.installation_id, ok=False,
                               error_code=f"token_http_{r.status_code}")
             return None
-        body = r.json()
-        return body["access_token"]
+        return r.json()
 
     def mark_needs_reconnect(self, error_code: str = "invalid_grant") -> None:
         if not self.ready():

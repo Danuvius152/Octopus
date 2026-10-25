@@ -85,9 +85,50 @@ export async function loadBgTaskSnapshot(sessionId: string, start = useSessionSt
   await applyBgResponse(sessionId, res, start);
 }
 
-/** Selection and archived viewing wait for both responses before applying
- * either one; reconnect deliberately loads the endpoints independently. */
-export async function loadSessionAndBgSnapshots(
+// Outstanding reads own only response ordering, never research status. A
+// response invalidates earlier reads after it applies; settled groups expire.
+const researchReads = new Map<string, Set<symbol>>();
+
+/** Selection, archived viewing and reconnect retain their original event
+ * baseline. The store distinguishes per-job updates from snapshot writes. */
+export async function loadResearchSnapshot(sessionId: string, start = useSessionStore.getState()): Promise<void> {
+  const before = useSessionStore.getState();
+  if (!start.token || start.accountGeneration !== before.accountGeneration || start.dispatchGeneration !== before.dispatchGeneration) return;
+  const reads = researchReads.get(sessionId) ?? new Set<symbol>();
+  const read = Symbol();
+  reads.add(read);
+  researchReads.set(sessionId, reads);
+  try {
+    const res = await fetch(`${API}/api/sessions/${sessionId}/research`, {
+      headers: { Authorization: `Bearer ${start.token}` },
+    });
+    if (!res.ok) throw new Error(`Could not load research (HTTP ${res.status}).`);
+    const jobs = await res.json();
+    const current = useSessionStore.getState();
+    if (!reads.has(read) || start.accountGeneration !== current.accountGeneration || start.dispatchGeneration !== current.dispatchGeneration) return;
+    current.setResearch(sessionId, jobs, start.research[sessionId] || []);
+    for (const older of reads) {
+      reads.delete(older);
+      if (older === read) break;
+    }
+  } finally {
+    reads.delete(read);
+    if (!reads.size && researchReads.get(sessionId) === reads) researchReads.delete(sessionId);
+  }
+}
+
+/** The accepted detail establishes the service identity without replacing the
+ * original account or event baseline captured by its caller. */
+export function loadResearchAfterDetail(sessionId: string, detail: Record<string, unknown>, start: SnapshotStart): Promise<void> {
+  const generation = readDispatchState(detail.dispatch_state)?.generation ?? start.dispatchGeneration;
+  const current = useSessionStore.getState();
+  if (start.accountGeneration !== current.accountGeneration || generation !== current.dispatchGeneration) return Promise.resolve();
+  return loadResearchSnapshot(sessionId, { ...start, dispatchGeneration: generation });
+}
+
+/** Selection and archived viewing accept detail before loading its research
+ * cards, so the first read also establishes the current service generation. */
+export async function loadSessionSnapshots(
   sessionId: string, start = useSessionStore.getState(),
   onDetail?: OnDetail,
 ) {
@@ -98,7 +139,10 @@ export async function loadSessionAndBgSnapshots(
       fetch(`${API}/api/sessions/${sessionId}/bg-tasks`, { headers }),
     ]);
     const detail = await applyDetailResponse(sessionId, detailRes, start, onDetail);
-    await applyBgResponse(sessionId, bgRes, start);
+    await Promise.all([
+      applyBgResponse(sessionId, bgRes, start),
+      ...(detail ? [loadResearchAfterDetail(sessionId, detail, start).catch(() => {})] : []),
+    ]);
     return detail;
   } catch (error) {
     useSessionStore.getState().setDispatchUnavailable(sessionId, true, start);

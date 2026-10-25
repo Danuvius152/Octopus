@@ -1,5 +1,5 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./test";
 
 const API = "http://localhost:8765/api";
 const headers = { Authorization: `Bearer ${TEST_BEARER}` };

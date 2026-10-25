@@ -1,93 +1,17 @@
-"""Unsupported ownerless installations are refused before preparing storage."""
+"""Retained installation evidence is refused; current owned facts survive reopening."""
 
 import json
 import os
-import socket
-import sqlite3
 import subprocess
 import sys
-import tempfile
-from contextlib import closing
 from pathlib import Path
 
 import pytest
 
+from tests.test_database_format import refuse_start
 from tests.test_service_runtime import installation_settings
 
 ROOT = Path(__file__).resolve().parents[1]
-
-
-def refuse_start(configuration, entry, tmp_path, cause="RetainedLegacyInstallation"):
-    admitted = tmp_path / "admitted"
-    with tempfile.TemporaryDirectory(prefix="octopus-baseline-", dir="/var/tmp") as directory:
-        journal = str(Path(directory) / "journal")
-        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as receiver:
-            receiver.bind(journal)
-            receiver.settimeout(1)
-            result = subprocess.run([sys.executable, "-c", """
-import asyncio,json,sys
-from pathlib import Path
-from server.config import settings
-for name,value in json.loads(Path(sys.argv[1]).read_text()).items():setattr(settings,name,value)
-settings.master_key=''
-from server import service_health
-service_health._JOURNAL_SOCKET=sys.argv[4]
-async def start():
-    if sys.argv[2]=='database':
-        from server.database import Database
-        database=Database(settings.db_path)
-        await database.initialize()
-        await database.close()
-        Path(sys.argv[3]).touch()
-    else:
-        from server.main import app
-        async with app.router.lifespan_context(app):Path(sys.argv[3]).touch()
-asyncio.run(start())
-""", str(configuration), entry, str(admitted), journal], cwd=ROOT,
-                env=dict(os.environ, OCTOPUS_ENV_FILE=str(tmp_path / "retained.env")),
-                capture_output=True, text=True, timeout=15)
-            assert result.returncode == 70, result.stderr
-            diagnostic = receiver.recv(8192).decode()
-            assert f"OCTOPUS_CAUSE={cause}" in diagnostic
-            assert "original ciphertext" not in diagnostic and "retained-setup-proof" not in diagnostic
-    assert not admitted.exists()
-
-
-@pytest.mark.parametrize("entry", ["database", "service"])
-@pytest.mark.parametrize("crashed_wal", [False, True])
-def test_nonempty_ownerless_installation_is_refused_before_writes(tmp_path, entry, crashed_wal):
-    config, configuration = installation_settings(tmp_path)
-    database = Path(config.db_path)
-    environment = tmp_path / "retained.env"
-    environment.write_text("OCTOPUS_AUTH_TOKEN=retained-setup-proof\n")
-    with closing(sqlite3.connect(database)) as writer:
-        writer.execute("CREATE TABLE retained_business(id INTEGER PRIMARY KEY, original BLOB)")
-        if not crashed_wal:
-            writer.execute("INSERT INTO retained_business VALUES(1, ?)", (b"original ciphertext\x00\xff",))
-        writer.commit()
-        if crashed_wal:
-            writer.execute("PRAGMA journal_mode=WAL")
-    if crashed_wal:
-        main_bytes = database.read_bytes()
-        subprocess.run([sys.executable, "-c", """
-import os,sqlite3,sys
-writer=sqlite3.connect(sys.argv[1])
-writer.execute('PRAGMA wal_autocheckpoint=0')
-writer.execute('INSERT INTO retained_business VALUES(1, ?)', (b'original ciphertext\\x00\\xff',))
-writer.commit()
-os._exit(0)
-""", str(database)], cwd=ROOT, check=True, timeout=10)
-        assert database.read_bytes() == main_bytes
-        assert Path(str(database) + "-wal").stat().st_size > 0
-    retained = {path: path.read_bytes() for path in (database, environment, Path(str(database) + "-wal"))
-                if path.exists()}
-    refuse_start(configuration, entry, tmp_path, cause="UnsupportedMainStorage")
-    assert not Path(config.master_key_file).exists()
-    assert not Path(config.users_root).exists()
-    assert {path: path.read_bytes() for path in retained} == retained
-    with closing(sqlite3.connect(database.as_uri() + "?mode=ro", uri=True)) as reader:
-        assert reader.execute("SELECT original FROM retained_business").fetchone()[0] == b"original ciphertext\x00\xff"
-        assert reader.execute("SELECT COUNT(*) FROM sqlite_schema WHERE name='agents'").fetchone()[0] == 0
 
 
 @pytest.mark.parametrize("entry", ["database", "service"])

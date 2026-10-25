@@ -66,60 +66,64 @@ def stopped_job(user_id, root, document, *, creation=None):
     return job
 
 
-@pytest.mark.parametrize("path", ["Library/note.md", "Library/assets/project/notes.md"])
-async def test_current_queued_work_keeps_exact_grant_and_original_request_after_reopen(client, tmp_path, path):
+@pytest.mark.parametrize("kind", ["selected_note", "selected_asset_note", "reserved_material", "existing_material"])
+async def test_current_work_keeps_exact_authority_and_files_after_reopen(client, tmp_path, kind):
     root = tmp_path / "vault"
-    (root / path).parent.mkdir(parents=True)
-    (root / path).write_text("# Original\n\nKeep this argument.\n")
+    material = "# Material\n\nPreserve these exact submitted bytes 原文.\n"
+    path = "Library/assets/project/notes.md" if kind == "selected_asset_note" else "Library/note.md"
+    if kind == "existing_material":
+        path = "Library/material.md"
+    if kind != "reserved_material":
+        (root / path).parent.mkdir(parents=True)
+        (root / path).write_text(material if kind == "existing_material" else "# Original\n\nKeep this argument.\n")
+    (root / "Library").mkdir(parents=True, exist_ok=True)
+    (root / "Library/unselected.md").write_text("# Not selected\nNo write authority was granted.\n")
     config = await wiki_api.configure(client, root)
     owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
     jobs = WikiJobs(owner)
-    document = jobs.store.read(path)
-    original = jobs.maintain("retained-exact-scope", "", "Finite work", [path], None, [], "human")
+    document = jobs.store.read(path) if kind != "reserved_material" else None
+    submitted = material if kind in {"reserved_material", "existing_material"} else ""
+    original = jobs.maintain("retained-exact-scope", submitted, "Finite work", [] if submitted else [path], None, [], "human")
+    original_files = {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*.md")}
+    config_path = registry.state(owner) / "config.json"
+    original_config = config_path.read_bytes()
     with jobs.store.connect() as db:
-        raw = tuple(db.execute("SELECT payload,items FROM jobs WHERE id=?", (original["id"],)).fetchone())
-        grant = tuple(db.execute("SELECT * FROM wiki_job_grants WHERE job_id=?", (original["id"],)).fetchone())
+        original_rows = {table: [tuple(row) for row in db.execute(f"SELECT * FROM {table} ORDER BY rowid")]
+                         for table in ("jobs", *grants.TABLES, "job_requests", "wiki_job_state", "wiki_job_outbox")}
     registry.close()
     current = WikiJobs(owner)
     job = current.get(original["id"])
-    assert job["status"] == "queued" and job["items"] == original["items"]
+    assert job["status"] == original["status"] == ("completed" if kind == "existing_material" else "queued")
+    assert job["items"] == original["items"]
+    assert job["payload"] == original["payload"]
+    assert job["grant"] == original["grant"]
     assert job["grant"]["registration_generation"] == config["registration_generation"]
     assert job["grant"]["allowed_new_paths"] == []
-    assert [item["doc_id"] for item in job["grant"]["selected_documents"]] == [document["id"]]
+    assert [item["doc_id"] for item in job["grant"]["selected_documents"]] == ([] if document is None else [document["id"]])
     with current.store.connect() as db:
-        assert tuple(db.execute("SELECT payload,items FROM jobs WHERE id=?", (original["id"],)).fetchone()) == raw
-        assert tuple(db.execute("SELECT * FROM wiki_job_grants WHERE job_id=?", (original["id"],)).fetchone()) == grant
-        assert db.execute("SELECT count(*) FROM wiki_path_reservations").fetchone()[0] == 0
-    assert current.next_queued() == original["id"]
-
-
-@pytest.mark.parametrize("existing", [False, True])
-async def test_current_material_keeps_finite_reservation_or_exact_input_identity_after_reopen(client, tmp_path, existing):
-    root = tmp_path / "vault"
-    (root / "Library").mkdir(parents=True)
-    material = "# Material\n\nPreserve these exact submitted bytes.\n"
-    if existing:
-        (root / "Library/material.md").write_text(material)
-    await wiki_api.configure(client, root)
-    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
-    jobs = WikiJobs(owner)
-    document = jobs.store.read("Library/material.md") if existing else None
-    job = jobs.maintain("retained-material", material, "Preserve submitted material", [], None, [], "human")
-    registry.close()
-    current = WikiJobs(owner)
-    retained = current.get(job["id"])
-    assert retained["grant"] == job["grant"]
-    with current.store.connect() as db:
+        for table, rows in original_rows.items():
+            assert [tuple(row) for row in db.execute(f"SELECT * FROM {table} ORDER BY rowid")] == rows
         reservations = [tuple(row) for row in db.execute("SELECT path,purpose,state FROM wiki_path_reservations")]
-    assert reservations == ([] if existing else [(f"Library/Inbox/{job['id']}.md", "framework_material", "reserved")])
-    first = current.ingest(job["id"])
-    assert current.ingest(job["id"])["id"] == first["id"]
-    assert (root / first["path"]).read_text() == material
-    if existing:
-        assert first["id"] == document["id"]
-    with current.store.connect() as db:
-        assert db.execute("SELECT count(*) FROM changes").fetchone()[0] == (0 if existing else 1)
-    assert [p.relative_to(root).as_posix() for p in root.rglob("*.md")] == [first["path"]]
+    assert reservations == ([(f"Library/Inbox/{job['id']}.md", "framework_material", "reserved")]
+                            if kind == "reserved_material" else [])
+    if submitted:
+        first = current.ingest(job["id"])
+        assert current.ingest(job["id"])["id"] == first["id"]
+        assert (root / first["path"]).read_bytes() == material.encode()
+        if document is not None:
+            assert first["id"] == document["id"]
+        with current.store.connect() as db:
+            assert db.execute("SELECT count(*) FROM changes").fetchone()[0] == int(document is None)
+            if document is None:
+                reservation = db.execute("SELECT state,document_id,output_revision FROM wiki_path_reservations WHERE job_id=?",
+                                         (job["id"],)).fetchone()
+                assert tuple(reservation) == ("bound", first["id"], first["revision"])
+        expected_files = original_files | {first["path"]: material.encode()}
+    else:
+        assert current.next_queued() == job["id"]
+        expected_files = original_files
+    assert {p.relative_to(root).as_posix(): p.read_bytes() for p in root.rglob("*.md")} == expected_files
+    assert config_path.read_bytes() == original_config
 
 
 async def test_completed_retained_rows_do_not_gain_new_authority(client, tmp_path):

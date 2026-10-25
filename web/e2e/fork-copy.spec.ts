@@ -1,5 +1,5 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
-import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
+import { test, expect, type Page, type APIRequestContext } from "./test";
 import { mkdtempSync, writeFileSync, rmSync, existsSync } from "fs";
 import { join } from "path";
 import { systemAgentId } from "./system-agent";

@@ -32,6 +32,7 @@ from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 from weakref import WeakValueDictionary
 
+from .aio import complete_cleanup
 from .config import settings
 from .models import SessionStatus
 from .sessions.submission import RequestCompletion
@@ -483,6 +484,25 @@ class ApplicationManager:
     async def request_build(
         self, app_id: str, prompt: str, user_id: str | None = None
     ) -> dict[str, Any]:
+        """Serialize build admission with this application's projection writers."""
+        await self.get_application(app_id, user_id)
+        if not (prompt or "").strip():
+            raise ApplicationError("prompt must be a non-empty string")
+        try:
+            async with self._build_updates.setdefault(app_id, asyncio.Lock()):
+                return await self._admit_build(app_id, prompt, user_id)
+        finally:
+            async def publish() -> None:
+                row = await self._require_db().get_application(app_id, user_id)
+                if row is not None:
+                    await self._broadcast_application("application_updated", row)
+            # A subscriber may request the next build. Publishing never holds
+            # the application lock, including on refusal or caller cancellation.
+            await complete_cleanup(publish())
+
+    async def _admit_build(
+        self, app_id: str, prompt: str, user_id: str | None,
+    ) -> dict[str, Any]:
         """Run another build turn — "make the header sticky", "add a dark
         mode". Reuses the build session so the agent keeps its context; if that
         session is gone (deleted), a fresh one is opened under the same agent
@@ -531,18 +551,29 @@ class ApplicationManager:
                 entrypoint=row["entrypoint"],
             )
 
-        await db.update_application(
-            app_id, status=STATUS_BUILDING, error=None, updated_at=_now()
-        )
-        updated = await db.get_application(app_id)
-        await self._broadcast_application("application_updated", updated)
-        receipt = await self.session_mgr.start_message(session.id, body, source="application")
-        if not receipt.accepted:
-            await db.update_application(
-                app_id, status=row["status"], error=row["error"], updated_at=_now()
-            )
-            await self._broadcast_application("application_updated", await db.get_application(app_id))
-            raise ApplicationError("Session admission is closed; the build did not start", status_code=409)
+        async def restore() -> None:
+            await db.update_application(app_id, status=row["status"], error=row["error"], updated_at=_now())
+
+        try:
+            await db.update_application(app_id, status=STATUS_BUILDING, error=None, updated_at=_now())
+            updated = await db.get_application(app_id)
+        except asyncio.CancelledError:
+            # No command has been submitted at this point.
+            await complete_cleanup(restore())
+            raise
+
+        async def admit() -> None:
+            try:
+                receipt = await self.session_mgr.start_message(session.id, body, source="application")
+            except ValueError as exc:
+                await restore()
+                raise ApplicationError(f"The build did not start: {exc}", status_code=409) from exc
+            if not receipt.accepted:
+                await restore()
+                raise ApplicationError("Session admission is closed; the build did not start", status_code=409)
+
+        # Owner admission does not await its publisher or completion consumers.
+        await complete_cleanup(admit())
         assert updated is not None  # written immediately above
         return updated
 
@@ -846,9 +877,12 @@ class ApplicationManager:
         if msg.get("type") != "status" or msg.get("status") != "running":
             return
         updates = []
-        async with self._build_updates.setdefault(sid, asyncio.Lock()):
-            rows = await self.db.get_applications_for_session(sid)
-            for row in rows:
+        rows = await self.db.get_applications_for_session(sid)
+        for candidate in rows:
+            async with self._build_updates.setdefault(candidate["id"], asyncio.Lock()):
+                row = await self.db.get_application(candidate["id"])
+                if row is None or row["session_id"] != sid:
+                    continue
                 session = self.session_mgr.get_session(sid) if self.session_mgr is not None else None
                 # Progress can outlive its writer and completion. Read the
                 # current execution projection instead of replaying running.
@@ -873,9 +907,12 @@ class ApplicationManager:
         if self.db is None or self.session_mgr is None:
             return
         updates = []
-        async with self._build_updates.setdefault(session_id, asyncio.Lock()):
-            rows = await self.db.get_applications_for_session(session_id)
-            for row in rows:
+        rows = await self.db.get_applications_for_session(session_id)
+        for candidate in rows:
+            async with self._build_updates.setdefault(candidate["id"], asyncio.Lock()):
+                row = await self.db.get_application(candidate["id"])
+                if row is None or row["session_id"] != session_id:
+                    continue
                 if not self._completion_is_current(session_id, completion.request_id):
                     continue
                 if completion.recording_state != "committed" or completion.outcome is None:

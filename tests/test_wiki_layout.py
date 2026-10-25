@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from server.wiki import format, material_proof, origins
+from server.wiki import format, layout, material_proof, origins, search_index
 from server.wiki.curation import WikiCuration
 from server.wiki.history import WikiHistory
 from server.wiki.store import WikiError, WikiStore
@@ -34,7 +34,19 @@ HEADINGS = [
 
 
 @pytest.mark.parametrize("heading", HEADINGS)
-@pytest.mark.parametrize("newline,bom", [("\n", ""), ("\r\n", "\ufeff")])
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_heading_syntax_qualifies_as_structure(heading, newline):
+    assert layout.headings_only(heading.replace("\n", newline)) is True
+
+
+# Syntax variations are checked above. These writes retain the byte/proof
+# contract for ATX, Setext, multiple headings and links, including BOM + CRLF.
+@pytest.mark.parametrize("heading,newline,bom", [
+    ("## 正文", "\n", ""),
+    ("Discussion\n==========", "\r\n", "\ufeff"),
+    ("## One\n\n### Two", "\n", ""),
+    ("## [Evidence](https://example.org/evidence)", "\r\n", "\ufeff"),
+], ids=["atx-lf", "setext-crlf-bom", "multiple-lf", "link-crlf-bom"])
 def test_heading_addition_has_only_requested_structure_and_keeps_original_proof(
     history, heading, newline, bom
 ):
@@ -92,6 +104,14 @@ def test_heading_addition_has_only_requested_structure_and_keeps_original_proof(
         "## Methods\n\n---",
     ],
 )
+def test_explanations_and_hidden_content_do_not_qualify_as_structure(addition):
+    assert layout.headings_only(addition) is False
+
+
+@pytest.mark.parametrize("addition", [
+    "A new explanation, with a condition.",
+    "## Methods\n\n<!-- A hidden claim. -->",
+], ids=["explanation", "heading-with-hidden-claim"])
 def test_explanations_and_hidden_content_cannot_bypass_attribution(history, addition):
     original = b"# Note\n\nOriginal source with its limit.\n"
     history.write("Library/note.md", original, None, "human", "create")
@@ -229,6 +249,39 @@ def test_heading_sources_remain_in_private_receipt_without_visible_body_claims(h
 )
 @pytest.mark.parametrize("heading", ["## Inserted", "Inserted\n--------"])
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_unicode_non_commonmark_separators_keep_heading_and_index_spans(
+    separator, heading, newline
+):
+    original = f"# Top{newline}{newline}left{separator}right{newline}"
+    heading = heading.replace("\n", newline)
+    addition = layout.insert_heading(
+        heading, layout.trailing_context(original), "", newline
+    )
+    output = original + addition
+    assert output == original + newline + heading
+    layout.validate_headings(output, [(len(original), addition)])
+    parsed = format.parse(output)
+    inserted = next(h for h in parsed.headings if h["title"] == "Inserted")
+    start = output.index(heading)
+    assert (inserted["start"], inserted["end"]) == (start, len(output))
+    assert parsed.sections[-1]["start"] == start
+    section = next(
+        part for part in search_index.sections(output, "Top")
+        if part["start"] == start
+    )
+    assert section["end"] == len(output)
+    assert section["readable_body"] is False
+
+
+# Keep the complete character/heading/newline matrix above; these cases cover
+# persistence and byte reconstruction for both heading styles and line endings.
+@pytest.mark.parametrize("separator,heading,newline", [
+    ("\u2028", "## Inserted", "\n"),
+    ("\u2029", "Inserted\n--------", "\r\n"),
+    ("\x85", "Inserted\n--------", "\n"),
+    ("\x1e", "## Inserted", "\r\n"),
+], ids=["line-separator-atx-lf", "paragraph-separator-setext-crlf",
+        "next-line-setext-lf", "record-separator-atx-crlf"])
 def test_unicode_non_commonmark_separators_keep_real_heading_spans_and_source(
     history, separator, heading, newline
 ):
@@ -265,8 +318,6 @@ def test_unicode_non_commonmark_separators_keep_real_heading_spans_and_source(
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
 def test_current_heading_ranges_and_search_evidence_share_markdown_lines(newline):
-    from server.wiki import search_index
-
     text = (
         "# Source\n\nleft\u2028right\n\n## Evidence\n\nOnly under condition A.\n"
     ).replace("\n", newline)
@@ -289,8 +340,6 @@ def test_current_heading_ranges_and_search_evidence_share_markdown_lines(newline
 def test_old_parser_index_refresh_preserves_document_bytes_identity_and_durable_history(
     history,
 ):
-    from server.wiki import search_index
-
     store = history.store
     raw = (
         b"# Source\n\nleft\xe2\x80\xa8right\n\n## Evidence\n\nOnly under condition A.\n"

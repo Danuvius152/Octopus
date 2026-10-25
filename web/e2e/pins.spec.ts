@@ -9,7 +9,7 @@ import { TEST_BEARER, enterAccountCredentials } from "./current-account";
  * in applications.spec.ts, where a real application exists to pin.
  */
 
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "./test";
 
 const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api";

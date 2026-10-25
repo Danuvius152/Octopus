@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from httpx import ASGITransport, AsyncClient
 
-from server import bg_tasks
+from server import bg_tasks, process_groups
 from server.main import app
 from server.session_manager import session_manager
 from tests import test_tenant_isolation as tenants
@@ -389,6 +389,7 @@ async def test_uncertain_thread_exit_keeps_shutdown_owner_and_withholds_terminal
     monkeypatch.setattr(Path, "iterdir", held_members)
     monkeypatch.setattr(bg_tasks.os, "getpgid", lambda pid: captured.pgid if not release and pid == captured.pgid else actual_getpgid(pid))
     monkeypatch.setattr(bg_tasks, "_group_exists", lambda pgid: True if not release and pgid == captured.pgid else actual_exists(pgid))
+    monkeypatch.setattr(process_groups, "group_exists", lambda pgid: True if not release and pgid == captured.pgid else actual_exists(pgid))
     try:
         with pytest.raises(RuntimeError, match="shutdown incomplete"):
             await manager.shutdown()

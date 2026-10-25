@@ -43,7 +43,7 @@ def coordinates(store, document, text):
     sections = iter(parsed.sections)
     section = next(sections, None)
     result, offset = [], 0
-    for index, part in enumerate(blocks(text)):
+    for index, part in enumerate(blocks(text, parsed=parsed)):
         while section is not None and section["end"] <= offset:
             section = next(sections, None)
         selected = section if section is not None and section["start"] <= offset else {}

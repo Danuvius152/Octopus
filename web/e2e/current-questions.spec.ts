@@ -1,5 +1,5 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
-import { expect, test } from "@playwright/test";
+import { expect, test } from "./test";
 
 test("current questions submit complete answers and keep answered and cancelled history after reload", async ({ page, request }) => {
   const api = "http://localhost:8765/api";

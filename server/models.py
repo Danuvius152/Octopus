@@ -809,6 +809,7 @@ class ConnectorTokenResponse(BaseModel):
 
     access_token: str
     expires_at_epoch: float
+    api_base: str | None = None
 
 
 class AgentConnectorsResponse(BaseModel):

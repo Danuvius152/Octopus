@@ -12,7 +12,7 @@ import { TEST_BEARER, enterAccountCredentials } from "./current-account";
  *    that same pane → the change shows up → delete it.
  */
 
-import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "./test";
 
 const TOKEN = TEST_BEARER;
 const SERVER_URL = "http://localhost:8765";

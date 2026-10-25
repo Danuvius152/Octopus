@@ -13,15 +13,66 @@ from typing import Any
 
 import yaml
 from markdown_it import MarkdownIt
+from markdown_it.rules_core import StateCore
 from markdown_it.token import Token
 
 from .bounded_yaml import compose as compose_metadata
 from .bounded_yaml import load as load_metadata
 
-VERSION = "okf-parser-v7"
+VERSION = "okf-parser-v10"
 _FRONT = re.compile(r"\A\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|$)", re.S)
 _BLOCK_ID = re.compile(r"\^([A-Za-z0-9-]+)[ \t]*(?=\r\n|\r|\n|$)")
+_WIKILINK = re.compile(r"\[\[([^\]\n]+)\]\]")
 _markdown = MarkdownIt("commonmark")
+
+
+def _inline_reference_inputs(children: list[Token]) -> list[tuple[str, str]]:
+    """Capture link syntax before escaped/entity text joins literal prose."""
+    references: list[tuple[str, str]] = []
+    text_parts: list[str] = []
+    nonliteral: set[int] = set()
+    length = 0
+
+    def flush() -> None:
+        nonlocal length
+        text = "".join(text_parts)
+        position = 0
+        while match := _WIKILINK.search(text, position):
+            start, end = match.start(), match.end()
+            if not nonliteral.intersection((start, start + 1, end - 2, end - 1)):
+                references.append(("wikilink", match[1].split("|", 1)[0]))
+                position = end
+            else:
+                # A literal link may follow escaped opening brackets in
+                # the same text run; the rejected example cannot hide it.
+                position = start + 1
+        text_parts.clear()
+        nonliteral.clear()
+        length = 0
+
+    for child in children:
+        if child.type in {"text", "text_special"}:
+            if child.type == "text_special":
+                nonliteral.update(length + index for index, char in enumerate(child.content) if char in "[]")
+            text_parts.append(child.content)
+            length += len(child.content)
+            continue
+        flush()
+        if child.type in {"link_open", "image"}:
+            resource = child.attrGet("href" if child.type == "link_open" else "src")
+            if resource:
+                references.append(("markdown_link", resource))
+    flush()
+    return references
+
+
+def _reference_inputs(state: StateCore) -> None:
+    for token in state.tokens:
+        if token.type == "inline":
+            token.meta["local_reference_inputs"] = _inline_reference_inputs(token.children or [])
+
+
+_markdown.core.ruler.before("text_join", "local_reference_inputs", _reference_inputs)
 _ROLES = {
     "reference": "reference", "source": "source", "synthesis": "synthesis",
     "concept": "concept", "topic": "navigation", "navigation": "navigation",
@@ -41,6 +92,7 @@ class DocumentFormat:
     sections: list[dict] = field(default_factory=list)
     headings: list[dict] = field(default_factory=list)
     html_anchors: set[str] = field(default_factory=set)
+    html_comments: list[str] = field(default_factory=list)
     block_spans: dict[str, tuple[int, int] | None] = field(default_factory=dict)
     error: str | None = None
     footnotes: list[str] = field(default_factory=list)
@@ -115,18 +167,101 @@ def heading_slug(title: str) -> str:
     return "-".join("".join(char for char in title.casefold() if char.isspace() or char in "_-" or unicodedata.category(char)[0] in {"L", "N"}).split())
 
 
+@dataclass(frozen=True)
+class _HTMLContext:
+    tag: str
+    namespace: str
+    integration: bool
+
+
 class _HTMLAnchors(HTMLParser):
+    """Track namespace/text boundaries for comments and anchors, not a DOM."""
+
+    CDATA_CONTENT_ELEMENTS = ("script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes")
+    _VOID = frozenset("area base basefont bgsound br col embed frame hr img input keygen link meta param source track wbr".split())
+    _MATH_TEXT = frozenset({"mi", "mo", "mn", "ms", "mtext"})
+    _FOREIGN_BREAKOUT = frozenset((
+        "b big blockquote body br center code dd div dl dt em embed h1 h2 h3 h4 h5 h6 head hr i img "
+        "li listing menu meta nobr ol p pre ruby s small span strong strike sub sup table tt u ul var"
+    ).split())
+
     def __init__(self) -> None:
         super().__init__()
         self.anchors: set[str] = set()
+        self.comments: list[str] = []
+        self._elements: list[_HTMLContext] = []
+
+    def _html_content(self, tag: str) -> bool:
+        if not self._elements:
+            return True
+        parent = self._elements[-1]
+        return (parent.namespace == "html" or parent.integration
+                or (parent.namespace == "math" and (
+                    (parent.tag in self._MATH_TEXT and tag not in {"mglyph", "malignmark"})
+                    or (parent.tag == "annotation-xml" and tag == "svg"))))
+
+    def _start_element(self, tag: str, attrs: list[tuple[str, str | None]]) -> str:
+        if tag in self._FOREIGN_BREAKOUT or (tag == "font" and any(key in {"color", "face", "size"} for key, _ in attrs)):
+            while not self._html_content(tag):
+                self._elements.pop()
+        namespace = ({"svg": "svg", "math": "math"}.get(tag, "html")
+                     if self._html_content(tag) else self._elements[-1].namespace)
+        integration = (namespace == "svg" and tag in {"foreignobject", "desc", "title"}) or (
+            namespace == "math" and tag == "annotation-xml"
+            and any(key == "encoding" and (value or "").lower() in {"text/html", "application/xhtml+xml"} for key, value in attrs))
+        if namespace != "html" or tag not in self._VOID:
+            self._elements.append(_HTMLContext(tag, namespace, integration))
+        self.anchors.update(value for key, value in attrs if key in {"id", "name"} and value is not None)
+        return namespace
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.anchors.update(value for key, value in attrs if key in {"id", "name"} and value is not None)
+        self._start_element(tag, attrs)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        namespace = self._start_element(tag, attrs)
+        if namespace != "html":
+            self._elements.pop()  # Foreign elements honor the self-closing flag.
+        elif tag in self.CDATA_CONTENT_ELEMENTS or tag == "plaintext":
+            # HTML ignores the self-closing flag on non-void text elements.
+            self.set_cdata_mode(tag)
+
+    def set_cdata_mode(self, elem: str, **options: Any) -> None:
+        # The stdlib selects text mode by tag name. An SVG/MathML element
+        # with that name still tokenizes its children as foreign content.
+        if self._elements and self._elements[-1].namespace == "html":
+            super().set_cdata_mode(elem, **options)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in {"br", "p"}:
+            while not self._html_content(tag):
+                self._elements.pop()
+        for index in range(len(self._elements) - 1, -1, -1):
+            if self._elements[index].tag == tag:
+                del self._elements[index:]
+                break
+
+    def handle_comment(self, data: str) -> None:
+        self.comments.append(data)
 
 
 def _explicit_locations(result: DocumentFormat, text: str) -> None:
     """Project explicit anchors only from actual HTML and prose tokens."""
     html = _HTMLAnchors()
+
+    def feed(token: Token) -> None:
+        # Generated paragraphs/code can leave foreign content too. Feed their
+        # tags, but never feed code or escaped text as literal HTML markup.
+        if token.type in {"html_block", "html_inline"}:
+            html.feed(token.content)
+        elif token.type in {"fence", "code_block"}:
+            html.feed("<pre><code></code></pre>")
+        elif token.type == "code_inline":
+            html.feed("<code></code>")
+        elif token.nesting:
+            html.feed(f"<{'/' if token.nesting == -1 else ''}{token.tag}>")
+        elif token.type in {"image", "hr", "hardbreak"}:
+            html.feed(f"<{token.tag}>")
+
     roots = [token for token in result.tokens if token.level == 0 and token.map is not None]
     spans = []
     for index, root in enumerate(roots):
@@ -144,15 +279,13 @@ def _explicit_locations(result: DocumentFormat, text: str) -> None:
     for token in result.tokens:
         if token.level == 0 and token.map is not None:
             root_index += 1
-        if token.type == "html_block":
-            html.feed(token.content)
+        feed(token)
         literal_ids = set()
         if token.children and token.map is not None:
             source = text[result.line_offsets[token.map[0]]:result.line_offsets[token.map[1]]]
             literal_ids = {marker[1] for marker in _BLOCK_ID.finditer(source)}
         for index, child in enumerate(token.children or []):
-            if child.type == "html_inline":
-                html.feed(child.content)
+            feed(child)
             if child.type != "text" or root_index < 0:
                 continue
             # The marker must end an actual prose line, rather than code,
@@ -177,6 +310,7 @@ def _explicit_locations(result: DocumentFormat, text: str) -> None:
             result.block_spans[identifier] = None if identifier in result.block_spans else span
     html.close()
     result.html_anchors = html.anchors
+    result.html_comments = html.comments
 
 
 def parse(text: str) -> DocumentFormat:

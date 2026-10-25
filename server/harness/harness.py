@@ -221,6 +221,7 @@ class Harness:
             argv, kwargs = prepare_spawn(argv, kwargs)
         except FileNotFoundError:
             raise HarnessOneshotError("not_found", f"{self.profile.binary} CLI not found")
+        from ..process_groups import wait_group_exit
         from .run import _terminate_process_group
 
         # The transport may create its process before delivering the handle.
@@ -242,6 +243,7 @@ class Harness:
                 return  # launch failed before creating a process
             _terminate_process_group(captured, signal.SIGKILL)
             await captured.wait()
+            await wait_group_exit(captured.pid, timeout=2.0, after_kill=True)
 
         def retirement_finished(done: asyncio.Task[None]) -> None:
             if not done.cancelled() and (error := done.exception()) is not None:
@@ -287,6 +289,7 @@ class Harness:
             # communicate() — confirm group retirement before propagating.
             await confirm_retirement()
             raise
+        await confirm_retirement()
         if proc.returncode != 0:
             logger.warning(
                 "Harness one-shot failed provider=%s exit_code=%s elapsed_ms=%s stderr=%s",

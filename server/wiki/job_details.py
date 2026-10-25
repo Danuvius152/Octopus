@@ -22,7 +22,9 @@ def actions(jobs, job):
     settled = job["settlement_phase"] not in {"pending", "attention", "unconfirmed"}
     scope = (job["grant"] is not None and not grants.scope_blocked(job.get("error"))
              and job["grant"]["registration_generation"] == jobs.registration["registration_generation"])
-    unfinished = any(item["status"] != "done" and not job_items.unresolved(item)
+    needs_material = bool(job["payload"].get("material")
+                          and not any(item.get("kind") != "creation" for item in job["items"]))
+    unfinished = needs_material or any(item["status"] != "done" and not job_items.unresolved(item)
                      and item["status"] not in {"unknown", "verifying", "excluded"}
                      and not item.get("receipt_id") and not item.get("output_change_id") for item in job["items"])
     return {"verify": stopped and reason is None, "retry": stopped and reason is None and settled and scope and unfinished,

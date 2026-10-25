@@ -227,7 +227,7 @@ async def test_an_unavailable_build_is_not_completed_just_because_its_file_exist
 
 
 async def test_owner_failure_does_not_assign_a_terminal_to_an_unconfirmed_steer(
-    notification_runtime, monkeypatch,
+    notification_runtime, monkeypatch, short_process_shutdown,
 ):
     runtime = notification_runtime
     runtime.controls.enabled = False

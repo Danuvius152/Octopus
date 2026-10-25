@@ -33,6 +33,7 @@ from .applications import (
     runtime_dir_for,
 )
 from .config import settings
+from .process_groups import wait_group_exit
 
 logger = logging.getLogger(__name__)
 
@@ -435,10 +436,21 @@ class BackendSupervisor:
             if st._waiter is None or st._waiter.cancelled():
                 st._waiter = asyncio.create_task(proc.wait(), name=f"app-{st.app_id}-process-exit")
             process_done, _ = await asyncio.wait({st._waiter}, timeout=_TERM_TIMEOUT_SECONDS)
-            if not process_done or proc.returncode is None:
+            group_exited = False
+            try:
+                await wait_group_exit(proc.pid, timeout=_TERM_TIMEOUT_SECONDS if process_done else 0.01)
+                group_exited = True
+            except TimeoutError:
+                pass
+            if not process_done or proc.returncode is None or not group_exited:
                 _kill_group(proc, signal.SIGKILL)
                 process_done, _ = await asyncio.wait({st._waiter}, timeout=_KILL_TIMEOUT_SECONDS)
-            if not process_done or proc.returncode is None:
+                try:
+                    await wait_group_exit(proc.pid, timeout=_KILL_TIMEOUT_SECONDS, after_kill=True)
+                    group_exited = True
+                except TimeoutError:
+                    group_exited = False
+            if not process_done or proc.returncode is None or not group_exited:
                 for task in st._readers:
                     if not task.done() and not task.cancelling():
                         task.cancel()

@@ -1,7 +1,6 @@
 """Durable source identity proofs, independent of the disposable graph index."""
 
 import json
-import re
 import uuid
 from dataclasses import replace
 from pathlib import PurePosixPath
@@ -81,13 +80,11 @@ def metadata(db, doc_id, path, raw, management):
         return {}
     extracted = extract(raw, PurePosixPath(path).suffix.lower())
     text, result = extracted["text"], extracted["metadata"]
-    portable = re.search(r"<!-- octopus-wiki\s+(.*?)\s*-->", text, re.S)
-    if portable:
-        try:
-            result |= portable_metadata.validate(json.loads(portable[1]))
-        except (ValueError, TypeError, RecursionError):
-            pass
     parsed = document_format.parse(text)
+    try:
+        result |= portable_metadata.from_document(parsed)
+    except (ValueError, TypeError, RecursionError):
+        pass
     if parsed.error:
         previous = db.execute("SELECT metadata FROM documents WHERE id=?", (doc_id,)).fetchone()
         if previous:

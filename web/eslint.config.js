@@ -8,6 +8,18 @@ import { defineConfig, globalIgnores } from 'eslint/config'
 export default defineConfig([
   globalIgnores(['dist']),
   {
+    files: ['e2e/**/*.spec.ts'],
+    rules: {
+      'no-restricted-imports': ['error', {
+        paths: [{
+          name: '@playwright/test',
+          importNames: ['test'],
+          message: 'Import test from ./test so offline contexts enforce local HTTP only.',
+        }],
+      }],
+    },
+  },
+  {
     files: ['**/*.{ts,tsx}'],
     extends: [
       js.configs.recommended,

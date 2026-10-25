@@ -106,7 +106,9 @@ async def test_codex_reads_per_agent_memory(tmp_path, monkeypatch):
     _seed(aid)
     wd = str(tmp_path / "ws")
     os.makedirs(wd)
-    cfg = dict(memory_dir=str(agent_memory.agent_memory_dir(aid)))
+    # This contract uses native file reads. Starting unrelated stdio MCP
+    # servers adds processes and handshakes without exercising those tools.
+    cfg = dict(memory_dir=str(agent_memory.agent_memory_dir(aid)), mcp_servers=[])
     out = await _recall("codex", cfg, wd)
     assert CODENAME in out.upper()
 

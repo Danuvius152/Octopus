@@ -2,9 +2,11 @@
 
 import json
 import os
+import socket
 import sqlite3
 import subprocess
 import sys
+import tempfile
 from contextlib import closing
 from pathlib import Path
 
@@ -17,6 +19,44 @@ from tests.accounts import create_account
 from tests.test_service_runtime import installation_settings
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def refuse_start(configuration, entry, tmp_path, cause="RetainedLegacyInstallation"):
+    """Observe public startup refusal and its fail-stop diagnostic."""
+    admitted = tmp_path / "admitted"
+    with tempfile.TemporaryDirectory(prefix="octopus-startup-", dir="/var/tmp") as directory:
+        journal = str(Path(directory) / "journal")
+        with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as receiver:
+            receiver.bind(journal)
+            receiver.settimeout(1)
+            result = subprocess.run([sys.executable, "-c", """
+import asyncio,json,sys
+from pathlib import Path
+from server.config import settings
+for name,value in json.loads(Path(sys.argv[1]).read_text()).items():setattr(settings,name,value)
+settings.master_key=''
+from server import service_health
+service_health._JOURNAL_SOCKET=sys.argv[4]
+async def start():
+    if sys.argv[2]=='database':
+        from server.database import Database
+        database=Database(settings.db_path)
+        await database.initialize()
+        await database.close()
+        Path(sys.argv[3]).touch()
+    else:
+        from server.main import app
+        async with app.router.lifespan_context(app):Path(sys.argv[3]).touch()
+asyncio.run(start())
+""", str(configuration), entry, str(admitted), journal], cwd=ROOT,
+                env=dict(os.environ, OCTOPUS_ENV_FILE=str(tmp_path / "retained.env"),
+                         CODEX_HOME=str(tmp_path / "provider-codex"), CLAUDE_CONFIG_DIR=str(tmp_path / "provider-claude")),
+                capture_output=True, text=True, timeout=15)
+            assert result.returncode == 70, result.stdout + result.stderr
+            diagnostic = receiver.recv(8192).decode()
+            assert f"OCTOPUS_CAUSE={cause}" in diagnostic
+            assert "original ciphertext" not in diagnostic and "retained-setup-proof" not in diagnostic
+    assert not admitted.exists()
 
 
 async def test_current_format_is_prepared_once_and_reopen_preserves_owned_facts(tmp_path, monkeypatch):
@@ -75,31 +115,43 @@ async def test_current_format_is_prepared_once_and_reopen_preserves_owned_facts(
 
 @pytest.mark.parametrize("entry", ["database", "service"])
 @pytest.mark.parametrize("damage", ["future_version", "future_version_wal", "previous_version", "unmarked"])
-async def test_unsupported_owned_format_is_refused_without_writes(tmp_path, monkeypatch, request, entry, damage):
+async def test_unsupported_format_is_refused_without_writes(tmp_path, monkeypatch, entry, damage):
     config, configuration = installation_settings(tmp_path)
     for name, value in json.loads(configuration.read_text()).items():
         monkeypatch.setattr(settings, name, value)
     monkeypatch.setattr(settings, "master_key", "format-fixture-master")
     path = Path(config.db_path)
-    database = Database(str(path))
-    await database.initialize()
-    owner, _ = await create_account(database, extra_roots=[tmp_path])
-    await database.save_session("original", "Original session", str(tmp_path), "time", user_id=owner["id"])
-    await database.append_message(session_id="original", seq=0, role="user", type="text", content="Original input must survive")
-    await database.close()
+    environment = tmp_path / "retained.env"
+    environment.write_text("OCTOPUS_AUTH_TOKEN=retained-setup-proof\n")
+    original_environment = environment.read_bytes()
+    if damage == "unmarked":
+        with closing(sqlite3.connect(path)) as writer:
+            writer.execute("CREATE TABLE retained(original BLOB)")
+            writer.execute("INSERT INTO retained VALUES(?)", (b"original ciphertext\x00\xff",))
+            writer.commit()
+    else:
+        database = Database(str(path))
+        await database.initialize()
+        owner, _ = await create_account(database, extra_roots=[tmp_path])
+        await database.save_session("original", "Original session", str(tmp_path), "time", user_id=owner["id"])
+        await database.append_message(session_id="original", seq=0, role="user", type="text", content="Original input must survive")
+        await database.close()
     if damage == "future_version_wal":
-        keeper = sqlite3.connect(path)
-        request.addfinalizer(keeper.close)
-        keeper.execute("PRAGMA wal_autocheckpoint=0")
-        keeper.execute("SELECT 1 FROM sessions").fetchall()
-    with closing(sqlite3.connect(path)) as writer:
-        if damage in ("future_version", "future_version_wal"):
-            writer.execute("PRAGMA user_version=999")
-        elif damage == "previous_version":
-            writer.execute("PRAGMA user_version=3")
-        else:
-            writer.execute("PRAGMA user_version=0")
-        writer.commit()
+        main_bytes = path.read_bytes()
+        subprocess.run([sys.executable, "-c", """
+import os,sqlite3,sys
+writer=sqlite3.connect(sys.argv[1])
+writer.execute('PRAGMA wal_autocheckpoint=0')
+writer.execute('PRAGMA user_version=999')
+writer.execute("UPDATE messages SET content='original ciphertext committed in WAL' WHERE session_id='original'")
+writer.commit()
+os._exit(0)
+""", str(path)], cwd=ROOT, check=True, timeout=10)
+        assert path.read_bytes() == main_bytes
+    elif damage != "unmarked":
+        with closing(sqlite3.connect(path)) as writer:
+            writer.execute(f"PRAGMA user_version={999 if damage == 'future_version' else 3}")
+            writer.commit()
     original = path.read_bytes()
     wal = Path(str(path) + "-wal")
     original_wal = wal.read_bytes() if wal.exists() else None
@@ -107,29 +159,7 @@ async def test_unsupported_owned_format_is_refused_without_writes(tmp_path, monk
         assert int.from_bytes(original[60:64], "big") == 4
         assert original_wal is not None and len(original_wal) > 32
     directories = {child.relative_to(tmp_path) for child in tmp_path.rglob("*") if child.is_dir()}
-    admitted = tmp_path / "admitted"
-    result = subprocess.run([sys.executable, "-c", """
-import asyncio,json,sys
-from pathlib import Path
-from server.config import settings
-for name,value in json.loads(Path(sys.argv[1]).read_text()).items():setattr(settings,name,value)
-settings.master_key=''
-from server.database import Database
-async def main():
-    if sys.argv[2]=='database':
-        database=Database(settings.db_path)
-        await database.initialize()
-        Path(sys.argv[3]).touch()
-        await database.close()
-    else:
-        from server.main import app
-        async with app.router.lifespan_context(app):Path(sys.argv[3]).touch()
-asyncio.run(main())
-""", str(configuration), entry, str(admitted)], cwd=ROOT, capture_output=True, text=True, timeout=15,
-        env=dict(os.environ, OCTOPUS_ENV_FILE=str(tmp_path / "no-project.env"),
-                 CODEX_HOME=str(tmp_path / "provider-codex"), CLAUDE_CONFIG_DIR=str(tmp_path / "provider-claude")))
-    assert result.returncode == 70, result.stdout + result.stderr
-    assert not admitted.exists()
+    refuse_start(configuration, entry, tmp_path, cause="UnsupportedMainStorage")
     assert path.read_bytes() == original
     # SQLite may create empty WAL/read-index coordination files in mode=ro.
     # It must neither append committed frames nor change retained WAL bytes.
@@ -139,6 +169,15 @@ asyncio.run(main())
         assert wal.stat().st_size == 0
     assert {child.relative_to(tmp_path) for child in tmp_path.rglob("*") if child.is_dir()} == directories
     assert not Path(config.master_key_file).exists()
+    assert environment.read_bytes() == original_environment
+    with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as reader:
+        if damage == "unmarked":
+            assert not Path(config.users_root).exists()
+            assert reader.execute("SELECT original FROM retained").fetchone()[0] == b"original ciphertext\x00\xff"
+            assert reader.execute("SELECT 1 FROM sqlite_schema WHERE name='agents'").fetchone() is None
+        elif damage == "future_version_wal":
+            assert reader.execute("PRAGMA user_version").fetchone()[0] == 999
+            assert reader.execute("SELECT content FROM messages WHERE session_id='original'").fetchone()[0] == "original ciphertext committed in WAL"
 
 
 @pytest.mark.parametrize("failure", ["during_ddl", "before_version", "commit_ack"])

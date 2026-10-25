@@ -44,4 +44,14 @@ async def test_adding_relation_retains_native_source_without_renewing_its_proof(
     assert current["metadata"]["sources"] == [] and current["metadata"]["source_refs"] == []
     text = (root / "Library/consumer.md").read_text()
     assert text.startswith(original[:original.index("Retain this claim.")])
+    assert text.count("Retain this claim.\n") == 1
+    # Clearing source evidence does not implicitly clear omitted relations.
+    assert "[[Library/b.md]]：Related support" in text
+    cleared_relations = await client.post("/api/wiki/organize", headers=client.headers, json={
+        "path": current["path"], "expected_revision": current["revision"], "reason": "clear relations explicitly",
+        "relations": [], "reuse_existing_summary": True,
+    })
+    assert cleared_relations.status_code == 200, cleared_relations.text
+    text = (root / "Library/consumer.md").read_text()
     assert text.endswith("Retain this claim.\n")
+    assert "Related support" not in text

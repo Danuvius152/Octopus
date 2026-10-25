@@ -24,7 +24,7 @@
  *      `showDelegations=false` by default).
  */
 
-import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
+import { test, expect, type Page, type APIRequestContext } from "./test";
 import { systemAgentId } from "./system-agent";
 
 const TOKEN = "changeme";

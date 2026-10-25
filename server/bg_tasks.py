@@ -38,7 +38,6 @@ import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -48,6 +47,10 @@ from .aio import complete_cleanup, drain_cancelled
 from .database import Database
 from .knowledge import OwnedTaskContext, capture, derive, encode
 from .mcp_identity import McpScope, require_live_scope, work_is_open
+from .process_groups import group_exists as _group_exists
+from .process_groups import (
+    group_has_live_members_after_kill as _group_has_live_members_after_kill,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,45 +141,6 @@ def _short_id() -> str:
     """Short hex id (12 chars). Long enough to not collide in a single
     session's task list, short enough to type by hand if needed."""
     return uuid.uuid4().hex[:12]
-
-
-def _group_exists(pgid: int) -> bool:
-    """Only the kernel's ESRCH confirms absence while members may fork."""
-    try:
-        os.killpg(pgid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
-def _group_has_live_members_after_kill(pgid: int) -> bool:
-    """After group KILL, distinguish exited orphans from live processes.
-
-    A procfs census is not an absence proof while processes may fork. It is
-    used only after SIGKILL, never to withdraw the TERM grace/KILL owner.
-    """
-    if not _group_exists(pgid):
-        return False
-    proc = Path("/proc")
-    if not proc.is_dir():
-        return True
-    for entry in proc.iterdir():
-        if not entry.name.isdigit():
-            continue
-        try:
-            if os.getpgid(int(entry.name)) != pgid:
-                continue
-            fields = (entry / "stat").read_text().rsplit(")", 1)[1].split()
-            group, state, threads = int(fields[2]), fields[0], int(fields[17])
-        except (FileNotFoundError, ProcessLookupError):
-            continue
-        except (OSError, IndexError, ValueError):
-            return True  # uncertain exit evidence must retain the cleanup owner
-        # Top-level procfs enumerates thread-group leaders. A zombie leader
-        # can still have live subthreads; its state alone cannot prove exit.
-        if group == pgid and (state not in {"Z", "X"} or threads != 1):
-            return True
-    return False
 
 
 _TRUNC_MARKER = b"\xe2\x80\xa6[truncated; tail bytes shown]\n"

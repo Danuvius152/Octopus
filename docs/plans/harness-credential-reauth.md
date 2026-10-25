@@ -113,12 +113,16 @@ valid and the flag clears.
   deleted, adopted or foreign target returns 404 without replacing its secret;
   install-owner None is an explicit owner here, not an unfiltered DB query.
 - **Codex** (`POST /credentials/codex/start`): optional
-  `reauth_credential_id`. The login re-runs `codex login` with
-  `CODEX_HOME = codex_home_for(reauth_credential_id)` — i.e. it overwrites
-  `auth.json` in the *same* directory the credential already points at, so
-  no path changes and no dir cleanup is needed. The status-route persist
-  branches: credential row exists → update + clear flag; else insert (new
-  sign-in).
+  `reauth_credential_id`. The permanent `codex_home_for(reauth_credential_id)`
+  path and credential ID stay unchanged. The login CLI writes into a fresh
+  staging home under the same home root; only after successful exit and auth
+  validation does Octopus atomically replace the existing `auth.json` with a
+  mode-0600 file. Failure, cancellation and launch errors remove only this
+  staging home, preserving existing authorization, configuration and native
+  sessions. The status route serializes persistence for each login and checks
+  the target account again on update. Repeated success reads return the owned
+  credential; deletion produces an explicit error without recreating the row.
+  Only a new sign-in inserts a credential.
 - **API key** (`PATCH /credentials/{id}` with a new secret): clears the
   flag too, so re-pasting a fresh key recovers an `api_key` credential.
 

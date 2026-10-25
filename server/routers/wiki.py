@@ -775,7 +775,7 @@ class Organize(BaseModel):
     expected_revision: str
     key_note: str | None = None
     tags: list[str] | None = None
-    relations: list[Relation] = []
+    relations: list[Relation] | None = None
     sources: list[Source] | None = None
     aliases: list[str] | None = None
     reuse_existing_summary: bool = False
@@ -798,7 +798,7 @@ def organize(
         body.expected_revision,
         body.key_note,
         body.tags,
-        [r.model_dump() for r in body.relations],
+        [r.model_dump() for r in body.relations] if body.relations is not None else None,
         [s.model_dump() for s in body.sources] if body.sources is not None else None,
         actor,
         body.reason,

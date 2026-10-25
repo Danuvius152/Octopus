@@ -32,12 +32,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
+from .aio import complete_cleanup
 from .applications import data_dir_for
 
 if TYPE_CHECKING:
     from .applications import ApplicationManager
     from .database import Database
     from .session_manager import SessionManager
+    from .sessions.base import Session
 
 logger = logging.getLogger(__name__)
 
@@ -95,12 +97,14 @@ class _Turn:
     attempt_id: str | None = None
     error: str | None = None
     cost: float | None = None
+    consumer_attached: bool = True
 
     def reply(self) -> str:
         return "\n\n".join(t for t in self.text if t).strip()
 
     def emit(self, event: dict[str, Any]) -> None:
-        self.queue.put_nowait({**event, "request_id": self.request_id, "attempt_id": self.attempt_id})
+        if self.consumer_attached:
+            self.queue.put_nowait({**event, "request_id": self.request_id, "attempt_id": self.attempt_id})
 
 
 class AppAgentManager:
@@ -111,6 +115,9 @@ class AppAgentManager:
         self.db: Database | None = None
         self.app_mgr: ApplicationManager | None = None
         self._turns: dict[str, _Turn] = {}
+        # Serializes each app's admission through asynchronous session creation.
+        # A cancelled waiter owns no slot; admitted turns live in _turns.
+        self._admission_locks: dict[str, asyncio.Lock] = {}
 
     def bind(
         self,
@@ -145,8 +152,8 @@ class AppAgentManager:
     async def _observe_completion(self, turn: _Turn, receipt) -> None:
         completion = await receipt.wait()
         if turn.done.is_set():
-            return
-        if completion.notification_state != "delivered":
+            pass  # A response error does not retire the original execution.
+        elif completion.notification_state != "delivered":
             self._fail_turn(turn, completion.reason or "The original request notification could not be delivered")
         elif completion.state != "completed" or completion.recording_state != "committed":
             self._fail_turn(turn, f"The request ended without a recorded reply ({completion.state})")
@@ -155,6 +162,16 @@ class AppAgentManager:
         else:
             turn.emit({"type": "done", "reply": turn.reply(), "cost": turn.cost})
             turn.done.set()
+        # A failed Owner can publish unavailable before its captured cleanup
+        # retires. Response completion alone must not release the app's slot.
+        await self._require_session_mgr().await_session_execution(turn.session_id)
+        self._release_turn(turn)
+
+    @staticmethod
+    def _detach_consumer(turn: _Turn) -> None:
+        turn.consumer_attached = False
+        while not turn.queue.empty():
+            turn.queue.get_nowait()
 
     # ------------------------------------------------------------- read-side
 
@@ -243,6 +260,7 @@ class AppAgentManager:
     async def ask(self, app_row: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         """Run one turn and wait for the answer (§2 — the JSON delivery)."""
         turn = await self.begin_turn(app_row, **kwargs)
+        self._detach_consumer(turn)
         try:
             await asyncio.wait_for(turn.done.wait(), timeout=ASK_TIMEOUT_SECONDS)
         except TimeoutError:
@@ -254,8 +272,6 @@ class AppAgentManager:
                           "request_id": turn.request_id, "state": "running",
                           "status_url": f"/apps/{turn.app_id}/agent/conversations/{turn.session_id}/requests/{turn.request_id}"},
             )
-        finally:
-            self._release_turn(turn)
         if turn.error:
             raise AppAgentError(turn.error, status_code=502)
         return {
@@ -304,8 +320,8 @@ class AppAgentManager:
         connection drops mid-answer, then `delta`/`tool`/`question` as they
         arrive, then exactly one terminal `done` or `error`.
         """
-        yield {"type": "conversation", "conversation_id": turn.session_id, "request_id": turn.request_id}
         try:
+            yield {"type": "conversation", "conversation_id": turn.session_id, "request_id": turn.request_id}
             while True:
                 try:
                     event = await asyncio.wait_for(
@@ -321,7 +337,7 @@ class AppAgentManager:
                 if event["type"] in ("done", "error"):
                     return
         finally:
-            self._release_turn(turn)
+            self._detach_consumer(turn)
 
     async def begin_turn(
         self,
@@ -357,6 +373,46 @@ class AppAgentManager:
                 status_code=413,
             )
 
+        # One app's creation and registration form one admission boundary.
+        # Other apps remain independent; cancellation releases the lock.
+        async with self._admission_locks.setdefault(app_id, asyncio.Lock()):
+            session, first_turn, turn = await self._register_turn(
+                app_row, conversation_id=conversation_id, agent=agent, title=title,
+            )
+
+        async def admit():
+            from .wiki.tasks import explicit_mode
+            mode = explicit_mode(message, wiki_mode)
+            body = self._compose_turn(
+                app_row, message=message, context=context, first_turn=first_turn
+            )
+            receipt = await mgr.start_message(
+                session.id, body, source="app", request_id=turn.request_id,
+                trusted_request=message, **({"wiki_mode": mode} if mode else {}),
+            )
+            if not receipt.accepted:
+                raise AppAgentError("This conversation is closed to new turns", status_code=409)
+            # Register observation before a cancelled HTTP waiter can leave.
+            turn.observer = asyncio.create_task(self._observe_completion(turn, receipt),
+                                               name=f"app-reply-{turn.request_id}")
+
+        try:
+            await complete_cleanup(admit())
+        except BaseException as exc:
+            if turn.observer is None:
+                self._release_turn(turn)
+            else:
+                self._detach_consumer(turn)
+            if isinstance(exc, (asyncio.CancelledError, AppAgentError)):
+                raise
+            raise AppAgentError(f"could not start the turn: {exc}", status_code=500) from exc
+        return turn
+
+    async def _register_turn(
+        self, app_row: dict[str, Any], *, conversation_id: str | None,
+        agent: str | None, title: str | None,
+    ) -> tuple[Session, bool, _Turn]:
+        app_id = app_row["id"]
         active = sum(1 for t in self._turns.values() if t.app_id == app_id)
         if active >= MAX_ACTIVE_TURNS_PER_APP:
             raise AppAgentError(
@@ -397,30 +453,7 @@ class AppAgentManager:
 
         turn = _Turn(session_id=session.id, app_id=app_id)
         self._turns[session.id] = turn
-        body = self._compose_turn(
-            app_row, message=message, context=context, first_turn=first_turn
-        )
-        try:
-            from .wiki.tasks import explicit_mode
-            mode = explicit_mode(message, wiki_mode)
-            receipt = await mgr.start_message(
-                session.id, body, source="app", request_id=turn.request_id,
-                trusted_request=message, **({"wiki_mode": mode} if mode else {}),
-            )
-        except BaseException as exc:
-            self._release_turn(turn)
-            if isinstance(exc, asyncio.CancelledError):
-                raise
-            raise AppAgentError(
-                f"could not start the turn: {exc}", status_code=500
-            )
-        if not receipt.accepted:
-            self._release_turn(turn)
-            raise AppAgentError("This conversation is closed to new turns", status_code=409)
-        if not turn.done.is_set():
-            turn.observer = asyncio.create_task(self._observe_completion(turn, receipt),
-                                                name=f"app-reply-{turn.request_id}")
-        return turn
+        return session, first_turn, turn
 
     # -------------------------------------------------------------- internals
 

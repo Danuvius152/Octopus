@@ -1,5 +1,5 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
-import { test, expect, type Page } from "@playwright/test";
+import { test, expect, type Page } from "./test";
 
 // Connectors UI against the real backend. No real third-party OAuth is needed:
 // configuring an OAuth client (or creating a custom connector) just flips a

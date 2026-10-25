@@ -302,7 +302,7 @@ async def _cli_pid(pid_file: Path) -> int:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("stage", ["reason", "web"])
 async def test_research_shutdown_interrupts_job_after_cli_retires(
-    rm, mgr, db, monkeypatch, tmp_path, stage
+    rm, mgr, db, monkeypatch, tmp_path, stage, short_process_shutdown
 ):
     pid_file = _blocking_research_cli(monkeypatch, tmp_path, stage=stage)
     session = await _session(mgr, db)
@@ -515,7 +515,7 @@ async def test_research_shutdown_timeout_keeps_pending_cleanup_for_later_join(
 
 @pytest.mark.asyncio
 async def test_research_shutdown_joins_every_parallel_web_cli_retirement(
-    rm, mgr, db, monkeypatch, tmp_path
+    rm, mgr, db, monkeypatch, tmp_path, short_process_shutdown
 ):
     original = get_harness("claude-code").profile
     script = (

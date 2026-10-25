@@ -3,7 +3,7 @@ import * as http from "node:http";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
+import { test, expect, type Page, type APIRequestContext } from "./test";
 import { systemAgentId } from "./system-agent";
 
 const TOKEN = TEST_BEARER;

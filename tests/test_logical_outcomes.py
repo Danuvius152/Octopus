@@ -121,7 +121,7 @@ async def test_provider_failure_recovers_with_one_result_in_live_and_history(run
     assert any(m["type"] == "recovery" for m in history)
 
 
-async def test_stop_delivers_one_interrupted_result_without_success(runtime, monkeypatch):
+async def test_stop_delivers_one_interrupted_result_without_success(runtime, monkeypatch, short_process_shutdown):
     manager, session, client = runtime
     scripted_cli(monkeypatch, [[
         {"type": "thread.started", "thread_id": "saved-thread"},

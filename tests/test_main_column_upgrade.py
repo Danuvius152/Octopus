@@ -2,7 +2,6 @@
 
 import sqlite3
 from contextlib import closing
-from pathlib import Path
 
 import aiosqlite
 import pytest
@@ -16,8 +15,6 @@ from server.routers import auth, credentials, sessions
 from server.sessions import SessionManager
 from server.users import UserManager
 from tests.accounts import create_account
-
-ROOT = Path(__file__).resolve().parents[1]
 
 
 async def seed(path):
@@ -51,16 +48,12 @@ async def seed(path):
 
 
 def facts(path):
-    """Include original rowids and all facts except the two proven duplicates."""
+    """Include original rowids and every stored column from every user table."""
     with closing(sqlite3.connect(path)) as reader:
         result = {}
-        tables = reader.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' "
-                                "AND name!='schema_migrations'").fetchall()
+        tables = reader.execute("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*'").fetchall()
         for (table,) in tables:
-            columns = [row[1] for row in reader.execute(f'PRAGMA table_info("{table}")')]
-            retired = {"backend_credentials": "secret_encrypted", "client_submissions": "recovered_by"}.get(table)
-            names = ','.join('"' + column + '"' for column in columns if column != retired)
-            result[table] = reader.execute(f'SELECT rowid,{names} FROM "{table}" ORDER BY rowid').fetchall()  # noqa: S608
+            result[table] = reader.execute(f'SELECT rowid,* FROM "{table}" ORDER BY rowid').fetchall()  # noqa: S608
         return result
 
 

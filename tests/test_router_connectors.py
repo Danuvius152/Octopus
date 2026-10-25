@@ -4,7 +4,9 @@ installation CRUD, the internal token route, and agent-scoped enable routes."""
 
 from __future__ import annotations
 
+import asyncio
 import time
+from html.parser import HTMLParser
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -114,6 +116,116 @@ async def _new_agent(client, name="Researcher"):
     r = await client.post("/api/agents", json={"name": name}, headers=client.headers)
     assert r.status_code == 201, r.text
     return r.json()["id"]
+
+
+async def test_oauth_callback_displays_external_errors_as_text(client):
+    class Page(HTMLParser):
+        def __init__(self):
+            super().__init__(convert_charrefs=True)
+            self.scripts = 0
+            self.text = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "script":
+                self.scripts += 1
+
+        def handle_data(self, data):
+            self.text.append(data)
+
+    await _configure(client)
+    started = await _start(client)
+    login_id = started.json()["login_id"]
+    state = connectors_mod._login_mgr.get(login_id).state
+    payload = '</p><script>window.leaked=localStorage.octopus_token</script><img src=x onerror="alert(1)">'
+    response = await client.get("/api/connectors/oauth/callback", params={
+        "state": f"{login_id}:{state}", "error": payload,
+    }, headers={"Authorization": ""})
+    assert response.status_code == 200
+    page = Page()
+    page.feed(response.text)
+    assert page.scripts == 1  # only the fixed window.close script
+    assert payload in "".join(page.text)
+    assert payload not in response.text
+    assert connectors_mod._login_mgr.get(login_id).message == payload
+    # Invalid state must still be refused before accepting provider errors.
+    rejected = await client.get("/api/connectors/oauth/callback", params={"state": "invalid", "error": payload})
+    assert payload not in rejected.text
+
+
+async def test_custom_http_mcp_uses_each_owned_installations_definition_concurrently(client, monkeypatch):
+    import httpx
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    from server.config import settings
+    from server.connectors.base import ConnectorInstallation
+    from server.harness.assembly import _http_entries
+    from server.mcp_identity import mint
+    from tests.callback_api import start_callback_api
+
+    manager = connectors_mod._require_manager()
+    owner = (await manager.db.get_system_agent())["user_id"]
+    other, _ = await create_account(manager.db, username="other-connector-owner")
+    entries = []
+    expected = []
+    installations = []
+    for kind, host in [("custom-a", "a"), ("custom-b", "b")]:
+        base = f"https://{host}.example.invalid/v1"
+        await manager.create_custom_connector(
+            kind=kind, display_name=kind, authorize_url="https://oauth.invalid/auth",
+            token_url="https://oauth.invalid/token", scopes=[], pkce=True,
+            api_base=base, client_id="id", client_secret="secret",
+        )
+        installation = await manager.complete_install(
+            kind=kind, token_set=OAuthTokenSet(f"token-{host}", None, 0), user_id=owner,
+        )
+        connector = await manager.get(kind)
+        entry = _http_entries([], [(connector, ConnectorInstallation(
+            id=installation["id"], kind=kind, label=kind,
+        ))], "mcp-session", owner)[0]
+        entries.append(entry)
+        installations.append(installation)
+        expected.append((f"{base}/items", f"Bearer token-{host}"))
+
+    destinations = []
+
+    def upstream(method, url, *, headers, **kwargs):
+        destinations.append((url, headers["Authorization"]))
+        return httpx.Response(200, json={"ok": True})
+
+    monkeypatch.delenv("OCTOPUS_CONNECTOR_API_BASE", raising=False)
+    monkeypatch.setenv("OCTOPUS_INSTALLATION_ID", "wrong-process-installation")
+    monkeypatch.setattr(httpx, "request", upstream)
+    api = await start_callback_api(
+        connectors_mod.router, readiness_token=mint("readiness", user_id=owner),
+    )
+    monkeypatch.setattr(settings, "port", api.port)
+
+    async def call(entry):
+        http_client = httpx.AsyncClient(
+            headers={"Authorization": f"Bearer {entry.credential}"}, timeout=10,
+        )
+        async with streamable_http_client(
+            f"http://127.0.0.1:{api.port}/mcp/custom/mcp", http_client=http_client,
+        ) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool("request", {"method": "GET", "path": "/items"})
+                return result.content[0].text
+
+    try:
+        outputs = await asyncio.gather(*(call(entry) for entry in entries))
+        assert all('"ok": true' in output for output in outputs)
+        assert sorted(destinations) == sorted(expected)
+        # A valid different-account scope cannot read token or destination even
+        # when it names the victim installation.
+        stolen = _http_entries([], [(await manager.get(installations[0]["kind"]), ConnectorInstallation(
+            id=installations[0]["id"], kind=installations[0]["kind"], label="other",
+        ))], "other-session", other["id"])[0]
+        assert "unavailable" in await call(stolen)
+        assert len(destinations) == 2
+    finally:
+        await api.stop()
 
 
 # --- auth + catalog --------------------------------------------------------

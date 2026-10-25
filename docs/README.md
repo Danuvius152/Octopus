@@ -29,6 +29,7 @@ Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验
 
 - **[共享 Wiki 开发过程总结](plans/wiki-development-summary.md)** — 本期已完成；实际交付、当前合同、证据边界与开发方法。
 - **[共享 Wiki 未来计划](plans/wiki-future-plan.md)** — Sapphire、SmartReader、共享能力及有触发条件的后续工作。
+- **[全库实现审查（2026-10-23，核验关闭于 10-25）](review/review-20261023.md)** — F01–F20 均已由 Octo 修复、Vera 独立核验关闭；记录最终修复候选的完整离线验证及证据边界。
 - **[user-guide.md](user-guide.md)** — practical instructions for this local
   WSL + Codex installation: startup, agents, and phone access with the
   project's Cloudflare Tunnel integration.

@@ -641,16 +641,15 @@ class WikiStore:
         metadata["metadata_validation_version"] = portable_metadata.VERSION
         if path.suffix.lower() == ".pdf":
             metadata["revision_kind"] = "stat"
-        portable = re.search(r"<!-- octopus-wiki\s+(.*?)\s*-->", text, re.S)
-        if portable:
-            try:
-                supplied = portable_metadata.validate(json.loads(portable[1]))
-                # Extraction quality and tool versions cannot be supplied by a document.
-                metadata |= {
-                    k: v for k, v in supplied.items() if k not in extracted["metadata"]
-                }
-            except (ValueError, TypeError, RecursionError):
-                metadata["metadata_error"] = "Invalid octopus-wiki metadata"
+        parsed = prepared["parsed"] if prepared is not None else document_format.parse(text)
+        try:
+            supplied = portable_metadata.from_document(parsed)
+            # Extraction quality and tool versions cannot be supplied by a document.
+            metadata |= {
+                k: v for k, v in supplied.items() if k not in extracted["metadata"]
+            }
+        except (ValueError, TypeError, RecursionError):
+            metadata["metadata_error"] = "Invalid octopus-wiki metadata"
         kind = metadata.get("kind", "original")
         if kind not in {"original", "source", "concept", "topic", "submission"}:
             kind = "original"
@@ -658,7 +657,6 @@ class WikiStore:
         if exclusion:
             kind = "asset"
             metadata["asset_reason"] = exclusion
-        parsed = prepared["parsed"] if prepared is not None else document_format.parse(text)
         if parsed.error and existing is not None and existing["id"] == doc_id:
             if not previous_metadata.get("frontmatter_error") or previous_metadata.get("frontmatter_retained_from"):
                 for name in ("title", "description", "type", "status", "resource", "uid",

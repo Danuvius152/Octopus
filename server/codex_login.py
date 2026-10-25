@@ -16,11 +16,13 @@ Lifecycle: `start(label)` → spawn + scrape (returns url+code) → caller polls
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
 import shutil
 import signal
+import tempfile
 import uuid
 from dataclasses import dataclass, field
 from enum import Enum
@@ -60,6 +62,11 @@ class CodexLoginSession:
     persisted: bool = False  # set once the route saves the credential row
     # Who started this login — see `LoginSession.user_id` in oauth_login.py.
     user_id: str | None = None
+    # A reauthorization owns only a staging home, never the existing native
+    # records. Publish its auth.json atomically after a successful CLI exit.
+    _login_home: str | None = field(default=None, repr=False)
+    _reauth: bool = field(default=False, repr=False)
+    _persist_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _proc: asyncio.subprocess.Process | None = field(default=None, repr=False)
     _task: asyncio.Task | None = field(default=None, repr=False)
     _watchdog: asyncio.Task | None = field(default=None, repr=False)
@@ -123,16 +130,19 @@ class CodexLoginManager:
                 "sign-in isn't available."
             )
 
-        # Re-authorization reuses the existing credential id, so `codex login`
-        # writes a fresh auth.json into the SAME CODEX_HOME the credential
-        # already points at — no new dir, no path change, bindings preserved
-        # (harness-credential-reauth.md §5). A fresh sign-in mints a new id.
+        # Keep the credential's permanent home and bindings. A reauthorization
+        # runs in an owned staging home so a failed CLI cannot damage valid
+        # auth, configuration or native session records in the existing home.
         credential_id = reauth_credential_id or uuid.uuid4().hex[:12]
         home = codex_home_for(credential_id)
-        os.makedirs(home, exist_ok=True)
+        os.makedirs(home, exist_ok=reauth_credential_id is not None)
+        login_home = (
+            tempfile.mkdtemp(prefix=f".{credential_id}-login-", dir=codex_home_root())
+            if reauth_credential_id else home
+        )
 
         env = os.environ.copy()
-        env["CODEX_HOME"] = home
+        env["CODEX_HOME"] = login_home
         # codex is a `#!/usr/bin/env node` script; make sure the child finds
         # node even when the service PATH omits the nvm bin (else exit 127).
         env["PATH"] = augmented_path(env.get("PATH"), os.path.dirname(argv[0]))
@@ -145,6 +155,8 @@ class CodexLoginManager:
             label=label,
             _created_at=loop.time(),
             user_id=user_id,
+            _login_home=login_home,
+            _reauth=reauth_credential_id is not None,
         )
         # Register before yielding to spawn. The drive owns the process even
         # if the HTTP waiter is cancelled or shutdown starts during creation.
@@ -154,7 +166,7 @@ class CodexLoginManager:
         async def launch_and_drive() -> None:
             try:
                 session._proc = await asyncio.create_subprocess_exec(
-                    *argv, cwd=home, env=env,
+                    *argv, cwd=login_home, env=env,
                     stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.STDOUT,
@@ -215,10 +227,31 @@ class CodexLoginManager:
 
         rc = await proc.wait()
         if session.state == CodexLoginState.cancelled:
+            shutil.rmtree(session._login_home or session.codex_home, ignore_errors=True)
             session._scraped.set()
             return
-        auth_ok = os.path.exists(os.path.join(session.codex_home, "auth.json"))
+        login_home = session._login_home or session.codex_home
+        auth_path = os.path.join(login_home, "auth.json")
+        auth_ok = os.path.isfile(auth_path)
         if rc == 0 and auth_ok:
+            try:
+                with open(auth_path) as auth_file:
+                    auth = json.load(auth_file)
+                if not isinstance(auth, dict) or not isinstance(auth.get("tokens"), dict) or not auth["tokens"].get("access_token"):
+                    raise ValueError("missing device authorization token")
+                os.chmod(auth_path, 0o600)
+            except (OSError, ValueError):
+                await self._fail(session, "Codex sign-in produced invalid auth.json.")
+                session._scraped.set()
+                return
+            if session._reauth:
+                try:
+                    os.replace(auth_path, os.path.join(session.codex_home, "auth.json"))
+                except OSError as exc:
+                    await self._fail(session, f"Could not save Codex sign-in: {exc}")
+                    session._scraped.set()
+                    return
+                shutil.rmtree(login_home, ignore_errors=True)
             session.state = CodexLoginState.success
             logger.info("Codex login %s: success", session.id)
         else:
@@ -259,8 +292,10 @@ class CodexLoginManager:
         session.state = CodexLoginState.error
         session.message = message
         _kill_process_group(session._proc)
-        # Clean up so a half-written CODEX_HOME can't masquerade as valid.
-        shutil.rmtree(session.codex_home, ignore_errors=True)
+        if session._proc is not None:
+            await session._proc.wait()
+        # This login owns the fresh home or reauthorization staging home only.
+        shutil.rmtree(session._login_home or session.codex_home, ignore_errors=True)
         logger.info("Codex login %s: error — %s", session.id, message)
 
     async def cancel(self, login_id: str) -> None:
@@ -273,7 +308,7 @@ class CodexLoginManager:
         session.message = "cancelled by user"
         _kill_process_group(session._proc)
         await self._reap(session)
-        shutil.rmtree(session.codex_home, ignore_errors=True)
+        shutil.rmtree(session._login_home or session.codex_home, ignore_errors=True)
         logger.info("Codex login %s: cancelled", login_id)
 
     def get(self, login_id: str) -> CodexLoginSession | None:

@@ -1,5 +1,5 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
-import { expect, test, type Page, type WebSocketRoute } from "@playwright/test";
+import { expect, test, type Page, type WebSocketRoute } from "./test";
 import { systemAgentId } from "./system-agent";
 
 /** Deterministic HTTP/WS boundary script. Queue execution is covered by the

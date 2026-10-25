@@ -29,12 +29,15 @@ reaped.
   (`run.py`) — the single spawn seam shared by the streaming engine
   (`run.py:222`) AND `Harness.run_oneshot` (`harness.py:152`). The child
   becomes a session/group leader, so its descendants share its pgid.
-- **Reap the group:** a `_terminate_process_group(proc)` helper does
-  `os.killpg(os.getpgid(pid), SIGTERM)` → wait → `SIGKILL` the group, guarded
-  for `ProcessLookupError`/`PermissionError` with a fallback to the old
-  per-proc `terminate()/kill()`. `HarnessRun.stop()` uses it (keeping the
-  stdin-close-first graceful step); `run_oneshot`'s timeout path kills the
-  group too. bg_tasks already uses process groups (`bg_tasks.py`) — same idea.
+- **Reap the captured group:** the spawned PID is its group ID even after
+  the leader exits. `HarnessRun.stop()` closes stdin first, then signals and
+  waits for the whole group, escalating TERM to KILL when necessary. The
+  application backend supervisor uses the same group-exit evidence. A direct
+  child exit or pipe EOF cannot release ownership while redirected children
+  can still write. After KILL, Linux procfs distinguishes inert orphan zombies
+  from live members, including a zombie leader with live threads. Unconfirmed
+  exit retains ownership and fails retirement. One-shot calls also confirm
+  group retirement after success, failure, timeout and cancellation.
 
 ## 3. Per-turn watchdog (idle + overall)
 

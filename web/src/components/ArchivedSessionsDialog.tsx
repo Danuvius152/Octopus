@@ -13,7 +13,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "./ui/dialog";
-import { loadSessionAndBgSnapshots } from "../lib/hydrateSession";
+import { loadSessionSnapshots } from "../lib/hydrateSession";
 import { selectSession } from "../lib/selectSession";
 
 const API_URL = window.location.origin;
@@ -68,7 +68,7 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
     setActiveSessionId(s.id);
     onOpenChange(false);
     try {
-      await loadSessionAndBgSnapshots(s.id, snapshotStart);
+      await loadSessionSnapshots(s.id, snapshotStart);
     } catch {
       // ignore
     }

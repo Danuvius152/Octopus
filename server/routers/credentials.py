@@ -502,7 +502,7 @@ async def codex_login_status(
         raise HTTPException(status_code=404, detail="unknown login_id")
 
     credential: CredentialInfo | None = None
-    if session.state == CodexLoginState.success and not session.persisted:
+    if session.state == CodexLoginState.success:
         db = _require_db()
         secret_key = await UserManager(db).data_key_for(user_id)
         credential = await _persist_codex_login(db, session, user_id, secret_key)
@@ -518,27 +518,42 @@ async def codex_login_status(
 
 async def _persist_codex_login(
     db: Database, session: CodexLoginSession, user_id: str | None, secret_key: str,
-) -> CredentialInfo:
-    if not session.persisted:
+) -> CredentialInfo | None:
+    from ..codex_login import CodexLoginState
+
+    # Concurrent status pollers share this login's one persistence operation.
+    async with session._persist_lock:
+        existing = await db.get_credential(session.credential_id, user_id)
+        if session.persisted or session._reauth:
+            if (existing is None or existing["user_id"] != user_id
+                    or existing["backend"] != BackendKind.codex.value):
+                session.state = CodexLoginState.error
+                session.message = "The signed-in credential is no longer available. Start a new sign-in."
+                return None
+            if session.persisted:
+                return _row_to_info(existing)
         # No real secret for Codex — the credential *is* the CODEX_HOME dir.
         # Store the dir path (encrypted, harmless) so the row is self-describing;
         # session_manager resolves the dir deterministically from credential_id.
-        existing = await db.get_credential(session.credential_id, user_id)
         if existing is not None:
             # Re-authorization: the row already exists (its CODEX_HOME just got
             # a fresh auth.json) — clear the needs_reconnect flag in place so
             # every binding keeps working (harness-credential-reauth.md §5).
-            await db.update_credential(
+            updated = await db.reauthorize_credential(
                 session.credential_id,
+                user_id=user_id,
+                backend=BackendKind.codex.value,
                 label=session.label,
                 status=CredentialStatus.active.value,
                 needs_reconnect=False,
                 last_refresh_error_code=None,
             )
+            if updated is None:
+                session.state = CodexLoginState.error
+                session.message = "The signed-in credential is no longer available. Start a new sign-in."
+                return None
             session.persisted = True
-            credential = _row_to_info(
-                await db.get_credential(session.credential_id)
-            )
+            credential = _row_to_info(updated)
         else:
             created_at = datetime.now(UTC).isoformat()
             await db.save_credential(
@@ -562,7 +577,6 @@ async def _persist_codex_login(
             )
 
         return credential
-    return _row_to_info(await db.get_credential(session.credential_id, user_id))
 
 
 @router.post("/codex/cancel", status_code=status.HTTP_204_NO_CONTENT)

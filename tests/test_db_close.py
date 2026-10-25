@@ -97,7 +97,7 @@ async def test_a_closed_database_is_closed_before_its_connection_goes():
 
 
 @pytest.mark.asyncio
-async def test_the_session_manager_drains_its_turns_when_the_db_closes(tmp_path, monkeypatch):
+async def test_the_session_manager_drains_its_turns_when_the_db_closes(tmp_path, monkeypatch, short_process_shutdown):
     """The hook that matters: a turn in flight is stopped while it can still
     unwind, rather than cancelled into a connection that has gone."""
     db = Database(":memory:")

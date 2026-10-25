@@ -907,7 +907,7 @@ async def test_retirement_owns_late_spawn_after_start_and_waiter_cancel(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_native_reader_drain_does_not_keep_cli_alive(tmp_path):
+async def test_native_reader_drain_does_not_keep_cli_alive(tmp_path, short_process_shutdown):
     from dataclasses import replace
 
     close_entered = asyncio.Event()

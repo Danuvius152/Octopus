@@ -64,31 +64,32 @@ async def test_app_cancel_uses_the_original_job_and_rejects_stale_target_without
     assert jobs.get(original["id"])["status"] == "queued"
 
 
-@pytest.mark.parametrize("value", ["true", "false", "1", "0", "on", "OFF", "yes", "invalid"])
-async def test_app_and_main_api_parse_boolean_aliases_and_invalid_values_identically(bound, value):
+async def test_app_and_main_api_parse_boolean_aliases_and_invalid_values_identically(bound):
     client, _, headers = bound
-    params = {"include_assets": value}
-    main = await client.get("/api/wiki/documents", headers=client.headers, params=params)
-    bridged = await client.get("/apps/parameters/wiki/documents", headers=headers, params=params)
-    assert main.status_code == bridged.status_code
-    if main.status_code == 200:
-        assert [row["path"] for row in main.json()["items"]] == [row["path"] for row in bridged.json()["items"]]
-    else:
-        assert main.status_code == 422
+    # Read-only variants share the same account, vault and application binding.
+    for value in ["true", "false", "1", "0", "on", "OFF", "yes", "invalid"]:
+        params = {"include_assets": value}
+        main = await client.get("/api/wiki/documents", headers=client.headers, params=params)
+        bridged = await client.get("/apps/parameters/wiki/documents", headers=headers, params=params)
+        assert main.status_code == bridged.status_code, (value, main.text, bridged.text)
+        if main.status_code == 200:
+            assert [row["path"] for row in main.json()["items"]] == [row["path"] for row in bridged.json()["items"]], value
+        else:
+            assert main.status_code == 422, value
 
 
-@pytest.mark.parametrize("operation,params", [
-    ("read", {}), ("read", {"doc": "Library/note.md", "length": "0"}),
-    ("read", {"doc": "Library/note.md", "length": "24001"}),
-    ("read", {"doc": "Library/note.md", "view": "unknown"}),
-    ("documents", {"offset": "-1"}), ("documents", {"limit": "101"}),
-    ("documents", {"limit": "1.0"}), ("search", {"query": "Note", "intent": "unknown"}),
-    ("jobs", {"limit": "101"}), ("jobs", {"limit": "1"}),
-])
-async def test_shared_query_defaults_types_and_bounds_match_the_main_route(bound, operation, params):
+async def test_shared_query_defaults_types_and_bounds_match_the_main_route(bound):
     client, jobs, headers = bound
-    main = await client.get(f"/api/wiki/{operation}", headers=client.headers, params=params)
-    bridged = await client.get(f"/apps/parameters/wiki/{operation}", headers=headers, params=params)
-    assert main.status_code == bridged.status_code, (main.text, bridged.text)
-    assert main.status_code in {200, 422}
-    assert jobs.list()["items"] == []
+    for operation, params in [
+        ("read", {}), ("read", {"doc": "Library/note.md", "length": "0"}),
+        ("read", {"doc": "Library/note.md", "length": "24001"}),
+        ("read", {"doc": "Library/note.md", "view": "unknown"}),
+        ("documents", {"offset": "-1"}), ("documents", {"limit": "101"}),
+        ("documents", {"limit": "1.0"}), ("search", {"query": "Note", "intent": "unknown"}),
+        ("jobs", {"limit": "101"}), ("jobs", {"limit": "1"}),
+    ]:
+        main = await client.get(f"/api/wiki/{operation}", headers=client.headers, params=params)
+        bridged = await client.get(f"/apps/parameters/wiki/{operation}", headers=headers, params=params)
+        assert main.status_code == bridged.status_code, (operation, params, main.text, bridged.text)
+        assert main.status_code in {200, 422}, (operation, params, main.text)
+        assert jobs.list()["items"] == [], (operation, params)

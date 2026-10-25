@@ -448,7 +448,7 @@ async def test_send_timeout_cancels_transport_and_reconnects_instead_of_signout(
         await asyncio.wait_for(client[2], 1)
 
 
-async def test_slow_browser_does_not_delay_stop_or_the_committed_result(runtime, monkeypatch, tmp_path):
+async def test_slow_browser_does_not_delay_stop_or_the_committed_result(runtime, monkeypatch, tmp_path, short_process_shutdown):
     import sys
     from dataclasses import replace
 

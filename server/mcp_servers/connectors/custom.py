@@ -1,7 +1,7 @@
 """Generic MCP server for custom (user-defined) connectors.
 
 One module serves every custom connector kind: it reads the connector's API
-base from env (injected per-installation by CustomConnector.mcp_entry) and
+base with its token from the account-scoped installation callback and
 exposes a single authenticated `request` tool the agent uses to call that API.
 Token fetch + reconnect handling are shared with the typed connectors.
 """
@@ -9,11 +9,11 @@ Token fetch + reconnect handling are shared with the typed connectors.
 from __future__ import annotations
 
 import logging
-import os
 import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 import httpx
 
@@ -45,8 +45,25 @@ _RECONNECT = (
 )
 
 
-def _api_base() -> str:
-    return (os.environ.get("OCTOPUS_CONNECTOR_API_BASE") or "").rstrip("/")
+def _request_url(api_base: str, path: str) -> str:
+    """Keep every request below the configured API origin and path prefix."""
+    base = urlsplit(api_base)
+    if (base.scheme not in {"http", "https"} or not base.hostname
+            or base.username or base.password or base.query or base.fragment):
+        raise ValueError("connector misconfigured (invalid API base)")
+    decoded = path
+    while True:
+        parts = urlsplit(decoded)
+        if (parts.scheme or parts.netloc or decoded.startswith("//")
+                or "\\" in decoded or parts.fragment
+                or any(ord(char) < 32 or ord(char) == 127 for char in decoded)
+                or ".." in parts.path.split("/")):
+            raise ValueError("path must be relative to the connector API base without traversal")
+        next_decoded = unquote(decoded)
+        if next_decoded == decoded:
+            break
+        decoded = next_decoded
+    return f"{api_base.rstrip('/')}/{path.lstrip('/')}"
 
 
 @mcp.tool(name="request")
@@ -58,13 +75,17 @@ def request(
     (e.g. '/issues'); `query` are optional query params; `body` is an optional
     JSON body for writes. The connector's OAuth token is attached automatically.
     """
-    token = ctx.access_token()
-    if token is None:
+    info = ctx.token_info()
+    if info is None:
         return "Error: connector unavailable — reconnect it in Octopus."
-    api_base = _api_base()
+    api_base = info.get("api_base")
     if not api_base:
         return "Error: connector misconfigured (no API base)."
-    url = path if path.startswith("http") else f"{api_base}/{path.lstrip('/')}"
+    try:
+        url = _request_url(api_base, path)
+    except ValueError as exc:
+        return f"Error: {exc}"
+    token = info["access_token"]
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     for attempt in range(3):
         try:
@@ -75,12 +96,15 @@ def request(
                 params=query,
                 json=body,
                 timeout=30.0,
+                follow_redirects=False,
             )
         except httpx.HTTPError as e:
             return f"Error: request failed: {e}"
         if r.status_code == 401:
             ctx.mark_needs_reconnect("invalid_grant")
             return _RECONNECT
+        if r.status_code in {301, 302, 303, 307, 308}:
+            return "Error: upstream redirect refused; use a path within this connector's API base."
         if r.status_code == 429 or r.status_code >= 500:
             if attempt < 2:
                 time.sleep(min(float(r.headers.get("Retry-After", "1") or 1), 5.0))

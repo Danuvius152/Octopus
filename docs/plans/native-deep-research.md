@@ -151,6 +151,10 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
 
 - Starts a research job for `(session_id, question)`, returns a `research_id`
   immediately, runs the pipeline as a tracked `asyncio.Task`.
+- A failed or empty final synthesis ends the job as `failed`, preserving the
+  reason and gathered findings in the account-owned job directory as
+  `synthesis-failure.json`. It emits no successful completion or report
+  injection; a placeholder is not a completed report.
 - Owns a **hard overall timeout** and an **idle/heartbeat** — the gap that let
   the CLI Workflow hang forever simply cannot happen here because we control
   the loop and never block on an unbounded external stream.

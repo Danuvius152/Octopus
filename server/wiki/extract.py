@@ -254,24 +254,29 @@ def extract(raw: bytes, suffix: str) -> dict:
     return {"text": text, "pages": pages, "quality": quality, "metadata": metadata}
 
 
-def blocks(text: str) -> list[str]:
+def blocks(text: str, *, parsed=None) -> list[str]:
     """Lossless blocks: fenced code/math/frontmatter are indivisible."""
+    from . import format
+
+    parsed = parsed if parsed is not None else format.parse(text)
+    protected = [(0, parsed.body_start)]
+    protected.extend((parsed.line_offsets[token.map[0]], parsed.line_offsets[token.map[1]])
+                     for token in parsed.tokens if token.type in {"fence", "code_block"} and token.map is not None)
+    ranges = iter(sorted(protected))
+    active = next(ranges, None)
     result: list[str] = []
     current: list[str] = []
-    fence = None
+    math = False
+    offset = 0
     for line in text.splitlines(keepends=True):
-        marker = re.match(r"^\s*(`{3,}|~{3,}|\$\$)", line)
-        if not current and not result and line.strip().lstrip("\ufeff") == "---":
-            fence = "---"
-        elif fence == "---" and line.strip() == "---":
-            fence = None
-        elif marker:
-            if fence is None:
-                fence = marker[1]
-            elif marker[1][0] == fence[0] and len(marker[1]) >= len(fence):
-                fence = None
+        while active is not None and active[1] <= offset:
+            active = next(ranges, None)
+        inside = active is not None and active[0] <= offset < active[1]
+        if not inside and re.match(r"^\s*\$\$", line):
+            math = not math
         current.append(line)
-        if not fence and not line.strip():
+        offset += len(line)
+        if not inside and not math and not line.strip():
             result.append("".join(current))
             current = []
     if current:

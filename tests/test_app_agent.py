@@ -522,8 +522,11 @@ async def test_ask_that_outlives_its_wait_says_where_the_answer_went(
     assert e.value.recovery["request_id"]
     assert e.value.recovery["state"] == "running"
     assert e.value.recovery["status_url"].endswith(e.value.recovery["request_id"])
-    # The record is released, so the conversation isn't wedged forever.
-    assert aam._turns == {}
+    # The socket stopped waiting, but the admitted execution still owns its cap.
+    turn = aam._turns[e.value.recovery["conversation_id"]]
+    assert not turn.done.is_set() and turn.observer is not None
+    assert not turn.observer.done() and not turn.consumer_attached
+    assert aam.list_conversations(row["id"])[0]["running"]
 
 
 async def test_request_status_recovers_only_the_original_completed_attempt(aam, am, db, turns):

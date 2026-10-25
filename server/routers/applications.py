@@ -352,7 +352,7 @@ _SKIP_REQUEST_HEADERS = {
 }
 _SKIP_RESPONSE_HEADERS = {
     "connection", "keep-alive", "transfer-encoding", "upgrade", "trailer",
-    "content-length", "content-encoding",
+    "content-length",
 }
 
 
@@ -432,6 +432,11 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
             # Mutation responses are JSON receipts. Consume them before returning
             # ownership to ASGI so disconnects cannot bypass lock cleanup.
             payload = await resp.aread()
+            # aread() decodes content encodings; the streaming path below
+            # forwards raw bytes and keeps their encoding header instead.
+            if response_headers.pop("content-encoding", None):
+                for header in ("etag", "content-md5", "digest", "content-digest", "repr-digest"):
+                    response_headers.pop(header, None)
             await resp.aclose()
             if path == "save" and resp.status_code == 409:
                 await mutation.conflict(mutation.body)

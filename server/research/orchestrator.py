@@ -71,6 +71,14 @@ class ResearchReport:
     cost: float | None = None
 
 
+class ResearchSynthesisError(Exception):
+    """No final report was produced; retain gathered evidence for diagnosis."""
+
+    def __init__(self, message: str, partial: ResearchReport):
+        super().__init__(message)
+        self.partial = partial
+
+
 async def run_research(
     question: str,
     *,
@@ -178,9 +186,21 @@ async def run_research(
     counts = {"verified": verified, "unverified": unverified, "verification_failed": verification_failed}
     await _emit("synthesize", f"Writing the report from {verified} verified and {unverified} unverified finding(s)…",
                 **counts)
+    partial = ResearchReport(
+        question=question, report="", findings=findings,
+        sources=sorted({f.url for f in findings if f.url}), angles=angles,
+        claims_examined=len(claims), cost=cost or None,
+    )
+    # Provider failures are LeafResult.error. Unknown exceptions include
+    # unconfirmed subprocess retirement and must retain their failure owner.
     synth_res = await reason(synthesize_prompt(question, survivors))
     cost += synth_res.cost or 0.0
-    report_text = synth_res.text or "(the model produced no report)"
+    partial.cost = cost or None
+    if synth_res.error or not synth_res.text.strip():
+        raise ResearchSynthesisError(
+            f"Report synthesis failed: {synth_res.error or 'the model produced no report'}", partial,
+        )
+    report_text = synth_res.text
 
     sources = sorted({f.url for f in survivors if f.url})
     await _emit("done", "Research complete.",

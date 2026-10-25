@@ -5,6 +5,8 @@ import {
   addSessionInfo,
   loadSessionSnapshot,
   loadBgTaskSnapshot,
+  loadResearchSnapshot,
+  loadResearchAfterDetail,
   hydrateSession,
   sessionInfoFromDetail,
 } from "../lib/hydrateSession";
@@ -73,6 +75,15 @@ export function handleWsMessage(data: Record<string, unknown>) {
   } = getState();
   const sessionId = data.session_id as string;
   const type = data.type as string;
+  // A second tab can miss research_started, including while its first list
+  // read is in flight. Recover the full record rather than inventing a card
+  // from a progress patch with no question or authoritative status.
+  const store = getState();
+  if (["research_progress", "research_completed", "research_failed", "research_delivery"].includes(type) &&
+      sessionId === store.activeSessionId &&
+      !store.research[sessionId]?.some((job) => job.id === data.research_id)) {
+    void loadResearchSnapshot(sessionId, store).catch(() => {});
+  }
 
   const seq = typeof data.seq === "number" ? (data.seq as number) : null;
   // The time the server stamped on the row this event is (`_tag_persisted`).
@@ -614,7 +625,9 @@ export function useWebSocket() {
             .catch(() => {});
 
           if (activeSessionId) {
-            loadSessionSnapshot(activeSessionId, snapshotStart).catch(() => {});
+            loadSessionSnapshot(activeSessionId, snapshotStart).then((detail) => {
+              if (detail && wsRef.current === ws) return loadResearchAfterDetail(activeSessionId, detail, snapshotStart);
+            }).catch(() => {});
             // Bg tasks: same reload, independent endpoint. Chat history
             // contains bg_run tool_use blocks whose chips need the bg
             // task records to render correctly after a reconnect.
@@ -628,18 +641,6 @@ export function useWebSocket() {
                 if (delegations && wsRef.current === ws) {
                   getState().setDelegations(activeSessionId, delegations);
                 }
-              })
-              .catch(() => {});
-            // Research jobs: same reconnect reload, so an in-flight job's card
-            // (and recently-finished ones) reappear without a missed
-            // `research_started` (native-deep-research.md §7).
-            fetch(
-              `${window.location.origin}/api/sessions/${activeSessionId}/research`,
-              { headers: { Authorization: `Bearer ${t}` } }
-            )
-              .then((r) => (r.ok ? r.json() : null))
-              .then((jobs) => {
-                if (jobs) getState().setResearch(activeSessionId, jobs, snapshotStart.research[activeSessionId] || []);
               })
               .catch(() => {});
           }

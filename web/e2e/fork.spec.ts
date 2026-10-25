@@ -1,5 +1,5 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
-import { test, expect, type Page, type APIRequestContext } from "@playwright/test";
+import { test, expect, type Page, type APIRequestContext } from "./test";
 
 // Pure-UI e2e for session tree-rewind / fork (session-rewind.md §6).
 // No real LLM turn: we import a parent session, drive the per-message "Fork

@@ -159,12 +159,6 @@ class CustomConnector(ConnectorBase):
     def mcp_module(self) -> str:
         return "server.mcp_servers.connectors.custom"
 
-    def mcp_entry(self, installation, callback_env):
-        entry = super().mcp_entry(installation, callback_env)
-        # The generic server needs the API base to call.
-        entry["env"]["OCTOPUS_CONNECTOR_API_BASE"] = self.api_base
-        return entry
-
     async def fetch_external_identity(self, token_set):
         # No known profile endpoint for an arbitrary API; label by name.
         return "", self.display_name

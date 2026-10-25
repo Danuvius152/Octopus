@@ -57,6 +57,20 @@ for each case. Content reads that supply authorization evidence remain real
 reads. Use the named `short_process_shutdown` fixture only where the default
 process-exit grace period is outside the tested contract; signals and joins stay real.
 
+Before starting a check, inspect existing results and running checks. Give each
+check one executor across agents; reuse successful evidence while its code,
+configuration, dependencies and environment remain unchanged. Rerun only the
+invalidated checks or a concrete new failure hypothesis, and state that reason.
+Reuse installed dependencies, browser binaries and download caches; provision
+them once per required version, while keeping mutable test state isolated.
+Confirm that commands actually produced their expected test summary or build
+artifacts; exit zero or a help screen alone is not passing evidence.
+
+Offline browser specs import `test` from `web/e2e/test.ts`. Their HTTP requests
+stay on loopback servers or explicit local mocks; remote fonts, images, scripts
+and other incidental assets are blocked. Bundle application assets locally.
+Provider/network integration uses the explicit live tier and its focused cases.
+
 Keep this feedback loop focused while editing. The hermetic selection over all
 of `tests/` is the full backend suite. Fast checks establish local correctness;
 complete the full checks at the commit boundary.

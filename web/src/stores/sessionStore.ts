@@ -20,6 +20,10 @@ import type {
   WikiJobCard,
 } from "../api";
 
+// Provenance for immutable per-job updates, including WS and API receipts.
+// Snapshot rows stay unmarked. Weak references retain no second task state.
+const researchUpdates = new WeakSet<ResearchJob>();
+
 // Re-export contract types under the names the rest of the frontend
 // already uses. Source of truth is `web/src/api/contracts.ts`, regenerated
 // from FastAPI's openapi.json via `bun run generate:contracts`.
@@ -927,17 +931,23 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         // render a card with no question/status — skip it; the /research
         // snapshot fetch on session load seeds those properly (Vera review).
         if (!job.question || !job.status) return {};
-        return { research: { ...s.research, [sessionId]: [...current, job as ResearchJob] } };
+        const added = { ...job } as ResearchJob;
+        researchUpdates.add(added);
+        return { research: { ...s.research, [sessionId]: [...current, added] } };
       }
+      const updated = { ...current[idx], ...job };
+      researchUpdates.add(updated);
       const next = [
         ...current.slice(0, idx),
-        { ...current[idx], ...job },
+        updated,
         ...current.slice(idx + 1),
       ];
       return { research: { ...s.research, [sessionId]: next } };
     }),
   setResearch: (sessionId, jobs, baseline) =>
-    set((s) => ({ research: { ...s.research, [sessionId]: mergeCardSnapshot(jobs, s.research[sessionId] || [], baseline, (t) => t.id) } })),
+    set((s) => ({ research: { ...s.research, [sessionId]: mergeCardSnapshot(
+      jobs, (s.research[sessionId] || []).filter((job) => researchUpdates.has(job)), baseline, (t) => t.id,
+    ) } })),
 
   delegations: {},
   setDelegations: (parentSessionId, ds) =>

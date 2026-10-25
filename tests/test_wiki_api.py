@@ -1623,6 +1623,8 @@ async def test_sapphire_existing_writer_and_async_git_share_framework_history(
     import json
     from datetime import UTC, datetime
 
+    from anyio.to_thread import current_default_thread_limiter
+
     from server.app_backends import backend_supervisor
     from server.applications import ApplicationManager
     from server.routers import applications as app_routes
@@ -1734,8 +1736,12 @@ ThreadingHTTPServer(('127.0.0.1', int(os.environ['PORT'])), H).serve_forever()
             "/apps/sapphire/api/git", params={"vault": "obv"}, headers=client.headers, json={"action": "pull"}
         )
         assert git.status_code == 202
-        # More contenders than AnyIO's usual worker pool: lock waiting must
-        # leave enough execution capacity for the owning writer to finish.
+        # Saturate a real, smaller AnyIO pool. More contenders than capacity
+        # still exposes a lock waiter starving its owning writer, without 43
+        # unrelated document writes and their growing index/history setup.
+        limiter = current_default_thread_limiter()
+        monkeypatch.setattr(limiter, "total_tokens", 2)
+        contenders = limiter.total_tokens + 3
         async with asyncio.timeout(20):
             receipts = await asyncio.gather(
                 *[
@@ -1749,7 +1755,7 @@ ThreadingHTTPServer(('127.0.0.1', int(os.environ['PORT'])), H).serve_forever()
                             "revision": "",
                         },
                     )
-                    for i in range(43)
+                    for i in range(contenders)
                 ]
             )
         assert all(r.status_code == 200 for r in receipts)

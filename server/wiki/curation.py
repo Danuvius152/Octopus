@@ -60,12 +60,10 @@ class WikiCuration:
         with self.store.connect() as db:
             original = db.execute("SELECT id,text FROM documents WHERE path=?", (path,)).fetchone()
             native = {}
-            portable = re.search(r"<!-- octopus-wiki\s+(.*?)\s*-->", text, re.S)
-            if portable:
-                try:
-                    native = portable_metadata.validate(json.loads(portable[1]))
-                except (ValueError, TypeError, RecursionError):
-                    pass
+            try:
+                native = portable_metadata.from_document(parsed)
+            except (ValueError, TypeError, RecursionError):
+                pass
             native |= parsed.metadata(native)
             if managed_metadata is None:
                 owned = db.execute("SELECT metadata FROM managed_notes WHERE path=?", (path,)).fetchone()
@@ -227,7 +225,7 @@ class WikiCuration:
 
                 tasks.require_path(task, self.store, path)
                 tasks.require_read(task, self.store, path, expected_revision)
-                for ref in (sources or []) + relations:
+                for ref in (sources or []) + (relations or []):
                     tasks.require_source_read(task, self.store, ref)
             source = self.store.read(
                 path, length=1, expected_revision=expected_revision
@@ -238,8 +236,8 @@ class WikiCuration:
                 publication = write_context(task, self.store, source)
             require_markdown_maintenance(source["path"])
             refs = self.sources(sources) if sources is not None else []
-            linked = self.sources(relations)
-            for entry, relationship in zip(linked, relations, strict=True):
+            linked = self.sources(relations or [])
+            for entry, relationship in zip(linked, relations or [], strict=True):
                 with self.store.connect() as db:
                     text = db.execute("SELECT text FROM documents WHERE id=?", (entry["doc"],)).fetchone()[0]
                 if source_span(text, entry["location"]) is None:
@@ -327,7 +325,9 @@ class WikiCuration:
                 additions.extend(part for part in previous if part["role"] == "aliases")
             elif normalized_aliases:
                 additions.append(region("aliases", "<!-- octopus-aliases " + json.dumps(normalized_aliases, ensure_ascii=False).replace("-->", "--\\u003e") + " -->", {"aliases": normalized_aliases}))
-            if linked:
+            if relations is None:
+                additions.extend(part for part in previous if part["role"] == "relations")
+            elif linked:
                 links = []
                 for entry, relationship in zip(linked, relations, strict=True):
                     links.append(
