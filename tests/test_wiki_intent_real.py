@@ -57,7 +57,9 @@ async def intake(tmp_path, monkeypatch):
         yield manager, session, WikiJobs(owner["id"]), worker, weber, vault
     finally:
         await worker.stop()
+        await manager.drain_turns(timeout=30)
         await manager.stop_all_held_processes()
+        await manager.close_session_owners()
         await api.stop()
         await db.close()
 
