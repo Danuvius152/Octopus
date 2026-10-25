@@ -10,8 +10,8 @@ from .read_response import compact_index
 from .store import WikiError
 
 
-def pagination(store, cursor, offset, filters):
-    epoch = store.index_state()["index_epoch"]
+def pagination(store, cursor, offset, filters, *, db=None):
+    epoch = store._index_state(db)["index_epoch"]
     fingerprint = hashlib.sha256(json.dumps(filters, sort_keys=True).encode()).hexdigest()
     if cursor:
         if offset:
@@ -85,8 +85,9 @@ def exact(db, query, kind, directory, include_assets, titles=False):
 def search(store, query, limit, offset, kind, include_assets, directory, intent, view, cursor, model_response=False):
     if intent not in {None, "lookup", "question", "overview", "compare"} or view not in {"full", "compact"}:
         raise WikiError("Unknown search intent/view", 422)
-    offset, epoch, fingerprint = pagination(store, cursor, offset, {"query": query, "kind": kind, "assets": include_assets, "directory": directory, "intent": intent, "view": view, "query_contract": MARKDOWN_QUERY_CONTRACT})
     with store.connect() as db:
+        db.execute("BEGIN")
+        offset, epoch, fingerprint = pagination(store, cursor, offset, {"query": query, "kind": kind, "assets": include_assets, "directory": directory, "intent": intent, "view": view, "query_contract": MARKDOWN_QUERY_CONTRACT}, db=db)
         identified, exact_rows = exact(db, query, kind, directory, include_assets, titles=intent == "lookup")
         if identified or exact_rows:
             total, terms, mode = len(exact_rows), [], "exact" if len(exact_rows) <= 1 else "ambiguous"
@@ -105,9 +106,9 @@ def search(store, query, limit, offset, kind, include_assets, directory, intent,
                 else:
                     snippet, position = row["text"][:400], 0
                     sections = [{"title": row["title"], "start": 0, "end": len(row["text"]), "line_start": 1, "line_end": row["text"].count("\n") + 1}]
-                items.append(store.navigation(row) | {"snippet": snippet, "snippet_start": position, "score": -hit["cost"] if hit else 0.0, "section": sections[0], "sections": sections})
+                items.append(store.navigation(row, db=db) | {"snippet": snippet, "snippet_start": position, "score": -hit["cost"] if hit else 0.0, "section": sections[0], "sections": sections})
+        state = store._index_state(db)
     next_offset = offset + limit if offset + limit < total else None
-    state = store.index_state()
     result = {"items": items, "total": total, "next_offset": next_offset, "next_cursor": continuation(next_offset, epoch, fingerprint), "match_mode": mode, "query_terms": terms, "view": view, "intent": intent or "question", **(compact_index(state) if view == "compact" else state)}
     if model_response:
         from .model_response import page

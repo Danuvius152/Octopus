@@ -7,11 +7,18 @@ import { verifyOfflineAudit } from "./offline-audit";
 
 const [mode, ...args] = process.argv.slice(2);
 if (mode !== "offline" && mode !== "real") throw new Error("Choose offline or real E2E mode");
-// Keep evidence outside the directories global-teardown removes. A fresh
-// directory prevents a previous successful run from satisfying this guard.
-const auditDir = mkdtempSync(path.join(os.tmpdir(), "octopus-e2e-audit-"));
-const runtimeDir = mkdtempSync(path.join(os.tmpdir(), "octopus-e2e-runtime-"));
+// Stay outside managed installation roots and CLI-restricted system temp dirs.
+// Each run owns fresh mutable state, even after an interrupted prior run.
+const testRoot = path.join(os.homedir(), ".cache", "octopus-tests");
+mkdirSync(testRoot, { recursive: true, mode: 0o700 });
+// Keep audit evidence outside runtime cleanup so late violations still count.
+const auditDir = mkdtempSync(path.join(testRoot, "e2e-audit-"));
+const runtimeDir = mkdtempSync(path.join(testRoot, "e2e-runtime-"));
 const environment = { ...process.env };
+// Codex refuses helper installation when CODEX_HOME is inside TMPDIR.
+// Both remain owned by this run, with provider homes beside its temp tree.
+environment.TMPDIR = path.join(runtimeDir, "tmp");
+mkdirSync(environment.TMPDIR);
 for (const [variable, directory, files] of [
   ["CODEX_HOME", ".codex", ["auth.json", "config.toml"]],
   ["CLAUDE_CONFIG_DIR", ".claude", [".credentials.json", "settings.json", ".claude.json"]],
@@ -31,10 +38,11 @@ for (const [variable, directory, files] of [
 environment.OCTOPUS_CODEX_HOME_DIR = path.join(runtimeDir, "credentials");
 environment.OCTOPUS_LARGE_PROMPTS_DIR = path.join(runtimeDir, "large-prompts");
 console.log(`E2E mode=${mode}; audit=${auditDir}`);
-const child = spawnSync("bunx", ["playwright", "test", ...args], {
+const child = spawnSync("./node_modules/.bin/playwright", ["test", ...args], {
   stdio: "inherit",
   env: { ...environment, OCTOPUS_E2E_MODE: mode, OCTOPUS_E2E_AUDIT_DIR: auditDir },
 });
+if (child.error) console.error(child.error);
 rmSync(runtimeDir, { recursive: true, force: true });
 let status = child.status ?? 1;
 // spawnSync returns after Playwright's webServer teardown: late, swallowed

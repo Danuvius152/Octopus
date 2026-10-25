@@ -119,10 +119,9 @@ export default defineConfig({
         ...process.env,
         OCTOPUS_E2E_AUDIT_FILE: path.join(auditDir ?? "", "main.jsonl"),
         // The backend spawns the `claude` CLI directly via PATH lookup.
-        // ~/.local/bin is the typical install location and may not be on
-        // a non-interactive shell's PATH. Prepend it so the e2e server
-        // can find the binary without the user having to configure shell.
-        PATH: `${process.env.HOME ?? ""}/.local/bin:${process.env.PATH ?? ""}`,
+        // Preserve the caller's selected test CLI, with the typical install
+        // location as a fallback for non-interactive shells.
+        PATH: `${process.env.PATH ?? ""}:${process.env.HOME ?? ""}/.local/bin`,
         OCTOPUS_AUTH_TOKEN: "changeme",
         OCTOPUS_DEFAULT_BACKEND: "claude-code",
         // Tell pydantic-settings the actual uvicorn port (matches the
@@ -175,7 +174,7 @@ export default defineConfig({
       env: {
         ...process.env,
         OCTOPUS_E2E_AUDIT_FILE: path.join(auditDir ?? "", "accounts.jsonl"),
-        PATH: `${process.env.HOME ?? ""}/.local/bin:${process.env.PATH ?? ""}`,
+        PATH: `${process.env.PATH ?? ""}:${process.env.HOME ?? ""}/.local/bin`,
         OCTOPUS_AUTH_TOKEN: "changeme",
         OCTOPUS_DEFAULT_BACKEND: "claude-code",
         OCTOPUS_PORT: `${E2E_ACCOUNTS_PORT}`,

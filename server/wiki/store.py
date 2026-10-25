@@ -12,6 +12,7 @@ import sqlite3
 import threading
 import uuid
 import weakref
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
@@ -125,9 +126,9 @@ class WikiStore:
         self._events_released = True
         self._recovery = recovery
         self._schema_ready = False
-        # One immutable raw coordinate map for the last-read revision. No text,
+        # Up to four immutable raw coordinate maps for interleaved reads. No text,
         # parser tokens, document authority or read coverage survives here.
-        self._raw_coordinates: tuple[str, RawCoordinates] | None = None
+        self._raw_coordinates: OrderedDict[str, RawCoordinates] | None = None
         self.root = root.resolve()
         self.state = state
         self.vault_id = vault_id
@@ -317,18 +318,17 @@ class WikiStore:
                 changed = events.paths
                 source_plans = source_plans or {}
                 changed.update(source_plans)
-                if dirty:
-                    with self.connect() as db:
+                with self.connect() as db:
+                    if dirty:
                         changed.update(row[0] for row in db.execute("SELECT path FROM documents WHERE signature=''").fetchall())
-                if self.events.needs_reconciliation and (not self.root.is_dir() or self.root.is_symlink()):
-                    with self.connect() as db:
+                    if self.events.needs_reconciliation and (not self.root.is_dir() or self.root.is_symlink()):
                         db.execute("UPDATE index_state SET error='Vault unavailable; existing index retained' WHERE singleton=1")
-                    return
-                if not changed:
-                    with self.connect() as db:
+                        return
+                    if not changed:
                         catalog.finish(db)
                         if self.events.journal is not None:
                             self.events.journal.mark_applied(db, events.receipts)
+                if not changed:
                     self.acknowledge_changes()
                     return
                 if not self.root.is_dir() or self.root.is_symlink():
@@ -785,14 +785,14 @@ class WikiStore:
             raise WikiError("Published text awaits chapter index recovery", 503)
         return row
 
-    def indexed_metadata(self, row):
+    def indexed_metadata(self, row, *, db=None):
         """Navigation metadata only; current evidence is read separately."""
         native = json.loads(row["metadata"])
         if "managed_metadata" in row.keys():
             supplied = json.loads(row["managed_metadata"] or "{}")
         else:
-            with self.connect() as db:
-                managed = db.execute("SELECT metadata FROM managed_notes WHERE path=?", (row["path"],)).fetchone()
+            with self.connect() if db is None else contextlib.nullcontext(db) as connection:
+                managed = connection.execute("SELECT metadata FROM managed_notes WHERE path=?", (row["path"],)).fetchone()
             supplied = json.loads(managed[0]) if managed else {}
         merged = native | supplied
         for field in ("tags", "aliases"):
@@ -854,12 +854,12 @@ class WikiStore:
             "characters": len(row["text"]),
         }
 
-    def navigation(self, row):
+    def navigation(self, row, *, db=None):
         """Index-only projection; it does not grant a content read receipt."""
-        with self.connect() as db:
-            refs = catalog.dependencies(db, row["id"])
+        with self.connect() if db is None else contextlib.nullcontext(db) as connection:
+            refs = catalog.dependencies(connection, row["id"])
         return {key: row[key] for key in ("id", "path", "revision", "title", "kind", "quality")} | {
-            "metadata": self.indexed_metadata(row) | {"source_refs": refs},
+            "metadata": self.indexed_metadata(row, db=db) | {"source_refs": refs},
             "pages": json.loads(row["pages"]), "characters": len(row["text"]),
             "stale": any(ref["status"] == "changed" or ref["status"] == "missing" and ref["revision"] for ref in refs),
             "freshness": "indexed",
@@ -915,8 +915,9 @@ class WikiStore:
             self.path(directory.rstrip("/"))
         from .retrieval import compact, continuation, pagination
 
-        offset, epoch, fingerprint = pagination(self, cursor, offset, {"kind": kind, "quality": quality, "source": source, "assets": include_assets, "directory": directory, "view": view, "query_contract": MARKDOWN_QUERY_CONTRACT})
         with self.connect() as db:
+            db.execute("BEGIN")
+            offset, epoch, fingerprint = pagination(self, cursor, offset, {"kind": kind, "quality": quality, "source": source, "assets": include_assets, "directory": directory, "view": view, "query_contract": MARKDOWN_QUERY_CONTRACT}, db=db)
             filters, arguments = [MARKDOWN_SQL], []
             if not include_assets and kind != "asset":
                 filters.append("d.kind<>'asset'")
@@ -941,10 +942,10 @@ class WikiStore:
                 "SELECT d.*,m.metadata AS managed_metadata" + relation + predicate + " ORDER BY d.title,d.path LIMIT ? OFFSET ?",
                 [*arguments, limit, offset],
             ).fetchall()
-            items = [compact(self, row) if view == "compact" else self.navigation(row) for row in rows]
+            items = [compact(self, row) if view == "compact" else self.navigation(row, db=db) for row in rows]
+            state = self._index_state(db)
         from .read_response import compact_index
 
-        state = self.index_state()
         result = {
             "items": items,
             "total": total,
@@ -993,8 +994,8 @@ class WikiStore:
         """Return the public read and the exact bytes from which it was indexed."""
         if start < 0 or not 1 <= length <= 24000 or (page is not None and page < 1):
             raise WikiError("Invalid read range", 422)
-        identity = self.resolve_identity(doc)
         with self.connect() as db:
+            identity = self.resolve_identity(doc, db=db)
             if identity is not None and identity[1] is None:
                 raise WikiError("Document not found", 404)
             relative = identity[1] if identity else doc
@@ -1033,8 +1034,8 @@ class WikiStore:
                 "freshness": "live", **self._index_state(db=db),
             }, raw
 
-    def resolve_identity(self, doc):
-        with self.connect() as db:
-            alias = db.execute("SELECT doc_id FROM uid_aliases WHERE uid=?", (doc.casefold(),)).fetchone()
+    def resolve_identity(self, doc, *, db=None):
+        with self.connect() if db is None else contextlib.nullcontext(db) as connection:
+            alias = connection.execute("SELECT doc_id FROM uid_aliases WHERE uid=?", (doc.casefold(),)).fetchone()
             identifier = alias[0] if alias else doc
-            return db.execute("SELECT id,path FROM document_identities WHERE id=?", (identifier,)).fetchone() or db.execute("SELECT id,path FROM document_identities WHERE path=?", (doc,)).fetchone()
+            return connection.execute("SELECT id,path FROM document_identities WHERE id=?", (identifier,)).fetchone() or connection.execute("SELECT id,path FROM document_identities WHERE path=?", (doc,)).fetchone()

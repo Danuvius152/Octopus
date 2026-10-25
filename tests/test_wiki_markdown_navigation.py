@@ -141,7 +141,7 @@ def test_legacy_batch_reads_history_and_restore_remain_compatible(store):
 def test_compact_navigation_bounds_errors_but_full_keeps_complete_diagnostics(store, monkeypatch):
     write(store, "one.md", "# Realtime\nRealtime evidence.\n")
     state = store.index_state() | {"index_errors": [{"path": "p" * 200 + str(index), "error": "e" * 200} for index in range(5)]}
-    monkeypatch.setattr(store, "index_state", lambda: state)
+    monkeypatch.setattr(store, "_index_state", lambda db=None: state)
     for operation in [store.documents, lambda **kw: store.search("Realtime", **kw)]:
         compact = operation(view="compact")
         assert len(compact["index_errors"]) == 3
@@ -171,10 +171,10 @@ def test_joined_navigation_metadata_preserves_overlay_and_order_without_per_item
     original = store.indexed_metadata
     seen = []
 
-    def metadata(row):
+    def metadata(row, **kwargs):
         assert "managed_metadata" in row.keys()
         seen.append(row["path"])
-        return original(row)
+        return original(row, **kwargs)
 
     monkeypatch.setattr(store, "indexed_metadata", metadata)
     for operation in [store.documents, lambda **kw: store.search("Realtime", **kw), lambda **kw: store.search("note-0.md", **kw)]:

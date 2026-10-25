@@ -9,7 +9,7 @@ import uuid
 
 from . import job_items, protocols
 
-VERSION = "maintenance-inputs-v9"
+VERSION = "maintenance-inputs-v10"
 PREFIX = "maintenance_input_"
 TABLES = {
     "maintenance_input_state": """CREATE TABLE maintenance_input_state(
@@ -50,6 +50,17 @@ INDEXES = (
     "CREATE INDEX IF NOT EXISTS maintenance_dependency_edges ON wiki_edges(source_doc,relation,ordinal)",
     "CREATE INDEX IF NOT EXISTS maintenance_document_errors ON documents(id) WHERE quality='error' OR json_extract(metadata, '$.frontmatter_error') IS NOT NULL",
 )
+VIEWS = {
+    "maintenance_member_sources": """CREATE VIEW maintenance_member_sources AS
+        SELECT j.id AS job_id,json_extract(i.value,'$.doc') AS doc_id
+            FROM jobs j,json_each(j.items) i WHERE json_type(i.value,'$.doc')='text'
+        UNION SELECT r.job_id,r.item_doc FROM operation_receipts r JOIN jobs j ON j.id=r.job_id
+            WHERE r.item_doc IS NOT NULL
+        UNION SELECT r.job_id,r.doc_id FROM operation_receipts r JOIN jobs j ON j.id=r.job_id
+        UNION SELECT p.job_id,p.source_doc FROM job_publications p JOIN jobs j ON j.id=p.job_id
+        UNION SELECT p.job_id,r.document_id FROM job_publications p
+            JOIN jobs j ON j.id=p.job_id JOIN change_retention r ON r.change_id=p.change_id""",
+}
 JOB_COLUMNS = (
     ("id", "TEXT", 0, None, 1, 0), ("request_key", "TEXT", 1, None, 0, 0),
     ("payload_hash", "TEXT", 1, None, 0, 0), ("payload", "TEXT", 1, None, 0, 0),
@@ -107,17 +118,12 @@ def _mark_docs(selection):
         SELECT affected.doc_id,s.generation FROM ({selection}) affected
         CROSS JOIN maintenance_input_state s WHERE affected.doc_id IS NOT NULL
         ON CONFLICT(doc_id) DO UPDATE SET cause_generation=excluded.cause_generation;
-        INSERT INTO maintenance_dirty_paths
-            SELECT d.id,d.path FROM ({selection}) affected JOIN documents d ON d.id=affected.doc_id WHERE true
-            ON CONFLICT(doc_id,path) DO NOTHING;
-        INSERT INTO maintenance_dirty_paths
-            SELECT p.doc_id,p.path FROM ({selection}) affected JOIN maintenance_projection p ON p.doc_id=affected.doc_id WHERE true
-            ON CONFLICT(doc_id,path) DO NOTHING;
         """
 
 
-def _invalidate_jobs(selection):
-    return _mark_docs(f"SELECT doc_id FROM maintenance_job_members WHERE job_id IN ({selection})") + f"""
+def _invalidate_jobs(selection, *, documents=None):
+    affected = documents if documents is not None else f"SELECT doc_id FROM maintenance_job_members WHERE job_id IN ({selection})"
+    return _mark_docs(affected) + f"""
         INSERT INTO maintenance_job_dirty
             SELECT j.id,s.generation FROM jobs j CROSS JOIN maintenance_input_state s
             WHERE j.id IN ({selection})
@@ -132,20 +138,32 @@ def _invalidate_jobs(selection):
     """
 
 
+def _updated_job_documents():
+    """Item changes affect their input and exact outputs; job state affects all."""
+    whole_job = " OR ".join(f"old.{column} IS NOT new.{column}"
+                            for column in ("id", "payload", "status", "error", "session_id"))
+    return f"""WITH changed_items AS MATERIALIZED (
+        SELECT * FROM (SELECT key,value FROM json_each(old.items)
+            EXCEPT SELECT key,value FROM json_each(new.items))
+        UNION SELECT * FROM (SELECT key,value FROM json_each(new.items)
+            EXCEPT SELECT key,value FROM json_each(old.items))
+    ), changed_documents AS MATERIALIZED (
+        SELECT json_extract(value,'$.doc') AS doc_id FROM changed_items
+    ) SELECT doc_id FROM maintenance_job_members WHERE job_id=new.id AND (
+        {whole_job}
+        OR EXISTS(SELECT 1 FROM changed_documents WHERE doc_id IS NULL)
+        OR doc_id IN (
+            SELECT doc_id FROM changed_documents
+            UNION SELECT doc_id FROM operation_receipts WHERE job_id=new.id
+                AND item_doc IN (SELECT doc_id FROM changed_documents)
+            UNION SELECT r.document_id FROM job_publications p
+                JOIN change_retention r ON r.change_id=p.change_id WHERE p.job_id=new.id
+                AND p.source_doc IN (SELECT doc_id FROM changed_documents)))"""
+
+
 def _refresh_jobs(selection):
     """Invalidate both sides of real relationship changes, writing only deltas."""
-    members = f"""SELECT j.id AS job_id,json_extract(i.value,'$.doc') AS doc_id
-            FROM jobs j,json_each(j.items) i
-            WHERE j.id IN ({selection}) AND json_type(i.value,'$.doc')='text'
-        UNION SELECT r.job_id,r.item_doc FROM operation_receipts r JOIN jobs j ON j.id=r.job_id
-            WHERE r.job_id IN ({selection}) AND r.item_doc IS NOT NULL
-        UNION SELECT r.job_id,r.doc_id FROM operation_receipts r JOIN jobs j ON j.id=r.job_id
-            WHERE r.job_id IN ({selection})
-        UNION SELECT p.job_id,p.source_doc FROM job_publications p JOIN jobs j ON j.id=p.job_id
-            WHERE p.job_id IN ({selection})
-        UNION SELECT p.job_id,r.document_id FROM job_publications p
-            JOIN jobs j ON j.id=p.job_id JOIN change_retention r ON r.change_id=p.change_id
-            WHERE p.job_id IN ({selection})"""
+    members = f"SELECT job_id,doc_id FROM maintenance_member_sources WHERE job_id IN ({selection})"
     return _invalidate_jobs(selection) + f"""
         DELETE FROM maintenance_job_members WHERE job_id IN ({selection})
             AND (job_id,doc_id) NOT IN ({members});
@@ -194,9 +212,9 @@ def triggers():
     bump = "UPDATE maintenance_input_state SET generation=generation+1 WHERE singleton=1;"
     writer_check = """SELECT CASE WHEN (SELECT recursive_triggers FROM pragma_recursive_triggers)=0
         THEN RAISE(ABORT,'maintenance inputs require recursive triggers') END;"""
-    member_change = "old.id IS NOT new.id OR " + " IS NOT ".join(
+    member_change = "old.id IS NOT new.id OR (old.items IS NOT new.items AND " + " IS NOT ".join(
         f"(SELECT json_group_array(json_extract(value,'$.doc')) FROM json_each({side}.items))"
-        for side in ("old", "new"))
+        for side in ("old", "new")) + ")"
 
     def add(table, action, body, *, before=False, columns=(), condition=None):
         name = PREFIX + table + "_" + action.lower() + ("_check" if before else "")
@@ -217,7 +235,10 @@ def triggers():
                         " UNION ".join(f"SELECT {side}.document_id AS doc_id" for side in sides)
                         if table == "wiki_path_reservations" else
                         f"SELECT doc_id FROM maintenance_job_members WHERE job_id IN ({jobs})")
-            add(table, action, bump + _mark_docs(affected) + _refresh_jobs(jobs))
+            # Grant facts do not add members: items, receipts and publications
+            # own those relations. A selected-document grant affects only that
+            # document; job-wide policy and reservation changes affect members.
+            add(table, action, bump + _mark_docs(affected))
         ids = " UNION ".join(f"SELECT {side}.id AS doc_id" for side in sides)
         incoming = (f"{ids} UNION SELECT source_doc FROM wiki_edges WHERE target_doc IN ({ids})"
                     f" UNION SELECT source_doc FROM source_bindings WHERE target_doc IN ({ids})")
@@ -257,9 +278,11 @@ def triggers():
                 body += _refresh_jobs(jobs)
             add(table, action, body)
         if action != "DELETE":
-            add("jobs", action, _input_check("new.items"), before=True)
+            # Every direct UPDATE must honor the writer protocol, including
+            # timestamp-only writes. Only changed JSON needs full validation.
+            add("jobs", action, _input_check("new.items") if action == "INSERT" else "", before=True)
         jobs = " UNION ".join(f"SELECT {side}.id" for side in sides)
-        add("jobs", action, bump + (_invalidate_jobs(jobs) if action == "UPDATE" else _refresh_jobs(jobs)),
+        add("jobs", action, bump + (_invalidate_jobs(jobs, documents=_updated_job_documents()) if action == "UPDATE" else _refresh_jobs(jobs)),
             columns=("id", "payload", "status", "items", "error", "session_id"),
             condition=f"NOT ({member_change})" if action == "UPDATE" else None)
     # Progress changes item state, not its document relationships. Keep the
@@ -267,10 +290,24 @@ def triggers():
     # when the item identities actually change. Both triggers share the TX.
     name = PREFIX + "jobs_update_members"
     result[name] = f"CREATE TRIGGER {name} AFTER UPDATE ON jobs WHEN {member_change} BEGIN {writer_check}{bump}" + _refresh_jobs("SELECT old.id UNION SELECT new.id") + " END"
+    name = PREFIX + "jobs_items_update_check"
+    result[name] = f"""CREATE TRIGGER {name} BEFORE UPDATE OF items ON jobs
+        WHEN old.items IS NOT new.items BEGIN {writer_check}{_input_check('new.items')} END"""
     result[PREFIX + "receipt_item_match"] = f"""CREATE TRIGGER {PREFIX}receipt_item_match
         AFTER UPDATE OF item_match_sequence ON operation_receipts
         WHEN old.item_match_sequence IS NOT new.item_match_sequence BEGIN {writer_check}{bump}""" + _mark_docs(
             "SELECT old.doc_id AS doc_id UNION SELECT new.doc_id UNION SELECT old.item_doc UNION SELECT new.item_doc") + " END"
+    # Every invalidated document keeps both its live and projected scope paths.
+    # Put this at the dirty-row boundary so callers evaluate their selection once.
+    for action in ("INSERT", "UPDATE"):
+        name = PREFIX + "dirty_paths_" + action.lower()
+        result[name] = f"""CREATE TRIGGER {name} AFTER {action} ON maintenance_dirty BEGIN {writer_check}
+            INSERT INTO maintenance_dirty_paths
+                SELECT id,path FROM documents WHERE id=new.doc_id
+                ON CONFLICT(doc_id,path) DO NOTHING;
+            INSERT INTO maintenance_dirty_paths
+                SELECT doc_id,path FROM maintenance_projection WHERE doc_id=new.doc_id
+                ON CONFLICT(doc_id,path) DO NOTHING; END"""
     return result
 
 
@@ -288,6 +325,8 @@ def _detach_triggers(db):
 def discard_derived(db):
     """Remove only this disposable projection, never a protocol or job ledger."""
     _detach_triggers(db)
+    for name in VIEWS:
+        db.execute(f"DROP VIEW IF EXISTS {name}")
     for name in TABLES:
         db.execute(f"DROP TABLE IF EXISTS {name}")
 
@@ -296,7 +335,9 @@ def _compatible(db):
     expected = triggers()
     actual = {r[0]: r[1] for r in db.execute("SELECT name,sql FROM sqlite_master WHERE type='table'")}
     trigger_rows = {r[0]: r[1] for r in db.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger'") if r[0].startswith(PREFIX)}
+    views = {r[0]: r[1] for r in db.execute("SELECT name,sql FROM sqlite_master WHERE type='view'")}
     reset = (any(name not in actual or _canonical(actual[name]) != _canonical(sql) for name, sql in TABLES.items())
+             or any(_canonical(views.get(name, "")) != _canonical(sql) for name, sql in VIEWS.items())
              or set(trigger_rows) != set(expected)
              or any(_canonical(trigger_rows.get(name, "")) != _canonical(sql) for name, sql in expected.items()))
     if not reset:
@@ -329,6 +370,8 @@ def initialize(db):
     if reset:
         discard_derived(db)
         for sql in TABLES.values():
+            db.execute(sql)
+        for sql in VIEWS.values():
             db.execute(sql)
         db.execute("INSERT INTO maintenance_input_state VALUES(1,?,?,1)", (VERSION, uuid.uuid4().hex))
         # Validate retained input before JSON traversal. Future ledger mutations

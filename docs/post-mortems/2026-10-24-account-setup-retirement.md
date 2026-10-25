@@ -208,10 +208,12 @@ receipt/ACK、进程退役、重复中断和不重放断言继续保留。没有
 ## 依据
 
 - 交付提交：`87ce64787cd4a446802c18207de1e28dcebdaee3`。
-- 本机票与规格：`.scratch/account-portability/spec.md`、
-  `issues/08-owned-first-account.md`、`issues/09-retire-legacy-adoption.md`。
-- 本机任务证据目录：`.scratch/account-portability/evidence/`；主要记录为
-  `08-progress.md`、`09-progress.md`、`08-09-post-gate.md`、r4–r9 progress、
-  `08-09-r9-final-gates.json`、`08-09-acceptance.md` 和各轮原始日志/JUnit。
+- 当前账户与启动合同：[精简计划](../plans/architecture-simplification-20261023.md)、
+  [存储格式](../plans/current-storage-format.md)。迁移接口见
+  [导出与导入](../backup-and-migrate.md#7-selected-account-export-and-import)。
+- 当次本机票、规格及原始日志/JUnit已归档到私有发布记录；临时 `.scratch`
+  目录可删除，不作为运行或后续维护的依赖。主要历史记录为 `08-progress.md`、
+  `09-progress.md`、`08-09-post-gate.md`、r4–r9 progress、
+  `08-09-r9-final-gates.json` 和 `08-09-acceptance.md`。
 - 验证与文档操作规则：[AGENTS.md](../../AGENTS.md#verification)。
 - 相关经验：[SessionOwner 合并交付的范围失控](2026-10-21-session-owner-scope-creep.md)。

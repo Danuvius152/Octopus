@@ -221,7 +221,8 @@ def test_malformed_direct_job_mutation_aborts_without_hiding_members(prepared, r
     assert members(jobs.store, job) == {docs["a"]["id"]}
 
 
-def test_derived_loss_changes_rebuild_nonce_and_cannot_accept_old_calculation(prepared):
+@pytest.mark.parametrize("missing", ["TABLE maintenance_job_items", "VIEW maintenance_member_sources"])
+def test_derived_loss_changes_rebuild_nonce_and_cannot_accept_old_calculation(prepared, missing):
     jobs, docs = prepared
     job = enqueue(jobs, docs["a"])
     inputs.normalize(jobs.store)
@@ -229,7 +230,7 @@ def test_derived_loss_changes_rebuild_nonce_and_cannot_accept_old_calculation(pr
     original_job = jobs.get(job["id"])
     with jobs.store.connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        db.execute("DROP TABLE maintenance_job_items")
+        db.execute("DROP " + missing)
         assert inputs.initialize(db)
     assert not publish(jobs.store, before, docs["a"])
     assert jobs.get(job["id"]) == original_job

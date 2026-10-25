@@ -27,7 +27,7 @@ if ! "$ROOT/.venv/bin/python" "$ROOT/scripts/dump-openapi.py" > "$tmp/openapi.js
   exit 1
 fi
 
-if ! (cd "$ROOT/web" && npx openapi-typescript "$tmp/openapi.json" -o "$tmp/contracts.ts" >/dev/null 2>&1); then
+if ! (cd "$ROOT/web" && ./node_modules/.bin/openapi-typescript "$tmp/openapi.json" -o "$tmp/contracts.ts" >/dev/null 2>&1); then
   echo "openapi-typescript failed — is web/node_modules installed?" >&2
   exit 1
 fi

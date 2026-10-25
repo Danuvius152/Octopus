@@ -124,4 +124,5 @@ def test_collection_barrier_keeps_unrelated_dirty_jobs_out_of_the_page(prepared,
 def test_collection_barrier_vm_work_ignores_unrelated_dirty_jobs(prepared, monkeypatch):
     measurements, plans = collection_barrier_measurements(prepared, monkeypatch, (0, 1000, 5000))
     print(json.dumps({"collection_barrier_cost": measurements, "query_plan": plans}))
-    assert measurements[-1]["vm_steps"] <= measurements[1]["vm_steps"] + 1000, measurements
+    steps = [row["vm_steps"] for row in measurements]
+    assert max(steps) <= min(steps) + 1000, measurements

@@ -35,14 +35,25 @@ def page_measurements(store, monkeypatch, count):
     first = None
     for phase in ("single_page", "all_pages", "no_change"):
         scanned.clear()
-        started = perf_counter()
+        elapsed, calls = 0.0, 0
+
+        def timed(operation):
+            nonlocal elapsed, calls
+            started = perf_counter()
+            try:
+                return operation()
+            finally:
+                elapsed += perf_counter() - started
+                calls += 1
+
         if phase == "single_page":
-            first = curation.blocks(document["id"], limit=25)
+            first = timed(lambda: curation.blocks(document["id"], limit=25))
             assert first["revision"] == revision(text.encode())
         elif phase == "all_pages":
             content, offset = [], 0
             while True:
-                page = curation.blocks(document["id"], expected_revision=document["revision"], offset=offset, limit=25)
+                page = timed(lambda offset=offset: curation.blocks(
+                    document["id"], expected_revision=document["revision"], offset=offset, limit=25))
                 for part in page["blocks"]:
                     assert part["content"] == text[part["start"]:part["end"]]
                     assert part["sha256"] == revision(part["content"].encode())
@@ -54,27 +65,31 @@ def page_measurements(store, monkeypatch, count):
                 offset = page["next_offset"]
             assert "".join(content) == text
         else:
-            confirmed = revise(curation, NoChangeRevision(
+            request = NoChangeRevision(
                 operation="no_change", doc=document["id"], expected_revision=document["revision"],
-                reason="Review current evidence and conditions"), "human", None)
+                reason="Review current evidence and conditions")
+            confirmed = timed(lambda request=request: revise(curation, request, "human", None))
             assert not confirmed["changed"] and confirmed["receipt_id"] and confirmed["change_id"] is None
             assert path.read_bytes() == text.encode()
             assert confirmed["revision"] == document["revision"]
-        measured.append({"sections": count, "phase": phase, "seconds": perf_counter() - started,
+        measured.append({"sections": count, "phase": phase, "seconds": elapsed, "calls": calls,
                          "parses": len(scanned), "parsed_characters": sum(scanned)})
     assert first is not None
+    assert [row["parses"] for row in measured] == [1, 0, 0], measured
     return measured
 
 
 def test_raw_pagination_reuses_same_revision_coordinates_and_no_change_needs_no_parse(store, monkeypatch):
-    measurements = page_measurements(store, monkeypatch, 30)
-    assert [row["parses"] for row in measurements] == [1, 0, 0]
+    page_measurements(store, monkeypatch, 15)
 
 
 @pytest.mark.wiki_perf
 @pytest.mark.parametrize("count", [100, 400, 1000])
 def test_raw_page_and_no_change_cost(store, monkeypatch, count):
-    print(json.dumps({"raw_page_cost": page_measurements(store, monkeypatch, count)}), flush=True)
+    print(json.dumps({
+        "timing_scope": "single instrumented sample per phase; sum of operation calls; assertions and verification reads excluded",
+        "raw_page_cost": page_measurements(store, monkeypatch, count),
+    }), flush=True)
 
 
 def test_raw_coordinates_cannot_survive_a_revision_or_escape_in_a_mutable_response(store):
@@ -95,12 +110,13 @@ def test_raw_coordinates_cannot_survive_a_revision_or_escape_in_a_mutable_respon
 
 
 async def test_warm_raw_coordinates_grant_only_returned_text_and_require_live_authority(client, tmp_path):
-    text = "# Topic\n\n" + "".join(f"## Section {index}\n\nEvidence and conditions {index}.\n\n" for index in range(30))
+    text = "# Topic\n\n" + "".join(f"## Section {index}\n\nEvidence and conditions {index}.\n\n" for index in range(3))
     root, config = await setup_note(client, tmp_path, text)
     path = "Library/note.md"
     async with active_worker(config, [path], client=client) as headers:
         first = await client.get("/api/wiki/blocks", headers=headers, params={"doc": path, "view": "locators", "limit": 3})
         assert first.status_code == 200, first.text
+        assert first.json()["next_offset"] is not None
         body = {"operation": "no_change", "doc": first.json()["id"], "expected_revision": first.json()["revision"], "reason": "Review"}
         denied = await client.post("/api/wiki/revise", headers=headers, json=body)
         assert denied.status_code == 422

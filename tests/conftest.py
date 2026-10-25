@@ -187,6 +187,13 @@ def _account_state_stays_in_tmp(request, tmp_path_factory, monkeypatch):
                 if (source / name).is_file():
                     (destination / name).symlink_to(source / name)
         monkeypatch.setenv(variable, str(destination))
+    if real and (request.node.get_closest_marker("real_codex") or request.node.get_closest_marker("codex_bin")):
+        # Codex installs its helper aliases under CODEX_HOME and rejects homes
+        # below its temporary directory. Keep both under this fixture's owner,
+        # in sibling directories; hermetic tests retain their existing setup.
+        cli_temporary = root / "cli-tmp"
+        cli_temporary.mkdir()
+        monkeypatch.setenv("TMPDIR", str(cli_temporary))
     if real and credential_root.is_dir():
         credentials = Path(settings.codex_home_dir)
         credentials.mkdir()
@@ -267,6 +274,10 @@ def pytest_addoption(parser):
     performance.addoption(
         "--run-wiki-perf", action="store_true", default=False,
         help="Run optional Wiki scale and performance measurements (not release gates)",
+    )
+    performance.addoption(
+        "--wiki-perf-output", metavar="FILE",
+        help="Retain the expanded Wiki efficiency matrix, raw samples and source fingerprint as JSON",
     )
     group = parser.getgroup("knowledge evaluation")
     group.addoption(

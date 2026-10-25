@@ -6,7 +6,7 @@ import uuid
 import pytest
 from markdown_it import MarkdownIt
 
-from server.wiki import source_bindings
+from server.wiki import format, portable_metadata, source_bindings
 from server.wiki.curation import WikiCuration
 from server.wiki.history import WikiHistory
 from server.wiki.references import local_references
@@ -193,14 +193,33 @@ def test_f04_real_html_comments_supply_same_metadata_to_index_and_source_ledger(
         assert source_bindings.metadata(db, document["id"], document["path"], text.encode(), None)["sources"] == payload["sources"]
 
 
-@pytest.mark.parametrize("tag", ["script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes"])
-@pytest.mark.parametrize("opening", ["<{tag}>", "<{tag} />", "<{tag}/>", '<{tag} data-example="a > b" />'])
-def test_f04_nonvoid_text_containers_keep_comment_examples_literal_until_the_real_close(store, tag, opening):
-    uid = "urn:uuid:" + str(uuid.uuid4())
+TEXT_CONTAINERS = ["script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes"]
+CONTAINER_OPENINGS = ["<{tag}>", "<{tag} />", "<{tag}/>", '<{tag} data-example="a > b" />']
+
+
+def container_example(tag, opening, uid):
     payload = {"title": "Example metadata", "uid": uid, "aliases": ["Example alias"]}
     comment = "<!-- octopus-wiki " + json.dumps(payload) + " -->"
-    text = ("# Real title\n\n" + opening.format(tag=tag.upper()) + "\n"
+    return ("# Real title\n\n" + opening.format(tag=tag.upper()) + "\n"
             + "</unrelated>\n" + comment + "\n</" + tag.upper() + " >\n")
+
+
+@pytest.mark.parametrize("tag", TEXT_CONTAINERS)
+@pytest.mark.parametrize("opening", CONTAINER_OPENINGS)
+def test_f04_nonvoid_text_containers_keep_comment_examples_literal_until_the_real_close(tag, opening):
+    text = container_example(tag, opening, "urn:uuid:" + str(uuid.uuid4()))
+    assert portable_metadata.from_document(format.parse(text)) == {}
+
+
+# Every spelling is checked above. Keep real UID ownership checks for raw-text
+# and RCDATA containers, including both self-closing forms and a quoted '>'.
+@pytest.mark.parametrize("tag,opening", [
+    ("script", CONTAINER_OPENINGS[0]), ("textarea", CONTAINER_OPENINGS[1]),
+    ("title", CONTAINER_OPENINGS[2]), ("xmp", CONTAINER_OPENINGS[3]),
+])
+def test_f04_literal_container_metadata_cannot_reserve_a_durable_uid(store, tag, opening):
+    uid = "urn:uuid:" + str(uuid.uuid4())
+    text = container_example(tag, opening, uid)
     document = note(store, "Library/text-container.md", text)
     assert document["title"] == "Real title"
     assert "Example alias" not in document["metadata"].get("aliases", [])
@@ -212,16 +231,27 @@ def test_f04_nonvoid_text_containers_keep_comment_examples_literal_until_the_rea
     assert not actual["metadata"].get("uid_conflict")
 
 
-@pytest.mark.parametrize("tag", ["script", "style", "textarea", "title", "xmp", "iframe", "noembed", "noframes"])
-@pytest.mark.parametrize("closed", [False, True])
-def test_f04_text_container_closes_only_at_its_end_tag_and_preserves_following_real_metadata(store, tag, closed):
-    uid = "urn:uuid:" + str(uuid.uuid4())
+def container_following_metadata(tag, closed, uid):
     example = '<!-- octopus-wiki {"title":"Example metadata"} -->'
     real = "<!-- octopus-wiki " + json.dumps({"title": "Real metadata", "uid": uid}) + " -->"
     text = "# Real title\n\n<" + tag + " />\n" + example + "\n"
     if closed:
         text += "</" + tag + ">\n\n"
-    text += real + "\n"
+    return text + real + "\n"
+
+
+@pytest.mark.parametrize("tag", TEXT_CONTAINERS)
+@pytest.mark.parametrize("closed", [False, True])
+def test_f04_text_container_closes_only_at_its_end_tag_and_preserves_following_real_metadata(tag, closed):
+    uid = "urn:uuid:" + str(uuid.uuid4())
+    text = container_following_metadata(tag, closed, uid)
+    assert portable_metadata.from_document(format.parse(text)) == ({"title": "Real metadata", "uid": uid} if closed else {})
+
+
+@pytest.mark.parametrize("tag,closed", [("style", False), ("textarea", True), ("title", False), ("iframe", True)])
+def test_f04_container_close_controls_durable_metadata_and_uid(store, tag, closed):
+    uid = "urn:uuid:" + str(uuid.uuid4())
+    text = container_following_metadata(tag, closed, uid)
     document = note(store, "Library/container-close.md", text)
     assert document["title"] == ("Real metadata" if closed else "Real title")
     if closed:

@@ -141,8 +141,12 @@ Codex agent、普通新会话都使用同一份用户技能。凭据仍使用
 全套测试、构建或付费模型请求。
 
 全量离线使用四个按文件分组的 pytest worker。WSL 的 `/tmp` 是容量有限的 tmpfs；
-需要保存多进程故障与恢复产物时，在命令前设置 `TMPDIR=/var/tmp` 使用磁盘空间。
-局部回归和 Codex 实机保持串行，公共测试配置不自动开启并行。
+需要磁盘空间或运行真实 Codex 时，在 `~/.cache/octopus-tests/` 下创建本轮独立目录，
+将 `TMPDIR` 指向它。不要放进 `~/.octopus` 或账户工作区：子目录仍继承受管安装归属。
+浏览器公共入口自动使用这一缓存根，每轮隔离全部临时状态并在退出后清理运行目录，
+审计回执单独保留；已安装依赖和浏览器仍复用。局部回归和 Codex 实机保持串行，
+公共测试配置不自动开启并行。
+CLI 登录目录与 `TMPDIR` 放在同一本轮运行根下的平行目录，避免辅助程序安装限制。
 
 Wiki 规模和性能测量使用独立的 `wiki_perf` 标记，默认在收集阶段排除，
 `scripts/check.sh`、Python pre-commit 与发布门禁都不运行。权限、事务、恢复和
@@ -183,16 +187,25 @@ Codex 实机测试按 AGENTS 的 marker 选择。其中 research 测试需要
 默认 Codex 实机检查统一使用 `low` 推理档位，不改宿主配置。检查协议事件、工具
 实际返回和持久化结果；Wiki 的回复措辞、整理质量不作为实机通过条件，也不要求
 模型必然产生推理记录。后者的接收、身份和时序边界由可重放日志的离线测试覆盖。
+CLI 默认模型额度不足时，使用当前对话的凭据、模型和显式服务档位完成隔离验证，
+不切换到宿主的另一份登录，也不修改已有 agent 设置。
+后台任务继承服务环境，不能假定它继承当前模型回合的 `CODEX_HOME`；应把本对话
+已核实的凭据路径显式传入后台验证，并核对最终登录链接目标，不读取或复制认证内容。
 
 重跑 Codex 后端实机测试时，可以这样创建并清理临时凭据入口：
 
 ```bash
 (
   cd ~/Octopus || exit
-  octopus_test_homes=$(mktemp -d) || exit
-  trap 'rm -f -- "$octopus_test_homes/host"; rmdir -- "$octopus_test_homes"' EXIT
-  ln -s "$HOME/.codex" "$octopus_test_homes/host" || exit
-  OCTOPUS_CODEX_HOME_DIR="$octopus_test_homes" .venv/bin/pytest tests/ -v \
+  : "${CODEX_HOME:?Set CODEX_HOME to the current conversation's selected login}"
+  octopus_test_base="$HOME/.cache/octopus-tests"
+  mkdir -p "$octopus_test_base" || exit
+  octopus_test_root=$(mktemp -d "$octopus_test_base/pytest.XXXXXX") || exit
+  trap 'rm -rf -- "$octopus_test_root"' EXIT
+  mkdir "$octopus_test_root/credentials" || exit
+  ln -s "$CODEX_HOME" "$octopus_test_root/credentials/selected" || exit
+  TMPDIR="$octopus_test_root" OCTOPUS_CODEX_HOME_DIR="$octopus_test_root/credentials" \
+    .venv/bin/pytest tests/ -v \
     -m 'real and (real_codex or codex_bin) and not real_claude and not knowledge_eval'
 )
 ```

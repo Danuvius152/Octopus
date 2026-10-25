@@ -112,15 +112,17 @@ def dependencies(db, doc_id):
 def graph(store, doc_id, offset=0, limit=100, cursor=None, *, model_response=False):
     from .retrieval import continuation, pagination
 
-    offset, epoch, fingerprint = pagination(store, cursor, offset, {"graph": doc_id})
     with store.connect() as db:
+        db.execute("BEGIN")
+        offset, epoch, fingerprint = pagination(store, cursor, offset, {"graph": doc_id}, db=db)
         total = db.execute("SELECT count(*) FROM wiki_edges WHERE source_doc=? OR target_doc=?", (doc_id, doc_id)).fetchone()[0]
         selected = db.execute("SELECT e.*,d.revision FROM wiki_edges e LEFT JOIN documents d ON d.id=e.target_doc WHERE e.source_doc=? OR e.target_doc=? ORDER BY e.source_doc,e.ordinal LIMIT ? OFFSET ?", (doc_id, doc_id, limit, offset)).fetchall()
         ids = {doc_id, *(edge["source_doc"] for edge in selected), *(edge["target_doc"] for edge in selected if edge["target_doc"])}
-        nodes = [store.navigation(row) for identifier in sorted(ids) if (row := db.execute("SELECT * FROM documents WHERE id=?", (identifier,)).fetchone()) is not None]
+        nodes = [store.navigation(row, db=db) for identifier in sorted(ids) if (row := db.execute("SELECT d.*,m.metadata AS managed_metadata FROM documents d LEFT JOIN managed_notes m ON m.path=d.path WHERE d.id=?", (identifier,)).fetchone()) is not None]
         edges = [{"from": edge["source_doc"], "to": edge["target_doc"], "resource": edge["resource"], "revision": edge["recorded_revision"] or edge["revision"], "location": edge["location"], "relation": edge["relation"], "status": edge["status"]} for edge in selected]
+        state = store._index_state(db)
     next_offset = offset + limit if offset + limit < total else None
-    result = {"nodes": nodes, "edges": edges, "total": total, "next_offset": next_offset, "next_cursor": continuation(next_offset, epoch, fingerprint), **store.index_state()}
+    result = {"nodes": nodes, "edges": edges, "total": total, "next_offset": next_offset, "next_cursor": continuation(next_offset, epoch, fingerprint), **state}
     if model_response:
         from .model_response import fit_prefix, presentation
 

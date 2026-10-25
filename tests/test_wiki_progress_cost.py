@@ -79,12 +79,12 @@ def progress_measurements(prepared, monkeypatch, count):
         assert projection["ready"] and projection["total"] == count + 1
         measured.append({"members": count, "phase": phase, "seconds": elapsed,
                          "vm_steps": vm_steps, "snapshots": len(events), **writes})
+    assert [(row["inserted"], row["deleted"]) for row in measured] == [(0, 0), (1, 1)], measured
     return measured
 
 
 def test_progress_writes_only_real_membership_changes(prepared, monkeypatch):
-    measurements = progress_measurements(prepared, monkeypatch, 4)
-    assert [(row["inserted"], row["deleted"]) for row in measurements] == [(0, 0), (1, 1)]
+    progress_measurements(prepared, monkeypatch, 4)
 
 
 @pytest.mark.wiki_perf
@@ -92,7 +92,10 @@ def test_progress_writes_only_real_membership_changes(prepared, monkeypatch):
 def test_progress_membership_cost(prepared, monkeypatch, count):
     # Explicit ticket41 measurement, excluded from ordinary correctness gates.
     measurements = progress_measurements(prepared, monkeypatch, count)
-    print(json.dumps({"progress_membership_cost": measurements}), flush=True)
+    print(json.dumps({
+        "timing_scope": "single instrumented sample per phase; updates include SQLite progress callbacks and membership audit triggers; verification and projection reads excluded",
+        "progress_membership_cost": measurements,
+    }), flush=True)
 
 
 def test_repeated_job_state_does_not_invalidate_current_maintenance(prepared):

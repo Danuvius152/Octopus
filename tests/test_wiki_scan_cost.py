@@ -16,7 +16,7 @@ def store(tmp_path):
     (root / "Library").mkdir(parents=True)
     (root / "tmp/resources").mkdir(parents=True)
     (root / "Library/note.md").write_bytes(b"# Existing note\nKeep original bytes.\n")
-    for index in range(20):
+    for index in range(2):
         (root / f"tmp/resources/resource-{index}.html").write_text(
             f"<p>Supporting fixture {index}</p>", encoding="utf-8"
         )

@@ -11,6 +11,7 @@ import sys
 import tempfile
 import time
 import uuid
+from contextlib import ExitStack
 from pathlib import Path
 from statistics import median
 
@@ -85,13 +86,17 @@ def main():
     options = parser.parse_args()
     if options.vault and not options.private_output:
         parser.error("Real-vault evaluation requires --private-output")
-    with tempfile.TemporaryDirectory(prefix="wiki-search-evaluation-") as temporary:
+    with tempfile.TemporaryDirectory(prefix="wiki-search-evaluation-") as temporary, ExitStack() as resources:
         folder = Path(temporary)
         root = options.vault.resolve() if options.vault else folder / "vault"
         if not options.vault:
             root.mkdir()
             populate(root)
-        store = WikiStore(root, folder / "state", str(uuid.uuid4()))
+        began = time.perf_counter()
+        # This ledger is new. Import durable navigation before the first index
+        # assigns identities or extracts managed aliases from the current files.
+        store = WikiStore(root, folder / "state", str(uuid.uuid4()), create=True, defer_recovery=True)
+        resources.callback(store.close)
         metadata_counts = {}
         if options.metadata_state:
             with (options.metadata_state / "vault.lock").open("rb") as lock:
@@ -107,7 +112,6 @@ def main():
                             metadata_counts[table] = len(records)
                 finally:
                     source.close()
-        began = time.perf_counter()
         store.refresh()
         build_ms = (time.perf_counter() - began) * 1000
         target = "Library/Research/vidu_realtime_report/技术报告.md"
@@ -119,6 +123,7 @@ def main():
         results = []
         for query, expected in cases:
             old_times, new_times = [], []
+            samples = []
             for iteration in range(5):
                 operations = [lambda query=query: baseline_search(store, query), lambda query=query: store.search(query, limit=3)]
                 measured = {}
@@ -128,6 +133,11 @@ def main():
                 found, new_ms, new_reads = measured[1]
                 old_times.append(old_ms)
                 new_times.append(new_ms)
+                samples.append({
+                    "first": "baseline" if iteration % 2 == 0 else "chapter",
+                    "baseline_ms": old_ms, "chapter_ms": new_ms,
+                    "baseline_file_reads": old_reads, "chapter_file_reads": new_reads,
+                })
             old = previous["paths"]
             paths = [item["path"] for item in found["items"]]
             evidence = []
@@ -153,15 +163,9 @@ def main():
                     "chapter_ms": round(median(new_times), 3),
                     "baseline_file_reads": old_reads,
                     "chapter_file_reads": new_reads,
+                    "samples": samples,
                     "evidence": evidence,
-                    "read_characters": next(
-                        (
-                            item["section"]["end"] - item["section"]["start"]
-                            for item in found["items"]
-                            if item["path"] == expected
-                        ),
-                        0,
-                    ),
+                    "read_characters": sum(part["characters"] for part in evidence),
                     "match_mode": found["match_mode"],
                 }
             )
@@ -189,9 +193,10 @@ def main():
                 {
                     "corpus": "private real vault; temporary derived index" if options.vault else "synthetic; 8 documents including assets and a long article",
                     "build_ms": round(build_ms, 3),
+                    "build_scope": "temporary ledger and observer creation, optional navigation metadata import, and initial indexing; fixture generation excluded",
                     "copied_navigation_metadata": metadata_counts,
                     "corpus_revisions": corpus_revisions,
-                    "timing_scope": "median of 5 alternating full operations: refresh, cached-row query/ranking, pagination and current metadata; evidence read measured separately",
+                    "timing_scope": "median of 5 alternating warm indexed operations: refresh, cached-row query/ranking, pagination and current metadata; per-sample times and file reads retained; top-level file reads are the final sample; evidence read measured separately",
                     "queries": results,
                     "personal_directory": personal,
                     "real_model_behavior_verified": False,

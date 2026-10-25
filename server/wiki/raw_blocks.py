@@ -1,5 +1,6 @@
 """Version-bound UTF-8 source coordinates, distinct from extracted offsets."""
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -36,9 +37,14 @@ def snapshot(store, doc, expected_revision=None):
 
 
 def coordinates(store, document, text):
-    cached = store._raw_coordinates
-    if cached is not None and cached[0] == document["revision"]:
-        return cached[1]
+    with store._lifecycle:
+        cache = store._raw_coordinates
+        if cache is None:
+            cache = store._raw_coordinates = OrderedDict()
+        cached = cache.get(document["revision"])
+        if cached is not None:
+            cache.move_to_end(document["revision"])
+            return cached
     parsed = format.parse(text)
     sections = iter(parsed.sections)
     section = next(sections, None)
@@ -51,7 +57,11 @@ def coordinates(store, document, text):
                                selected.get("title", ""), "metadata" if offset < parsed.body_start else selected.get("role", "body")))
         offset += len(part)
     current = RawCoordinates(parsed.body_start, tuple(result))
-    store._raw_coordinates = document["revision"], current
+    with store._lifecycle:
+        cache[document["revision"]] = current
+        cache.move_to_end(document["revision"])
+        while len(cache) > 4:
+            cache.popitem(last=False)
     return current
 
 
@@ -70,6 +80,9 @@ def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget
         raise WikiError("Raw start requires a nonnegative full-content position", 422)
     with curation.history.locked():
         document, text = snapshot(curation.store, doc, expected_revision)
+        from .read_response import INDEX_FIELDS
+
+        state = {key: document[key] for key in (*INDEX_FIELDS, "index_errors") if key in document}
         parts = coordinates(curation.store, document, text).blocks
         if ids is not None:
             requested = set(ids)
@@ -85,7 +98,7 @@ def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget
                 raise WikiError("Raw start must be within the first selected block", 422)
             header = {"id": document["id"], "path": document["path"], "revision": document["revision"],
                       "view": view, "coordinate_system": "raw_unicode_codepoints", "raw_characters": len(text),
-                      "total": count, "freshness": "live", **curation.store.index_state()}
+                      "total": count, "freshness": "live", **state}
             projected = presentation(selected)
 
             def build(amount):
@@ -133,4 +146,4 @@ def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget
                 tasks.record_raw_read(task, document, part["start"], part["end"], len(text))
             result.append(item)
         next_offset = offset + len(result) if offset + len(result) < count else None
-        return {"id": document["id"], "path": document["path"], "revision": document["revision"], "view": view, "coordinate_system": "raw_unicode_codepoints", "raw_characters": len(text), "blocks": result, "total": count, "next_offset": next_offset, "budget_exhausted": len(result) < len(selected), "freshness": "live", **curation.store.index_state()}
+        return {"id": document["id"], "path": document["path"], "revision": document["revision"], "view": view, "coordinate_system": "raw_unicode_codepoints", "raw_characters": len(text), "blocks": result, "total": count, "next_offset": next_offset, "budget_exhausted": len(result) < len(selected), "freshness": "live", **state}

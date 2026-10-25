@@ -31,7 +31,7 @@ def _reference():
         catalog = _catalog(reference)
         protocols = dict(reference.execute("SELECT name,version FROM wiki_protocols"))
         tables = {
-            "maintenance": set(maintenance_inputs.TABLES),
+            "maintenance": set(maintenance_inputs.TABLES) | set(maintenance_inputs.VIEWS),
             "search": {"search_documents", "search_sections", "search_fts"},
             "materials": {"raw_materials"},
             "catalog": {"wiki_edges", "wiki_edge_lookups", "wiki_lookup_names", "catalog_state",
@@ -56,6 +56,7 @@ def _reference():
                         break
         replaceable: dict[tuple[str, str], frozenset[tuple] | None] = dict.fromkeys(
             {("table", name) for name in maintenance_inputs.TABLES}
+            | {("view", name) for name in maintenance_inputs.VIEWS}
             | {("trigger", name) for name in maintenance_inputs.triggers()}
             | {("index", name) for name in derived_indexes})
         # The search owner can append these two known tail columns, in order.
