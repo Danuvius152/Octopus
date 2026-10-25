@@ -156,31 +156,20 @@ def _sql(value):
 def initialize(db):
     if not db.in_transaction:
         raise ValueError("Grant initialization requires the schema transaction")
-    for sql in (*TABLES.values(), *INDEXES.values(), *TRIGGERS.values()):
+    for sql in (*TABLES.values(), *INDEXES.values(), *TRIGGERS.values(), *JOB_TRIGGER.values()):
         db.execute(sql)
     db.execute("INSERT INTO wiki_protocols VALUES('wiki_grants',2)")
-    if maintenance_inputs.jobs_initialized(db):
-        attach_jobs(db)
     require(db)
-
-
-def attach_jobs(db):
-    if not db.in_transaction or not maintenance_inputs.jobs_initialized(db):
-        raise ValueError("Grant job guards belong to the actual job initialization transaction")
-    for sql in JOB_TRIGGER.values():
-        db.execute(sql)
 
 
 def require(db):
     protocols.require(db, "wiki_grants", 2)
-    initialized = maintenance_inputs.jobs_initialized(db)
-    expected = TABLES | INDEXES | TRIGGERS | (JOB_TRIGGER if initialized else {})
-    names = expected.keys() | JOB_TRIGGER.keys()
+    maintenance_inputs.require_jobs(db)
+    expected = TABLES | INDEXES | TRIGGERS | JOB_TRIGGER
+    names = expected.keys()
     actual = {row[0]: _sql(row[1]) for row in db.execute(
         "SELECT name,sql FROM sqlite_master WHERE name IN (" + ",".join("?" for _ in names) + ")", tuple(names))}
     if actual != {name: _sql(sql) for name, sql in expected.items()}:
-        raise unavailable()
-    if not initialized and db.execute("SELECT 1 FROM wiki_job_grants LIMIT 1").fetchone():
         raise unavailable()
 
 

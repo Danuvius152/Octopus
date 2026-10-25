@@ -17,6 +17,16 @@ lives in [`plans/`](plans/); CLI/stream-protocol research notes live in the
 `*-notes.md` files. `server/db/schema.py` (`_SCHEMA`) is the source of truth for
 the data model — this doc describes it conceptually rather than pasting SQL.
 
+The [2026-10-23 simplification plan](plans/architecture-simplification-20261023.md)
+retains its historical baseline and the proposed account-portability scope.
+Obsolete online interfaces, installation-era adoption/rotation and startup
+migration chains have since been retired. Current SessionOwner, transaction,
+authorization and Wiki recovery responsibilities remain the foundation.
+`_SCHEMA` now declares the complete current main layout; startup creates empty
+storage or requires its exact current marker. Publication owns retained-layout
+verification and any finite conversion, as described in the
+[current storage contract](plans/current-storage-format.md).
+
 ## System Overview
 
 ```
@@ -140,8 +150,8 @@ One install serves several people, each fully isolated (design:
 |---|---|
 | `main.py` | FastAPI app + lifespan. Clears the `CLAUDECODE` env var so a nested `claude` subprocess behaves normally. Wires DB, SessionManager, ScheduleRunner, ConnectorManager, AgentManager, the in-process MCP namespaces, the metrics store, optional CloudflareTunnel. Registers routers, `GET /api/backends`, `GET /health`, and the SPA static mount. |
 | `config.py` | Pydantic settings from `.env` (prefix `OCTOPUS_`) — see **Configuration** below. |
-| `auth.py` / `users.py` | Accounts: empty-installation setup → first admin and owned default agent, login → session bearer, invite registration, password change and admin operations. Setup proof is checked only at `/api/auth/setup`; `deps.py` resolves the current business identity and owner. Historical handoff protection remains separate from new setup. |
-| `crypto.py` | Encryption at rest: a server-held **master key** wraps each account's data-encryption key (DEK), which Fernet-encrypts that account's secrets. A password only authenticates. Historical install-key handling remains confined to retained handoff protection. |
+| `auth.py` / `users.py` | Accounts: empty-installation setup → first admin and owned default agent, login → session bearer, invite registration, password change and admin operations. Setup proof is checked only at `/api/auth/setup`; `deps.py` resolves the current business identity and owner. Startup refuses retained pre-account business inputs. |
+| `crypto.py` | Encryption at rest: a server-held **master key** wraps each account's data-encryption key (DEK), which Fernet-encrypts that account's secrets. A password only authenticates. |
 | `models.py` | Pydantic request/response models + enums (`SessionStatus`, `MessageRole`, agent/schedule/connector/credential DTOs). |
 | `session_manager.py` | Core turn engine. Owns in-memory `Session` objects, drives each turn through the **Harness**, persists + broadcasts events to WebSocket clients, runs tool-result forwarding, interactive questions, mid-turn interrupt, the per-session message queue, premature-exit auto-respawn, and large-prompt spill. |
 | `sessions/` | SessionOwner serializes mutable execution, question and lifecycle state; managed Harness I/O reports original results. Completion consumers read the plan §3.2 contract. |
@@ -439,8 +449,9 @@ GET                /health
 ## Data model
 
 `server/db/schema.py` `_SCHEMA` is authoritative; this is the conceptual map.
-SQLite, WAL with `synchronous=FULL`, foreign-key cascade; additive `ALTER`s go through idempotent
-migrations (never re-create or duplicate the schema in docs).
+SQLite, WAL with `synchronous=FULL`, foreign-key cascade. Startup accepts the
+current format only; publication verifies retained data and owns any finite
+conversion. Do not duplicate the schema in docs.
 
 - **`client_submissions`** — browser input, attachment proofs, immutable admission
   receipt, execution owner/state and manual recovery provenance. Scoped through
@@ -588,10 +599,11 @@ reservation refuses deletion with 409 until that original operation finishes.
   reaps silent bg tasks. See [`post-mortems/2026-05-18-bg-pipeline-hardening.md`](post-mortems/2026-05-18-bg-pipeline-hardening.md).
 - **Secrets split + encrypted.** Credential/connector secrets live in dedicated
   `*_secrets` tables, Fernet-encrypted under the owning account's DEK (a
-  master-wrapped per-user key; install-era secrets under the access token), read
+  master-wrapped per-user key), read
   only by the in-process MCP namespace at tool-call time.
-- **Schema evolves additively.** New tables go in `_SCHEMA`; column changes go
-  through idempotent migrations — never an in-place destructive change.
+- **Current declarations and explicit handoff.** Schema changes update the complete
+  current declarations. Publication supplies any finite conversion and verifies
+  retained facts; startup does not traverse historical migrations.
 
 ## Running
 

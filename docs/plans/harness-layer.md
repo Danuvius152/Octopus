@@ -22,6 +22,14 @@ confirmed resource retirement are separate facts. See the
 section3.2, for the current contract and verification boundary; these edits
 do not establish later native-tail finality or cross-request lease changes.
 
+Design note (2026-10-23): the proposed [Codex app-server migration](../review/codex-app-server-feasibility-20261023.md)
+keeps this public Harness/Profile boundary, but JSONL serialization alone no
+longer describes the protocol differences. Private protocol implementations
+may vary while one HarnessRun retains resource ownership. Steering, process
+reuse and completion evidence are separate concerns. The [DSH proposal](deepseek-harness-backend.md)
+compares ACP, SDK and headless; none is mandated by this historical plan.
+These are design updates, not shipped behavior.
+
 ## 0. Why this exists
 
 Octopus has a good *per-turn* backend abstraction (`BackendBase` in

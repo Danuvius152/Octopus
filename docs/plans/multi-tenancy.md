@@ -2,10 +2,20 @@
 
 > **Status:** shipped — one site, many users: the label becomes a username, the token becomes a password, and every user gets their own directory, rows and keys.
 
-> **Storage update, 2026-10-24:** pre-account business/adoption is retired; the
-> preceding dated scope note and old rollout sections are historical. Main
-> storage validates the supported complete baseline and upgrades through one
-> `user_version` transaction, without a runtime migration ledger or owner backfills.
+> **Scope update, 2026-10-25:** accounts, isolation, invitations, passwords and
+> per-account keys remain supported. The pre-account business mode and §9's
+> adoption of an old installation have been retired under the
+> [simplification plan](architecture-simplification-20261023.md).
+> First-account creation on an empty installation remains;
+> moving current accounts to another machine is a separate offline operation.
+> References to the old transition below explain the original implementation,
+> not a requirement to keep importing earlier installations indefinitely.
+
+> **Storage update, 2026-10-25:** the original design and rollout sections below
+> are historical. Main storage creates the complete current layout and marker
+> in one transaction only when empty; reopening requires the current marker.
+> Publication owns retained-layout verification and any finite conversion;
+> see the [current storage contract](current-storage-format.md).
 
 Octopus is single-user by construction: one `OCTOPUS_AUTH_TOKEN` is the API
 credential, the WebSocket ticket, the application cookie, the MCP signing key

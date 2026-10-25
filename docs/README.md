@@ -29,7 +29,7 @@ Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验
 
 - **[共享 Wiki 开发过程总结](plans/wiki-development-summary.md)** — 本期已完成；实际交付、当前合同、证据边界与开发方法。
 - **[共享 Wiki 未来计划](plans/wiki-future-plan.md)** — Sapphire、SmartReader、共享能力及有触发条件的后续工作。
-- **[全库实现审查（2026-10-23，核验关闭于 10-25）](review/review-20261023.md)** — F01–F20 均已由 Octo 修复、Vera 独立核验关闭；记录最终修复候选的完整离线验证及证据边界。
+- **[全库实现审查（2026-10-23，核验关闭于 10-25）](https://github.com/Danuvius152/Octopus/blob/fe2200fbbaa705b99b6a392e188bbb2423b21ae2/docs/review/review-20261023.md)** — F01–F20 均已由 Octo 修复、Vera 独立核验关闭；记录最终修复候选的完整离线验证及证据边界。
 - **[user-guide.md](user-guide.md)** — practical instructions for this local
   WSL + Codex installation: startup, agents, and phone access with the
   project's Cloudflare Tunnel integration.
@@ -46,8 +46,14 @@ Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验
   async work ownership in `server/knowledge.py`.
 - **[backup-and-migrate.md](backup-and-migrate.md)** — persistent state, CLI
   transcripts and configuration to include in a backup or migration.
-- **[迁移机制审查（2026-10-23）](review/migration-scope-and-portability-20261023.md)** —
-  取消旧版兼容的范围、当前备份风险，以及账户和数据跨机器搬迁的修改建议；尚未实施。
+- **[迁移机制审查（2026-10-23）](https://github.com/Danuvius152/Octopus/blob/fe2200fbbaa705b99b6a392e188bbb2423b21ae2/docs/review/migration-scope-and-portability-20261023.md)** —
+  对比 before-takeover 与本地新版本，审查旧兼容、旧接口和重复状态；含跨机器搬迁建议，尚未实施。
+- **[当前账户架构简化与跨机器搬迁](plans/architecture-simplification-20261023.md)** —
+  后续实施入口：复用已交付基础，退出旧接口与安装时代业务，保全当前数据后收敛格式，
+  单独验收同版本冷迁移；七张生命周期/能力暂停票不恢复。代码尚未实施。
+- **[Codex exec → app-server 可行性与实施设计](review/codex-app-server-feasibility-20261023.md)** —
+  基于当前 Harness/Owner 与本机 Codex 0.164.0 schema，区分请求内交互迁移和完整
+  原生尾部；列明权限、输入、问题、完成、恢复及验收挑战。仅设计，未恢复暂停票。
 
 ## Design records — [`plans/`](plans/)
 
@@ -94,12 +100,13 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | [Wiki 与运行基础缺陷修复：2026-10-17 交接](plans/wiki-bug-remediation-20261017.md) | shipped | 简化后的 A01/A02/A03/A05 实现与本机验收；A04/A06/A07 不在范围。§16 记录当前合同与交付证据，§1–§15 保留历史。 |
 | [共享 Wiki：开发过程总结与当前合同](plans/wiki-development-summary.md) | shipped | Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验收已完成；保留当前合同、证据边界和开发方法。 |
 | [运行日志缺陷修复：设计访谈与行为契约](plans/runtime-log-repair-20261013.md) | shipped | Q12 修复及本地 Codex 验收已完成；Stop 暂停内存积压、人工纠偏优先、明确恢复；保留主要框架，Q11 持久队列不实施。 |
-| [P1 问题整改：CR-03 输入恢复](plans/p1-remediation-20261020.md) | superseded by minimal-architecture-execution-20261020.md | CR-03 暂存实现并入最小机制架构计划，以下保留原范围决定与历史验收，不再作为单独发布入口。 |
+| [AI 与数字人研究工作流改进计划](plans/ai-digital-human-research-workflow-20261024.md) | proposed | 对照 Pika 的行为流程与 prompt，改进研究证据、PDF 转 Markdown、阅读写作与 Wiki 续接；面向 AI 与数字人。 |
+| [Codex / DSH 兼容与 DeepSeek backend 可行性方案](plans/deepseek-harness-backend.md) | proposed | 保留 Claude 原生支持与 Codex，评估以 API key 增加 DeepSeek backend；DSH 接口按适配度选择，尚未实施。 |
 | [Codex performance in Monitor](plans/codex-performance-monitor.md) | completed | effective output TPS implemented and validated for local Codex; client windows, model grouping and passive collection. |
 | [Current storage and publication handoff](plans/current-storage-format.md) | implemented | Validation and release handoff are tracked separately from production deployment. |
-| [DeepSeek Harness 作为第三个 backend：实施计划](plans/deepseek-harness-backend.md) | proposed | 以 API key + `dsh --profile headless` 接入 DeepSeek Harness（DSH），复用现有 harness 边界；先交付单轮/事件/MCP/resume，账号登录与 SDK 长驻模式留在后续。 |
 | [Rotating the installation access token](plans/token-rotation.md) | retired | Installation-token rotation and recovery are removed; current account authentication remains. |
 | [共享 Wiki：未来计划与应用协同](plans/wiki-future-plan.md) | proposed | Sapphire、SmartReader 与条件性扩展的统一计划；保留未完成合同，不把本文当作开发或生产写入授权。 |
+| [当前账户基线上的架构简化与跨机器搬迁](plans/architecture-simplification-20261023.md) | 当前格式收敛设计已确认，待实施 | 只维护当前读写模型；启动兼容层退出，发布承担当次数据交接；保全当前资料和同版本账户搬迁合同。原阶段交付证据保留。 |
 | [运行时接口修补：接管、记录与调用身份](plans/runtime-interface-repair.md) | completed | Q13–Q30 中已确认实施的修补全部通过本机验收；按 Q31 合并 main 并上线 `01c16a6` 独立服务快照，已验证并清理两个旧 release；Q25 脱敏未纳入。 |
 
 <!-- END plans-index -->
@@ -121,5 +128,7 @@ post-mortem on a tricky pipeline. Cited from code where relevant.
     post-mortem on four `mcp__bg__run` → model-turn pipeline bugs.
   - [`2026-10-21-session-owner-scope-creep.md`](post-mortems/2026-10-21-session-owner-scope-creep.md):
     SessionOwner 合并交付的范围失控——切在实现入口、共同接口未收敛、测试未触发目标故障。
+  - [`2026-10-24-account-setup-retirement.md`](post-mortems/2026-10-24-account-setup-retirement.md):
+    08/09 开户与旧接管退役——身份夹具迁移、冷恢复前提遗漏及门禁证据收束。
   Note: the `server/backends/*` paths in the 2026-05-18 doc predate the harness
   refactor — that code now lives under `server/harness/`.

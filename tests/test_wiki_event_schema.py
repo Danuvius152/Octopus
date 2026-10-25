@@ -39,15 +39,14 @@ def seed_pending(database):
 
 
 def test_missing_initialized_selection_job_guard_is_not_recreated(database):
-    from server.wiki.jobs import WikiJobs
+    from server.wiki import maintenance_selections
 
     with database.connect() as db:
         db.execute("DROP TRIGGER maintenance_evidence_job_owner")
     before = snapshot(database)
     with database.connect() as db:
-        db.execute("BEGIN IMMEDIATE")
         with pytest.raises(WikiError, match="Selection ledger.*retained") as error:
-            WikiJobs.initialize_ledger(db)
+            maintenance_selections.require(db)
         assert error.value.status == 503
         assert db.execute("SELECT name FROM sqlite_master WHERE name='maintenance_evidence_job_owner'").fetchone() is None
     with pytest.raises((WikiError, RuntimeError)):

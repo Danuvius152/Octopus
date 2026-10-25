@@ -128,6 +128,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
     case "recording_failed":
       clearStreamingText(sessionId);
       applyDispatchState(sessionId, data.dispatch_state);
+      addMessage(sessionId, { role: "system", type: "notice", content: data.message ?? "Result recording could not be confirmed. Inspect the recorded messages in this conversation." });
       break;
 
     case "queued":

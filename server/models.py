@@ -262,7 +262,6 @@ class DispatchState(BaseModel):
     generation: str
     revision: int = 0
     paused: bool = False
-    recording_failure: dict[str, str] | None = None
     active_request_id: str | None = None
     items: list[DispatchQueueItem] = []
 

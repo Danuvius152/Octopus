@@ -169,7 +169,6 @@ export function ChatView({
   const dispatchStates = useSessionStore((s) => s.dispatchStates);
   const dispatchUnavailable = useSessionStore((s) => s.dispatchUnavailable);
   const dispatchPaused = activeSessionId ? dispatchStates[activeSessionId]?.paused ?? false : false;
-  const savingBlocked = activeSessionId ? Boolean(dispatchStates[activeSessionId]?.recording_failure) : false;
   const pendingQuestionsMap = useSessionStore((s) => s.pendingQuestions);
   const pendingQuestions = activeSessionId
     ? (pendingQuestionsMap[activeSessionId] ?? EMPTY_QUESTIONS)
@@ -805,7 +804,7 @@ export function ChatView({
       const sid = activeSessionId;
       const label = trimmed.slice("/fork".length).trim() || undefined;
       const unknown = !dispatchStates[sid] || dispatchUnavailable[sid];
-      const busy = unknown || Boolean(dispatchStates[sid]?.recording_failure) || isSessionBusy(
+      const busy = unknown || isSessionBusy(
         activeSession?.status,
         dispatchStates[sid]?.items.length ?? 0,
         pendingQuestionsMap[sid]?.length ?? 0,
@@ -1416,7 +1415,7 @@ export function ChatView({
         clearForkBackoff(sid);
         continue;
       }
-      if (!dispatchStates[sid] || dispatchUnavailable[sid] || dispatchStates[sid].recording_failure) continue;
+      if (!dispatchStates[sid] || dispatchUnavailable[sid]) continue;
       const busy = isSessionBusy(
         sess.status,
         dispatchStates[sid]?.items.length ?? 0,
@@ -1723,8 +1722,8 @@ export function ChatView({
       ) : (
         <div className="chat-input-bar shrink-0 bg-background px-6 pb-5 pt-2">
 
-          {(dispatchPaused || savingBlocked) && <p className="dispatch-pause-hint mb-2 text-xs text-muted-foreground">
-            {savingBlocked ? "New messages stay queued until result saving is verified." : "Your next message takes priority. Pending results stay paused until you resume processing."}
+          {dispatchPaused && <p className="dispatch-pause-hint mb-2 text-xs text-muted-foreground">
+            Your next message takes priority. Pending results stay paused until you resume processing.
           </p>}
           {/* `relative` anchors the slash-command menu, which floats just
               above the composer (bottom-full) like the Claude Code CLI. */}

@@ -3879,10 +3879,6 @@ export interface components {
              * @default false
              */
             paused: boolean;
-            /** Recording Failure */
-            recording_failure?: {
-                [key: string]: string;
-            } | null;
             /** Active Request Id */
             active_request_id?: string | null;
             /**

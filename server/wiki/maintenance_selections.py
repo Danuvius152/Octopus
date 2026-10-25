@@ -113,36 +113,24 @@ def _sql(value):
 
 
 def initialize(db):
-    """Only the coordinated pre-v10 migration may create this durable ledger."""
+    """Create observations and their job guards in the empty-layout transaction."""
     if not db.in_transaction:
         raise ValueError("Selection initialization requires an explicit transaction")
-    for sql in (*TABLES.values(), *INDEXES.values(), *TRIGGERS.values()):
+    for sql in (*TABLES.values(), *INDEXES.values(), *TRIGGERS.values(), *JOB_TRIGGER.values()):
         db.execute(sql)
     db.execute("INSERT INTO wiki_protocols VALUES('maintenance_selections',1)")
-    if maintenance_inputs.jobs_initialized(db):
-        attach_jobs(db)
     require(db)
-
-
-def attach_jobs(db):
-    """The job DDL owner installs its evidence guard in the same transaction."""
-    if not db.in_transaction or not maintenance_inputs.jobs_initialized(db):
-        raise ValueError("Selection job guard requires initialized jobs in an explicit transaction")
-    for sql in JOB_TRIGGER.values():
-        db.execute(sql)
 
 
 def require(db):
     protocols.require(db, "maintenance_selections")
-    initialized = maintenance_inputs.jobs_initialized(db)
-    expected = TABLES | INDEXES | TRIGGERS | (JOB_TRIGGER if initialized else {})
-    names = expected.keys() | JOB_TRIGGER.keys()
+    maintenance_inputs.require_jobs(db)
+    expected = TABLES | INDEXES | TRIGGERS | JOB_TRIGGER
+    names = expected.keys()
     rows = db.execute("SELECT name,sql FROM sqlite_master WHERE name IN (" +
                       ",".join("?" for _ in names) + ")", tuple(names))
     actual = {row[0]: _sql(row[1]) for row in rows}
     if actual != {name: _sql(sql) for name, sql in expected.items()}:
-        raise unavailable()
-    if not initialized and db.execute("SELECT 1 FROM job_selection_evidence LIMIT 1").fetchone():
         raise unavailable()
 
 

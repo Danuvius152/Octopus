@@ -16,12 +16,24 @@
 > The planning decisions and protocol below are a historical record of the
 > pre-retirement implementation. They do not describe currently callable APIs.
 
-> **Status:** in-progress — Migrating token rotation to the minimal architecture contract; candidate verification and review remain open.
+> **Status:** superseded by architecture-simplification-20261023.md — Install-era rotation is scheduled for removal; the implementation remains until current data and pending-operation checks permit retirement.
 >
-> The existing feature is being migrated under the
-> [minimal architecture execution plan](minimal-architecture-execution-20261020.md).
-> The protocol below is implemented in the unpublished candidate; expanded
-> verification and independent review remain required.
+> **Scope decision, 2026-10-23:** account operation and current-version
+> portability replace the old no-account installation requirement. Do not
+> continue extending rotation under the minimal architecture plan. The
+> [simplification plan](architecture-simplification-20261023.md) owns the
+> removal sequence and verification. At local `3d793d3`, the route, Settings
+> control and startup recovery still exist; account installations refuse
+> rotation. This documentation change does not remove them.
+>
+> **Interview confirmed, 2026-10-23:** remove the Settings control, old route,
+> dedicated recovery logic and tests as one feature. Keep account login,
+> password changes, bearer revocation, provider credentials and current tool
+> authentication. The user confirmed removal; implementation is still pending.
+>
+> Sections 1–5 describe the existing protocol and explain its safeguards.
+> Keep those safeguards while the operation remains reachable. Section 6
+> defines retirement; none of the checks below was rerun for this doc update.
 
 ## 1. Secret ownership
 
@@ -143,11 +155,40 @@ unchanged. Captured NULL-owner secret callers are rejected after handoff,
 rather than deriving an account's key from an adopted row. Wiki publication
 retains its existing migration journal and recovery evidence.
 
+## 6. Retirement as one operation
+
+Before removing the operation, inspect the selected current data baseline:
+owned credential/Connector secrets must use their account DEKs, installation
+OAuth client secrets must use the master key, and no unresolved rotation intent
+or first-account handoff may remain. A prior report of an empty intent table is
+not a substitute for this check. If evidence remains, retain it and settle the
+original operation with the version that owns its protocol before cutting over.
+
+Remove the Settings control, `/api/auth/rotate`, request/response contracts,
+`auth_token_rotated` client event, `token_rotation.py`, the intent schema,
+startup recovery and rotation-only tests together. Remove legacy installation
+key serialization only after bootstrap and all NULL-owner secret consumers
+have also retired. Current per-installation Connector refresh locking and
+account ownership checks continue to protect real operations.
+
+Do not globally delete `settings.auth_token`: classify its remaining setup,
+callback and diagnostic consumers first. First-account setup still requires
+an installation-level proof; ordinary account business must not accept it.
+Current MCP signatures use the master key and calls still need their verified
+session/account/run scope. Preserve account login/logout/password changes,
+bearer revocation, master-key wrapping and account DEKs. Password changes are
+not secret re-encryption, and this retirement is not master-key rotation.
+
+Verification must cover empty-install setup, concurrent first-account attempts,
+current-account restarts, credential refresh and scoped MCP calls. Preserve the
+current-operation cases in mixed installation-key/bootstrap tests; remove cases
+that exist only to prove the cancelled installation-era operation. The actual
+removal and code validation remain pending.
+
 ## 10. What this defers
 
-- A CLI client for the same route; the existing Settings control is the
-  current entry point.
-- Rotation while the server is down; the operation owns the live token and
-  processes in the running service.
-- Per-device install tokens, which require a separate issuance and revocation
-  product contract.
+The former CLI rotation, offline installation-token rotation and per-device
+installation-token extensions are cancelled with the old product requirement;
+they are not a backlog. Any future account-key or master-key rotation needs its
+own concrete requirement and protocol. Current-version machine moves are owned
+by the simplification plan, not by this route.

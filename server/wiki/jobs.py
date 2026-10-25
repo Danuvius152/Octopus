@@ -51,32 +51,19 @@ class WikiJobs:
         self.registration = registration if registration is not None else registry.config(user_id)
         self.store = store if store is not None else registry.store(user_id)
         with self.store.connect() as db:
-            if not maintenance_inputs.require(db):
-                raise WikiError("Wiki job authority has not been prepared; durable state retained", 503)
+            maintenance_inputs.require(db)
             job_events.require(db)
 
     @staticmethod
     def initialize_ledger(db):
-        """WikiJobs owns its DDL and commits its initialization marker with it."""
-        from . import maintenance_selections
-
+        """Create the job ledger before its dependents in the creation transaction."""
         if not db.in_transaction:
             raise ValueError("Job initialization requires an explicit transaction")
-        maintenance_selections.require(db)
-        grants.require(db)
-        if maintenance_inputs.jobs_initialized(db):
-            job_events.require(db)
-            return False
         db.execute(WikiJobs.LEDGER_DDL)
         db.execute("""CREATE TABLE job_requests (
           request_key TEXT PRIMARY KEY,request_hash TEXT NOT NULL,job_id TEXT NOT NULL
         )""")
         db.execute("INSERT INTO wiki_protocols VALUES('maintenance_jobs',1)")
-        maintenance_selections.attach_jobs(db)
-        grants.attach_jobs(db)
-        maintenance_inputs.initialize(db)
-        job_events.attach_jobs(db)
-        return True
 
     LEDGER_DDL = """CREATE TABLE "jobs" (
           id TEXT UNIQUE NOT NULL,request_key TEXT UNIQUE NOT NULL,payload_hash TEXT NOT NULL,

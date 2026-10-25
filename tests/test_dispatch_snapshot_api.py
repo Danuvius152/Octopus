@@ -18,6 +18,7 @@ async def test_live_detail_exposes_only_the_current_dispatch_snapshot(client):
     assert detail['dispatch_state']['generation']
     assert detail['dispatch_state']['items'] == []
     assert detail['dispatch_state']['paused'] is False
+    assert 'recording_failure' not in detail['dispatch_state']
 
 
 async def test_archived_detail_remains_readable_without_a_live_dispatch_owner(client):

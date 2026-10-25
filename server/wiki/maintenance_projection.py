@@ -48,7 +48,7 @@ class Batch:
         if not db.in_transaction:
             raise ValueError("Maintenance facts require an explicit snapshot")
         self.identifiers = list(identifiers)
-        with_jobs = maintenance_inputs.require(db)
+        maintenance_inputs.require(db)
         if not maintenance_inputs.ready(db, self.identifiers):
             raise WikiError("Maintenance job normalization is updating", 503)
         db.execute("CREATE TEMP TABLE IF NOT EXISTS maintenance_requested_documents(doc_id TEXT PRIMARY KEY) WITHOUT ROWID")
@@ -82,25 +82,23 @@ class Batch:
             FROM maintenance_requested_documents wanted CROSS JOIN change_retention r
             ON r.document_id=wanted.doc_id JOIN change_proposals p ON p.change_id=r.change_id
             WHERE r.resolved_at IS NULL""")}
-        self.jobs, self.items = {}, []
-        if with_jobs:
-            related = """SELECT m.job_id FROM maintenance_requested_documents wanted
-                         JOIN maintenance_job_members m ON m.doc_id=wanted.doc_id"""
-            self.jobs = {row["id"]: dict(row) for row in db.execute(
-                "SELECT j.admission_sequence AS sequence,j.id,j.status FROM jobs j WHERE j.id IN (" + related + ")")}
-            # Only this batch's direct inputs and exact receipt/publication
-            # inputs can affect its summaries. Loading every item of a shared
-            # job here repeats that whole job once per intersecting batch.
-            db.execute("""CREATE TEMP TABLE IF NOT EXISTS maintenance_requested_inputs(
-                job_id TEXT,item_doc TEXT,PRIMARY KEY(job_id,item_doc)) WITHOUT ROWID""")
-            db.execute("DELETE FROM maintenance_requested_inputs")
-            pairs = {pair for values in self.related_inputs.values() for pair in values if pair[0] and pair[1]}
-            db.executemany("INSERT INTO maintenance_requested_inputs VALUES(?,?)", sorted(pairs))
-            self.items = [dict(row) for row in db.execute("""SELECT i.*
-                FROM maintenance_requested_documents wanted CROSS JOIN maintenance_job_items i
-                ON i.item_doc=wanted.doc_id UNION SELECT i.*
-                FROM maintenance_requested_inputs wanted CROSS JOIN maintenance_job_items i
-                ON i.item_doc=wanted.item_doc AND i.job_id=wanted.job_id""")]
+        related = """SELECT m.job_id FROM maintenance_requested_documents wanted
+                     JOIN maintenance_job_members m ON m.doc_id=wanted.doc_id"""
+        self.jobs = {row["id"]: dict(row) for row in db.execute(
+            "SELECT j.admission_sequence AS sequence,j.id,j.status FROM jobs j WHERE j.id IN (" + related + ")")}
+        # Only this batch's direct inputs and exact receipt/publication
+        # inputs can affect its summaries. Loading every item of a shared
+        # job here repeats that whole job once per intersecting batch.
+        db.execute("""CREATE TEMP TABLE IF NOT EXISTS maintenance_requested_inputs(
+            job_id TEXT,item_doc TEXT,PRIMARY KEY(job_id,item_doc)) WITHOUT ROWID""")
+        db.execute("DELETE FROM maintenance_requested_inputs")
+        pairs = {pair for values in self.related_inputs.values() for pair in values if pair[0] and pair[1]}
+        db.executemany("INSERT INTO maintenance_requested_inputs VALUES(?,?)", sorted(pairs))
+        self.items = [dict(row) for row in db.execute("""SELECT i.*
+            FROM maintenance_requested_documents wanted CROSS JOIN maintenance_job_items i
+            ON i.item_doc=wanted.doc_id UNION SELECT i.*
+            FROM maintenance_requested_inputs wanted CROSS JOIN maintenance_job_items i
+            ON i.item_doc=wanted.item_doc AND i.job_id=wanted.job_id""")]
         self.items_by_doc, self.items_by_job_doc = defaultdict(list), defaultdict(list)
         for item in self.items:
             self.items_by_doc[item["item_doc"]].append(item)

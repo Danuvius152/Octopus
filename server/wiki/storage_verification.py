@@ -39,7 +39,7 @@ def _reference():
         }
         tables["search"].update(row[1] for row in reference.execute("PRAGMA table_list") if row[2] == "shadow")
         triggers = {
-            "maintenance": set(maintenance_inputs.triggers(True)),
+            "maintenance": set(maintenance_inputs.triggers()),
             "search": {"search_section_delete", "search_document_delete"},
             "materials": {"raw_material_delete"},
             "catalog": {"wiki_edge_delete", "wiki_reference_delete", "wiki_lookup_delete"},
@@ -56,7 +56,7 @@ def _reference():
                         break
         replaceable: dict[tuple[str, str], frozenset[tuple] | None] = dict.fromkeys(
             {("table", name) for name in maintenance_inputs.TABLES}
-            | {("trigger", name) for name in maintenance_inputs.triggers(True)}
+            | {("trigger", name) for name in maintenance_inputs.triggers()}
             | {("index", name) for name in derived_indexes})
         # The search owner can append these two known tail columns, in order.
         # Admit only its exact repairable layouts, never arbitrary cache DDL.

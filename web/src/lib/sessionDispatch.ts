@@ -3,7 +3,6 @@ export interface DispatchState {
   generation: string;
   revision: number;
   paused: boolean;
-  recording_failure?: { request_id: string; state: string } | null;
   active_request_id: string | null;
   items: { request_id: string; source: string; summary: string; priority: boolean }[];
 }
@@ -18,9 +17,5 @@ export function readDispatchState(value: unknown): DispatchState | null {
       !Array.isArray(data.items) || !data.items.every((item) => item &&
         typeof item.request_id === "string" && typeof item.source === "string" &&
         typeof item.summary === "string" && typeof item.priority === "boolean")) return null;
-  if (data.recording_failure != null &&
-      (typeof data.recording_failure !== "object" || Array.isArray(data.recording_failure) ||
-       typeof data.recording_failure.request_id !== "string" || !data.recording_failure.request_id ||
-       typeof data.recording_failure.state !== "string" || !data.recording_failure.state)) return null;
   return data;
 }

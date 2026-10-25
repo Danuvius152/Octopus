@@ -2,6 +2,13 @@
 
 > **Status:** shipped — 本期39项已交付；七张暂停票的目标、依赖与恢复条件保留在§10。
 
+**2026-10-23 后续简化范围：** 本期交付记录与七票暂停状态保持；下一轮删除旧接口、
+无账户业务和历史格式转换，统一由[当前账户架构简化与跨机器搬迁计划](architecture-simplification-20261023.md)
+维护。该计划核对本地 `3d793d3`，不代表重新验证或发布本期候选。
+本文 token rotation、首账户接管、memory handoff 及任意旧版升级的条目保留为历史
+实施合同，不再作为未来扩建义务。删除须以当前存量保全和未完成操作核实为前提；
+当前事务、执行身份、资源退休及 Wiki 故障恢复合同继续有效。
+
 **2026-10-24 全票共同规则：** 不符合新接口的旧请求原始记录，在核验和必要收束
 完成后清理，专属兼容代码和测试同时退出；保护旧载荷只覆盖核验与收束阶段，不构成
 永久保留义务。本文旧D2的“拒绝回执只读保留”等表述是当时实施合同，已由本规则
@@ -14,6 +21,11 @@
 先运行，也不先写4而遗留旧请求。旧human通知责任在冷启动边界随退役协议退出，
 不伪造历史ACK、不新增墓碑或档案；当前三态GET、去重、恢复、后继及独立source回注
 仍按现有合同运行。具体规则见[知识请求与异步工作](../knowledge-requests.md)。
+
+**2026-10-23 协议可行性设计：** 用户要求重新评估 Codex exec 到 app-server 的实现挑战，
+见[迁移可行性与实施设计](../review/codex-app-server-feasibility-20261023.md)。该文基于
+当前源码与本机 schema，分别评估请求内交互迁移和完整原生尾部；只交付设计，本文
+七票暂停及既有交付状态不变。
 
 **2026-10-22后续范围决定（2026-10-23核对）：** 本期沿用Codex exec与Claude
 stream-json/idle，22、23、24、28、31、42、43整体暂停，不作为后排任务，也不进入
@@ -44,7 +56,7 @@ Codex浏览器1项、离线浏览器88场景有效覆盖，以及八项门禁和
 不因依赖满足而自动启动。本文中的完整实施路线仍是计划，不是本轮继续执行或发布的授权。
 
 **2026-10-22 文档统一记录：** 当时仅更新剩余 spec、票据及依赖，未启动后续实现或发布。
-主要设计解释采用[开发指南](../review/octopus-development-guide-20261022.md)，以源码核实事实。
+主要设计解释当时采用[开发指南](https://github.com/Danuvius152/Octopus/blob/3d793d3326b749c171675d4349907a50b4f7b9b2/docs/review/octopus-development-guide-20261022.md)，现已退出工作树，以源码核实事实。
 原统一拆分为30项：配置前置正式编号52，旧代准入接管单列53，39/49各拆成两项；当前数量与新顺序见上方后续范围决定。
 53在21之前接管旧代证明，52已明确配置快照；21交付普通单输入原子结算。
 28的多输入送达集合及31/42/43随生命周期分支整体暂停。
@@ -52,15 +64,15 @@ Codex浏览器1项、离线浏览器88场景有效覆盖，以及八项门禁和
 已完成批次以本节提交和交付摘要为准；未完成票的状态、直接依赖以§10为准。
 
 本机私有 tickets 保留 P1～P8 工作包，将允许前置的 CR-18 单列为 01；
-公开进度与票20验收见[实施验收摘要](../review/session-owner-20-acceptance-20261021.md)。
+公开进度与票20验收见[实施验收摘要](https://github.com/Danuvius152/Octopus/blob/3d793d3326b749c171675d4349907a50b4f7b9b2/docs/review/session-owner-20-acceptance-20261021.md)。
 原始票据、冻结包与日志不纳入源码仓库；设计合同仍以本计划和最小机制规范为准。
 
 ## 1. 依据、范围与实际起点
 
-本计划把[架构简化审阅](../review/architecture-optimization-20261020.md)作为问题来源，
-把[最小机制实施规范](../review/octopus_minimal_architecture_spec_20261020.md)作为设计合同。
-二者冲突时使用后者；本计划 §2 记录本次访谈进一步确定的两项修订。
-本文件负责实施依赖、删除条件与验收安排，不再复制一份架构规范。
+本计划 §2 记录本次访谈进一步确定的两项修订。
+本文件负责本期实施依赖、删除条件与验收安排，不再复制一份架构规范。
+§1 的起点、P1～P8 及§11的旧审查映射按原实施时点阅读；当前交付状态看顶部，
+仍未完成的七票看§10；后续简化范围看链接的新计划。代码仍存在不等于需求仍被支持。
 
 2026-10-20 已只读核对的本地起点：
 
@@ -179,7 +191,7 @@ CR-18 的历史前像错绑存在跨文档恢复风险，完整定点修复可�
 | 一次业务结算 | 主库中的精确 terminal 与输入关联，同事务提交 | 主输出候选、通知发送状态、HTTP waiter 是独立事实 |
 | 哪份账本拥有正文范围 | 已有注册、安装/范围引用；Registry 统一认领与交接 | Store/observer 持有捕获引用，不各自再选择 owner |
 | Wiki 已发生的效果 | history 原文与 prepared/applied、operation receipt、observer inbox | job item 引用这些证据；模型文字、索引或取消确认不能替代它们 |
-| 跨资源安装变更 | 原命令 owner、实际账户/adoption 行及已有专属 intent/journal | startup 只按持久事实收束；不新增通用迁移框架或双写状态 |
+| 历史跨资源安装变更（拟退役） | 原命令 owner、实际账户/adoption 行及已有专属 intent/journal | 在操作整体退出前保留收束；后续按新计划 R2 删除，不新增通用迁移框架或双写状态 |
 
 #### 模块接口与依赖方向
 
@@ -206,6 +218,9 @@ CR-18 的历史前像错绑存在跨文档恢复风险，完整定点修复可�
 singleton。认领锁、数据库事务锁、文件写锁分别保护不同对象，不因名称相似合并。
 
 #### 按协议一次解决创建、效果与恢复
+
+下表 token 轮换、首账户交接及其后 memory 交接段落解释已有实现；这些历史操作
+已被新范围取消。整体删除前仍须遵守原协议，不能只拆保护；它们也不是跨机器搬迁接口。
 
 | 协议 | 发布成功所需的完整事实 | 失败后的唯一责任 |
 | --- | --- | --- |
@@ -302,7 +317,7 @@ Session 的 provider 转录完整性诊断不是数据库提交失信，不能�
 
 本节记录当前工作树的票20实现接口，不把 P4 全部目标或后续票描述为已交付。
 本票状态、固定候选与实际验收记录在
-[票20验收摘要](../review/session-owner-20-acceptance-20261021.md)。
+[票20验收摘要](https://github.com/Danuvius152/Octopus/blob/3d793d3326b749c171675d4349907a50b4f7b9b2/docs/review/session-owner-20-acceptance-20261021.md)。
 通过本票不代表已经部署，也不替代第51票的完整发布检查。
 
 `SessionManager` 保留应用入口、跨会话配额和原 Owner 的失败接管。
@@ -351,7 +366,7 @@ stdin 交付和结算事务的后续改动仍按原票拆分，不因本票单�
 **本票验收（2026-10-21）：** 固定候选 `134705` 的115文件受影响联测为
 1907 passed、23 deselected，506.26秒，exit0；Vera代码及收尾复核均已读取，
 相关代码问题和两项文档P3已关闭。当前源码与该候选逐文件一致；
-[验收摘要](../review/session-owner-20-acceptance-20261021.md)
+[验收摘要](https://github.com/Danuvius152/Octopus/blob/3d793d3326b749c171675d4349907a50b4f7b9b2/docs/review/session-owner-20-acceptance-20261021.md)
 保留候选／日志摘要、旧失败和验证范围。这是票20验收，不代表完整后端、前端、
 浏览器、live或system发布门禁已通过；后续票及第51票未启动。
 
@@ -605,7 +620,7 @@ Claude 实机不探测、不安装、不计通过；两后端离线协议继续�
 
 本计划初稿（2026-10-20）仅完成文档设计与静态调用链核对；这不是当前实施状态。
 本期最终候选为`4169e45`，整体证据边界见[Wiki交付记录](wiki-development-summary.md#6-最近一次交付的证据及限制)；
-[票20验收摘要](../review/session-owner-20-acceptance-20261021.md)只记录该票的历史交付。
+[票20验收摘要](https://github.com/Danuvius152/Octopus/blob/3d793d3326b749c171675d4349907a50b4f7b9b2/docs/review/session-owner-20-acceptance-20261021.md)只记录该票的历史交付。
 已实现接口不代表 T01～T36、性能目标或线上行为全部通过；完整发布门禁仍属第51票，
 每次实施和发布按当次用户授权推进，不因技术依赖已满足而自动启动后续工作。
 
@@ -774,14 +789,17 @@ Owner只选择一次终态：
 
 ### 11.1 来源与裁决顺序
 
+以下为原实施期的来源映射。已退出当前工作树的审查和验收文档链接锁定到
+`3d793d3` 的历史内容，供追溯证据；未来支持范围以顶部的新计划为准。
+
 | 来源 | 用途与处理 |
 | --- | --- |
-| [代码审阅](../review/octopus_code_review_20261020.md) | 确认问题清单已到 CR-20，另外包含工作流、效率实测与覆盖限制；不能只读旧 CR-01～16 摘要。 |
-| [风险分析](../review/bug_risk_analysis_20261020.md) | 同一组 20 项的风险重述，不额外重复计算为另一批 bug。 |
-| [原架构报告](../review/architecture-analysis-20261020.md) | 含未经核实或已被反驳的 P0/索引/游标结论；只吸收有具体触发证据且未重复的责任。 |
-| [架构简化审阅](../review/architecture-optimization-20261020.md) | 三个复杂度根源纳入；执行表/PDEATHSIG/多表化/入口一次授权等建议服从最新规范的修正。 |
-| [旧实施 Spec](../review/octopus_implementation_spec_20261020.md) | 吸收来源、移动、锚点、分块及 App/UI 的具体可观察合同；与最小机制规范冲突的在线补偿或新增协议不直接照搬。 |
-| [最小机制 Spec](../review/octopus_minimal_architecture_spec_20261020.md) | 当前架构与行为合同，已同步本轮覆盖补充；执行步骤由本计划负责。 |
+| [代码审阅](https://github.com/Danuvius152/Octopus/blob/3d793d3326b749c171675d4349907a50b4f7b9b2/docs/review/octopus_code_review_20261020.md) | 确认问题清单已到 CR-20，另外包含工作流、效率实测与覆盖限制；不能只读旧 CR-01～16 摘要。 |
+| [风险分析](https://github.com/Danuvius152/Octopus/blob/3d793d3326b749c171675d4349907a50b4f7b9b2/docs/review/bug_risk_analysis_20261020.md) | 同一组 20 项的风险重述，不额外重复计算为另一批 bug。 |
+| [原架构报告](https://github.com/Danuvius152/Octopus/blob/3d793d3326b749c171675d4349907a50b4f7b9b2/docs/review/architecture-analysis-20261020.md) | 含未经核实或已被反驳的 P0/索引/游标结论；只吸收有具体触发证据且未重复的责任。 |
+| [架构简化审阅](https://github.com/Danuvius152/Octopus/blob/3d793d3326b749c171675d4349907a50b4f7b9b2/docs/review/architecture-optimization-20261020.md) | 三个复杂度根源纳入；执行表/PDEATHSIG/多表化/入口一次授权等建议服从最新规范的修正。 |
+| [旧实施 Spec](https://github.com/Danuvius152/Octopus/blob/3d793d3326b749c171675d4349907a50b4f7b9b2/docs/review/octopus_implementation_spec_20261020.md) | 吸收来源、移动、锚点、分块及 App/UI 的具体可观察合同；与最小机制规范冲突的在线补偿或新增协议不直接照搬。 |
+| [最小机制 Spec](https://github.com/Danuvius152/Octopus/blob/3d793d3326b749c171675d4349907a50b4f7b9b2/docs/review/octopus_minimal_architecture_spec_20261020.md) | 当前架构与行为合同，已同步本轮覆盖补充；执行步骤由本计划负责。 |
 | review 三份 Python 复现、usage JSON | 行为/成本与可信边界证据；应转为必要回归，不是新的功能或通过承诺。 |
 
 ### 11.2 已确认缺陷的目标覆盖

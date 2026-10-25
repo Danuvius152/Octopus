@@ -17,6 +17,12 @@ Search, catalog, material hashes and maintenance projections remain rebuildable
 under their existing owners; durable jobs, receipts, sources and event ledgers
 are never recreated as caches.
 
+Empty Wiki creation prepares jobs before their dependent grants, selection and
+event guards, then installs maintenance projections once. All steps share the
+creation transaction; the Registry publishes only the completed ledger. There
+is no separate no-jobs layout or later job attachment. This assembly change
+preserves the complete format 15 declarations and protocol set.
+
 ## Publication boundary
 
 The existing private publisher under `~/.octopus/ops/publication/tools/` owns

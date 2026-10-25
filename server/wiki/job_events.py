@@ -182,9 +182,9 @@ def job_triggers():
 
 
 def initialize(db):
-    """The schema owner calls this once, in its versioned migration transaction."""
+    """Create event authority and all job guards in the empty-layout transaction."""
     if not db.in_transaction:
-        raise ValueError("Wiki job events require an explicit migration transaction")
+        raise ValueError("Wiki job events require an explicit creation transaction")
     present = {row[0] for row in db.execute("SELECT name FROM sqlite_master")}
     if set(TABLES) & present or db.execute("SELECT 1 FROM wiki_protocols WHERE name='wiki_job_events'").fetchone():
         raise unavailable()
@@ -192,33 +192,19 @@ def initialize(db):
         db.execute(sql)
     for sql in INDEXES.values():
         db.execute(sql)
-    for sql in TRIGGERS.values():
+    for sql in (TRIGGERS | job_triggers()).values():
         db.execute(sql)
     db.execute("INSERT INTO wiki_protocols VALUES('wiki_job_events',2)")
-    if maintenance_inputs.jobs_initialized(db):
-        attach_jobs(db)
-
-
-def attach_jobs(db):
-    """Install job-dependent triggers only after the actual jobs DDL owner commits them."""
-    for sql in job_triggers().values():
-        db.execute(sql)
-    db.execute("""INSERT INTO wiki_job_state
-        SELECT id,1,CASE WHEN status='queued' THEN 0 ELSE 1 END,
-          CASE WHEN status='cancelled' THEN 'attention' ELSE 'none' END FROM jobs""")
 
 
 def require(db):
     protocols.require(db, "wiki_job_events", 2)
-    with_jobs = maintenance_inputs.jobs_initialized(db)
-    expected = TABLES | INDEXES | TRIGGERS | (job_triggers() if with_jobs else {})
+    maintenance_inputs.require_jobs(db)
+    expected = TABLES | INDEXES | TRIGGERS | job_triggers()
     actual = dict(db.execute("SELECT name,sql FROM sqlite_master"))
     if any(canonical(actual.get(name)) != canonical(sql) for name, sql in expected.items()):
         raise unavailable()
-    installed = {name for name in actual if name in job_triggers()}
-    if installed != (set(job_triggers()) if with_jobs else set()):
-        raise unavailable()
-    if with_jobs and db.execute("SELECT 1 FROM jobs j LEFT JOIN wiki_job_state s ON s.job_id=j.id WHERE s.job_id IS NULL LIMIT 1").fetchone():
+    if db.execute("SELECT 1 FROM jobs j LEFT JOIN wiki_job_state s ON s.job_id=j.id WHERE s.job_id IS NULL LIMIT 1").fetchone():
         raise unavailable()
 
 

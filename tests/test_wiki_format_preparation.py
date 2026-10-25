@@ -25,7 +25,7 @@ async def test_current_owned_format_shares_the_complete_current_contract(registe
             assert db.execute("PRAGMA user_version").fetchone()[0] == schema.VERSION
             assert db.execute("SELECT 1 FROM sqlite_schema WHERE name='wiki_schema'").fetchone() is None
             assert facts(db) == before
-            assert maintenance_inputs.require(db)
+            maintenance_inputs.require(db)
             grants.require(db)
             job_events.require(db)
         assert protocols.registration_preflight(state, complete=True)["vault_id"] == registration["vault_id"]

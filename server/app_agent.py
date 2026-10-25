@@ -638,7 +638,8 @@ class AppAgentManager:
             turn.text.clear()
             turn.emit({"type": "reset"})
         if kind == "recording_failed":
-            turn.error = "The agent finished, but saving its result is unconfirmed. Open the conversation to retry saving."
+            reason = msg.get("message") or "The agent finished, but saving its result is unconfirmed."
+            turn.error = f"{reason} Open the conversation to inspect the recorded messages."
             turn.emit({"type": "error", "code": "recording_unconfirmed", "message": turn.error})
             turn.done.set()
             return

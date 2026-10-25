@@ -93,26 +93,13 @@ def validate_jobs(db):
         raise unavailable("job ledger constraints are incompatible")
 
 
-def jobs_initialized(db):
-    marker = db.execute("SELECT version FROM wiki_protocols WHERE name='maintenance_jobs'").fetchone()
-    present = names(db) & {"jobs", "job_requests"}
-    if marker:
-        protocols.require(db, "maintenance_jobs")
-        validate_jobs(db)
-        return True
-    if present:
-        raise unavailable("initialized job protocol is missing")
-    if (db.execute("SELECT 1 FROM operation_receipts WHERE job_id IS NOT NULL LIMIT 1").fetchone()
-            or db.execute("SELECT 1 FROM job_publications LIMIT 1").fetchone()):
-        raise unavailable("referenced job ledger is missing")
-    return False
-
-
-
+def require_jobs(db):
+    protocols.require(db, "maintenance_jobs")
+    validate_jobs(db)
 
 def require(db):
     protocols.require(db, "maintenance_inputs")
-    return jobs_initialized(db)
+    require_jobs(db)
 
 
 def _mark_docs(selection):
@@ -202,7 +189,7 @@ def _affected_changes(changes):
                UNION SELECT job_id FROM job_publications WHERE change_id IN ({changes})"""
 
 
-def triggers(with_jobs):
+def triggers():
     result = {}
     bump = "UPDATE maintenance_input_state SET generation=generation+1 WHERE singleton=1;"
     writer_check = """SELECT CASE WHEN (SELECT recursive_triggers FROM pragma_recursive_triggers)=0
@@ -230,7 +217,7 @@ def triggers(with_jobs):
                         " UNION ".join(f"SELECT {side}.document_id AS doc_id" for side in sides)
                         if table == "wiki_path_reservations" else
                         f"SELECT doc_id FROM maintenance_job_members WHERE job_id IN ({jobs})")
-            add(table, action, bump + _mark_docs(affected) + (_refresh_jobs(jobs) if with_jobs else ""))
+            add(table, action, bump + _mark_docs(affected) + _refresh_jobs(jobs))
         ids = " UNION ".join(f"SELECT {side}.id AS doc_id" for side in sides)
         incoming = (f"{ids} UNION SELECT source_doc FROM wiki_edges WHERE target_doc IN ({ids})"
                     f" UNION SELECT source_doc FROM source_bindings WHERE target_doc IN ({ids})")
@@ -247,7 +234,7 @@ def triggers(with_jobs):
         receipt_jobs = " UNION ".join(f"SELECT {side}.job_id" for side in sides)
         revoke = ("UPDATE operation_receipts SET item_match_sequence=NULL WHERE id=new.id AND item_match_sequence IS NOT NULL;"
                   if action != "DELETE" else "")
-        add("operation_receipts", action, revoke + bump + _mark_docs(receipt_docs) + (_refresh_jobs(receipt_jobs) if with_jobs else ""),
+        add("operation_receipts", action, revoke + bump + _mark_docs(receipt_docs) + _refresh_jobs(receipt_jobs),
             columns=("id", "job_id", "item_doc", "doc_id", "path", "input_revision", "output_revision",
                      "operation", "reason", "change_id", "created_at", "details"))
 
@@ -263,25 +250,23 @@ def triggers(with_jobs):
             if table == "job_publications":
                 affected += " UNION " + " UNION ".join(f"SELECT {side}.source_doc" for side in sides)
             body = bump + _mark_docs(affected)
-            if with_jobs and table != "change_proposals":
+            if table != "change_proposals":
                 jobs = _affected_changes(changes)
                 if table == "job_publications":
                     jobs += " UNION " + " UNION ".join(f"SELECT {side}.job_id" for side in sides)
                 body += _refresh_jobs(jobs)
             add(table, action, body)
-        if with_jobs:
-            if action != "DELETE":
-                add("jobs", action, _input_check("new.items"), before=True)
-            jobs = " UNION ".join(f"SELECT {side}.id" for side in sides)
-            add("jobs", action, bump + (_invalidate_jobs(jobs) if action == "UPDATE" else _refresh_jobs(jobs)),
-                columns=("id", "payload", "status", "items", "error", "session_id"),
-                condition=f"NOT ({member_change})" if action == "UPDATE" else None)
-    if with_jobs:
-        # Progress changes item state, not its document relationships. Keep the
-        # ordinary invalidation/version path; traverse relation sources only
-        # when the item identities actually change. Both triggers share the TX.
-        name = PREFIX + "jobs_update_members"
-        result[name] = f"CREATE TRIGGER {name} AFTER UPDATE ON jobs WHEN {member_change} BEGIN {writer_check}{bump}" + _refresh_jobs("SELECT old.id UNION SELECT new.id") + " END"
+        if action != "DELETE":
+            add("jobs", action, _input_check("new.items"), before=True)
+        jobs = " UNION ".join(f"SELECT {side}.id" for side in sides)
+        add("jobs", action, bump + (_invalidate_jobs(jobs) if action == "UPDATE" else _refresh_jobs(jobs)),
+            columns=("id", "payload", "status", "items", "error", "session_id"),
+            condition=f"NOT ({member_change})" if action == "UPDATE" else None)
+    # Progress changes item state, not its document relationships. Keep the
+    # ordinary invalidation/version path; traverse relation sources only
+    # when the item identities actually change. Both triggers share the TX.
+    name = PREFIX + "jobs_update_members"
+    result[name] = f"CREATE TRIGGER {name} AFTER UPDATE ON jobs WHEN {member_change} BEGIN {writer_check}{bump}" + _refresh_jobs("SELECT old.id UNION SELECT new.id") + " END"
     result[PREFIX + "receipt_item_match"] = f"""CREATE TRIGGER {PREFIX}receipt_item_match
         AFTER UPDATE OF item_match_sequence ON operation_receipts
         WHEN old.item_match_sequence IS NOT new.item_match_sequence BEGIN {writer_check}{bump}""" + _mark_docs(
@@ -307,8 +292,8 @@ def discard_derived(db):
         db.execute(f"DROP TABLE IF EXISTS {name}")
 
 
-def _compatible(db, with_jobs):
-    expected = triggers(with_jobs)
+def _compatible(db):
+    expected = triggers()
     actual = {r[0]: r[1] for r in db.execute("SELECT name,sql FROM sqlite_master WHERE type='table'")}
     trigger_rows = {r[0]: r[1] for r in db.execute("SELECT name,sql FROM sqlite_master WHERE type='trigger'") if r[0].startswith(PREFIX)}
     reset = (any(name not in actual or _canonical(actual[name]) != _canonical(sql) for name, sql in TABLES.items())
@@ -329,31 +314,30 @@ def prepare_repair(db):
     """
     if not db.in_transaction:
         raise ValueError("Maintenance repair requires an explicit transaction")
-    with_jobs = require(db)
+    require(db)
     dependencies = {"search_documents", "search_sections", "search_fts", "raw_materials",
                     "wiki_edges", "wiki_edge_lookups", "wiki_lookup_names", "catalog_state",
                     "catalog_dirty", "wiki_uid_claims", "wiki_uid_dirty"}
-    if not _compatible(db, with_jobs) or not dependencies.issubset(names(db)):
+    if not _compatible(db) or not dependencies.issubset(names(db)):
         _detach_triggers(db)
 
 
 def initialize(db):
-    with_jobs = require(db)
-    expected = triggers(with_jobs)
-    reset = not _compatible(db, with_jobs)
+    require(db)
+    expected = triggers()
+    reset = not _compatible(db)
     if reset:
         discard_derived(db)
         for sql in TABLES.values():
             db.execute(sql)
         db.execute("INSERT INTO maintenance_input_state VALUES(1,?,?,1)", (VERSION, uuid.uuid4().hex))
-        if with_jobs:
-            # Validate legacy/rebuild input too, before JSON traversal. Future
-            # ledger mutations are guarded by the corresponding BEFORE triggers.
-            for row in db.execute("SELECT items FROM jobs"):
-                _decode_items(row[0])
-            for statement in _refresh_jobs("SELECT id FROM jobs").split(";"):
-                if statement.strip():
-                    db.execute(statement)
+        # Validate retained input before JSON traversal. Future ledger mutations
+        # are guarded by the corresponding BEFORE triggers.
+        for row in db.execute("SELECT items FROM jobs"):
+            _decode_items(row[0])
+        for statement in _refresh_jobs("SELECT id FROM jobs").split(";"):
+            if statement.strip():
+                db.execute(statement)
         db.execute("INSERT OR IGNORE INTO maintenance_dirty SELECT id,1 FROM documents")
         db.execute("INSERT OR IGNORE INTO maintenance_dirty_paths SELECT id,path FROM documents")
         for sql in expected.values():
@@ -380,8 +364,9 @@ def capture_jobs(db, doc_ids=None):
     """Decode each changed relevant job once in the caller's read snapshot."""
     if not db.in_transaction:
         raise ValueError("Maintenance capture requires an explicit snapshot")
+    require(db)
     nonce = state(db)["rebuild_nonce"]
-    if not require(db) or not db.execute("SELECT 1 FROM maintenance_job_dirty LIMIT 1").fetchone():
+    if not db.execute("SELECT 1 FROM maintenance_job_dirty LIMIT 1").fetchone():
         return {"nonce": nonce, "jobs": []}
     condition, parameters = "", ()
     if doc_ids is not None:

@@ -63,6 +63,9 @@ and its delivered notification prefix. Failed or unavailable notification
 ends the app request with an explicit delivery error, preserving any already
 committed transcript/outcome for the original status lookup; it never replays
 the operation. Cancelling an app waiter does not cancel an admitted command.
+Result-recording conflicts and unconfirmed recording remain explicit errors.
+Their messages direct the caller to inspect the original conversation; they do
+not offer a saving retry or establish that the operation had no effects.
 HTTP timeouts, caller cancellation and SSE disconnection detach only that
 response consumer. The application keeps the original execution in its active
 count and conversation list until its receipt and resource retirement finish,

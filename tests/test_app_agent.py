@@ -495,16 +495,21 @@ async def test_app_waits_through_recovery_events(aam, am, db, mgr, turns):
     assert not any(event["type"] == "error" for event in events)
 
 
-async def test_app_reports_recording_failure_without_a_saved_success(aam, am, db, mgr, turns):
+@pytest.mark.parametrize("message", [None, "This request conflicts with an already recorded outcome."])
+async def test_app_reports_recording_failure_without_a_saved_success(aam, am, db, mgr, turns, message):
     row = await _make_app(am, db)
     turns.emit = False
     turn = await aam.begin_turn(row, message="hi")
     await mgr._broadcast({"type": "recording_failed", "session_id": turn.session_id,
-                          "request_id": turn.request_id, "recording_state": "unconfirmed"})
+                          "request_id": turn.request_id, "recording_state": "unconfirmed", "message": message})
     assert turn.done.is_set()
     events = [event async for event in aam.stream_turn(turn)]
     assert events[-1]["type"] == "error"
     assert events[-1]["code"] == "recording_unconfirmed"
+    assert events[-1]["message"] == (
+        (message or "The agent finished, but saving its result is unconfirmed.")
+        + " Open the conversation to inspect the recorded messages."
+    )
     assert not any(event["type"] == "done" for event in events)
 
 

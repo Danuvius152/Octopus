@@ -95,7 +95,6 @@ class TurnsMixin(SessionManagerBase):
             "generation": self._dispatch_generation,
             "revision": session._dispatch_revision,
             "paused": session._dispatch_paused,
-            "recording_failure": None,
             "active_request_id": (
                 session._run.request.request_id if session._run.request else None
             ),
