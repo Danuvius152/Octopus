@@ -265,6 +265,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command")
 
+    export_parser = subparsers.add_parser("export-account", help="Export current account data to a portable archive")
+    export_parser.add_argument("user_id", help="Original account ID")
+    export_parser.add_argument("archive", type=Path, help="New archive path, outside the selected account")
+    export_parser.add_argument("--home", type=Path, default=Path.home(), help="Source home layout prefix")
+    export_parser.add_argument("--token-file", type=Path, help="Administrator bearer for a running managed source")
+    export_parser.add_argument("--wait", type=float, default=1800, help="Seconds to wait for natural source idle")
+    export_parser.add_argument("--pause-command", help="Program and arguments to drain/stop external writers")
+    export_parser.add_argument("--resume-command", help="Program and arguments to restore those writers")
+    import_parser = subparsers.add_parser("import-account", help="Import an account archive into empty data locations")
+    import_parser.add_argument("archive", type=Path)
+    import_parser.add_argument("--home", type=Path, default=Path.home(), help="Target home layout prefix")
+
     # serve (default)
     serve_parser = subparsers.add_parser("serve", help="Start the Octopus server")
     serve_parser.add_argument(
@@ -431,6 +443,49 @@ def _fmt(v) -> str:
     return str(v)
 
 
+def do_portability(args: argparse.Namespace) -> None:
+    """Thin local adapter; domain operations own all package and restore rules."""
+    import shlex
+    import sqlite3
+    import subprocess
+    import zipfile
+    from contextlib import contextmanager
+
+    from .config import settings
+    from .portability import export_account, import_account
+    from .portability_lifecycle import managed_source
+
+    try:
+        if args.command == "import-account":
+            config = import_account(args.archive, home=args.home)
+            result = {"imported": True, "environment": config.db_path + ".import.env"}
+        else:
+            if bool(args.pause_command) != bool(args.resume_command):
+                raise ValueError("External writer pause and resume commands must be supplied together")
+            if args.wait < 0:
+                raise ValueError("Wait must not be negative")
+            token = args.token_file.read_text().strip() if args.token_file else ""
+
+            @contextmanager
+            def source_lifecycle():
+                external_touched = False
+                try:
+                    if args.pause_command:
+                        external_touched = True
+                        subprocess.run(shlex.split(args.pause_command), check=True)
+                    with managed_source(settings, token=token, timeout=args.wait):
+                        yield
+                finally:
+                    if external_touched:
+                        subprocess.run(shlex.split(args.resume_command), check=True)
+
+            result = export_account(settings, args.user_id, args.archive, home=args.home, pause=source_lifecycle())
+        print(json.dumps(result, ensure_ascii=False))
+    except (OSError, ValueError, RuntimeError, sqlite3.Error, zipfile.BadZipFile, subprocess.SubprocessError) as error:
+        print(f"Account migration failed: {error}", file=sys.stderr)
+        raise SystemExit(1) from error
+
+
 def main() -> None:
     """CLI entry point."""
     parser = build_parser()
@@ -444,6 +499,8 @@ def main() -> None:
         do_pull(args)
     elif args.command == "monitor":
         do_monitor(args)
+    elif args.command in {"export-account", "import-account"}:
+        do_portability(args)
     else:
         parser.print_help()
 

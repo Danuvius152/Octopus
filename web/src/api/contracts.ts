@@ -2822,6 +2822,26 @@ export interface paths {
         patch: operations["update_notifier_api_notifiers__notifier_id__patch"];
         trace?: never;
     };
+    "/api/installation/quiesce": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Quiesce Installation
+         * @description Seal an idle managed installation; the external owner then stops it.
+         */
+        post: operations["quiesce_installation_api_installation_quiesce_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/backends": {
         parameters: {
             query?: never;
@@ -11598,6 +11618,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["NotifierInfo"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    quiesce_installation_api_installation_quiesce_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
                 };
             };
             /** @description Validation Error */

@@ -18,6 +18,20 @@ from .store import WikiError
 PROTOCOL = 1
 
 
+def read_state(db, root, vault_id):
+    """Validate receipt continuity on the caller's existing transaction."""
+    state = db.execute("SELECT * FROM filesystem_state WHERE singleton=1").fetchone()
+    if state is None or (state["protocol"], state["root"], state["vault_id"]) != (PROTOCOL, str(root), vault_id):
+        raise WikiError("Filesystem inbox binding/protocol changed; durable evidence retained", 503)
+    if state["applied_seq"] > state["received_seq"]:
+        raise WikiError("Invalid filesystem inbox watermark; durable evidence retained", 503)
+    pending = db.execute("SELECT count(*),min(seq),max(seq) FROM filesystem_inbox WHERE status='pending'").fetchone()
+    count = state["received_seq"] - state["applied_seq"]
+    if pending[0] != count or (count and (pending[1], pending[2]) != (state["applied_seq"] + 1, state["received_seq"])):
+        raise WikiError("Filesystem inbox receipt sequence is incomplete; durable evidence retained", 503)
+    return state
+
+
 class EventInbox:
     def __init__(self, db_path, root, vault_id, *, recovery=None, health=None):
         self.health = health if health is not None else ServiceHealth()
@@ -36,16 +50,7 @@ class EventInbox:
 
     def state(self, db):
         """Validate receipt continuity without discarding uncertain evidence."""
-        state = db.execute("SELECT * FROM filesystem_state WHERE singleton=1").fetchone()
-        if state is None or (state["protocol"], state["root"], state["vault_id"]) != (PROTOCOL, self.root, self.vault_id):
-            raise WikiError("Filesystem inbox binding/protocol changed; durable evidence retained", 503)
-        if state["applied_seq"] > state["received_seq"]:
-            raise WikiError("Invalid filesystem inbox watermark; durable evidence retained", 503)
-        pending = db.execute("SELECT count(*),min(seq),max(seq) FROM filesystem_inbox WHERE status='pending'").fetchone()
-        count = state["received_seq"] - state["applied_seq"]
-        if pending[0] != count or (count and (pending[1], pending[2]) != (state["applied_seq"] + 1, state["received_seq"])):
-            raise WikiError("Filesystem inbox receipt sequence is incomplete; durable evidence retained", 503)
-        return state
+        return read_state(db, self.root, self.vault_id)
 
     def check(self, db, *, allow_armed=False):
         from . import recovery_state

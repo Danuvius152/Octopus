@@ -6,20 +6,26 @@ does not establish a complete backup. Paths below describe current code; use
 the active service configuration to locate them.
 
 **Scope, 2026-10-23:** preserve current accounts and data. Importing an old
-no-account installation is no longer a future support requirement. Complete
-same-version cold export/restore with path and machine-binding changes is
-[planned](plans/architecture-simplification-20261023.md), not implemented or
-verified. This guide identifies what must be protected and the current restore
-limits; it is not an automated cross-machine migration recipe.
+no-account installation is no longer a future support requirement. Selected
+same-build account export/import is provided by `server.portability` and the
+CLI in §7. Sections 1–6 describe complete backups, whose scope also includes
+history excluded by the selected migration.
 
 **Migration simplification, 2026-10-25:** the selected migration follows the
 current layout under home, with an optional home-prefix change. It exports
 stable data only; unresolved writes affecting the selected data must be handled
 on the source first. Export and import perform their own preflight checks.
-Import failure leaves the target inactive; remove this attempt's staging and
-retry. Arbitrary multi-root mapping, cross-machine execution recovery, resumable
+Incomplete publication leaves the target guarded; verify this attempt's inventory
+before cleanup and retry. Arbitrary multi-root mapping, cross-machine execution recovery, resumable
 imports and generic hardcoded-path scanning are outside this scope. An empty
 target means the selected Octopus data locations, not the entire home directory.
+
+The interface must remain useful as data and code grow: each export collects
+the actual selected account resources, including later files, agents, Wiki
+content and applications. It must not freeze today's instance or file list.
+Features introducing new persistent data or changing its storage must maintain
+their export/import integration and round-trip coverage in the same change.
+This preserves matching-version migration, not arbitrary old-package upgrades.
 
 **Migration scope clarification, 2026-10-23:** the user's move to a new machine
 includes persistent contents of `users/<user_id>/`, with agents, memory, the
@@ -41,8 +47,8 @@ reauthorize those credentials on the target before validating model access.
 This exclusion applies to login tokens and authentication caches wherever they
 are stored. It does not exclude the Octopus account password verifier or the
 keys needed to decrypt retained data, and does not change the source login.
-The inventory below describes what a complete backup protects; the migration scope is being confirmed
-in [the plan](plans/architecture-simplification-20261023.md#71-接口和数据边界).
+The inventory below describes what a complete backup protects; selected migration
+scope is defined in [the plan](plans/architecture-simplification-20261023.md#71-接口和数据边界).
 Archiving a session keeps its messages and directory path, not a file snapshot.
 
 ## 1. Where the state actually lives
@@ -72,11 +78,9 @@ the configured `users_root/<id>/`. Sessions may also refer to external project
 roots or retained directories from an earlier setup. Back up the locations
 actually referenced, irrespective of when they were created.
 
-Attachment and large-prompt writers currently still use global configured roots.
-The confirmed [account-path correction](plans/architecture-simplification-20261023.md#64-附件和长输入文件的账户归属)
-will use the owning account's directories and preserve existing files and references;
-it is not implemented yet. Inventory the actual global files as well as account
-trees until that correction is verified. Do not discard files with unknown ownership.
+Attachment and large-prompt writers use the owning account's directories.
+Retained global files and references remain protected; a complete backup must
+inventory them too. Do not discard files with unknown ownership.
 
 **Native provider state.** Octopus messages serve the UI; provider transcripts
 and associated state supply native resume. For Codex, locate the effective
@@ -128,13 +132,13 @@ Ordinary initialization is not a verification method: although startup no longer
 performs historical migrations, writers and projection repair may modify the
 copy being inspected. See the [current storage contract](plans/current-storage-format.md).
 
-The intended migration workflow produces one complete archive for later import
+The selected migration workflow produces one complete archive for later import
 on another machine. Import need not contact the source. The confirmed export flow
 pauses relevant writes only while taking a stable copy, then resumes source use
 and compresses that copy. The user requested working export/import interfaces,
 verified in isolation; no actual production migration is requested now. This
-workflow is not implemented yet. Later source changes are not included in an
-earlier archive; online backup of one database does not snapshot all app/Wiki files.
+workflow is described in §7. Later source changes are not included in an earlier
+archive; online backup of one database does not snapshot all app/Wiki files.
 
 ## 4. Path and machine bindings
 
@@ -151,14 +155,13 @@ existing vault root, and service startup checks ownership markers against its
 profile. These checks protect current data and must not be bypassed by deleting
 markers or rebuilding the entire Wiki database.
 
-The planned migration follows the agreed home layout and adjusts only defined
+The selected migration follows the agreed home layout and adjusts only defined
 system path fields and explicitly known configuration for the selected contents,
 preserves retained account/agent/vault/document/change identities and content,
 and rebinds machine-local
 state in a staged target. It does not replace arbitrary path strings inside
-messages, source documents or application code. Until that operation is
-implemented and validated, keep the source intact and do not treat a manual
-copy as a verified cross-machine restore.
+messages, source documents or application code. Keep the source intact until
+the imported account and its resources have been verified.
 
 ## 5. Working copies and applications are persistent data
 
@@ -177,8 +180,8 @@ guide does not authorize pruning either kind of directory.
 
 ## 6. Restore readiness and verification
 
-The checks below describe complete-backup restoration, not claims that a restore
-command already exists. For the selected migration, validate the contents agreed
+The checks below describe complete-backup restoration. For the selected migration,
+use §7 and validate the contents agreed
 in the plan; old chats, work trees and native thread continuity are not gates.
 For that migration, missing subscription login state is expected: preserve the
 selected credential association, request reauthorization, then verify model
@@ -216,3 +219,66 @@ expected scoped tools. This does not require restoring an old native thread.
 Validation with a changed home prefix and filesystem identity remains an explicit
 deliverable of the [portability plan](plans/architecture-simplification-20261023.md#7-r4当前版账户资料导出与导入).
 Source-data deletion is a separate decision after verified recovery.
+
+## 7. Selected account export and import
+
+Run both commands using the same Octopus build. The archive records a fingerprint
+of the installed Python implementation; a different implementation is refused.
+Keep that build with the archive. This interface accepts the configured paths
+under one home and can replace that home prefix on import.
+
+For a running managed source, supply its administrator account bearer through a
+private file. This is an account bearer, distinct from the installation setup
+proof. The command waits for work to finish, closes admission through the service
+owner, stops the unit and takes a stable copy under the installation lock. It
+restarts the source and confirms readiness before compression begins.
+
+```bash
+octopus export-account ACCOUNT_ID /private/account.zip \
+  --home /home/source --token-file /private/admin-bearer --wait 1800
+octopus import-account /private/account.zip --home /home/target
+```
+
+For a standalone source, its process owner must stop the service first. Stop
+external editors, sync tools and application writers too. Paired
+`--pause-command` and `--resume-command` options can do that: each is a program
+with arguments, parsed without a shell. Pause runs before the managed handoff
+so Wiki can receive the final filesystem events; resume runs after the service
+has restarted, including on copy failure. A pause program must return only once
+its writers have stopped, and its resume program must handle partial pause.
+Without hooks the caller is responsible for those external writers.
+
+If a handoff response is lost, only the matching request receipt confirms
+ownership. A current `ready` response cannot prove a delayed POST was rejected.
+Unconfirmed cancellation reports `outcome is unknown`; inspect the managed
+service before retrying. The exporter never restarts a different request's owner.
+
+Import validates inventory, hashes, build, key and target paths before writing.
+It restores privately, rebinds only defined account paths and current Wiki
+registration/file identities, then publishes under the installation lock.
+`<db_path>.import.env` contains the resulting configuration, with mode 0600.
+Start a standalone target with `OCTOPUS_ENV_FILE` pointing at that file, or use
+that configuration with the existing managed-service setup procedure. Sign in
+with the original account password. Reauthorize excluded model CLI subscription
+credentials on the target; API configuration and saved associations are retained.
+Applications reinstall `.runtime` dependencies while retaining code and `.data`.
+
+The archive contains the master key and account secrets; it is created with mode
+0600 and must be transferred through protected storage. ZIP compression supplies
+integrity checks, not encryption.
+
+An interrupted publication leaves `<db_path>.importing`, which blocks startup
+before keys or databases are initialized. Preserve its recorded inventory and
+diagnostics. Verify and remove only this attempt's published roots and staging,
+then remove the guard and retry into an empty target. If publication finished
+but the final guard removal/sync failed, the complete data remains intact:
+verify it before deciding whether to finish activation or clear that attempt.
+Never clear an unexplained guard merely to make startup succeed.
+
+Ordinary new files, agents, registered applications and Wiki content are collected
+on each export. When adding persistent fields, relationships or storage roots,
+update account selection in `server/db/portability.py`, resource collection in
+`server/portability.py` or Wiki restoration in `server/wiki/portability.py` in the
+same feature change. Classify exclusions explicitly and verify a round trip for
+the new semantics. Migration-specific tests for this delivery are temporary by
+user request; acceptance results are retained outside the long-lived test suite.

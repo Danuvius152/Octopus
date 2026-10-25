@@ -106,7 +106,7 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | [Current storage and publication handoff](plans/current-storage-format.md) | implemented | Validation and release handoff are tracked separately from production deployment. |
 | [Rotating the installation access token](plans/token-rotation.md) | retired | Installation-token rotation and recovery are removed; current account authentication remains. |
 | [共享 Wiki：未来计划与应用协同](plans/wiki-future-plan.md) | proposed | Sapphire、SmartReader 与条件性扩展的统一计划；保留未完成合同，不把本文当作开发或生产写入授权。 |
-| [当前账户基线上的架构简化与跨机器搬迁](plans/architecture-simplification-20261023.md) | 当前格式收敛设计已确认，待实施 | 只维护当前读写模型；启动兼容层退出，发布承担当次数据交接；保全当前资料和同版本账户搬迁合同。原阶段交付证据保留。 |
+| [当前账户基线上的架构简化与跨机器搬迁](plans/architecture-simplification-20261023.md) | 已实现 | 账户精简及同版搬迁接口已完成；迁移专项隔离验收通过，临时测试按用户要求退役。Codex 全套发布检查受用量上限影响，尚未上线。 |
 | [运行时接口修补：接管、记录与调用身份](plans/runtime-interface-repair.md) | completed | Q13–Q30 中已确认实施的修补全部通过本机验收；按 Q31 合并 main 并上线 `01c16a6` 独立服务快照，已验证并清理两个旧 release；Q25 脱敏未纳入。 |
 
 <!-- END plans-index -->

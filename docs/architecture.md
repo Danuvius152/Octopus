@@ -18,7 +18,7 @@ lives in [`plans/`](plans/); CLI/stream-protocol research notes live in the
 the data model — this doc describes it conceptually rather than pasting SQL.
 
 The [2026-10-23 simplification plan](plans/architecture-simplification-20261023.md)
-retains its historical baseline and the proposed account-portability scope.
+retains its historical baseline and the account-portability scope.
 Obsolete online interfaces, installation-era adoption/rotation and startup
 migration chains have since been retired. Current SessionOwner, transaction,
 authorization and Wiki recovery responsibilities remain the foundation.
@@ -103,6 +103,27 @@ See [model and reasoning settings](plans/model-reasoning.md).
 - `SessionManager` reads the owning agent's config *directly each turn*, so
   editing an agent is picked up by its open sessions on their next turn (no
   restart, no re-bind).
+
+## Account portability
+
+`server.portability` provides offline `export_account` / `import_account` and
+the CLI exposes `export-account` / `import-account`. Each archive contains one
+account's current durable rows, files, registered application code/data and Wiki
+state, with a build fingerprint and verified relative inventory. Collection
+follows current ownership and registrations, so later content uses the same
+entry point. `server/db/portability.py` classifies relational ownership;
+`server/wiki/portability.py` preserves historical evidence and rebinds current
+registration and file identity. Native model login, old conversations and
+schedules are excluded. See [scope and operation](backup-and-migrate.md#7-selected-account-export-and-import).
+
+For a running managed source, the lifecycle owner waits for natural idle, seals
+HTTP/WebSocket and background admission, then hands off to the offline owner.
+External writers stop before this handoff; Wiki receives final events before
+its observers close. The exporter releases the installation lock and restores
+source readiness before compressing its stable copy. Import verifies before
+writing, stages privately and publishes under that same lock. A persistent
+incomplete-import guard blocks startup before key/database initialization;
+removing it only enables already durable, complete data.
 
 ## Accounts & isolation
 

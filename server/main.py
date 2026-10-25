@@ -30,6 +30,7 @@ from .connector_manager import ConnectorManager
 from .crypto import master_key
 from .database import Database
 from .delegations import delegation_manager
+from .installation_admission import InstallationAdmission
 from .mcp_http import lifespan as mcp_lifespan
 from .mcp_http import mount_all as mount_mcp
 from .monitor import Event as _MonEvent
@@ -471,6 +472,85 @@ app.include_router(notifiers.router)
 app.include_router(ws.router)
 
 
+def _installation_is_idle(request: Request) -> bool:
+    """The lifecycle owner checks its actual producers before closing admission."""
+    from .codex_login import codex_login_manager
+    from .wiki.jobs import worker
+    from .wiki.registry import registry
+
+    gate = getattr(request.app.state, "installation_admission", None)
+    if gate is None or not gate.idle:
+        return False
+    sm = session_manager
+    if (any(not owner.idle or owner.failed for owner in sm._session_owners.values())
+            or any(not task.done() for task in sm._owned_tasks)
+            or sm.configuration_lock.locked() or sm._agent_lifecycle_lock.locked()
+            or any(session._pending_queue or session._steer_queue or session._forking
+                   or session._archive_reservation or session._run.retirements for session in sm.sessions.values())):
+        return False
+    if (bg_task_manager._starting or bg_task_manager._running
+            or any(not task.done() for task in bg_task_manager._cleanup_tasks)
+            or any(not task.done() for task in research_manager._tasks.values())
+            or any(not task.done() for task in delegation_manager._commands)
+            or delegation_manager._completion_handoffs or app_agent_manager._turns
+            or any(rec.state in {"pending", "queued", "running"} or rec._terminal_injecting
+                   or rec._awaiting_sub_relay or rec._save_lock.locked() for rec in delegation_manager._rounds.values())
+            or worker.pending or worker.executing
+            or any(not task.done() for task in (*worker.tasks.values(), *worker.cancellations.values()))):
+        return False
+    if any(backend.lock.locked() or any(task is not None and not task.done() for task in (backend._operation, backend._spawn))
+           for backend in backend_supervisor._backends.values()):
+        return False
+    if any((item._task is not None and not item._task.done()) or (item._proc is not None and item._proc.returncode is None)
+           for item in codex_login_manager._sessions.values()):
+        return False
+    runner = getattr(request.app.state, "schedule_runner", None)
+    if runner is not None and any(not task.done() for task in getattr(runner._executor, "_pending_futures", ())):
+        return False
+    db = sm.db
+    if db is None or db._write_owner or db._write_lock.locked() or db._agent_memory_lock.locked():
+        return False
+    return registry.idle
+
+
+@app.post("/api/installation/quiesce")
+async def quiesce_installation(request: Request, user: deps.CurrentUser):
+    """Seal an idle managed installation; the external owner then stops it."""
+    from uuid import UUID
+
+    if not user["is_admin"]:
+        return JSONResponse({"detail": "Installation maintenance requires an administrator"}, status_code=403)
+    owner = request.app.state.installation_owner
+    health = request.app.state.service_health
+    if owner.profile is None:
+        return JSONResponse({"detail": "Use the standalone process owner to stop this installation"}, status_code=409)
+    try:
+        request_id = str(UUID((await request.json())["request_id"]))
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return JSONResponse({"detail": "A valid request_id is required"}, status_code=400)
+    if health.state != "ready":
+        return JSONResponse({"detail": "Installation is unavailable", "request_id": owner.offline_request}, status_code=409)
+    if not _installation_is_idle(request):
+        return JSONResponse({"detail": "Installation still has work; wait for natural completion"}, status_code=409)
+    # No await between the proof above and sealing producers. Already admitted
+    # work is complete; ordinary shutdown will retire only idle resources.
+    owner.offline_request = request_id
+    health.begin_shutdown()
+    session_manager.close_admission()
+    from .codex_login import codex_login_manager
+    from .wiki.jobs import worker
+
+    worker.begin_shutdown()
+    runner = getattr(request.app.state, "schedule_runner", None)
+    if runner is not None:
+        runner.begin_shutdown()
+    research_manager.begin_shutdown()
+    bg_task_manager.begin_shutdown()
+    backend_supervisor.begin_shutdown()
+    codex_login_manager.begin_shutdown()
+    return {"status": "stopping", "request_id": request_id}
+
+
 @app.get("/api/backends")
 async def list_backends(_: str = Depends(verify_token)):
     """Which AI backends are usable on this host (codex-backend.md §6.1).
@@ -506,12 +586,17 @@ async def health():
 async def readiness(request: Request):
     health = getattr(request.app.state, "service_health", None)
     state = health.state if health is not None else "starting"
-    return JSONResponse({"status": state}, status_code=200 if state == "ready" else 503)
+    result = {"status": state}
+    owner = getattr(request.app.state, "installation_owner", None)
+    if owner is not None and owner.offline_request:
+        result["offline_request"] = owner.offline_request
+    return JSONResponse(result, status_code=200 if state == "ready" else 503)
 
 
 # Serve built frontend as static files (SPA catch-all).
 # Mounted after API routes so /api/*, /ws, /health take priority.
 _dist_dir = Path(__file__).resolve().parent.parent / "web" / "dist"
+app.add_middleware(InstallationAdmission)
 if _dist_dir.is_dir():
     app.mount("/", StaticFiles(directory=str(_dist_dir), html=True), name="spa")
 

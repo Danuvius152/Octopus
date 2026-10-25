@@ -203,6 +203,9 @@ agents, which gained `POST /api/agents/{id}/unarchive` for the same section).
 - `server/agent_memory.py` — Per-agent native memory (`docs/plans/memory.md`): one canonical markdown dir per owned agent (`<users_root>/<user_id>/agents/<id>/memory/`), shared by both harnesses. Claude points its auto-memory at it via `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE`; Codex via an injected `developer_instructions` blurb naming the dir (its native `features.memories` pipeline is unused — it doesn't run in headless `exec`). Memory is decoupled from both harnesses' config/auth dirs — `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are never touched, so auth and `--resume` transcripts are unaffected. Pure path helpers + idempotent provisioning.
 ### Accounts
 
+- When adding persistent data, relationships or storage roots, maintain its
+  migration integration in the same change; see [account portability](docs/backup-and-migrate.md#7-selected-account-export-and-import)
+  for collection, exclusions, restoration and verification responsibilities.
 - `docs/plans/multi-tenancy.md` — account ownership background. Every account
   gets its own rows, keys and directories. `POST /api/auth/setup` creates the first administrator,
   wrapped DEK and owned protected agent on an empty installation. The configured

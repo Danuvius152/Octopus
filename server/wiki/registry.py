@@ -71,6 +71,14 @@ class WikiRegistry:
         self._recovery_results: dict[tuple[str, str], BaseException | None] = {}
         self._previous_writers_retired = False
 
+    @property
+    def idle(self) -> bool:
+        """Released retired stores are history, not outstanding writer owners."""
+        with self._lock:
+            return not (self._constructing
+                        or any(store._users for store in self._stores.values())
+                        or any(store._users or not store._events_released for store in self._retired_stores))
+
     def bind_health(self, health: ServiceHealth) -> None:
         """A new service generation may bind only after every old owner exits."""
         if not self._close_gate.acquire(blocking=False):
@@ -650,6 +658,13 @@ class WikiRegistry:
                 await self._task
             self._task = None
             self._stopping = None
+            # Writers have retired. Receive the final kernel events while the
+            # original observers still exist; a same-bytes replacement must
+            # end the old document identity before its watcher is closed.
+            with self._lock:
+                stores = list(self._stores.values())
+            for store in stores:
+                await complete_cleanup(asyncio.to_thread(store.synchronize))
             await asyncio.to_thread(self.close)
             drained = True
         finally:

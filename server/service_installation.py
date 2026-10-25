@@ -623,13 +623,33 @@ class InstallationOwner:
         self.db_path = None if config.db_path == ":memory:" else Path(config.db_path).expanduser().resolve()
         self._lock: BinaryIO | None = None
         self.profile: ServiceProfile | None = None
+        self.offline_request: str | None = None
 
     def acquire(self) -> None:
+        self._acquire(service_process=True)
+
+    def acquire_offline(self) -> None:
+        """Own stopped storage without impersonating systemd's server process."""
+        self._acquire(service_process=False)
+
+    def _acquire(self, *, service_process: bool) -> None:
         self._acquire_lock()
         try:
+            if self.db_path is not None:
+                incomplete = self.db_path.with_name(self.db_path.name + ".importing")
+                if incomplete.exists() or incomplete.is_symlink():
+                    raise InstallationError(f"Incomplete account import; inspect its owned-path inventory before cleanup: {incomplete}")
             self.profile = read_service_profile(self.config)
             if self.profile is not None:
-                _verify_service(self.profile)
+                if service_process:
+                    _verify_service(self.profile)
+                else:
+                    command = ["systemctl", *(["--user"] if self.profile.manager == "user" else []),
+                               "show", "--no-pager", "--property=MainPID,ActiveState,Job", "--", self.profile.unit]
+                    result = subprocess.run(command, check=True, capture_output=True, text=True, timeout=10)
+                    actual = dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
+                    if actual.get("MainPID") != "0" or actual.get("ActiveState") not in {"inactive", "failed"} or actual.get("Job"):
+                        raise InstallationError("Managed installation must finish stopping before offline storage access")
             else:
                 for name, raw in _claimed_paths(self.config, _paths(self.config)).items():
                     path = Path(raw)
