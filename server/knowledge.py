@@ -72,7 +72,7 @@ def admit(*, session_id: str, request_id: str, user_id: str | None,
     command, _ = wiki_command(prompt)
     return KnowledgeContext(
         RequestRef(session_id, request_id, user_id), prompt, mode,
-        ("wiki", "web") if command == "read" else (),
+        ("wiki", "web") if command is not None else (),
         MaintenanceLimit(mode != "read" and not worker, (prompt,) if mode == "maintain" else ()),
         registration,
     )
@@ -150,7 +150,7 @@ def derive(parent: AdmittedRequest, prompt: str, *, selected: str | None = None,
         task_requirements=tuple(dict.fromkeys((*parent.context.task_requirements, prompt))),
         mode=(requested or parent.context.mode) if limits.may_submit else "read",
         sources=tuple(dict.fromkeys((*parent.context.sources, *(
-            ("wiki", "web") if wiki_command(prompt)[0] == "read" else ()
+            ("wiki", "web") if wiki_command(prompt)[0] is not None else ()
         )))) if sources is None else sources,
     )
     return OwnedTaskContext(execution, parent)

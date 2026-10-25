@@ -25,7 +25,7 @@ PATHS_MAX_ITEMS = 16
 PUBLIC_GUIDES = ("query", "retrieval", "entry")
 WORKER_GUIDES = ("worker", "maintenance", "article", "writing")
 GUIDE_FILES = (
-    "access", "query-v2", "retrieval-v2", "entry", "auto-entry",
+    "access", "query-v2", "retrieval-v2", "entry",
     "worker-v2", "maintenance-v2", "article-v2", "writing",
 )
 QUERY_TOOLS = frozenset({
@@ -107,7 +107,7 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
     bundle = {name: guide(name) for name in GUIDE_FILES}
     digest = hashlib.sha256(json.dumps([POLICY_VERSION, bundle], ensure_ascii=False, sort_keys=True).encode()).hexdigest()
     available = {"query": bundle["query-v2"], "retrieval": bundle["retrieval-v2"],
-                 "entry": bundle["auto-entry" if mode == "auto" else "entry"]} if live else {}
+                 "entry": bundle["entry"]} if live else {}
     if worker:
         available |= {
             "worker": "正文与新页按操作卡目标；已有导航 Markdown 可用 relations-only organize 补本批入口，不取得该页正文修改权。\n\n" + bundle["worker-v2"],

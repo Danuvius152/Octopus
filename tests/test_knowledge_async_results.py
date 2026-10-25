@@ -291,7 +291,7 @@ asyncio.run(main())
     assert not (tmp_path / "must-not-run").exists()
 
 
-async def test_research_return_restores_original_read_request_at_backend_boundary(
+async def test_research_return_restores_original_sources_without_borrowing_wiki_registration(
     owned_database, tmp_path, monkeypatch,
 ):
     database = owned_database
@@ -315,9 +315,11 @@ async def test_research_return_restores_original_read_request_at_backend_boundar
         job = await research.start(session.id, "/wiki Compare X and Y.")
         owned = decode_owned(job["knowledge_context"])
         assert owned is not None
-        assert owned.return_binding.context.mode == "read"
+        assert owned.return_binding.context.mode == "auto"
+        assert owned.return_binding.context.sources == ("wiki", "web")
+        assert owned.return_binding.context.maintenance.may_submit is False
         config, prompt = await asyncio.wait_for(observed.get(), 5)
-        assert config.wiki_mode == "read"
+        assert config.wiki_mode is None  # This account has no registered vault.
         assert f"[deep-research:{job['id']}]" in prompt
         assert "/wiki Compare X and Y." in prompt
         assert leaves
@@ -382,7 +384,7 @@ async def test_research_return_uses_fixed_parent_after_lease_retires(
 
     sessions.on_broadcast("return-contract", finished)
     try:
-        original = await sessions.start_message(session.id, "/wiki Compare X and Y.", work_id=work_id)
+        original = await sessions.start_message(session.id, "/wiki Compare X and Y.", work_id=work_id, wiki_mode="read")
         assert (await original.wait()).outcome.status == "success"
         assert len(launched) == 1
         assert not scope_is_live(scopes[0])

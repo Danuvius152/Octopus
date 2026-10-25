@@ -4,14 +4,15 @@ import { expect, test } from "@playwright/test";
 const API = "http://localhost:8765/api";
 const headers = { Authorization: `Bearer ${TEST_BEARER}` };
 
-test("schedule text retains read permission until a human chooses a new control", async ({ page, request }) => {
+test("an explicit read control survives schedule text edits until a human changes it", async ({ page, request }) => {
   const agents = await (await request.get(`${API}/agents`, { headers })).json();
   const name = `Knowledge schedule ${Date.now()}`;
   const created = await request.post(`${API}/schedules`, {
-    headers, data: { agent_id: agents[0].id, name, prompt: "/wiki Explain X", interval_seconds: 3600 },
+    headers, data: { agent_id: agents[0].id, name, prompt: "/wiki Explain X", wiki_mode: "read", interval_seconds: 3600 },
   });
   expect(created.ok()).toBeTruthy();
   const schedule = await created.json();
+  expect(schedule.wiki_mode).toBe("read");
   try {
     const edited = await request.patch(`${API}/schedules/${schedule.id}`, {
       headers, data: { prompt: "/wiki maintain Library/Y.md", enabled: false },

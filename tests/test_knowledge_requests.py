@@ -12,10 +12,30 @@ from server.knowledge import (
 )
 
 
-def test_explicit_wiki_requires_local_and_web_independently_of_read_permission():
+@pytest.mark.parametrize("prompt", [
+    "/wiki 维护一下知识库",
+    "/wiki 维护本地知识库",
+    "/wiki 维护个人知识库",
+    "/wiki 如何维护知识库？",
+    "/wiki Please review the notes I just added.",
+])
+def test_wiki_source_selection_leaves_the_action_to_the_agent_without_imposing_read_only(prompt):
+    context = admit(session_id="human", request_id="current", user_id="owner", prompt=prompt)
+    assert context.trusted_request == prompt
+    assert context.sources == ("wiki", "web")
+    assert context.mode == "auto"
+    assert context.maintenance.may_submit is True
+    restricted = admit(session_id="human", request_id="current", user_id="owner", prompt=prompt, selected="read")
+    assert restricted.sources == context.sources
+    assert restricted.mode == "read"
+    assert restricted.maintenance.may_submit is False
+
+
+def test_explicit_read_keeps_local_and_web_requirements_without_submission_permission():
     context = admit(
         session_id="question-session", request_id="question-request", user_id="reader",
         prompt="/wiki Compare the methods using our notes and relevant evidence.",
+        selected="read",
     )
 
     assert context.sources == ("wiki", "web")
@@ -69,7 +89,7 @@ def test_worker_can_delegate_queries_but_cannot_create_a_submitter():
 def test_definition_edit_preserves_field_omission_and_rejects_ambiguous_null():
     from server.knowledge import revise
 
-    existing = admit(session_id="origin", request_id="o", user_id="reader", prompt="/wiki Explain X.")
+    existing = admit(session_id="origin", request_id="o", user_id="reader", prompt="/wiki Explain X.", selected="read")
     edit = admit(session_id="editor", request_id="e", user_id="reader", prompt="/wiki maintain Library/Y.md")
     caller = AdmittedRequest(edit.origin, edit)
     revised = revise(existing, caller, {"prompt": "/wiki maintain Library/Y.md"}, human=True)
@@ -83,7 +103,7 @@ def test_definition_edit_preserves_field_omission_and_rejects_ambiguous_null():
 def test_definition_agent_edit_narrows_but_explicit_human_control_can_reauthorize():
     from server.knowledge import revise
 
-    existing = admit(session_id="origin", request_id="o", user_id="reader", prompt="/wiki Explain X.")
+    existing = admit(session_id="origin", request_id="o", user_id="reader", prompt="/wiki Explain X.", selected="read")
     edit = admit(session_id="editor", request_id="e", user_id="reader", prompt="General task")
     caller = AdmittedRequest(edit.origin, edit)
     agent = revise(existing, caller, {"prompt": "/wiki maintain Library/Y.md", "wiki_mode": "auto"})

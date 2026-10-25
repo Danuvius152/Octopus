@@ -70,10 +70,10 @@ async def plan_runtime(work_runtime, monkeypatch):
         await runner.shutdown()
 
 
-async def live_caller(manager, parent, starts, *, work_id=None, prompt="/wiki controlled source question"):
+async def live_caller(manager, parent, starts, *, work_id=None, prompt="/wiki controlled source question", mode=None):
     from server.mcp_identity import scope_is_live, verify
 
-    receipt = await manager.start_message(parent.id, prompt, work_id=work_id)
+    receipt = await manager.start_message(parent.id, prompt, work_id=work_id, wiki_mode=mode)
     context = await asyncio.wait_for(starts.get(), 5)
     bearer = next(entry.credential for entry in context.mcp_servers if entry.key == "bg")
     scope = verify(bearer)
@@ -85,7 +85,7 @@ async def live_caller(manager, parent, starts, *, work_id=None, prompt="/wiki co
 
 async def test_mcp_creation_inherits_read_even_when_the_scheduled_body_requests_maintenance(plan_runtime, tmp_path):
     manager, runner, parent, starts, api = plan_runtime
-    receipt, headers = await live_caller(manager, parent, starts)
+    receipt, headers = await live_caller(manager, parent, starts, mode="read")
     created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=headers, json={
         "prompt": "/wiki maintain Library/Y.md", "interval_seconds": 3600, "in_session": False,
     })
@@ -109,7 +109,7 @@ async def test_mcp_edit_intersects_saved_and_callers_limits_in_both_patch_adapte
     created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=api.headers,
                              json={"prompt": "Human task", "interval_seconds": 3600})
     schedule_id = created.json()["id"]
-    _, headers = await live_caller(manager, parent, starts)
+    _, headers = await live_caller(manager, parent, starts, mode="read")
     url = f"/api/sessions/{parent.id}/schedules/{schedule_id}" if scoped else f"/api/schedules/{schedule_id}"
     edited = await api.patch(url, headers=headers, json={"prompt": "/wiki maintain Library/Y.md", "wiki_mode": "auto"})
     assert edited.status_code == 200, edited.text
@@ -143,7 +143,7 @@ async def test_human_reauthorization_clears_missing_contract_without_enabling_th
 async def test_definition_edit_does_not_change_a_fire_already_captured_by_its_owner(plan_runtime, tmp_path):
     manager, runner, parent, starts, api = plan_runtime
     created = await api.post(f"/api/sessions/{parent.id}/schedules", headers=api.headers, json={
-        "prompt": "/wiki controlled first definition", "interval_seconds": 3600, "in_session": False,
+        "prompt": "/wiki controlled first definition", "interval_seconds": 3600, "in_session": False, "wiki_mode": "read",
     })
     schedule_id = created.json()["id"]
     first = asyncio.create_task(runner._fire(schedule_id))

@@ -12,12 +12,16 @@ import pytest
 from server.agent_manager import AgentManager
 from server.harness import get_harness
 from server.mcp_identity import scope_is_live, verify
+from server.wiki import registry
 from tests.test_delegation_work import work_runtime as work_runtime
 
 
 @pytest.fixture
 async def controlled_runtime(work_runtime, monkeypatch, tmp_path):
-    _, _, _, starts = work_runtime
+    _, _, parent, starts = work_runtime
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    registry.configure(parent.user_id, vault, parent.agent_id)
 
     def argv(context):
         starts.put_nowait(context)
@@ -72,7 +76,7 @@ async def test_child_execution_retains_the_trusted_source_contract(controlled_ru
     context = recorded["knowledge"]["value"]
     assert context["sources"] == ["wiki", "web"]
     assert context["trusted_request"] == original
-    assert context["maintenance"]["may_submit"] is False
+    assert context["mode"] == "auto" and context["maintenance"]["may_submit"] is True
 
 
 async def test_terminal_return_restores_its_direct_parent_contract_after_retirement_and_a_new_root(
@@ -195,7 +199,7 @@ async def test_follow_up_uses_a_new_caller_contract_and_keeps_the_previous_round
     recorded = (await request_context(manager.db, second.delegation_id))["knowledge"]["value"]
     assert first.owned_context is original_owned
     assert first.work_id != second.work_id and first is not second
-    assert original_owned.execution.mode == "read"
+    assert original_owned.execution.mode == "auto"
     assert recorded["mode"] == "maintain"
     assert recorded["trusted_request"] == "/wiki maintain Library/y.md\nGATE:caller"
     assert second.owned_context.return_binding.reference.request_id != original_owned.return_binding.reference.request_id
@@ -219,6 +223,7 @@ async def test_legacy_round_without_a_contract_retains_its_result_without_an_aut
         while child.state == "running" or manager.has_pending_or_active_work(child.delegation_id, child.work_id):
             await asyncio.sleep(.01)
     assert child.state == "completed"
+    await delegations.confirm_recording()
     assert manager.dispatch_snapshot(parent.id)["items"] == []
     assert starts.empty()
     history = await manager.db.load_messages(child.delegation_id)

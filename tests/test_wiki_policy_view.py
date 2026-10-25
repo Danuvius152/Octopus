@@ -134,7 +134,7 @@ async def test_guide_hash_changes_with_the_actual_guide_bundle_but_never_enables
         tasks.close(token)
 
 
-async def test_mode_dependent_entry_has_its_own_body_digest_and_bootstrap_stays_stable(client, tmp_path):
+async def test_shared_entry_contract_hashes_its_body_independently_of_task_mode(client, tmp_path):
     vault = tmp_path / "vault"
     vault.mkdir()
     await wiki_api.configure(client, vault)
@@ -145,14 +145,14 @@ async def test_mode_dependent_entry_has_its_own_body_digest_and_bootstrap_stays_
     try:
         a, b = operation(auto, "auto"), operation(maintain, "maintain")
         assert a["guide_hash"] == b["guide_hash"]
-        assert a["guide_digests"]["entry"] != b["guide_digests"]["entry"]
+        assert a["guide_digests"]["entry"] == b["guide_digests"]["entry"]
         assert a["guide_digests"]["query"] == b["guide_digests"]["query"]
         assert workflow.instructions("auto", auto) == workflow.instructions("maintain", maintain)
-        for token, expected in ((auto, "auto-entry"), (maintain, "entry")):
+        for token in (auto, maintain):
             response = await client.get("/api/wiki/guide", params={"module": "entry"},
                 headers={"Authorization": "Bearer " + mint(session.id, user_id=session.user_id, wiki_task_id=token)})
             assert response.status_code == 200, response.text
-            assert response.json()["content"] == workflow.guide(expected)
+            assert response.json()["content"] == workflow.guide("entry")
             assert response.json()["guide_digest"] == operation(token, "auto")["guide_digests"]["entry"]
     finally:
         tasks.close(auto)

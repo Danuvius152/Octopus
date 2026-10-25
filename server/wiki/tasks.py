@@ -235,17 +235,23 @@ class WikiTasks:
             selections = task.knowledge.maintenance.required_selections
         else:
             selections = (task.request,) if task.mode == "maintain" else ()
+        if checked and not selections:
+            self._require_library_changes(paths)
         for selection in selections:
             self._require_selection_basis(selection, paths, store, checked=checked, db=db)
 
     @staticmethod
+    def _require_library_changes(paths):
+        from .formats import is_markdown_maintenance
+
+        if not all(path.startswith("Library/") and is_markdown_maintenance(path) for path in paths):
+            raise WikiError("Daily maintenance is limited to current Library Markdown changes", 403)
+
+    @staticmethod
     def _require_selection_basis(request, paths, store, *, checked, db):
         if checked and daily_command(request):
-            from .formats import is_markdown_maintenance
-
-            if all(path.startswith("Library/") and is_markdown_maintenance(path) for path in paths):
-                return  # Eligibility and the observation are checked under the admission lock.
-            raise WikiError("Daily maintenance is limited to current Library Markdown changes", 403)
+            WikiTasks._require_library_changes(paths)
+            return  # Eligibility and the observation are checked under the admission lock.
         # Only the trusted request's first line selects existing files. Article
         # body, retrieved notes and model-supplied scope descriptions cannot.
         first_line = next(iter(request.splitlines()), "")
@@ -352,7 +358,7 @@ def wiki_command(message: str) -> tuple[str | None, str]:
     if words and words[0] == "/wiki":
         if len(words) > 1 and words[1] in {"maintain", "维护"}:
             return "maintain", words[2] if len(words) > 2 else ""
-        return "read", text.split(maxsplit=1)[1] if len(words) > 1 else ""
+        return "auto", text.split(maxsplit=1)[1] if len(words) > 1 else ""
     return None, message
 
 
@@ -374,14 +380,18 @@ def explicit_mode(message: str, selected: str | None = None) -> str | None:
     """Only call at trusted input boundaries, never on app context/reports."""
     if selected is not None and selected not in ("auto", "read", "maintain"):
         raise ValueError("Unknown knowledge request mode")
-    # Read-only control wins over command text. Preserve the existing command
-    # interpretation of auto at public adapters and the original input digest.
+    # Read-only control wins over command text. A source selector leaves the
+    # action to the agent; only the formal maintenance command selects a mode.
     if selected == "read":
         return "read"
     mode, _ = wiki_command(message)
-    if mode:
+    if mode == "maintain":
         return mode
-    return selected if selected in {"read", "maintain"} else None
+    if selected == "maintain":
+        return selected
+    if mode == "auto":
+        return "auto"
+    return None
 
 
 tasks = WikiTasks()

@@ -33,7 +33,7 @@ async def test_regular_turn_only_advertises_stable_discovery_and_loads_current_g
         assert operation["writable_files"] == []
         assert "capabilities" not in operation and "guides" not in operation
         assert prompt == BOOTSTRAP
-        for name in ("access", "query-v2", "entry", "auto-entry", "worker-v2", "retrieval-v2"):
+        for name in ("access", "query-v2", "entry", "worker-v2", "retrieval-v2"):
             assert guide(name) not in prompt
         assert config["vault_id"] not in prompt and config["registration_generation"] not in prompt
         # Marker reuse is advisory, never a cached denial of a fresh guide request.

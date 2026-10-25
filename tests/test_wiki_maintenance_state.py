@@ -35,13 +35,13 @@ async def prepare(client, tmp_path, files=None):
 
 
 @asynccontextmanager
-async def entry(client, mode="maintain", request="/wiki维护", agent="reader"):
+async def entry(client, mode="maintain", request="/wiki维护", agent="reader", knowledge=None):
     owner = await deps.get_user_manager().resolve_token(
         client.headers["Authorization"].removeprefix("Bearer "), touch=False,
     )
     assert owner is not None
     session = SimpleNamespace(id="state-" + agent, user_id=owner["id"], agent_id=agent)
-    token = tasks.open(session, mode, request)
+    token = tasks.open(session, mode, request, knowledge=knowledge)
     try:
         yield {"Authorization": "Bearer " + mint(session.id, user_id=session.user_id, wiki_task_id=token)}, tasks.active[token]
     finally:
@@ -152,6 +152,45 @@ async def test_explicit_short_name_is_unique_and_cannot_expand_to_another_delta(
     async with entry(client, request="/wiki维护 brief.md") as (headers, _):
         observed = (await state(client, "Library/a/brief.md", headers=headers))["items"][0]
         assert (await client.post("/api/wiki/maintain", headers=headers, json=submission(observed))).status_code == 403
+
+
+async def test_auto_checked_review_is_limited_to_current_library_changes(client, tmp_path):
+    vault, _, jobs = await prepare(client, tmp_path, {"Library/new.md": "# New\n", "outside.md": "# Outside\n"})
+    original = {path: (vault / path).read_bytes() for path in ("Library/new.md", "outside.md")}
+    async with entry(client, mode="auto", request="/wiki 维护个人知识库") as (headers, _):
+        outside = (await state(client, "outside.md", headers=headers))["items"][0]
+        rejected = await client.post("/api/wiki/maintain", headers=headers, json=submission(outside))
+        assert rejected.status_code == 403, rejected.text
+        observed = (await state(client, "Library/new.md", headers=headers))["items"][0]
+        queued = await client.post("/api/wiki/maintain", headers=headers, json=submission(observed))
+        assert queued.status_code == 200, queued.text
+        replay = await client.post("/api/wiki/maintain", headers=headers, json=submission(observed))
+        assert replay.status_code == 200 and replay.json()["id"] == queued.json()["id"]
+        denied_write = await client.post("/api/wiki/organize", headers=headers, json={
+            "path": "Library/new.md", "expected_revision": observed["current"]["revision"],
+            "key_note": "The submitter cannot write this.", "reason": "Not a worker",
+        })
+        assert denied_write.status_code == 403
+    assert len(jobs.list()["items"]) == 1
+    assert {path: (vault / path).read_bytes() for path in original} == original
+
+
+@pytest.mark.parametrize("read_only", [False, True])
+async def test_semantic_child_cannot_widen_its_parents_selection_or_read_control(client, tmp_path, read_only):
+    from server.knowledge import AdmittedRequest, derive, for_account
+
+    _, _, jobs = await prepare(client, tmp_path, {"Library/chosen.md": "# Chosen\n", "Library/other.md": "# Other\n"})
+    parent = for_account(session_id="parent", request_id="original", user_id=jobs.user_id,
+                         prompt="/wiki maintain Library/chosen.md", selected="read" if read_only else None)
+    child = derive(AdmittedRequest(parent.origin, parent), "/wiki 维护个人知识库")
+    async with entry(client, mode=child.execution.mode, request="/wiki 维护个人知识库",
+                     knowledge=child.execution) as (headers, _):
+        other = (await state(client, "Library/other.md", headers=headers))["items"][0]
+        assert (await client.post("/api/wiki/maintain", headers=headers, json=submission(other))).status_code == 403
+        chosen = (await state(client, "Library/chosen.md", headers=headers))["items"][0]
+        response = await client.post("/api/wiki/maintain", headers=headers, json=submission(chosen))
+        assert response.status_code == (403 if read_only else 200), response.text
+    assert len(jobs.list()["items"]) == (0 if read_only else 1)
 
 
 async def test_observation_drift_and_return_to_old_input_are_not_false_success(client, tmp_path):

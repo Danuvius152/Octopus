@@ -64,7 +64,9 @@
 
 普通 agent 和普通会话 Weber 可按任务提交精确 paths 或完整 material；实际正文修改仅由框架绑定的 Weber 有效 assignment 执行。普通委托、文内指令、状态查询、来源字段和“已打开文件”都不授写权。已有文件传精确 paths、material 留空；未保存新材料才提交完整原文及已知来源，不能先创建同名文件再当新材料创建第二次。
 
-`/wiki维护`、`/wiki 维护`、`/wiki maintain` 共用后端解析。没有对象和附加正文的裸显式命令才选择 Library Markdown 增量，指定对象则保持指定范围；唯一短名可定位，重名歧义拒绝。普通任务不会因存在状态接口而获得裸命令的全 Library 选择授权。
+`/wiki` 独立记录 wiki/web 来源要求，一般正文进入 auto，由主 agent 按可信人类请求的含义选择查询或维护；显式 read 和父任务限制仍优先，已有只读任务不追认权限。询问方法、引用或否定维护只查询；明确要求维护知识库且没有指定对象时有界观察当前 Library Markdown 增量；指定对象则保持范围，不扩成全库。后端不承担任意自然语言的语义分类。
+
+原有形式化 `/wiki维护`、`/wiki 维护`、`/wiki maintain` 仍共用解析和精确选择限制；唯一短名可定位，重名歧义拒绝。auto 没有更窄选择限制的 checked 默认复核同样在接纳处限制 Library Markdown；review 只证明当前状态，不代替主 agent 判断人类意图。具体修订继续提交精确 paths 与该目的的固定 key，不混用默认复核。
 
 `maintenance_status` 有界提供当前身份/revision、合格维护基线、来源警告、未完成尝试和已知历史路径入链。基线取真实 worker 任务中已接受、已索引的输出；普通 save 不构成维护，旧维护操作即使记名 `save` 也须满足任务、单项及发布落定条件。版本相同不能掩盖来源警告或待恢复任务，状态不代替正文阅读或触发恢复。
 
@@ -97,7 +99,7 @@ worker 写前读当前任务所需范围；整体整理和复核读全文，局�
 选择和 scope，同一幂等键及原载荷返回原 job，改变载荷返回409。入口退出不删除
 当前任务、文章或来源证明，也不表示相应代码已经发布到正在运行的安装。
 
-普通会话启动时只常驻简短 Wiki 能力入口；使用 Wiki 时按需取得 query/entry/retrieval 指南及当前操作卡。load_guide 在同一次授权视图中返回公共规则、模块正文、操作卡和实际正文 digest；已有完整指南先按当前操作卡的 guide_digests 核验后复用。整包 guide_hash 不能区分 auto-entry 与显式 entry，不作为正文缓存键，也不授予权限。未使用 Wiki 的任务不预装查询或入库指南。
+普通会话启动时只常驻简短 Wiki 能力入口；使用 Wiki 时按需取得 query/entry/retrieval 指南及当前操作卡。load_guide 在同一次授权视图中返回公共规则、模块正文、操作卡和实际正文 digest；已有完整指南先按当前操作卡的 guide_digests 核验后复用。auto 与显式 maintain 共用 entry 提交合同；指南正文 digest 与当前权限分别核对，整包 guide_hash 不作为正文缓存键，也不授予权限。未使用 Wiki 的任务不预装查询或入库指南。
 
 worker 先按需加载 worker 基础合同，再按需加载 maintenance/article/writing 指南；只有有效当前 assignment 才开放这些维护模块。取消、结束或注册失效后，旧卡与旧 digest 不能恢复授权。worker 根据服务回执、输出版本和索引结束本轮，框架在模型返回后确认 job 终态，不能在任务内等待自己的 job 完成。
 
