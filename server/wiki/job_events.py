@@ -22,7 +22,7 @@ TABLES = {
         id TEXT PRIMARY KEY NOT NULL,job_id TEXT NOT NULL,owner TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('chat','app','schedule','human')),
         target TEXT NOT NULL,request_id TEXT NOT NULL,client_id TEXT NOT NULL,created_at TEXT NOT NULL,
-        UNIQUE(job_id,owner,kind,target,client_id))""",
+        UNIQUE(job_id,owner,kind,target,request_id,client_id))""",
     "wiki_job_deliveries": """CREATE TABLE wiki_job_deliveries(
         event_id TEXT NOT NULL,subscriber_id TEXT NOT NULL,
         acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(acknowledged IN (0,1)),
@@ -30,7 +30,7 @@ TABLES = {
 }
 INDEXES = {
     "wiki_job_delivery_pending": "CREATE INDEX wiki_job_delivery_pending ON wiki_job_deliveries(event_id,subscriber_id) WHERE acknowledged=0",
-    "wiki_job_subscriber_target": "CREATE INDEX wiki_job_subscriber_target ON wiki_job_subscribers(owner,target,job_id)",
+    "wiki_job_subscriber_target": "CREATE INDEX wiki_job_subscriber_target ON wiki_job_subscribers(owner,target,request_id,kind,client_id,job_id)",
 }
 WRITER = """SELECT CASE WHEN (SELECT recursive_triggers FROM pragma_recursive_triggers)=0
     THEN RAISE(ABORT,'Wiki job events require recursive triggers') END;"""
@@ -194,11 +194,11 @@ def initialize(db):
         db.execute(sql)
     for sql in (TRIGGERS | job_triggers()).values():
         db.execute(sql)
-    db.execute("INSERT INTO wiki_protocols VALUES('wiki_job_events',2)")
+    db.execute("INSERT INTO wiki_protocols VALUES('wiki_job_events',3)")
 
 
 def require(db):
-    protocols.require(db, "wiki_job_events", 2)
+    protocols.require(db, "wiki_job_events", 3)
     maintenance_inputs.require_jobs(db)
     expected = TABLES | INDEXES | TRIGGERS | job_triggers()
     actual = dict(db.execute("SELECT name,sql FROM sqlite_master"))
@@ -239,13 +239,18 @@ def subscribe(db, job_id, requester):
     if not db.in_transaction or not isinstance(requester, Requester):
         raise ValueError("Subscription requires a trusted requester and admission transaction")
     owner = requester.owner if requester.owner is not None else "legacy"
-    identity = [job_id, owner, requester.kind, requester.target, requester.client_id]
+    identity = [job_id, owner, requester.kind, requester.target, requester.request_id, requester.client_id]
     identifier = hashlib.sha256(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
-    row = db.execute("SELECT * FROM wiki_job_subscribers WHERE id=?", (identifier,)).fetchone()
+    # Stored coordinates are authoritative. A retained subscription keeps its
+    # original identifier, including after a finite storage handoff.
+    row = db.execute("SELECT id FROM wiki_job_subscribers WHERE job_id=? AND owner=? AND kind=? "
+                     "AND target=? AND request_id=? AND client_id=?", identity).fetchone()
     if row is None:
         db.execute("INSERT INTO wiki_job_subscribers VALUES(?,?,?,?,?,?,?,?)",
                    (identifier, job_id, owner, requester.kind, requester.target, requester.request_id,
                     requester.client_id, datetime.now(UTC).isoformat()))
+    else:
+        identifier = row[0]
     # Repeated subscriptions do not create a new version or an extra receiver.
     # A subscriber arriving after other receivers ACKed still gets this snapshot.
     db.execute("""INSERT INTO wiki_job_deliveries(event_id,subscriber_id)

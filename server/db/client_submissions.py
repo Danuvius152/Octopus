@@ -51,6 +51,36 @@ class ClientSubmissionsMixin(DatabaseBase):
             )
             return _submission(row) if row else None
 
+    async def execution_context_inputs(self, session_id: str, request_id: str) -> dict[str, Any] | None:
+        """Read one original execution and its exact inline inputs together.
+
+        The execution owner fixes membership; transcript position only orders
+        those members. Invalid or missing member evidence stays visible to the
+        caller rather than being filtered into an apparently unchanged request.
+        """
+        async with self.transaction(write=False) as tx:
+            original = await tx.fetch_one(
+                _SELECT + "WHERE i.session_id=? AND i.request_id=?", (session_id, request_id),
+            )
+            owner = await tx.fetch_one("SELECT user_id FROM sessions WHERE id=?", (session_id,))
+            if original is None or owner is None:
+                return None
+            rows = await tx.fetch_all(
+                "SELECT i.request_id,i.payload,i.receipt,i.delivery_state,m.seq,m.content,m.tool_input "
+                "FROM client_submissions i LEFT JOIN messages m ON m.session_id=i.session_id "
+                "AND m.role='user' AND m.type='text' AND CASE WHEN json_valid(m.tool_input) THEN "
+                "json_extract(m.tool_input,'$.request_context.request_id')=i.request_id ELSE 0 END "
+                "WHERE i.session_id=? AND i.execution_owner=? AND i.request_id<>? ORDER BY m.seq,i.rowid",
+                (session_id, request_id, request_id),
+            )
+            return {"original": _submission(original), "owner": owner[0], "inputs": [
+                {"request_id": row[0], "payload": json.loads(row[1]) if row[1] is not None else None,
+                 "receipt": json.loads(row[2]) if row[2] is not None else None, "delivery_state": row[3],
+                 "seq": row[4], "content": json.loads(row[5]) if row[5] is not None else None,
+                 "tool_input": json.loads(row[6]) if row[6] is not None else None}
+                for row in rows
+            ]}
+
     async def get_client_submission(self, session_id: str, client_id: str) -> dict[str, Any] | None:
         async with self.transaction(write=False) as tx:
             return await self._get_client_submission(tx, session_id, client_id)

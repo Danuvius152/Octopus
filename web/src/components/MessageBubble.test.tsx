@@ -111,14 +111,24 @@ it("keeps recovery details expandable while showing its attempt count", () => {
   expect(container.querySelector("details")?.hasAttribute("open")).toBe(false);
 });
 
-it("honors human source metadata when a typed message resembles an automatic result", () => {
+it.each(["[bg-task-result]", "[wiki-maintenance-result]"])("honors human metadata for a typed %s marker", (marker) => {
   const { container, getByText } = render(<MessageBubble sessionId="source-test" message={{
-    role: "user", type: "text", content: "[bg-task-result] I typed this",
+    role: "user", type: "text", content: `${marker} I typed this`,
     tool_input: { request_context: { request_id: "human-1", source: "human" } },
   }} />);
-  expect(getByText("[bg-task-result] I typed this")).toBeTruthy();
+  expect(getByText(`${marker} I typed this`)).toBeTruthy();
   expect(container.querySelector(".msg-user")).toBeTruthy();
   expect(container.querySelector(".msg-bg-result")).toBeNull();
+});
+
+it("shows the Wiki return as an automatic notice beside its task cards", () => {
+  const { getByText, queryByText, queryByTestId } = render(<MessageBubble sessionId="source-test" onFork={() => {}} message={{
+    role: "user", type: "text", content: '[wiki-maintenance-result]\n{"job_id":"internal-reference"}', seq: 5,
+    tool_input: { request_context: { request_id: "wiki-1", source: "wiki" } },
+  }} />);
+  expect(getByText("Wiki maintenance results received")).toBeTruthy();
+  expect(queryByText(/internal-reference/)).toBeNull();
+  expect(queryByTestId("fork-from-here")).toBeNull();
 });
 
 it("does not offer a human rewind target for a structured automatic result", () => {

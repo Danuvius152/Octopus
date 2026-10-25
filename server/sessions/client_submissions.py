@@ -12,6 +12,7 @@ from ..attachments import AttachmentUnavailable, validate_message_attachments
 from .runtime_types import QuotaExceeded
 
 if TYPE_CHECKING:
+    from ..database import Database
     from ..knowledge import KnowledgeContext
     from . import SessionManager
     from .base import PendingInput, QueuedPrompt
@@ -42,6 +43,60 @@ def saved_context(session_id: str, row: dict[str, Any]) -> KnowledgeContext | No
             context.origin.session_id != session_id or context.origin.request_id != row["request_id"]):
         return None
     return context
+
+
+async def execution_context(database: Database, session_id: str, original_row: dict[str, Any]) -> KnowledgeContext | None:
+    """Recover the closed execution's confirmed contract, including human steer.
+
+    Call after the original Wiki task has retired. A frame's persisted delivery
+    acknowledgment and original execution owner distinguish accepted additions
+    from queued, unsent or unconfirmed text. No latest-message inference applies.
+    """
+    from ..knowledge import AdmittedRequest, RequestRef, decode_context, revise
+
+    try:
+        snapshot = await database.execution_context_inputs(session_id, original_row["request_id"])
+        if snapshot is None:
+            return None
+        original, owner = snapshot["original"], snapshot["owner"]
+        if not isinstance(original["payload"], dict):
+            return None
+        context = saved_context(session_id, original)
+        if (context is None or context.origin.user_id != owner or original["terminal"] is None
+                or original["delivery_state"] == "unknown"
+                or original["execution_owner"] != original["request_id"]):
+            return None
+        seen = set()
+        for inline in snapshot["inputs"]:
+            payload, receipt = inline["payload"], inline["receipt"]
+            if (not isinstance(payload, dict) or payload.get("source") != "human"
+                    or not isinstance(receipt, dict) or receipt.get("accepted") is not True
+                    or receipt.get("disposition") != "steered"):
+                return None
+            delivery = inline["delivery_state"]
+            if delivery == "none":
+                continue  # The durable unknown marker precedes any frame send.
+            if delivery != "confirmed" or inline["request_id"] in seen:
+                return None
+            seen.add(inline["request_id"])
+            edit = saved_context(session_id, inline)
+            metadata = inline["tool_input"]
+            request = metadata.get("request_context") if isinstance(metadata, dict) else None
+            if (edit is None or edit.origin.user_id != owner or not isinstance(request, dict)
+                    or request.get("request_id") != inline["request_id"] or request.get("source") != "human"
+                    or request.get("work_id") != payload.get("work_id")
+                    or inline["content"] != payload.get("content") or not isinstance(inline["seq"], int)):
+                return None
+            merged = decode_context(json.dumps(request.get("knowledge")))
+            expected = revise(context, AdmittedRequest(
+                RequestRef(session_id, inline["request_id"], owner), edit, payload.get("work_id"),
+            ), {"prompt": payload["trusted_request"]}, human=True)
+            if merged is None or merged != expected:
+                return None
+            context = merged
+        return context
+    except (KeyError, TypeError, ValueError):
+        return None
 
 
 def _files(session_id: str, identifiers: list[str], *, user_id: str) -> list[dict[str, Any]]:

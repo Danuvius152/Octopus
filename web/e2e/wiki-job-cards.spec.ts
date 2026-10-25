@@ -112,7 +112,9 @@ test("Wiki cards persist, cancel their displayed attempt, and catch up after rec
       expect(value).toMatchObject({ origin_request_id: scope.request_id, status: "cancelled", settlement_phase: "confirmed" });
     }
     const detail = await (await request.get(`${API}/sessions/${session.id}`, { headers })).json();
-    expect(detail.messages).toEqual([]);
+    expect(detail.messages).toHaveLength(1);
+    expect(detail.messages[0]).toMatchObject({ role: "system", type: "delivery_notice" });
+    expect(detail.messages[0].content).toContain("原请求的执行约束无法核实");
     expect((await request.post(`${API}/sessions/${session.id}/unarchive`, { headers })).ok()).toBeTruthy();
     await page.reload();
     await openOriginalSession();

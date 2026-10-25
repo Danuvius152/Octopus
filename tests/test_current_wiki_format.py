@@ -13,7 +13,7 @@ async def test_previous_wiki_marker_is_refused_without_reinterpreting_identical_
     root, state, registration, _ = registered_account
     path = state / 'index.sqlite3'
     with sqlite3.connect(path) as db:
-        db.execute('PRAGMA user_version=14')
+        db.execute('PRAGMA user_version=15')
     before, config, body = path.read_bytes(), (state / 'config.json').read_bytes(), (root / 'source.md').read_bytes()
     for open_storage in (
         lambda: protocols.registration_preflight(state, complete=True),

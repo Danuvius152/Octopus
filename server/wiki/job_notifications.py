@@ -5,7 +5,7 @@ import logging
 from functools import partial
 
 from ..aio import complete_cleanup
-from . import job_events
+from . import job_events, job_returns
 from .registry import registry
 from .store import WikiError
 
@@ -58,7 +58,9 @@ async def dispatch(jobs, manager):
                     "vault_id": jobs.registration["vault_id"], "job_id": delivery["job_id"],
                     "state_version": delivery["state_version"],
                 }, user_id=jobs.user_id)
-            await _io(_acknowledge, jobs, delivery, outcome)
+                outcome = await job_returns.deliver(jobs, manager, delivery, _io)
+            if outcome is not None:
+                await _io(_acknowledge, jobs, delivery, outcome)
         except Exception as exc:
             failure = failure or exc
         manager._wiki_notice_cursors[key] = ((delivery["outbox_order"], delivery["subscriber_id"]), through)

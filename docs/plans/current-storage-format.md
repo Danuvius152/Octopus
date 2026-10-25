@@ -2,7 +2,7 @@
 
 > **Status:** implemented — Validation and release handoff are tracked separately from production deployment.
 
-The main database uses format **4**, and Wiki uses format **15**. Each database
+The main database uses format **4**, and Wiki uses format **16**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
 before a writer opens; a genuinely empty database creates the complete current
 layout and marker in one transaction. Startup does not interpret older layouts,
@@ -21,7 +21,7 @@ Empty Wiki creation prepares jobs before their dependent grants, selection and
 event guards, then installs maintenance projections once. All steps share the
 creation transaction; the Registry publishes only the completed ledger. There
 is no separate no-jobs layout or later job attachment. This assembly change
-preserves the complete format 15 declarations and protocol set.
+uses the complete current declarations and protocol set.
 
 ## Publication boundary
 
@@ -48,15 +48,16 @@ inspection of committed facts; it does not trust an older success receipt, resto
 old databases or replay model/tool effects. An already running candidate is
 verified without another conversion or restart.
 
-This release starts from the observed main 4 / Wiki 14 installation. Main has
-no physical format change. The finite Wiki handoff drops the historical
-`wiki_schema` table, installs current maintenance guards and commits marker 15.
-It checks the retained original declaration read-only, compares exact durable
-values before/after, rejects unconverted item evidence, and validates the current
-layout before commit. Current-format task history and unknown execution references
-remain. The original source and finite private script remain available until the
-actual handoff is accepted; their presence is not a promise of future old-format
-support. Implementing this code does not itself convert the running installation.
+The maintenance-return release starts from the observed main 4 / Wiki 15
+installation. Main has no physical format change. The finite Wiki handoff adds
+`request_id` to subscription uniqueness, preserves existing subscription IDs,
+snapshots and ACKs, and commits marker 16 with notification protocol 3. Different
+requests in one conversation can then independently receive the same retained
+job; replaying one request keeps its original subscription and delivery facts.
+The handoff checks the original declarations read-only, compares exact retained
+facts before/after, and verifies the current layout in the conversion transaction.
+The original source and finite private script remain until actual acceptance;
+implementing this code does not itself convert the running installation.
 
 Only an actual structure or semantic change changes a format marker. Developer
 intermediate layouts do not create support obligations. A later format-changing

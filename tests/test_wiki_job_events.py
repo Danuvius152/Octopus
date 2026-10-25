@@ -191,7 +191,8 @@ async def test_retry_of_completed_job_returns_its_existing_result(jobs):
     assert replayed["state_version"] == completed["state_version"]
 
 
-async def test_late_subscriber_gets_current_version_after_prior_delivery_was_acked(jobs):
+@pytest.mark.parametrize("following_target", ["original", "following"])
+async def test_late_subscriber_gets_current_version_after_prior_delivery_was_acked(jobs, following_target):
     job = enqueue(jobs)
     with jobs.store.connect() as db:
         db.execute("BEGIN IMMEDIATE")
@@ -204,7 +205,7 @@ async def test_late_subscriber_gets_current_version_after_prior_delivery_was_ack
         assert not job_events.pending(db)
     with jobs.store.connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        following = job_events.subscribe(db, job["id"], job_events.Requester(jobs.user_id, "chat", "following", "request-2"))
+        following = job_events.subscribe(db, job["id"], job_events.Requester(jobs.user_id, "chat", following_target, "request-2"))
     with jobs.store.connect() as db:
         pending = job_events.pending(db)
         assert len(pending) == 1
@@ -214,7 +215,7 @@ async def test_late_subscriber_gets_current_version_after_prior_delivery_was_ack
     assert jobs.get(job["id"])["state_version"] == completed["state_version"]
 
 
-async def test_same_chat_subscribes_once_even_from_a_later_request(jobs):
+async def test_same_chat_subscribes_once_per_original_request(jobs):
     job = enqueue(jobs)
     identifiers = []
     for request in ("request-1", "request-2", "request-1"):
@@ -222,11 +223,27 @@ async def test_same_chat_subscribes_once_even_from_a_later_request(jobs):
             db.execute("BEGIN IMMEDIATE")
             identifiers.append(job_events.subscribe(
                 db, job["id"], job_events.Requester(jobs.user_id, "chat", "original", request)))
-    assert len(set(identifiers)) == 1
+    assert identifiers[0] == identifiers[2] and identifiers[0] != identifiers[1]
     with jobs.store.connect() as db:
-        assert db.execute("SELECT count(*) FROM wiki_job_subscribers").fetchone()[0] == 1
-        assert len(job_events.pending(db)) == 1
+        assert db.execute("SELECT count(*) FROM wiki_job_subscribers").fetchone()[0] == 2
+        assert {row["request_id"] for row in job_events.pending(db)} == {"request-1", "request-2"}
     assert jobs.get(job["id"])["state_version"] == job["state_version"]
+
+
+async def test_replaying_retained_subscription_keeps_its_original_id_and_ack(jobs):
+    job = enqueue(jobs)
+    requester = job_events.Requester(jobs.user_id, "chat", "original", "request-1")
+    with jobs.store.connect() as db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("INSERT INTO wiki_job_subscribers VALUES(?,?,?,?,?,?,?,?)", (
+            "retained-original-id", job["id"], jobs.user_id, "chat", "original", "request-1", "", "original-time",
+        ))
+        original = job_events.pending(db)
+        assert len(original) == 1
+        job_events.acknowledge(db, original[0]["event_id"], "retained-original-id", "delivered")
+        assert job_events.subscribe(db, job["id"], requester) == "retained-original-id"
+        assert job_events.pending(db) == []
+        assert db.execute("SELECT count(*) FROM wiki_job_subscribers").fetchone()[0] == 1
 
 
 async def test_event_snapshot_limits_outputs_and_keeps_the_full_job_evidence(jobs):

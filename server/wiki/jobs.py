@@ -1674,10 +1674,19 @@ class WikiWorker:
 
             grants.assign(session.id, job_id, readable, registration=config,
                           request_id=reference["request_id"], attempt=reference["attempt"])
+            review = payload.get("request", {}).get("review")
+            review_phase = ""
+            if review is not None:
+                review_phase = (
+                    "\n日常复核阶段: 首次复核（无已接受基线）；执行 worker 指南中的首次复核检查。"
+                    if review["baseline_receipt_id"] is None else
+                    "\n日常复核阶段: 增量复核（已有接受基线）；按当前变化做必要复核。"
+                )
             prompt = (
                 "这是已明确授权的持久维护任务。按本次共享维护与写作指南执行。\n"
                 + "用户要求: "
                 + payload["scope"]
+                + review_phase
                 + "\n正文与新页仅限这些目标；已有导航页可用 relations-only organize 补本批入口，其他关联页按需读取:\n"
                 + json.dumps(briefing, ensure_ascii=False)
                 + "\n重读原因与已用重读次数:\n"

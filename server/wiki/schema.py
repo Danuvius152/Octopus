@@ -2,7 +2,7 @@
 
 import re
 
-VERSION = 15
+VERSION = 16
 
 
 def require_current_format(db):

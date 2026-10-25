@@ -1,5 +1,7 @@
 /// <reference types="vitest/config" />
-import { defineConfig } from 'vite'
+import { realpathSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+import { defineConfig, searchForWorkspaceRoot } from 'vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
 
@@ -17,6 +19,10 @@ export default defineConfig({
   // it.
   cacheDir: process.env.VITE_CACHE_DIR || undefined,
   server: {
+    // Worktrees reuse installed dependencies; font URLs resolve to that
+    // directory's real path, which can be outside this checkout.
+    fs: { allow: [searchForWorkspaceRoot(fileURLToPath(new URL('.', import.meta.url))),
+      realpathSync(new URL('./node_modules', import.meta.url))] },
     proxy: {
       '/api': apiTarget,
       // Applications are served by the backend out of their own directories

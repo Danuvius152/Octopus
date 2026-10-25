@@ -178,6 +178,12 @@ export function MessageBubble({
             />
           );
         }
+        if (source === "wiki" && typeof message.content === "string" &&
+            message.content.startsWith("[wiki-maintenance-result]")) {
+          return <div className="msg msg-system py-1 text-center text-xs text-muted-foreground">
+            Wiki maintenance results received
+          </div>;
+        }
         // Agent-to-agent delegation injection (reply / question /
         // error). The DelegationManager injects these as user-message
         // turns starting with a `[agent-…:<name> delegation=…]` prefix.
