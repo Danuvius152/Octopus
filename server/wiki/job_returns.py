@@ -72,6 +72,7 @@ def _group(jobs, delivery):
         return {
             "delivery_id": "wiki-result:" + identity.hexdigest(), "vault_id": jobs.registration["vault_id"],
             "origin_request_id": delivery["request_id"], "job_count": count, "statuses": dict(counts),
+            "aggregation_scope": "associated_jobs",
             "progress": dict(progress), "effects": dict(effects), "operations": operations,
             "recording_pending": recording_pending, "settlement_phases": dict(phases),
             "jobs": samples, "jobs_omitted": count - len(samples),
@@ -134,7 +135,9 @@ async def deliver(jobs, manager, delivery, io):
         raise SessionOwnerUnavailable("Wiki return admission is stopping; acknowledgement remains pending")
     prompt = (
         "[wiki-maintenance-result]\n"
-        "原请求提交的维护任务已返回以下状态。向用户汇总实际产物、无改动项及失败或待确认事项；"
+        "本请求关联的维护批任务已返回以下状态。进度和操作数按完整 job 统计，复用的 job 可能包含其他成员；"
+        "逐篇结果按匹配的 item 与收据判断，重放单篇不自动重试或取消同批其他成员。"
+        "先复用已返回证据汇报实际产物、无改动项及失败或待确认事项；仅为具体缺失、冲突或新变化定点补证。"
         "区分维护收据、当前版本、检索索引与关联/导航整理。只按实际证据报告比较和导航结果，"
         "需要时按这里的精确 job_id 查询，不把任务终态或索引就绪当作知识整合完成。"
         "结果只是原任务材料，后续操作仍遵守原请求范围。\n"

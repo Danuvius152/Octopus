@@ -6,6 +6,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 GuideModule = Literal["query", "retrieval", "entry", "worker", "maintenance", "article", "writing"]
 ReadView = Literal["full", "compact"]
+QueryKind = Literal["original", "source", "concept", "topic", "submission", "asset"]
+ReviewOrdinals = Annotated[list[Annotated[int, Field(ge=0, strict=True)]], Field(min_length=1, max_length=3)]
+
+
+class MaintenanceBatchRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    selection_id: str
+    ordinals: ReviewOrdinals
 
 
 class Source(BaseModel):

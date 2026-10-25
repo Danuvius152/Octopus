@@ -71,13 +71,15 @@ def project(document, text, part):
             "characters": part.end - part.start, "title": part.title, "role": part.role}
 
 
-def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget_chars=None, offset=0, limit=None, start=None, task=None):
+def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget_chars=None, offset=0, limit=None, start=None, tail=None, task=None):
     from .tasks import tasks
 
     if view not in {"full", "locators"} or offset < 0 or limit is not None and not 1 <= limit <= 100 or budget_chars is not None and not 1 <= budget_chars <= 96000:
         raise WikiError("Invalid raw block view or budget", 422)
     if start is not None and (start < 0 or view != "full"):
         raise WikiError("Raw start requires a nonnegative full-content position", 422)
+    if tail is not None and (isinstance(tail, bool) or not isinstance(tail, int) or not 1 <= tail <= 100 or offset or ids is not None):
+        raise WikiError("tail selects 1..100 final blocks and cannot combine with offset or ids", 422)
     with curation.history.locked():
         document, text = snapshot(curation.store, doc, expected_revision)
         from .read_response import INDEX_FIELDS
@@ -90,6 +92,8 @@ def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget
                 raise WikiError("Raw block not found in current revision", 404)
             parts = tuple(part for part in parts if str(part.index) in requested)
         count = len(parts)
+        if tail is not None:
+            offset = max(0, count - tail)
         selected = [project(document, text, part) for part in (parts[offset:offset + limit] if limit is not None else parts[offset:])]
         if task is not None or start is not None:
             from .model_response import fit_prefix, presentation

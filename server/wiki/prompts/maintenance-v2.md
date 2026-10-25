@@ -1,6 +1,6 @@
 这是按需维护细则，权限仍以当前 job、身份、版本和可写范围的服务校验为准。模板化及原块布局见 article，新解释的表达见 writing，关联选材见 retrieval；已在上下文的模块直接复用。
 
-局部修订用 revise(operation="patch")：blocks(view="locators") 只定位，之后 blocks(ids=[...]) 读取实际原始块及必要上下文。使用当前 locator、expected_block_hash 和逐字 expected_text；start/end 是该原始块内 code-point 零基半开区间。correction 只替换明确错误，addition/annotation 在 start=end 处插入；重复句依靠定位区分，多补丁互不重叠。read/search 的提取 offset 不可直接当 raw offset。读取后确有新变化才重新定位；过去人工编辑、AI 作者或旧 ownership 均不决定修订资格。blocks 的 limit 为1至100，按 next_offset 续页；正文 read 按 next_start 续读。
+局部修订用 revise(operation="patch")：已知块 ids 可直接 blocks(ids=[...])；文末追加先 blocks(tail=2)，取得末块及邻块的实际原文和定位。只有位置不明才取少量 locators 再读目标块，不枚举全篇坐标。使用当前 locator、expected_block_hash 和逐字 expected_text；start/end 是该原始块内 code-point 零基半开区间。correction 只替换明确错误，addition/annotation 在 start=end 处插入；重复句依靠定位区分，多补丁互不重叠。read/search 的提取 offset 不可直接当 raw offset。原始块分页按 worker 的续读规则，只有实际变化才重新定位；过去人工编辑、AI 作者或旧 ownership 均不决定修订资格。
 
 保全思想：有风格的判断、推测和引文保留其主体、语境及强度。事实有新条件时补充证据或更正说明，不替原作者改立场；引文疑点在引文外注明。纠错不顺带润色整段，不用新摘要替换正文。修改涉及旧管理区时由服务更新或撤销过期定位，历史继续保留。
 
@@ -12,4 +12,4 @@
 
 多输入任务中新建独立页面用 item_doc 指明所属项。publish 只用于获准、有独立用途的新页；不为文章入库强制创建来源副本或 Concept/Topic。普通文件保存、目录移动和自动索引不触发语义整理；人工小修后的明确维护按当前实际版本及必要上下文处理，不重复整理整库。
 
-原始 blocks 返回 content_end 小于 end 时，完整块的 hash/locator/start/end 不变，实际已读范围是 content_start..content_end。将 next_offset 和 next_start（作为 start 参数）一同带入下一次 blocks 请求；只读定位符不算已读正文。不得把原块 end 当作本次返回内容的末尾。
+原始块的完整 hash/locator/start/end 不因截断变化，实际已读范围是 content_start..content_end；只读定位符不算已读正文，原块 end 不代表本次返回末尾。

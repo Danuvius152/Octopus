@@ -1770,6 +1770,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/wiki/maintain-batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Maintain Batch */
+        post: operations["maintain_batch_api_wiki_maintain_batch_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/wiki/curate": {
         parameters: {
             query?: never;
@@ -4358,6 +4375,13 @@ export interface components {
             /** Selection Ordinal */
             selection_ordinal?: number | null;
             creation?: components["schemas"]["CreationRequest"] | null;
+        };
+        /** MaintenanceBatchRequest */
+        MaintenanceBatchRequest: {
+            /** Selection Id */
+            selection_id: string;
+            /** Ordinals */
+            ordinals: number[];
         };
         /**
          * MaintenanceSelectionRequest
@@ -8471,7 +8495,7 @@ export interface operations {
     documents_api_wiki_documents_get: {
         parameters: {
             query?: {
-                kind?: string | null;
+                kind?: ("original" | "source" | "concept" | "topic" | "submission" | "asset") | null;
                 quality?: string | null;
                 source?: string | null;
                 include_assets?: boolean;
@@ -8750,6 +8774,7 @@ export interface operations {
         parameters: {
             query: {
                 module: "query" | "retrieval" | "entry" | "worker" | "maintenance" | "article" | "writing";
+                known_context_digest?: string | null;
                 token?: string | null;
             };
             header?: never;
@@ -8784,7 +8809,7 @@ export interface operations {
                 query: string;
                 limit?: number;
                 offset?: number;
-                kind?: string | null;
+                kind?: ("original" | "source" | "concept" | "topic" | "submission" | "asset") | null;
                 include_assets?: boolean;
                 directory?: string | null;
                 intent?: ("lookup" | "question" | "overview" | "compare") | null;
@@ -9169,6 +9194,7 @@ export interface operations {
                 offset?: number;
                 limit?: number | null;
                 start?: number | null;
+                tail?: number | null;
                 token?: string | null;
             };
             header?: never;
@@ -9314,6 +9340,41 @@ export interface operations {
         requestBody: {
             content: {
                 "application/json": components["schemas"]["Maintenance"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    maintain_batch_api_wiki_maintain_batch_post: {
+        parameters: {
+            query?: {
+                token?: string | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MaintenanceBatchRequest"];
             };
         };
         responses: {

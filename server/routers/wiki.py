@@ -21,7 +21,9 @@ from ..wiki.contracts import (
     JobControlRequest,
     JobDetail,
     JobOutputPage,
+    MaintenanceBatchRequest,
     MaintenanceSelectionRequest,
+    QueryKind,
     ReadBatch,
     ReadView,
     ReviewObservation,
@@ -81,6 +83,7 @@ async def app_wiki(request: Request, app_id: str, operation: str):
         ("GET", "graph"): (graph, None),
         ("GET", "maintenance-status"): (maintenance_status, None),
         ("POST", "maintenance-selections"): (create_maintenance_selection, MaintenanceSelectionRequest),
+        ("POST", "maintain-batch"): (maintain_batch, MaintenanceBatchRequest),
         ("GET", "snapshots"): (snapshots, None),
         ("POST", "snapshot/restore"): (restore_snapshot, SnapshotRestore),
     }
@@ -238,7 +241,7 @@ def recovery_status(recovery_id: str, request: Request, user_id: ScopeUser = Non
 @router.get("/documents")
 def documents(
     request: Request,
-    kind: str | None = None,
+    kind: QueryKind | None = None,
     quality: str | None = None,
     source: str | None = None,
     include_assets: bool = False,
@@ -416,7 +419,7 @@ def info(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_to
 
 
 @router.get("/guide")
-def get_guide(request: Request, module: GuideModule, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+def get_guide(request: Request, module: GuideModule, known_context_digest: str | None = None, user_id: ScopeUser = None, _: str = Depends(verify_token)):
     from ..wiki.workflow import view
 
     task = access(request)
@@ -424,10 +427,7 @@ def get_guide(request: Request, module: GuideModule, user_id: ScopeUser = None, 
     if task is None or scope is None or task.user_id != user_id:
         raise WikiError("Wiki guides require an active authorized turn", 403)
     current = view(task)
-    return {"module": module, "content": current.load(module),
-            "access": current.access_text, "operation": current.card,
-            "policy_version": current.card["policy_version"], "guide_hash": current.card["guide_hash"],
-            "guide_digest": current.card["guide_digests"][module]}
+    return current.guide_response(module, known_context_digest)
 
 
 class SearchSection(BaseModel):
@@ -505,7 +505,7 @@ def search(
     query: str,
     limit: int = Query(12, ge=1, le=50),
     offset: int = Query(0, ge=0),
-    kind: str | None = None,
+    kind: QueryKind | None = None,
     include_assets: bool = False,
     directory: str | None = None,
     intent: Literal["lookup", "question", "overview", "compare"] | None = None,
@@ -743,11 +743,12 @@ def get_blocks(
     offset: int = Query(0, ge=0),
     limit: int | None = Query(None, ge=1, le=100),
     start: int | None = None,
+    tail: int | None = Query(None, ge=1, le=100),
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
     task = access(request)
-    return WikiCuration(registry.store(user_id)).blocks(doc, view=view, ids=ids, expected_revision=expected_revision, budget_chars=budget_chars, offset=offset, limit=limit, start=start, task=task)
+    return WikiCuration(registry.store(user_id)).blocks(doc, view=view, ids=ids, expected_revision=expected_revision, budget_chars=budget_chars, offset=offset, limit=limit, start=start, tail=tail, task=task)
 
 
 @router.post("/revise")
@@ -897,6 +898,17 @@ def maintain(
         creation=body.creation.model_dump() if body.creation is not None else None,
         requester=requester_for(request, user_id, task),
     )
+
+
+@router.post("/maintain-batch")
+def maintain_batch(body: MaintenanceBatchRequest, request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+    from ..wiki.maintenance_admission import admit_batch
+
+    task = access(request, write=True)
+    tasks.require_submitter(task)
+    return admit_batch(WikiJobs(user_id), body.selection_id, body.ordinals,
+                       actor_for(task, request.path_params.get("app_id")), task,
+                       mcp_scope=_mcp_scope(request), requester=requester_for(request, user_id, task))
 
 
 class Curate(BaseModel):

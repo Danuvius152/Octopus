@@ -45,7 +45,15 @@ def _authorize(jobs, db, key, request, review, task, mcp_scope: McpScope | None)
 def _current(jobs, db, key, request, review, task, mcp_scope: McpScope | None):
     """Uses only the final connection; no file/index synchronization or new writer."""
     _authorize(jobs, db, key, request, review, task, mcp_scope)
-    previous = jobs.previous_request(key, request, db=db)
+    try:
+        previous = jobs.previous_request(key, request, db=db)
+    except WikiError as error:
+        if error.status != 409 or request["target"] not in (None, ""):
+            raise
+        # Checked review has always accepted both absent-target representations.
+        # Match only this no-op field; retain every original ledger hash.
+        equivalent = request | {"target": "" if request["target"] is None else None}
+        previous = jobs.previous_request(key, equivalent, db=db)
     current = db.execute("SELECT id,path,revision,quality FROM documents WHERE id=?", (review["doc"],)).fetchone()
     if current is None:
         raise selections.error("source_missing", "The observed identity is no longer current", 409)
@@ -62,7 +70,7 @@ def _current(jobs, db, key, request, review, task, mcp_scope: McpScope | None):
             if not snapshot.ready or projected["source_warnings"] or projected["attempt_count"]:
                 raise selections.error("review_changed", "The prior output's current dependencies or index need review", 409)
             return dict(current), previous
-        if previous["status"] in {"queued", "running", "attention", "failed", "cancelled"}:
+        if previous["status"] in {"queued", "running", "attention", "failed", "cancelled", "interrupted", "completed_with_attention"}:
             landed = any(row["job_id"] == previous["id"] and row["doc_id"] == current["id"]
                          and row["output_revision"] == current["revision"] and row["change_status"] == "applied"
                          for row in snapshot.receipts)
@@ -80,6 +88,22 @@ def _current(jobs, db, key, request, review, task, mcp_scope: McpScope | None):
     return dict(current), None
 
 
+def _insert(jobs, db, key, request, items, task, *, aliases=()):
+    """One checked job, exact grant and per-document replay keys in this TX."""
+    from . import grants
+
+    payload = {"kind": "curation", "new_only": False, "material": "", "scope": DAILY_SCOPE,
+               "paths": request["paths"], "target": None, "sources": [], "actor": request["actor"], "request": request}
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    job_id, now = uuid.uuid4().hex, datetime.now(UTC).isoformat()
+    db.execute("INSERT INTO jobs(id,request_key,payload_hash,payload,status,items,error,session_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+               (job_id, key, hashlib.sha256(raw.encode()).hexdigest(), raw, "queued", job_items.encode(items), None, None, now, now))
+    for alias_key, alias_request in [(key, request), *aliases]:
+        db.execute("INSERT INTO job_requests VALUES(?,?,?)", (alias_key, jobs.request_hash(alias_request), job_id))
+    grants.issue(db, jobs.registration, job_id, items, policy=task.mode if task else request["actor"])
+    return job_id
+
+
 def commit(jobs, key, request, review, task, *, selection_id=None, selection_ordinal=None, mcp_scope: McpScope | None = None, requester=None):
     """Caller holds history/account/registration locks; this is the final TX."""
     with jobs.store.connect() as db:
@@ -90,19 +114,9 @@ def commit(jobs, key, request, review, task, *, selection_id=None, selection_ord
         current, previous = _current(jobs, db, key, request, review, task, mcp_scope)
         created = previous is None
         if created:
-            payload = {"kind": "curation", "new_only": False, "material": "", "scope": DAILY_SCOPE,
-                       "paths": request["paths"], "target": None, "sources": [], "actor": request["actor"], "request": request}
-            raw = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-            job_id, now = uuid.uuid4().hex, datetime.now(UTC).isoformat()
             items = [{"status": "pending", "path": current["path"], "doc": current["id"],
                       "revision": current["revision"], "quality": current["quality"]}]
-            db.execute("INSERT INTO jobs(id,request_key,payload_hash,payload,status,items,error,session_id,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                       (job_id, key, hashlib.sha256(raw.encode()).hexdigest(), raw, "queued",
-                        job_items.encode(items), None, None, now, now))
-            db.execute("INSERT INTO job_requests VALUES(?,?,?)", (key, jobs.request_hash(request), job_id))
-            from . import grants
-
-            grants.issue(db, jobs.registration, job_id, items, policy=task.mode if task else request["actor"])
+            job_id = _insert(jobs, db, key, request, items, task)
         else:
             job_id = previous["id"]
         if selection_id is not None:
@@ -112,13 +126,17 @@ def commit(jobs, key, request, review, task, *, selection_id=None, selection_ord
     return result, created
 
 
+def _request(review, actor, target=None):
+    return {"material": "", "scope": DAILY_SCOPE, "paths": [review["path"]], "target": target,
+            "sources": [], "actor": actor, "created_changes": {}, "review": review}
+
+
 def admit(jobs, key, material, paths, target, sources, actor, created_changes, review, task, *, selection_id=None, selection_ordinal=None, mcp_scope: McpScope | None = None, requester=None):
     from .jobs import worker
 
     if material or target or sources or created_changes or paths != [review["path"]] or not key.strip():
         raise WikiError("A checked daily review selects one existing document only", 422)
-    request = {"material": material, "scope": DAILY_SCOPE, "paths": paths, "target": target,
-               "sources": sources, "actor": actor, "created_changes": created_changes, "review": review}
+    request = _request(review, actor, target)
     # Construction is already complete. History precedes account; config stays
     # shared-locked from its final generation check through commit.
     with jobs.store.borrow(), WikiHistory(jobs.store).locked():
@@ -134,5 +152,58 @@ def admit(jobs, key, material, paths, target, sources, actor, created_changes, r
             except sqlite3.DatabaseError as exc:
                 raise selections.unavailable() from exc
     if created:
+        worker.wake(jobs.user_id)
+    return result
+
+
+def admit_batch(jobs, selection_id, ordinals, actor, task, *, mcp_scope=None, requester=None):
+    """Admit up to three frozen observations atomically; replay each original key."""
+    from .jobs import worker
+
+    if not 1 <= len(ordinals) <= 3 or len(set(ordinals)) != len(ordinals):
+        raise WikiError("Choose one to three distinct selection ordinals", 422)
+    with jobs.store.borrow(), WikiHistory(jobs.store).locked():
+        with jobs.store.connect() as db:
+            selections.header(db, selection_id, jobs.registration, jobs.user_id, actor)
+            reviews = [selections.item(db, selection_id, ordinal)["review"] for ordinal in ordinals]
+        for review in reviews:
+            prepare(jobs, review)
+        with registry._account_lock(jobs.user_id), registry.registration_lock(jobs.user_id):
+            registration = registry.config(jobs.user_id)
+            if registration != jobs.registration or jobs.store.registration_generation != registration["registration_generation"]:
+                raise selections.error("registration_changed", "Wiki registration changed before admission", 409)
+            with jobs.store.connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                states = []
+                for ordinal, review in zip(ordinals, reviews, strict=True):
+                    selections.check_item(db, selection_id, ordinal, review, registration, jobs.user_id, actor)
+                    request = _request(review, actor)
+                    current, previous = _current(jobs, db, review["review_key"], request, review, task, mcp_scope)
+                    states.append((ordinal, review, request, current, previous))
+                fresh = [row for row in states if row[4] is None]
+                job_id = None
+                if fresh:
+                    request = {"material": "", "scope": DAILY_SCOPE, "paths": [row[3]["path"] for row in fresh],
+                               "target": None, "sources": [], "actor": actor, "created_changes": {},
+                               "reviews": [row[1] for row in fresh]}
+                    tasks.require_submission(task, request, jobs.store, db, mcp_scope, registration, checked=True)
+                    key = "wiki-daily-batch-v1:" + digest([row[1]["review_key"] for row in fresh])
+                    items = [{"status": "pending", "path": row[3]["path"], "doc": row[3]["id"],
+                              "revision": row[3]["revision"], "quality": row[3]["quality"]} for row in fresh]
+                    job_id = _insert(jobs, db, key, request, items, task,
+                                     aliases=[(row[1]["review_key"], row[2]) for row in fresh])
+                selected, results = [], {}
+                for ordinal, review, _, _, previous in states:
+                    target = previous["id"] if previous else job_id
+                    selections.accept(db, target, selection_id, ordinal, review)
+                    if target not in results:
+                        jobs.subscribe(db, target, requester)
+                        results[target] = jobs.get(target, db=db)
+                    item = next(item for item in results[target]["items"] if item.get("doc") == review["doc"])
+                    selected.append({"ordinal": ordinal, "review_key": review["review_key"],
+                                     "job_id": target, "reused": previous is not None, **{key: item[key] for key in (
+                        "doc", "path", "status", "revision", "output_revision", "receipt_id") if key in item}})
+                result = {"aggregation_scope": "associated_jobs", "jobs": [jobs.summary(job) for job in results.values()], "selected_items": selected}
+    if fresh:
         worker.wake(jobs.user_id)
     return result

@@ -1674,14 +1674,17 @@ class WikiWorker:
 
             grants.assign(session.id, job_id, readable, registration=config,
                           request_id=reference["request_id"], attempt=reference["attempt"])
-            review = payload.get("request", {}).get("review")
+            request = payload.get("request", {})
+            reviews = request.get("reviews") or ([request["review"]] if request.get("review") else [])
+            phases = {review["doc"]: "first" if review["baseline_receipt_id"] is None else "incremental" for review in reviews}
             review_phase = ""
-            if review is not None:
-                review_phase = (
-                    "\n日常复核阶段: 首次复核（无已接受基线）；执行 worker 指南中的首次复核检查。"
-                    if review["baseline_receipt_id"] is None else
-                    "\n日常复核阶段: 增量复核（已有接受基线）；按当前变化做必要复核。"
-                )
+            if phases:
+                review_phase = "\n日常复核阶段逐篇见 review_phase：first 为首次复核（无已接受基线），incremental 为增量必要复核。"
+                for document in briefing:
+                    if document["id"] in phases:
+                        document["review_phase"] = phases[document["id"]]
+            rereads = [{key: item.get(key) for key in ("path", "retry_reason", "retry_count")}
+                       for item in readable if item.get("retry_reason") or item.get("retry_count")]
             prompt = (
                 "这是已明确授权的持久维护任务。按本次共享维护与写作指南执行。\n"
                 + "用户要求: "
@@ -1689,8 +1692,7 @@ class WikiWorker:
                 + review_phase
                 + "\n正文与新页仅限这些目标；已有导航页可用 relations-only organize 补本批入口，其他关联页按需读取:\n"
                 + json.dumps(briefing, ensure_ascii=False)
-                + "\n重读原因与已用重读次数:\n"
-                + json.dumps([{key: item.get(key) for key in ("path", "retry_reason", "retry_count")} for item in readable], ensure_ascii=False)
+                + (("\n重读原因与已用重读次数:\n" + json.dumps(rereads, ensure_ascii=False)) if rereads else "")
                 + "\n本队列没有人等待同步答复；以实际发布产物结束。"
             )
             receipt = None

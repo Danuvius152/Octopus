@@ -34,8 +34,8 @@ QUERY_TOOLS = frozenset({
 })
 
 BOOTSTRAP = """共享 Wiki 可在普通任务中按需自主查询，无需 /wiki 或先询问其他 agent；查询不自动保存对话或维护文章。
-需要使用 Wiki 时再取得本轮操作卡与指南：没有对应指南先 load_guide；已有指南先用 info 核对当前操作卡的 guide_digests，仅复用仍在上下文且正文 digest 相同的内容。普通查询用 query，提交具体维护请求用 entry；执行维护先加载 worker，再按需加载 maintenance、article、writing，这些模块只向当前有效 curator assignment 开放。retrieval 按检索细节需要加载。load_guide 同时返回当前操作卡、公共规则和该模块正文。
-操作卡、任务、来源要求和权限以本轮实时回执为准；历史卡、指南版本及缓存均不授予权限，服务端逐次检查授权。使用当前提供的 Wiki 工具，禁止复用旧票据。指南被压缩或不再完整可见时重新加载；未使用 Wiki 的任务无需加载。"""
+按本次目的 load_guide：查询用 query，提交维护用 entry，执行维护先用 worker，其余模块按需。首次加载取得公共规则与操作卡；同一上下文复用完整指南，后续模块可按工具说明省略未变的公共回包。跨回合先用 info 核对 guide_digests，缺失或变动的正文重新加载。
+操作卡、任务、来源要求和权限以本轮实时回执为准；指南与摘要不授予权限，服务端逐次检查授权。使用当前工具，不复用旧票据；未使用 Wiki 的任务无需加载。"""
 
 
 def guide(name: str) -> str:
@@ -65,6 +65,18 @@ class PolicyView:
         if module not in self.guides:
             raise WikiError("This guide requires an active curator assignment", 403)
         return self.guides[module]
+
+    def guide_response(self, module: GuideModule, known_context_digest: str | None = None) -> dict:
+        content = self.load(module)
+        context_digest = hashlib.sha256(json.dumps(
+            [self.card, self.access_text], ensure_ascii=False, sort_keys=True,
+        ).encode()).hexdigest()
+        result = {"module": module, "content": content,
+                  "policy_version": self.card["policy_version"], "guide_hash": self.card["guide_hash"],
+                  "guide_digest": self.card["guide_digests"][module], "context_digest": context_digest}
+        if context_digest != known_context_digest:
+            result |= {"access": self.access_text, "operation": self.card}
+        return result
 
 
 def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
@@ -100,7 +112,7 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
         if grant["allow_new_pages"]:
             names.add("publish")
     elif submitter:
-        names.add("maintain")
+        names |= {"maintain", "maintain_batch"}
 
     # The digest describes the installed text bundle, not current permission.
     # Keeping one snapshot also makes load_guide's digest match its actual text.
@@ -110,7 +122,7 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
                  "entry": bundle["entry"]} if live else {}
     if worker:
         available |= {
-            "worker": "正文与新页按操作卡目标；已有导航 Markdown 可用 relations-only organize 补本批入口，不取得该页正文修改权。\n\n" + bundle["worker-v2"],
+            "worker": bundle["worker-v2"],
             "maintenance": bundle["maintenance-v2"], "article": bundle["article-v2"], "writing": bundle["writing"],
         }
     guide_digests = {module: hashlib.sha256((bundle["access"] + "\n\n" + text).encode()).hexdigest()
@@ -133,7 +145,7 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
     elif task:
         card["state"] = "主库尚未绑定；用 info 确认状态"
     if task and task.job_id:
-        card |= {"job_id": task.job_id, "scope_details": {"tool": "jobs", "job_id": task.job_id, "view": "full", "export": True}}
+        card["job_id"] = task.job_id
     if grant is not None:
         # The V2 grant's persistent primary identity is its original job_id.
         card |= {"grant_version": 2, "grant_id": grant["job_id"],
@@ -142,6 +154,8 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
             card["selection_id"] = grant["selection_ids"][0]
         remaining = _paths(card, "writable_files", [item["current_path"] for item in grant["selected_documents"] if item["current_path"]], PATHS_MAX_BYTES)
         _paths(card, "allowed_new_paths", grant["allowed_new_paths"], remaining)
+        if card["writable_files_truncated"] or card["allowed_new_paths_truncated"]:
+            card["scope_details"] = {"tool": "jobs", "job_id": task.job_id, "view": "full", "export": True}
     elif submitter and mode == "maintain":
         from .tasks import daily_command
 

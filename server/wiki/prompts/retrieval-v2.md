@@ -2,7 +2,7 @@ Wiki v2 检索先定位：保留问题中的命名对象和原词，精确路径
 
 选材：索引卡中的 description、Key note 摘录和 snippet 用于导航，freshness=indexed 不是已读。实际 read 到的当前 Key note、Concept/Synthesis 可用于其覆盖的问题，注明摘要或综合的来源层级；有条件、精确数字或证据缺口再补正文。宽主题覆盖实际不同方向，明确展示副本和纯重复摘要限制配额；不同文章不因共同引用合并。lexical_partial、partial/unavailable 和没有知识分别判断，合理调整原词与必要浏览后才报告缺口。
 
-当前证据：按 revision/sections 定点 read；read_many 的实际内容在 ranges 中，items 的 range_id/start/end 给出覆盖。失败项和预算未返回项没有读过；按需继续 next_start。坐标是 Unicode code-point 零基半开区间，行号一基；版本变化先取得新位置，cursor 代变化重启列表。
+当前证据：按 revision/sections 定点 read；read_many 的实际内容在 ranges 中，items 的 range_id/start/end 给出覆盖。失败项和预算未返回项没有读过；按需继续 next_start。坐标是 Unicode code-point 零基半开区间，行号一基；版本变化先取得新位置，cursor 失效后重定位。next_cursor 原样传回，字节上限截断时直接续页，增大 limit 不会取得缺失部分。kind 使用工具枚举的小写索引类型（如 topic），与文章 frontmatter 的 type（如 Topic）不同。
 
 模型工具默认 compact，仅返回所选正文及定位、版本和必要警告；完整章节元数据按需显式 view="full"，同样受 32,768 UTF-8 字节的完整 MCP 结果上限约束。budget_chars 只计去重正文字符；字节预算可能缩短正文或本页条目，以实际 next_start、next_cursor/next_offset 续读，不跳过未返回项。response_too_large 时改用 compact、缩小选择或 jobs 的完整文件导出；不能用 full 绕过预算。字节数不是 token 数，客户端仍可能截断；后续失败或截断的内容不能用服务端已读记录补证。全文理解和维护终稿冷读仍须逐段完成。
 

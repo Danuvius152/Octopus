@@ -9,9 +9,11 @@ from ..mcp_result import TEXT_RESULT_MAX_BYTES, bound_tool_handler, model_result
 from ..wiki.contracts import (
     CreationRequest,
     GuideModule,
+    QueryKind,
     ReadRequest,
     ReadView,
     ReviewObservation,
+    ReviewOrdinals,
     Revision,
 )
 from . import _host
@@ -65,25 +67,20 @@ def search(
     query: str,
     limit: int = 12,
     offset: int = 0,
-    kind: str | None = None,
+    kind: QueryKind | None = None,
     include_assets: bool = False,
     directory: str | None = None,
     intent: str | None = None,
     view: str = "compact",
     cursor: str | None = None,
 ) -> dict:
-    """Find Markdown navigation; defaults to compact with lookup/question/overview/compare intent.
+    """Find Markdown navigation with lookup/question/overview/compare intent.
 
-    All intents, explicit identities, kind and include_assets remain Markdown-only.
-    Use read() for an explicitly selected HTML/TXT original.
-    Explicit view=full includes indexed metadata within the same byte limit.
-    Each document appears once. section.start/end locate evidence for read();
-    sections includes extra matched chapters for terms discussed separately.
-    pass expected_revision to check freshness. Snippets are navigation only.
-    match_mode=lexical_partial means some query words were absent; index_status
-    and index_errors distinguish extraction failure from missing knowledge.
-    Use directory to narrow an explicitly identified folder; it is a literal
-    vault-relative prefix. Preserve named objects when adjusting query wording.
+    section/sections give revision-bound positions for read(); snippets are not
+    reading evidence. compact is default; full adds metadata within the same
+    byte limit. lexical_partial indicates absent query terms; inspect index
+    status/errors before concluding no knowledge. directory is a literal prefix.
+    All filters remain Markdown-only; read explicit HTML/TXT originals directly.
     """
     return call(
         "GET", "search", params={k: v for k, v in locals().items() if v is not None}
@@ -94,15 +91,11 @@ def search(
 def read_many(items: list[ReadRequest], budget_chars: int = 24000, view: ReadView = "compact") -> dict:
     """Read requested current passages once, merging overlaps; no model is called.
 
-    Each item reports ok/partial/changed/not_found/excluded/budget_exhausted.
-    Content appears once in ranges; items reference range_id and start/end.
-    budget_chars counts unique body Unicode characters. Default compact omits
-    full chapter metadata and caps the serialized MCP text result and its
-    wrapper at 32768 UTF-8 bytes. This is not a token
-    limit or a guarantee against later client truncation. Follow next_start
-    after partial/budget results; only returned passages count as read.
-    Explicit view=full keeps metadata within the same envelope limit; if its
-    minimum cannot fit, use compact or fewer documents. No unseen range is read.
+    items report status and reference actual content in ranges by range_id and
+    start/end. budget_chars counts unique Unicode characters; the complete MCP
+    envelope is separately capped at 32768 UTF-8 bytes in both views. Follow
+    next_start for partial/budget results; unseen ranges never count as read.
+    full adds metadata; oversized metadata needs compact or fewer documents.
     """
     return call("POST", "read-many", body={"items": [item.model_dump() for item in items], "budget_chars": budget_chars, "view": view})
 
@@ -118,12 +111,10 @@ def read(
 ) -> dict:
     """Read one current document slice, not the vault; no model is called.
 
-    start/length are Unicode character offsets (default 16000 characters).
-    Default compact omits full chapter metadata and bounds the complete MCP
-    result at 32768 UTF-8 bytes, so less body may fit. Keep revision and follow
-    next_start; only returned content was read. This is not a token limit or
-    a guarantee against later client truncation. Explicit view=full keeps its
-    metadata within the same limit; oversized metadata requires compact view.
+    start/length are Unicode character offsets. Keep revision and follow
+    next_start; only returned content counts as read. Both views cap the full
+    MCP envelope at 32768 UTF-8 bytes, independently of requested characters.
+    full adds metadata; oversized metadata requires compact.
     """
     return call(
         "GET", "read", params={k: v for k, v in locals().items() if v is not None}
@@ -137,17 +128,16 @@ def info() -> dict:
 
 
 @mcp.tool()
-def load_guide(module: GuideModule) -> dict:
-    """Load a needed guide with common rules and the current operation card.
+def load_guide(module: GuideModule, known_context_digest: str | None = None) -> dict:
+    """Load one needed guide, checking current authority on every call.
 
-    Reuse complete content only when its guide_digest still matches the current
-    operation's guide_digests[module]; reload missing content. The whole-bundle
-    guide_hash alone does not identify mode-dependent entry text.
-    query/retrieval/entry are readable in authorized turns. worker/maintenance
-    (patches, sources, recovery), article (metadata/layout) and writing
-    (new prose) require a current curator worker assignment.
+    Reuse a module already complete in context with its current guide_digest.
+    For another module, pass the prior context_digest as known_context_digest
+    only while its common rules and operation card remain in context. Matching
+    context omits those shared fields; changed context returns them in full.
+    Omit the digest after context loss. A digest never grants worker authority.
     """
-    return call("GET", "guide", params={"module": module})
+    return call("GET", "guide", params={key: value for key, value in locals().items() if value is not None})
 
 
 @mcp.tool()
@@ -155,7 +145,7 @@ def list_documents(
     directory: str | None = None,
     offset: int = 0,
     limit: int = 30,
-    kind: str | None = None,
+    kind: QueryKind | None = None,
     include_assets: bool = False,
     quality: str | None = None,
     source: str | None = None,
@@ -253,30 +243,19 @@ def maintain(
 ) -> dict:
     """Submit a durable maintenance request to the configured Weber worker.
 
-    This queues work; a job ID alone does not mean maintenance is complete.
-    Submission gives the caller no direct document-writing capability.
-    Existing-document work grants no new pages. For explicitly requested new
-    knowledge pages, propose creation={purpose:'requested_knowledge_page',paths:[...]};
-    the host admits at most 16 exact targets under the current entry policy.
-    An autonomous entry may omit paths for one stable host-selected target.
-    A scoped maintenance entry must select those targets in the original command.
-    Workers cannot expand this grant; citations remain read-only.
-    Material is preserved verbatim; target is a new Library/*.md path, otherwise
-    Library/Inbox is used. Sources are read-only citations, not write targets.
-    Selected paths must be eligible Markdown; HTML/TXT originals remain read-only.
-    In autonomous mode, choose exact paths relevant to the current task.
-    Explicit maintenance mode retains the user's selected paths. The user need
-    not type /wiki; no material or paths means no full-vault maintenance.
-    Returns a bounded submission receipt with the actual current job status;
-    use jobs(job_id=..., view="full", export=true) for complete item evidence.
-    For ordinary daily review, copy review and its review_key from the current
-    maintenance_status item, set paths to that one current path and material
-    empty. This checked branch has a fixed minimal-review purpose; it does not
-    accept new material, sources or targets. Other explicit purposes retain the
-    original idempotency contract. A comparison never grants file selection.
-    For a frozen selection also supply its ID and exact item ordinal together;
-    copy the complete review and exact path. Selection identity does not create
-    duplicate semantic work or relax the current write scope.
+    Queues exact Markdown paths or verbatim new material; the returned job state
+    is not completion or direct write authority. Citations and HTML/TXT originals
+    stay read-only. Keep the original task's selection; no empty full-vault job.
+    New material targets Library/*.md or defaults to Library/Inbox.
+    Existing-file maintenance grants no new pages. Explicitly requested pages
+    use creation={purpose:'requested_knowledge_page',paths:[...]} (at most 16);
+    scoped requests must already select them. Auto may omit paths for one stable
+    host-selected target. Workers cannot expand the admitted grant.
+    Single daily review copies its current review/review_key and exact path,
+    with empty material and no new sources/target. Frozen evidence also supplies
+    selection_id and selection_ordinal together. Multiple frozen items should
+    use maintain_batch. Other purposes keep their original idempotency contract.
+    Only missing item evidence needs jobs(view="full", export=true).
     """
     result = call(
         "POST",
@@ -299,6 +278,12 @@ def maintain(
     from ..wiki.jobs import WikiJobs
 
     receipt = WikiJobs.summary(result)
+    if review is not None and result.get("payload", {}).get("request", {}).get("reviews"):
+        receipt["aggregation_scope"] = "associated_jobs"
+        receipt["selected_items"] = [
+            {key: item[key] for key in ("doc", "path", "status", "revision", "output_revision", "receipt_id") if key in item}
+            for item in result["items"] if item.get("doc") == review.doc
+        ]
     reused = [item for item in result["items"] if item.get("reused") is True]
     if reused:
         limits = {"doc": 128, "output": 512, "output_revision": 128}
@@ -313,6 +298,20 @@ def maintain(
             for key, limit in limits.items()
         )
     return receipt
+
+
+@mcp.tool()
+def maintain_batch(selection_id: str, ordinals: ReviewOrdinals) -> dict:
+    """Submit one to three exact frozen selection ordinals as a checked review batch.
+
+    Copy the selection ID and choose actionable items from its returned page.
+    The host rechecks each observation and original write scope atomically.
+    Fresh items share one worker context; original review keys remain reusable.
+    Existing work is reused, never merged into another running job. jobs report
+    whole-job state; selected_items report each requested document's own state.
+    This submits work, grants no direct writes and creates no knowledge pages.
+    """
+    return call("POST", "maintain-batch", body={"selection_id": selection_id, "ordinals": ordinals})
 
 
 @mcp.tool()
@@ -388,9 +387,12 @@ def publish(
 
 
 @mcp.tool()
-def blocks(doc: str, view: str = "full", ids: list[str] | None = None, expected_revision: str | None = None, budget_chars: int | None = None, offset: int = 0, limit: int | None = None, start: int | None = None) -> dict:
-    """Locate current raw blocks with view=locators, then read selected ids.
+def blocks(doc: str, view: str = "full", ids: list[str] | None = None, expected_revision: str | None = None, budget_chars: int | None = None, offset: int = 0, limit: int | None = None, start: int | None = None, tail: int | None = None) -> dict:
+    """Read selected raw blocks directly; tail=2 reads the last two for an append.
 
+    tail (1..100) cannot combine with ids or a nonzero offset.
+    On continuation omit tail, keep expected_revision and pass next_offset as
+    offset plus next_start as start when present; offsets refer to the full note.
     Raw positions are Unicode codepoints and hashes cover original UTF-8 bytes.
     Locators bind the document/revision; locator-only output is not a read.
     offset is zero-based; limit is 1..100. Follow next_offset for more blocks.
