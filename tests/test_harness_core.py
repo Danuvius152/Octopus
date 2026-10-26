@@ -729,7 +729,11 @@ async def test_send_user_frame_refused_on_argv_backends(tmp_path):
 
 
 def _sig_profile() -> RuntimeProfile:
-    return _stream_profile('{"type":"result"}')
+    from dataclasses import replace
+
+    from server.harness.profile import ToolPolicySupport
+
+    return replace(_stream_profile('{"type":"result"}'), tool_policy=ToolPolicySupport(allow=True, deny=True))
 
 
 def test_spawn_signature_is_stable_across_turns():
@@ -741,16 +745,18 @@ def test_spawn_signature_is_stable_across_turns():
     the signature, so every turn looked like a config change and reuse silently
     never happened. That fails quietly, as a permanent ~1s-per-turn tax.
     """
-    class _Conn:
-        kind = "gmail"
+    from copy import copy
 
-    class _Inst:
-        id = "install-1"
+    from server.connectors.base import ConnectorInstallation
+    from server.connectors.registry import get_connector
+
+    connector = get_connector("gmail")
+    installation = ConnectorInstallation(id="install-1", kind="gmail", label="Mail")
 
     profile = _sig_profile()
     cfg = dict(system_prompt="P", model="m")
-    a = Harness(profile).create_run(RunConfig(connectors=[(_Conn(), _Inst())], **cfg))
-    b = Harness(profile).create_run(RunConfig(connectors=[(_Conn(), _Inst())], **cfg))
+    a = Harness(profile).create_run(RunConfig(connectors=[(copy(connector), copy(installation))], **cfg))
+    b = Harness(profile).create_run(RunConfig(connectors=[(copy(connector), copy(installation))], **cfg))
     assert a.spawn_signature("/tmp", None) == b.spawn_signature("/tmp", None)
 
 

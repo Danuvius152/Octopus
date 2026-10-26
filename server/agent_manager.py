@@ -26,6 +26,20 @@ from .credential_bindings import (
     validate_failed_credential_write,
 )
 from .database import Database
+from .harness import RunConfig, get_harness
+
+
+def _validate_runtime_configuration(backend: str, fields: dict[str, Any]) -> None:
+    harness = get_harness(backend)
+    allow, deny = fields.get("tool_allow"), fields.get("tool_deny")
+    harness.profile.tool_policy.validate(backend, allow, deny)
+    harness.validate_configuration(RunConfig(
+        system_prompt=fields.get("system_prompt"), model=fields.get("model"),
+        reasoning_effort=fields.get("reasoning_effort"), service_tier=fields.get("service_tier"),
+        subagents=fields.get("subagents") or [], mcp_servers=[],
+        tool_allow=[line.strip() for line in (allow or "").splitlines() if line.strip()],
+        tool_deny=[line.strip() for line in (deny or "").splitlines() if line.strip()],
+    ))
 
 
 class AgentError(Exception):
@@ -108,8 +122,12 @@ class AgentManager:
         backend = backend or settings.default_backend
         credential_id = credential_id or None
         try:
+            _validate_runtime_configuration(backend, {
+                "system_prompt": system_prompt, "model": model, "reasoning_effort": reasoning_effort,
+                "service_tier": service_tier, "subagents": subagents, "tool_allow": tool_allow, "tool_deny": tool_deny,
+            })
             await validate_credential_binding(self.db, credential_id, backend, user_id)
-        except CredentialBindingError as exc:
+        except ValueError as exc:
             raise AgentError(str(exc)) from exc
         agent_id = uuid.uuid4().hex[:12]
         now = datetime.now(UTC).isoformat()
@@ -156,6 +174,7 @@ class AgentManager:
         agent = await self.db.get_agent(agent_id, user_id=user_id)
         if agent is None:
             raise AgentError("Agent not found")
+        fields = self.db.normalize_agent_update(fields)
         if "credential_id" in fields:
             fields["credential_id"] = fields["credential_id"] or None
         credential_id = fields.get("credential_id", agent.get("credential_id"))
@@ -164,10 +183,11 @@ class AgentManager:
             backend = agent["backend"]
         owner_id = agent.get("user_id")
         try:
+            _validate_runtime_configuration(backend, {**agent, **fields})
             await validate_credential_binding(
                 self.db, credential_id, backend, owner_id
             )
-        except CredentialBindingError as exc:
+        except ValueError as exc:
             raise AgentError(str(exc)) from exc
         if "name" in fields and fields["name"] is not None:
             new_name = fields["name"].strip()

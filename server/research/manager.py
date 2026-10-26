@@ -224,12 +224,20 @@ class ResearchManager:
                 harness = get_harness(session.backend)
                 agent = await self.db.get_agent(session.agent_id) if session.agent_id else None
                 model = (agent or {}).get("model")
-                credential = await self.session_mgr.resolve_credential_by_id(
-                    session.credential_id or (agent or {}).get("credential_id"),
-                    style=harness.profile.credential_style,
-                    context=f"research {job_id}",
-                    user_id=self._contexts[job_id].execution.origin.user_id,
-                )
+                user_id = self._contexts[job_id].execution.origin.user_id
+                credential_id, backend = session.credential_id or (agent or {}).get("credential_id"), session.backend
+                database = self.db
+
+                async def authorize_spawn():
+                    await database.require_run_authority(user_id, credential_id, backend)
+
+                try:
+                    credential = await self.session_mgr.resolve_credential_by_id(
+                        credential_id, backend=backend, context=f"research {job_id}", user_id=user_id,
+                    )
+                    await authorize_spawn()
+                except ValueError as error:
+                    raise ResearchError(str(error), status_code=403) from error
                 if not work_is_open(self._contexts[job_id].return_binding.work_id):
                     raise asyncio.CancelledError("original research work is closed")
 
@@ -259,6 +267,7 @@ class ResearchManager:
                         working_dir=scratch,
                         limits=ResearchLimits(),
                         on_progress=on_progress,
+                        authorize_spawn=authorize_spawn,
                     )
 
             # Completion is selected before this await. Cancellation retires

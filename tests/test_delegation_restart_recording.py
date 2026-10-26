@@ -23,6 +23,7 @@ from server.mcp_identity import revoke_run, scope_is_live, verify
 from server.sessions import SessionManager
 from server.users import UserManager
 from tests.accounts import create_account
+from tests.harness_profiles import session_turn_argv
 
 
 async def _finished(manager, rec):
@@ -156,7 +157,7 @@ async def _crash_scenario(directory: Path, mode: str, applied: bool) -> None:
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    harness.profile = replace(harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None)
+    harness.profile = replace(harness.profile, build_turn_argv=session_turn_argv(harness.profile, argv), prepare_resume=None, activity_observer=None)
     database = Database(str(path))
     await database.initialize()
     if unfinished is None:

@@ -93,7 +93,7 @@ class ForkingMixin(SessionManagerBase):
                         eff_cred_id = ag.get("credential_id") if ag else None
                     cred = await self.resolve_credential_by_id(
                         eff_cred_id,
-                        style=harness.profile.credential_style,
+                        backend=harness.profile.backend,
                         context=f"fork recovery {fork_id}",
                         require_auth=False,
                         user_id=row.get("user_id"),
@@ -526,7 +526,7 @@ class ForkingMixin(SessionManagerBase):
                 agent.get("credential_id") if agent else None
             )
             parent_cred = await self.resolve_credential_by_id(
-                eff_cred_id, style=harness.profile.credential_style,
+                eff_cred_id, backend=harness.profile.backend,
                 context=f"fork {parent.id}", require_auth=False,
                 user_id=source.user_id,
             )

@@ -13,7 +13,8 @@ import { reorderAgentPins, setAgentPinned } from "../api/agents";
 import { fetchInstallations } from "../api/connectors";
 import { selectSession } from "../lib/selectSession";
 import { loadSessionSnapshot, sessionInfoFromDetail } from "../lib/hydrateSession";
-import { sidebarAgents, withPinOrder } from "../lib/sidebarPins";
+import { sidebarAgents } from "../lib/sidebarPins";
+import { refreshAgents, withAgentRequest } from "../lib/refreshAgents";
 import { useSessionStore, type Agent, type SessionInfo } from "../stores/sessionStore";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
 import { SortablePin, SortablePins, type DragHandle } from "./SortablePins";
@@ -42,7 +43,6 @@ const API = window.location.origin;
 export function SidebarAgents() {
   const token = useSessionStore((s) => s.token);
   const agents = useSessionStore((s) => s.agents);
-  const setAgents = useSessionStore((s) => s.setAgents);
   const sessions = useSessionStore((s) => s.sessions);
   const setSessions = useSessionStore((s) => s.setSessions);
   const activeAgentId = useSessionStore((s) => s.activeAgentId);
@@ -77,12 +77,6 @@ export function SidebarAgents() {
 
   const headers = { Authorization: `Bearer ${token}` };
 
-  const fetchAgents = useCallback(async () => {
-    const res = await fetch(`${API}/api/agents`, { headers });
-    if (res.ok) setAgents((await res.json()) as Agent[]);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, setAgents]);
-
   const fetchSessions = useCallback(async () => {
     try {
       const res = await fetch(`${API}/api/sessions`, { headers });
@@ -95,7 +89,7 @@ export function SidebarAgents() {
 
   useEffect(() => {
     if (!token) return;
-    void fetchAgents().catch(() => {});
+    void refreshAgents().catch(() => {});
     fetchSessions();
     fetch(`${API}/api/backends`, { headers })
       .then((r) => (r.ok ? r.json() : null))
@@ -103,6 +97,7 @@ export function SidebarAgents() {
         if (d?.available) setAvailableBackends(d.available);
         if (d?.default) useSessionStore.getState().setDefaultBackend(d.default);
         if (d?.models) useSessionStore.getState().setBackendModels(d.models);
+        if (d?.tool_policy) useSessionStore.getState().setBackendToolPolicies(d.tool_policy);
       })
       .catch(() => {});
     // Connector installations are global; the agent form reads them to render
@@ -202,27 +197,27 @@ export function SidebarAgents() {
     }
   };
 
-  // A drop reorders the store at once and lets the server confirm; its reply
-  // is the whole live list, so it replaces ours. A failure puts back the
-  // server's truth rather than leaving a local order nobody saved.
+  // A drop and its receipt/compensation retain one operation identity.
   const reorder = async (orderedIds: string[]) => {
-    const store = useSessionStore.getState();
-    store.setAgents(withPinOrder(store.agents, orderedIds));
-    try {
-      setAgents((await reorderAgentPins(token, orderedIds)) as Agent[]);
-    } catch {
-      fetchAgents();
-    }
+    await withAgentRequest(async (request) => {
+      const store = useSessionStore.getState();
+      store.applyAgentOrder(orderedIds, request);
+      try {
+        store.applyAgentSnapshot((await reorderAgentPins(token, orderedIds)) as Agent[], request);
+      } catch {
+        await refreshAgents(request).catch(() => {});
+      }
+    });
   };
 
   const setPinned = async (agent: Agent, pinned: boolean) => {
-    try {
-      useSessionStore
-        .getState()
-        .upsertAgent((await setAgentPinned(token, agent.id, pinned)) as Agent);
-    } catch {
-      fetchAgents();
-    }
+    await withAgentRequest(async (request) => {
+      try {
+        useSessionStore.getState().upsertAgent((await setAgentPinned(token, agent.id, pinned)) as Agent, request);
+      } catch {
+        await refreshAgents(request).catch(() => {});
+      }
+    });
   };
 
   // Archive, not delete: the conversation leaves the rail with nothing in

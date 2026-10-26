@@ -476,7 +476,8 @@ class RecoveryManager:
                     relative = Path(entry.path).relative_to(h.metadata.root).as_posix()
                     files.append(self._file(h.metadata.root, relative)[0])
 
-        visit(h.metadata.root)
+        with h.observer.watching():
+            visit(h.metadata.root)
         return sorted(files, key=lambda item: item["path"]), directories
 
     def plan(self, user_id, retain=()):

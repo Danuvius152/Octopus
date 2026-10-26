@@ -24,8 +24,7 @@ import time
 import uuid as uuid_module
 from collections import deque
 from collections.abc import AsyncIterator, Awaitable, Callable
-from dataclasses import dataclass, field
-from pathlib import Path
+from dataclasses import asdict, dataclass, field
 from typing import Any
 
 from ..config import settings
@@ -33,6 +32,7 @@ from ..diagnostics import diagnostic_text, exception_diagnostic
 from ..process_groups import group_exists, wait_group_exit
 from . import assembly
 from .events import HarnessCredential, HarnessEvent
+from .launch_limits import validate_launch
 from .profile import ActivityObserver, RuntimeProfile, StdinMode, TurnContext
 
 logger = logging.getLogger(__name__)
@@ -120,6 +120,7 @@ def prepare_spawn(
     env = kwargs.get("env") or os.environ.copy()
     cli_dir = os.path.dirname(argv[0]) if argv and os.path.isabs(argv[0]) else None
     env["PATH"] = augmented_path(env.get("PATH"), cli_dir)
+    validate_launch(argv, env)
     # Own process group (session leader) so the whole tree the CLI spawns —
     # MCP servers, nested subagents (Claude `Task`/Workflow) — is reapable as a
     # unit via killpg, instead of orphaning on stop()/interrupt()
@@ -281,54 +282,9 @@ class HarnessRun:
         """Run the shared assembly (MCP selection, system-prompt composition,
         working-dir absolutization) into a neutral TurnContext. Side-effect
         free, so both `build_argv` (argv inspection) and `start()` use it."""
-        # Resolve working_dir to ABSOLUTE before handing it to the CLI: MCP
-        # grandchildren inherit cwd, so a relative path would be double-resolved.
-        abs_wd = str(Path(working_dir).resolve())
-        wiki_scope_id = self._config.wiki_task_id
-        if self.reusable and self._config.session_id and wiki_scope_id:
-            from ..wiki.tasks import RUN_WIKI_SCOPE
-            wiki_scope_id = RUN_WIKI_SCOPE
-        callback_env = assembly.build_callback_env(self._config.session_id)
-        mcp_servers = assembly.select_mcp_servers(
-            self._config.mcp_servers,
-            self._config.connectors,
-            callback_env,
-            session_id=self._config.session_id,
-            user_id=self._config.user_id,
-            wiki_task_id=wiki_scope_id,
-            run_lease_id=self.run_lease_id,
-            work_id=self.work_id,
-        )
-        system_prompt = assembly.compose_system_prompt(
-            self._config.system_prompt,
-            self._profile.tools_prompt,
-            self._config.connectors,
-            memory_dir=self._config.memory_dir,
-            inject_memory=self._profile.injects_memory_prompt,
-            fork_note=None,
-            wiki_mode=self._config.wiki_mode,
-            wiki_capability=True,
-            wiki_task_id=self._config.wiki_task_id,
-        )
-        turn_instructions = "\n\n".join(filter(None, (self._config.turn_instructions, self._config.fork_note)))
-        if self._profile.backend != "codex":
-            system_prompt = "\n\n".join(filter(None, (system_prompt, turn_instructions)))
-        return TurnContext(
-            prompt=prompt,
-            working_dir=abs_wd,
-            resume_id=resume_id,
-            system_prompt=system_prompt,
-            model=self._config.model,
-            reasoning_effort=self._config.reasoning_effort,
-            service_tier=self._config.service_tier,
-            tool_allow=self._config.tool_allow,
-            tool_deny=self._config.tool_deny,
-            mcp_servers=mcp_servers,
-            credential=credential,
-            memory_dir=self._config.memory_dir,
-            web_research=self._config.web_research,
-            subagents=self._config.subagents,
-            turn_instructions=turn_instructions if self._profile.backend == "codex" else "",
+        return assembly.assemble_turn(
+            self._profile, self._config, prompt, working_dir, resume_id, credential,
+            run_lease_id=self.run_lease_id, work_id=self.work_id,
         )
 
     def build_argv(
@@ -366,7 +322,7 @@ class HarnessRun:
             raise RuntimeError("Delegated work is closed")
 
         ctx = self._make_context(prompt, working_dir, resume_id, credential)
-        spawn_identity = self.spawn_signature(working_dir, credential)
+        spawn_identity = self._context_signature(ctx)
         argv, kwargs = self._profile.build_turn_argv(ctx)
         argv, kwargs = prepare_spawn(argv, kwargs)
         if ctx.resume_id and self._profile.prepare_resume is not None:
@@ -565,53 +521,36 @@ class HarnessRun:
         """
         if self._spawn_identity is not None:
             return self._spawn_identity
-        parts = [
-            self._profile.backend,
-            self.work_id or "",
-            ("run-bound-wiki" if self.reusable and self._config.session_id and self._config.wiki_task_id else self._config.wiki_task_id or ""),
-            self._config.wiki_mode or "",
-            self._config.system_prompt or "",
-            self._config.model or "",
-            self._config.reasoning_effort or "",
-            self._config.service_tier or "default",
-            self._config.credential_id or "",
-            ",".join(sorted(self._config.mcp_servers or [])),
-            # WHERE those namespaces are served, and with what credential. Since
-            # they moved in-process (polish-2026-09.md §4 B1) each entry's URL
-            # carries the server's port and its bearer is derived from the
-            # session and the access token — all of it baked into argv at spawn,
-            # and all of it derived from this env. A held process reused after
-            # the port moved is pointed at a socket that is not there: it
-            # reports every namespace as unreachable and the model loses its
-            # tools mid-conversation, with nothing in our logs to say why.
-            # (Hashed like everything else here, so the token is not held in
-            # readable form.)
-            ",".join(
-                f"{k}={v}"
-                for k, v in sorted(
-                    assembly.build_callback_env(self._config.session_id).items()
-                )
-            ),
-            ",".join(sorted(self._config.tool_allow or [])),
-            ",".join(sorted(self._config.tool_deny or [])),
-            self._config.memory_dir or "",
-            self._config.fork_note or "",
-            str(self._config.web_research),
-            # (kind, installation id) — content, not object identity. A
-            # connector object's default repr carries its memory address, which
-            # changes between turns and would make every signature differ, so
-            # reuse would silently never happen for an agent with connectors.
-            ",".join(
-                sorted(
-                    f"{getattr(conn, 'kind', '?')}:{getattr(inst, 'id', '?')}"
-                    for conn, inst in self._config.connectors
-                )
-            ),
-            str(Path(working_dir).resolve()),
-            (credential.auth_type + ":" + (credential.secret or "")) if credential else "",
-            (credential.home_dir or "") if credential else "",
-        ]
-        return hashlib.sha256("\x1f".join(parts).encode()).hexdigest()
+        return self._context_signature(self._make_context("", working_dir, None, credential))
+
+    def _context_signature(self, ctx: TurnContext) -> str:
+        """Hash the same assembled inputs the renderer receives. Prompt/resume
+        and separately delivered instructions are per request. Minted HTTP
+        bearers/leases vary without changing the process configuration.
+        """
+        parts = {
+            "backend": self._profile.backend,
+            "session_id": self._config.session_id,
+            "user_id": self._config.user_id,
+            "work_id": self.work_id,
+            "credential_id": self._config.credential_id,
+            "wiki_scope": "run-bound-wiki" if self.reusable and self._config.session_id and self._config.wiki_task_id else self._config.wiki_task_id,
+            "system_prompt": ctx.system_prompt,
+            "model": ctx.model,
+            "reasoning_effort": ctx.reasoning_effort,
+            "service_tier": ctx.service_tier or "default",
+            "tool_allow": sorted(ctx.tool_allow or []),
+            "tool_deny": sorted(ctx.tool_deny or []),
+            "subagents": ctx.subagents,
+            "mcp_servers": [{key: value for key, value in asdict(entry).items() if key != "credential"} for entry in ctx.mcp_servers],
+            # A rotated installation token invalidates existing signed bearers.
+            "callback_env": assembly.build_callback_env(self._config.session_id),
+            "memory_dir": ctx.memory_dir,
+            "web_research": ctx.web_research,
+            "working_dir": ctx.working_dir,
+            "credential": asdict(ctx.credential) if ctx.credential else None,
+        }
+        return hashlib.sha256(json.dumps(parts, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
     def is_alive(self) -> bool:
         """Whether the subprocess is up and could serve another turn."""

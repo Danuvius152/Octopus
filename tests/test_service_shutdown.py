@@ -30,6 +30,7 @@ from server.wiki import jobs as wiki_jobs
 from server.wiki.registry import registry
 from server.wiki.store import WikiError
 from tests.accounts import create_account
+from tests.harness_profiles import session_turn_argv
 
 
 @pytest.fixture
@@ -210,7 +211,7 @@ def synthetic_cli(monkeypatch, starts, code=None):
 
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
-        harness.profile, build_turn_argv=argv, stdin_mode=StdinMode.STREAM_JSON,
+        harness.profile, build_turn_argv=session_turn_argv(harness.profile, argv), stdin_mode=StdinMode.STREAM_JSON,
         activity_observer=None,
     ))
 

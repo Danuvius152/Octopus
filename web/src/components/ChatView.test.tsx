@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ChatView } from "./ChatView";
+import { mockChatViewport } from "./chatViewport.test-support";
 import { VirtuosoMockContext } from "react-virtuoso";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import commandCasesText from "../../../tests/fixtures/wiki-command-cases.json?raw";
@@ -13,6 +14,7 @@ const session = {
 } as SessionInfo;
 
 beforeEach(() => {
+  mockChatViewport();
   useSessionStore.setState({
     token: "",
     activeSessionId: session.id, sessions: [session], agents: [],
@@ -21,7 +23,7 @@ beforeEach(() => {
     pendingForks: {}, credentials: [], backendModels: {},
   });
 });
-afterEach(cleanup);
+afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 it("keeps correction separate from paused results and resumes only on the explicit button", async () => {
   const paused = {

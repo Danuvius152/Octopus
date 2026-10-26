@@ -30,6 +30,7 @@ const OWNED_NAMES = new Set([
   "Waiting Hint No",
   "Virtuoso Long Session",
   "Windowed Transcript",
+  "Windowed Transcript Tall",
   "Queue Test",
   "Interrupt Test",
   "Asked Question",
@@ -281,60 +282,76 @@ test.describe("Windowed transcript", () => {
   const WINDOW = 200;
   const BOUNDARY = `msg-${TOTAL - WINDOW}`; // the oldest message the open returns
 
-  test("opens at the newest, pages back without jumping or duplicating", async ({
-    page,
-    request,
-  }) => {
-    await importSessionApi(
+  for (const tallTail of [false, true]) {
+    test(`opens at the newest, pages back without jumping or duplicating${tallTail ? " with a tall final message" : ""}`, async ({
+      page,
       request,
-      "Windowed Transcript",
-      Array.from({ length: TOTAL }, (_, i) => ({
-        role: "user",
-        type: "text",
-        content: `msg-${i}`,
-      }))
-    );
-    await login(page);
-    await page
-      .locator(".session-item .session-name", { hasText: "Windowed Transcript" })
-      .click();
-    await expect(page.locator(".chat-header .crumb-current")).toHaveText(
-      "Windowed Transcript"
-    );
+    }) => {
+      const sessionName = tallTail ? "Windowed Transcript Tall" : "Windowed Transcript";
+      let releaseOlder!: () => void;
+      const olderResponse = new Promise<void>((resolve) => { releaseOlder = resolve; });
+      const olderRequests: string[] = [];
+      await page.route("**/messages?before_seq=*", async (route) => {
+        olderRequests.push(route.request().url());
+        await olderResponse;
+        await route.continue();
+      });
+      await importSessionApi(
+        request,
+        sessionName,
+        Array.from({ length: TOTAL }, (_, i) => ({
+          role: tallTail && i === TOTAL - 1 ? "assistant" : "user",
+          type: "text",
+          content: `${tallTail && i === TOTAL - 1 ? "A paragraph in a long final response.\n\n".repeat(40) : ""}msg-${i}`,
+        }))
+      );
+      await login(page);
+      await page
+        .locator(".session-item").getByText(sessionName, { exact: true })
+        .click();
+      await expect(page.locator(".chat-header .crumb-current")).toHaveText(
+        sessionName
+      );
 
-    // It opens where the conversation left off, not at its beginning.
-    await expect(
-      page.getByText(`msg-${TOTAL - 1}`, { exact: true })
-    ).toBeVisible();
+      // It opens where the conversation left off, not at its beginning.
+      await expect(
+        page.getByText(`msg-${TOTAL - 1}`, { exact: true })
+      ).toBeInViewport();
+      expect(olderRequests).toHaveLength(0);
 
-    // Reaching the top is what asks for more, so go there.
-    const scroller = page.locator(".chat-messages");
-    await scroller.evaluate((el) => {
-      el.scrollTop = 0;
+      // Reaching the top is what asks for more, so go there.
+      const scroller = page.locator(".chat-messages");
+      await scroller.evaluate((el) => {
+        el.scrollTop = 0;
+      });
+      await expect(page.getByText(BOUNDARY, { exact: true })).toBeInViewport();
+      // Hold the HTTP response until the reader's anchor is visible, then
+      // verify it survives the prepend rather than racing through both states.
+      releaseOlder();
+
+      // Reaching the top starts the fetch; the notice at the top of the list is
+      // the only sign anything is missing, and it goes away when nothing is. Not
+      // asserted as *present* first: the fetch can outrun the assertion, and a
+      // test that depends on losing that race is not a test.
+      await expect(page.locator(".chat-older-notice")).toHaveCount(0, {
+        timeout: 15_000,
+      });
+
+      // The message that was on screen is still on screen: prepending 60 items
+      // must not move the view (this is what `firstItemIndex` buys).
+      await expect(page.getByText(BOUNDARY, { exact: true })).toBeInViewport();
+      // And it is there exactly once — the seam is where a duplicate would land.
+      expect(await page.getByText(BOUNDARY, { exact: true }).count()).toBe(1);
+      expect(olderRequests).toHaveLength(1);
+
+      // The real top is now reachable, and the first message is the first one.
+      await scroller.evaluate((el) => {
+        el.scrollTop = 0;
+      });
+      await expect(page.getByText("msg-0", { exact: true })).toBeInViewport();
+      expect(await page.getByText("msg-0", { exact: true }).count()).toBe(1);
     });
-    await expect(page.getByText(BOUNDARY, { exact: true })).toBeVisible();
-
-    // Reaching the top starts the fetch; the notice at the top of the list is
-    // the only sign anything is missing, and it goes away when nothing is. Not
-    // asserted as *present* first: the fetch can outrun the assertion, and a
-    // test that depends on losing that race is not a test.
-    await expect(page.locator(".chat-older-notice")).toHaveCount(0, {
-      timeout: 15_000,
-    });
-
-    // The message that was on screen is still on screen: prepending 60 items
-    // must not move the view (this is what `firstItemIndex` buys).
-    await expect(page.getByText(BOUNDARY, { exact: true })).toBeVisible();
-    // And it is there exactly once — the seam is where a duplicate would land.
-    expect(await page.getByText(BOUNDARY, { exact: true }).count()).toBe(1);
-
-    // The real top is now reachable, and the first message is the first one.
-    await scroller.evaluate((el) => {
-      el.scrollTop = 0;
-    });
-    await expect(page.getByText("msg-0", { exact: true })).toBeVisible();
-    expect(await page.getByText("msg-0", { exact: true }).count()).toBe(1);
-  });
+  }
 });
 
 // ---------------------------------------------------------------------------

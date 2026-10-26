@@ -20,6 +20,7 @@ from server.mcp_identity import verify
 from server.sessions import SessionManager
 from server.sessions.owner import SessionOwnerUnavailable
 from tests.accounts import create_account
+from tests.harness_profiles import session_turn_argv
 
 
 @pytest.fixture
@@ -58,7 +59,7 @@ async def notification_runtime(tmp_path, monkeypatch):
 
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, prepare_resume=None, activity_observer=None,
-        stdin_mode=StdinMode.STREAM_JSON, build_turn_argv=argv,
+        stdin_mode=StdinMode.STREAM_JSON, build_turn_argv=session_turn_argv(harness.profile, argv),
     ))
     spawn, submit = asyncio.create_subprocess_exec, manager.start_message
 

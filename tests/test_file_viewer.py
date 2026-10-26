@@ -350,23 +350,22 @@ async def test_get_file_session_not_found(client):
 
 
 async def _patch_showme(monkeypatch):
-    """Capture the credential argument the resolver was called with."""
+    """Capture the resolved one-shot context at the harness boundary."""
     captured: dict = {}
 
-    async def _fake_resolve(
-        text, *, harness, model, credential, working_dir, messages,
-        session_name=None, reasoning_effort=None, service_tier=None,
-    ):
-        captured["credential"] = credential
-        captured["model"] = model
-        captured["reasoning_effort"] = reasoning_effort
-        captured["service_tier"] = service_tier
-        captured["working_dir"] = working_dir
-        from server.showme_ai import ShowMeResolution
+    async def _fake_oneshot(ctx, **kwargs):
+        await ctx.authorize_spawn()
+        captured["credential"] = ctx.credential
+        captured["model"] = ctx.model
+        captured["reasoning_effort"] = ctx.reasoning_effort
+        captured["service_tier"] = ctx.service_tier
+        captured["working_dir"] = ctx.working_dir
+        return '{"path":"answer.md"}'
 
-        return ShowMeResolution(path="answer.md")
+    from server.harness import get_harness
 
-    monkeypatch.setattr("server.routers.files.resolve_showme_reference", _fake_resolve)
+    for backend in ("claude-code", "codex"):
+        monkeypatch.setattr(get_harness(backend), "run_oneshot", _fake_oneshot)
     return captured
 
 
@@ -386,6 +385,27 @@ async def test_showme_resolve_no_credential_passes_none(
     # No credential on the agent → resolver should receive None (the CLI
     # falls back to whatever host auth it finds).
     assert captured["credential"] is None
+
+
+async def test_showme_exact_path_does_not_require_model_authentication(client, session_with_files, monkeypatch):
+    sid, _ = session_with_files
+    session = session_manager.get_session(sid)
+    await session_manager.db.save_credential(
+        "unavailable", session.backend, "owned", "api_key", "", "now", user_id=session.user_id,
+    )
+    await session_manager.db.update_credential("unavailable", needs_reconnect=True)
+    session.credential_id = "unavailable"
+
+    async def forbidden_oneshot(*args, **kwargs):
+        pytest.fail("An exact local path must not invoke a model")
+
+    monkeypatch.setattr("server.harness.Harness.run_oneshot", forbidden_oneshot)
+    direct = await client.post(f"/api/sessions/{sid}/showme/resolve", json={"text": "plan.md"})
+    assert direct.status_code == 200, direct.text
+    assert direct.json()["path"] == "plan.md"
+    inferred = await client.post(f"/api/sessions/{sid}/showme/resolve", json={"text": "the proposed plan"})
+    assert inferred.status_code == 422
+    assert "unavailable" in inferred.json()["detail"]
 
 
 @pytest.mark.parametrize("override, expected", [(None, "fast"), ("default", "default"), ("fast", "fast")])

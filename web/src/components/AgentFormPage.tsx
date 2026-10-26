@@ -5,6 +5,8 @@ import { setAgentPinned } from "../api/agents";
 import { fetchAgentConnectors, toggleAgentConnector } from "../api/connectors";
 import { openAgentChat } from "../lib/openAgentChat";
 import { pinnedInOrder } from "../lib/sidebarPins";
+import { refreshAgents, withAgentRequest } from "../lib/refreshAgents";
+import { agentRequestIsCurrent } from "../lib/agentUpdates";
 import { useModelSettings } from "../hooks/useModelSettings";
 import {
   useSessionStore,
@@ -83,6 +85,7 @@ export function AgentFormPage({
   const installations = useSessionStore((s) => s.connectorInstallations);
   const availableBackends = useSessionStore((s) => s.availableBackends);
   const defaultBackend = useSessionStore((s) => s.defaultBackend);
+  const backendToolPolicies = useSessionStore((s) => s.backendToolPolicies);
   const showChat = useSessionStore((s) => s.showChat);
   const openAgentForm = useSessionStore((s) => s.openAgentForm);
   const setActiveAgentId = useSessionStore((s) => s.setActiveAgentId);
@@ -106,6 +109,7 @@ export function AgentFormPage({
   const { catalog, error: catalogError } = useModelSettings(backend, credentialId, tab === "form");
   const [toolAllow, setToolAllow] = useState("");
   const [toolDeny, setToolDeny] = useState("");
+  const toolPolicy = backendToolPolicies[backend];
   const [enabledConnectors, setEnabledConnectors] = useState<string[]>([]);
   // Sub-agents this agent brings with it (native-subagents.md §6). Empty is
   // the normal case: the CLI's own built-ins are always available.
@@ -192,6 +196,15 @@ export function AgentFormPage({
 
   const save = async () => {
     if (!name.trim() || busy) return;
+    for (const [field, value, supported] of [
+      ["tool_allow", toolAllow, toolPolicy?.allow],
+      ["tool_deny", toolDeny, toolPolicy?.deny],
+    ] as const) {
+      if (value.trim() && !supported) {
+        setError(`${backend} cannot enforce ${field}. Clear this policy or select a backend that supports it.`);
+        return;
+      }
+    }
     setBusy(true);
     setError(null);
     const fields = agentFields({
@@ -208,6 +221,7 @@ export function AgentFormPage({
         || (backendChanged && ["credential_id", "model", "reasoning_effort", "service_tier"].includes(key))
       ))
       : { ...fields, mcp_servers: [...BUILTIN_MCP] };
+    const request = useSessionStore.getState().beginAgentRequest();
     try {
       const res = await fetch(editing ? `${API}/${editing.id}` : API, {
         method: editing ? "PATCH" : "POST",
@@ -219,14 +233,19 @@ export function AgentFormPage({
         throw new Error(detail?.detail || `HTTP ${res.status}`);
       }
       const saved = (await res.json()) as Agent;
-      upsertAgent(saved);
+      if (!agentRequestIsCurrent(request, useSessionStore.getState())) return;
+      upsertAgent(saved, request);
+      const current = useSessionStore.getState();
+      if (!agentRequestIsCurrent(request, current) || current.editingAgentId !== editingAgentId || current.mainView !== "agent-form") return;
+      if (!current.agents.some((row) => row.id === saved.id)) throw new Error("This agent was archived while saving. Your draft has been kept.");
       // Select what you just made: the sidebar unfolds it, a new session
       // lands under it, and the account menu's "Agent settings" edits it.
       setActiveAgentId(saved.id);
       showChat();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to save agent");
+      if (agentRequestIsCurrent(request, useSessionStore.getState())) setError(e instanceof Error ? e.message : "Failed to save agent");
     } finally {
+      useSessionStore.getState().endAgentRequest(request);
       setBusy(false);
     }
   };
@@ -238,18 +257,19 @@ export function AgentFormPage({
     if (agent.is_system) return false;
     if (!window.confirm(`Archive "${agent.name}"? You can restore it later.`))
       return false;
-    const res = await fetch(`${API}/${agent.id}/archive`, {
-      method: "POST",
-      headers,
+    return withAgentRequest(async (request) => {
+      const res = await fetch(`${API}/${agent.id}/archive`, { method: "POST", headers });
+      if (!agentRequestIsCurrent(request, useSessionStore.getState())) return false;
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        setError(detail?.detail || "Failed to archive agent");
+        return false;
+      }
+      removeAgent(agent.id, request);
+      if (useSessionStore.getState().agents.some((row) => row.id === agent.id)) return false;
+      loadArchived();
+      return true;
     });
-    if (!res.ok) {
-      const detail = await res.json().catch(() => null);
-      setError(detail?.detail || "Failed to archive agent");
-      return false;
-    }
-    removeAgent(agent.id);
-    loadArchived();
-    return true;
   };
 
   const archive = async () => {
@@ -260,26 +280,32 @@ export function AgentFormPage({
   // (the server pins what it restores), which is the confirmation.
   const restore = async (agent: Agent) => {
     setError(null);
-    const res = await fetch(`${API}/${agent.id}/unarchive`, {
-      method: "POST",
-      headers,
+    await withAgentRequest(async (request) => {
+      const res = await fetch(`${API}/${agent.id}/unarchive`, { method: "POST", headers });
+      if (!res.ok) {
+        const detail = await res.json().catch(() => null);
+        if (agentRequestIsCurrent(request, useSessionStore.getState())) setError(detail?.detail || "Failed to restore agent");
+        return;
+      }
+      const restored = await res.json() as Agent;
+      if (!agentRequestIsCurrent(request, useSessionStore.getState())) return;
+      upsertAgent(restored, request);
+      if (useSessionStore.getState().agents.some((row) => row.id === agent.id)) {
+        setArchived((cur) => cur.filter((a) => a.id !== agent.id));
+      }
     });
-    if (!res.ok) {
-      const detail = await res.json().catch(() => null);
-      setError(detail?.detail || "Failed to restore agent");
-      return;
-    }
-    upsertAgent((await res.json()) as Agent);
-    setArchived((cur) => cur.filter((a) => a.id !== agent.id));
   };
 
   const togglePin = async (agent: Agent, pinned: boolean) => {
     setError(null);
-    try {
-      upsertAgent((await setAgentPinned(token, agent.id, pinned)) as Agent);
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to update the sidebar");
-    }
+    await withAgentRequest(async (request) => {
+      try {
+        upsertAgent((await setAgentPinned(token, agent.id, pinned)) as Agent, request);
+      } catch (e) {
+        if (agentRequestIsCurrent(request, useSessionStore.getState())) setError(e instanceof Error ? e.message : "Failed to update the sidebar");
+        await refreshAgents(request).catch(() => {});
+      }
+    });
   };
 
   const chat = async (agent: Agent) => {
@@ -576,7 +602,7 @@ export function AgentFormPage({
               <div className="grid gap-6 md:grid-cols-2">
                 <div className="space-y-2">
                   <Label htmlFor="agent-tool-allow">
-                    Tool policy
+                    Allowed tools
                     <span className="ml-2 font-mono text-[11px] font-normal text-gray-700">
                       tool_policy
                     </span>
@@ -586,23 +612,30 @@ export function AgentFormPage({
                     className="agent-tool-allow min-h-20 w-full rounded-xl border border-gray-400 bg-card px-4 py-3 font-mono text-[12.5px] text-gray-900 outline-none transition-colors placeholder:text-gray-600 focus:border-primary focus:ring-[3px] focus:ring-primary/10"
                     value={toolAllow}
                     onChange={(e) => setToolAllow(e.target.value)}
+                    disabled={!toolPolicy?.allow && !toolAllow}
+                    aria-describedby="agent-tool-allow-help"
                     placeholder="allow (one per line) — empty allows everything"
                   />
+                  <p id="agent-tool-allow-help" className="text-xs text-gray-700">
+                    {toolPolicy?.allow ? "Only the listed tools are allowed." : "This engine does not support a tool allow list. Clear any saved value before saving or running."}
+                  </p>
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="agent-tool-deny">
                     Denied tools
-                    <span className="ml-2 font-normal text-gray-700">
-                      deny wins over allow
-                    </span>
                   </Label>
                   <textarea
                     id="agent-tool-deny"
                     className="agent-tool-deny min-h-20 w-full rounded-xl border border-gray-400 bg-card px-4 py-3 font-mono text-[12.5px] text-gray-900 outline-none transition-colors placeholder:text-gray-600 focus:border-primary focus:ring-[3px] focus:ring-primary/10"
                     value={toolDeny}
                     onChange={(e) => setToolDeny(e.target.value)}
+                    disabled={!toolPolicy?.deny && !toolDeny}
+                    aria-describedby="agent-tool-deny-help"
                     placeholder="deny (one per line)"
                   />
+                  <p id="agent-tool-deny-help" className="text-xs text-gray-700">
+                    {toolPolicy?.deny ? "Uses the engine's native deny rules, including MCP tool patterns." : "This engine does not support tool deny rules. Clear any saved value before saving or running."}
+                  </p>
                 </div>
               </div>
 

@@ -2,6 +2,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { VirtuosoMockContext } from "react-virtuoso";
 import { ChatView } from "./ChatView";
+import { mockChatViewport } from "./chatViewport.test-support";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { handleWsMessage } from "../hooks/useWebSocket";
 import { loadOlderMessages } from "../lib/transcript";
@@ -24,15 +25,18 @@ const detail = () => ({ ...child,
   pending_questions: [], subagents: [], dispatch_state: dispatch("old-service"),
 });
 
-beforeEach(() => useSessionStore.setState({
+beforeEach(() => {
+  mockChatViewport();
+  useSessionStore.setState({
   token: "synthetic-token", activeSessionId: parent.id, activeAgentId: "agent",
   sessions: [parent], archivedSessions: [], agents: [], credentials: [], backendModels: {},
   messages: {}, streamingText: {}, lastAppliedSeq: {}, oldestSeq: {}, hasMoreMessages: {}, wikiJobs: {},
   pendingQuestions: {}, closedQuestionIds: {}, subagents: {},
   dispatchUnavailable: {}, pendingForks: {}, dispatchStates: { parent: dispatch("old-service") },
   dispatchGeneration: "old-service", retiredDispatchGenerations: [],
-}));
-afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
+  });
+});
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
 function mockSessionFetch(handler: (url: string) => Promise<Response>) {
   const fetcher = vi.fn(handler);

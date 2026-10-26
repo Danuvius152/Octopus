@@ -11,6 +11,7 @@ import pytest
 from server.agent_manager import AgentManager
 from server.harness import get_harness
 from server.mcp_identity import scope_is_live, verify
+from tests.harness_profiles import session_turn_argv
 from tests.test_delegation_restart import runtime as runtime
 
 
@@ -37,7 +38,7 @@ def gated_cli(runtime, tmp_path, monkeypatch):
 
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
-        harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None,
+        harness.profile, build_turn_argv=session_turn_argv(harness.profile, argv), prepare_resume=None, activity_observer=None,
     ))
     return release
 

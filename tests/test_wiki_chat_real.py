@@ -161,7 +161,7 @@ async def ordinary_chat_probe(tmp_path, monkeypatch, request):
     try:
         # Directory-backed credential resolution reads no provider secrets here.
         # Refuse fallback to an unrelated default CLI login.
-        credential = await manager.resolve_credential_by_id(credential_id, style="home_dir", user_id=owner["id"])
+        credential = await manager.resolve_credential_by_id(credential_id, backend="codex", user_id=owner["id"])
         assert credential is not None, "selected credential home is unavailable; default-login fallback forbidden"
         monkeypatch.setattr(manager, "_resolve_credential", guarded_chat_credential(manager, credential_id, credential.home_dir))
         agent = await AgentManager(db).create_agent(

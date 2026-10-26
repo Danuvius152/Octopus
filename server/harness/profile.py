@@ -16,7 +16,7 @@ servers, composed system prompt) into a `TurnContext`; the profile's
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Coroutine
+from collections.abc import Awaitable, Callable, Coroutine
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Protocol
@@ -55,6 +55,9 @@ class McpServerEntry:
     url: str = ""
     credential: str = ""
     tool_timeout_seconds: int | None = None
+    # Stable account binding carried by an HTTP bearer. The namespace only
+    # contains a short ID; rotating lease/signature bytes do not change this ID.
+    installation_id: str | None = None
 
     @property
     def is_http(self) -> bool:
@@ -122,6 +125,7 @@ class OneShotContext:
     working_dir: str | None = None
     reasoning_effort: str | None = None
     service_tier: str | None = None
+    authorize_spawn: Callable[[], Awaitable[None]] | None = None
 
 
 @dataclass
@@ -195,6 +199,22 @@ class StdinMode(str, Enum):
 
 
 @dataclass(frozen=True)
+class ToolPolicySupport:
+    """Restrictions this adapter can enforce, independent of auto-approval."""
+
+    allow: bool = False
+    deny: bool = False
+
+    def validate(self, backend: str, allow: str | list[str] | None, deny: str | list[str] | None) -> None:
+        for field_name, supported, value in (("tool_allow", self.allow, allow), ("tool_deny", self.deny, deny)):
+            entries = value.splitlines() if isinstance(value, str) else value or []
+            if not supported and any(entry.strip() for entry in entries):
+                raise ValueError(
+                    f"{backend} cannot enforce {field_name}. Clear this policy or select a backend that supports it."
+                )
+
+
+@dataclass(frozen=True)
 class RuntimeProfile:
     """Everything that differs between harness kinds, as one record."""
 
@@ -214,6 +234,10 @@ class RuntimeProfile:
     new_event_parser: Callable[[], EventParser]
     build_oneshot_argv: Callable[[OneShotContext], tuple[list[str], dict[str, Any]]]
     parse_oneshot_stdout: Callable[[str], str]
+    tool_policy: ToolPolicySupport = field(default_factory=ToolPolicySupport)
+    # Request instructions have a native per-turn channel on some adapters;
+    # otherwise they are fixed in the process's composed system prompt.
+    separate_turn_instructions: bool = False
     # Lowercased substrings that identify an auth-credential rejection in
     # THIS backend's CLI error output (harness-credential-reauth.md §3). A
     # failed turn whose combined error text contains any of them is treated

@@ -181,13 +181,12 @@ async def test_create_and_get_agent(client):
         name="Inbox Bot",
         system_prompt="You triage email.",
         model="claude-opus-4-7",
-        tool_allow="Read\nGrep",
         tool_deny="Bash",
     )
     assert agent["name"] == "Inbox Bot"
     assert agent["system_prompt"] == "You triage email."
     assert agent["model"] == "claude-opus-4-7"
-    assert agent["tool_allow"] == "Read\nGrep"
+    assert agent["tool_allow"] == ""
     assert agent["tool_deny"] == "Bash"
     assert agent["is_system"] is False
     assert agent["active_session_count"] == 0
@@ -492,6 +491,7 @@ async def _agent_archive_fault_child(tmp_path, tmp_path_factory, monkeypatch):
         code = (
             "import json,os,sys,time\n"
             "from pathlib import Path\n"
+            "with Path(sys.argv[2]).open('a') as stream: stream.write(sys.argv[3]+'\\n')\n"
             "fields=Path(f'/proc/{os.getpid()}/stat').read_text().rsplit(')',1)[1].split()\n"
             "Path(sys.argv[1]).write_text(json.dumps({'pid':os.getpid(),'process_group':os.getpgrp(),'start_time':fields[19]}))\n"
             "print(json.dumps({'type':'thread.started','thread_id':'agent-archive-thread'}),flush=True)\n"
@@ -500,8 +500,7 @@ async def _agent_archive_fault_child(tmp_path, tmp_path_factory, monkeypatch):
         )
 
         def argv(context):
-            record_start(context.prompt)
-            return [sys.executable, "-u", "-c", code, str(artifacts / "model.json")], {"cwd": context.working_dir}
+            return [sys.executable, "-u", "-c", code, str(artifacts / "model.json"), str(artifacts / "starts.jsonl"), json.dumps(context.prompt)], {"cwd": context.working_dir}
 
         harness = get_harness("codex")
         monkeypatch.setattr(harness, "profile", replace(
@@ -689,12 +688,31 @@ async def test_schedule_from_text_rigid(client):
     assert data["recurrence_label"] == "Every 30m"
 
 
+async def test_rigid_schedule_does_not_require_model_authentication(client, monkeypatch):
+    owner = (await session_manager.db.get_system_agent())["user_id"]
+    await session_manager.db.save_credential("unavailable", "codex", "owned", "oauth", "", "now", user_id=owner)
+    await session_manager.db.update_credential("unavailable", needs_reconnect=True)
+    agent = await _create_agent(client, backend="codex", credential_id="unavailable")
+
+    async def forbidden_oneshot(*args, **kwargs):
+        pytest.fail("A rigid schedule must not invoke a model")
+
+    monkeypatch.setattr("server.harness.Harness.run_oneshot", forbidden_oneshot)
+    url = f"/api/agents/{agent['id']}/schedules/from_text"
+    rigid = await client.post(url, json={"text": "30m check the build"})
+    assert rigid.status_code == 201, rigid.text
+    natural = await client.post(url, json={"text": "check the build every morning"})
+    assert natural.status_code == 422, natural.text
+    assert "unavailable" in natural.json()["detail"]
+
+
 @pytest.mark.asyncio
 async def test_schedule_from_text_ai_cron(client, monkeypatch):
     """Natural language → AI parse → cron schedule (the harness one-shot mocked)."""
     from server.harness import get_harness
 
     async def fake_oneshot(ctx):
+        await ctx.authorize_spawn()
         assert "America/Los_Angeles" in ctx.prompt
         return (
             '{"name":"Gmail summary","prompt":"summarize my unread email",'
@@ -732,6 +750,7 @@ async def test_schedule_from_text_parse_error_is_422(client, monkeypatch):
     from server.harness import get_harness
 
     async def fake_oneshot(ctx):
+        await ctx.authorize_spawn()
         return "I'm not sure what you mean."
 
     monkeypatch.setattr(get_harness("claude-code"), "run_oneshot", fake_oneshot)
@@ -760,6 +779,7 @@ async def test_schedule_from_text_codex_agent_parses_on_codex(client, monkeypatc
     seen: dict = {}
 
     async def fake_oneshot(ctx):
+        await ctx.authorize_spawn()
         seen["model"] = ctx.model
         return (
             '{"name":"Daily","prompt":"do it","recurrence":'

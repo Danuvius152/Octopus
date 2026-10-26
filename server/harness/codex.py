@@ -1089,6 +1089,7 @@ _CODEX_TRANSIENT_ERROR_PATTERNS = (
 
 
 CODEX = RuntimeProfile(
+    separate_turn_instructions=True,
     model_settings=read_model_settings,
     backend="codex",
     binary="codex",

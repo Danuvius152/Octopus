@@ -632,14 +632,15 @@ async def test_resolve_credential_returns_decrypted_secret(manager):
 
 
 @pytest.mark.asyncio
-async def test_resolve_credential_returns_none_when_missing(manager):
+async def test_resolve_credential_rejects_explicit_missing_binding(manager):
     session = await _new(manager, "S")
-    # A removed legacy binding is tolerated on read; new bindings must exist.
+    # Explicit bindings never fall back to the host's default identity.
     session.credential_id = "ghost"
+    from server.credential_bindings import CredentialBindingError
     from server.harness import get_harness
 
-    cred = await manager._resolve_credential(session, None, get_harness("claude-code"))
-    assert cred is None
+    with pytest.raises(CredentialBindingError, match="not found"):
+        await manager._resolve_credential(session, None, get_harness("claude-code"))
 
 
 @pytest.mark.asyncio
@@ -761,8 +762,7 @@ async def test_resolve_credential_marks_needs_reconnect_on_refresh_failure(
     manager, monkeypatch
 ):
     """Refresh failure → credential is marked needs_reconnect with a
-    typed error code, and the resolver returns None (so the backend
-    falls back to no credential rather than firing a broken request)."""
+    typed error code, and explicit execution is rejected without host fallback."""
     import json
     import time
     from datetime import datetime
@@ -801,19 +801,19 @@ async def test_resolve_credential_marks_needs_reconnect_on_refresh_failure(
     monkeypatch.setattr(provider, "refresh_access_token", fake_refresh)
 
     session = await _new(manager,"S-dead", credential_id="c-dead")
+    from server.credential_bindings import CredentialBindingError
     from server.harness import get_harness
 
-    cred = await manager._resolve_credential(session, None, get_harness("claude-code"))
-    assert cred is None
+    with pytest.raises(CredentialBindingError, match="could not be resolved"):
+        await manager._resolve_credential(session, None, get_harness("claude-code"))
 
     row = await manager.db.get_credential("c-dead")
     assert row.get("needs_reconnect") is True
     assert row.get("last_refresh_error_code") == "refresh_token_expired"
 
-    # A subsequent resolve sees needs_reconnect and returns None without
-    # retrying the refresh.
-    cred2 = await manager._resolve_credential(session, None, get_harness("claude-code"))
-    assert cred2 is None
+    # A subsequent resolve rejects the revoked credential before retrying refresh.
+    with pytest.raises(ValueError, match="Reconnect"):
+        await manager._resolve_credential(session, None, get_harness("claude-code"))
 
 
 @pytest.mark.asyncio
@@ -953,7 +953,6 @@ async def test_make_run_applies_agent_config(manager):
         system_prompt="You are a pirate.",
         model="claude-opus-4-7",
         mcp_servers=["ask"],
-        tool_allow="Read\nGrep",
         tool_deny="Bash",
     )
     session = await manager.create_session(aid, name="S")
@@ -967,11 +966,10 @@ async def test_make_run_applies_agent_config(manager):
     ap = argv[argv.index("--append-system-prompt") + 1]
     assert "You are a pirate." in ap
     assert "Octopus in-app tools" in ap
-    # deny = always-on AskUserQuestion + agent deny; allow = agent allow
+    # Supported deny = always-on AskUserQuestion + agent deny.
     dis = argv[argv.index("--disallowedTools") + 1]
     assert "AskUserQuestion" in dis and "Bash" in dis
-    allow = argv[argv.index("--allowedTools") + 1]
-    assert "Read" in allow and "Grep" in allow
+    assert "--allowedTools" not in argv
     # only the selected MCP server is registered
     cfg = _json.loads(argv[argv.index("--mcp-config") + 1])
     assert set(cfg["mcpServers"].keys()) == {"ask"}
@@ -1540,6 +1538,14 @@ async def _bind_credential(manager, backend, secret="sk-ant-x"):
         created_at=datetime.now(UTC).isoformat(),
         user_id=owner,
     )
+    if backend == "codex":
+        from pathlib import Path
+
+        from server.codex_login import codex_home_for
+
+        home = Path(codex_home_for(cid))
+        home.mkdir(parents=True, exist_ok=True)
+        (home / "auth.json").write_text("{}")
     return cid
 
 

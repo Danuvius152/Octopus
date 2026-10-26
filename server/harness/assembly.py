@@ -14,9 +14,50 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from .profile import McpServerEntry
+from .events import HarnessCredential
+from .profile import McpServerEntry, RuntimeProfile, StdinMode, TurnContext
+
+if TYPE_CHECKING:
+    from .run import RunConfig
+
+
+def assemble_turn(
+    profile: RuntimeProfile, config: RunConfig, prompt: str, working_dir: str,
+    resume_id: str | None = None, credential: HarnessCredential | None = None, *,
+    run_lease_id: str | None = None, work_id: str | None = None,
+) -> TurnContext:
+    """Pure inputs for static validation and actual execution, with no run,
+    parser, observer or process creation. Runtime identities are supplied by
+    the existing run owner when present.
+    """
+    profile.tool_policy.validate(profile.backend, config.tool_allow, config.tool_deny)
+    wiki_scope_id = config.wiki_task_id
+    if profile.stdin_mode is StdinMode.STREAM_JSON and config.session_id and wiki_scope_id:
+        from ..wiki.tasks import RUN_WIKI_SCOPE
+        wiki_scope_id = RUN_WIKI_SCOPE
+    mcp_servers = select_mcp_servers(
+        config.mcp_servers, config.connectors, build_callback_env(config.session_id),
+        session_id=config.session_id, user_id=config.user_id, wiki_task_id=wiki_scope_id,
+        run_lease_id=run_lease_id, work_id=work_id,
+    )
+    system_prompt = compose_system_prompt(
+        config.system_prompt, profile.tools_prompt, config.connectors,
+        memory_dir=config.memory_dir, inject_memory=profile.injects_memory_prompt,
+        wiki_mode=config.wiki_mode, wiki_capability=True, wiki_task_id=config.wiki_task_id,
+    )
+    turn_instructions = "\n\n".join(filter(None, (config.turn_instructions, config.fork_note)))
+    if not profile.separate_turn_instructions:
+        system_prompt = "\n\n".join(filter(None, (system_prompt, turn_instructions)))
+    return TurnContext(
+        prompt=prompt, working_dir=str(Path(working_dir).resolve()), resume_id=resume_id,
+        system_prompt=system_prompt, model=config.model, reasoning_effort=config.reasoning_effort,
+        service_tier=config.service_tier, tool_allow=config.tool_allow, tool_deny=config.tool_deny,
+        mcp_servers=mcp_servers, credential=credential, memory_dir=config.memory_dir,
+        web_research=config.web_research, subagents=config.subagents,
+        turn_instructions=turn_instructions if profile.separate_turn_instructions else "",
+    )
 
 # Repo root (contains the `server/` package): needed to launch each MCP
 # server via `-m server.mcp_servers.<name>` and to set PYTHONPATH so the
@@ -168,6 +209,7 @@ def _http_entries(
             # (multi-tenancy.md §7), so a tool body has an owner without a
             # round trip and the signature covers it.
             credential=mint(session_id, installation_id, user_id, wiki_task_id, run_lease_id, work_id),
+            installation_id=installation_id,
             # Ask waits for a human. Keep the client's tool deadline beyond
             # the host's answer deadline; Codex otherwise defaults to 60s.
             # Its numeric setting has no documented infinity value. The

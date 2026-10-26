@@ -11,17 +11,22 @@ from .store import WikiError
 
 
 def pagination(store, cursor, offset, filters, *, db=None):
+    if type(offset) is not int or not 0 <= offset <= 2**63 - 1:
+        raise WikiError("Invalid pagination offset", 422)
     epoch = store._index_state(db)["index_epoch"]
     fingerprint = hashlib.sha256(json.dumps(filters, sort_keys=True).encode()).hexdigest()
-    if cursor:
+    if cursor is not None:
         if offset:
             raise WikiError("cursor and offset cannot be combined", 422)
         try:
-            if len(cursor) > 2048:
+            if not isinstance(cursor, str) or not cursor or len(cursor) > 2048:
                 raise ValueError()
-            value = json.loads(base64.urlsafe_b64decode(cursor.encode()))
-            if value["filters"] != fingerprint or not isinstance(value["offset"], int) or value["offset"] < 0:
+            value = json.loads(base64.b64decode(cursor.encode("ascii"), altchars=b"-_", validate=True))
+            if not isinstance(value, dict) or not isinstance(value["filters"], str) or value["filters"] != fingerprint:
                 raise ValueError()
+            for field in ("offset", "epoch"):
+                if type(value[field]) is not int or not 0 <= value[field] <= 2**63 - 1:
+                    raise ValueError()
         except (ValueError, KeyError, TypeError) as exc:
             raise WikiError("Invalid pagination cursor or changed filters", 422) from exc
         if value["epoch"] != epoch:

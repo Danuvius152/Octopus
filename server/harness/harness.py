@@ -19,7 +19,9 @@ import time
 
 from ..config import settings
 from ..diagnostics import diagnostic_text, exception_diagnostic
+from .assembly import assemble_turn
 from .events import HarnessCredential, HarnessOneshotError
+from .launch_limits import LaunchConfigurationError, validate_launch
 from .login import LoginDriver
 from .model_settings import ModelOption, ModelSettings
 from .profile import OneShotContext, RuntimeProfile
@@ -55,6 +57,15 @@ class Harness:
     def create_run(self, config: RunConfig | None = None) -> HarnessRun:
         """Build the per-turn streaming run engine for this harness."""
         return HarnessRun(self.profile, config)
+
+    def validate_configuration(self, config: RunConfig) -> None:
+        """Validate the known static render without resolving or launching a CLI.
+        Final dynamic instructions, MCP entries and environment are checked again
+        by prepare_spawn with the actual invocation.
+        """
+        ctx = assemble_turn(self.profile, config, "", ".", work_id=config.work_id)
+        argv, kwargs = self.profile.build_turn_argv(ctx)
+        validate_launch(argv, kwargs.get("env"))
 
     def is_auth_error(self, text: str, *, code: str | None = None) -> bool:
         """Whether `text` (a failed turn's combined error output + stderr)
@@ -216,9 +227,11 @@ class Harness:
         and extracts the result text from stdout."""
         started_at = time.monotonic()
         diagnostic_secrets = (settings.auth_token, ctx.credential.secret if ctx.credential else "")
-        argv, kwargs = self.profile.build_oneshot_argv(ctx)
         try:
+            argv, kwargs = self.profile.build_oneshot_argv(ctx)
             argv, kwargs = prepare_spawn(argv, kwargs)
+        except LaunchConfigurationError as error:
+            raise HarnessOneshotError("configuration", str(error)) from error
         except FileNotFoundError:
             raise HarnessOneshotError("not_found", f"{self.profile.binary} CLI not found")
         from ..process_groups import wait_group_exit
@@ -226,21 +239,33 @@ class Harness:
 
         # The transport may create its process before delivering the handle.
         # Capture that launch before cancellation can surrender ownership.
-        spawn = asyncio.create_task(asyncio.create_subprocess_exec(
-            *argv,
-            # DEVNULL gives a stdin-reading CLI EOF immediately.
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            **kwargs,
-        ), name="one-shot-process-startup")
+        async def spawn_process():
+            if ctx.authorize_spawn is not None:
+                try:
+                    await ctx.authorize_spawn()
+                except asyncio.CancelledError:
+                    return None  # authorization ended before OS submission
+                except ValueError as error:
+                    raise HarnessOneshotError("unauthorized", str(error)) from error
+            return await asyncio.create_subprocess_exec(
+                *argv,
+                # DEVNULL gives a stdin-reading CLI EOF immediately.
+                stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **kwargs,
+            )
+
+        spawn = asyncio.create_task(spawn_process(), name="one-shot-process-startup")
         retirement: asyncio.Task[None] | None = None
 
         async def retire_spawn() -> None:
             try:
                 captured = await asyncio.shield(spawn)
-            except FileNotFoundError:
+            except (FileNotFoundError, HarnessOneshotError):
                 return  # launch failed before creating a process
+            if captured is None:
+                return
             _terminate_process_group(captured, signal.SIGKILL)
             await captured.wait()
             await wait_group_exit(captured.pid, timeout=2.0, after_kill=True)
@@ -273,6 +298,8 @@ class Harness:
 
         try:
             proc = await asyncio.shield(spawn)
+            if proc is None:
+                raise asyncio.CancelledError
         except FileNotFoundError:
             raise HarnessOneshotError("not_found", f"{self.profile.binary} CLI not found")
         except asyncio.CancelledError:

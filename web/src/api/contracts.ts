@@ -3413,6 +3413,21 @@ export interface components {
          * @enum {string}
          */
         AuthType: "api_key" | "oauth";
+        /** BackendAvailability */
+        BackendAvailability: {
+            /** Available */
+            available: string[];
+            /** Models */
+            models: {
+                [key: string]: string[];
+            };
+            /** Default */
+            default: string;
+            /** Tool Policy */
+            tool_policy: {
+                [key: string]: components["schemas"]["ToolPolicySupport"];
+            };
+        };
         /**
          * BackendKind
          * @enum {string}
@@ -5443,6 +5458,22 @@ export interface components {
         ToggleAgentConnectorRequest: {
             /** Enabled */
             enabled: boolean;
+        };
+        /**
+         * ToolPolicySupport
+         * @description Restrictions this adapter can enforce, independent of auto-approval.
+         */
+        ToolPolicySupport: {
+            /**
+             * Allow
+             * @default false
+             */
+            allow: boolean;
+            /**
+             * Deny
+             * @default false
+             */
+            deny: boolean;
         };
         /** ToolReceipt */
         ToolReceipt: {
@@ -11738,7 +11769,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": unknown;
+                    "application/json": components["schemas"]["BackendAvailability"];
                 };
             };
         };

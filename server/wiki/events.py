@@ -1,12 +1,14 @@
 """Filesystem change notifications; compensation scans stay outside queries.
 
-Linux uses the nonblocking inotify ABI documented in inotify(7). Other
-platforms, unavailable watches and overflow use the registry's periodic
-reconciliation. A notification is a hint to read a file, never its content.
+Linux uses the nonblocking inotify ABI documented in inotify(7). Unavailable
+observers, watches and overflow close the identity-continuity gate. Periodic
+reconciliation cannot prove missing history. A notification is a hint to read
+a file, never its content.
 Observed delete/move order also ends document bindings. A scan cannot recover
 an unobserved unlink/recreate, or distinguish it from an atomic save.
 """
 
+import contextlib
 import ctypes
 import fcntl
 import io
@@ -22,6 +24,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .store import WikiError
+
 _HEADER = struct.Struct("iIII")
 _MODIFICATIONS = 0x00000FCE
 _ONLY_DIRECTORY = 0x01000000
@@ -31,6 +35,13 @@ _IGNORED = 0x00008000
 _UNMOUNT = 0x00002000
 _OBSERVERS: weakref.WeakValueDictionary[tuple[int, str, str], "VaultEvents"] = weakref.WeakValueDictionary()
 _OBSERVERS_LOCK = threading.RLock()
+
+
+class ObservationUnavailable(WikiError):
+    """Abort indexing before recording a watch gap outside its transaction."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason, 503)
 
 
 @dataclass
@@ -124,7 +135,21 @@ class VaultEvents:
                 self._finalizer = weakref.finalize(self, os.close, self._fd)
             else:
                 self.error = os.strerror(ctypes.get_errno())
+                self._uncertain_reason = "Filesystem observer unavailable: " + self.error
+        else:
+            self.error = "Continuous filesystem observation is unavailable on this platform"
+            self._uncertain_reason = self.error
         self.watch(root)
+
+    @contextlib.contextmanager
+    def watching(self):
+        """Caller owns any index transaction; persist only after it unwinds."""
+        try:
+            yield
+        except ObservationUnavailable as error:
+            if self.journal is not None:
+                self.journal.uncertain(str(error))
+            raise
 
     def bind_journal(self, db_path, vault_id):
         from .event_inbox import EventInbox
@@ -182,6 +207,9 @@ class VaultEvents:
             if descriptor < 0:
                 self.needs_reconciliation = True
                 self.error = os.strerror(ctypes.get_errno())
+                self._uncertain_reason = "Filesystem directory watch unavailable: " + self.error
+                if self.journal is not None:
+                    raise ObservationUnavailable(self._uncertain_reason)
             else:
                 self._directories[descriptor] = directory
                 if directory == self.root:

@@ -272,8 +272,8 @@ class ConnectorManager:
         )
         if existing is not None:
             iid = existing["id"]
-            await self.db.update_connector_installation(
-                iid,
+            return await self.update_installation(
+                iid, user_id,
                 label=label,
                 scopes=list(token_set.scopes),
                 token_expires_at=token_expires_at,
@@ -283,7 +283,7 @@ class ConnectorManager:
             )
         else:
             iid = uuid.uuid4().hex[:12]
-            await self.db.save_connector_installation(
+            return await self.db.save_connector_installation(
                 installation_id=iid,
                 kind=kind,
                 label=label,
@@ -295,29 +295,28 @@ class ConnectorManager:
                 token_expires_at=token_expires_at,
                 user_id=user_id,
             )
-        inst = await self.db.get_connector_installation(iid)
-        assert inst is not None
-        return inst
 
     async def update_installation(
         self, installation_id: str, user_id: str | None = None, **fields: Any
     ) -> dict[str, Any]:
-        if await self.db.get_connector_installation(installation_id, user_id) is None:
-            raise ConnectorError("connector installation not found")
-        await self.db.update_connector_installation(installation_id, **fields)
-        updated = await self.db.get_connector_installation(installation_id)
-        assert updated is not None
-        return updated
+        async with self._lock(installation_id):
+            if await self.db.get_connector_installation(installation_id, user_id) is None:
+                raise ConnectorError("connector installation not found")
+            updated = await self.db.update_connector_installation(installation_id, **fields)
+            if updated is None:
+                raise ConnectorError("connector installation not found")
+            return updated
 
     async def delete_installation(
         self, installation_id: str, user_id: str | None = None
     ) -> None:
         # Resolved within the account first: a DELETE straight to the id would
         # remove anybody's, and report the same success either way.
-        if await self.db.get_connector_installation(installation_id, user_id) is None:
-            raise ConnectorError("connector installation not found")
-        if not await self.db.delete_connector_installation(installation_id):
-            raise ConnectorError("connector installation not found")
+        async with self._lock(installation_id):
+            if await self.db.get_connector_installation(installation_id, user_id) is None:
+                raise ConnectorError("connector installation not found")
+            if not await self.db.delete_connector_installation(installation_id):
+                raise ConnectorError("connector installation not found")
 
     async def mark_needs_reconnect(
         self,
@@ -325,10 +324,8 @@ class ConnectorManager:
         error_code: str = "invalid_grant",
         user_id: str | None = None,
     ) -> None:
-        if await self.db.get_connector_installation(installation_id, user_id) is None:
-            raise ConnectorError("connector installation not found")
-        await self.db.update_connector_installation(
-            installation_id, needs_reconnect=True, last_refresh_error_code=error_code
+        await self.update_installation(
+            installation_id, user_id, needs_reconnect=True, last_refresh_error_code=error_code,
         )
         # The other half of the Gmail case (§9 G0): the app knew the connector
         # was broken, but nothing counted how long it stayed that way.
@@ -388,23 +385,27 @@ class ConnectorManager:
                         refresh_token=ts.refresh_token,
                     )
                 except Exception as e:  # provider/transport failure → reconnect
-                    await self.db.update_connector_installation(
+                    saved = await self.db.update_connector_installation(
                         installation_id,
                         needs_reconnect=True,
                         last_refresh_error_code=getattr(e, "code", "refresh_failed"),
                     )
+                    if not saved:
+                        raise ConnectorError("connector installation not found") from e
                     raise ConnectorError(f"token refresh failed: {e}") from e
                 # Providers may omit the refresh token when the old one stands.
                 if new_ts.refresh_token is None:
                     new_ts.refresh_token = ts.refresh_token
                 ts = new_ts
-                await self.db.update_connector_installation(
+                saved = await self.db.update_connector_installation(
                     installation_id,
                     secret_encrypted=encrypt(_serialize_token_set(ts), secret_key),
                     token_expires_at=_expires_iso(ts.expires_at_epoch),
                     needs_reconnect=False,
                     last_refresh_error_code=None,
                 )
+                if not saved:
+                    raise ConnectorError("connector installation not found")
 
             connector = await resolve_connector(self.db, inst["kind"])
             return {
@@ -435,15 +436,10 @@ class ConnectorManager:
         installation_ids: list[str],
         user_id: str | None = None,
     ) -> list[str]:
-        current = set(await self.db.get_agent_connector_ids(agent_id))
-        target = set(installation_ids)
-        for iid in target - current:
-            if await self.db.get_connector_installation(iid, user_id) is None:
-                raise ConnectorError(f"connector installation not found: {iid}")
-            await self.db.set_agent_connector(agent_id, iid, True)
-        for iid in current - target:
-            await self.db.set_agent_connector(agent_id, iid, False)
-        return sorted(target)
+        try:
+            return await self.db.replace_agent_connectors(agent_id, installation_ids, user_id)
+        except ValueError as error:
+            raise ConnectorError(str(error)) from error
 
     async def enabled_installations_for_agent(
         self, agent_id: str

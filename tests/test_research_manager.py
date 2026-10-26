@@ -18,6 +18,7 @@ import pytest
 
 from server.database import Database
 from server.harness import Harness, get_harness
+from server.harness.launch_limits import LaunchConfigurationError
 from server.harness.registry import _REGISTRY
 from server.research import manager as rm_mod
 from server.research.manager import ResearchManager
@@ -53,6 +54,57 @@ async def rm(mgr, db):
 async def _session(mgr, db, *, backend="claude-code"):
     agent = await db.get_system_agent()
     return await mgr.create_session(agent["id"], "S", backend=backend)
+
+
+async def test_unavailable_binding_finishes_job_and_does_not_poison_shutdown(rm, mgr, db, monkeypatch):
+    session = await _session(mgr, db)
+    await db.save_credential("revoked", session.backend, "owned", "api_key", "", "now", user_id=session.user_id)
+    session.credential_id = "revoked"
+    await db.update_credential("revoked", needs_reconnect=True)
+
+    async def forbidden_pipeline(*args, **kwargs):
+        pytest.fail("Unavailable authentication must be rejected before the pipeline")
+
+    monkeypatch.setattr(rm_mod, "run_research", forbidden_pipeline)
+    job = await rm.start(session.id, "A rejected research job")
+    await rm._tasks[job["id"]]
+    row = await db.get_research_job(job["id"])
+    assert row["status"] == "failed"
+    assert "unavailable" in row["error"]
+    assert job["id"] not in rm._contexts
+    await rm.shutdown()
+
+
+async def test_oversized_configuration_finishes_research_and_releases_owner(rm, mgr, db, monkeypatch):
+    from server.harness.launch_limits import validate_launch
+
+    session = await _session(mgr, db)
+    profile = get_harness(session.backend).profile
+    spawned = []
+
+    def oversized_turn(ctx):
+        return [sys.executable, "x" * 150000], {"cwd": ctx.working_dir}
+
+    def oversized_oneshot(ctx):
+        return [sys.executable, "x" * 150000], {"cwd": ctx.working_dir}
+
+    async def forbidden_spawn(*args, **kwargs):
+        spawned.append(args)
+        pytest.fail("Refused research configuration must never spawn")
+
+    # Native launch refusal is known before a process exists.
+    with pytest.raises(LaunchConfigurationError):
+        validate_launch([sys.executable, "x" * 150000], {})
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden_spawn)
+    monkeypatch.setitem(_REGISTRY, session.backend, Harness(replace(profile,
+        build_turn_argv=oversized_turn, build_oneshot_argv=oversized_oneshot, activity_observer=None)))
+    job = await rm.start(session.id, "A refused research configuration")
+    await rm._tasks[job["id"]]
+    row = await db.get_research_job(job["id"])
+    assert row["status"] == "failed" and "bytes" in row["error"]
+    assert job["id"] not in rm._contexts
+    assert not spawned
+    await rm.shutdown()
 
 
 async def test_closed_work_cancellation_joins_research_cleanup(rm, mgr, db, monkeypatch):

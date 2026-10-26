@@ -32,7 +32,7 @@ class ConnectorsMixin(DatabaseBase):
         enable_by_default: bool = False,
         token_expires_at: str | None = None,
         user_id: str | None = None,
-    ) -> None:
+    ) -> dict[str, Any]:
         async with self.transaction(write=True) as tx:
             await tx.execute(
                 "INSERT INTO connector_installations "
@@ -52,6 +52,9 @@ class ConnectorsMixin(DatabaseBase):
                 "(installation_id, secret_encrypted) VALUES (?, ?)",
                 (installation_id, secret_encrypted),
             )
+            row = await tx.fetch_one(f"SELECT {self._CONNECTOR_COLS} FROM connector_installations WHERE id=?", (installation_id,))
+            assert row is not None
+            return self._row_to_connector(row)
 
     async def load_connector_installations(
         self, user_id: str | None = None
@@ -123,8 +126,13 @@ class ConnectorsMixin(DatabaseBase):
 
     async def update_connector_installation(
         self, installation_id: str, **fields: Any
-    ) -> None:
+    ) -> dict[str, Any] | None:
         async with self.transaction(write=True) as tx:
+            # Batch kind deletion does not take individual manager locks.
+            # Check existence in the same transaction as metadata and secret
+            # writes, so a late update cannot recreate an orphan secret.
+            if await tx.fetch_one("SELECT 1 FROM connector_installations WHERE id = ?", (installation_id,)) is None:
+                return None
             meta_allowed = {
                 "label",
                 "external_account_id",
@@ -170,6 +178,9 @@ class ConnectorsMixin(DatabaseBase):
                     "(installation_id, secret_encrypted) VALUES (?, ?)",
                     (installation_id, secret_value),
                 )
+            row = await tx.fetch_one(f"SELECT {self._CONNECTOR_COLS} FROM connector_installations WHERE id=?", (installation_id,))
+            assert row is not None
+            return self._row_to_connector(row)
 
 
     async def delete_connector_installation(self, installation_id: str) -> bool:

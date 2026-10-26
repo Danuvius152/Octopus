@@ -632,7 +632,7 @@ class SessionManagerBase:
         self,
         cred_id: str | None,
         *,
-        style: str = "env_secret",
+        backend: str,
         context: str = "",
         require_auth: bool = True,
         user_id: str | None = None,

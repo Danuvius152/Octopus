@@ -12,6 +12,7 @@ import {
 } from "../lib/hydrateSession";
 import { readRuntimeMetadata } from "../lib/toolIdentity";
 import { refreshSchedules } from "../lib/refreshSchedules";
+import { refreshAgents } from "../lib/refreshAgents";
 import { refreshWikiJobs } from "../lib/wikiJobs";
 import type { WikiMessageMode } from "../lib/wikiComposer";
 import {
@@ -581,6 +582,10 @@ export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const token = useSessionStore((s) => s.token);
+  const dispatchGeneration = useSessionStore((s) => s.dispatchGeneration);
+  useEffect(() => {
+    if (token && dispatchGeneration !== null) void refreshAgents().catch(() => {});
+  }, [token, dispatchGeneration]);
   const submissions = useRef(new Map<string, {
     sessionId: string;
     finish: (reply: SubmissionReply) => void;
@@ -609,6 +614,7 @@ export function useWebSocket() {
         const snapshotStart = getState();
         const { activeSessionId, token: t } = snapshotStart;
         if (t) {
+          void refreshAgents().catch(() => {});
           fetch(`${window.location.origin}/api/sessions`, {
             headers: { Authorization: `Bearer ${t}` },
           })

@@ -658,6 +658,6 @@ async def parse_schedule_text(
         model_text = await run(ctx)
     except HarnessOneshotError as e:
         raise ScheduleParseError(
-            _ONESHOT_ERROR_MESSAGES.get(e.code, _ONESHOT_ERROR_MESSAGES["failed"])
+            str(e) if e.code in {"configuration", "unauthorized"} else _ONESHOT_ERROR_MESSAGES.get(e.code, _ONESHOT_ERROR_MESSAGES["failed"])
         )
     return validate_parsed(extract_json(model_text), default_tz=tz, original_text=text)

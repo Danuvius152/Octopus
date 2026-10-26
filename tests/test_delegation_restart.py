@@ -17,6 +17,7 @@ from server.harness import get_harness
 from server.sessions import SessionManager
 from server.users import UserManager
 from tests.accounts import create_account
+from tests.harness_profiles import session_turn_argv
 
 
 @dataclass
@@ -51,7 +52,7 @@ async def runtime(tmp_path, monkeypatch, short_process_shutdown):
 
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
-        harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None,
+        harness.profile, build_turn_argv=session_turn_argv(harness.profile, argv), prepare_resume=None, activity_observer=None,
     ))
 
     async def boot(path=None):

@@ -5,9 +5,9 @@ from fastapi.responses import Response, StreamingResponse
 
 from ..auth import verify_token
 from ..config import settings
-from ..credential_bindings import CredentialBindingError
+from ..credential_bindings import CredentialBindingError, validate_credential_binding
 from ..deps import ScopeUser, SessionMgr
-from ..harness import BackendForkNotSupported, StdinMode, get_harness
+from ..harness import BackendForkNotSupported
 from ..models import (
     CreateSessionRequest,
     DispatchState,
@@ -22,8 +22,9 @@ from ..models import (
     SessionUpdate,
     SubagentRun,
 )
-from ..session_manager import ForkError, fork_info_fields
+from ..session_manager import ForkError
 from ..sessions import SessionManager
+from ..sessions.presentation import session_info
 from ..sessions.runtime_types import QuotaExceeded
 from ..submission_models import (
     ClientSubmissionRefusal,
@@ -42,58 +43,6 @@ router = APIRouter(prefix="/api/sessions", tags=["sessions"])
 MESSAGE_WINDOW = 200
 
 
-def _fork_fields(s) -> dict:
-    """The public fork fields for SessionInfo, from a live Session."""
-    return fork_info_fields(
-        backend=s.backend,
-        forked_from_session_id=s.forked_from_session_id,
-        fork_after_seq=s.fork_after_seq,
-        fork_metadata=s.fork_metadata,
-        fork_revert_record=s.fork_revert_record,
-    )
-
-
-def _can_steer(backend: str) -> bool:
-    """Whether a turn on this backend can take a message mid-flight.
-
-    A harness capability, derived the same way `can_fork` is: only a backend
-    that takes its input on stdin has a channel to steer through
-    (inline-steering.md §8). Codex keeps queue-until-idle.
-    """
-    try:
-        return get_harness(backend).profile.stdin_mode is StdinMode.STREAM_JSON
-    except Exception:
-        return False
-
-
-def _to_session_info(
-    s, message_count: int | None = None, archived: bool = False
-) -> SessionInfo:
-    return SessionInfo(
-        id=s.id,
-        name=s.name,
-        working_dir=s.working_dir,
-        status=s.status,
-        created_at=s.created_at,
-        message_count=s._message_count if message_count is None else message_count,
-        transcript_integrity=s._transcript_integrity,
-        claude_session_id=s.claude_session_id,
-        credential_id=s.credential_id,
-        agent_id=s.agent_id,
-        origin=s.origin,
-        backend=s.backend,
-        model=s.model,
-        reasoning_effort=s.reasoning_effort,
-        service_tier=s.service_tier,
-        parent_session_id=s.parent_session_id,
-        delegation_request=s.delegation_request,
-        app_id=s.app_id,
-        archived=archived,
-        can_steer=_can_steer(s.backend),
-        **_fork_fields(s),
-    )
-
-
 @router.get("", response_model=list[SessionInfo])
 async def list_sessions(
     session_manager: SessionMgr,
@@ -101,7 +50,7 @@ async def list_sessions(
     include_archived: bool = Query(False),
     _: str = Depends(verify_token),
 ):
-    live = [_to_session_info(s) for s in session_manager.list_sessions(user_id)]
+    live = [session_info(s) for s in session_manager.list_sessions(user_id)]
     if not include_archived:
         return live
     archived = await session_manager.list_archived_sessions(user_id)
@@ -123,23 +72,19 @@ def _own_session(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
 
 
-async def _check_credential_backend(
-    session_manager: SessionManager, credential_id: str | None, backend: str
+async def _check_credential_binding(
+    session_manager: SessionManager, credential_id: str | None, backend: str,
+    user_id: str | None,
 ) -> None:
-    """A session must not run a credential whose backend differs from its own
-    (codex-backend.md §4.2) — e.g. a Codex subscription on a Claude session.
-    400 on mismatch. A missing credential is tolerated (resolved later)."""
-    if not credential_id:
-        return
-    row = await session_manager.db.get_credential(credential_id)
-    if row is None:
-        return
-    if row["backend"] != backend:
-        raise HTTPException(
-            status.HTTP_400_BAD_REQUEST,
-            f"Credential backend {row['backend']!r} does not match session "
-            f"backend {backend!r}",
+    """Validate the explicit binding before changing any session fields."""
+    try:
+        await validate_credential_binding(
+            session_manager.db, credential_id, backend, user_id,
         )
+    except CredentialBindingError as error:
+        raise HTTPException(
+            404 if str(error) == "Credential not found" else 400, str(error),
+        ) from error
 
 
 @router.patch("/{session_id}", response_model=SessionInfo)
@@ -172,13 +117,7 @@ async def _update_session_settings(
 
     if "credential_id" in fields:
         cred_id = fields["credential_id"] or None
-        if cred_id is not None:
-            row = await session_manager.db.get_credential(cred_id)
-            if row is None:
-                raise HTTPException(
-                    status.HTTP_404_NOT_FOUND, "Credential not found"
-                )
-            await _check_credential_backend(session_manager, cred_id, session.backend)
+        await _check_credential_binding(session_manager, cred_id, session.backend, user_id)
         updates["credential_id"] = cred_id
 
     # `/model`. Deliberately not validated against a list: both CLIs accept
@@ -232,7 +171,7 @@ async def _update_session_settings(
         for key, value in updates.items():
             setattr(session, key, value)
 
-    return _to_session_info(session)
+    return session_info(session)
 
 
 @router.post("", response_model=SessionInfo, status_code=status.HTTP_201_CREATED)
@@ -254,7 +193,7 @@ async def create_session(
         if req.backend is not None
         else agent.get("backend") or settings.default_backend
     )
-    await _check_credential_backend(session_manager, req.credential_id, backend)
+    await _check_credential_binding(session_manager, req.credential_id, backend, user_id)
     try:
         s = await session_manager.create_session(
             agent_id,
@@ -265,7 +204,7 @@ async def create_session(
         )
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
-    return _to_session_info(s, message_count=0)
+    return session_info(s, message_count=0)
 
 
 @router.post("/{session_id}/dispatch/resume", response_model=DispatchState)
@@ -320,24 +259,7 @@ async def import_session(
     messages_raw = await session_manager.db.load_messages(s.id)
     messages = [MessageContent(**m) for m in messages_raw]
     return SessionDetail(
-        id=s.id,
-        name=s.name,
-        working_dir=s.working_dir,
-        status=s.status,
-        created_at=s.created_at,
-        message_count=s._message_count,
-        claude_session_id=s.claude_session_id,
-        credential_id=s.credential_id,
-        agent_id=s.agent_id,
-        origin=s.origin,
-        backend=s.backend,
-        model=s.model,
-        reasoning_effort=s.reasoning_effort,
-        service_tier=s.service_tier,
-        parent_session_id=s.parent_session_id,
-        delegation_request=s.delegation_request,
-        app_id=s.app_id,
-        **_fork_fields(s),
+        **session_info(s).model_dump(),
         messages=messages,
         dispatch_state=DispatchState(**session_manager.dispatch_snapshot(s.id)),
         pending_questions=[
@@ -495,25 +417,7 @@ async def get_session(
             messages = []
         oldest = messages[0].seq if messages else None
         return SessionDetail(
-            id=s.id,
-            name=s.name,
-            working_dir=s.working_dir,
-            status=s.status,
-            created_at=s.created_at,
-            message_count=message_count,
-            transcript_integrity="duplicate_seq" if duplicates else "ok",
-            claude_session_id=s.claude_session_id,
-            credential_id=s.credential_id,
-            agent_id=s.agent_id,
-            origin=s.origin,
-            backend=s.backend,
-            model=s.model,
-            reasoning_effort=s.reasoning_effort,
-            service_tier=s.service_tier,
-            parent_session_id=s.parent_session_id,
-            delegation_request=s.delegation_request,
-            app_id=s.app_id,
-            **_fork_fields(s),
+            **session_info(s, message_count, transcript_integrity="duplicate_seq" if duplicates else "ok").model_dump(),
             messages=messages,
             active_attempt={"request_id": s._run.request.request_id, "attempt_id": s._run.question_attempt_id}
             if s._run.request and s._run.question_attempt_id else None,
@@ -677,7 +581,7 @@ async def fork_session(
                 "backend": e.backend,
             },
         )
-    return _to_session_info(fork)
+    return session_info(fork)
 
 
 @router.post(
@@ -711,7 +615,7 @@ async def duplicate_session(
                 "backend": e.backend,
             },
         )
-    return _to_session_info(fork)
+    return session_info(fork)
 
 
 @router.post("/{session_id}/reset")
@@ -759,7 +663,7 @@ async def archive_session(
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
     if new is None:
         return Response(status_code=status.HTTP_204_NO_CONTENT)
-    return _to_session_info(new)
+    return session_info(new)
 
 
 @router.post("/{session_id}/unarchive", response_model=SessionInfo)
@@ -778,4 +682,4 @@ async def unarchive_session(
         s = await session_manager.unarchive_session(session_id, user_id)
     except ValueError:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-    return _to_session_info(s)
+    return session_info(s)

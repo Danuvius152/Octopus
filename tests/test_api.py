@@ -225,6 +225,8 @@ async def test_create_session_rejects_credential_backend_mismatch(client):
     from server.config import settings
     from server.crypto import encrypt
 
+    agent = await session_manager.db.get_system_agent()
+    assert agent is not None
     enc = encrypt("sk-x", settings.auth_token)
     await session_manager.db.save_credential(
         credential_id="c-cc",
@@ -233,9 +235,8 @@ async def test_create_session_rejects_credential_backend_mismatch(client):
         auth_type="api_key",
         secret_encrypted=enc,
         created_at=datetime.now(UTC).isoformat(),
+        user_id=agent["user_id"],
     )
-    agent = await session_manager.db.get_system_agent()
-    assert agent is not None
     resp = await client.post(
         "/api/sessions",
         headers=client.headers,
@@ -257,15 +258,6 @@ async def test_session_info_reports_the_steering_capability(client):
     composer reads it to say what the send button will actually do. Claiming
     "Queue message" when the message will steer is worse than saying nothing.
     """
-    from server.routers.sessions import _can_steer
-
-    # Claude takes input on stdin, so a turn on it can be steered mid-flight.
-    assert _can_steer("claude-code") is True
-    # Codex's prompt lives in argv; it keeps queue-until-idle.
-    assert _can_steer("codex") is False
-    # An unknown backend must not claim a capability it can't honour.
-    assert _can_steer("nonsense-backend") is False
-
     agent = await session_manager.db.get_system_agent()
     assert agent is not None
     res = await client.post(

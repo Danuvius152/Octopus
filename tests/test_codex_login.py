@@ -251,34 +251,39 @@ async def test_codex_login_status_unknown(client):
 
 
 @pytest.mark.asyncio
-async def test_codex_home_credential_resolution():
+async def test_codex_home_credential_resolution(client):
     """The codex home_dir credential resolves deterministically and only when
     it's a completed login (auth.json present). Resolution now lives in
-    resolve_credential_by_id(style="home_dir") + _resolve_credential's
+    resolve_credential_by_id(backend="codex") + _resolve_credential's
     session→agent precedence (the old _codex_home_for, folded in)."""
     from types import SimpleNamespace
 
     from server.harness import get_harness
     from server.session_manager import SessionManager
 
+    c, db = client
+    owner = (await db.get_system_agent())["user_id"]
     mgr = SessionManager()
+    await mgr.initialize(db)
+    await db.save_credential("credX", "codex", "owned", "oauth", "", "now", user_id=owner)
     codex = get_harness("codex")  # credential_style == "home_dir"
-    sess = SimpleNamespace(credential_id="credX", id="s1", user_id=None)
+    sess = SimpleNamespace(credential_id="credX", id="s1", user_id=owner)
 
-    # No dir yet → fall back to host login (None).
-    assert await mgr._resolve_credential(sess, None, codex) is None
+    # An explicit incomplete login must not fall back to a different host login.
+    with pytest.raises(ValueError, match="completed login"):
+        await mgr._resolve_credential(sess, None, codex)
 
     home = codex_login.codex_home_for("credX")
     os.makedirs(home, exist_ok=True)
-    # Dir exists but no auth.json (interrupted login) → still None.
-    assert await mgr._resolve_credential(sess, None, codex) is None
+    with pytest.raises(ValueError, match="completed login"):
+        await mgr._resolve_credential(sess, None, codex)
 
     open(os.path.join(home, "auth.json"), "w").close()
     cred = await mgr._resolve_credential(sess, None, codex)
     assert cred is not None and cred.home_dir == home and cred.backend == "codex"
 
     # Falls back to the agent's default credential when the session has none.
-    no_cred = SimpleNamespace(credential_id=None, id="s2", user_id=None)
+    no_cred = SimpleNamespace(credential_id=None, id="s2", user_id=owner)
     cred2 = await mgr._resolve_credential(no_cred, {"credential_id": "credX"}, codex)
     assert cred2 is not None and cred2.home_dir == home
     # No credential anywhere → None.

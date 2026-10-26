@@ -62,7 +62,7 @@ def test_turn_argv_full_config(tmp_path):
         prompt="hello", wd=str(tmp_path), resume="resume-1",
         credential=HarnessCredential(backend="claude-code", auth_type="oauth", secret="tok-xyz"),
         model="claude-opus-4-7", mcp_servers=["bg", "ask"],
-        tool_allow=["Read", "Glob"], tool_deny=["Write"], persona="PERSONA", session_id="s1",
+        tool_deny=["Write"], persona="PERSONA", session_id="s1",
     )
     argv, kw = build_turn_argv(ctx)
 
@@ -73,7 +73,7 @@ def test_turn_argv_full_config(tmp_path):
             # finished (inline-steering.md §3).
             "--include-partial-messages"} <= set(argv)
     assert argv[argv.index("--model") + 1] == "claude-opus-4-7"
-    assert argv[argv.index("--allowedTools") + 1] == "Read,Glob"
+    assert "--allowedTools" not in argv
     assert argv[argv.index("--disallowedTools") + 1] == "AskUserQuestion,Write"
     assert argv[argv.index("--resume") + 1] == "resume-1"
     # The prompt is NOT in argv under STREAM_JSON — it's written to stdin as a

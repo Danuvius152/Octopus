@@ -14,8 +14,9 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
+from ..credential_bindings import CredentialBindingError, validate_credential_binding
 from ..crypto import decrypt, encrypt
-from ..harness import HarnessCredential
+from ..harness import HarnessCredential, get_harness
 from ..models import CredentialStatus
 from ..oauth_errors import RefreshErrorCode
 from ..oauth_providers import OAuthTokenSet, get_provider
@@ -44,64 +45,54 @@ class CredentialsMixin(SessionManagerBase):
             agent.get("credential_id") if agent else None
         )
         return await self.resolve_credential_by_id(
-            cred_id, style=harness.profile.credential_style, context=f"session {session.id}", user_id=session.user_id,
+            cred_id, backend=harness.profile.backend, context=f"session {session.id}", user_id=session.user_id,
         )
 
     async def resolve_credential_by_id(
         self,
         cred_id: str | None,
         *,
-        style: str = "env_secret",
+        backend: str,
         context: str = "",
         require_auth: bool = True,
         user_id: str | None = None,
     ) -> HarnessCredential | None:
-        """Resolve a credential id into a `HarnessCredential` of the shape the
-        harness needs (`style`). Returns None when there's no id, the row is
-        missing/needs_reconnect, or it can't be resolved — the caller then runs
-        with whatever auth the CLI finds on its own. `context` labels log lines.
-        `user_id` is the captured caller owner; secret-backed resolution
-        requires an account and never uses an installation encryption key.
+        """Resolve an owned backend binding; an explicit invalid id never falls
+        back to the host identity. Only an absent binding returns the default.
 
-        - ``home_dir`` (Codex): the credential is directory-backed; its dir is
-          deterministic (`<codex_home_dir>/<credential_id>/`), so we resolve it
-          with no DB read and require a completed login (auth.json present).
-        - ``env_secret`` (Claude): decrypt the secret; refresh an OAuth bundle
-          if near expiry, else use the long-lived key as-is.
-
-        `require_auth=False` resolves the credential only for locating on-disk
-        artifacts (e.g. fork transcript copy/cleanup), NOT for making API calls:
-        a directory-backed credential returns its home dir even with a
-        missing/revoked `auth.json` (the rollout still lives there and must be
-        cleaned up — Vera review), and a secret-backed credential returns None
-        (its transcripts aren't keyed by credential, so no home to locate)."""
+        Artifact lookup still validates owner/backend, but does not require an
+        active account authentication: historical rollouts must remain cleanable.
+        Execution additionally checks current authority here and at actual spawn.
+        """
         if not cred_id:
             return None
-
+        if self.db is None:
+            raise CredentialBindingError("Credential not found")
+        await validate_credential_binding(self.db, cred_id, backend, user_id)
+        if require_auth:
+            await self.db.require_run_authority(user_id, cred_id, backend)
+        style = get_harness(backend).profile.credential_style
         if style == "home_dir":
             from ..codex_login import codex_home_for
 
             home = codex_home_for(cred_id)
             if require_auth and not os.path.exists(os.path.join(home, "auth.json")):
-                return None  # inherit the host default ~/.codex (option A)
-            return HarnessCredential(backend="codex", auth_type="oauth", home_dir=home)
+                raise CredentialBindingError("Credential has no completed login. Reconnect it before sending new work.")
+            return HarnessCredential(backend=backend, auth_type="oauth", home_dir=home)
 
         if not require_auth:
             # Secret-backed (Claude): no per-credential on-disk artifact store to
             # locate, so artifact copy/cleanup needs no credential.
             return None
 
-        if self.db is None:
-            return None
         secret_key = await UserManager(self.db).data_key_for(user_id)
         row = await self.db.get_credential(cred_id, user_id)
         if row is None or row.get("user_id") != user_id:
-            logger.warning(
-                "%s references unavailable credential %s; running without auth override",
-                context or "caller", cred_id,
-            )
-            return None
-        return await self._resolve_secret_credential(cred_id, row, secret_key)
+            raise CredentialBindingError("Credential not found")
+        resolved = await self._resolve_secret_credential(cred_id, row, secret_key)
+        if resolved is None:
+            raise CredentialBindingError("Credential could not be resolved. Reconnect it before sending new work.")
+        return resolved
 
     async def _resolve_secret_credential(
         self, cred_id: str, row: dict[str, Any], secret_key: str,
@@ -109,7 +100,7 @@ class CredentialsMixin(SessionManagerBase):
         """Read and refresh with the caller's captured account DEK."""
         if row.get("needs_reconnect"):
             logger.warning(
-                "Credential %s is in needs_reconnect state (%s); running without auth override",
+                "Credential %s is in needs_reconnect state (%s)",
                 cred_id,
                 row.get("last_refresh_error_code"),
             )
@@ -118,7 +109,7 @@ class CredentialsMixin(SessionManagerBase):
             plaintext = decrypt(row["secret_encrypted"], secret_key)
         except ValueError:
             logger.warning(
-                "Could not decrypt credential %s (wrong auth token?); running without auth override",
+                "Could not decrypt credential %s",
                 cred_id,
             )
             return None

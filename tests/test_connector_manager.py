@@ -124,6 +124,29 @@ def _token_set(expires_in: float = 3600.0) -> OAuthTokenSet:
     return OAuthTokenSet("at", "rt", time.time() + expires_in, scopes=["s"])
 
 
+@pytest.mark.parametrize("operation", ["install", "update"])
+async def test_committed_installation_result_survives_subsequent_kind_deletion(mgr, db, owner, monkeypatch, operation):
+    if operation == "update":
+        original = await mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"])
+    method = "save_connector_installation" if operation == "install" else "update_connector_installation"
+    persist = getattr(db, method)
+
+    async def commit_then_delete(*args, **kwargs):
+        committed = await persist(*args, **kwargs)
+        assert await db.delete_connector_installations_by_kind("fakekind") == 1
+        return committed
+
+    monkeypatch.setattr(db, method, commit_then_delete)
+    if operation == "install":
+        result = await mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"])
+    else:
+        result = await mgr.update_installation(original["id"], owner["id"], label="Committed update")
+        assert result["label"] == "Committed update"
+    assert result["kind"] == "fakekind" and result["user_id"] == owner["id"]
+    assert await db.get_connector_installation(result["id"]) is None
+    assert await db.get_connector_secret(result["id"]) is None
+
+
 async def test_owned_refresh_keeps_short_database_operations_available(mgr, db, provider, monkeypatch):
     from tests.accounts import create_account
 
@@ -300,12 +323,206 @@ async def test_replace_agent_connectors_diffs(mgr, db, owner):
     i2 = await mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"])
 
     await mgr.set_agent_connector("a-1", i1["id"], True)
-    result = await mgr.replace_agent_connectors("a-1", [i2["id"]])
+    result = await mgr.replace_agent_connectors("a-1", [i2["id"]], owner["id"])
     assert result == [i2["id"]]
     assert await mgr.get_agent_connector_ids("a-1") == [i2["id"]]
 
     with pytest.raises(ConnectorError):
-        await mgr.replace_agent_connectors("a-1", ["ghost"])
+        await mgr.replace_agent_connectors("a-1", ["ghost"], owner["id"])
+
+
+async def _installations(db, owner, ids):
+    for iid in ids:
+        await db.save_connector_installation(
+            installation_id=iid, kind="fakekind", label=iid, auth_type="oauth",
+            secret_encrypted="test-only", created_at="now", user_id=owner["id"],
+        )
+
+
+async def test_replace_rolls_back_every_member_when_storage_rejects_a_later_insert(mgr, db, owner):
+    import sqlite3
+
+    await _agent(db, user_id=owner["id"])
+    await _installations(db, owner, ["first", "second"])
+    async with db.transaction(write=True) as tx:
+        await tx.execute("CREATE TRIGGER fail_second BEFORE INSERT ON agent_connectors "
+                         "WHEN (SELECT COUNT(*) FROM agent_connectors) > 0 "
+                         "BEGIN SELECT RAISE(ABORT, 'injected insert failure'); END")
+    with pytest.raises(sqlite3.IntegrityError, match="injected insert failure"):
+        await mgr.replace_agent_connectors("a-1", ["first", "second"], owner["id"])
+    assert await mgr.get_agent_connector_ids("a-1") == []
+
+
+async def test_concurrent_replacements_commit_one_complete_target(mgr, db, owner):
+    await _agent(db, user_id=owner["id"])
+    await _installations(db, owner, ["a", "b", "c", "d"])
+    entered = [asyncio.Event(), asyncio.Event()]
+
+    async def replace_target(index, target):
+        entered[index].set()
+        return await mgr.replace_agent_connectors("a-1", target, owner["id"])
+
+    # Both requests queue on the real transaction boundary before either writes.
+    async with db.transaction(write=True):
+        first = asyncio.create_task(replace_target(0, ["a", "b"]))
+        second = asyncio.create_task(replace_target(1, ["c", "d"]))
+        await asyncio.gather(*(event.wait() for event in entered))
+    assert await asyncio.gather(first, second) == [["a", "b"], ["c", "d"]]
+    assert set(await mgr.get_agent_connector_ids("a-1")) in ({"a", "b"}, {"c", "d"})
+    assert await mgr.replace_agent_connectors("a-1", [], owner["id"]) == []
+    assert await mgr.get_agent_connector_ids("a-1") == []
+
+
+async def test_replace_rejects_foreign_or_missing_members_without_changing_selection(mgr, db, owner):
+    from tests.accounts import create_account
+
+    await _agent(db, user_id=owner["id"])
+    await _installations(db, owner, ["original", "new"])
+    other, _ = await create_account(db, username="other")
+    await _installations(db, other, ["foreign"])
+    assert await mgr.replace_agent_connectors("a-1", ["original", "original"], owner["id"]) == ["original"]
+    for invalid in ("foreign", "missing"):
+        with pytest.raises(ConnectorError, match="installation not found"):
+            await mgr.replace_agent_connectors("a-1", ["new", invalid], owner["id"])
+        assert await mgr.get_agent_connector_ids("a-1") == ["original"]
+    with pytest.raises(ConnectorError, match="agent not found"):
+        await mgr.replace_agent_connectors("a-1", [], other["id"])
+    assert await mgr.get_agent_connector_ids("a-1") == ["original"]
+
+
+@pytest.mark.parametrize("operation", ["reauth", "delete", "mark", "metadata"])
+@pytest.mark.parametrize("refresh_fails", [False, True])
+async def test_same_installation_mutations_wait_for_inflight_refresh(mgr, db, owner, provider, monkeypatch, operation, refresh_fails):
+    installation = await mgr.complete_install(kind="fakekind", token_set=_token_set(1), user_id=owner["id"])
+    iid = installation["id"]
+    entered, release = asyncio.Event(), asyncio.Event()
+    refresh = provider.refresh
+
+    async def blocked_refresh(**kwargs):
+        entered.set()
+        await release.wait()
+        if refresh_fails:
+            raise RuntimeError("old refresh rejected")
+        return await refresh(**kwargs)
+
+    monkeypatch.setattr(provider, "refresh", blocked_refresh)
+    refreshing = asyncio.create_task(mgr.get_access_token(iid, owner["id"]))
+    mutation = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        if operation == "reauth":
+            call = mgr.complete_install(kind="fakekind", token_set=OAuthTokenSet("reauthorized", "new-rt", time.time() + 3600), user_id=owner["id"])
+        elif operation == "delete":
+            call = mgr.delete_installation(iid, owner["id"])
+        elif operation == "mark":
+            call = mgr.mark_needs_reconnect(iid, "new-rejection", owner["id"])
+        else:
+            call = mgr.update_installation(iid, owner["id"], label="Updated")
+        mutation = asyncio.create_task(call)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(asyncio.shield(mutation), 0.05)
+    finally:
+        release.set()
+        results = await asyncio.gather(refreshing, *([mutation] if mutation else []), return_exceptions=True)
+    assert isinstance(results[0], ConnectorError) if refresh_fails else isinstance(results[0], dict)
+    assert not isinstance(results[1], BaseException)
+    current = await mgr.get_installation(iid, owner["id"])
+    if operation == "reauth":
+        assert not current["needs_reconnect"]
+        assert (await mgr.get_access_token(iid, owner["id"]))["access_token"] == "reauthorized"
+    elif operation == "delete":
+        assert current is None
+    elif operation == "mark":
+        assert current["last_refresh_error_code"] == "new-rejection"
+    else:
+        assert current["label"] == "Updated"
+
+
+@pytest.mark.parametrize("refresh_fails", [False, True])
+async def test_batch_delete_during_refresh_never_recreates_secret_or_returns_sqlite_error(mgr, db, owner, provider, monkeypatch, refresh_fails):
+    installation = await mgr.complete_install(kind="fakekind", token_set=_token_set(1), user_id=owner["id"])
+    iid = installation["id"]
+    entered, release = asyncio.Event(), asyncio.Event()
+    refresh = provider.refresh
+
+    async def blocked_refresh(**kwargs):
+        entered.set()
+        await release.wait()
+        if refresh_fails:
+            raise RuntimeError("old refresh rejected")
+        return await refresh(**kwargs)
+
+    monkeypatch.setattr(provider, "refresh", blocked_refresh)
+    refreshing = asyncio.create_task(mgr.get_access_token(iid, owner["id"]))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        assert await db.delete_connector_installations_by_kind("fakekind") == 1
+    finally:
+        release.set()
+    result = (await asyncio.gather(refreshing, return_exceptions=True))[0]
+    assert isinstance(result, ConnectorError)
+    assert await db.get_connector_secret(iid) is None
+    assert await mgr.get_installation(iid, owner["id"]) is None
+
+
+async def test_captured_reauthorization_target_deleted_while_waiting_is_not_recreated(mgr, db, owner, provider, monkeypatch):
+    installation = await mgr.complete_install(kind="fakekind", token_set=_token_set(1), user_id=owner["id"])
+    entered, release, captured = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    refresh = provider.refresh
+    lookup = db.get_connector_installation_by_account
+
+    async def blocked_refresh(**kwargs):
+        entered.set()
+        await release.wait()
+        return await refresh(**kwargs)
+
+    async def observed_lookup(*args, **kwargs):
+        row = await lookup(*args, **kwargs)
+        assert row["id"] == installation["id"]
+        captured.set()
+        return row
+
+    monkeypatch.setattr(provider, "refresh", blocked_refresh)
+    monkeypatch.setattr(db, "get_connector_installation_by_account", observed_lookup)
+    refreshing = asyncio.create_task(mgr.get_access_token(installation["id"], owner["id"]))
+    reauthorizing = None
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        reauthorizing = asyncio.create_task(mgr.complete_install(kind="fakekind", token_set=_token_set(), user_id=owner["id"]))
+        await asyncio.wait_for(captured.wait(), 2)
+        await db.delete_connector_installations_by_kind("fakekind")
+    finally:
+        release.set()
+        results = await asyncio.gather(refreshing, *([reauthorizing] if reauthorizing else []), return_exceptions=True)
+    assert len(results) == 2 and all(isinstance(result, ConnectorError) for result in results)
+    assert await db.load_connector_installations(owner["id"]) == []
+    assert await db.get_connector_secret(installation["id"]) is None
+
+
+async def test_different_installations_refresh_concurrently(mgr, owner, provider, monkeypatch):
+    first = await mgr.complete_install(kind="fakekind", token_set=_token_set(1), user_id=owner["id"])
+    (await mgr.get("fakekind"))._identity = ("ext-2", "second")
+    second = await mgr.complete_install(kind="fakekind", token_set=_token_set(1), user_id=owner["id"])
+    both_entered, release = asyncio.Event(), asyncio.Event()
+    refresh = provider.refresh
+    calls = 0
+
+    async def blocked_refresh(**kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            both_entered.set()
+        await release.wait()
+        return await refresh(**kwargs)
+
+    monkeypatch.setattr(provider, "refresh", blocked_refresh)
+    running = [asyncio.create_task(mgr.get_access_token(inst["id"], owner["id"])) for inst in (first, second)]
+    try:
+        await asyncio.wait_for(both_entered.wait(), 2)
+    finally:
+        release.set()
+        results = await asyncio.gather(*running, return_exceptions=True)
+    assert all(isinstance(result, dict) for result in results)
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { AgentFormPage } from "./AgentFormPage";
+import { handleWsMessage } from "../hooks/useWebSocket";
 import {
   useSessionStore, type Agent, type BackendKind, type SessionInfo,
 } from "../stores/sessionStore";
@@ -54,6 +55,7 @@ function mount(
     connectorInstallations: [],
     availableBackends: ["claude-code", "codex"],
     defaultBackend,
+    backendToolPolicies: { "claude-code": { allow: false, deny: true }, codex: { allow: false, deny: false } },
     mainView: "agent-form",
   });
   return render(<AgentFormPage onToggleSidebar={() => {}} />);
@@ -72,6 +74,58 @@ afterEach(() => {
 });
 
 describe("AgentFormPage", () => {
+  it.each(["update", "archive"])("a late form receipt preserves the newer WS %s", async (event) => {
+    const existing = agent({ name: "Original" });
+    let finish!: (response: Response) => void;
+    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === "PATCH") return new Promise<Response>((resolve) => { finish = resolve; });
+      return json([]);
+    });
+    mount(existing.id, [existing]);
+    fireEvent.change(screen.getByLabelText("One-line role"), { target: { value: "Draft" } });
+    fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    act(() => handleWsMessage(event === "update"
+      ? { type: "agent_updated", agent: { ...existing, name: "Newer update" } }
+      : { type: "agent_archived", agent_id: existing.id }));
+    await act(async () => finish(json({ ...existing, description: "Draft" })));
+    const current = useSessionStore.getState().agents.find((row) => row.id === existing.id);
+    if (event === "update") expect(current?.name).toBe("Newer update");
+    else {
+      expect(current).toBeUndefined();
+      expect(useSessionStore.getState().mainView).toBe("agent-form");
+    }
+  });
+
+  it("preserves a legacy unsupported policy and requires an explicit correction", async () => {
+    const existing = agent({ backend: "codex", tool_allow: "Read", tool_deny: "Write" });
+    mount(existing.id, [existing]);
+    const allow = screen.getByLabelText(/Allowed tools/);
+    const deny = screen.getByLabelText(/Denied tools/);
+    expect(allow).toHaveValue("Read");
+    expect(deny).toHaveValue("Write");
+    expect(allow).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
+    expect(await screen.findByText(/cannot enforce tool_allow/)).toBeInTheDocument();
+    expect(fetchMock.mock.calls.some(([, init]) => init?.method === "PATCH")).toBe(false);
+    expect(allow).toHaveValue("Read");
+    fireEvent.change(allow, { target: { value: "" } });
+    fireEvent.change(deny, { target: { value: "" } });
+    expect(allow).toBeDisabled();
+    expect(deny).toBeDisabled();
+  });
+
+  it("uses backend metadata for tool support without clearing values on an engine switch", () => {
+    const existing = agent({ tool_deny: "Write" });
+    mount(existing.id, [existing]);
+    expect(screen.getByLabelText(/Allowed tools/)).toBeDisabled();
+    expect(screen.getByLabelText(/Denied tools/)).toBeEnabled();
+    fireEvent.click(screen.getByRole("radio", { name: /Codex/ }));
+    expect(screen.getByLabelText(/Denied tools/)).toHaveValue("Write");
+    fireEvent.click(screen.getByRole("button", { name: "Save Agent" }));
+    expect(screen.getByText(/cannot enforce tool_deny/)).toBeInTheDocument();
+  });
+
   it("loads connector enablement, rolls back a failed toggle and removes deleted installations", async () => {
     let patches = 0;
     fetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
@@ -307,7 +361,7 @@ describe("AgentFormPage", () => {
   it("preserves unrelated fields updated by another client", async () => {
     const existing = agent({
       backend: "codex", model: "model-a", reasoning_effort: "high", service_tier: "default",
-      system_prompt: "original", tool_allow: "tool-a", tool_deny: "tool-b",
+      system_prompt: "original",
       subagents: [{ name: "reviewer", description: "review", prompt: "original", model: null, tools: [] }],
     });
     mockCodexEdit(existing);
@@ -315,7 +369,7 @@ describe("AgentFormPage", () => {
     await waitFor(() => expect(screen.getByLabelText("Speed")).toBeEnabled());
     act(() => useSessionStore.getState().upsertAgent({
       ...existing, model: "model-b", reasoning_effort: "low", system_prompt: "updated",
-      tool_allow: "new-allow", tool_deny: "new-deny", credential_id: "new-credential",
+      credential_id: "new-credential",
       subagents: [{ name: "helper", description: "help", prompt: "updated", model: null, tools: [] }],
     }));
     fireEvent.change(screen.getByLabelText("Speed"), { target: { value: "fast" } });
@@ -325,7 +379,7 @@ describe("AgentFormPage", () => {
     await waitFor(() => expect(useSessionStore.getState().mainView).toBe("chat"));
     expect(useSessionStore.getState().agents[0]).toMatchObject({
       model: "model-b", reasoning_effort: "low", system_prompt: "updated",
-      tool_allow: "new-allow", tool_deny: "new-deny", credential_id: "new-credential",
+      credential_id: "new-credential",
       subagents: [{ name: "helper" }], service_tier: "fast",
     });
   });
@@ -487,6 +541,23 @@ describe("AgentFormPage", () => {
     await waitFor(() => expect(screen.getByText("Scout")).toBeTruthy());
     fireEvent.click(screen.getByRole("button", { name: "Restore" }));
     await waitFor(() => expect(screen.getByText(/already exists/)).toBeTruthy());
+  });
+
+  it("a late restore receipt preserves an archive event and the archived row", async () => {
+    const retired = agent({ id: "ag8", name: "Retired", is_system: false, archived: true });
+    let finish!: (response: Response) => void;
+    fetchMock.mockImplementation(async (url: unknown) => {
+      if (String(url).includes("/unarchive")) return new Promise<Response>((resolve) => { finish = resolve; });
+      if (String(url).includes("include_archived=true")) return json([retired]);
+      return json([]);
+    });
+    mount(null, [agent()], "all");
+    fireEvent.click(await screen.findByRole("button", { name: "Restore" }));
+    await waitFor(() => expect(finish).toBeTypeOf("function"));
+    act(() => handleWsMessage({ type: "agent_archived", agent_id: retired.id }));
+    await act(async () => finish(json({ ...retired, archived: false })));
+    expect(useSessionStore.getState().agents.some((row) => row.id === retired.id)).toBe(false);
+    expect(screen.getByRole("button", { name: "Restore" })).toBeVisible();
   });
 
   it("names the second tab Edit while an agent is open", () => {

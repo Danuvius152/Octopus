@@ -62,6 +62,24 @@ class AgentsMixin(DatabaseBase):
             rows = await cursor.fetchall()
             return [row[0] for row in rows]
 
+    async def replace_agent_connectors(
+        self, agent_id: str, installation_ids: list[str], user_id: str | None,
+    ) -> list[str]:
+        """Validate and replace one complete selection in a single commit."""
+        target = sorted(set(installation_ids))
+        async with self.transaction(write=True) as tx:
+            agent = await tx.fetch_one("SELECT user_id FROM agents WHERE id = ?", (agent_id,))
+            if agent is None or agent[0] != user_id:
+                raise ValueError("agent not found")
+            for iid in target:
+                installation = await tx.fetch_one("SELECT user_id FROM connector_installations WHERE id = ?", (iid,))
+                if installation is None or installation[0] != user_id:
+                    raise ValueError("connector installation not found")
+            await tx.execute("DELETE FROM agent_connectors WHERE agent_id = ?", (agent_id,))
+            for iid in target:
+                await tx.execute("INSERT INTO agent_connectors (agent_id, installation_id) VALUES (?, ?)", (agent_id, iid))
+        return target
+
     async def get_enabled_connectors_for_agent(
         self, agent_id: str
     ) -> list[dict[str, Any]]:
@@ -261,23 +279,22 @@ class AgentsMixin(DatabaseBase):
             row = await cursor.fetchone()
             return self._row_to_agent(row) if row else None
 
+    @staticmethod
+    def normalize_agent_update(fields: dict[str, Any]) -> dict[str, Any]:
+        """The effective patch, shared by validation and persistence."""
+        allowed = {
+            "name", "description", "avatar", "system_prompt", "model",
+            "reasoning_effort", "service_tier", "credential_id", "backend",
+            "mcp_servers", "tool_allow", "tool_deny", "subagents", "archived",
+        }
+        nullable = {"credential_id", "model", "avatar", "reasoning_effort", "service_tier"}
+        return {k: v for k, v in fields.items() if k in allowed and (v is not None or k in nullable)}
+
     async def update_agent(self, agent_id: str, **fields: Any) -> None:
+        fields = self.normalize_agent_update(fields)
         async with self.transaction(write=True) as tx:
-            allowed = {
-                "name", "description", "avatar", "system_prompt", "model",
-                "reasoning_effort", "service_tier",
-                "credential_id", "backend", "mcp_servers", "tool_allow", "tool_deny",
-                "subagents",
-                "archived",
-            }
-            # credential_id / model / avatar are nullable and may be cleared.
-            nullable = {"credential_id", "model", "avatar", "reasoning_effort", "service_tier"}
             updates: dict[str, Any] = {}
             for k, v in fields.items():
-                if k not in allowed:
-                    continue
-                if v is None and k not in nullable:
-                    continue
                 if k in ("mcp_servers", "subagents"):
                     updates[k] = json.dumps(v if v is not None else [])
                 elif k == "archived":

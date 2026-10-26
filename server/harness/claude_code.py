@@ -37,6 +37,7 @@ from .profile import (
     ParseOutput,
     RuntimeProfile,
     StdinMode,
+    ToolPolicySupport,
     TurnContext,
     WebCapability,
 )
@@ -272,7 +273,8 @@ def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
     only thing spawning this); `--disallowedTools AskUserQuestion` (force the
     `mcp__ask__user` replacement) plus any agent denies; `--mcp-config` JSON
     for the in-process servers; `--append-system-prompt`; optional
-    `--allowedTools`/`--model`/`--resume`; `--` then the prompt."""
+    `--model`/`--resume`; `--` then the prompt. Auto-approval flags do not
+    enforce an allow list; unsupported policies are refused by the harness."""
     mcp_config = json.dumps({"mcpServers": {e.key: _mcp_entry(e) for e in ctx.mcp_servers}})
     disallowed = ["AskUserQuestion", *(ctx.tool_deny or [])]
     if ctx.web_research:
@@ -316,8 +318,6 @@ def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
         # CLI's own built-ins (Explore, Plan, general-purpose…) stay available
         # alongside these; `--agents` adds, it doesn't replace.
         argv += ["--agents", json.dumps(_render_subagents(ctx.subagents))]
-    if ctx.tool_allow:
-        argv += ["--allowedTools", ",".join(ctx.tool_allow)]
     if ctx.model:
         argv += ["--model", ctx.model]
     if ctx.resume_id:
@@ -880,6 +880,7 @@ _CLAUDE_TRANSIENT_ERROR_PATTERNS = (
 
 
 CLAUDE_CODE = RuntimeProfile(
+    tool_policy=ToolPolicySupport(deny=True),
     # The aliases `claude --model` documents. Aliases rather than pinned ids on
     # purpose: they keep meaning the newest model of each tier, so this list
     # does not go stale every release.

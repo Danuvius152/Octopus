@@ -19,6 +19,7 @@ from server.harness import get_harness
 from server.mcp_identity import mint, verify
 from server.sessions import SessionManager
 from tests.accounts import create_account
+from tests.harness_profiles import session_turn_argv
 from tests.test_delegation_restart_security import wait_live_scope
 
 
@@ -67,7 +68,7 @@ async def work_runtime(monkeypatch, tmp_path, short_process_shutdown):
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=session_turn_argv(harness.profile, argv), prepare_resume=None, activity_observer=None))
     try:
         yield manager, delegations, parent, starts
     finally:

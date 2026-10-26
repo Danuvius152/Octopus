@@ -19,7 +19,7 @@ from typing import Any
 from ..config import settings
 from ..credential_bindings import validate_credential_binding
 from ..harness import get_harness
-from ..models import MessageContent, SessionDetail, SessionStatus
+from ..models import MessageContent, SessionDetail
 from ..users import owner_is_available
 from ..workspace import confine
 from .base import (
@@ -27,11 +27,11 @@ from .base import (
     Session,
     SessionManagerBase,
     _session_from_row,
-    fork_info_fields,
     resolve_working_dir,
 )
 from .owner import SessionOwnerUnavailable
 from .owner_runtime import AutoArchive, CloseExecution, ReleaseArchive
+from .presentation import session_info
 
 # The window an archived open returns, matching the live one in
 # `routers/sessions.MESSAGE_WINDOW`. Declared here rather than imported to keep
@@ -598,35 +598,8 @@ class LifecycleMixin(SessionManagerBase):
             if not row["archived"]:
                 continue
             count, _next_seq, duplicates = await self.db.message_sequence_state(row["id"])
-            out.append(
-                {
-                    "id": row["id"],
-                    "name": row["name"],
-                    "working_dir": row["working_dir"],
-                    "status": SessionStatus.idle.value,
-                    "created_at": row["created_at"],
-                    "message_count": count,
-                    "transcript_integrity": "duplicate_seq" if duplicates else "ok",
-                    "claude_session_id": row["claude_session_id"],
-                    "credential_id": row.get("credential_id"),
-                    "agent_id": row.get("agent_id"),
-                    "origin": row.get("origin") or "user",
-                    "backend": row.get("backend") or "claude-code",
-                    "model": row.get("model"),
-                    "reasoning_effort": row.get("reasoning_effort"),
-                    "service_tier": row.get("service_tier"),
-                    "parent_session_id": row.get("parent_session_id"),
-                    "delegation_request": row.get("delegation_request"),
-                    "archived": True,
-                    **fork_info_fields(
-                        backend=row.get("backend") or "claude-code",
-                        forked_from_session_id=row.get("forked_from_session_id"),
-                        fork_after_seq=row.get("fork_after_seq"),
-                        fork_metadata=row.get("fork_metadata"),
-                        fork_revert_record=row.get("fork_revert_record"),
-                    ),
-                }
-            )
+            out.append(session_info(row, count, archived=True,
+                                    transcript_integrity="duplicate_seq" if duplicates else "ok").model_dump())
         return out
 
     async def load_archived_session_detail(
@@ -656,31 +629,7 @@ class LifecycleMixin(SessionManagerBase):
             messages = []
         oldest = messages[0].seq if messages else None
         return SessionDetail(
-            id=match["id"],
-            name=match["name"],
-            working_dir=match["working_dir"],
-            status=SessionStatus.idle,
-            created_at=match["created_at"],
-            message_count=total,
-            transcript_integrity="duplicate_seq" if duplicates else "ok",
-            claude_session_id=match["claude_session_id"],
-            credential_id=match.get("credential_id"),
-            agent_id=match.get("agent_id"),
-            origin=match.get("origin") or "user",
-            backend=match.get("backend") or "claude-code",
-            model=match.get("model"),
-            reasoning_effort=match.get("reasoning_effort"),
-            service_tier=match.get("service_tier"),
-            parent_session_id=match.get("parent_session_id"),
-            delegation_request=match.get("delegation_request"),
-            **fork_info_fields(
-                backend=match.get("backend") or "claude-code",
-                forked_from_session_id=match.get("forked_from_session_id"),
-                fork_after_seq=match.get("fork_after_seq"),
-                fork_metadata=match.get("fork_metadata"),
-                fork_revert_record=match.get("fork_revert_record"),
-            ),
-            archived=True,
+            **session_info(match, total, archived=True, transcript_integrity="duplicate_seq" if duplicates else "ok").model_dump(),
             messages=messages,
             pending_questions=[],
             oldest_loaded_seq=oldest,

@@ -146,6 +146,7 @@ async def test_duplicate_pins_cleanup_credential_for_codex(manager, tmp_path, mo
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     repo = _repo(tmp_path)
     cx_parent = await _seed_parent(manager, repo, backend="codex")
+    await manager.db.save_credential("cred-1", "codex", "owned", "oauth", "", "now", user_id=cx_parent.user_id)
     cx_parent.credential_id = "cred-1"
     await manager.db.update_session_field(cx_parent.id, credential_id="cred-1")
     cx_fork = await manager.duplicate_session(cx_parent.id)
@@ -154,6 +155,7 @@ async def test_duplicate_pins_cleanup_credential_for_codex(manager, tmp_path, mo
     b = tmp_path / "b"
     b.mkdir()
     cl_parent = await _seed_parent(manager, _repo(b), backend="claude-code")
+    await manager.db.save_credential("cred-2", "claude-code", "owned", "oauth", "", "now", user_id=cl_parent.user_id)
     cl_parent.credential_id = "cred-2"
     await manager.db.update_session_field(cl_parent.id, credential_id="cred-2")
     cl_fork = await manager.duplicate_session(cl_parent.id)
@@ -499,16 +501,19 @@ async def test_resolve_credential_require_auth_false(manager, tmp_path, monkeypa
     from server.codex_login import codex_home_for
 
     cid = "cred-xyz"
+    owner = (await manager.db.get_system_agent())["user_id"]
+    await manager.db.save_credential(cid, "codex", "owned", "oauth", "", "now", user_id=owner)
     home = codex_home_for(cid)
-    # No auth.json on disk → require_auth=True yields None, =False yields the dir.
-    assert await manager.resolve_credential_by_id(cid, style="home_dir") is None
+    with pytest.raises(ValueError, match="completed login"):
+        await manager.resolve_credential_by_id(cid, backend="codex", user_id=owner)
     cred = await manager.resolve_credential_by_id(
-        cid, style="home_dir", require_auth=False
+        cid, backend="codex", require_auth=False, user_id=owner,
     )
     assert cred is not None and cred.home_dir == home
     # Secret-backed: no on-disk store keyed by credential → None for cleanup.
+    await manager.db.save_credential("secret", "claude-code", "owned", "oauth", "", "now", user_id=owner)
     assert await manager.resolve_credential_by_id(
-        cid, style="env_secret", require_auth=False
+        "secret", backend="claude-code", require_auth=False, user_id=owner,
     ) is None
 
 

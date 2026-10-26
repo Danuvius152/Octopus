@@ -551,7 +551,7 @@ async def quiesce_installation(request: Request, user: deps.CurrentUser):
     return {"status": "stopping", "request_id": request_id}
 
 
-@app.get("/api/backends")
+@app.get("/api/backends", response_model=backends.BackendAvailability)
 async def list_backends(_: str = Depends(verify_token)):
     """Which AI backends are usable on this host (codex-backend.md §6.1).
     A harness kind appears only when its CLI resolves on PATH. `claude-code`
@@ -574,6 +574,7 @@ async def list_backends(_: str = Depends(verify_token)):
         "available": available,
         "models": models,
         "default": settings.default_backend,
+        "tool_policy": {kind: get_harness(kind).profile.tool_policy for kind in available},
     }
 
 

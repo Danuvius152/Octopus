@@ -11,7 +11,6 @@ import os
 import tempfile
 import threading
 import uuid
-from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -48,7 +47,7 @@ class WikiRegistry:
     def __init__(self) -> None:
         self.health = ServiceHealth()
         self._lock = threading.RLock()
-        self._stores: OrderedDict[tuple, WikiStore] = OrderedDict()
+        self._stores: dict[tuple, WikiStore] = {}
         self._task: asyncio.Task | None = None
         self._stopping: asyncio.Event | None = None
         self._account_locks: dict[str, threading.RLock] = {}
@@ -342,6 +341,7 @@ class WikiRegistry:
                     raise WikiError("Filesystem recovery handoff is not durably complete", 503)
             key = self._key(user_id, self.state(user_id).resolve(), config)
             self._recovery_results[(str(store.state.resolve()), store.vault_id)] = None
+            store._on_retired = self._collect_retired
             self._stores[key] = store
             store._recovery = None
             self._advance(user_id)
@@ -349,6 +349,12 @@ class WikiRegistry:
 
     def _allowed(self, user_id):
         return user_id not in self._blocked and not self._closing and not self._stopped
+
+    def _collect_retired(self, store):
+        """Only confirmed retired owners leave the retained-resource set."""
+        with self._lock:
+            if store._retired and not store._users and store._events_released:
+                self._retired_stores.pop(store, None)
 
     @staticmethod
     def _key(user_id, state, config):
@@ -377,7 +383,6 @@ class WikiRegistry:
                 key = self._key(user_id, state, config)
                 existing = self._stores.get(key)
                 if existing is not None and not existing._retired:
-                    self._stores.move_to_end(key)
                     return existing
                 failure = self._recovery_results.get((str(state), config["vault_id"]))
                 if failure is not None:
@@ -407,6 +412,7 @@ class WikiRegistry:
                 raise WikiError(str(error), 503) from error
             def acquired(store):
                 permit.candidate = store
+                store._on_retired = self._collect_retired
                 # Publication rechecks this captured binding and the permit
                 # after construction completes.
                 store.registration_generation = config["registration_generation"]
@@ -434,11 +440,6 @@ class WikiRegistry:
                         old = self._stores.pop(previous)
                         self._retired_stores[old] = user_id
                         retire.append(old)
-                self._stores.move_to_end(key)
-                while len(self._stores) > 32:
-                    previous, old = self._stores.popitem(last=False)
-                    self._retired_stores[old] = previous[0]
-                    retire.append(old)
             for old in retire:
                 old.retire()
             return winner

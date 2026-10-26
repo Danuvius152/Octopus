@@ -151,6 +151,7 @@ async def resolve_showme_reference(
     session_name: str | None = None,
     reasoning_effort: str | None = None,
     service_tier: str | None = None,
+    runner=None,
 ) -> ShowMeResolution:
     """Resolve a human file reference to a concrete path. See module docstring
     for the three layers (exact-path short-circuit, model call, path-shaped
@@ -169,7 +170,7 @@ async def resolve_showme_reference(
         reasoning_effort=reasoning_effort,
         service_tier=service_tier,
     )
-    out = await harness.run_oneshot(ctx)
+    out = await (runner or harness.run_oneshot)(ctx)
 
     obj = extract_json(out)
     if obj is not None:

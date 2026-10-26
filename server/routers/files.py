@@ -16,6 +16,8 @@ no second weaker token to leak.
 from __future__ import annotations
 
 import logging
+from dataclasses import replace
+from functools import partial
 
 from fastapi import APIRouter, HTTPException, Query, status
 from fastapi.responses import FileResponse, JSONResponse
@@ -29,7 +31,7 @@ from ..file_viewer import (
     UnsupportedType,
     resolve_safe_path,
 )
-from ..harness import get_harness
+from ..harness import HarnessOneshotError, get_harness
 from ..models import ShowMeResolveRequest, ShowMeResolveResponse
 from ..sessions import SessionManager
 from ..showme_ai import resolve_showme_reference
@@ -96,24 +98,33 @@ async def resolve_showme(
     # `home_dir` for Codex), not a raw DB row. Effective id: session override
     # wins over the agent's default (agent-refactor.md §5.2 / decision #2).
     cred_id = session.credential_id or agent.get("credential_id")
-    try:
+    backend, db = session.backend, session_manager.db
+
+    async def run_resolver(ctx):
         credential = await session_manager.resolve_credential_by_id(
-            cred_id,
-            style=harness.profile.credential_style,
-            context=f"showme resolver for session {session_id}",
+            cred_id, backend=backend, context=f"showme resolver for session {session_id}",
             user_id=user_id,
         )
+        return await harness.run_oneshot(replace(
+            ctx, credential=credential,
+            authorize_spawn=partial(db.require_run_authority, user_id, cred_id, backend),
+        ))
+
+    try:
         result = await resolve_showme_reference(
             req.text,
             harness=harness,
             model=session.model or agent.get("model"),
             reasoning_effort=session.reasoning_effort or agent.get("reasoning_effort"),
             service_tier=session.service_tier or agent.get("service_tier"),
-            credential=credential,
+            credential=None,
+            runner=run_resolver,
             working_dir=session.working_dir,
             messages=await session_manager.db.load_messages(session_id),
             session_name=session.name,
         )
+    except (ValueError, HarnessOneshotError) as error:
+        raise HTTPException(422, str(error)) from error
     except Exception:
         # Don't leak raw model/harness errors (paths, credential labels,
         # tracebacks) to the client; log them for the operator.

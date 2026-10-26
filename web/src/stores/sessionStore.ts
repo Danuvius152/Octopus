@@ -1,5 +1,7 @@
 import { create } from "zustand";
 import { mergeCardSnapshot } from "../lib/cardSnapshots";
+import { agentRequestIsCurrent, beginAgentRequest, canApplyAgent, endAgentRequest, recordAgentChanges, recordAgentSnapshot, type AgentRequest } from "../lib/agentUpdates";
+import { withPinOrder } from "../lib/sidebarPins";
 import type { ControlCommandStatus } from "../lib/submission";
 import { normalizeMessage, type MessageInput } from "../lib/turnOutcome";
 import { readDispatchState, type DispatchState } from "../lib/sessionDispatch";
@@ -17,6 +19,7 @@ import type {
   SubagentRun as ApiSubagentRun,
   SessionStatus as ApiSessionStatus,
   RuntimeMetadata,
+  ToolPolicySupport,
   WikiJobCard,
 } from "../api";
 
@@ -176,8 +179,12 @@ interface SessionStore {
   // drives the session/schedule filters.
   agents: Agent[];
   setAgents: (a: Agent[]) => void;
-  upsertAgent: (a: Agent) => void;
-  removeAgent: (id: string) => void;
+  beginAgentRequest: (kind?: AgentRequest["kind"]) => AgentRequest;
+  endAgentRequest: (request: AgentRequest) => void;
+  applyAgentSnapshot: (agents: Agent[], request: AgentRequest) => void;
+  applyAgentOrder: (ids: string[], request: AgentRequest) => void;
+  upsertAgent: (a: Agent, request?: AgentRequest) => void;
+  removeAgent: (id: string, request?: AgentRequest) => void;
   activeAgentId: string | null;
   setActiveAgentId: (id: string | null) => void;
 
@@ -228,6 +235,8 @@ interface SessionStore {
   // does not claim to know (see RuntimeProfile.models).
   backendModels: Record<string, string[]>;
   setBackendModels: (m: Record<string, string[]>) => void;
+  backendToolPolicies: Record<string, ToolPolicySupport>;
+  setBackendToolPolicies: (policies: Record<string, ToolPolicySupport>) => void;
 
   sessions: SessionInfo[];
   setSessions: (s: SessionInfo[]) => void;
@@ -487,9 +496,40 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   },
 
   agents: [],
-  setAgents: (agents) => set({ agents }),
-  upsertAgent: (agent) =>
+  setAgents: (agents) => {
+    recordAgentChanges(new Set([...get().agents, ...agents].map((agent) => agent.id)));
+    set({ agents });
+  },
+  beginAgentRequest: (kind) => beginAgentRequest(get(), kind),
+  endAgentRequest,
+  applyAgentSnapshot: (rows, request) => set((s) => {
+    if (!agentRequestIsCurrent(request, s)) return s;
+    const incoming = new Map(rows.filter((agent) => !agent.archived).map((agent) => [agent.id, agent]));
+    const ids = new Set([...s.agents, ...rows].map((agent) => agent.id));
+    const current = new Map(s.agents.map((agent) => [agent.id, agent]));
+    const accepted = [...ids].filter((id) => canApplyAgent(id, request));
+    for (const id of accepted) {
+      const row = incoming.get(id);
+      if (row) current.set(id, row);
+      else current.delete(id);
+    }
+    recordAgentChanges(accepted, request);
+    recordAgentSnapshot(request);
+    return { agents: [...current.values()] };
+  }),
+  applyAgentOrder: (ids, request) => set((s) => {
+    if (!agentRequestIsCurrent(request, s)) return s;
+    const current = new Map(s.agents.map((agent) => [agent.id, agent]));
+    const accepted = new Set(ids.filter((id) => current.has(id) && canApplyAgent(id, request)));
+    const ordered = withPinOrder(s.agents, ids);
+    recordAgentChanges(accepted, request, true);
+    return { agents: ordered.map((agent) => accepted.has(agent.id) ? agent : current.get(agent.id)!) };
+  }),
+  upsertAgent: (agent, request) =>
     set((s) => {
+      if ((request && !agentRequestIsCurrent(request, s)) || !canApplyAgent(agent.id, request)) return s;
+      recordAgentChanges([agent.id], request);
+      if (agent.archived) return { agents: s.agents.filter((row) => row.id !== agent.id) };
       const idx = s.agents.findIndex((a) => a.id === agent.id);
       const agents =
         idx >= 0
@@ -497,8 +537,12 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
           : [...s.agents, agent];
       return { agents };
     }),
-  removeAgent: (id) =>
-    set((s) => ({ agents: s.agents.filter((a) => a.id !== id) })),
+  removeAgent: (id, request) =>
+    set((s) => {
+      if ((request && !agentRequestIsCurrent(request, s)) || !canApplyAgent(id, request)) return s;
+      recordAgentChanges([id], request);
+      return { agents: s.agents.filter((a) => a.id !== id) };
+    }),
   activeAgentId: null,
   setActiveAgentId: (activeAgentId) => set({ activeAgentId }),
 
@@ -578,6 +622,8 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   setAvailableBackends: (availableBackends) => set({ availableBackends }),
   backendModels: {},
   setBackendModels: (backendModels) => set({ backendModels }),
+  backendToolPolicies: {},
+  setBackendToolPolicies: (backendToolPolicies) => set({ backendToolPolicies }),
 
   sessions: [],
   setSessions: (sessions) => set({ sessions }),

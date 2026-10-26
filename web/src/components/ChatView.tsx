@@ -9,7 +9,7 @@ import {
   IconPlayerStop,
   IconX,
 } from "@tabler/icons-react";
-import { Virtuoso, type VirtuosoHandle } from "react-virtuoso";
+import { Virtuoso } from "react-virtuoso";
 import {
   useSessionStore,
   type Message,
@@ -177,6 +177,9 @@ export function ChatView({
   // Forks whose POST is currently in flight — guards the watcher against
   // double-firing the same deferred fork across re-renders.
   const forksInFlight = useRef<Set<string>>(new Set());
+  // Reset HTTP calls own these short-lived markers. An idle WS update can arrive
+  // before their receipt; defer the captured fork until that reset resolves.
+  const resetsInFlight = useRef<Set<{ sessionId: string }>>(new Set());
   // Bounded backoff for the 409-race retry path: per-session attempt count +
   // outstanding retry timers, and a tick that re-runs the watcher when a
   // backoff elapses (the frontend may see the session as idle while the
@@ -199,7 +202,6 @@ export function ChatView({
     }
     forkAttempts.current.delete(sid);
   };
-  const virtuosoRef = useRef<VirtuosoHandle>(null);
 
   // Scroll-back over a windowed transcript (polish-2026-09.md §4 B2). An open
   // returns the most recent 200 messages; reaching the top asks for the page
@@ -243,53 +245,19 @@ export function ChatView({
     });
   }, [activeSessionId]);
 
-  // Page back while the reader is at the top. A *state*, not Virtuoso's
-  // `startReached` event: that fires once, at the moment the top is reached,
-  // and it used to be ignored until Virtuoso had also reported the bottom —
-  // a report that can land after the reader has already scrolled up, so the
-  // one event passed with nothing listening and the older messages never
-  // came. Here the top is a state, armed by the moment parking finishes
-  // (which also clears whatever the mount-time scroll 0 left behind), so an
-  // "at the top" after that is always the reader's, and loads.
+  // Remember reaching the top even if Virtuoso's initial bottom report lands
+  // afterward. The bottom report arms paging; the mount-time scroll 0 alone
+  // must never fetch history before the reader has seen the latest message.
   useEffect(() => {
     if (atTop && parked && hasOlder && !loadingOlder && !olderStalled) {
       loadOlder();
     }
   }, [atTop, parked, hasOlder, loadingOlder, olderStalled, loadOlder]);
 
-  // Scroll to the bottom when switching into a session whose history has
-  // already loaded. `initialTopMostItemIndex` is captured at mount time, so
-  // it doesn't help when messages arrive asynchronously after the click.
+  // Mount the transcript with its first loaded window so Virtuoso owns the
+  // initial positioning. Repeated imperative scrolls can finish after the
+  // reader has already scrolled back and steal that position.
   const hasMessages = messages.length > 0;
-  useEffect(() => {
-    if (!activeSessionId || !hasMessages) return;
-    // Re-issued over the next frames rather than once. `initialTopMostItemIndex`
-    // cannot do this job — it is captured at mount, before the transcript fetch
-    // returns — and a single `scrollToIndex` can land before Virtuoso has
-    // measured the items that just arrived, which leaves the conversation open
-    // at its oldest loaded message instead of its newest.
-    let frames = 3;
-    let raf = 0;
-    const park = () => {
-      virtuosoRef.current?.scrollToIndex({
-        index: "LAST",
-        align: "end",
-        behavior: "auto",
-      });
-      if (--frames > 0) {
-        raf = requestAnimationFrame(park);
-        return;
-      }
-      // Parked. Any "at the top" reported so far came from the mount-time
-      // scroll 0, not the reader; drop it and arm paging in one render, so
-      // the paging effect never sees the stale value with paging armed.
-      setAtTop(false);
-      setParked(true);
-    };
-    park();
-    // A session switched mid-park must not arm the next one early.
-    return () => cancelAnimationFrame(raf);
-  }, [activeSessionId, hasMessages]);
 
   // Prefilled chat input on fork open (session-rewind.md §6.1). When the
   // active session carries a non-null fork_prefilled_prompt (the rewound user
@@ -654,26 +622,50 @@ export function ChatView({
     // session is stuck in "Running" forever.
     if (trimmed.toLowerCase() === "/reset") {
       setInput("");
+      setSubmissionError("");
+      const sid = activeSessionId;
+      const start = useSessionStore.getState();
+      const questionIds = (start.pendingQuestions[sid] ?? []).map((question) => question.question_id);
+      const fork = start.pendingForks[sid];
+      const reset = { sessionId: sid };
+      resetsInFlight.current.add(reset);
+      let current = true;
+      const unsubscribe = useSessionStore.subscribe((state) => {
+        if (state.accountGeneration !== start.accountGeneration ||
+            state.dispatchGeneration !== start.dispatchGeneration || state.activeSessionId !== sid ||
+            state.mainView !== start.mainView) {
+          current = false;
+          resetsInFlight.current.delete(reset);
+        }
+      });
       try {
-        const token = useSessionStore.getState().token;
-        await fetch(
-          `${window.location.origin}/api/sessions/${activeSessionId}/reset`,
+        const response = await fetch(
+          `${window.location.origin}/api/sessions/${sid}/reset`,
           {
             method: "POST",
-            headers: { Authorization: `Bearer ${token}` },
+            headers: { Authorization: `Bearer ${start.token}` },
           }
         );
-        // The server broadcasts a status=idle event; the WS handler
-        // applies it. We also clear local pending state so the input
-        // bar drops out of any "waiting on answer" UI immediately.
+        if (!response.ok) {
+          const body = await response.json().catch(() => null);
+          const reason = typeof body?.detail === "string" ? body.detail : body?.detail?.message;
+          throw new Error(reason || `Reset failed (HTTP ${response.status}).`);
+        }
+        if (!current) return;
+        // WS owns status. Close only the interactions captured by this reset;
+        // later question/fork identities belong to their own user action.
         const store = useSessionStore.getState();
-        store.setPendingQuestions(activeSessionId, []);
-        // A reset is a recovery action — drop any deferred /fork for this
-        // session so it doesn't fire once the reset lands it back at idle.
-        store.clearPendingFork(activeSessionId);
-        clearForkBackoff(activeSessionId);
-      } catch {
-        // best-effort — if the request itself fails the session stays as-is
+        for (const id of questionIds) store.removePendingQuestion(sid, id);
+        if (fork && useSessionStore.getState().pendingForks[sid] === fork) {
+          store.clearPendingFork(sid);
+          clearForkBackoff(sid);
+        }
+      } catch (error) {
+        if (current) setSubmissionError(`Couldn't reset session: ${error instanceof Error ? error.message : "Network error."}`);
+      } finally {
+        unsubscribe();
+        resetsInFlight.current.delete(reset);
+        if (current) setForkRetryTick((tick) => tick + 1);
       }
       return;
     }
@@ -1403,6 +1395,7 @@ export function ChatView({
   useEffect(() => {
     const MAX_FORK_RETRIES = 6;
     for (const sid of Object.keys(pendingForksMap)) {
+      if ([...resetsInFlight.current].some((reset) => reset.sessionId === sid)) continue;
       if (forksInFlight.current.has(sid)) continue;
       // Honor an in-progress backoff: while a retry timer is pending, an
       // unrelated re-render must NOT jump the cooldown and POST early (Vera
@@ -1672,21 +1665,15 @@ export function ChatView({
       )}
 
       <Virtuoso
-        ref={virtuosoRef}
+        key={`${activeSessionId}:${hasMessages}`}
         className="chat-messages flex-1 min-h-0"
         data={messages}
         itemContent={renderMessage}
-        initialTopMostItemIndex={messages.length ? messages.length - 1 : 0}
+        initialTopMostItemIndex={{ index: "LAST", align: "end" }}
         firstItemIndex={firstItemIndex}
-        // Paging back is armed only once the conversation has been parked at
-        // its newest message (`parked`). A chat mounts empty and fills in
-        // asynchronously, so `initialTopMostItemIndex` is captured before there
-        // is anything to scroll to and the effect above is what parks it;
-        // until that has happened the list is briefly at scroll 0, where
-        // Virtuoso reports the top as reached. Unguarded, that loads a page of
-        // older messages on open — which then holds the view at the top,
-        // exactly where the user did not want to be. The load itself is the
-        // `atTop` effect above.
+        atBottomStateChange={(bottom) => {
+          if (bottom && hasMessages) setParked(true);
+        }}
         atTopStateChange={(top) => {
           setAtTop(top);
           if (!top) setOlderStalled(false);

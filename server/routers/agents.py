@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
+from functools import partial
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
@@ -20,6 +22,7 @@ from ..models import (
     ScheduleInfo,
     SessionInfo,
 )
+from ..sessions.presentation import session_info
 from .backends import model_settings_for, validate_reasoning, validate_service_tier
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
@@ -282,10 +285,8 @@ async def delete_agent(
 async def list_agent_sessions(session_manager: SessionMgr, agent_id: str, user_id: ScopeUser = None, _: str = Depends(verify_token)):
     if await _get_manager().get_agent(agent_id, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Agent not found")
-    from .sessions import _to_session_info
-
     return [
-        _to_session_info(s)
+        session_info(s)
         for s in session_manager.list_sessions()
         if s.agent_id == agent_id
     ]
@@ -302,7 +303,7 @@ async def create_agent_session(
 ):
     """Preferred path to start a session — the agent comes from the URL, so
     the body's `agent_id` (if any) is ignored."""
-    from .sessions import _check_credential_backend, _to_session_info
+    from .sessions import _check_credential_binding
 
     # Scoped, and *enforced*: the lookup was already scoped, but a `None` fell
     # through to `create_session` below, which takes the session's owner from
@@ -317,7 +318,7 @@ async def create_agent_session(
         if req.backend is not None
         else agent.get("backend") or "claude-code"
     )
-    await _check_credential_backend(session_manager, req.credential_id, backend)
+    await _check_credential_binding(session_manager, req.credential_id, backend, user_id)
     try:
         s = await session_manager.create_session(
             agent_id,
@@ -328,7 +329,7 @@ async def create_agent_session(
         )
     except ValueError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
-    return _to_session_info(s, message_count=0)
+    return session_info(s, message_count=0)
 
 
 @router.get("/{agent_id}/schedules", response_model=list[ScheduleInfo])
@@ -412,12 +413,20 @@ async def create_agent_schedule_from_text(
     # both support one-shot, D2), with its own model + credential resolved in
     # the shape that harness needs. No backend-kind branching.
     harness = get_harness(agent.get("backend"))
-    credential = await session_manager.resolve_credential_by_id(
-        agent.get("credential_id"),
-        style=harness.profile.credential_style,
-        context=f"schedule-parse agent {agent_id}",
-        user_id=user_id,
-    )
+    cred_id, backend, db = agent.get("credential_id"), harness.profile.backend, session_manager.db
+
+    async def run_parser(ctx):
+        try:
+            credential = await session_manager.resolve_credential_by_id(
+                cred_id, backend=backend, context=f"schedule-parse agent {agent_id}",
+                user_id=user_id,
+            )
+        except ValueError as error:
+            raise ScheduleParseError(str(error)) from error
+        return await harness.run_oneshot(replace(
+            ctx, credential=credential,
+            authorize_spawn=partial(db.require_run_authority, user_id, cred_id, backend),
+        ))
     try:
         parsed = await parse_schedule_text(
             req.text,
@@ -427,7 +436,7 @@ async def create_agent_schedule_from_text(
             model=agent.get("model") or None,
             reasoning_effort=agent.get("reasoning_effort") or None,
             service_tier=agent.get("service_tier") or None,
-            credential=credential,
+            runner=run_parser,
         )
     except ScheduleParseError as e:
         raise HTTPException(422, str(e))

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, render, screen } from "@testing-library/react";
 import { VirtuosoMockContext } from "react-virtuoso";
 import { ChatView } from "./ChatView";
+import { mockChatViewport } from "./chatViewport.test-support";
 import { handleWsMessage, useWebSocket } from "../hooks/useWebSocket";
 import { applyTranscript } from "../lib/transcript";
 import { applySessionSnapshot } from "../lib/hydrateSession";
@@ -19,16 +20,20 @@ const closed = {
   reason: "interrupted", message: "Question closed: interrupted. No answer was received.",
 };
 
-beforeEach(() => useSessionStore.setState({
+beforeEach(() => {
+  mockChatViewport();
+  useSessionStore.setState({
   activeSessionId: sid,
   sessions: [{ id: sid, name: "Question", working_dir: "/tmp", created_at: "2026-10-13", status: "running" } as SessionInfo],
   agents: [], messages: {}, lastAppliedSeq: {}, pendingQuestions: {}, dispatchUnavailable: {}, closedQuestionIds: {},
   streamingText: {}, pendingForks: {}, credentials: [], backendModels: {},
   dispatchGeneration: null, retiredDispatchGenerations: [], dispatchStates: {},
-}));
+  });
+});
 afterEach(() => {
   cleanup();
   vi.unstubAllGlobals();
+  vi.restoreAllMocks();
 });
 
 function renderChat() {

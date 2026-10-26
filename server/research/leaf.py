@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -53,6 +54,7 @@ async def run_web_leaf(
     credential: HarnessCredential | None,
     model: str | None,
     timeout: float = 120.0,
+    authorize_spawn: Callable[[], Awaitable[None]] | None = None,
 ) -> LeafResult:
     """Run one isolated, web-enabled, read-only-ish sub-turn and return its
     final text. Side-effect-contained: empty MCP set, no connectors/memory,
@@ -68,6 +70,7 @@ async def run_web_leaf(
         connectors=[],
         memory_dir=None,
         web_research=True,
+        authorize_spawn=authorize_spawn,
     )
     run = harness.create_run(config)
     parts: list[str] = []
@@ -110,17 +113,19 @@ async def run_reason_leaf(
     model: str | None,
     working_dir: str | None,
     timeout: float = 90.0,
+    authorize_spawn: Callable[[], Awaitable[None]] | None = None,
 ) -> LeafResult:
     """Run one tool-free reasoning call (`run_oneshot`) — scope decompose /
     synthesize. Provider errors degrade; cleanup failures propagate."""
     ctx = OneShotContext(
-        prompt=prompt, model=model, credential=credential, working_dir=working_dir
+        prompt=prompt, model=model, credential=credential, working_dir=working_dir,
+        authorize_spawn=authorize_spawn,
     )
     try:
         text = await harness.run_oneshot(ctx, timeout=timeout)
         return LeafResult(text=(text or "").strip())
     except HarnessOneshotError as e:
-        return LeafResult(text="", error=f"reasoning leaf failed: {e.code}")
+        return LeafResult(text="", error=str(e) if e.code in {"configuration", "unauthorized"} else f"reasoning leaf failed: {e.code}")
     except asyncio.CancelledError:
         raise
     except Exception:  # noqa: BLE001

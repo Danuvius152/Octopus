@@ -9,6 +9,7 @@ import json
 import os
 import re
 import sqlite3
+import stat
 import threading
 import uuid
 import weakref
@@ -25,6 +26,8 @@ from .extract import HTML_BODY_VERSION, SUPPORTED, extract
 from .formats import MARKDOWN_QUERY_CONTRACT, MARKDOWN_SQL
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from .raw_blocks import RawCoordinates
 
 
@@ -91,6 +94,7 @@ def vault_read(function):
             return read_locked(self, *args, **kwargs)
 
     def read_locked(self, *args, **kwargs):
+        from .events import ObservationUnavailable
         from .history import WikiHistory
 
         if function.__name__ != "refresh":
@@ -103,6 +107,8 @@ def vault_read(function):
         with history.locked(shared=function.__name__ != "refresh"):
             try:
                 return function(self, *args, **kwargs)
+            except ObservationUnavailable:
+                raise
             except (OSError, WikiError, sqlite3.DatabaseError) as error:
                 if function.__name__ != "refresh":
                     raise
@@ -124,6 +130,7 @@ class WikiStore:
         self._users = 0
         self._retired = False
         self._events_released = True
+        self._on_retired: Callable[[WikiStore], None] | None = None
         self._recovery = recovery
         self._schema_ready = False
         # Up to four immutable raw coordinate maps for interleaved reads. No text,
@@ -201,8 +208,18 @@ class WikiStore:
             if checked is None and not defer_recovery:
                 self.refresh()
             else:
-                for directory in watched:
-                    self.events.watch(self.root / directory)
+                with self.operation():
+                    for directory in watched:
+                        # This derived cache may predate directory retirement.
+                        # Only a current supported directory needs a watch;
+                        # hints do not certify history or clear the inbox gate.
+                        try:
+                            target = self.root if directory == "." else self.observed_path(directory)
+                            if target is None or not stat.S_ISDIR(target.stat(follow_symlinks=False).st_mode):
+                                continue
+                        except (FileNotFoundError, NotADirectoryError):
+                            continue
+                        self.events.watch(target)
                 self.events.needs_reconciliation = True
         except BaseException:
             self.release_events()
@@ -227,14 +244,25 @@ class WikiStore:
         try:
             yield lease
         finally:
-            with self._lifecycle:
+            self._return_user(lease)
+
+    def _return_user(self, lease=None):
+        with self._lifecycle:
+            if lease is not None:
                 lease.active = False
-                self._users -= 1
-                try:
-                    if not self._users and self._retired:
-                        self.release_events()
-                finally:
-                    self._lifecycle.notify_all()
+            self._users -= 1
+            try:
+                if not self._users and self._retired:
+                    self.release_events()
+            finally:
+                self._lifecycle.notify_all()
+        self._notify_retired()
+
+    def _notify_retired(self):
+        # Retirement and confirmed release are monotonic after the last user.
+        # Never acquire Registry ownership while holding the lifecycle lock.
+        if self._retired and not self._users and self._events_released and self._on_retired is not None:
+            self._on_retired(self)
 
     @contextlib.contextmanager
     def operation(self, lease: StoreBorrow | None = None):
@@ -252,21 +280,17 @@ class WikiStore:
                 self._users += 1
             self._local.depth = 1
             try:
-                yield self
+                with contextlib.nullcontext() if self._create_database else self.events.watching():
+                    yield self
             finally:
                 self._local.depth = 0
-                with self._lifecycle:
-                    self._users -= 1
-                    try:
-                        if not self._users and self._retired:
-                            self.release_events()
-                    finally:
-                        self._lifecycle.notify_all()
+                self._return_user()
             return
         with self.borrow():
             self._local.depth = 1
             try:
-                yield self
+                with contextlib.nullcontext() if self._create_database else self.events.watching():
+                    yield self
             finally:
                 self._local.depth = 0
 
@@ -275,6 +299,7 @@ class WikiStore:
             self._retired = True
             if not self._users:
                 self.release_events()
+        self._notify_retired()
 
     def close(self) -> None:
         self.retire()
@@ -284,6 +309,7 @@ class WikiStore:
             # The last user may have failed to release the observer. Waking
             # from its notification is not evidence that cleanup succeeded.
             self.release_events()
+        self._notify_retired()
 
     def index_state(self) -> dict[str, Any]:
         with self.operation():
@@ -309,6 +335,7 @@ class WikiStore:
         """Consume only known changes; full compensation is a background job."""
         if getattr(self._synchronizing, "active", False):
             return
+        from .events import ObservationUnavailable
         from .history import WikiHistory
 
         with WikiHistory(self).locked():
@@ -342,6 +369,7 @@ class WikiStore:
                             for directory, dirs, files in os.walk(target, followlinks=False, onerror=enumeration_error):
                                 dirs[:] = [d for d in dirs if not d.startswith(".") and not (Path(directory) / d).is_symlink()]
                                 self.events.watch(Path(directory))
+                                db.execute("INSERT OR IGNORE INTO watch_directories VALUES(?)", (Path(directory).relative_to(self.root).as_posix(),))
                                 paths.update((Path(directory) / name).relative_to(self.root).as_posix() for name in files if not name.startswith("."))
                         prefix = relative.rstrip("/") + "/"
                         paths.update(row[0] for row in db.execute("SELECT path FROM document_identities WHERE substr(path,1,?)=?", (len(prefix), prefix)))
@@ -361,6 +389,8 @@ class WikiStore:
                     if self.events.journal is not None:
                         self.events.journal.mark_applied(db, events.receipts)
                 self.acknowledge_changes()
+            except ObservationUnavailable:
+                raise
             except (OSError, WikiError, sqlite3.DatabaseError) as error:
                 self.events.needs_reconciliation = True
                 with self.connect() as db:
@@ -469,6 +499,14 @@ class WikiStore:
         for index, event in enumerate(lifecycle):
             old, new = event.path, event.destination
             prefix = old.rstrip("/") + "/"
+            if event.directory and event.kind in {"delete", "move"}:
+                watched = [row[0] for row in db.execute(
+                    "SELECT path FROM watch_directories WHERE ? OR path=? OR substr(path,1,?)=?",
+                    (not old, old, len(prefix), prefix),
+                )]
+                db.executemany("DELETE FROM watch_directories WHERE path=?", [(path,) for path in watched])
+                if event.kind == "move":
+                    db.executemany("INSERT OR IGNORE INTO watch_directories VALUES(?)", [(new + path[len(old):],) for path in watched])
             bound = [row[0] for row in db.execute(
                 "SELECT path FROM document_identities WHERE (? OR path=? OR (? AND substr(path,1,?)=?)) AND (? OR file_key<>'')",
                 (old == "" and event.directory, old, event.directory, len(prefix), prefix, event.kind != "move"),
@@ -715,6 +753,9 @@ class WikiStore:
         queued = self.pending_changes()
         with self.connect() as db:
             self.apply_lifecycle(db, queued.lifecycle)
+            # Replace this derived directory cache only with a complete scan.
+            # Any walk/watch failure rolls back together with index changes.
+            db.execute("DELETE FROM watch_directories")
             found = set()
             if self.events.mode == "inotify":
                 self.events.error = None
