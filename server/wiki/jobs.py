@@ -753,7 +753,8 @@ class WikiJobs:
         """A terminal database row cannot stand in for execution retirement."""
         job_execution.require_retired(self.store, job, manager=manager)
 
-    def readmit(self, job_id, paths, creation=None, *, expected_attempt=None, expected_vault_id=None, operation_id=None):
+    def readmit(self, job_id, paths, creation=None, *, expected_attempt=None, expected_vault_id=None, operation_id=None,
+                requester=None):
         """Owner-only re-admission preserves the old job, key, payload and receipts."""
         from .contracts import GrantReadmissionRequest
 
@@ -905,14 +906,17 @@ class WikiJobs:
                                        (item["reservation_id"],))
                 items = [*completed, *selected, *created, *excluded]
                 recovery = any(job_items.unresolved(item) for item in items if item["status"] != "done")
+                job_events.next_dispatch(db, job_id)
                 db.execute("UPDATE jobs SET status=?,error=NULL,session_id=?,items=?,attempt_errors=?,updated_at=? WHERE id=?",
                            ("interrupted" if recovery else "queued", job["session_id"] if recovery else None,
                             job_items.encode(items), self.retain_error(job), datetime.now(UTC).isoformat(), job_id))
+                self.subscribe(db, job_id, requester)
                 job_controls.record(db, job_id, control)
         worker.wake(self.user_id)
         return self.get(job_id)
 
-    def retry(self, job_id, *, expected_attempt=None, expected_vault_id=None, operation_id=None):
+    def retry(self, job_id, *, expected_attempt=None, expected_vault_id=None, operation_id=None,
+              requester=None, task=None, mcp_scope=None):
         control = job_controls.identity(operation_id, "retry", {
             "expected_attempt": expected_attempt, "expected_vault_id": expected_vault_id,
         })
@@ -924,12 +928,28 @@ class WikiJobs:
                 if job_controls.replay(db, job_id, control):
                     return job
             self.require_control(job, expected_attempt, expected_vault_id)
-            return self._retry(job_id, control)
+            return self._retry(job_id, control, requester=requester, task=task, mcp_scope=mcp_scope)
 
-    def _retry(self, job_id, control=None):
+    def require_dispatch_caller(self, task, mcp_scope):
+        """Recheck the original live caller at the final control writer boundary."""
+        if task is not None:
+            from .tasks import tasks
+
+            original = task.active_task or task
+            if tasks.require(mcp_scope, write=True) is not original:
+                raise WikiError("The original retry caller is no longer active", 403)
+            if not task.job_id:
+                tasks.require_submitter(task, self.registration)
+
+    def _retry(self, job_id, control=None, *, requester=None, task=None, mcp_scope=None):
         job = self.get(job_id)
         if job["status"] == "completed":
-            return job
+            with self.store.connect() as db:
+                db.execute("BEGIN IMMEDIATE")
+                self.require_dispatch_caller(task, mcp_scope)
+                self.subscribe(db, job_id, requester)
+                job_controls.record(db, job_id, control)
+                return self.get(job_id, db=db)
         if job["settlement_phase"] in {"pending", "attention"}:
             raise WikiError("Confirm the original cancellation and result recording before retry", 409)
         if any(item["status"] == "unknown" for item in job["items"]):
@@ -1003,11 +1023,14 @@ class WikiJobs:
             header = db.execute("SELECT * FROM wiki_job_grants WHERE job_id=?", (job_id,)).fetchone()
             if not header or grants.current_generation(db, header) != self.registration["registration_generation"]:
                 raise WikiError("The retained grant changed before retry", 409)
+            self.require_dispatch_caller(task, mcp_scope)
             grants.reacquire(db, reacquire)
             recovery = any(item["status"] == "verifying" for item in job["items"])
+            job_events.next_dispatch(db, job_id)
             db.execute("UPDATE jobs SET status=?,items=?,error=NULL,session_id=?,attempt_errors=?,updated_at=? WHERE id=?",
                        ("interrupted" if recovery else "queued", job_items.encode(job["items"]),
                         job["session_id"] if recovery else None, self.retain_error(job), datetime.now(UTC).isoformat(), job_id))
+            self.subscribe(db, job_id, requester)
             job_controls.record(db, job_id, control)
         worker.wake(self.user_id)
         return self.get(job_id)

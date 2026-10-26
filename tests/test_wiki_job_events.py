@@ -235,8 +235,8 @@ async def test_replaying_retained_subscription_keeps_its_original_id_and_ack(job
     requester = job_events.Requester(jobs.user_id, "chat", "original", "request-1")
     with jobs.store.connect() as db:
         db.execute("BEGIN IMMEDIATE")
-        db.execute("INSERT INTO wiki_job_subscribers VALUES(?,?,?,?,?,?,?,?)", (
-            "retained-original-id", job["id"], jobs.user_id, "chat", "original", "request-1", "", "original-time",
+        db.execute("INSERT INTO wiki_job_subscribers VALUES(?,?,?,?,?,?,?,?,?)", (
+            "retained-original-id", job["id"], jobs.user_id, "chat", "original", "request-1", "", "original-time", 0,
         ))
         original = job_events.pending(db)
         assert len(original) == 1

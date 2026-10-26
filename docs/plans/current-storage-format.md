@@ -2,7 +2,7 @@
 
 > **Status:** implemented — Validation and release handoff are tracked separately from production deployment.
 
-The main database uses format **4**, and Wiki uses format **16**. Each database
+The main database uses format **4**, and Wiki uses format **17**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
 before a writer opens; a genuinely empty database creates the complete current
 layout and marker in one transaction. Startup does not interpret older layouts,
@@ -48,12 +48,33 @@ inspection of committed facts; it does not trust an older success receipt, resto
 old databases or replay model/tool effects. An already running candidate is
 verified without another conversion or restart.
 
-The maintenance-return release starts from the observed main 4 / Wiki 15
+The dispatch-return release starts from the observed main 4 / Wiki 16
 installation. Main has no physical format change. The finite Wiki handoff adds
-`request_id` to subscription uniqueness, preserves existing subscription IDs,
-snapshots and ACKs, and commits marker 16 with notification protocol 3. Different
-requests in one conversation can then independently receive the same retained
-job; replaying one request keeps its original subscription and delivery facts.
+`dispatch_generation` to the existing job state and subscription uniqueness,
+preserves subscription IDs, snapshots and ACKs, and commits marker 17 with
+notification protocol 4. The observed installation has only completed jobs,
+acknowledged notices and settled automatic return inputs. The bounded handoff
+rechecks these facts, retains historical subscriptions in generation zero and
+initializes the completed jobs' current generation to one without a subscriber.
+This closes consumed return scopes without relabelling their original identities
+or guessing historical dispatchers. A new caller explicitly retrieves the saved
+result; unfinished legacy owners block this handoff and retain their actual
+recovery responsibility. Fresh current jobs start at generation zero.
+An accepted explicit retry or scope re-admission advances
+the generation and subscribes its actual entry in the same writer transaction.
+Worker claims, automatic recovery, completed-result retrieval, ordinary reuse
+and control replay do not advance it. Prior generations retain their effects
+and cards but cannot automatically report a later dispatch.
+
+An account-scoped in-process admission gate orders explicit dispatch transfer
+against automatic return acceptance. It is held only through these bounded
+admissions, never model execution; no registry lock or database transaction is
+held across the asynchronous session submission. Cold restart relies on durable
+generations and existing source receipts. Native cancellation joins the captured
+control writer before releasing that gate. Aggregation and operation counts only
+include current subscriptions; the return identity remains stable for the original
+request even when a transferred member leaves the group, preventing a second
+report after a lost ACK. Already accepted return inputs remain original facts.
 The handoff checks the original declarations read-only, compares exact retained
 facts before/after, and verifies the current layout in the conversion transaction.
 The original source and finite private script remain until actual acceptance;

@@ -169,7 +169,7 @@ async def test_guides_follow_verified_job_role_instead_of_agent_name(client, not
     entry_token = tasks.open(session, "maintain")
     try:
         entry = instructions("maintain", entry_token)
-        assert entry == BOOTSTRAP and guide("entry") not in entry
+        assert entry.startswith(BOOTSTRAP) and guide("entry") not in entry
         assert load_guide("entry", entry_token) == guide("entry")
         assert "worker" not in view(tasks.active[entry_token]).guides
     finally:
@@ -181,7 +181,7 @@ async def test_guides_follow_verified_job_role_instead_of_agent_name(client, not
     token = tasks.open(session, "maintain")
     try:
         worker = instructions("maintain", token)
-        assert worker == BOOTSTRAP and guide("worker-v2") not in worker
+        assert worker.startswith(BOOTSTRAP) and guide("worker-v2") not in worker
         assert guide("worker-v2") in load_guide("worker", token)
         assert load_guide("writing", token) == guide("writing")
         assert load_guide("maintenance", token) == guide("maintenance-v2")
@@ -215,7 +215,7 @@ async def test_guides_follow_verified_job_role_instead_of_agent_name(client, not
 
         jobs.update(job["id"], status="cancelled")
         ended = instructions("maintain", token)
-        assert ended == BOOTSTRAP
+        assert ended.startswith(BOOTSTRAP)
         assert view(tasks.active[token]).card["actor_role"] == "ended_worker"
         for module in ("worker", "maintenance", "article", "writing"):
             denied = await client.get("/api/wiki/guide", params={"module": module}, headers=headers)

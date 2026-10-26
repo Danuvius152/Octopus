@@ -1,9 +1,11 @@
 """Return a settled request group through the original durable session input."""
 
+import asyncio
 import hashlib
 import json
 from collections import Counter
 
+from ..aio import complete_cleanup
 from ..mcp_identity import work_is_open
 from ..sessions.client_submissions import execution_context, saved_context
 from ..sessions.runtime_types import SessionOwnerUnavailable
@@ -12,6 +14,16 @@ from .store import WikiError
 from .tasks import tasks
 
 TERMINAL = frozenset({"completed", "completed_with_attention", "failed", "cancelled"})
+
+
+def dispatch_gate(manager, user_id):
+    """Serialize explicit dispatch transfer with return acceptance, never execution.
+
+    The manager owns this in-process admission gate. Durable generations and
+    source receipts retain ownership and deduplication after a cold restart.
+    No registry lock or SQLite transaction is held over the asynchronous handoff.
+    """
+    return manager._wiki_dispatch_locks.setdefault(user_id, asyncio.Lock())
 
 
 def _group(jobs, delivery):
@@ -29,13 +41,17 @@ def _group(jobs, delivery):
                (jobs.user_id, delivery["target"], delivery["request_id"])
                for task in tuple(tasks.active.values())):
             return None
-        current = db.execute("SELECT j.status,s.attempt FROM jobs j JOIN wiki_job_state s ON s.job_id=j.id WHERE j.id=?",
-                             (delivery["job_id"],)).fetchone()
+        current = db.execute("SELECT j.status,v.attempt,v.dispatch_generation=s.dispatch_generation AS current_dispatch "
+                             "FROM jobs j JOIN wiki_job_state v ON v.job_id=j.id "
+                             "JOIN wiki_job_subscribers s ON s.job_id=j.id WHERE j.id=? AND s.id=?",
+                             (delivery["job_id"], delivery["subscriber_id"])).fetchone()
         event = json.loads(delivery["body"])
-        if current is None or current["attempt"] != event["attempt"] or current["status"] not in TERMINAL:
+        if (current is None or not current["current_dispatch"]
+                or current["attempt"] != event["attempt"] or current["status"] not in TERMINAL):
             return False  # A later attempt owns its own eventual return.
         coordinates = (delivery["owner"], delivery["kind"], delivery["target"], delivery["request_id"], delivery["client_id"])
-        selection = "s.owner=? AND s.kind=? AND s.target=? AND s.request_id=? AND s.client_id=?"
+        selection = ("s.owner=? AND s.kind=? AND s.target=? AND s.request_id=? AND s.client_id=? "
+                     "AND s.dispatch_generation=v.dispatch_generation")
         rows = db.execute(
             "SELECT j.id,j.status,v.attempt,o.body FROM wiki_job_subscribers s "
             "JOIN jobs j ON j.id=s.job_id JOIN wiki_job_state v ON v.job_id=j.id "
@@ -49,7 +65,6 @@ def _group(jobs, delivery):
             if row["status"] not in TERMINAL:
                 return None
             count += 1
-            identity.update(json.dumps([row["id"], row["attempt"]]).encode())
             snapshot = json.loads(row["body"])
             counts[row["status"]] += 1
             progress.update(snapshot["progress"])
@@ -76,7 +91,8 @@ def _group(jobs, delivery):
                 size += needed
         operations = dict(db.execute(
             "SELECT r.operation,count(*) FROM operation_receipts r "
-            "JOIN wiki_job_subscribers s ON s.job_id=r.job_id WHERE " + selection + " GROUP BY r.operation", coordinates,
+            "JOIN wiki_job_subscribers s ON s.job_id=r.job_id JOIN wiki_job_state v ON v.job_id=s.job_id WHERE "
+            + selection + " GROUP BY r.operation", coordinates,
         ))
         return {
             "delivery_id": "wiki-result:" + identity.hexdigest(), "vault_id": jobs.registration["vault_id"],
@@ -101,6 +117,11 @@ async def deliver(jobs, manager, delivery, io):
     """None keeps the outbox pending; acceptance and visible cards are distinct."""
     if json.loads(delivery["body"])["status"] not in TERMINAL:
         return "delivered"
+    async with dispatch_gate(manager, jobs.user_id):
+        return await complete_cleanup(_deliver_current(jobs, manager, delivery, io))
+
+
+async def _deliver_current(jobs, manager, delivery, io):
     sid = delivery["target"]
     session = manager.get_session(sid)
     if session is None or session.user_id != jobs.user_id or (delivery["client_id"] and session.app_id != delivery["client_id"]):

@@ -12,7 +12,7 @@ from .store import WikiError
 TABLES = {
     "wiki_job_state": """CREATE TABLE wiki_job_state(
         job_id TEXT PRIMARY KEY NOT NULL,state_version INTEGER NOT NULL CHECK(state_version>0),
-        attempt INTEGER NOT NULL CHECK(attempt>=0),settlement_phase TEXT NOT NULL
+        attempt INTEGER NOT NULL CHECK(attempt>=0),dispatch_generation INTEGER NOT NULL DEFAULT 0 CHECK(dispatch_generation>=0),settlement_phase TEXT NOT NULL
         CHECK(settlement_phase IN ('none','pending','confirmed','attention')))""",
     "wiki_job_outbox": """CREATE TABLE wiki_job_outbox(
         event_id TEXT PRIMARY KEY NOT NULL,job_id TEXT NOT NULL,state_version INTEGER NOT NULL,
@@ -22,7 +22,8 @@ TABLES = {
         id TEXT PRIMARY KEY NOT NULL,job_id TEXT NOT NULL,owner TEXT NOT NULL,
         kind TEXT NOT NULL CHECK(kind IN ('chat','app','schedule','human')),
         target TEXT NOT NULL,request_id TEXT NOT NULL,client_id TEXT NOT NULL,created_at TEXT NOT NULL,
-        UNIQUE(job_id,owner,kind,target,request_id,client_id))""",
+        dispatch_generation INTEGER NOT NULL DEFAULT 0 CHECK(dispatch_generation>=0),
+        UNIQUE(job_id,owner,kind,target,request_id,client_id,dispatch_generation))""",
     "wiki_job_deliveries": """CREATE TABLE wiki_job_deliveries(
         event_id TEXT NOT NULL,subscriber_id TEXT NOT NULL,
         acknowledged INTEGER NOT NULL DEFAULT 0 CHECK(acknowledged IN (0,1)),
@@ -54,6 +55,7 @@ TRIGGERS["wiki_job_state_update_guard"] = f"""CREATE TRIGGER wiki_job_state_upda
     BEFORE UPDATE ON wiki_job_state BEGIN {WRITER}
     SELECT CASE WHEN new.job_id<>old.job_id OR new.state_version<>old.state_version+1
       OR new.attempt<old.attempt OR new.attempt>old.attempt+1
+      OR new.dispatch_generation<old.dispatch_generation OR new.dispatch_generation>old.dispatch_generation+1
       THEN RAISE(ABORT,'Invalid Wiki job state transition') END; END"""
 TRIGGERS["wiki_job_delivery_update_guard"] = f"""CREATE TRIGGER wiki_job_delivery_update_guard
     BEFORE UPDATE ON wiki_job_deliveries BEGIN {WRITER}
@@ -63,7 +65,8 @@ TRIGGERS["wiki_job_delivery_update_guard"] = f"""CREATE TRIGGER wiki_job_deliver
 TRIGGERS["wiki_job_outbox_deliver"] = """CREATE TRIGGER wiki_job_outbox_deliver
     AFTER INSERT ON wiki_job_outbox BEGIN
     INSERT INTO wiki_job_deliveries(event_id,subscriber_id)
-      SELECT new.event_id,id FROM wiki_job_subscribers WHERE job_id=new.job_id; END"""
+      SELECT new.event_id,s.id FROM wiki_job_subscribers s JOIN wiki_job_state v USING(job_id)
+      WHERE s.job_id=new.job_id AND s.dispatch_generation=v.dispatch_generation; END"""
 TRIGGERS["wiki_job_subscriber_current"] = """CREATE TRIGGER wiki_job_subscriber_current
     AFTER INSERT ON wiki_job_subscribers BEGIN
     INSERT INTO wiki_job_deliveries(event_id,subscriber_id)
@@ -144,11 +147,12 @@ def job_triggers():
             WHEN NOT EXISTS(SELECT 1 FROM jobs WHERE id=new.job_id)
             BEGIN SELECT RAISE(ABORT,'Wiki job state requires its job'); END""",
         "wiki_job_subscriber_owner": """CREATE TRIGGER wiki_job_subscriber_owner BEFORE INSERT ON wiki_job_subscribers
-            WHEN NOT EXISTS(SELECT 1 FROM jobs WHERE id=new.job_id)
-            BEGIN SELECT RAISE(ABORT,'Wiki subscriber requires its job'); END""",
+            WHEN NOT EXISTS(SELECT 1 FROM jobs j JOIN wiki_job_state v ON v.job_id=j.id
+              WHERE j.id=new.job_id AND v.dispatch_generation=new.dispatch_generation)
+            BEGIN SELECT RAISE(ABORT,'Wiki subscriber requires its current dispatch'); END""",
         "wiki_job_insert_state": f"""CREATE TRIGGER wiki_job_insert_state AFTER INSERT ON jobs BEGIN {WRITER}
             UPDATE wiki_job_state SET state_version=state_version+1 WHERE job_id=new.id;
-            INSERT INTO wiki_job_state
+            INSERT INTO wiki_job_state(job_id,state_version,attempt,settlement_phase)
               SELECT new.id,1,CASE WHEN new.status='queued' THEN 0 ELSE 1 END,
                 CASE WHEN new.status='cancelled' THEN '{unresolved}' ELSE 'none' END
               WHERE NOT EXISTS(SELECT 1 FROM wiki_job_state WHERE job_id=new.id); END""",
@@ -194,11 +198,11 @@ def initialize(db):
         db.execute(sql)
     for sql in (TRIGGERS | job_triggers()).values():
         db.execute(sql)
-    db.execute("INSERT INTO wiki_protocols VALUES('wiki_job_events',3)")
+    db.execute("INSERT INTO wiki_protocols VALUES('wiki_job_events',4)")
 
 
 def require(db):
-    protocols.require(db, "wiki_job_events", 3)
+    protocols.require(db, "wiki_job_events", 4)
     maintenance_inputs.require_jobs(db)
     expected = TABLES | INDEXES | TRIGGERS | job_triggers()
     actual = dict(db.execute("SELECT name,sql FROM sqlite_master"))
@@ -215,6 +219,14 @@ def metadata(db, job_id):
     if row is None:
         raise unavailable()
     return dict(row)
+
+
+def next_dispatch(db, job_id):
+    """An accepted explicit continuation transfers future result ownership."""
+    if not db.in_transaction:
+        raise ValueError("Dispatch transfer must commit with its control and subscription")
+    db.execute("UPDATE wiki_job_state SET state_version=state_version+1,"
+               "dispatch_generation=dispatch_generation+1 WHERE job_id=?", (job_id,))
 
 
 @dataclass(frozen=True)
@@ -239,16 +251,18 @@ def subscribe(db, job_id, requester):
     if not db.in_transaction or not isinstance(requester, Requester):
         raise ValueError("Subscription requires a trusted requester and admission transaction")
     owner = requester.owner if requester.owner is not None else "legacy"
-    identity = [job_id, owner, requester.kind, requester.target, requester.request_id, requester.client_id]
+    generation = db.execute("SELECT dispatch_generation FROM wiki_job_state WHERE job_id=?", (job_id,)).fetchone()[0]
+    coordinates = [job_id, owner, requester.kind, requester.target, requester.request_id, requester.client_id]
+    identity = [*coordinates, generation]
     identifier = hashlib.sha256(json.dumps(identity, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
     # Stored coordinates are authoritative. A retained subscription keeps its
     # original identifier, including after a finite storage handoff.
     row = db.execute("SELECT id FROM wiki_job_subscribers WHERE job_id=? AND owner=? AND kind=? "
-                     "AND target=? AND request_id=? AND client_id=?", identity).fetchone()
+                     "AND target=? AND request_id=? AND client_id=? AND dispatch_generation=?", identity).fetchone()
     if row is None:
-        db.execute("INSERT INTO wiki_job_subscribers VALUES(?,?,?,?,?,?,?,?)",
+        db.execute("INSERT INTO wiki_job_subscribers VALUES(?,?,?,?,?,?,?,?,?)",
                    (identifier, job_id, owner, requester.kind, requester.target, requester.request_id,
-                    requester.client_id, datetime.now(UTC).isoformat()))
+                    requester.client_id, datetime.now(UTC).isoformat(), generation))
     else:
         identifier = row[0]
     # Repeated subscriptions do not create a new version or an extra receiver.
@@ -298,7 +312,7 @@ def pending(db, limit=50, *, after=None, through=None):
         conditions.append("o.rowid<=?")
         parameters.append(through)
     rows = db.execute("""SELECT o.rowid AS outbox_order,o.event_id,o.job_id,o.state_version,o.body,s.id AS subscriber_id,
-        s.owner,s.kind,s.target,s.request_id,s.client_id FROM wiki_job_deliveries d
+        s.owner,s.kind,s.target,s.request_id,s.client_id,s.dispatch_generation FROM wiki_job_deliveries d
         JOIN wiki_job_outbox o ON o.event_id=d.event_id JOIN wiki_job_subscribers s ON s.id=d.subscriber_id
         WHERE """ + " AND ".join(conditions) + " ORDER BY o.rowid,s.id LIMIT ?", (*parameters, limit)).fetchall()
     return [dict(row) for row in rows]

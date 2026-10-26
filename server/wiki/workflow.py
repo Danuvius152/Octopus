@@ -167,8 +167,16 @@ def view(task: WikiTask | None, *, mode: str = "read") -> PolicyView:
 
 
 def instructions(mode: str, task_id: str | None = None) -> str:
-    """Stable discovery only; live authority and guide bodies are loaded on use."""
-    return BOOTSTRAP
+    """Route this turn by the existing policy; guides and authority remain live."""
+    current = view(tasks.active.get(task_id), mode=mode)
+    role = current.card["actor_role"]
+    route = {
+        "worker": "当前角色 worker：框架已分派维护，先加载 worker 指南。",
+        "submitter": "当前角色 submitter：包括普通 Weber 会话；提交或重试维护先加载 entry，实际维护交给框架 worker。",
+        "ended_worker": "当前角色 ended_worker：维护分派已结束，仅可查询；按需加载 query。",
+        "query": "当前角色 query：按需加载 query，仅查询，不提交维护。",
+    }[role]
+    return BOOTSTRAP + "\n" + route
 
 
 def load_guide(module: GuideModule, task_id: str | None) -> str:

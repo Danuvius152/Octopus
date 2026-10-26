@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
+from ..aio import complete_cleanup
 from ..auth import verify_token
 from ..deps import ScopeUser, SessionMgr
 from ..mcp_identity import McpScope, verify
@@ -46,7 +47,7 @@ app_router = APIRouter(tags=["wiki-app"])
     methods=["GET", "POST", "PUT"],
     include_in_schema=False,
 )
-async def app_wiki(request: Request, app_id: str, operation: str):
+async def app_wiki(request: Request, app_id: str, operation: str, session_mgr: SessionMgr):
     import anyio
     from pydantic import ValidationError
 
@@ -102,15 +103,15 @@ async def app_wiki(request: Request, app_id: str, operation: str):
             and request.method == "POST"
             and parts[2] in {"cancel", "retry", "verify"}
         ):
-            handlers[("POST", operation)] = (
-                {"cancel": cancel_job, "retry": retry_job, "verify": verify_job}[parts[2]],
-                JobControlRequest,
-            )
+            controls: dict[str, Callable[..., Any]] = {"cancel": cancel_job, "retry": retry_job, "verify": verify_job}
+            handlers[("POST", operation)] = (controls[parts[2]], JobControlRequest)
     handler = handlers.get((request.method, operation))
     if handler is None:
         raise WikiError("Knowledge operation not found", 404)
     function, schema = handler
     kwargs = {"request": request, "user_id": user_id, "_": "app"}
+    if function is retry_job:
+        kwargs["session_mgr"] = session_mgr
     try:
         route = next(route for route in router.routes if isinstance(route, APIRoute) and route.endpoint is function)
         query, errors = request_params_to_args(route.dependant.query_params, request.query_params)
@@ -1015,9 +1016,10 @@ async def cancel_job(
 
 
 @router.post("/jobs/{job_id}/retry")
-def retry_job(
+async def retry_job(
     job_id: str,
     request: Request,
+    session_mgr: SessionMgr,
     body: JobControlRequest | None = None,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
@@ -1025,7 +1027,16 @@ def retry_job(
     task = access(request, write=True)
     if task and task.job_id and task.job_id != job_id:
         raise WikiError("A worker can control only its original assigned job", 403)
-    result = WikiJobs(user_id).retry(job_id, **(body.model_dump() if body else {}))
+    import anyio
+
+    from ..wiki.job_returns import dispatch_gate
+
+    async with dispatch_gate(session_mgr, user_id):
+        result = await complete_cleanup(anyio.to_thread.run_sync(lambda: WikiJobs(user_id).retry(
+            job_id, **(body.model_dump() if body else {}),
+            requester=None if task and task.job_id else requester_for(request, user_id, task),
+            task=task, mcp_scope=_mcp_scope(request),
+        )))
     return control_result(result) if task is not None else result
 
 
@@ -1049,14 +1060,22 @@ async def verify_job(
 
 
 @router.post("/jobs/{job_id}/readmit")
-def readmit_job(
+async def readmit_job(
     job_id: str,
     body: GrantReadmissionRequest,
     request: Request,
+    session_mgr: SessionMgr,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
     access(request, human_only=True)
-    return WikiJobs(user_id).readmit(job_id, body.paths, body.creation.model_dump() if body.creation else None,
-                                    expected_attempt=body.expected_attempt, expected_vault_id=body.expected_vault_id,
-                                    operation_id=body.operation_id)
+    import anyio
+
+    from ..wiki.job_returns import dispatch_gate
+
+    async with dispatch_gate(session_mgr, user_id):
+        return await complete_cleanup(anyio.to_thread.run_sync(lambda: WikiJobs(user_id).readmit(
+            job_id, body.paths, body.creation.model_dump() if body.creation else None,
+            expected_attempt=body.expected_attempt, expected_vault_id=body.expected_vault_id,
+            operation_id=body.operation_id, requester=requester_for(request, user_id, None),
+        )))

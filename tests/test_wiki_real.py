@@ -120,7 +120,9 @@ async def test_codex_resumed_turn_replaces_previous_wiki_off_instruction(tmp_pat
         assert note.read_text() == "# Permission proof\nThe current proof is " + proof + "\n"
         assert WikiJobs(owner["id"]).get(job["id"])["status"] == "queued"
     finally:
+        await manager.drain_turns(timeout=30)
         await manager.stop_all_held_processes()
+        await manager.close_session_owners()
         await api.stop()
         await db.close()
 
@@ -214,6 +216,8 @@ async def test_codex_explicit_wiki_and_native_helper(
         assert raw[-1].type == "result" and not raw[-1].is_error
         assert "Sent prompt with event ID:" not in backend.stderr_text
     finally:
+        await manager.drain_turns(timeout=30)
         await manager.stop_all_held_processes()
+        await manager.close_session_owners()
         await api.stop()
         await db.close()

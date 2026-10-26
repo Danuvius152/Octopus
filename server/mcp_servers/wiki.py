@@ -477,6 +477,8 @@ def retry_job(job_id: str, expected_attempt: int | None = None, expected_vault_i
 
     Unconfirmed original recording is verified without starting another model.
     Cancellation pending/unconfirmed blocks retry. Original receipts and reread budgets remain.
+    An accepted continuation returns to this dispatching request; old chat subscriptions
+    do not own its result. Do not pre-review the note merely to resume retained work.
     """
     return call("POST", f"jobs/{job_id}/retry", body={"expected_attempt": expected_attempt, "expected_vault_id": expected_vault_id})
 

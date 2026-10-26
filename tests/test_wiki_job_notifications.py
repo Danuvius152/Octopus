@@ -33,7 +33,8 @@ async def receiver(tmp_path, jobs):
     async def broadcast(event, *, user_id):
         frames.append((event, user_id))
 
-    manager = SimpleNamespace(db=database, _broadcast=broadcast, frames=frames, get_session=lambda _sid: None)
+    manager = SimpleNamespace(db=database, _broadcast=broadcast, frames=frames, get_session=lambda _sid: None,
+                              _wiki_dispatch_locks={})
     try:
         yield manager
     finally:

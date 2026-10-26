@@ -16,12 +16,13 @@ def card(token):
 
 
 @pytest.mark.parametrize("mode", ["auto", "read", "maintain"])
-async def test_regular_turn_only_advertises_stable_discovery_and_loads_current_guides_on_use(client, tmp_path, mode):
+@pytest.mark.parametrize("curator", [False, True])
+async def test_regular_turn_only_advertises_stable_discovery_and_loads_current_guides_on_use(client, tmp_path, mode, curator):
     vault = tmp_path / "vault"
     vault.mkdir()
     config = await wiki_api.configure(client, vault)
     owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
-    session = SimpleNamespace(id="reader", user_id=owner, agent_id="ordinary-reader")
+    session = SimpleNamespace(id="reader", user_id=owner, agent_id=config["curator_agent_id"] if curator else "ordinary-reader")
     token = tasks.open(session, mode)
     try:
         prompt = instructions(mode, token)
@@ -32,7 +33,10 @@ async def test_regular_turn_only_advertises_stable_discovery_and_loads_current_g
         assert operation["curator_agent_id"] == config["curator_agent_id"]
         assert operation["writable_files"] == []
         assert "capabilities" not in operation and "guides" not in operation
-        assert prompt == BOOTSTRAP
+        assert prompt.startswith(BOOTSTRAP)
+        routing = prompt.splitlines()[-1]
+        assert ("当前角色 query" if mode == "read" else "当前角色 submitter") in routing
+        assert ("加载 query" if mode == "read" else "加载 entry") in routing
         for name in ("access", "query-v2", "entry", "worker-v2", "retrieval-v2"):
             assert guide(name) not in prompt
         assert config["vault_id"] not in prompt and config["registration_generation"] not in prompt
@@ -52,7 +56,7 @@ async def test_unbound_turn_does_not_advertise_a_vault_or_write_grants(client):
         operation = card(token)
         assert operation["state"] == "主库尚未绑定；用 info 确认状态"
         assert operation["injected_guides"] == []
-        assert prompt == BOOTSTRAP
+        assert prompt.startswith(BOOTSTRAP)
         assert "vault_id" not in operation and "writable_files" not in operation
         assert "capabilities" not in operation and "guides" not in operation
     finally:
@@ -80,13 +84,15 @@ async def test_worker_and_cancelled_assignment_mark_the_actual_branch(client, tm
         assert operation["injected_guides"] == []
         assert operation["job_id"] == job["id"]
         assert operation["writable_files"] == ["Library/note.md"]
-        assert prompt == BOOTSTRAP and guide("worker-v2") not in prompt
+        assert prompt.startswith(BOOTSTRAP) and guide("worker-v2") not in prompt
+        assert "当前角色 worker" in prompt.splitlines()[-1] and "加载 worker" in prompt.splitlines()[-1]
         assert guide("worker-v2") in load_guide("worker", token)
         assert load_guide("writing", token) == load_guide("writing", token) == guide("writing")
         jobs.update(job["id"], status="cancelled")
         ended = instructions("maintain", token)
         assert card(token)["injected_guides"] == [] and card(token)["actor_role"] == "ended_worker"
-        assert ended == BOOTSTRAP
+        assert ended.startswith(BOOTSTRAP)
+        assert "当前角色 ended_worker" in ended.splitlines()[-1] and "仅可查询" in ended.splitlines()[-1]
         with pytest.raises(WikiError):
             load_guide("worker", token)
         with pytest.raises(WikiError) as refused:

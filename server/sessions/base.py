@@ -672,6 +672,7 @@ class SessionManagerBase:
         # execution. Read/validate/write and turn snapshots must agree.
         self.configuration_lock = asyncio.Lock()
         self._agent_lifecycle_lock = asyncio.Lock()
+        self._wiki_dispatch_locks: dict[str | None, asyncio.Lock] = {}
         self._closed_agents: set[str] = set()
         self._agent_operations: dict[str | None, set[asyncio.Future[None]]] = {}
         self._agent_archive_tasks: dict[str, asyncio.Task[None]] = {}
@@ -710,6 +711,7 @@ class SessionManagerBase:
         self.configuration_lock = asyncio.Lock()
         self._agent_lifecycle_lock = asyncio.Lock()
         self._closed_agents.clear()
+        self._wiki_dispatch_locks.clear()
         self._agent_operations.clear()
         self._agent_archive_tasks.clear()
         self._admission_closed = False
