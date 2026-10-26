@@ -27,6 +27,7 @@ class ReadRequest(BaseModel):
     start: int = Field(default=0, ge=0)
     length: int = Field(default=16000, ge=1, le=24000)
     expected_revision: str | None = None
+    location: str | None = None
 
 
 class ReviewObservation(BaseModel):
@@ -187,6 +188,7 @@ class ReadBatch(BaseModel):
     items: list[ReadRequest] = Field(min_length=1, max_length=20)
     budget_chars: int = Field(default=24000, ge=1, le=96000)
     view: ReadView = "full"
+    reuse_delivered: bool = False
 
 
 class RawEdit(BaseModel):

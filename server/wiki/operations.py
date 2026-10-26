@@ -55,6 +55,9 @@ def record(db, *, doc_id, path, before, after, operation, reason, publication=No
         grants.check_write(db, store, publication, path, change_id=change_id, doc_id=doc_id)
     identifier = uuid.uuid4().hex
     details = dict(details or {})
+    from .readback import details as reading_details
+
+    details = reading_details(db, publication, doc_id, before, after, details)
     if publication:
         if publication.get("execution") is not None:
             details["execution"] = publication["execution"]

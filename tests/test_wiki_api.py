@@ -355,7 +355,11 @@ async def test_confirm_sources_updates_only_checked_dependencies_and_keeps_body(
     result = await client.post("/api/wiki/revise", headers=client.headers, json={"doc": summary["id"], "expected_revision": summary["revision"], "operation": "confirm_sources", "checks": [{"resource": "a.md", "doc": current["id"], "revision": current["revision"], "location": "L2-L2"}], "reason": "已重读 a，原解释仍适用"})
     assert result.status_code == 200, result.text
     after = (await client.get("/api/wiki/read", params={"doc": summary["id"]}, headers=client.headers)).json()
-    assert after["metadata"]["sources"][0]["revision"] == current["revision"]
+    assert result.json()["revision"] == summary["revision"] and not result.json()["changed"]
+    assert (vault / "summary.md").read_bytes() == before
+    assert after["metadata"]["sources"][0]["revision"] == inputs[0]["revision"]
+    assert after["metadata"]["source_refs"][0]["confirmed_revision"] == current["revision"]
+    assert after["metadata"]["source_refs"][0]["confirmation_receipt_id"] == result.json()["receipt_id"]
     assert after["metadata"]["sources"][1]["revision"] == inputs[1]["revision"]
     assert after["stale"] is True
     assert (vault / "summary.md").read_text().split("---\n", 2)[2] == body
@@ -393,13 +397,15 @@ async def test_confirm_sources_distinguishes_positions_of_one_resource(client, t
     assert result.status_code == 200, result.text
     after = (await client.get("/api/wiki/read", params={"doc": "note.md"})).json()
     if not combined:
-        assert [ref["revision"] for ref in after["metadata"]["sources"]] == [current["revision"], source["revision"]]
+        assert [ref.get("confirmed_revision") for ref in after["metadata"]["source_refs"]] == [current["revision"], None]
         assert after["stale"]
         result = await client.post("/api/wiki/revise", json=request | {"expected_revision": after["revision"], "checks": [check | {"location": "Second"}]})
         assert result.status_code == 200, result.text
         after = (await client.get("/api/wiki/read", params={"doc": "note.md"})).json()
     assert not after["stale"]
-    assert after["metadata"]["sources"] == [ref | {"revision": current["revision"]} for ref in summary["metadata"]["sources"]]
+    assert note.read_bytes() == before
+    assert after["metadata"]["sources"] == summary["metadata"]["sources"]
+    assert [ref["confirmed_revision"] for ref in after["metadata"]["source_refs"]] == [current["revision"]] * 2
     front, preserved = note.read_text().split("---\n")[1:]
     assert yaml.safe_load(front)["custom"] == "keep" and preserved == body
 

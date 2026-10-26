@@ -91,6 +91,21 @@ def heading_role(heading: str) -> str | None:
     return _HEADINGS.get(re.sub(r"\s*(?:（[^（）]*）|\([^()]*\))$", "", label).strip())
 
 
+def unlinked_text(inline: Token) -> str:
+    """Visible prose outside links/code, using this parser's inline grammar."""
+    parts, linked = [], 0
+    for token in inline.children or []:
+        if token.type == 'link_open':
+            linked += 1
+        elif token.type == 'link_close':
+            linked -= 1
+        elif token.type in {'text', 'text_special'} and not linked:
+            parts.append(_WIKILINK.sub('', token.content))
+        elif token.type in {'softbreak', 'hardbreak'} and not linked:
+            parts.append(' ')
+    return ' '.join(''.join(parts).split())
+
+
 @dataclass
 class DocumentFormat:
     fields: dict[str, Any] = field(default_factory=dict)

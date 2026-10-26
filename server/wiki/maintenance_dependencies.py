@@ -2,11 +2,11 @@
 
 import json
 
-from . import source_bindings
+from . import source_bindings, source_confirmations
 from .maintenance_contract import digest
 from .references import ParsedReference
 
-VERSION = "direct-maintenance-evidence-v2"
+VERSION = "direct-maintenance-evidence-v3"
 
 
 def read(db, documents):
@@ -24,8 +24,7 @@ def read(db, documents):
             if identifier not in documents:
                 continue
             if (not row["observation_id"] or row["source_doc"] != identifier
-                    or row["pending_plan"] or row["revision"] != documents[identifier]["revision"]
-                    or row["path"] != documents[identifier]["path"]):
+                    or row["pending_plan"] or row["revision"] != documents[identifier]["revision"]):
                 raise ValueError("current source observation is not settled")
             current = json.loads(row["occurrences"])
             if not isinstance(current, list):
@@ -46,6 +45,7 @@ def read(db, documents):
         edges = {(row["source_doc"], row["ordinal"]): dict(row) for row in db.execute("""SELECT e.*
             FROM maintenance_requested_documents wanted JOIN wiki_edges e ON e.source_doc=wanted.doc_id
             WHERE e.relation IN ('derived_from','representation_of')""")}
+        confirmations = source_confirmations.read(db, [doc for doc, values in entries.items() if values])
         result = {}
         for identifier, current in entries.items():
             evidence, warnings = [], {}
@@ -59,14 +59,8 @@ def read(db, documents):
                 recorded = entry.get("recorded_revision")
                 recorded = recorded if isinstance(recorded, str) else None
                 policy = binding["policy"]
-                if policy in {"external", "unknown"}:
-                    status = policy
-                elif not binding["target_doc"] or binding["target_path"] is None:
-                    status = "missing"
-                elif not recorded:
-                    status = "version_unknown"
-                else:
-                    status = "indexed" if recorded == binding["target_revision"] else "changed"
+                confirmation = confirmations.get((identifier, entry["ordinal"]))
+                status = source_confirmations.status(policy, recorded, binding["target_revision"], confirmation)
                 if reference.relation == "derived_from" and status in {"changed", "missing", "version_unknown", "unknown"}:
                     warnings[status] = warnings.get(status, 0) + 1
                 # Locator/reference evidence and the *current* proof are distinct
@@ -77,7 +71,8 @@ def read(db, documents):
                                  "binding_reference": json.loads(binding["reference"]), "base": binding["base"],
                                  "policy": policy, "target": binding["target_doc"], "proof": json.loads(binding["proof"]),
                                  "current_path": binding["target_path"], "current_revision": binding["target_revision"],
-                                 "status": status, "edge": edges.get((identifier, entry["ordinal"]))})
+                                 "status": status, "confirmation": confirmation,
+                                 "edge": edges.get((identifier, entry["ordinal"]))})
             result[identifier] = (digest({"version": VERSION, "occurrences": evidence}), warnings)
         if set(result) != set(documents):
             raise ValueError("current source observation is missing")

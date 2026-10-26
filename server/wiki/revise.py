@@ -3,7 +3,7 @@
 import json
 import unicodedata
 
-from . import format, material_proof, operations, raw_blocks
+from . import format, material_proof, operations, raw_blocks, source_bindings
 from .formats import require_markdown_maintenance
 from .references import source_reference
 from .store import WikiError
@@ -41,7 +41,9 @@ def revise(curation, body, actor, task):
             curation.history.blob(text.encode())
             with store.connect() as db:
                 receipt = operations.record(db, doc_id=document["id"], path=path, before=document["revision"], after=document["revision"], operation="no_change", reason=body.reason, publication=context, store=store)
-            return {"id": document["id"], "path": path, "revision": document["revision"], "changed": False, "change_id": None, "receipt_id": receipt, "operation": "no_change", **store.index_state()}
+            from .readback import response
+
+            return response(store, {"id": document["id"], "path": path, "revision": document["revision"], "changed": False, "change_id": None, "receipt_id": receipt, "operation": "no_change", **store.index_state()})
         changes, fields, tags, aliases, refs = [], None, None, None, None
         candidate = text
         trace = material_proof.Trace(text)
@@ -49,7 +51,11 @@ def revise(curation, body, actor, task):
             tasks.require_read(task, store, path, body.expected_revision)
             refs = [dict(ref) for ref in document["metadata"].get("sources", [])]
             dependencies = document["metadata"].get("source_refs", [])
-            seen = set()
+            with store.connect() as db:
+                observation = source_bindings.current(db, document["id"])
+            if observation is None or observation["revision"] != document["revision"]:
+                raise source_bindings.unavailable("current source observation is not settled")
+            seen, checks = set(), []
             for check in body.checks:
                 matched = [index for index, ref in enumerate(refs) if (ref.get("resource") or ref.get("doc") or ref.get("path")) == check.resource]
                 if len(matched) > 1:
@@ -64,8 +70,21 @@ def revise(curation, body, actor, task):
                     raise WikiError("Confirm one existing direct dependency at a time; it cannot be rebound", 422)
                 seen.add(matched[0])
                 tasks.require_source_read(task, store, check.model_dump())
-                refs[matched[0]]["revision"] = check.revision
-                refs[matched[0]]["location"] = check.location
+                entry = observation["entries"][matched[0]]
+                checks.append({"ordinal": matched[0], "occurrence": entry["occurrence_id"],
+                               "binding": entry["binding_id"], "doc": current["id"],
+                               "revision": check.revision, "location": check.location})
+            curation.history.blob(text.encode())
+            with store.connect() as db:
+                receipt = operations.record(db, doc_id=document["id"], path=path,
+                    before=document["revision"], after=document["revision"],
+                    operation=body.operation, reason=body.reason, publication=context,
+                    details={"source_confirmation": {"observation": observation["id"], "checks": checks}}, store=store)
+            from .readback import response
+
+            return response(store, {"id": document["id"], "path": path, "revision": document["revision"],
+                    "changed": False, "change_id": None, "receipt_id": receipt,
+                    "operation": body.operation, **store.index_state()})
         else:
             current = raw_blocks.coordinates(store, document, text)
             document["raw_body_start"] = current.body_start
@@ -120,6 +139,6 @@ def revise(curation, body, actor, task):
         trace.metadata(candidate)
         management = operations.management(store, path, candidate, replaced=replaced)
         curation.validate_links(path, candidate, candidate=candidate, managed_metadata=json.loads(management["metadata"]) if management else {})
-        allow_seed = body.operation == "confirm_sources" or any(value is not None for value in (fields, tags, aliases))
+        allow_seed = any(value is not None for value in (fields, tags, aliases))
         result = curation.history.write_locked(path, candidate.encode(), document["revision"], actor, body.reason, management, publication=context, operation=body.operation, operation_details={"changed_ranges": changes}, origin_builder=trace.transition(context, allow_seed=allow_seed))
         return result | {"id": document["id"], "changed_ranges": changes, "original_preserved": False if changes else True, "operation": body.operation}

@@ -40,6 +40,8 @@ def compact_document(document):
         result["warnings"] = warnings
     if document.get("pages"):
         result["page_count"] = len(document["pages"])
+    if 'sources' in document:
+        result['sources'] = document['sources']
     return result
 
 

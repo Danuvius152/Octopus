@@ -33,6 +33,9 @@ async def test_worker_distinguishes_first_incremental_and_specific_review(client
     assert finished["status"] == "completed"
     assert "首次复核（无已接受基线）" in prompts[-1]
     assert target(prompts[-1], first["doc"])["review_phase"] == "first"
+    context = target(prompts[-1], first['doc'])['review_context']
+    assert context['baseline'] is None and context['reasons'] == ['first_review']
+    assert context['observed']['dependency_generation'] == first['dependency_generation']
     assert finished["payload"]["request"] == original_request
 
     current = jobs.store.read(first["doc"])
@@ -45,6 +48,10 @@ async def test_worker_distinguishes_first_incremental_and_specific_review(client
     incremental = jobs.maintain(changed["review_key"], "", "", [changed["path"]], None, [], "human", review=changed)
     assert (await process(jobs, incremental, curator))["status"] == "completed"
     assert target(prompts[-1], changed["doc"])["review_phase"] == "incremental"
+    context = target(prompts[-1], changed['doc'])['review_context']
+    assert context['baseline']['id'] == changed['baseline_receipt_id']
+    assert context['baseline']['output_revision'] == current['revision']
+    assert context['reasons'] == ['article_changed']
 
     specific = jobs.maintain("specific-review", "", "Check the explicitly selected wording only",
                              [changed["path"]], None, [], "human")

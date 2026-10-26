@@ -20,7 +20,15 @@ from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 from ..service_health import ServiceHealth
-from . import catalog, portable_metadata, search_index, source_bindings, storage, uids
+from . import (
+    catalog,
+    portable_metadata,
+    search_index,
+    source_bindings,
+    source_confirmations,
+    storage,
+    uids,
+)
 from . import format as document_format
 from .extract import HTML_BODY_VERSION, SUPPORTED, extract
 from .formats import MARKDOWN_QUERY_CONTRACT, MARKDOWN_SQL
@@ -882,9 +890,10 @@ class WikiStore:
                     for original in metadata.get("sources", []):
                         if original.get("doc") == source_id:
                             original["path"] = source["path"]
-                if ref.get("revision") and ref["status"] not in {"external", "unknown"} and current != ref.get("revision"):
+                ref["status"] = source_confirmations.status(ref["status"], ref.get("revision"), current,
+                    ref if "confirmed_revision" in ref else None)
+                if source_confirmations.is_stale(ref):
                     stale = True
-                    ref["status"] = "changed" if current else "missing"
                 ref["current_revision"] = current
         return {
             k: row[k] for k in ("id", "path", "revision", "title", "kind", "quality")
@@ -902,7 +911,7 @@ class WikiStore:
         return {key: row[key] for key in ("id", "path", "revision", "title", "kind", "quality")} | {
             "metadata": self.indexed_metadata(row, db=db) | {"source_refs": refs},
             "pages": json.loads(row["pages"]), "characters": len(row["text"]),
-            "stale": any(ref["status"] == "changed" or ref["status"] == "missing" and ref["revision"] for ref in refs),
+            "stale": any(source_confirmations.is_stale(ref) for ref in refs),
             "freshness": "indexed",
         }
 

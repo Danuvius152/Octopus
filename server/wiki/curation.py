@@ -16,6 +16,38 @@ from .sections import original_text, region, top_offset
 from .store import WikiError, revision
 
 
+def _legacy_trace(text, base, offset, previous, additions):
+    """Render owned regions with actual copies for every retained region."""
+    from .material_proof import Trace, gaps
+
+    raw = text.encode()
+    known = {}
+    for part in previous:
+        first = len(text[:text.index(part['raw'])].encode())
+        known[part['raw']] = (first, first + len(part['raw'].encode()))
+    original = gaps(len(raw), list(known.values()))
+
+    def body(first, last):
+        chunks, cursor = [], 0
+        for start, end in original:
+            length = end - start
+            left, right = max(first, cursor), min(last, cursor + length)
+            if left < right:
+                chunks.append((start + left - cursor, start + right - cursor))
+            cursor += length
+        return chunks
+
+    def regions(roles):
+        return [known[part['raw']] if part['raw'] in known else part['raw'].encode()
+                for part in additions if part['role'] in roles]
+
+    position = len(base[:offset].encode())
+    trace = Trace(text)
+    trace.replace([*body(0, position), *regions({'key_note', 'tags', 'aliases'}),
+                   *body(position, len(base.encode())), *regions({'relations', 'navigation_links'})])
+    return trace
+
+
 class WikiCuration:
     def __init__(self, store):
         self.store = store
@@ -176,8 +208,10 @@ class WikiCuration:
         # this branch to acquire a new-page reservation or write permission.
         if not self.store.path(path).is_file():
             raise WikiError("Supporting links require an existing navigation page", 403)
-        tasks.require_read(task, self.store, path, expected_revision)
-        source = self.store.read(path, length=1, expected_revision=expected_revision)
+        from . import navigation_context, raw_blocks
+
+        source, text = raw_blocks.snapshot(self.store, path, expected_revision)
+        navigation_context.require(task, self.store, source, text)
         for relation in relations:
             tasks.require_source_read(task, self.store, relation)
             if not relation["explanation"].strip():
@@ -212,7 +246,8 @@ class WikiCuration:
         result = self.history.write_locked(path, trace.raw, expected_revision, actor, reason, management,
                                            publication=context, operation="navigation_link",
                                            origin_builder=trace.transition(context))
-        return result | {"original_preserved": True, "source_path": path}
+        return result | {"original_preserved": True, "source_path": path,
+                         'readback': {'required': False, 'reason': 'fixed_navigation_links_verified_by_host'}}
 
     def _organize(
         self, path, expected_revision, key_note, tags, relations, sources, actor, reason,
@@ -259,13 +294,9 @@ class WikiCuration:
                 )
             previous = json.loads(owned["regions"]) if owned else []
             owned_metadata = json.loads(owned["metadata"]) if owned else {}
-            from .material_proof import Trace
-
-            trace = Trace(base)
             rendered_base = base
             base = original_text(base, previous)
             offset = top_offset(base)
-            trace.edit([(rendered_base.index(part["raw"]), rendered_base.index(part["raw"]) + len(part["raw"]), "") for part in previous])
             additions = []
             # Omitted sources retain the saved or native evidence. Retained
             # citations keep their recorded identity/version, even when stale;
@@ -350,7 +381,7 @@ class WikiCuration:
                 part["raw"] for part in additions if part["role"] in {"relations", "navigation_links"}
             )
             text = base[:offset] + head + base[offset:] + tail
-            trace.edit([(offset, offset, head), (len(base), len(base), tail)])
+            trace = _legacy_trace(rendered_base, base, offset, previous, additions)
             metadata = {
                 "author": "Weber 整理",
                 "tags": normalized,

@@ -209,6 +209,10 @@ def incoming(db, doc_id, path, revision, source_entries, policy):
         copied = selected_plan(db, doc_id, previous["path"], previous["revision"],
                                previous["entries"], context + ":captured", previous)
         previous = seal(db, copied, resolve_new=False)
+    elif previous["revision"] == revision and same_entries(previous["entries"], source_entries):
+        # A verified continuation with no content change keeps its checks.
+        # Selected restore/copy evidence takes the separate branches above.
+        return dict(previous)
     return plan(db, doc_id, path, revision, source_entries, context, prior=previous)
 
 
@@ -289,7 +293,9 @@ def index(db, row, metadata):
             # The applied version was edited again before indexing. Keep its
             # exact evidence, without resolving old unconfirmed names today.
             active = seal(db, pending, resolve_new=False)
-    if active is None or active["revision"] != row["revision"] or active["path"] != row["path"] or not same_entries(active["entries"], wanted):
+    # The observation records its original path. A pure move keeps this exact
+    # evidence; restore/copy plans above still create their own occurrences.
+    if active is None or active["revision"] != row["revision"] or not same_entries(active["entries"], wanted):
         active = seal(db, plan(db, row["id"], row["path"], row["revision"], wanted,
                                "filesystem:" + uuid.uuid4().hex, prior=active))
     db.execute("""INSERT INTO source_binding_head VALUES(?,?,NULL)
@@ -328,8 +334,9 @@ def record(db, change_id, doc_id, path, before, after, before_management, after_
     elif transition is not None:
         after_plan = incoming(db, doc_id, path, after_revision, after_entries, transition | {"context": change_id + ":after"})
     else:
-        after_plan = plan(db, doc_id, path, after_revision, after_entries,
-                          change_id + ":after", prior=before_plan)
+        prior = current(db, doc_id) if before_revision == after_revision else before_plan
+        after_plan = incoming(db, doc_id, path, after_revision, after_entries,
+                              {"mode": "continuation", "context": change_id + ":after", "prior": prior})
     after_plan["change_id"] = change_id
     db.execute("INSERT INTO change_source_bindings VALUES(?,?,?)", (change_id, encoded(before_plan), encoded(after_plan)))
 
@@ -354,4 +361,9 @@ def apply(db, change_id):
         draft = {"version": 1, "id": uuid.uuid4().hex, "source_doc": row["document_id"],
                  "path": row["path"], "revision": row["after_hash"], "context": change_id + ":legacy-after",
                  "entries": [], "confirmed": False, "unknown_current": True}
+    identity = db.execute("SELECT path FROM document_identities WHERE id=?", (draft["source_doc"],)).fetchone()
+    if draft["revision"] is None and identity and identity["path"] not in {None, draft["path"]}:
+        # A rename journals both paths. Its old-path deletion is historical,
+        # and cannot replace the source observation of the still-live document.
+        return
     stage(db, draft)

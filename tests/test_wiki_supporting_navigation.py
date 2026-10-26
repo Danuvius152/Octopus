@@ -75,6 +75,61 @@ async def test_selected_note_can_add_an_index_link_without_reviewing_or_rewritin
         assert jobs.recover_publication(job["id"], item) and item["output"] == source["path"]
 
 
+@pytest.mark.parametrize('heading', ['# Code review', '# **Code review**'])
+async def test_navigation_append_reads_topic_context_without_the_long_link_list(client, tmp_path, heading):
+    root, _, job, config, _ = await setup_notes(client, tmp_path)
+    index = root / 'Library/index.md'
+    index.write_text(heading + '\n\nCompare review techniques and their limits.\n\n' +
+                     '\n'.join(f'- External example {number}: https://example.org/{number}' for number in range(200)))
+    original = index.read_bytes()
+    async with assigned(job, config, client=client) as (headers, _):
+        source = (await client.get('/api/wiki/read', headers=headers, params={'doc': 'Library/requested.md'})).json()
+        context = await client.get('/api/wiki/blocks', headers=headers, params={'doc': 'Library/index.md', 'view': 'navigation'})
+        assert context.status_code == 200, context.text
+        navigation = context.json()
+        assert navigation['view'] == 'navigation'
+        assert 'Compare review techniques and their limits.' in ''.join(block['content'] for block in navigation['blocks'])
+        assert navigation['index_deduplication'] == 'host_at_publication'
+        assert sum(len(block['content']) for block in navigation['blocks']) < len(original) // 10
+        added = await client.post('/api/wiki/organize', headers=headers, json=addition(source, navigation))
+        assert added.status_code == 200, added.text
+        assert index.read_bytes().startswith(original)
+        assert added.json()['readback']['required'] is False
+
+
+@pytest.mark.parametrize('full_read', [False, True])
+async def test_quoted_navigation_introduction_remains_usable_without_a_template(client, tmp_path, full_read):
+    root, _, job, config, _ = await setup_notes(client, tmp_path)
+    index = root / 'Library/index.md'
+    index.write_text('# Index\n\n> Compare claims and their necessary conditions.\n\n- [[Library/other]]\n')
+    original = index.read_bytes()
+    async with assigned(job, config, client=client) as (headers, _):
+        source = (await client.get('/api/wiki/read', headers=headers, params={'doc': 'Library/requested.md'})).json()
+        endpoint = '/api/wiki/read' if full_read else '/api/wiki/blocks'
+        navigation = await client.get(endpoint, headers=headers, params={
+            'doc': 'Library/index.md', 'view': 'full' if full_read else 'navigation',
+        })
+        assert navigation.status_code == 200, navigation.text
+        added = await client.post('/api/wiki/organize', headers=headers, json=addition(source, navigation.json()))
+        assert added.status_code == 200, added.text
+        assert index.read_bytes().startswith(original)
+
+
+@pytest.mark.parametrize('shell', [
+    '# Index\n\n<!-- no topic -->\n\n- [[Library/other]]\n',
+    '# **Index**\n\n- [[Library/other]]\n',
+    '# Index\n## Contents\n- [[Library/other]]\n',
+    '# Index\n\n> [[Library/other]]\n',
+])
+async def test_link_only_navigation_shell_cannot_be_mistaken_for_topic_context(client, tmp_path, shell):
+    root, _, job, config, _ = await setup_notes(client, tmp_path)
+    (root / 'Library/index.md').write_text(shell)
+    async with assigned(job, config, client=client) as (headers, _):
+        source, navigation = await read_pair(client, headers, 'Library/index.md')
+        refused = await client.post('/api/wiki/organize', headers=headers, json=addition(source, navigation))
+        assert refused.status_code == 422 and 'topic context' in refused.text
+
+
 @pytest.mark.parametrize("case", ["ordinary-note", "unassigned-relation", "frontmatter-change", "new-index"])
 async def test_supporting_index_addition_cannot_expand_to_other_notes_or_body_changes(client, tmp_path, case):
     root, _, job, config, original = await setup_notes(client, tmp_path)

@@ -292,6 +292,33 @@ class WikiTasks:
         task.reads.setdefault(key, []).append((document["start"], document["end"]))
         task.read_sizes[key] = document["characters"]
 
+    @staticmethod
+    def delivered(task, document):
+        """Extracted coordinates, including raw delivery verified to be identical."""
+        key = (document['id'], document['path'], document['revision'])
+        ranges = task.reads.get(key, []) if task else []
+        merged = []
+        for first, last in sorted(ranges):
+            if merged and first <= merged[-1][1]:
+                merged[-1] = merged[-1][0], max(merged[-1][1], last)
+            else:
+                merged.append((first, last))
+        return merged
+
+    def reading_summary(self, task):
+        documents = []
+        for key in list(dict.fromkeys([*task.reads, *task.raw_reads]))[-8:]:
+            document = {'id': key[0], 'path': key[1], 'revision': key[2]}
+            ranges = self.delivered(task, document)
+            raw = task.raw_reads.get(key, [])
+            documents.append({'doc': key[0], 'path': key[1], 'revision': key[2],
+                              'ranges': ranges[:8], 'ranges_complete': len(ranges) <= 8,
+                              'raw_ranges': sorted(raw)[:8], 'raw_ranges_complete': len(raw) <= 8,
+                              'full_raw_delivered': key in task.raw_read_sizes and self.coverage(raw, 0) >= task.raw_read_sizes[key],
+                              'full_text_delivered': key in task.read_sizes and self.coverage(ranges, 0) >= task.read_sizes[key]})
+        return {'documents': documents, 'documents_complete': len(set(task.reads) | set(task.raw_reads)) <= 8,
+                'scope': 'This task only. Delivery does not prove text remains in model context.'}
+
     def require_read(self, task, store, path, expected_revision):
         if task is None:
             return

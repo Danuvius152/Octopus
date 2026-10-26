@@ -427,7 +427,10 @@ def get_guide(request: Request, module: GuideModule, known_context_digest: str |
     if task is None or scope is None or task.user_id != user_id:
         raise WikiError("Wiki guides require an active authorized turn", 403)
     current = view(task)
-    return current.guide_response(module, known_context_digest)
+    response = current.guide_response(module, known_context_digest)
+    if task.job_id:
+        response['reading'] = tasks.reading_summary(task)
+    return response
 
 
 class SearchSection(BaseModel):
@@ -530,27 +533,25 @@ def read(
     expected_revision: str | None = None,
     page: int | None = Query(None, ge=1),
     view: ReadView = "full",
+    location: str | None = None,
+    source_cursor: str | None = None,
+    source_limit: int = Query(8, ge=1, le=20),
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    from ..wiki.read_response import compact_read, validate_view
+    from ..wiki.reading import read as read_document
 
-    task = access(request)
-    validate_view(view)
-    result = registry.store(user_id).read(
-        doc, start=start, length=length, expected_revision=expected_revision, page=page
-    )
-    if view == "compact" or task is not None:
-        result = compact_read(result, view=view)
-    tasks.record_read(task, result)
-    return result
+    return read_document(registry.store(user_id), doc, user_id, start=start, length=length,
+                         expected_revision=expected_revision, page=page, view=view, location=location,
+                         source_cursor=source_cursor, source_limit=source_limit, task=access(request))
 
 
 @router.post("/read-many", operation_id="wiki_read_many")
 def read_many(body: ReadBatch, request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
     from ..wiki.batch_read import read_many
 
-    return read_many(registry.store(user_id), body.items, body.budget_chars, access(request), view=body.view)
+    return read_many(registry.store(user_id), body.items, body.budget_chars, access(request),
+                     view=body.view, reuse_delivered=body.reuse_delivered, user_id=user_id)
 
 
 @router.get("/image")

@@ -100,7 +100,7 @@ async def test_worker_and_cancelled_assignment_mark_the_actual_branch(client, tm
 
 def test_worker_retains_cold_read_safeguards_and_writing_semantic_checks():
     worker = guide("worker-v2")
-    for text in ("全部新增、修改区段", "必要邻接上下文", "不只检查最后一个补丁", "正文逐字节相同", "当前元数据已观察", "no_change 不新增写后阅读义务"):
+    for text in ("全部新增、修改和结构移动影响的最终区段", "必要邻接上下文", "不只检查最后一个补丁", "正文逐字节相同", "当前元数据已观察", "no_change 不新增写后阅读义务"):
         assert text in worker
     writing = guide("writing")
     for text in ("论点、归属、条件和来源位置", "突兀过渡", "遗漏理由", "被强化的结论", "完整终稿冷读合同"):

@@ -248,6 +248,14 @@ class WikiHistory:
                 ))
             if status == "prepared":
                 from .operations import record
+                from .readback import transition
+
+                operation_details = dict(operation_details or {})
+                if publication and after is not None:
+                    trace = getattr(origin_builder, 'trace', None)
+                    operation_details['readback_transition'] = transition(
+                        before, after, trace, fixed=operation == 'navigation_link',
+                        managed_before=before_state, managed_after=after_state)
 
                 if publication and publication.get("reservation_id"):
                     from . import grants
@@ -433,7 +441,9 @@ class WikiHistory:
             self.blob(before)
             with self.store.connect() as db:
                 receipt = record(db, doc_id=document["id"], path=relative, before=current, after=current, operation=operation, reason=reason, publication=publication, details=operation_details, store=self.store)
-            return {"path": relative, "revision": current, "change_id": None, "receipt_id": receipt, "changed": False, **self.store.index_state()}
+            from .readback import response
+
+            return response(self.store, {"path": relative, "revision": current, "change_id": None, "receipt_id": receipt, "changed": False, **self.store.index_state()})
         row = self.record(relative, before, raw, actor, reason, "prepared", management, publication=publication, operation=operation, operation_details=operation_details, origin_state=origin_state, origin_builder=origin_builder, source_plan=source_plan)
         # flock coordinates Octopus writers, not an external editor. Preparing
         # the durable journal can take time: validate both identity and bytes
@@ -496,7 +506,10 @@ class WikiHistory:
                 catalog.finish(db)
         with self.store.connect() as db:
             receipt = db.execute("SELECT id FROM operation_receipts WHERE change_id=?", (row["id"],)).fetchone()
-        return {"change_id": row["id"], "path": relative, "revision": row["after_hash"], "receipt_id": receipt[0] if receipt else None, "changed": True, **self.store.index_state()}
+        from .readback import response
+
+        result = {"change_id": row["id"], "path": relative, "revision": row["after_hash"], "receipt_id": receipt[0] if receipt else None, "changed": True, **self.store.index_state()}
+        return response(self.store, result) if raw is not None else result
 
     def history(self, path, offset=0, limit=50):
         with self.locked():

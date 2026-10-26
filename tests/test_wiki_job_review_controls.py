@@ -27,7 +27,7 @@ async def test_navigation_receipt_does_not_become_an_unstarted_creation_effect(j
 
     WikiHistory(jobs.store).write("Library/note.md", b"# Primary\nKeep this argument.\n", None, "human", "source")
     primary = jobs.store.read("Library/note.md")
-    WikiHistory(jobs.store).write("Library/index.md", b"---\ntype: Topic\n---\n# Navigation\n", None, "human", "navigation")
+    WikiHistory(jobs.store).write("Library/index.md", b"---\ntype: Topic\n---\n# Navigation\n\nCompare the primary argument and its conditions.\n", None, "human", "navigation")
     job = jobs.maintain("cancel-navigation-only", "", "Review A and create B", [primary["path"]], None, [], "human",
                         creation={"purpose": "requested_knowledge_page", "paths": ["Library/unstarted.md"]})
     for count, item in enumerate(job["items"], 1):

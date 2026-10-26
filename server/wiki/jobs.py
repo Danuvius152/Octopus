@@ -1590,6 +1590,8 @@ class WikiWorker:
                 return
             briefing = []
             readable = []
+            review_observations = payload.get('request', {}).get('reviews') or ([payload['request']['review']] if payload.get('request', {}).get('review') else [])
+            review_by_doc = {review['doc']: review for review in review_observations}
             for item in batch:
                 if item["status"] == "verifying" and item.get("worker_request", {}).get("request_id"):
                     await self._recover_recorded_item(jobs, job_id, item)
@@ -1642,6 +1644,10 @@ class WikiWorker:
                             )
                         }
                     )
+                    if doc['id'] in review_by_doc:
+                        from .source_details import review_context
+
+                        briefing[-1]['review_context'] = await _io(review_context, jobs, doc, review_by_doc[doc['id']])
             await _io(
                 jobs.update, job_id, expected_status="running", items=job["items"]
             )

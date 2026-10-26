@@ -5,11 +5,11 @@ import json
 import uuid
 from functools import partial
 from itertools import product
-from types import SimpleNamespace
 
 import pytest
 
 from server.wiki.batch_read import read_many
+from server.wiki.contracts import ReadRequest
 from server.wiki.history import WikiHistory
 from server.wiki.retrieval import continuation
 from server.wiki.store import WikiError, WikiStore
@@ -127,7 +127,7 @@ def test_legacy_batch_reads_history_and_restore_remain_compatible(store):
         created = history.write(path, before, None, "human", "create")
         edited = history.write(path, after, created["revision"], "human", "edit")
         current = store.read(path)
-        request = SimpleNamespace(doc=current["id"], start=0, length=100, expected_revision=current["revision"])
+        request = ReadRequest(doc=current["id"], start=0, length=100, expected_revision=current["revision"])
         result = read_many(store, [request], 100, view="compact")
         assert result["items"][0]["status"] == "ok"
         assert result["ranges"][0]["content"] == current["content"]

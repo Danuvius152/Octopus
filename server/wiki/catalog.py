@@ -2,7 +2,7 @@
 
 from pathlib import PurePosixPath
 
-from . import format, resolver, source_bindings, uids
+from . import format, resolver, source_bindings, source_confirmations, uids
 from .links import note_name
 from .references import ParsedReference, local_references
 
@@ -103,9 +103,12 @@ def resolve_edges(db, row, metadata):
 
 def dependencies(db, doc_id):
     result = []
-    for row in db.execute("SELECT e.*,d.path,d.revision FROM wiki_edges e LEFT JOIN documents d ON d.id=e.target_doc WHERE e.source_doc=? AND e.relation='derived_from' ORDER BY e.ordinal", (doc_id,)):
-        status = row["status"] if row["status"] in {"external", "unknown"} else "missing" if row["path"] is None else "version_unknown" if not row["recorded_revision"] else "changed" if row["revision"] != row["recorded_revision"] else "indexed"
-        result.append({"doc": row["target_doc"], "path": row["path"], "resource": row["resource"], "id": row["label"], "revision": row["recorded_revision"], "current_revision": row["revision"], "location": row["location"], "status": status})
+    rows = db.execute("SELECT e.*,d.path,d.revision FROM wiki_edges e LEFT JOIN documents d ON d.id=e.target_doc WHERE e.source_doc=? AND e.relation='derived_from' ORDER BY e.ordinal", (doc_id,)).fetchall()
+    confirmations = source_confirmations.read(db, [doc_id]) if rows else {}
+    for row in rows:
+        confirmation = confirmations.get((doc_id, row["ordinal"]))
+        status = source_confirmations.status(row["status"], row["recorded_revision"], row["revision"], confirmation)
+        result.append({"doc": row["target_doc"], "path": row["path"], "resource": row["resource"], "id": row["label"], "revision": row["recorded_revision"], "current_revision": row["revision"], "location": row["location"], "status": status, **(confirmation or {})})
     return result
 
 

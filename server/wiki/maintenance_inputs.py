@@ -9,7 +9,7 @@ import uuid
 
 from . import job_items, protocols
 
-VERSION = "maintenance-inputs-v10"
+VERSION = "maintenance-inputs-v11"
 PREFIX = "maintenance_input_"
 TABLES = {
     "maintenance_input_state": """CREATE TABLE maintenance_input_state(

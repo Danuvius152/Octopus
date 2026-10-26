@@ -30,9 +30,11 @@ def _merge(intervals):
     return result
 
 
-def read_many(store, requests, budget_chars, task=None, view="full"):
+def read_many(store, requests, budget_chars, task=None, view="full", *, reuse_delivered=False, user_id=None):
     from .history import WikiHistory
     from .read_response import compact_batch, validate_view
+    from .reading import window
+    from .source_details import page as source_page
     from .tasks import tasks
 
     validate_view(view)
@@ -60,16 +62,32 @@ def read_many(store, requests, budget_chars, task=None, view="full"):
                 if not is_maintainable_text(document["path"]):
                     items.append(item | {"status": "excluded", "error": document["metadata"].get("asset_reason", "Excluded asset")})
                     continue
-                start = min(request.start, len(text))
-                requested_end = min(start + request.length, len(text))
+                start, requested_end, boundary = window(text, request.start, request.length, request.location)
+                delivered = tasks.delivered(task, document) if reuse_delivered else []
+                reused = [(max(start, first), min(requested_end, last)) for first, last in delivered
+                          if first < requested_end and start < last]
+                if reused:
+                    item |= {'reused_ranges': reused[:8], 'reused_ranges_complete': len(reused) <= 8}
+                first_unseen = tasks.coverage(delivered, start)
+                if delivered and first_unseen >= requested_end:
+                    items.append(item | {'status': 'already_delivered', 'start': start, 'end': requested_end,
+                                         'next_start': requested_end if requested_end < boundary else None})
+                    continue
+                start = min(max(start, first_unseen), requested_end)
+                # Return the next contiguous gap. A later covered interval is
+                # referenced, never silently repeated or credited as new text.
+                gap_end = min([first for first, _ in delivered if start < first < requested_end], default=requested_end)
+                requested_end = gap_end
                 end, spent = _end(start, requested_end, intervals.get(document["id"], []), remaining)
                 if end == start and start < requested_end:
                     items.append(item | {"status": "budget_exhausted", "next_start": start})
                     continue
                 remaining -= spent
                 intervals[document["id"]] = _merge([*intervals.get(document["id"], []), (start, end)])
-                documents[document["id"]] = {key: value for key, value in document.items() if key not in {"content", "start", "end", "next_start", "line_start", "line_end", "page"}}
-                items.append(item | {"status": "ok" if end == requested_end else "partial", "start": start, "end": end, "next_start": end if end < len(text) else None})
+                documents[document["id"]] = {key: value for key, value in document.items() if key not in {"content", "start", "end", "next_start", "line_start", "line_end", "page"}} | {'sources': source_page(store, document, user_id)}
+                following = tasks.coverage(delivered, end)
+                items.append(item | {"status": "ok" if end == requested_end else "partial", "start": start, "end": end,
+                                     "next_start": following if following < boundary else None})
             except WikiError as exc:
                 if exc.status in {400, 401, 403, 422}:
                     raise

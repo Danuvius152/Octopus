@@ -4726,6 +4726,11 @@ export interface components {
              * @enum {string}
              */
             view: "full" | "compact";
+            /**
+             * Reuse Delivered
+             * @default false
+             */
+            reuse_delivered: boolean;
         };
         /** ReadRequest */
         ReadRequest: {
@@ -4743,6 +4748,8 @@ export interface components {
             length: number;
             /** Expected Revision */
             expected_revision?: string | null;
+            /** Location */
+            location?: string | null;
         };
         /** RecoveryApproval */
         RecoveryApproval: {
@@ -8883,6 +8890,9 @@ export interface operations {
                 expected_revision?: string | null;
                 page?: number | null;
                 view?: "full" | "compact";
+                location?: string | null;
+                source_cursor?: string | null;
+                source_limit?: number;
                 token?: string | null;
             };
             header?: never;

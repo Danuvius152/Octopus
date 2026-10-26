@@ -36,7 +36,7 @@ def snapshot(store, doc, expected_revision=None):
     return document, text
 
 
-def coordinates(store, document, text):
+def coordinates(store, document, text, *, parsed=None):
     with store._lifecycle:
         cache = store._raw_coordinates
         if cache is None:
@@ -45,7 +45,7 @@ def coordinates(store, document, text):
         if cached is not None:
             cache.move_to_end(document["revision"])
             return cached
-    parsed = format.parse(text)
+    parsed = parsed if parsed is not None else format.parse(text)
     sections = iter(parsed.sections)
     section = next(sections, None)
     result, offset = [], 0
@@ -74,6 +74,11 @@ def project(document, text, part):
 def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget_chars=None, offset=0, limit=None, start=None, tail=None, task=None):
     from .tasks import tasks
 
+    navigation = view == 'navigation'
+    if navigation:
+        if ids is not None or tail is not None:
+            raise WikiError('Navigation context cannot combine with ids or tail', 422)
+        view = 'full'
     if view not in {"full", "locators"} or offset < 0 or limit is not None and not 1 <= limit <= 100 or budget_chars is not None and not 1 <= budget_chars <= 96000:
         raise WikiError("Invalid raw block view or budget", 422)
     if start is not None and (start < 0 or view != "full"):
@@ -82,6 +87,27 @@ def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget
         raise WikiError("tail selects 1..100 final blocks and cannot combine with offset or ids", 422)
     with curation.history.locked():
         document, text = snapshot(curation.store, doc, expected_revision)
+        equivalent_text = False
+        if task is not None:
+            with curation.store.connect() as db:
+                indexed = db.execute('SELECT text FROM documents WHERE id=? AND revision=?',
+                                     (document['id'], document['revision'])).fetchone()
+            equivalent_text = indexed is not None and indexed[0] == text
+
+        def record(first, last):
+            tasks.record_raw_read(task, document, first, last, len(text))
+            # Reuse the actual returned bytes only after verifying that the
+            # current extraction has exactly the same Unicode coordinates.
+            if equivalent_text:
+                tasks.record_read(task, document | {'start': first, 'end': last, 'characters': len(text)})
+
+        if navigation:
+            from .navigation_context import select
+
+            choices = select(curation.store, document, text)
+            if not choices:
+                raise WikiError('Navigation has no readable topic context; leave the entry unchanged', 422)
+            ids = [str(part.index) for part in choices[0]]
         from .read_response import INDEX_FIELDS
 
         state = {key: document[key] for key in (*INDEX_FIELDS, "index_errors") if key in document}
@@ -101,8 +127,10 @@ def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget
             if start is not None and (not selected or not selected[0]["start"] <= start <= selected[0]["end"]):
                 raise WikiError("Raw start must be within the first selected block", 422)
             header = {"id": document["id"], "path": document["path"], "revision": document["revision"],
-                      "view": view, "coordinate_system": "raw_unicode_codepoints", "raw_characters": len(text),
+                      "view": 'navigation' if navigation else view, "coordinate_system": "raw_unicode_codepoints", "raw_characters": len(text),
                       "total": count, "freshness": "live", **state}
+            if navigation:
+                header['index_deduplication'] = 'host_at_publication'
             projected = presentation(selected)
 
             def build(amount):
@@ -135,7 +163,7 @@ def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget
             result = fit_prefix(build, capacity)
             if view == "full":
                 for part in result["blocks"]:
-                    tasks.record_raw_read(task, document, part["content_start"], part["content_end"], len(text))
+                    record(part["content_start"], part["content_end"])
             return result
         remaining, result = budget_chars, []
         for part in selected:
@@ -147,7 +175,7 @@ def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget
                     break
                 if remaining is not None:
                     remaining -= len(part["content"])
-                tasks.record_raw_read(task, document, part["start"], part["end"], len(text))
+                record(part["start"], part["end"])
             result.append(item)
         next_offset = offset + len(result) if offset + len(result) < count else None
-        return {"id": document["id"], "path": document["path"], "revision": document["revision"], "view": view, "coordinate_system": "raw_unicode_codepoints", "raw_characters": len(text), "blocks": result, "total": count, "next_offset": next_offset, "budget_exhausted": len(result) < len(selected), "freshness": "live", **state}
+        return {"id": document["id"], "path": document["path"], "revision": document["revision"], "view": 'navigation' if navigation else view, "coordinate_system": "raw_unicode_codepoints", "raw_characters": len(text), "blocks": result, "total": count, "next_offset": next_offset, "budget_exhausted": len(result) < len(selected), "freshness": "live", **({'index_deduplication': 'host_at_publication'} if navigation else {}), **state}

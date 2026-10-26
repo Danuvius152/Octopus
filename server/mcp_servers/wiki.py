@@ -88,7 +88,7 @@ def search(
 
 
 @mcp.tool()
-def read_many(items: list[ReadRequest], budget_chars: int = 24000, view: ReadView = "compact") -> dict:
+def read_many(items: list[ReadRequest], budget_chars: int = 24000, view: ReadView = "compact", reuse_delivered: bool = False) -> dict:
     """Read requested current passages once, merging overlaps; no model is called.
 
     items report status and reference actual content in ranges by range_id and
@@ -96,8 +96,12 @@ def read_many(items: list[ReadRequest], budget_chars: int = 24000, view: ReadVie
     envelope is separately capped at 32768 UTF-8 bytes in both views. Follow
     next_start for partial/budget results; unseen ranges never count as read.
     full adds metadata; oversized metadata needs compact or fewer documents.
+    location reads a cited heading, block or lines directly. Set reuse_delivered
+    only while this task's previous text is still in context; already_delivered
+    items reference those ranges without returning them again. Omit it to recover
+    context. No reading is inherited from another task or revision.
     """
-    return call("POST", "read-many", body={"items": [item.model_dump() for item in items], "budget_chars": budget_chars, "view": view})
+    return call("POST", "read-many", body={"items": [item.model_dump() for item in items], "budget_chars": budget_chars, "view": view, "reuse_delivered": reuse_delivered})
 
 
 @mcp.tool()
@@ -108,6 +112,9 @@ def read(
     expected_revision: str | None = None,
     page: int | None = None,
     view: ReadView = "compact",
+    location: str | None = None,
+    source_cursor: str | None = None,
+    source_limit: int = 8,
 ) -> dict:
     """Read one current document slice, not the vault; no model is called.
 
@@ -115,6 +122,11 @@ def read(
     next_start; only returned content counts as read. Both views cap the full
     MCP envelope at 32768 UTF-8 bytes, independently of requested characters.
     full adds metadata; oversized metadata requires compact.
+    location selects cited lines/heading/block; follow next_start within that
+    location. sources includes bounded current dependency facts; source_cursor
+    continues only those facts and never grants a body read. Long display labels
+    are clipped independently; omitted source facts include recovery pointers to
+    the current original declaration, never a substitute reading proof.
     """
     return call(
         "GET", "read", params={k: v for k, v in locals().items() if v is not None}
@@ -342,6 +354,9 @@ def organize(
     For an existing navigation page outside the assigned body targets, pass
     only relations to current batch documents: the host appends fixed links,
     preserving its body and metadata. This does not complete a batch item.
+    Read its topic context with blocks(view="navigation") first; the host checks
+    the whole index for existing links. Generic titles/link-only shells need
+    relevant context, not automatic full-index reading.
     Maintain Markdown only. TXT/HTML originals are read-only; explicitly select
     an existing paired Markdown note when that is the maintenance target.
     """
@@ -400,6 +415,11 @@ def blocks(doc: str, view: str = "full", ids: list[str] | None = None, expected_
     For partial blocks also pass next_start as start. Full block hash/locator
     and start/end stay unchanged; content_start/end cover the returned raw
     Unicode character range. Only those returned characters count as read.
+    view="navigation" returns the actual topic heading and introduction for a
+    fixed supporting link, with that view retained in the response. Its
+    index_deduplication reports the host's whole-index check at publication;
+    follow pagination normally. If it is not enough to judge relevance, read the
+    relevant raw section or leave the index unchanged. A link-only shell fails.
     """
     return call("GET", "blocks", params={key: value for key, value in locals().items() if value is not None})
 
@@ -411,8 +431,12 @@ def revise(request: Revision) -> dict:
     Current task, assignment, revision, block hash, original words and actual
     read coverage are required. Prior human edits do not bar maintenance.
     Patch cannot replace a whole document. Other words and omitted fields stay.
-    Confirm repeated source resources by their original location; no body edit
-    or template normalization is needed to confirm sources.
+    Confirm repeated source resources by their original location. Confirmation
+    records checked versions in its receipt, preserving article bytes/revision;
+    source_refs reports confirmed_revision separately from the original revision.
+    readback reports surviving final changes from this job, including structural
+    context; follow block_ids on the final revision when required. Confirmation
+    adds no new body readback but cannot erase earlier modifications.
     """
     return call("POST", "revise", body=request.model_dump())
 
