@@ -10,7 +10,7 @@ from .formats import is_markdown_maintenance
 from .maintenance_contract import DAILY_SCOPE as DAILY_SCOPE
 from .maintenance_contract import MAINTENANCE_OPERATIONS as MAINTENANCE_OPERATIONS
 from .maintenance_contract import PURPOSE, digest
-from .maintenance_projection import bounds, settle
+from .maintenance_projection import PENDING_REVIEW, bounds, settle
 from .maintenance_view import MaintenanceSnapshot
 from .read_response import COMPACT_READ_MAX_BYTES, model_result_bytes
 from .store import WikiError
@@ -76,7 +76,8 @@ def status(store, registration, user_id, *, doc=None, directory="Library", view=
             with store.connect() as db:
                 db.execute("BEGIN")
                 snapshot = MaintenanceSnapshot(store, registration, user_id, db, actor)
-                filters = digest({"doc": doc, "directory": directory, "view": view, "contract": PURPOSE})
+                filters = digest({"doc": doc, "directory": directory, "view": view, "contract": PURPOSE,
+                                  "selection": "review-deltas-v1"})
                 offset = _cursor(cursor, filters, snapshot.generation)
                 response_scope = "selected_document" if doc is not None else directory
                 row = exact_document(db, doc) if doc is not None else None
@@ -105,10 +106,10 @@ def status(store, registration, user_id, *, doc=None, directory="Library", view=
                         selected = [snapshot.project(identifier, value) for value in snapshot.load_page(rows[offset:offset + limit])]
                 else:
                     parameters = bounds(directory)
-                    total = db.execute("""SELECT count(*) FROM maintenance_projection
-                        WHERE candidate=1 AND path>=? AND path<?""", parameters).fetchone()[0]
-                    rows = db.execute("""SELECT * FROM maintenance_projection
-                        WHERE candidate=1 AND path>=? AND path<? ORDER BY path,doc_id LIMIT ? OFFSET ?""",
+                    total = db.execute(f"""SELECT count(*) FROM maintenance_projection
+                        WHERE {PENDING_REVIEW} AND path>=? AND path<?""", parameters).fetchone()[0]
+                    rows = db.execute(f"""SELECT * FROM maintenance_projection
+                        WHERE {PENDING_REVIEW} AND path>=? AND path<? ORDER BY path,doc_id LIMIT ? OFFSET ?""",
                                       (*parameters, limit, offset)).fetchall()
                     selected = [snapshot.project(value["current"]["id"], value) for value in snapshot.load_page(rows)]
 

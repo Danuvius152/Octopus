@@ -5,10 +5,10 @@ from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Any
 
-from .format import _HEADINGS
+from .format import heading_role
 
 SUPPORTED = {".md", ".markdown", ".txt", ".html", ".htm", ".pdf"}
-HTML_BODY_VERSION = "html-body-v3"
+HTML_BODY_VERSION = "html-body-v4"
 
 _HTML_BODY_EXCLUDED = {
     "head",
@@ -89,7 +89,7 @@ class HTMLBodyAnalyzer(HTMLParser):
             return
         label = " ".join("".join(frame.heading_parts).split()).casefold()
         level = int(frame.tag[1:])
-        selected = _HEADINGS.get(label)
+        selected = heading_role(label)
         if selected is not None:
             self._role, self._role_level = selected, level
         elif not self._role_level or level <= self._role_level:

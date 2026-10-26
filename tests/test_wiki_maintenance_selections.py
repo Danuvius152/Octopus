@@ -10,7 +10,13 @@ from server.wiki.contracts import ReviewObservation
 from server.wiki.registry import registry
 from server.wiki.tasks import tasks
 from tests.test_wiki_maintenance_state import client as client
-from tests.test_wiki_maintenance_state import entry, prepare
+from tests.test_wiki_maintenance_state import (
+    current_read,
+    entry,
+    prepare,
+    settle,
+    state,
+)
 from tests.test_wiki_maintenance_state import two_accounts as two_accounts
 
 FILES = {f"Library/{name}.md": f"# {name}\nCurrent words.\n" for name in ("a", "b", "c")}
@@ -26,6 +32,42 @@ def submission(selection, item):
     return {"idempotency_key": item["review"]["review_key"], "paths": [item["path"]],
             "review": item["review"], "selection_id": selection["id"],
             "selection_ordinal": item["ordinal"]}
+
+
+async def test_selection_skips_pure_moves_and_retained_work_but_keeps_frozen_ordinals(client, tmp_path):
+    root, config, jobs = await prepare(client, tmp_path, FILES)
+    accepted, _ = await settle(client, jobs, config, path="Library/a.md")
+    (root / "Library/a.md").rename(root / "Library/moved.md")
+    moved = (await current_read(client, "Library/moved.md")).json()
+    observed = (await state(client, moved["id"]))["items"][0]
+    assert observed["path_changed"] and not observed["actionable"]
+    assert observed["baseline"]["path"] == "Library/a.md"
+    assert moved["revision"] == accepted["revision"]
+    assert [item["current"]["path"] for item in (await state(client))["items"]] == ["Library/b.md", "Library/c.md"]
+
+    frozen = await select(client, limit=1)
+    assert frozen["candidate_count"] == 2
+    assert frozen["items"][0]["path"] == "Library/b.md"
+    queued = await client.post("/api/wiki/maintain", headers=client.headers,
+                               json=submission(frozen, frozen["items"][0]))
+    assert queued.status_code == 200, queued.text
+    for status in ("queued", "failed"):
+        if status == "failed":
+            job = jobs.get(queued.json()["id"])
+            job["items"][0]["status"] = "failed"
+            jobs.update(job["id"], status=status, items=job["items"])
+        fresh = await select(client)
+        assert fresh["candidate_count"] == 1 and fresh["items"][0]["path"] == "Library/c.md"
+        assert fresh["deferred_count"] == 1 and not fresh["deferred_truncated"]
+        assert fresh["deferred"][0]["current"]["path"] == "Library/b.md"
+        assert fresh["deferred"][0]["attempts"][0]["status"] == status
+        retained = (await state(client, "Library/b.md"))["items"][0]
+        assert not retained["actionable"] and retained["attempts"][0]["status"] == status
+        assert "Library/b.md" in [item["current"]["path"] for item in (await state(client))["items"]]
+    following = await client.get("/api/wiki/maintenance-selections/" + frozen["id"], headers=client.headers,
+                                 params={"cursor": frozen["next_cursor"]})
+    assert following.status_code == 200, following.text
+    assert [(item["ordinal"], item["path"]) for item in following.json()["items"]] == [(1, "Library/c.md")]
 
 
 @pytest.mark.parametrize("mode", ["read", "auto", "maintain"])

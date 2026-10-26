@@ -15,7 +15,7 @@ from . import format as document_format
 from .extract import HTML_BODY_VERSION, HTMLBodyAnalyzer
 from .formats import MARKDOWN_SQL
 
-VERSION = "sections-v8"
+VERSION = "sections-v9"
 _tokenizer = jieba.Tokenizer()
 jieba.setLogLevel(logging.WARNING)
 _letter = r"(?:(?![\u3400-\u9fff])[^\W_])"

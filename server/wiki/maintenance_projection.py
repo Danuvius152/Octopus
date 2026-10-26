@@ -9,6 +9,11 @@ from .maintenance_contract import MAINTENANCE_OPERATIONS
 from .store import WikiError
 
 BATCH_SIZE = 512
+# A moved, otherwise unchanged document remains addressable for history/links,
+# without repeatedly entering semantic review or recovery navigation.
+PENDING_REVIEW = """candidate=1 AND (status<>'unchanged'
+    OR json_extract(summary_json,'$.attempt_count')>0
+    OR json_extract(summary_json,'$.source_warnings')<>'{}')"""
 
 
 def bounds(directory):

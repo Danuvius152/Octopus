@@ -19,7 +19,7 @@ from markdown_it.token import Token
 from .bounded_yaml import compose as compose_metadata
 from .bounded_yaml import load as load_metadata
 
-VERSION = "okf-parser-v10"
+VERSION = "okf-parser-v11"
 _FRONT = re.compile(r"\A\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|$)", re.S)
 _BLOCK_ID = re.compile(r"\^([A-Za-z0-9-]+)[ \t]*(?=\r\n|\r|\n|$)")
 _WIKILINK = re.compile(r"\[\[([^\]\n]+)\]\]")
@@ -83,6 +83,12 @@ _HEADINGS = {
     "key note": "key_note", "keynote": "key_note",
     "正文": "body", "相关笔记": "related_notes", "整理说明": "curator_note",
 }
+
+
+def heading_role(heading: str) -> str | None:
+    """A parenthetical attribution does not change a standard section's role."""
+    label = heading.strip().casefold()
+    return _HEADINGS.get(re.sub(r"\s*(?:（[^（）]*）|\([^()]*\))$", "", label).strip())
 
 
 @dataclass
@@ -361,7 +367,7 @@ def parse(text: str) -> DocumentFormat:
             heading = tokens[index + 1].content
             active_heading = heading
             level = int(token.tag[1:])
-            selected = _HEADINGS.get(heading.casefold())
+            selected = heading_role(heading)
             if selected is not None:
                 active_role, active_level = selected, level
             elif not active_level or level <= active_level:

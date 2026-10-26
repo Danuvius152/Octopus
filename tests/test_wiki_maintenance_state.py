@@ -64,7 +64,7 @@ async def current_read(client, doc, headers=None):
     pytest.fail("Known filesystem notifications did not settle")
 
 
-async def settle(client, jobs, config, path="Library/journal.md", *, job=None, operation="no_change", final_status="completed", settled=True):
+async def settle(client, jobs, config, path="Library/journal.md", *, job=None, operation="no_change", final_status="completed", settled=True, reason="Current record already fits its purpose"):
     job = job or jobs.maintain("baseline-" + path, "", "Review current words", [path] if operation != "publish" else [], None, [], "human",
                                creation={"purpose": "requested_knowledge_page", "paths": ["Library/summary.md"]} if operation == "publish" else None)
     session = SimpleNamespace(id="settle-worker", user_id=jobs.user_id, agent_id=config["curator_agent_id"])
@@ -75,7 +75,7 @@ async def settle(client, jobs, config, path="Library/journal.md", *, job=None, o
     try:
         read = (await client.get("/api/wiki/read", params={"doc": path}, headers=headers)).json()
         if operation == "no_change":
-            response = await client.post("/api/wiki/revise", headers=headers, json={"doc": read["id"], "expected_revision": read["revision"], "operation": operation, "reason": "Current record already fits its purpose"})
+            response = await client.post("/api/wiki/revise", headers=headers, json={"doc": read["id"], "expected_revision": read["revision"], "operation": operation, "reason": reason})
         elif operation == "publish":
             response = await client.post("/api/wiki/publish", headers=headers, json={"path": "Library/summary.md", "expected_revision": None, "content": "# Summary\n\nA supported interpretation.\n", "kind": "concept", "sources": [{"doc": read["id"], "revision": read["revision"], "location": "L1-L2"}], "reason": "Publish a separately authorized interpretation", "item_doc": read["id"]})
         else:

@@ -190,8 +190,8 @@ def inspect_image(path: str):
 def maintenance_status(doc: str | None = None, directory: str = "Library", view: Literal["state", "links"] = "state", limit: int = 20, cursor: str | None = None) -> dict:
     """Observe maintenance state without reading bodies or granting writes.
 
-    Defaults to bounded Library Markdown deltas; an explicit doc returns its
-    state, including unchanged. Compare current identity/revision with accepted
+    Defaults to Library review/recovery deltas, omitting pure moves; an explicit
+    doc also returns unchanged/path history. Compare identity/revision with accepted
     maintenance only, not ordinary saves. Follow next_cursor; changed state
     invalidates old cursors. ready=false is not a clean result. Observations
     do not count as reading the note. For an actionable daily review copy its
@@ -205,10 +205,11 @@ def maintenance_status(doc: str | None = None, directory: str = "Library", view:
 
 @mcp.tool()
 def maintenance_select(directory: str = "Library", limit: int | None = None) -> dict:
-    """Freeze ordered maintenance observations without reading bodies or granting writes.
+    """Freeze actionable reviews without reading bodies or granting writes.
 
     Returns an ID, candidate_count, expiration and one bounded page of complete
-    reviews. New enqueues do not invalidate its cursor. Follow pages with
+    reviews, plus bounded deferred work observed at creation. New enqueues do
+    not invalidate its cursor. Follow frozen pages with
     maintenance_selection. Admission still checks current facts and authority.
     Overflow requires a narrower directory, never a silently truncated selection.
     """
@@ -410,6 +411,8 @@ def revise(request: Revision) -> dict:
     Current task, assignment, revision, block hash, original words and actual
     read coverage are required. Prior human edits do not bar maintenance.
     Patch cannot replace a whole document. Other words and omitted fields stay.
+    Confirm repeated source resources by their original location; no body edit
+    or template normalization is needed to confirm sources.
     """
     return call("POST", "revise", body=request.model_dump())
 

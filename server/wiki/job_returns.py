@@ -56,11 +56,20 @@ def _group(jobs, delivery):
             effects.update(snapshot["effects"])
             phases[snapshot["settlement_phase"]] += 1
             recording_pending += snapshot["recording_pending"]
+            if len(samples) >= 10:
+                continue
             sample = {key: snapshot[key] for key in (
                 "job_id", "attempt", "status", "settlement_phase", "progress", "effects", "recording_pending", "error",
             )}
             sample.update(outcome_refs=snapshot["outcome_refs"][:2], outcome_count=snapshot["outcome_count"])
             sample["outcome_refs_truncated"] = snapshot["outcome_refs_truncated"] or snapshot["outcome_count"] > 2
+            receipts = [dict(receipt) for receipt in db.execute("""SELECT r.id AS receipt_id,r.item_doc,r.doc_id,r.path,
+                r.operation,r.output_revision,substr(r.reason,1,384) AS reason,length(r.reason)>384 AS reason_truncated,
+                CASE WHEN r.change_id IS NULL THEN 'recorded' ELSE coalesce(c.status,'unknown') END AS status,
+                json_extract(r.details,'$.execution.attempt') AS attempt
+                FROM operation_receipts r LEFT JOIN changes c ON c.id=r.change_id
+                WHERE r.job_id=? ORDER BY r.rowid DESC LIMIT 5""", (row["id"],))]
+            sample |= {"receipts": receipts[:4], "receipts_truncated": len(receipts) > 4}
             needed = len(json.dumps(sample, ensure_ascii=False).encode())
             if len(samples) < 10 and size + needed <= 16000:
                 samples.append(sample)

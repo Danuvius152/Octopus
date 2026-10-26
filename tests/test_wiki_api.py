@@ -330,7 +330,8 @@ async def test_targeted_revision_changes_only_selected_raw_words_after_human_edi
     assert conflict.status_code == 409
 
 
-async def test_confirm_sources_updates_only_checked_dependencies_and_keeps_body(client, tmp_path):
+@pytest.mark.parametrize("missing_location", [False, True])
+async def test_confirm_sources_updates_only_checked_dependencies_and_keeps_body(client, tmp_path, missing_location):
     vault = tmp_path / "vault"
     vault.mkdir()
     for name in ("a", "b"):
@@ -339,11 +340,18 @@ async def test_confirm_sources_updates_only_checked_dependencies_and_keeps_body(
     inputs = [(await client.get("/api/wiki/read", params={"doc": f"{name}.md"}, headers=client.headers)).json() for name in ("a", "b")]
     body = "# 综合\n\n我认为有条件成立；保留反例。\n"
     front = "---\ntype: Synthesis\nsources:\n" + "".join(f"  - {{id: {name}, resource: {name}.md, revision: '{item['revision']}', location: L2-L2}}\n" for name, item in zip(("a", "b"), inputs, strict=True)) + "---\n"
+    if missing_location:
+        front = front.replace(", location: L2-L2", "", 1)
     (vault / "summary.md").write_text(front + body)
     for name in ("a", "b"):
         (vault / f"{name}.md").write_text(f"# {name}\n追加条件。\n")
     summary = (await client.get("/api/wiki/read", params={"doc": "summary.md"}, headers=client.headers)).json()
     current = (await client.get("/api/wiki/read", params={"doc": "a.md"}, headers=client.headers)).json()
+    other = (await client.get("/api/wiki/read", params={"doc": "b.md"}, headers=client.headers)).json()
+    before = (vault / "summary.md").read_bytes()
+    rejected = await client.post("/api/wiki/revise", headers=client.headers, json={"doc": summary["id"], "expected_revision": summary["revision"], "operation": "confirm_sources", "checks": [{"resource": "a.md", "doc": other["id"], "revision": other["revision"], "location": "L2-L2"}], "reason": "Cannot rebind a dependency to another document"})
+    assert rejected.status_code == 422, rejected.text
+    assert (vault / "summary.md").read_bytes() == before
     result = await client.post("/api/wiki/revise", headers=client.headers, json={"doc": summary["id"], "expected_revision": summary["revision"], "operation": "confirm_sources", "checks": [{"resource": "a.md", "doc": current["id"], "revision": current["revision"], "location": "L2-L2"}], "reason": "已重读 a，原解释仍适用"})
     assert result.status_code == 200, result.text
     after = (await client.get("/api/wiki/read", params={"doc": summary["id"]}, headers=client.headers)).json()
@@ -351,6 +359,49 @@ async def test_confirm_sources_updates_only_checked_dependencies_and_keeps_body(
     assert after["metadata"]["sources"][1]["revision"] == inputs[1]["revision"]
     assert after["stale"] is True
     assert (vault / "summary.md").read_text().split("---\n", 2)[2] == body
+
+
+@pytest.mark.parametrize("combined", [False, True])
+async def test_confirm_sources_distinguishes_positions_of_one_resource(client, tmp_path, combined):
+    import yaml
+
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    source_path = vault / "source.md"
+    source_path.write_text("# Source\n\n## First\nOld first condition.\n\n## Second\nOld second condition.\n")
+    (vault / "other.md").write_text("# Other\nAn unrelated source.\n")
+    await configure(client, vault)
+    source = (await client.get("/api/wiki/read", params={"doc": "source.md"})).json()
+    refs = [{"doc": source["id"], "resource": source["id"], "revision": source["revision"],
+             "location": location, "custom": "keep"} for location in ("First", "Second")]
+    body = "# Interpretation\n\nThe existing explanation still applies, with its conditions.\n"
+    note = vault / "note.md"
+    note.write_text("---\n" + yaml.safe_dump({"sources": refs, "custom": "keep"}) + "---\n" + body)
+    source_path.write_text(source_path.read_text() + "\nAdditional context.\n")
+    current = (await client.get("/api/wiki/read", params={"doc": "source.md"})).json()
+    other = (await client.get("/api/wiki/read", params={"doc": "other.md"})).json()
+    summary = (await client.get("/api/wiki/read", params={"doc": "note.md"})).json()
+    check = {"resource": source["id"], "doc": source["id"], "revision": current["revision"], "location": "First"}
+    request = {"doc": summary["id"], "expected_revision": summary["revision"], "operation": "confirm_sources", "reason": "Both original explanations still apply"}
+    before = note.read_bytes()
+    for checks in ([check | {"location": "Missing"}], [check, check], [check | {"doc": other["id"], "revision": other["revision"]}]):
+        rejected = await client.post("/api/wiki/revise", json=request | {"checks": checks})
+        assert rejected.status_code == 422, rejected.text
+        assert note.read_bytes() == before
+    checks = [check | {"location": "Second"}, check] if combined else [check]
+    result = await client.post("/api/wiki/revise", json=request | {"checks": checks})
+    assert result.status_code == 200, result.text
+    after = (await client.get("/api/wiki/read", params={"doc": "note.md"})).json()
+    if not combined:
+        assert [ref["revision"] for ref in after["metadata"]["sources"]] == [current["revision"], source["revision"]]
+        assert after["stale"]
+        result = await client.post("/api/wiki/revise", json=request | {"expected_revision": after["revision"], "checks": [check | {"location": "Second"}]})
+        assert result.status_code == 200, result.text
+        after = (await client.get("/api/wiki/read", params={"doc": "note.md"})).json()
+    assert not after["stale"]
+    assert after["metadata"]["sources"] == [ref | {"revision": current["revision"]} for ref in summary["metadata"]["sources"]]
+    front, preserved = note.read_text().split("---\n")[1:]
+    assert yaml.safe_load(front)["custom"] == "keep" and preserved == body
 
 
 async def test_compact_lookup_and_domain_search_use_index_only_and_respect_roles(client, tmp_path, monkeypatch):

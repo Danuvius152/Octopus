@@ -13,8 +13,9 @@ from pydantic import ValidationError
 from ..config import settings
 from . import maintenance_inputs, protocols
 from .contracts import ReviewObservation
+from .index_state import maintenance_blockers
 from .maintenance_contract import PURPOSE, digest
-from .maintenance_projection import bounds, settle
+from .maintenance_projection import PENDING_REVIEW, bounds, settle
 from .maintenance_view import MaintenanceSnapshot
 from .model_response import page as model_page
 from .store import WikiError
@@ -222,7 +223,7 @@ def item(db, selection_id, ordinal):
     return _item(row)
 
 
-def _page(db, selection, *, limit=None, cursor=None):
+def _page(db, selection, *, limit=None, cursor=None, deferred=None):
     count = _limit(limit)
     offset = _offset(selection, cursor)
     rows = db.execute("""SELECT * FROM maintenance_selection_items
@@ -233,6 +234,8 @@ def _page(db, selection, *, limit=None, cursor=None):
     items = [_item(row) for row in rows]
     base = {key: selection[key] for key in ("id", "vault_id", "registration_generation", "created_at", "expires_at", "candidate_count")}
     base |= {"purpose": selection["purpose"], "filters": json.loads(selection["filters"])}
+    if deferred is not None:
+        base |= {"deferred_count": len(deferred), "deferred": deferred[:3], "deferred_truncated": len(deferred) > 3}
     return model_page(items, base, offset, selection["candidate_count"], lambda following: _cursor(selection, following))
 
 
@@ -248,24 +251,32 @@ def create(store, registration, user_id, *, actor="human", directory="Library", 
             snapshot = MaintenanceSnapshot(store, registration, user_id, db, actor)
             if not settled or not snapshot.scope_ready(directory=directory):
                 raise error("selection_updating", "Current maintenance observations must settle before selecting", 503)
-            rows = db.execute("""SELECT summary_json FROM maintenance_projection
-                WHERE candidate=1 AND path>=? AND path<? ORDER BY path,doc_id LIMIT ?""",
+            rows = db.execute(f"""SELECT summary_json FROM maintenance_projection
+                WHERE {PENDING_REVIEW} AND path>=? AND path<? ORDER BY path,doc_id LIMIT ?""",
                               (*bounds(directory), settings.wiki_selection_max_candidates + 1)).fetchall()
             if len(rows) > settings.wiki_selection_max_candidates:
                 raise error("selection_limit_exceeded", "Too many candidates; narrow the directory before creating a selection")
+            observed = [json.loads(row["summary_json"]) for row in rows]
+            blocked = maintenance_blockers(db, [value["current"]["id"] for value in observed if value["actionable"]])
+            executable, deferred = [], []
+            for value in observed:
+                if value["actionable"] and value["current"]["id"] not in blocked:
+                    executable.append(value)
+                else:
+                    deferred.append({key: value[key] for key in ("current", "status", "source_warnings", "attempts", "attempt_count")})
             now = utcnow()
             selection = {"id": uuid.uuid4().hex, **context(registration, user_id, actor),
                          "filters": json.dumps({"directory": directory}, sort_keys=True),
                          "created_at": now.isoformat(),
                          "expires_at": (now + timedelta(seconds=settings.wiki_selection_ttl_seconds)).isoformat(),
-                         "candidate_count": len(rows), "version": VERSION}
+                         "candidate_count": len(executable), "version": VERSION}
             db.execute("INSERT INTO maintenance_selections VALUES(?,?,?,?,?,?,?,?,?,?,?)", tuple(selection.values()))
-            for ordinal, row in enumerate(rows):
-                review = snapshot.review(json.loads(row["summary_json"]))
+            for ordinal, value in enumerate(executable):
+                review = snapshot.review(value)
                 db.execute("INSERT INTO maintenance_selection_items VALUES(?,?,?,?,?,?)",
                            (selection["id"], ordinal, review["doc"], review["path"], review["revision"],
                             json.dumps(review, ensure_ascii=False, sort_keys=True)))
-            return _page(db, selection, limit=limit)
+            return _page(db, selection, limit=limit, deferred=deferred)
     except (sqlite3.DatabaseError, KeyError, json.JSONDecodeError) as exc:
         raise unavailable() from exc
 

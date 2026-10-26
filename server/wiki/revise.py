@@ -5,6 +5,7 @@ import unicodedata
 
 from . import format, material_proof, operations, raw_blocks
 from .formats import require_markdown_maintenance
+from .references import source_reference
 from .store import WikiError
 
 
@@ -51,9 +52,15 @@ def revise(curation, body, actor, task):
             seen = set()
             for check in body.checks:
                 matched = [index for index, ref in enumerate(refs) if (ref.get("resource") or ref.get("doc") or ref.get("path")) == check.resource]
-                dependency = next((ref for ref in dependencies if ref["resource"] == check.resource), None)
+                if len(matched) > 1:
+                    matched = [index for index in matched if source_reference(refs[index]).fragment == check.location]
+                if len(matched) != 1 or matched[0] in seen:
+                    raise WikiError("Identify one existing dependency by resource and, when repeated, its original location", 422)
+                original_location = source_reference(refs[matched[0]]).fragment
+                dependency = next((ref for ref in dependencies if ref["resource"] == check.resource
+                                   and ref.get("location") == original_location), None)
                 current = store.read(check.doc, length=1, expected_revision=check.revision)
-                if len(matched) != 1 or not dependency or current["id"] != dependency["doc"] or matched[0] in seen:
+                if not dependency or current["id"] != dependency["doc"]:
                     raise WikiError("Confirm one existing direct dependency at a time; it cannot be rebound", 422)
                 seen.add(matched[0])
                 tasks.require_source_read(task, store, check.model_dump())

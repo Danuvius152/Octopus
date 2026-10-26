@@ -77,6 +77,27 @@ async def finish_original(returning):
     assert completion.recording_state == "committed" and completion.outcome.status == "success"
 
 
+@pytest.mark.parametrize("count", [1, 5])
+async def test_return_includes_bounded_receipt_reasons_without_exporting_the_job(jobs, returning, client, count):
+    from server.wiki import job_returns
+    from tests.test_wiki_maintenance_state import settle
+
+    job = submitted(jobs, returning, "receipt-summary")
+    item = job["items"][0]
+    reason = "Current explanation still applies. " + "checked context; " * 40
+    for _ in range(count):
+        result, _ = await settle(client, jobs, jobs.registration, path=item["path"], job=job, reason=reason)
+    await finish_original(returning)
+    with jobs.store.connect() as db:
+        delivery = next(row for row in job_events.pending(db) if json.loads(row["body"])["status"] == "completed")
+    group = job_returns._group(jobs, delivery)
+    evidence = group["jobs"][0]["receipts"]
+    assert len(evidence) == min(count, 4) and group["jobs"][0]["receipts_truncated"] == (count > 4)
+    assert evidence[0]["receipt_id"] == result["receipt_id"] and evidence[0]["operation"] == "no_change"
+    assert evidence[0]["path"] == item["path"] and evidence[0]["output_revision"] == item["revision"]
+    assert evidence[0]["reason"] == reason[:384] and evidence[0]["reason_truncated"]
+
+
 async def test_all_jobs_return_once_to_original_after_the_group_settles(jobs, returning, monkeypatch):
     first, second = submitted(jobs, returning, "first"), submitted(jobs, returning, "second")
     complete(jobs, first)

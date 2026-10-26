@@ -131,6 +131,20 @@ def populate(vault):
         path.write_text(content)
 
 
+@pytest.mark.parametrize("heading", ["相关笔记（整理者补充）", "整理说明 (curator)"])
+def test_attributed_auxiliary_sections_do_not_compete_with_body_evidence(store, heading):
+    original = f"# Different subject\n\nIndependent argument.\n\n## {heading}\nUnicornneedle is discussed in another note.\n"
+    auxiliary = store.root / "auxiliary.md"
+    auxiliary.write_text(original)
+    (store.root / "actual.md").write_text("# Actual subject\n\nUnicornneedle requires this condition.\n")
+    store.refresh()
+    found = store.search("Unicornneedle", intent="question")
+    assert [item["path"] for item in found["items"]] == ["actual.md"]
+    document = store.read("auxiliary.md")
+    assert document["metadata"]["body_sections"][-1]["role"] in {"related_notes", "curator_note"}
+    assert auxiliary.read_text() == original
+
+
 def populated_store(directory):
     root = directory / "vault"
     root.mkdir()

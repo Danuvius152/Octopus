@@ -435,3 +435,8 @@ def test_nested_heading_does_not_change_outer_body_or_editorial_role(container):
     assert not html_has_readable_body(
         f"<h2>相关笔记</h2><{container}><h2>正文</h2>Linked note.</{container}><p>Bookkeeping.</p>"
     )
+
+
+@pytest.mark.parametrize("heading", ["相关笔记（整理者补充）", "整理说明 (curator)"])
+def test_attributed_auxiliary_sections_are_not_original_body(heading):
+    assert not html_has_readable_body(f"<h1>Title</h1><h2>{heading}</h2><p>Only a curator addition.</p>")
