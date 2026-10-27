@@ -11,15 +11,15 @@ stay top-level, *wrapped* by the harness login drivers — not relocated.
 Verified green at implementation time; current suite counts: ~764 backend
 tests + 64 frontend (vitest) + tsc + 62 e2e (Playwright).
 
-The ticket20 worktree keeps this Harness/Profile boundary. `SessionOwner`
+The current implementation keeps this Harness/Profile boundary. `SessionOwner`
 owns mutable session execution state; managed preparation, spawn, stdin,
 reader and retirement operations retain their original results and wake the
 Owner. Harness producer backpressure and stream closure reach the actual
 reader, and the original late handle remains owned through retirement.
 An input write, a committed business terminal, notification delivery and
 confirmed resource retirement are separate facts. See the
-[architecture execution plan](minimal-architecture-execution-20261020.md),
-section3.2, for the current contract and verification boundary; these edits
+[architecture contract](architecture-contract.md#输入完成与资源退休)
+for the current contract and verification boundary; these guarantees
 do not establish later native-tail finality or cross-request lease changes.
 
 Design note (2026-10-23): the proposed [Codex app-server migration](../review/codex-app-server-feasibility-20261023.md)

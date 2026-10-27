@@ -5,7 +5,7 @@
 > **Scope update, 2026-10-25:** accounts, isolation, invitations, passwords and
 > per-account keys remain supported. The pre-account business mode and §9's
 > adoption of an old installation have been retired under the
-> [simplification plan](architecture-simplification-20261023.md).
+> [architecture contract](architecture-contract.md#公开接口与账户配置).
 > First-account creation on an empty installation remains;
 > moving current accounts to another machine is a separate offline operation.
 > References to the old transition below explain the original implementation,

@@ -324,12 +324,11 @@ session。实际 OS spawn 前继续调用原 `RunConfig.authorize_spawn`；增�
 
 ### 3.4 路径、安装与账户架构计划的衔接
 
-本文基线仍有 legacy/首账户 bootstrap，但
-[账户架构简化计划](architecture-simplification-20261023.md) 拟删除该历史路径。
-**DSH 的目标安装以现有账户为入口，不新建 ownerless DSH 支持。** 若本计划先
-实施，保留既有 Claude/Codex 的 legacy 行为，DSH 在缺 owner 时明确不可执行；
-若账户简化先实施，直接使用其非空 owner 合同。两种顺序都不扩建首账户历史转换，
-也不让缺失的 user_id 隐式落到宿主目录。
+原调查基线包含 legacy/首账户 bootstrap；当前已按
+[架构约定](architecture-contract.md#公开接口与账户配置)退出该历史业务。
+**DSH 的目标安装以现有账户为入口，不新建 ownerless DSH 支持。** 实施时使用
+当前账户合同，缺 owner 明确拒绝，不恢复首账户接管，也不让缺失的 user_id
+隐式落到宿主目录。原调查中的 legacy 描述不构成新的兼容义务。
 
 - [config.py](../../server/config.py)：增加 `dsh_home_dir`，并把
   `default_backend: Literal[...]` 同步扩展为包含 `deepseek`；不改当前安装默认值。
@@ -819,8 +818,7 @@ service 行为有变化时补 supervisor integration，再按 [自动发布](../
   [请求配置测试](../../tests/test_request_configuration.py)。
 - [MCP 组装](../../server/harness/assembly.py)、[MCP identity](../../server/mcp_identity.py)、
   [凭据路由](../../server/routers/credentials.py)、[模型设置](../../server/routers/backends.py)。
-- [最小机制执行计划](minimal-architecture-execution-20261020.md)、
-  [账户简化计划](architecture-simplification-20261023.md)、
+- [架构约定与暂停范围](architecture-contract.md)、
   [Harness 设计](harness-layer.md)、[模型与 reasoning](model-reasoning.md)、
   [架构说明](../architecture.md)。历史计划帮助解释目的，具体签名以源码为准。
 

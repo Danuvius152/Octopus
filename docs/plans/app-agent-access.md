@@ -74,9 +74,8 @@ through conversation creation and turn registration, so concurrent requests
 cannot exceed either the execution or conversation cap.
 This is distinct from `ApplicationManager`'s build-status consumer, which also
 observes the original completion, including direct chat in the build session.
-See the [architecture execution plan](minimal-architecture-execution-20261020.md),
-section3.2, for the shared ownership and retirement contract. This worktree
-revision does not claim a deployed release.
+See the [architecture contract](architecture-contract.md#输入完成与资源退休)
+for the shared ownership and retirement rules. Deployment is verified separately.
 
 ## 3. A conversation is a session
 

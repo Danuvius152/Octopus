@@ -6,10 +6,9 @@
 > shipped feature; see commit history for the review-driven fixes that
 > closed the plan/implementation drift.
 
-The ticket20 ownership/completion revision below describes the current
-worktree, not a deployed release. Its shared contract and acceptance boundary
-are in the [architecture execution plan](minimal-architecture-execution-20261020.md),
-section3.2.
+The shared ownership, completion and retirement rules are in the
+[architecture contract](architecture-contract.md#输入完成与资源退休).
+Deployment is verified separately from the implementation described here.
 
 ## 0. What we're building, and the mental model
 

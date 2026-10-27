@@ -2,11 +2,11 @@
 
 > **Status:** shipped — Per-agent native memory: one markdown directory per agent, shared by both harnesses.
 
-> **Scope update, 2026-10-25:** current per-account memory remains durable and
+> Current per-account memory remains durable and
 > supported. Moving install-era memory into the first account is an obsolete
 > transition retired with bootstrap under the
-> [simplification plan](architecture-simplification-20261023.md). Current memory
-> content and account isolation remain protected. The proposed account-portability
+> [architecture contract](architecture-contract.md#公开接口与账户配置). Current memory
+> content and account isolation remain protected. Account portability
 > workflow includes current memory as persistent user data,
 > rather than invoking the old handoff again.
 

@@ -2,6 +2,18 @@
 
 > **Status:** shipped — A message typed mid-turn reaches the agent already running, and the held CLI process that makes a turn cheap to start.
 
+## Current scope
+
+Steering is backend-specific: the current Claude profile uses `STREAM_JSON`;
+Codex exec uses `CLOSE_AFTER_SPAWN` and queues new input for a later turn.
+`can_steer` is derived in `server/sessions/presentation.py`; input handling is
+owned by `server/sessions/owner_runtime.py` and the selected Harness profile.
+
+The implementation narrative, old source locations and measurements below are
+historical evidence from Claude 2.1.272. They explain the design; their timings
+are not current performance guarantees or evidence of Codex steering support.
+The “Today” baseline in §1 predates this implementation.
+
 > **Implementation status: ALL THREE STAGES SHIPPED.** Three staged
 > changes (§4). Every CLI behaviour and every number below is *measured*
 > against our own `claude 2.1.272`, not assumed.

@@ -16,24 +16,10 @@
 > The planning decisions and protocol below are a historical record of the
 > pre-retirement implementation. They do not describe currently callable APIs.
 
-> **Status:** superseded by architecture-simplification-20261023.md — Install-era rotation is scheduled for removal; the implementation remains until current data and pending-operation checks permit retirement.
->
-> **Scope decision, 2026-10-23:** account operation and current-version
-> portability replace the old no-account installation requirement. Do not
-> continue extending rotation under the minimal architecture plan. The
-> [simplification plan](architecture-simplification-20261023.md) owns the
-> removal sequence and verification. At local `3d793d3`, the route, Settings
-> control and startup recovery still exist; account installations refuse
-> rotation. This documentation change does not remove them.
->
-> **Interview confirmed, 2026-10-23:** remove the Settings control, old route,
-> dedicated recovery logic and tests as one feature. Keep account login,
-> password changes, bearer revocation, provider credentials and current tool
-> authentication. The user confirmed removal; implementation is still pending.
->
-> Sections 1–5 describe the existing protocol and explain its safeguards.
-> Keep those safeguards while the operation remains reachable. Section 6
-> defines retirement; none of the checks below was rerun for this doc update.
+Current account and retirement rules are in the
+[architecture contract](architecture-contract.md#公开接口与账户配置).
+The protocol below explains the retired implementation's safeguards; its
+original removal sequence is historical evidence, not pending work.
 
 ## 1. Secret ownership
 

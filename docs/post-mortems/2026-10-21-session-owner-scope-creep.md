@@ -158,6 +158,6 @@ delegation、WS/UI、archive 等多个消费者都被卷了进来。完成结果
 
 - 检查与验证规则：[AGENTS.md](../../AGENTS.md)
 - 所有权、启动代际与资源退役合同：
-  [minimal-architecture-execution-20261020.md](../plans/minimal-architecture-execution-20261020.md)
+  [架构约定](../plans/architecture-contract.md#输入完成与资源退休)
 - 票面模板应增加 Contract 块和故障注入矩阵；`to-tickets` 当前只要求
   “end-to-end behaviour + acceptance”，不足以强制这些字段。

@@ -4,7 +4,7 @@
 配套：[octopus-app-server-tickets-20261022.md](octopus-app-server-tickets-20261022.md)。本稿完整替代方案 B 的修订6；沿用 exec 的方案 A 仍是另一条路线，本次不切换部署。
 
 > **2026-10-23 阅读说明：** 本文保留完整原生尾部方案的历史设计，未成为当前执行合同。
-> 当前七票暂停及已交付状态以[最小机制执行计划](../plans/minimal-architecture-execution-20261020.md)为准。
+> 当前七票暂停范围以[架构约定](../plans/architecture-contract.md#暂停范围与恢复条件)为准。
 > 基于本地 `3d793d3` 和 Codex 0.164.0 的新核对见
 > [迁移可行性与实施设计](codex-app-server-feasibility-20261023.md)；其中范围 A 指
 > 请求内 app-server 迁移，与本文旧“方案 A＝继续 exec”的编号不同。新设计区分协议

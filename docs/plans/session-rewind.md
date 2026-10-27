@@ -2,6 +2,19 @@
 
 > **Status:** shipped — Branch a conversation at any prior user message, with an optional git revert of the working tree.
 
+## Current behavior and historical scope
+
+`/rewind` uses truncated-history replay for both backends, then resumes the
+backend's own session. Full-session `/fork` has a separate native-copy contract
+in [session-fork.md](session-fork.md). Current profile behavior is in
+`server/harness/claude_code.py` and `server/harness/codex.py`.
+
+The experiments and implementation chronology below describe the original
+rewind work. The June 2026 stdin workaround was later superseded by
+[inline steering](inline-steering.md): Claude uses stream-JSON input with stdin
+kept open; Codex exec closes stdin after spawn. Historical timings and failures
+apply to the versions and spawn paths tested, not every current CLI invocation.
+
 > **Origin (2026-06-06).** Inspired by Pi agent's `/tree`: rewind a
 > conversation to a prior user message and try again — edited,
 > redone, or replaced with a new instruction.
@@ -17,21 +30,22 @@
 > `tests/test_session_fork_real.py`, `web/src/lib/forkTree.test.ts`,
 > `web/src/components/ForkDialog.test.tsx`, `web/e2e/fork.spec.ts`).
 >
-> **⚠ Phase-5 strategy change — Claude uses HISTORY_REPLAY, not
-> NATIVE_TRANSCRIPT.** Real-CLI testing showed `claude --resume` of an
+> **Phase-5 strategy change (2026-06-08) — HISTORY_REPLAY.** At that time,
+> real-CLI testing showed `claude --resume` of an
 > externally-synthesized JSONL is unreliable through the production
 > spawn path: the CLI resolves the resume id against a session-discovery
 > path that does NOT dependably see a transcript Octopus wrote, failing
 > ~all the time with "No conversation found" and silently starting a
-> fresh empty session (it resumes its OWN sessions fine). So BOTH
-> backends now use HISTORY_REPLAY: the fork's first turn replays the
+> fresh empty session (it resumed its OWN sessions fine). BOTH
+> backends therefore used HISTORY_REPLAY: the rewind branch's first turn replays the
 > truncated transcript in its user prompt; turn 2+ resumes the backend's
 > own captured session id natively. The NATIVE_TRANSCRIPT design below
-> (§3.2/§5.3.1) is preserved as documentation; it can return as a cache
-> optimization if/when the CLI gains reliable external-transcript resume.
-> Side effect of the investigation: `claude --print` now closes stdin
+> (§3.2/§5.3.1) is preserved as the original design, not a current implementation
+> instruction. Subsequent stream-JSON experiments are recorded in
+> [inline-steering.md](inline-steering.md) §10.
+> Side effect of that investigation: `claude --print` closed stdin
 > right after spawn (it takes its prompt from argv), removing a ~3s
-> per-turn wait the open pipe was causing.
+> per-turn wait observed with the then-current open-but-idle pipe.
 
 ## 0. What we're building, and the mental model
 

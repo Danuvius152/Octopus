@@ -17,8 +17,8 @@ lives in [`plans/`](plans/); CLI/stream-protocol research notes live in the
 `*-notes.md` files. `server/db/schema.py` (`_SCHEMA`) is the source of truth for
 the data model — this doc describes it conceptually rather than pasting SQL.
 
-The [2026-10-23 simplification plan](plans/architecture-simplification-20261023.md)
-retains its historical baseline and the account-portability scope.
+The [architecture contract](plans/architecture-contract.md) owns cross-component
+decisions, conventions and the paused execution scope.
 Obsolete online interfaces, installation-era adoption/rotation and startup
 migration chains have since been retired. Current SessionOwner, transaction,
 authorization and Wiki recovery responsibilities remain the foundation.
@@ -41,7 +41,10 @@ verification and any finite conversion, as described in the
         │  └─────┬───────┘                  │
         │        │                          │
         │        ┌──────▼───────┐            │
-        │        │SessionManager│            │  one in-process turn engine
+        │        │SessionManager│            │  session entry points and quota
+        │        └──────┬───────┘            │
+        │        ┌──────▼───────┐            │
+        │        │ SessionOwner │            │  one mutable execution owner per session
         │        └──────┬───────┘            │
         │        ┌──────▼───────┐            │
         │        │   Harness    │            │  RuntimeProfile per backend kind
@@ -114,7 +117,7 @@ follows current ownership and registrations, so later content uses the same
 entry point. `server/db/portability.py` classifies relational ownership;
 `server/wiki/portability.py` preserves historical evidence and rebinds current
 registration and file identity. Native model login, old conversations and
-schedules are excluded. See [scope and operation](backup-and-migrate.md#7-selected-account-export-and-import).
+schedules are excluded. See [scope and operation](backup-and-migrate.md#account-export-and-import).
 
 For a running managed source, the lifecycle owner waits for natural idle, seals
 HTTP/WebSocket and background admission, then hands off to the offline owner.
@@ -174,19 +177,19 @@ One install serves several people, each fully isolated (design:
 | `auth.py` / `users.py` | Accounts: empty-installation setup → first admin and owned default agent, login → session bearer, invite registration, password change and admin operations. Setup proof is checked only at `/api/auth/setup`; `deps.py` resolves the current business identity and owner. Startup refuses retained pre-account business inputs. |
 | `crypto.py` | Encryption at rest: a server-held **master key** wraps each account's data-encryption key (DEK), which Fernet-encrypts that account's secrets. A password only authenticates. |
 | `models.py` | Pydantic request/response models + enums (`SessionStatus`, `MessageRole`, agent/schedule/connector/credential DTOs). |
-| `session_manager.py` | Core turn engine. Owns in-memory `Session` objects, drives each turn through the **Harness**, persists + broadcasts events to WebSocket clients, runs tool-result forwarding, interactive questions, mid-turn interrupt, the per-session message queue, premature-exit auto-respawn, and large-prompt spill. |
-| `sessions/` | SessionOwner serializes mutable execution, question and lifecycle state; managed Harness I/O reports original results. Completion consumers read the plan §3.2 contract. |
+| `session_manager.py` | Session entry points, registration and cross-session quota; delegates mutable per-session behavior to SessionOwner. |
+| `sessions/` | SessionOwner serializes mutable execution, input, question and lifecycle state; managed Harness I/O reports original results. Completion consumers follow [the execution contract](plans/architecture-contract.md#输入完成与资源退休): business outcome, notification delivery and retirement have separate authorities. |
 | `harness/` | The single boundary for all model/runtime interaction (see below). Also normalizes **native sub-agents** ([`plans/native-subagents.md`](plans/native-subagents.md)): Claude Code's `system/task_*` events and Codex's `collab_tool_call` items collapse onto one `SubagentUpdate`, keyed on the spawning tool call's id, and `agents.subagents` renders to `--agents` so an Octopus agent can bring its own helpers. |
 | `agent_manager.py` | Agent CRUD (the durable assistant definitions). |
-| `agent_memory.py` | Per-agent native memory provisioning (`<agents_dir>/<id>/memory/`). |
-| `delegations.py` | Agent-to-agent delegation manager ([`plans/agent-collaboration.md`](plans/agent-collaboration.md)) — `mcp__ask_agent__ask` lets one agent spawn a child session under another agent, or continue a prior delegation in the same child session by passing its `delegation_id`. Subscribes to the session-manager broadcast bus; on the child's terminal event (`result` / `error` / `question_request`) injects an `[agent-reply:…]` / `[agent-error:…]` / `[agent-question:…]` turn back into the parent. Owns cycle + depth-3 guards (with DB fallback for archived ancestors), single-inject idempotency, same-session follow-up reset, cascade-cancel of descendants, and child auto-archive after terminal delivery. |
+| `agent_memory.py` | Per-agent native memory provisioning under the owning account's `agents/<id>/memory/`. |
+| `delegations.py` | Named-agent delegation and continuation by `delegation_id` ([design](plans/agent-collaboration.md)). The original request's completion determines each round's reply or error; question events relay pending questions separately. Owns cycle/depth guards, delivery identity, continuation and descendant cancellation. Completion does not by itself archive an ordinary delegation session or prove its execution has retired. |
 | `scheduler.py` | `ScheduleRunner` — APScheduler runner for recurring prompts, **interval and cron**, fired per agent into fresh auto-archiving sessions. |
 | `schedule_ai.py` | Natural-language `/schedule` parsing — turns "every weekday at 9am" into a cron/interval spec via the agent's own harness (backend-agnostic). |
 | `database.py` / `db/` | SQLite (`aiosqlite`, WAL, FK cascade, `busy_timeout`, `synchronous=FULL`). `db/schema.py` defines current format 4; `PRAGMA user_version` is its sole format marker. Startup matches it before keys or writers; genuinely empty storage creates the complete current DDL directly. Ordinary reopening does not interpret or convert historical data. Publication verifies the full retained structure and current facts after old writers retire, before the candidate starts. Credentials and recovery relationships have one authority in `credential_secrets` and the successor's `recovery_of`. Short transactions confirm the original driver's COMMIT; uncertain storage enters fail-stop. Current input and unfinished-fork recovery remain owned by `SessionManager`. See [current storage and publication](plans/current-storage-format.md). |
 | `jsonl_parser.py` / `jsonl_writer.py` | Read/write Claude Code JSONL session files for `octopus handoff` (import) and `octopus pull` (export → local `claude --resume`). |
-| `applications.py` | **Applications** ([`plans/applications.md`](plans/applications.md)) — agent-built web apps. Owns the app directory under the owning account's workspace (`paths_for(user_id).applications`), the *build session* (a normal session with `origin='application'` whose working dir is the app dir), and a `building\|ready\|failed` status **derived** from whether the entrypoint exists when a build turn ends. Subscribes to the SessionManager broadcast bus (the DelegationManager pattern), so a change typed straight into the build session updates the badge too. Archive keeps row *and* files; the name index is live-only, so an archived name frees up. |
+| `applications.py` | Agent-built applications ([design](plans/applications.md)): account-owned directories, build sessions (`origin='application'`) and status projection. Progress can mark a build running; the original request's committed completion and entrypoint determine its final status. Direct build-session requests use the same completion observer. Archive keeps rows and files; the name index is live-only. |
 | `app_backends.py` | **Application backends** ([`plans/application-backends.md`](plans/application-backends.md)) — an executable `start.sh` at the app root IS the declaration; no manifest. Allocates a port, runs install/start with a **minimal** environment (never the server's, so Octopus credentials cannot leak into app code), waits for the port to accept, proxies `/apps/{id}/api/*`, reaps when idle. Three directories, three owners: `<slug>/` code (a rebuild rewrites it), `<slug>.data/` the app's own state (never touched), `<slug>.runtime/` installed deps (delete to force a clean reinstall). |
-| `app_agent.py` | **Application↔agent conversations** ([`plans/app-agent-access.md`](plans/app-agent-access.md)) — a running app can hold a real conversation with an agent. A conversation is a session (`origin='app'`, `sessions.app_id`), so it resumes and is readable in the chat view. Mounted under the app's own path so its page reaches it relatively; its backend reaches it with a scoped token that opens exactly one app's surface. Converts session events into the vocabulary an app consumes (`delta`/`message`/`tool`/`question`/`done`/`error`), streamed as SSE. |
+| `app_agent.py` | Application↔agent conversations ([design](plans/app-agent-access.md)): resumable app-owned sessions and scoped SSE (`delta`/`message`/`tool`/`question`/`done`/`error`). Original-request completion confirms recording, outcome and notification delivery before `done`; response completion alone does not release the execution slot. |
 | `mcp_http.py` | **The MCP namespaces, served in-process** ([`plans/polish-2026-09.md`](plans/polish-2026-09.md) §4 B1) — each tool namespace is mounted at `/mcp/<name>` over streamable-HTTP instead of spawned as a stdio subprocess per session. Both CLIs build the tool name from the config key, so keys are unchanged and `mcp__bg__run` stays `mcp__bg__run`; connectors mount once per *kind* while their key stays per-installation. Replaces 7 subprocesses per session (~39 MB PSS each). |
 | `mcp_identity.py` | Per-session scope for those namespaces. One HTTP endpoint serves every session, so identity travels with the request: master-key signatures identify the session/account/run and each call checks its current authority. Claude passes the bearer as a header, Codex as an env var it names; that asymmetry stops at the profile boundary. |
 | `bg_tasks.py` | Cross-turn background shell tasks: spawn, stream capture (bounded), idle watchdog, cancel, persistence in `bg_tasks`. |
@@ -221,13 +224,17 @@ The harness is the **only** place that talks to a model runtime. There is one
 
 ### In-app MCP servers (`server/mcp_servers/`)
 
-Every turn injects a small set of stdio MCP servers into the CLI's
-`--mcp-config`. The built-ins are configurable per agent (default
-`["ask", "bg", "ask_agent"]`); each enabled connector adds one more.
+Normal session turns use in-process streamable-HTTP namespaces, selected from
+the saved agent configuration and the current call scope. Harness assembly
+renders the configuration for each CLI; connector and Wiki tools additionally
+depend on their current bindings and authority. Defaults for newly created
+agents do not replace saved tool selections. Stdio construction remains for
+contexts without a live session scope; it is not the normal per-turn transport.
 
 | Server | Tool(s) | Purpose |
 |---|---|---|
 | `bg.py` | `mcp__bg__run` / `cancel` / `list` | Fire-and-forget shell commands that run **across turns**; the result arrives as a follow-up turn. |
+| `schedule.py` | `mcp__schedule__create` / `list` / `update` / `delete` | Manage durable schedules owned by the authenticated session's agent. |
 | `ask.py` | `mcp__ask__user(questions)` | Structured multiple-choice question rendered as a form in the UI; long-polls for the answer. Caller-aware: when invoked from a delegation-origin session the question is also injected as an `[agent-question:…]` turn into the parent agent's session — same pending queue, two answer producers. Replaces the old permission-prompt hack. |
 | `ask_agent.py` | `mcp__ask_agent__ask` / `cancel` / `answer` / `list` | Agent-to-agent delegation. `ask(request, name=…, delegation_id=…, files=…)` is bimodal: pass `name` to spawn a fresh child session under the named agent, or pass `delegation_id` to continue a prior delegation in the same child session so the target keeps her transcript across rounds; exactly one id is required. `answer` drains a child's pending question with the parent's chosen label; `cancel` stops a delegation (cascade-cancels descendants); `list` enumerates this session's delegations. Same env-injection + bg-task-style follow-up-turn pattern as `bg`. Design: [`plans/agent-collaboration.md`](plans/agent-collaboration.md). |
 | `connectors/github.py`, `gmail.py` | typed API tools | Built-in connector tools (see Connectors). |
@@ -656,16 +663,6 @@ octopus pull SESSION_ID [--cwd DIR]            # export a session to local JSONL
 
 ## Tests
 
-Verification scope, full-suite criteria, release checks and provider scope live in
-[AGENTS.md](../AGENTS.md#verification); this doc does not keep a
-second policy or test count. The full selections below are command references;
-routine changes select affected checks under AGENTS.md:
-
-```bash
-.venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf"  # hermetic backend
-.venv/bin/pytest -m 'real and (real_codex or codex_bin) and not real_claude and not knowledge_eval'  # live Codex
-cd web && bun run test                                  # frontend unit
-cd web && bun run typecheck                             # TypeScript (tsc -b)
-cd web && bun run test:e2e:fast                         # offline UI bucket
-cd web && bun run test:e2e:llm                          # real-LLM bucket, one worker
-```
+Verification scope, suite commands, evidence reuse, provider selection and
+release gates live in [testing.md](testing.md). The everyday development summary
+is in [AGENTS.md](../AGENTS.md#verification).

@@ -208,9 +208,9 @@ receipt/ACK、进程退役、重复中断和不重放断言继续保留。没有
 ## 依据
 
 - 交付提交：`87ce64787cd4a446802c18207de1e28dcebdaee3`。
-- 当前账户与启动合同：[精简计划](../plans/architecture-simplification-20261023.md)、
+- 当前账户与启动合同：[架构约定](../plans/architecture-contract.md#公开接口与账户配置)、
   [存储格式](../plans/current-storage-format.md)。迁移接口见
-  [导出与导入](../backup-and-migrate.md#7-selected-account-export-and-import)。
+  [导出与导入](../backup-and-migrate.md#account-export-and-import)。
 - 当次本机票、规格及原始日志/JUnit已归档到私有发布记录；临时 `.scratch`
   目录可删除，不作为运行或后续维护的依赖。主要历史记录为 `08-progress.md`、
   `09-progress.md`、`08-09-post-gate.md`、r4–r9 progress、

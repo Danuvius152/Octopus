@@ -4,7 +4,7 @@
 
 ## 1. 依据和判断
 
-结合用户工作区 `octopus_runtime_audit/{audit,plan,spec,evidence}.md`、最新运行日志审计及当前源码核对。源码基线为 main `74eab95`，上一轮运行时部署为 `b083efe`；相关运行时路径在两者之间没有变化。上一轮已经完成的规则见[运行日志修复计划](runtime-log-repair-20261013.md)，本方案补充其边界，不改写已经交付的验收结论。
+结合用户工作区 `octopus_runtime_audit/{audit,plan,spec,evidence}.md`、最新运行日志审计及当前源码核对。源码基线为 main `74eab95`，上一轮运行时部署为 `b083efe`；相关运行时路径在两者之间没有变化。上一轮已经完成的规则见[运行日志修复计划](https://github.com/Danuvius152/Octopus/blob/b19f6f9deaa36245d80ed3c283d6e64dc257d978/docs/plans/runtime-log-repair-20261013.md)，本方案补充其边界，不改写已经交付的验收结论。
 
 | 问题 | 本次证据 | 修改判断 |
 | --- | --- | --- |

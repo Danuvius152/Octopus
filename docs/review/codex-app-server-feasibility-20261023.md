@@ -29,10 +29,10 @@ turn 内使用原生子代理；它不承诺根 turn 结束后仍能完成未来
 
 ### 1.1 文档优先级与旧草案校正
 
-1. [最小机制执行计划](../plans/minimal-architecture-execution-20261020.md)顶部及
-   §10 是当前交付状态：22、23、24、28、31、42、43 整票暂停；当前仍为 Codex exec
+1. [架构约定的暂停范围](../plans/architecture-contract.md#暂停范围与恢复条件)
+   保留22、23、24、28、31、42、43整票暂停；当前仍为 Codex exec
    与 Claude stream-json/idle。新文档不覆盖这项事实。
-2. [当前账户简化计划](../plans/architecture-simplification-20261023.md)规定保全当前
+2. [当前数据约定](../plans/architecture-contract.md#当前数据与存储演进)规定保全当前
    数据、退出旧接口，不为任意旧客户端或旧版本建立永久兼容层。
 3. [10 月 22 日 app-server 规范](octopus-app-server-spec-20261022.md)和
    [票据](octopus-app-server-tickets-20261022.md)是较早的 B 范围候选；其中“22 整票

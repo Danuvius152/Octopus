@@ -6,13 +6,20 @@ document responsible for one kind of information:
 | Location | Responsibility |
 | --- | --- |
 | Current guides and `architecture.md` | Product behavior, architecture and user instructions. |
-| [`plans/`](plans/) | Initiative status and remaining work; Wiki uses one development summary and one future plan, with a dated handoff for the current review-driven bug fixes. |
+| [`plans/`](plans/) | Durable decisions, rationale, conventions and remaining scope, maintained by subject. Current architecture decisions live in [`architecture-contract.md`](plans/architecture-contract.md). |
 | [`local-wsl.md`](local-wsl.md) | Current local environment and operating procedures; repository action policy lives in [`AGENTS.md`](../AGENTS.md#repository-and-upstream-maintenance). |
+| [`testing.md`](testing.md) | Verification policy, suite selection, evidence reuse and release gates. |
+| [`agents/issue-tracker.md`](agents/issue-tracker.md) | Local specs and tickets under `.scratch/`; no external tracker. |
 | [`post-mortems/`](post-mortems/) | Specific incidents and their evidence, rather than an ever-growing current-state checklist. |
 | [`review/`](review/) | Dated code and behavior reviews, with evidence, scope and remediation impact. |
 
 Update the responsible document when facts change and link to it from the
-others. Keep transient logs in task artifacts. Documentation-only work stays
+others. Revise its current section and remove superseded claims; consolidate
+overlapping plans instead of appending dated corrections or repeated progress
+reports. Keep decisions and conventions, with the reasons and constraints that
+still apply. Git preserves implementation history; standalone experiments and
+post-mortems retain the version and conditions needed to interpret their evidence.
+Keep transient logs in task artifacts. Documentation-only work stays
 uncommitted unless the user requests a commit; it does not trigger deployment.
 
 ## Current
@@ -25,7 +32,7 @@ uncommitted unless the user requests a commit; it does not trigger deployment.
 Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验收已完成（2026-10-17）。开发过程、当前合同和证据集中在总结；Sapphire、SmartReader 等后续功能单列未来计划。
 
 随后选定的 Wiki A01/A02/A03/A05 整改已交付；当前合同、验收范围和历史证据见
-**[2026-10-17 缺陷修复交接](plans/wiki-bug-remediation-20261017.md)**。
+**[2026-10-17 缺陷修复交接](https://github.com/Danuvius152/Octopus/blob/b19f6f9deaa36245d80ed3c283d6e64dc257d978/docs/plans/wiki-bug-remediation-20261017.md)**。
 
 - **[共享 Wiki 开发过程总结](plans/wiki-development-summary.md)** — 本期已完成；实际交付、当前合同、证据边界与开发方法。
 - **[共享 Wiki 未来计划](plans/wiki-future-plan.md)** — Sapphire、SmartReader、共享能力及有触发条件的后续工作。
@@ -48,18 +55,20 @@ Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验
   transcripts and configuration to include in a backup or migration.
 - **[迁移机制审查（2026-10-23）](https://github.com/Danuvius152/Octopus/blob/fe2200fbbaa705b99b6a392e188bbb2423b21ae2/docs/review/migration-scope-and-portability-20261023.md)** —
   对比 before-takeover 与本地新版本，审查旧兼容、旧接口和重复状态；含跨机器搬迁建议，尚未实施。
-- **[当前账户架构简化与跨机器搬迁](plans/architecture-simplification-20261023.md)** —
-  后续实施入口：复用已交付基础，退出旧接口与安装时代业务，保全当前数据后收敛格式，
-  单独验收同版本冷迁移；七张生命周期/能力暂停票不恢复。代码尚未实施。
+- **[架构约定与未完成范围](plans/architecture-contract.md)** —
+  Owner、事务、输入/完成、账户、存储和搬迁的有效决策与 Conventions；
+  七项执行扩展的暂停范围和恢复条件。当前组件与操作分别查架构概览和用户指南。
 - **[Codex exec → app-server 可行性与实施设计](review/codex-app-server-feasibility-20261023.md)** —
   基于当前 Harness/Owner 与本机 Codex 0.164.0 schema，区分请求内交互迁移和完整
   原生尾部；列明权限、输入、问题、完成、恢复及验收挑战。仅设计，未恢复暂停票。
 
 ## Design records — [`plans/`](plans/)
 
-One plan per major initiative, written before/while it was built and kept as the
-design rationale. **Code comments cite these by filename + section** (e.g.
-`agent-refactor.md §5.5`), so treat them as living references, not throwaways.
+Keep one owning document per subject for decisions, conventions and remaining
+work. Completion updates that document; it does not start a new dated plan for
+the same contract. **Code comments cite filenames and sections**, so update
+incoming references when merging documents. Preserve useful rationale and
+scoped evidence; use Git history for superseded execution timelines.
 
 Each plan states its own status on one line under its title; the table below is
 generated from those lines by `scripts/gen-docs-index.py`, and `scripts/check.sh`
@@ -86,7 +95,6 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | [Multi-tenancy (`user-1.0`)](plans/multi-tenancy.md) | shipped | one site, many users: the label becomes a username, the token becomes a password, and every user gets their own directory, rows and keys. |
 | [Native sub-agents, surfaced](plans/native-subagents.md) | shipped | The CLIs' own sub-agents surfaced as one event and one card — including the ones that finish after the turn that started them. |
 | [Octopus on a phone](plans/mobile.md) | shipped | Octopus on a phone — the drawer that puts itself away, 16px fields, touch targets, and safe-area insets. |
-| [Octopus 最小机制架构：执行计划](plans/minimal-architecture-execution-20261020.md) | shipped | 本期39项已交付；七张暂停票的目标、依赖与恢复条件保留在§10。 |
 | [Octopus-native deep research](plans/native-deep-research.md) | shipped | Octopus-orchestrated deep research: scoped fan-out of web-search sub-turns, adversarially verified, then synthesized. |
 | [Polish pass, September 2026](plans/polish-2026-09.md) | shipped | The September 2026 polish pass: size debt, migration safety, the MCP sidecar footprint, gates, docs, and monitoring. All eleven items in §10 landed; the changes and four defects are recorded in docs/2026-09-25-polish-pass.md. |
 | [Scheduled runs: what a fire is, and what stops it stacking](plans/scheduled-runs.md) | shipped | What a scheduled fire is: the overlap guard, the `[scheduled:…]` marker, and the link from "last run" to the run. |
@@ -97,16 +105,14 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | [The schedule an agent sets for itself](plans/schedule-tool.md) | shipped | `mcp__schedule__*` over session-scoped routes: an agent sets, lists, re-times and pauses its own schedules. |
 | [Three small affordances: message time, composer history, `/model`](plans/composer-and-time.md) | shipped | hover a message for its time, ArrowUp for what you sent, `/model` to switch model for one session. |
 | [Turn safety (Layer 1): timeout + process-group reaping](plans/turn-safety.md) | shipped | Bounded automatic recovery after idle stops, an optional whole-turn duration cap, and process-group reaping. |
-| [Wiki 与运行基础缺陷修复：2026-10-17 交接](plans/wiki-bug-remediation-20261017.md) | shipped | 简化后的 A01/A02/A03/A05 实现与本机验收；A04/A06/A07 不在范围。§16 记录当前合同与交付证据，§1–§15 保留历史。 |
 | [共享 Wiki：开发过程总结与当前合同](plans/wiki-development-summary.md) | shipped | Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验收已完成；保留当前合同、证据边界和开发方法。 |
-| [运行日志缺陷修复：设计访谈与行为契约](plans/runtime-log-repair-20261013.md) | shipped | Q12 修复及本地 Codex 验收已完成；Stop 暂停内存积压、人工纠偏优先、明确恢复；保留主要框架，Q11 持久队列不实施。 |
 | [AI 与数字人研究工作流改进计划](plans/ai-digital-human-research-workflow-20261024.md) | proposed | 对照 Pika 的行为流程与 prompt，改进研究证据、PDF 转 Markdown、阅读写作与 Wiki 续接；面向 AI 与数字人。 |
 | [Codex / DSH 兼容与 DeepSeek backend 可行性方案](plans/deepseek-harness-backend.md) | proposed | 保留 Claude 原生支持与 Codex，评估以 API key 增加 DeepSeek backend；DSH 接口按适配度选择，尚未实施。 |
 | [Codex performance in Monitor](plans/codex-performance-monitor.md) | completed | effective output TPS implemented and validated for local Codex; client windows, model grouping and passive collection. |
 | [Current storage and publication handoff](plans/current-storage-format.md) | implemented | Validation and release handoff are tracked separately from production deployment. |
+| [Octopus 架构约定与未完成范围](plans/architecture-contract.md) | implemented | 当前架构、数据演进和接口约定；七项执行扩展仍暂停，部署状态另行核验。 |
 | [Rotating the installation access token](plans/token-rotation.md) | retired | Installation-token rotation and recovery are removed; current account authentication remains. |
 | [共享 Wiki：未来计划与应用协同](plans/wiki-future-plan.md) | proposed | Sapphire、SmartReader 与条件性扩展的统一计划；保留未完成合同，不把本文当作开发或生产写入授权。 |
-| [当前账户基线上的架构简化与跨机器搬迁](plans/architecture-simplification-20261023.md) | 已实现 | 账户精简及同版搬迁接口已完成；迁移专项隔离验收通过，临时测试按用户要求退役。Codex 全套发布检查受用量上限影响，尚未上线。 |
 | [运行时接口修补：接管、记录与调用身份](plans/runtime-interface-repair.md) | completed | Q13–Q30 中已确认实施的修补全部通过本机验收；按 Q31 合并 main 并上线 `01c16a6` 独立服务快照，已验证并清理两个旧 release；Q25 脱敏未纳入。 |
 
 <!-- END plans-index -->

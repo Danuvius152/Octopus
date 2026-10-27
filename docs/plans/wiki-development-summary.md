@@ -6,7 +6,7 @@
 
 完成记录：本期 Wiki 范围已交付并验收收尾。Sapphire、SmartReader 的应用整合、PDF 自动处理及其他条件项仍按未来计划管理，不计入本期完成范围，也不因这条记录自动启动开发或生产维护。
 
-后续缺陷整改与简化已随 `d546d71` 完成此前的发布验收。用户随后明确只继续 A01、A02、A03、A05，完成修复和文档后结束，A04/A06/A07 不在本轮范围。这四项实现与本机离线、Codex 实机验证已完成；范围、最终独立结算和实际发布回执见[简化后选定收尾](wiki-bug-remediation-20261017.md#16-简化后的选定收尾a01a02a03a05)。原 F12 的冻结与组件批准继续作为历史证据，不代替本次新代码验收。
+后续缺陷整改与简化已随 `d546d71` 完成此前的发布验收。用户随后明确只继续 A01、A02、A03、A05，完成修复和文档后结束，A04/A06/A07 不在本轮范围。这四项实现与本机离线、Codex 实机验证已完成；范围、最终独立结算和实际发布回执见[简化后选定收尾](https://github.com/Danuvius152/Octopus/blob/b19f6f9deaa36245d80ed3c283d6e64dc257d978/docs/plans/wiki-bug-remediation-20261017.md#16-简化后的选定收尾a01a02a03a05)。原 F12 的冻结与组件批准继续作为历史证据，不代替本次新代码验收。
 
 ## 1. 本次收束的范围
 
@@ -53,7 +53,7 @@
 
 这些阶段包含失败、修复、重审和用户范围调整，不是一次零失败的直线开发。历史暂停、保留样本及曾经暂缓的决定有时间范围，不能覆盖后来的明确恢复和交付。
 
-运行时独立决定仍见[逻辑轮次修复计划](runtime-log-repair-20261013.md)及[接口修补计划](runtime-interface-repair.md)：逻辑轮次拥有唯一最终结论；接管、执行、记录和通知分别结算，内存队列不承诺跨重启恢复；工具以调用身份关联且不恢复旧动态日志兼容；真实运行活动独立于展示文本，并用于刷新静默计时。这些约束随原 ADR 退役继续保留。
+运行时独立决定仍见[逻辑轮次修复计划](https://github.com/Danuvius152/Octopus/blob/b19f6f9deaa36245d80ed3c283d6e64dc257d978/docs/plans/runtime-log-repair-20261013.md)及[接口修补计划](runtime-interface-repair.md)：逻辑轮次拥有唯一最终结论；接管、执行、记录和通知分别结算，内存队列不承诺跨重启恢复；工具以调用身份关联且不恢复旧动态日志兼容；真实运行活动独立于展示文本，并用于刷新静默计时。这些约束随原 ADR 退役继续保留。
 
 ## 4. 当前运行合同
 
@@ -99,11 +99,11 @@
 
 ### F12 开发修正与本轮收尾边界
 
-F12/P02 修正经后继简化已随 `d546d71` 发布；A01/A02/A03/A05 的后续交付见[选定收尾](wiki-bug-remediation-20261017.md#16-简化后的选定收尾a01a02a03a05)的证据入口。仅授权入库 A，不再默认获得任意新建 B 的权利；必要知识新页由受信任务给出有限创建范围。A 中有依据的 `[[B]]` 强关联、派生反向关系和检索索引同步继续允许；有效 worker 还可为本批输入在已有导航 Markdown 追加固定入口，无需逐次确认。这不赋予关联页正文重写权，也不把导航收据当作 A 或新建页的整理完成证明。
+F12/P02 修正经后继简化已随 `d546d71` 发布；A01/A02/A03/A05 的后续交付见[选定收尾](https://github.com/Danuvius152/Octopus/blob/b19f6f9deaa36245d80ed3c283d6e64dc257d978/docs/plans/wiki-bug-remediation-20261017.md#16-简化后的选定收尾a01a02a03a05)的证据入口。仅授权入库 A，不再默认获得任意新建 B 的权利；必要知识新页由受信任务给出有限创建范围。A 中有依据的 `[[B]]` 强关联、派生反向关系和检索索引同步继续允许；有效 worker 还可为本批输入在已有导航 Markdown 追加固定入口，无需逐次确认。这不赋予关联页正文重写权，也不把导航收据当作 A 或新建页的整理完成证明。
 
 权限在领取时固定到实际文档及创建预留身份，路径移动只更新位置；同一 job 的其他文档占据旧路径也不能加入当前批次。旧待办、注册变化和异常恢复沿原 job 处理，保留原请求、材料、授权与收据；不确定的 prepared 发布不自动另建稿。明确选中的 assets/ASSETS 内 Markdown 保留既有原位维护及重新准入例外，未选身份和资产目录新建限制不放宽。
 
-F12 当时的两环境完整 Wiki/MCP/accounts 离线组各 **2040 passed / 13 deselected**，本组件四项静态检查通过；Vera 已批准 F12 的 implementation、cost、gate 及 code+cost+gate。成本有界复用 r4 原五组测量，保留原测量身份；不证明 readmit 自身性能、全 F09 性能或生产 SLA。该轮完整冻结、原始验证、限制和停止点以[历史结算](wiki-bug-remediation-20261017.md#15-f12-最终结算与本轮停止点)为准；用户后续选定四项的新实现与验收另见[选定收尾](wiki-bug-remediation-20261017.md#16-简化后的选定收尾a01a02a03a05)，不沿用旧停止要求。
+F12 当时的两环境完整 Wiki/MCP/accounts 离线组各 **2040 passed / 13 deselected**，本组件四项静态检查通过；Vera 已批准 F12 的 implementation、cost、gate 及 code+cost+gate。成本有界复用 r4 原五组测量，保留原测量身份；不证明 readmit 自身性能、全 F09 性能或生产 SLA。该轮完整冻结、原始验证、限制和停止点以[历史结算](https://github.com/Danuvius152/Octopus/blob/b19f6f9deaa36245d80ed3c283d6e64dc257d978/docs/plans/wiki-bug-remediation-20261017.md#15-f12-最终结算与本轮停止点)为准；用户后续选定四项的新实现与验收另见[选定收尾](https://github.com/Danuvius152/Octopus/blob/b19f6f9deaa36245d80ed3c283d6e64dc257d978/docs/plans/wiki-bug-remediation-20261017.md#16-简化后的选定收尾a01a02a03a05)，不沿用旧停止要求。
 
 ### 内容与受控操作
 
@@ -180,7 +180,7 @@ Codex 控制指令的当前交付生命周期见[运行时计划](codex-backend.
 
 | 职责 | 入口 |
 | --- | --- |
-| 接管、执行、持久终态、通知 | [sessions](../../server/sessions/)、[harness](../../server/harness/)、[逻辑轮次计划](runtime-log-repair-20261013.md)、[接口修补计划](runtime-interface-repair.md) |
+| 接管、执行、持久终态、通知 | [sessions](../../server/sessions/)、[harness](../../server/harness/)、[逻辑轮次计划](https://github.com/Danuvius152/Octopus/blob/b19f6f9deaa36245d80ed3c283d6e64dc257d978/docs/plans/runtime-log-repair-20261013.md)、[接口修补计划](runtime-interface-repair.md) |
 | HTTP / MCP 与真实参数 | [router](../../server/routers/wiki.py)、[MCP](../../server/mcp_servers/wiki.py)、[contracts](../../server/wiki/contracts.py) |
 | 权限、命令选择、维护观察 | [tasks](../../server/wiki/tasks.py)、[maintenance_state](../../server/wiki/maintenance_state.py)、[当前合同](#4-当前运行合同) |
 | 注册、索引与文件事件 | [registry](../../server/wiki/registry.py)、[store](../../server/wiki/store.py)、[events](../../server/wiki/events.py) |
@@ -202,7 +202,7 @@ Codex 控制指令的当前交付生命周期见[运行时计划](codex-backend.
 41消除了纯进度的成员写入，实测VM工作减少约16–18%，未证明延迟改善；44的
 1000小节同版全分页重复解析81→0，样本耗时5.56→1.12秒。Standards/Spec和Vera
 复核无未关闭确认发现。上述首轮失败、定向补验和测量结果为保留的验收摘要；
-阶段范围与状态见[执行计划](minimal-architecture-execution-20261020.md)。
+当次范围与状态见[原执行计划快照](https://github.com/Danuvius152/Octopus/blob/cf98ecb75d1aa741c31292977ac9d83e727d366f/docs/plans/minimal-architecture-execution-20261020.md)。
 本次按授权在当前分支提交；未推送或发布。CLI生命周期暂停票及可选知识评测不计完成，
 Claude真实CLI/浏览器未执行；并行的迁移审查报告和文档入口改动另留工作区。
 
@@ -215,7 +215,7 @@ Claude真实CLI/浏览器未执行；并行的迁移审查报告和文档入口�
 全量按文件分组使用四个 worker，局部与实机保持串行。最新后端 4,643 项逐节点完整覆盖、
 前端 513 项、Codex 实机 11 项及任务卡离线浏览器 1 项通过；lint、类型、生成合同和文档索引通过。
 两处旧时序测试修正后仅补验受影响节点，未变检查按来源复用；
-阶段范围与状态见[执行计划](minimal-architecture-execution-20261020.md)。
+当次范围与状态见[原执行计划快照](https://github.com/Danuvius152/Octopus/blob/cf98ecb75d1aa741c31292977ac9d83e727d366f/docs/plans/minimal-architecture-execution-20261020.md)。
 Standards、Spec 与 Vera 复核均无剩余确认发现。交付范围为本次代码提交，运行版本仍以发布验收为准。
 
 下面保留 2026-10-17 的普通入口发布验收，供历史追溯。

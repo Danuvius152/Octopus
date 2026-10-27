@@ -97,17 +97,16 @@ ApplicationManager evaluates that build's entrypoint and outcome
 status = ready (entrypoint exists)  |  failed (it doesn't)
 ```
 
-In the ticket20 worktree, `ApplicationManager` observes each original request
+`ApplicationManager` observes each original request
 completion through `SessionManager.on_request_complete`, including direct
 chat in the build session. An acknowledged business outcome triggers the
 existing entrypoint check: present means ready, absent means failed with the
 turn's error when available. A turn can fail after writing a usable app;
 the entrypoint rule still applies. An unavailable/unconfirmed outcome instead
 produces failed with an explicit reason. Failed result notification cannot
-leave the build permanently building. This revision's shared contract and
-acceptance boundary are in the
-[architecture execution plan](minimal-architecture-execution-20261020.md),
-section3.2; it is not a deployed-release claim.
+leave the build permanently building. The shared ownership and completion
+rules are in the [architecture contract](architecture-contract.md#输入完成与资源退休);
+deployment is verified separately.
 
 The broadcast subscriber only derives running progress from current execution.
 Per-session projection updates coordinate without holding that coordination
