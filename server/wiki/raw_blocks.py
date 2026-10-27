@@ -65,10 +65,13 @@ def coordinates(store, document, text, *, parsed=None):
     return current
 
 
-def project(document, text, part):
-    return {"id": str(part.index), "locator": f"{document['id']}:{document['revision']}:{part.index}:{part.digest}",
-            "content": text[part.start:part.end], "sha256": part.digest, "start": part.start, "end": part.end,
-            "characters": part.end - part.start, "title": part.title, "role": part.role}
+def project(document, text, part, *, include_content=True):
+    result = {"id": str(part.index), "locator": f"{document['id']}:{document['revision']}:{part.index}:{part.digest}",
+              "sha256": part.digest, "start": part.start, "end": part.end,
+              "characters": part.end - part.start, "title": part.title, "role": part.role}
+    if include_content:
+        result["content"] = text[part.start:part.end]
+    return result
 
 
 def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget_chars=None, offset=0, limit=None, start=None, tail=None, task=None):
@@ -120,7 +123,8 @@ def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget
         count = len(parts)
         if tail is not None:
             offset = max(0, count - tail)
-        selected = [project(document, text, part) for part in (parts[offset:offset + limit] if limit is not None else parts[offset:])]
+        selected = [project(document, text, part, include_content=view != "locators")
+                    for part in (parts[offset:offset + limit] if limit is not None else parts[offset:])]
         if task is not None or start is not None:
             from .model_response import fit_prefix, presentation
 
@@ -168,9 +172,7 @@ def read(curation, doc, *, view="full", ids=None, expected_revision=None, budget
         remaining, result = budget_chars, []
         for part in selected:
             item = dict(part)
-            if view == "locators":
-                item.pop("content")
-            else:
+            if view != "locators":
                 if remaining is not None and remaining < len(part["content"]):
                     break
                 if remaining is not None:

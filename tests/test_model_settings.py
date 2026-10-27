@@ -81,7 +81,8 @@ def test_unavailable_catalog_keeps_basic_controls(catalog_home, cache):
     assert read_model_settings().reasoning_efforts == ["low", "medium", "high", "xhigh"]
 
 
-def test_effort_reaches_new_resumed_and_oneshot_argv(catalog_home, tmp_path):
+def test_effort_reaches_new_resumed_and_oneshot_argv(catalog_home, tmp_path, monkeypatch):
+    monkeypatch.setattr("server.harness.run._which_with_fallback", lambda name: "/fake/bin/codex")
     harness = get_harness("codex")
     run = harness.create_run(RunConfig(model="model-a", reasoning_effort="high", mcp_servers=[]))
     for resume_id in (None, "existing-thread"):
@@ -93,7 +94,7 @@ def test_effort_reaches_new_resumed_and_oneshot_argv(catalog_home, tmp_path):
             assert argv[argv.index("resume") + 1] == resume_id
     ctx = OneShotContext(prompt="hello", reasoning_effort="low")
     argv, _ = harness.profile.build_oneshot_argv(ctx)
-    assert 'model_reasoning_effort="low"' in argv
+    assert argv[argv.index("--effort") + 1] == "low"
     inherited = harness.create_run(RunConfig(mcp_servers=[]))
     assert not any(a.startswith("model_reasoning_effort=") for a in inherited.build_argv("hi", str(tmp_path))[0])
     changed = harness.create_run(RunConfig(model="model-a", reasoning_effort="low", mcp_servers=[]))
@@ -101,7 +102,8 @@ def test_effort_reaches_new_resumed_and_oneshot_argv(catalog_home, tmp_path):
 
 
 @pytest.mark.parametrize("tier, rendered", [(None, "default"), ("default", "default"), ("fast", "fast")])
-def test_speed_reaches_new_resumed_and_oneshot_argv(catalog_home, tmp_path, tier, rendered):
+def test_speed_reaches_new_resumed_and_oneshot_argv(catalog_home, tmp_path, tier, rendered, monkeypatch):
+    monkeypatch.setattr("server.harness.run._which_with_fallback", lambda name: "/fake/bin/codex")
     harness = get_harness("codex")
     run = harness.create_run(RunConfig(service_tier=tier, mcp_servers=[]))
     flag = f'service_tier="{rendered}"'
@@ -112,7 +114,7 @@ def test_speed_reaches_new_resumed_and_oneshot_argv(catalog_home, tmp_path, tier
         if resume_id:
             assert argv.index(flag) < argv.index("resume")
     argv, _ = harness.profile.build_oneshot_argv(OneShotContext(prompt="hello", service_tier=tier))
-    assert flag in argv
+    assert argv[argv.index("--tier") + 1] == rendered
     other = harness.create_run(RunConfig(service_tier="default" if tier == "fast" else "fast", mcp_servers=[]))
     assert other.spawn_signature(str(tmp_path), None) != run.spawn_signature(str(tmp_path), None)
 

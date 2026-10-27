@@ -4,8 +4,8 @@ Everything Codex-specific as data + collaborators behind the `CODEX`
 `RuntimeProfile`: rendering a turn into a `codex exec --json` command (MCP
 servers as `-c mcp_servers.*` TOML overrides, developer_instructions, the
 exec-flags-before-`resume` ordering), normalizing its event stream, the
-one-shot call (D2: non-interactive `codex exec`, final agent message text
-extracted from the stream), and — wired in Phase 4 — the device-code login
+one-shot call (a model-only text worker using native Codex authentication),
+and — wired in Phase 4 — the device-code login
 driver. Codex has no transcript codec (handoff/pull unsupported).
 
 Ported faithfully from the former `backends/codex.py`. Shared per-turn
@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import sys
 import time
 import tomllib
 import uuid
@@ -778,45 +779,33 @@ class CodexEventParser(EventParser):
 
 
 def build_oneshot_argv(ctx: OneShotContext) -> tuple[list[str], dict[str, Any]]:
-    """Lean, non-interactive `codex exec --json` — no MCP, no developer
-    instructions, no connectors. The JSON stream's final agent_message is the
-    result (extracted by parse_oneshot_stdout)."""
-    argv = [
-        "codex",
-        "exec",
-        "--json",
-        "--dangerously-bypass-approvals-and-sandbox",
-        "--skip-git-repo-check",
-    ]
-    if ctx.working_dir:
-        argv += ["-C", ctx.working_dir]
-    if ctx.model:
-        argv += ["-m", ctx.model]
-    if ctx.reasoning_effort:
-        argv += ["-c", f"model_reasoning_effort={_toml_basic_string(ctx.reasoning_effort)}"]
-    argv += _service_tier_args(ctx.service_tier)
-    argv += ["--", ctx.prompt]
+    """A model-only worker, owned and retired by the common one-shot engine."""
+    from .run import _which_with_fallback, augmented_path
+
     env = os.environ.copy()
     _apply_home_dir(env, ctx.credential)
+    binary = _which_with_fallback("codex")
+    if binary is None:
+        raise FileNotFoundError("codex")
+    env["PATH"] = augmented_path(env.get("PATH"), os.path.dirname(binary))
+    home = env.get("CODEX_HOME") or str(Path.home() / ".codex")
+    argv = [sys.executable, "-I", str(Path(__file__).with_name("codex_text.py")),
+            "--home", home, "--codex", binary, "--tier", ctx.service_tier or "default"]
+    if ctx.model:
+        argv += ["--model", ctx.model]
+    if ctx.reasoning_effort:
+        argv += ["--effort", ctx.reasoning_effort]
+    argv += ["--", ctx.prompt]
     return argv, {"cwd": ctx.working_dir or os.getcwd(), "env": env}
 
 
 def parse_oneshot_stdout(stdout: str) -> str:
-    """Concatenate the agent_message text(s) from the codex event stream."""
-    texts: list[str] = []
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            obj = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if obj.get("type") == "item.completed":
-            item = obj.get("item")
-            if isinstance(item, dict) and item.get("type") == "agent_message" and item.get("text"):
-                texts.append(item["text"])
-    return "\n".join(texts)
+    """Only the model worker's completed text is eligible for consumption."""
+    try:
+        result = json.loads(stdout)
+    except ValueError:
+        return ""
+    return result.get("text", "") if isinstance(result, dict) and isinstance(result.get("text"), str) else ""
 
 
 # ------------------------------------------------------------------ fork (HISTORY_REPLAY)

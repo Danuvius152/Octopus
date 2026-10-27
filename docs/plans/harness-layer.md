@@ -262,8 +262,10 @@ non-interactive, tool-free model calls: it builds argv via
 `profile.build_oneshot_argv`, runs the subprocess, and extracts text via
 `profile.parse_oneshot_stdout`. Claude's profile renders today's `claude
 --print --output-format=json` (`schedule_ai.py:260–313` becomes the
-Claude profile's oneshot fns); Codex's renders `codex exec --json` and
-extracts the final `agent_message` text from the event stream (D2). It is
+Claude profile's oneshot fns); Codex's launches an isolated model-only text
+worker and consumes its completed-text envelope (D2). The worker's native
+authentication and capability boundary are owned by
+[the Codex contract](codex-backend.md#single-call-capability-verification-2026-10-27). It is
 the home for any future model-backed utility (memory summarization, etc.)
 so nothing ever shells out directly again.
 
@@ -390,8 +392,9 @@ since it's the wire contract serialized to `contracts.ts`.)
 
 ### D2 — Codex `oneshot`/`schedule_parse` — DECIDED: add now
 
-Codex gets `oneshot` (via non-interactive `codex exec --json`, text
-extracted from its event stream) and therefore `schedule_parse`. So
+Codex gets `oneshot` and therefore `schedule_parse`. Its original `exec --json`
+implementation was replaced by the model-only worker after actual capability
+probes found native tools still advertised. So
 natural-language `/schedule` works on Codex agents in this refactor.
 `run_oneshot` is a **lean** invocation (no MCP, no Octopus-tools blurb,
 no connectors) — distinct from a full turn run. The Codex credential
@@ -439,8 +442,8 @@ migration.
   `OAuthLoginManager`). Behavior byte-identical; existing Claude tests
   retargeted and green.
 - **Phase 3 — Codex profile.** `CODEX` profile: `build_turn_argv` +
-  `CodexEventParser` (ported from `codex.py`), oneshot fns (`codex exec
-  --json`, extract final `agent_message` — D2), `transcript_codec=None`,
+  `CodexEventParser` (ported from `codex.py`), oneshot fns (current model-only
+  text worker — D2), `transcript_codec=None`,
   device-code `LoginDriver` (wrapping `CodexLoginManager`) +
   `CODEX_HOME` resolution.
 - **Phase 4 — migrate callers** (§12): `session_manager`, routers,

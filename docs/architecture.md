@@ -219,6 +219,7 @@ The harness is the **only** place that talks to a model runtime. There is one
 | `events.py` | Backend-neutral `HarnessEvent` DTOs (`text`, `thinking`, `tool_use`, `tool_result`, `question_request`, `result`, `error`, `session_started`). |
 | `claude_code.py` | Claude profile — `claude --print --output-format=stream-json` argv, event normalization, JSONL transcript codec, `run_oneshot`. |
 | `codex.py` | Codex profile — `codex exec --json` argv (per-turn `-c` TOML overrides for MCP), event normalization, `run_oneshot`. Runs exactly once per turn. |
+| `codex_text.py` | Codex one-shot model-only worker: native authentication/configuration, subscription text HTTP with no tool dispatcher, completed-text result. The common Harness owns admission and process-group retirement; [capability contract](plans/codex-backend.md#single-call-capability-verification-2026-10-27). |
 | `registry.py` | `get_harness(backend)` / `available_backends()` (a kind appears only when its CLI resolves on PATH; `claude-code` is always listed). |
 | `login.py` | `LoginDriver` protocol for in-app credential login flows. |
 
@@ -575,9 +576,11 @@ reservation refuses deletion with 409 until that original operation finishes.
 - **One harness, profiles not subclasses.** All model interaction goes through a
   single `Harness` + `HarnessRun` engine parameterized by a `RuntimeProfile`
   value per backend. Adding a backend is a new profile, not a new class tree.
-- **CLIs, not an SDK.** Octopus spawns `claude --print` / `codex exec --json`
-  and parses their stream-JSON itself (`harness/run.py`), so there's no
-  `claude-code-sdk` dependency and behavior tracks the CLIs directly.
+- **Native CLI turns.** Octopus spawns `claude --print` / `codex exec --json`
+  and parses their stream-JSON itself (`harness/run.py`). Codex tool-free
+  one-shots use the dedicated text worker; native Codex still owns their
+  authentication and default configuration. There is no `claude-code-sdk`
+  dependency.
 - **Agent-centric data model.** Sessions and schedules hang off an agent; `SessionManager` reads agent config live each turn, so edits
   take effect on the next turn without restart.
 - **Single-port, same-origin.** API + SPA on one port; the client derives all

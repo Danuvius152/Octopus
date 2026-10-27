@@ -83,11 +83,10 @@ DSH 协议依据本机 npm 包 `@deepseek-ai/dsh@0.2.1-rc.2` 的 README、类型
   Codex renderer 没有消费这两个字段。DSH bridge 的强制 allow/deny 是新增合同，
   不能声称现有 Codex 已等价支持。Codex 不支持的策略应在配置边界明确提示/拒绝，
   或在实际 CLI 支持验证后接通；不能静默接受成“已限制”。不为统一工具名另造运行时。
-- **Oneshot：** `Harness.run_oneshot()` 注释称 tool-free，但 Codex renderer
-  使用 `--dangerously-bypass-approvals-and-sandbox`，没有显式关闭原生工具、宿主
-  MCP、skills 或项目规则。当前证据不足以保证零工具调用。双后端交付必须把 Codex
-  与 DSH 的 oneshot 实际限制都验收，不能把现状当安全模板，也不能仅改成 read-only
-  就称为 tool-free。
+- **Oneshot：** 原 Codex `exec` 路径未兑现 tool-free，已由 R1 替换为无执行
+  dispatcher 的纯文本 worker；当前边界及安装版本证据归
+  [Codex 合同](codex-backend.md#single-call-capability-verification-2026-10-27)。
+  DSH 的 oneshot 仍须独立验收，不能只把沙箱改成 read-only 就称为 tool-free。
 - **Research leaf：** Codex 当前启用 `read-only` 和 `web_search`，这不证明只剩
   web 工具；[leaf](../../server/research/leaf.py) 的 `mcp_servers=[]` 只证明本次
   Octopus 未装配 MCP，不证明 CLI 没有加载宿主配置。验收分别断言模型可见工具、

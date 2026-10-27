@@ -1,6 +1,7 @@
 """Same-revision raw pages preserve coordinates, authorization and read coverage."""
 
 import json
+from pathlib import Path
 from time import perf_counter
 
 import pytest
@@ -14,6 +15,42 @@ from tests.test_wiki_commonmark_locations import store as store
 from tests.test_wiki_read_response import client as client
 from tests.test_wiki_read_response import setup_note
 from tests.test_wiki_write_gates import active_worker
+
+
+def test_locator_page_does_not_copy_omitted_body_but_still_checks_current_bytes(store, monkeypatch):
+    from server.wiki import raw_blocks
+
+    text = "# Current\n\n" + "".join(f"## Topic {index}\n\n" + "Current evidence. " * 50 + "\n" for index in range(6))
+    path = store.root / "current.md"
+    path.write_text(text)
+    curation = WikiCuration(store)
+    current = curation.blocks("current.md", limit=1)
+    copied, byte_reads = [], []
+    snapshot, read_bytes = raw_blocks.snapshot, Path.read_bytes
+
+    class ObservedText(str):
+        def __getitem__(self, key):
+            result = super().__getitem__(key)
+            if isinstance(key, slice):
+                copied.append(len(result))
+            return result
+
+    def observed_snapshot(*args, **kwargs):
+        document, content = snapshot(*args, **kwargs)
+        return document, ObservedText(content)
+
+    def observed_bytes(file):
+        content = read_bytes(file)
+        if file == path:
+            byte_reads.append(len(content))
+        return content
+
+    monkeypatch.setattr(raw_blocks, "snapshot", observed_snapshot)
+    monkeypatch.setattr(Path, "read_bytes", observed_bytes)
+    result = curation.blocks(current["id"], view="locators", expected_revision=current["revision"], limit=100)
+    assert result["blocks"] and all("content" not in part for part in result["blocks"])
+    assert byte_reads == [len(text.encode())]
+    assert copied == [], "Locator-only navigation must not allocate discarded body slices"
 
 
 def page_measurements(store, monkeypatch, count):

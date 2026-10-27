@@ -57,12 +57,36 @@ anything still marked unverified.
 
 ### Single-call capability verification (2026-10-27)
 
-The intended `run_oneshot` contract is one non-interactive text call without
-tools. The current Codex `exec --json` path does not yet enforce that contract.
-Its consumers include schedule parsing, `/showme` reference resolution, and
-research decomposition/synthesis. They retain their current behavior pending a
-decision about the single-call execution interface; ordinary sessions are not
-part of that decision.
+`run_oneshot` performs one non-interactive text task without executable model
+tools. The Codex profile now launches `codex_text.py` with isolated Python
+(`-I`) under the common Harness, instead of starting `codex exec`. Schedule
+parsing, `/showme` reference resolution and research decomposition/synthesis
+keep their public interface; ordinary Codex turns still use the native CLI.
+
+The worker sends a subscription Responses request with `tools=[]`,
+`tool_choice="none"` and no dispatcher for tool execution. It does not load
+project instructions, skills, MCP, apps or plugins into the model request.
+Only a successful `response.completed` can publish text; incomplete, failed,
+tool-operation and truncated streams fail without publishing partial text.
+There is no fallback to the old executable-agent path or API-key billing.
+
+Native Codex remains the authentication authority. The installed 0.164.0
+app-server's `getAuthStatus(includeToken=true, refreshToken=false)` returns
+the selected ChatGPT bearer in memory, using native file/auto/keyring storage
+selection and login policy. The worker neither reads `auth.json` itself nor
+writes a token cache. This preserves the unbound host-default login as well as
+an explicitly bound application login. Account routing comes from the native
+token's account claim. On HTTP401, it rereads native current auth and requests
+native refresh only if the rejected login is still current, then retries the
+model request once. Other failures do not start a retry loop.
+
+Explicit model/effort values win; absent values use native `config/read` for
+the working directory, then `model/list` defaults if needed. Octopus normal
+speed remains `default`; `fast` maps to Responses `priority`. HTTP proxy
+environment variables remain inherited. Native control starts no model thread.
+Both it and the HTTP request belong to the common one-shot process group:
+spawn authorization precedes execution; cancellation/timeout must confirm group
+retirement, including native descendants, before reporting a clean stop.
 
 With installed Codex 0.164.0, an isolated loopback Responses probe still exposed
 tool definitions inside `input[].additional_tools` after all public feature
@@ -77,11 +101,31 @@ and installed protocol schema have not established a complete supported
 no-tools setting. No production configuration or saved agent fields were
 changed by these probes.
 
-R1 remains unaccepted until a supported capability restriction and real
-consumer/retirement checks pass. Disabling current consumers or changing their
-execution interface requires the explicit product choice described above;
-prompt prohibitions, read-only sandboxing and output filtering do not meet this
-contract.
+The later instruction to complete all remaining work authorized this one-shot
+interface replacement. Real isolated-home probes verified the native bearer
+and account route, hostile MCP/project/Python startup configuration, an induced
+file-write request, schedule parsing, `/showme`, a reasoning summary and the
+unbound host default. No startup/model marker was created and the selected
+auth file stayed unchanged. An initial probe had a wrong import; a second
+reached `/showme` without file-existence evidence and correctly asked for
+clarification. The corrected fixture supplied an existing, previously read
+file and completed all consumers. Those failures remain in the evidence.
+
+Hermetic coverage exercises the actual worker through Harness against loopback
+HTTP and a synthetic native keystore: bound/unbound logins without an auth file,
+admission denial,401/other HTTP failures, stream terminal states, timeout and
+native-descendant retirement. Missing native Codex is rejected before the worker
+starts and remains a public `not_found` error. Argument-rendering tests stub
+successful CLI discovery locally; with host discovery forced to find no Codex,
+all 39 tests in the profile, model-settings and worker-process modules passed,
+including the independent missing-binary regression.
+
+The live installation uses file storage; no OS
+keyring was provisioned for testing. The legacy auth operation and subscription
+wire protocol are verified for this installed version, not promised by the v2
+schema or across future CLI upgrades. A protocol incompatibility fails visibly;
+it cannot restore executable tools. Saved agents and production login/config
+were not changed, and this source change is not a deployment receipt.
 
 ## 2. Non-goals (v1)
 

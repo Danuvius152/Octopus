@@ -1,6 +1,6 @@
 """Phase 3: the CODEX profile is a faithful port of the legacy CodexBackend —
 turn argv (asserted *equal* to the old backend's build_args), event
-normalization — plus the new D2 one-shot (codex exec → final agent_message).
+normalization and the model-only one-shot transport.
 """
 
 from __future__ import annotations
@@ -140,7 +140,8 @@ def test_parser_command_execution():
 # --------------------------------------------------------------------------- #
 
 
-def test_oneshot_argv(tmp_path):
+def test_oneshot_argv(tmp_path, monkeypatch):
+    monkeypatch.setattr("server.harness.run._which_with_fallback", lambda name: "/fake/bin/codex")
     home = str(tmp_path / "h")
     argv, kw = build_oneshot_argv(
         OneShotContext(
@@ -149,20 +150,18 @@ def test_oneshot_argv(tmp_path):
             working_dir=str(tmp_path),
         )
     )
-    assert argv[:3] == ["codex", "exec", "--json"]
-    assert "-C" in argv and argv[argv.index("-C") + 1] == str(tmp_path)
-    assert argv[argv.index("-m") + 1] == "gpt-5.5"
+    assert argv[1] == "-I" and Path(argv[2]).name == "codex_text.py"
+    assert "exec" not in argv and "--dangerously-bypass-approvals-and-sandbox" not in argv
+    assert kw["cwd"] == str(tmp_path)
+    assert argv[argv.index("--home") + 1] == home
+    assert argv[argv.index("--codex") + 1] == "/fake/bin/codex"
+    assert argv[argv.index("--model") + 1] == "gpt-5.5"
     assert argv[-2:] == ["--", "parse this"]
-    assert 'service_tier="default"' in argv
+    assert argv[argv.index("--tier") + 1] == "default"
     assert kw["env"]["CODEX_HOME"] == home
 
 
-def test_oneshot_extracts_agent_message():
-    stream = "\n".join([
-        json.dumps({"type": "thread.started", "thread_id": "t"}),
-        json.dumps({"type": "item.completed", "item": {"type": "reasoning", "text": "thinking"}}),
-        json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": '{"name":"x"}'}}),
-        json.dumps({"type": "turn.completed", "usage": {}}),
-    ])
-    assert parse_oneshot_stdout(stream) == '{"name":"x"}'
+def test_oneshot_extracts_only_the_completed_text_envelope():
+    assert parse_oneshot_stdout(json.dumps({"text": '{"name":"x"}'})) == '{"name":"x"}'
     assert parse_oneshot_stdout("garbage\n{not json") == ""  # nothing extractable
+    assert parse_oneshot_stdout('{"type":"item.completed","item":{"type":"agent_message","text":"partial"}}') == ""

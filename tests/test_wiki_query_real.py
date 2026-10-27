@@ -178,6 +178,18 @@ async def evaluate(query_probe, question, request):
 @pytest.mark.parametrize("question", ["介绍我的背景", "我的职业是什么"])
 async def test_codex_personal_facts_use_current_me_directory_without_guessing(query_probe, question, request):
     await evaluate(query_probe, question, request)
+    assert_personal_read_workflow(query_probe)
+
+
+def assert_personal_read_workflow(probe):
+    """Read every current personal note, batching without repeated passages."""
+    expected = {path.relative_to(probe.root).as_posix(): len(path.read_text())
+                for path in (probe.root / "Library/Me").glob("*.md")}
+    reads = probe.reads()
+    assert {path for path, _, _ in reads} == set(expected), "Personal facts require the current directory's evidence"
+    assert all(start == 0 and end == expected[path] for path, start, end in reads), "Short notes must be completely read"
+    assert len(reads) == len(set(reads)), "The same personal passage was delivered repeatedly"
+    assert any(operation == "read-many" for operation, _ in probe.responses), "Short personal notes should use the existing batch reader"
 
 
 async def test_codex_knowledge_question_with_my_still_searches_the_term(query_probe, request):
