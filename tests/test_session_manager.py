@@ -792,24 +792,25 @@ async def test_resolve_credential_marks_needs_reconnect_on_refresh_failure(
     )
 
     async def fake_refresh(refresh_token):
-        # The provider raises RuntimeError(...) on a 400 from the token endpoint
-        raise RuntimeError(
-            "refresh endpoint returned 400: invalid_grant — refresh token expired"
+        from server.oauth_errors import OAuthRefreshError, RefreshErrorCode
+
+        raise OAuthRefreshError(
+            "refresh endpoint returned 400: invalid_grant",
+            RefreshErrorCode.refresh_token_invalidated, reconnect=True,
         )
 
     provider = op.get_provider("claude-code")
     monkeypatch.setattr(provider, "refresh_access_token", fake_refresh)
 
     session = await _new(manager,"S-dead", credential_id="c-dead")
-    from server.credential_bindings import CredentialBindingError
     from server.harness import get_harness
 
-    with pytest.raises(CredentialBindingError, match="could not be resolved"):
+    with pytest.raises(ValueError, match="Reconnect"):
         await manager._resolve_credential(session, None, get_harness("claude-code"))
 
     row = await manager.db.get_credential("c-dead")
     assert row.get("needs_reconnect") is True
-    assert row.get("last_refresh_error_code") == "refresh_token_expired"
+    assert row.get("last_refresh_error_code") == "refresh_token_invalidated"
 
     # A subsequent resolve rejects the revoked credential before retrying refresh.
     with pytest.raises(ValueError, match="Reconnect"):

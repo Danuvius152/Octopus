@@ -1,13 +1,8 @@
-"""Resolving the credential a turn runs under, and refreshing it when it is near expiry.
-
-One slice of `SessionManager`, which was a single 4,017-line class with 84
-methods (docs/plans/polish-2026-09.md §3 A1). Split by responsibility; the
-methods are unchanged and still reached through one `session_manager` object,
-so no call site moved.
-"""
+"""Resolve owned credentials; shared refresh work outlives individual waiters."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
@@ -18,7 +13,7 @@ from ..credential_bindings import CredentialBindingError, validate_credential_bi
 from ..crypto import decrypt, encrypt
 from ..harness import HarnessCredential, get_harness
 from ..models import CredentialStatus
-from ..oauth_errors import RefreshErrorCode
+from ..oauth_errors import OAuthRefreshError, RefreshErrorCode
 from ..oauth_providers import OAuthTokenSet, get_provider
 from ..users import UserManager
 from .base import (
@@ -85,17 +80,43 @@ class CredentialsMixin(SessionManagerBase):
             # locate, so artifact copy/cleanup needs no credential.
             return None
 
-        secret_key = await UserManager(self.db).data_key_for(user_id)
-        row = await self.db.get_credential(cred_id, user_id)
-        if row is None or row.get("user_id") != user_id:
-            raise CredentialBindingError("Credential not found")
-        resolved = await self._resolve_secret_credential(cred_id, row, secret_key)
+        if self._credential_refresh_closed:
+            raise CredentialBindingError("Credential resolution is closing")
+        identity = (user_id, cred_id)
+        operation = self._credential_refreshes.get(identity)
+        if operation is None:
+            operation = asyncio.create_task(self._resolve_owned_secret(cred_id, backend, user_id))
+            self._credential_refreshes[identity] = operation
+
+            def finished(task):
+                if self._credential_refreshes.get(identity) is task:
+                    del self._credential_refreshes[identity]
+                # All waiters may have cancelled; the owner still observes failure.
+                if not task.cancelled():
+                    task.exception()
+
+            operation.add_done_callback(finished)
+        resolved = await asyncio.shield(operation)
         if resolved is None:
             raise CredentialBindingError("Credential could not be resolved. Reconnect it before sending new work.")
+        await self.db.require_run_authority(user_id, cred_id, backend)
         return resolved
 
+    async def drain_credential_refreshes(self) -> None:
+        self._credential_refresh_closed = True
+        while self._credential_refreshes:
+            await asyncio.shield(asyncio.gather(*tuple(self._credential_refreshes.values()), return_exceptions=True))
+
+    async def _resolve_owned_secret(self, cred_id, backend, user_id):
+        secret_key = await UserManager(self.db).data_key_for(user_id)
+        await self.db.require_run_authority(user_id, cred_id, backend)
+        row = await self.db.get_credential(cred_id, user_id)
+        if row is None or row["user_id"] != user_id or row["backend"] != backend:
+            raise CredentialBindingError("Credential not found")
+        return await self._resolve_secret_credential(cred_id, row, secret_key)
+
     async def _resolve_secret_credential(
-        self, cred_id: str, row: dict[str, Any], secret_key: str,
+        self, cred_id: str, row: dict[str, Any], secret_key: str, *, refresh: bool = True,
     ) -> HarnessCredential | None:
         """Read and refresh with the caller's captured account DEK."""
         if row.get("needs_reconnect"):
@@ -118,18 +139,13 @@ class CredentialsMixin(SessionManagerBase):
         # JSON blob, not a bare key. Refresh if close to expiry, then use
         # the access_token as the runtime secret.
         if row["auth_type"] == "oauth" and plaintext.startswith("{"):
-            access_token = await self._refresh_oauth_if_needed(
+            return await self._refresh_oauth_if_needed(
                 credential_id=cred_id,
                 backend=row["backend"],
                 bundle_json=plaintext,
                 secret_key=secret_key,
-            )
-            if access_token is None:
-                return None
-            return HarnessCredential(
-                backend=row["backend"],
-                auth_type="oauth",
-                secret=access_token,
+                captured=row,
+                refresh=refresh,
             )
 
         # Either auth_type=api_key OR legacy auth_type=oauth where the
@@ -148,18 +164,10 @@ class CredentialsMixin(SessionManagerBase):
         backend: str,
         bundle_json: str,
         secret_key: str,
-    ) -> str | None:
-        """Return a usable access_token for an OAuth-bundle credential.
-
-        Parses the stored bundle. If the access_token is still fresh,
-        returns it as-is. Otherwise hits the provider's refresh endpoint,
-        persists the new bundle (DB write), and returns the new
-        access_token.
-
-        On unrecoverable refresh failure (refresh_token expired/reused/etc),
-        marks the credential needs_reconnect with the right error code so
-        the frontend can prompt re-login, and returns None.
-        """
+        captured: dict[str, Any],
+        refresh: bool,
+    ) -> HarnessCredential | None:
+        """Refresh once, conditionally commit, then resolve the current authority."""
         try:
             bundle = json.loads(bundle_json)
         except json.JSONDecodeError:
@@ -169,6 +177,8 @@ class CredentialsMixin(SessionManagerBase):
             )
             return None
 
+        if not isinstance(bundle, dict):
+            return None
         access_token = bundle.get("access_token")
         refresh_token = bundle.get("refresh_token")
         expires_at_epoch = bundle.get("expires_at_epoch", 0)
@@ -179,68 +189,50 @@ class CredentialsMixin(SessionManagerBase):
             )
             return None
 
+        minimum_lifetime = self._OAUTH_REFRESH_LEEWAY_SEC if refresh else 0
         if (
             isinstance(expires_at_epoch, (int, float))
-            and expires_at_epoch - time.time() > self._OAUTH_REFRESH_LEEWAY_SEC
+            and expires_at_epoch - time.time() > minimum_lifetime
         ):
-            return access_token
+            return HarnessCredential(backend=backend, auth_type="oauth", secret=access_token)
 
+        if not refresh:
+            raise CredentialBindingError("Credential changed during refresh; try the current credential again.")
+
+        failure: Exception | None = None
+        fields: dict[str, Any] = {}
         if not isinstance(refresh_token, str) or not refresh_token:
-            # Can't refresh — mark needs_reconnect so the user knows.
-            await self._mark_needs_reconnect(
-                credential_id, RefreshErrorCode.refresh_token_other
-            )
-            return None
-
-        try:
-            provider = get_provider(backend)
-        except KeyError:
-            logger.warning(
-                "Credential %s: unknown backend %r, can't refresh",
-                credential_id,
-                backend,
-            )
-            return None
-
-        try:
-            new_ts: OAuthTokenSet = await provider.refresh_access_token(refresh_token)
-        except RuntimeError as e:
-            code = self._classify_refresh_error(str(e))
-            logger.warning(
-                "Credential %s: refresh failed (%s): %s", credential_id, code.value, e
-            )
-            await self._mark_needs_reconnect(credential_id, code)
-            return None
-        except Exception:
-            logger.exception(
-                "Credential %s: unexpected refresh error", credential_id
-            )
-            await self._mark_needs_reconnect(
-                credential_id, RefreshErrorCode.unknown
-            )
-            return None
-
-        new_bundle = {
-            "access_token": new_ts.access_token,
-            "refresh_token": new_ts.refresh_token,
-            "expires_at_epoch": new_ts.expires_at_epoch,
-            "scopes": list(new_ts.scopes),
-            "token_type": new_ts.token_type,
-        }
-        secret_encrypted = encrypt(
-            json.dumps(new_bundle, separators=(",", ":")), secret_key
-        )
-        token_expires_at = datetime.fromtimestamp(
-            new_ts.expires_at_epoch, tz=UTC
-        ).isoformat()
-        await self.db.update_credential(
-            credential_id,
-            secret_encrypted=secret_encrypted,
-            token_expires_at=token_expires_at,
-            needs_reconnect=False,
-            last_refresh_error_code=None,
-        )
-        return new_ts.access_token
+            failure = OAuthRefreshError("OAuth bundle has no refresh token", RefreshErrorCode.refresh_token_other, reconnect=True)
+        else:
+            try:
+                provider = get_provider(backend)
+                new_ts: OAuthTokenSet = await provider.refresh_access_token(refresh_token)
+            except Exception as error:
+                failure = error
+                logger.exception("Credential %s: OAuth refresh failed", credential_id)
+            else:
+                new_bundle = {
+                    "access_token": new_ts.access_token, "refresh_token": new_ts.refresh_token,
+                    "expires_at_epoch": new_ts.expires_at_epoch, "scopes": list(new_ts.scopes),
+                    "token_type": new_ts.token_type,
+                }
+                fields = {
+                    "secret_encrypted": encrypt(json.dumps(new_bundle, separators=(",", ":")), secret_key),
+                    "token_expires_at": datetime.fromtimestamp(new_ts.expires_at_epoch, tz=UTC).isoformat(),
+                    "needs_reconnect": False, "last_refresh_error_code": None,
+                }
+        if isinstance(failure, OAuthRefreshError) and failure.reconnect:
+            fields = {"status": CredentialStatus.needs_reconnect.value, "needs_reconnect": True,
+                      "last_refresh_error_code": failure.code.value}
+        committed = await self.db.commit_credential_refresh(captured, **fields)
+        # This also validates a replacement after a late provider success/failure.
+        await self.db.require_run_authority(captured["user_id"], credential_id, backend)
+        if failure is not None and committed:
+            raise CredentialBindingError("Credential refresh failed; try again later.") from failure
+        current = await self.db.get_credential(credential_id, captured["user_id"])
+        if current is None or current["user_id"] != captured["user_id"]:
+            raise CredentialBindingError("Credential not found")
+        return await self._resolve_secret_credential(credential_id, current, secret_key, refresh=False)
 
     async def _mark_needs_reconnect(
         self, credential_id: str, code: RefreshErrorCode
@@ -253,22 +245,3 @@ class CredentialsMixin(SessionManagerBase):
             needs_reconnect=True,
             last_refresh_error_code=code.value,
         )
-
-    @staticmethod
-    def _classify_refresh_error(msg: str) -> RefreshErrorCode:
-        lower = msg.lower()
-        if "expired" in lower:
-            return RefreshErrorCode.refresh_token_expired
-        if "reused" in lower or "already used" in lower:
-            return RefreshErrorCode.refresh_token_reused
-        if "invalid_grant" in lower or "invalidated" in lower or "revoked" in lower:
-            return RefreshErrorCode.refresh_token_invalidated
-        if (
-            "network" in lower
-            or "timeout" in lower
-            or "connection" in lower
-        ):
-            return RefreshErrorCode.network_error
-        if "refresh endpoint returned" in lower:
-            return RefreshErrorCode.refresh_token_other
-        return RefreshErrorCode.unknown

@@ -342,16 +342,17 @@ def test_graph_and_history(tmp_path, cost_probe, links):
 
 
 @pytest.mark.parametrize("accounts", [4, 40])
-def test_registry_cache_pressure(tmp_path, monkeypatch, cost_probe, accounts):
+def test_registered_vault_store_retention(tmp_path, monkeypatch, cost_probe, accounts):
     monkeypatch.setattr(settings, "wiki_dir", str(tmp_path / "state"))
     owners = [str(uuid.uuid4()) for _ in range(accounts)]
-    roots = []
+    roots, stores = [], []
     for number, owner in enumerate(owners):
         root = tmp_path / f"vault-{number}"
         root.mkdir()
         (root / "note.md").write_text(f"# Account {number}\nowned evidence\n")
         registry.configure(owner, root, "curator")
         roots.append(root)
+        stores.append(registry.store(owner))
 
     def cycle():
         return [registry.store(owner).read("note.md", length=30)["content"] for owner in owners]
@@ -359,8 +360,10 @@ def test_registry_cache_pressure(tmp_path, monkeypatch, cost_probe, accounts):
     cycle()
     cost_probe.measure("account_round_robin", cycle,
                        lambda rows: require(all(row.startswith(f"# Account {number}\n") for number, row in enumerate(rows))),
-                       roots=roots, dimensions={"active_vaults": accounts, "cache_capacity": 32}, repeat=3)
-    assert len(registry._stores) <= 32
+                       roots=roots, dimensions={"active_vaults": accounts, "retention": "one_store_per_registered_vault"}, repeat=3)
+    assert len(registry._stores) == accounts
+    assert all(registry.store(owner) is store for owner, store in zip(owners, stores, strict=True))
+    assert all(not store._retired and not store._events_released for store in stores)
 
 
 async def test_http_views_worker_reads_and_concurrency(client, tmp_path, cost_probe):

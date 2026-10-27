@@ -255,6 +255,61 @@ async def test_concurrent_cross_key_same_material_creates_and_organizes_once(job
             jobs.maintain(key, raw + "different", "organize", [], path, [], "human")
 
 
+@pytest.mark.parametrize("status", ["queued", "running", "interrupted"])
+@pytest.mark.parametrize("changed", ["scope", "sources", "location"])
+async def test_pending_material_rejects_new_intent_without_accepting_alias(jobs, client, status, changed):
+    WikiHistory(jobs.store).write("Library/source.md", b"# Evidence\nfirst\nsecond\n", None, "human", "create")
+    source = jobs.store.read("Library/source.md")
+    refs = [{"doc": source["id"], "revision": source["revision"], "location": "L1-L2"}]
+    original = jobs.maintain("first", "# New material\n", "organize", [], "Library/new.md", refs, "human")
+    jobs.update(original["id"], status=status)
+    original = jobs.get(original["id"])
+    response = await client.post("/api/wiki/maintain", json={
+        "idempotency_key": "second", "material": "# New material\n",
+        "scope": "summarize" if changed == "scope" else "organize",
+        "sources": [] if changed == "sources" else [refs[0] | {"location": "L3" if changed == "location" else "L1-L2"}],
+        "target": "Library/other.md",
+    })
+    assert response.status_code == 409, response.text
+    assert response.json()["code"] == "maintenance_intent_conflict"
+    assert response.json()["existing_job"]["id"] == original["id"]
+    assert response.json()["existing_job"]["status"] == status
+    assert jobs.get(original["id"])["payload"] == original["payload"]
+    assert len(jobs.list()["items"]) == 1
+    with jobs.store.connect() as db:
+        assert db.execute("SELECT count(*) FROM job_requests WHERE request_key='second'").fetchone()[0] == 0
+    assert not jobs.store.path("Library/new.md").exists()
+    assert not jobs.store.path("Library/other.md").exists()
+    # A rejected key remains available for a request matching the original intent.
+    alias = jobs.maintain("second", "# New material\n", "organize", [], "Library/other.md", refs, "human")
+    assert alias["id"] == original["id"]
+
+
+async def test_same_intent_reuses_pending_material_after_source_rename(jobs, client):
+    WikiHistory(jobs.store).write("Library/source.md", b"# Evidence\nOriginal words\n", None, "human", "create")
+    source = jobs.store.read("Library/source.md")
+    refs = [{"doc": source["id"], "revision": source["revision"], "location": "L1-L2"}]
+    original = jobs.maintain("first", "# New material\n", "organize", [], "Library/new.md", refs, "human")
+    jobs.store.path("Library/source.md").rename(jobs.store.path("Library/renamed.md"))
+    moved = jobs.store.read("Library/renamed.md")
+    assert (moved["id"], moved["revision"]) == (source["id"], source["revision"])
+    response = await client.post("/api/wiki/maintain", json={
+        "idempotency_key": "second", "material": "# New material\n", "scope": "organize",
+        "sources": [{"doc": "Library/renamed.md", "revision": source["revision"], "location": "L1-L2"}],
+        "target": "Library/other.md",
+    })
+    assert response.status_code == 200, response.text
+    assert response.json()["id"] == original["id"]
+    assert jobs.get(original["id"])["payload"] == original["payload"]
+    assert len(jobs.list()["items"]) == 1
+    with jobs.store.connect() as db:
+        assert db.execute("SELECT job_id FROM job_requests WHERE request_key='second'").fetchone()[0] == original["id"]
+    curator = Curator(jobs, sources=refs)
+    assert (await process(jobs, original, curator))["status"] == "completed"
+    assert curator.turns == 1
+    assert not jobs.store.path("Library/other.md").exists()
+
+
 async def test_existing_organized_original_is_reused_without_new_write_or_model(jobs):
     raw = "# 现有原文\n核心观点逐字保留。\n"
     history = WikiHistory(jobs.store)

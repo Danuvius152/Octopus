@@ -1,5 +1,6 @@
 """Current evidence batches with shared content ranges and truthful receipts."""
 
+from .line_coordinates import LineCoordinates
 from .store import WikiError, is_maintainable_text
 
 
@@ -95,9 +96,10 @@ def read_many(store, requests, budget_chars, task=None, view="full", *, reuse_de
         ranges = []
         for identifier, selected in intervals.items():
             document, text = cache[identifier]
+            lines = LineCoordinates(text)
             for start, end in selected:
                 range_id = f"{identifier}:{document['revision']}:{start}:{end}"
-                ranges.append({"id": range_id, "doc": identifier, "revision": document["revision"], "start": start, "end": end, "content": text[start:end], "line_start": text[:start].count("\n") + 1, "line_end": text[:end].count("\n") + 1})
+                ranges.append({"id": range_id, "doc": identifier, "revision": document["revision"], "start": start, "end": end, "content": text[start:end], "line_start": lines.line(start), "line_end": lines.line(end)})
                 for item in items:
                     if item.get("id") == identifier and item["status"] in {"ok", "partial"} and start <= item["start"] <= item["end"] <= end:
                         item["range_id"] = range_id

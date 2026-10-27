@@ -109,7 +109,12 @@ class WikiJobs:
             + [item["current_path"] for item in grant.get("selected_documents", ()) if item.get("current_path")]
         ))
 
-    def replay(self, key, request, *, task=None, mcp_scope=None, requester=None, alias_job=None):
+    @staticmethod
+    def source_intent(sources):
+        """Validated sources have stable IDs; their current paths are presentation."""
+        return [(source["doc"], source["revision"], source["location"]) for source in sources]
+
+    def replay(self, key, request, *, task=None, mcp_scope=None, requester=None, alias_job=None, alias_sources=None):
         """Even an idempotent return admits its subscriber in the final writer TX."""
         with registry._account_lock(self.user_id), registry.registration_lock(self.user_id), self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
@@ -125,6 +130,14 @@ class WikiJobs:
             if previous is not None:
                 tasks.require_submission(task, request, self.store, db, mcp_scope, self.registration,
                                          actual_paths=self.effect_paths(db, previous))
+            if new_alias and previous["status"] in {"queued", "running", "interrupted"}:
+                payload = previous["payload"]
+                if (payload["scope"] != request["scope"]
+                        or self.source_intent(payload["sources"]) != self.source_intent(alias_sources)):
+                    raise WikiError(
+                        "The existing material has a pending job with different maintenance intent; inspect it before submitting article maintenance",
+                        409, response={"code": "maintenance_intent_conflict", "existing_job": self.summary(previous)},
+                    )
             if new_alias:
                 db.execute("INSERT INTO job_requests VALUES(?,?,?)", (key, self.request_hash(request), alias_job))
             if previous is not None:
@@ -440,7 +453,7 @@ class WikiJobs:
                 )
                 if eligible and pending_payload.get("material") == material and pending_payload.get("creation") == creation:
                     return self.replay(key, request, task=task, mcp_scope=mcp_scope,
-                                       requester=requester, alias_job=job["id"])
+                                       requester=requester, alias_job=job["id"], alias_sources=refs)
             reused = materials.find(self.store, material.encode(), markdown_only=True)
             if reused and creation is None:
                 result = self.enqueue(key, payload, [{

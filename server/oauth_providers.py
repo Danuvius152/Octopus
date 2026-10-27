@@ -21,6 +21,7 @@ OAuthTokenSet directly. See `oauth_errors.ScopeMissingError`.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from dataclasses import dataclass, field
 from typing import Protocol
@@ -28,7 +29,7 @@ from urllib.parse import urlencode
 
 import httpx
 
-from .oauth_errors import ScopeMissingError
+from .oauth_errors import OAuthRefreshError, RefreshErrorCode, ScopeMissingError
 
 
 @dataclass
@@ -190,11 +191,23 @@ class ClaudeCodeProvider:
             "refresh_token": refresh_token,
             "client_id": self.CLIENT_ID,
         }
-        async with httpx.AsyncClient(timeout=self.REFRESH_TIMEOUT) as client:
-            resp = await client.post(self.TOKEN_URL, json=payload)
+        try:
+            async with asyncio.timeout(self.REFRESH_TIMEOUT):
+                async with httpx.AsyncClient(timeout=self.REFRESH_TIMEOUT) as client:
+                    resp = await client.post(self.TOKEN_URL, json=payload)
+        except (httpx.RequestError, TimeoutError) as error:
+            raise OAuthRefreshError("OAuth refresh transport failed", RefreshErrorCode.network_error) from error
         if resp.status_code != 200:
-            raise RuntimeError(
-                f"refresh endpoint returned {resp.status_code}: {resp.text[:300]}"
+            try:
+                error_body = resp.json()
+            except ValueError:
+                error_body = {}
+            rejected = (resp.status_code in {400, 401} and isinstance(error_body, dict)
+                        and error_body.get("error") == "invalid_grant")
+            raise OAuthRefreshError(
+                f"refresh endpoint returned {resp.status_code}: {resp.text[:300]}",
+                RefreshErrorCode.refresh_token_invalidated if rejected else RefreshErrorCode.unknown,
+                reconnect=rejected,
             )
         body = resp.json()
         # Some OAuth servers omit `refresh_token` on a refresh response when

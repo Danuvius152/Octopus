@@ -34,6 +34,39 @@ credential, surface it (chat error + sidebar badge), and let the user
 re-authorize **in place** (same credential id, so all agent/session
 bindings survive) which clears the flag.
 
+### Proactive refresh ownership
+
+Secret-backed OAuth bundles share one in-flight resolution per account and
+credential in the SessionManager. Different credentials progress independently.
+Cancelling a waiter leaves the provider operation and its database write owned
+by the manager; database shutdown closes resolution admission and joins these
+operations before retiring the connection. The provider has one bounded HTTP
+request (20 seconds total, including a slow streaming response); subsequent
+calls, rather than an added retry loop, retry temporary failures. The five-minute
+refresh leeway triggers renewal at entry, while resolution after a provider
+result accepts any currently valid token, including a shorter-lived renewal.
+
+The database commits a refresh only while the captured account, backend,
+authentication type, ciphertext and active execution authority still match.
+Reauthorization and key updates replace the ciphertext, so late success or
+failure cannot overwrite the new secret; deletion, revocation, account disable
+and ownership changes also reject the old result. A rejected write resolves the
+current authorized state, or reports that it is unavailable. It never returns
+the old provider result as a new authorization.
+
+The provider reports structured `OAuthRefreshError` classifications. A 400/401
+OAuth `invalid_grant` requires reconnect; a missing refresh token also cannot
+refresh. Network errors, timeouts, 5xx, other HTTP failures and unknown exceptions
+fail the current call with their exception context while retaining retryable
+credential state. Error text does not decide persistent invalidation. Directory
+credentials and the reactive CLI rejection path retain their separate contracts.
+
+Regression evidence (2026-10-27): the resolver, provider and reauthorization
+modules passed 179 hermetic cases with temporary SQLite and controlled HTTP,
+including shared refresh, independent progress, late results, cancelled waiters,
+short-lived renewals and total deadlines under slow streaming responses.
+This does not establish a live Claude result.
+
 ## 3. Detection lives behind the harness contract
 
 Per the harness-layer rule (no `if backend ==` outside `server/harness/`),
@@ -157,5 +190,5 @@ sign-in flow itself and must run while logged out.
 
 - No automatic *retry* of the failed turn after re-auth — the user re-runs
   their prompt. (Connectors don't auto-retry either.)
-- No change to the proactive OAuth-refresh path; this is purely the
-  reactive complement.
+- Reactive detection complements the proactive refresh contract above; it does
+  not add refresh retries or change directory-based login.

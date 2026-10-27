@@ -39,6 +39,15 @@ class RefreshErrorCode(str, Enum):
 REFRESH_ERROR_CODES: tuple[str, ...] = tuple(c.value for c in RefreshErrorCode)
 
 
+class OAuthRefreshError(RuntimeError):
+    """Provider classification; only explicit token rejection is permanent."""
+
+    def __init__(self, message: str, code: RefreshErrorCode, *, reconnect: bool = False):
+        super().__init__(message)
+        self.code = code
+        self.reconnect = reconnect
+
+
 class ScopeMissingError(RuntimeError):
     """OAuth token lacks the scope needed for the requested action.
 

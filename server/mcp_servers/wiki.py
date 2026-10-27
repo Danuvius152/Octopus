@@ -58,7 +58,7 @@ def call(method: str, path: str, *, params=None, body=None) -> dict:
     result = response.json()
     if response.is_error:
         return {"error": result.get("detail", result), "status": response.status_code,
-                **{key: result[key] for key in ("code", "hint", "response_limit_bytes") if key in result}}
+                **{key: result[key] for key in ("code", "hint", "response_limit_bytes", "existing_job") if key in result}}
     return result
 
 

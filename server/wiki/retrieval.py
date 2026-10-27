@@ -7,6 +7,7 @@ from contextlib import nullcontext
 
 from . import search_index
 from .formats import MARKDOWN_QUERY_CONTRACT, MARKDOWN_SQL
+from .line_coordinates import LineCoordinates
 from .read_response import compact_index
 from .store import WikiError
 
@@ -112,7 +113,7 @@ def search(store, query, limit, offset, kind, include_assets, directory, intent,
                     sections = [search_index.public_section(part) for part in hit["sections"]]
                 else:
                     snippet, position = row["text"][:400], 0
-                    sections = [{"title": row["title"], "start": 0, "end": len(row["text"]), "line_start": 1, "line_end": row["text"].count("\n") + 1}]
+                    sections = [{"title": row["title"], "start": 0, "end": len(row["text"]), "line_start": 1, "line_end": LineCoordinates(row["text"]).line(len(row["text"]))}]
                 items.append(store.navigation(row, db=db) | {"snippet": snippet, "snippet_start": position, "score": -hit["cost"] if hit else 0.0, "section": sections[0], "sections": sections})
         state = store._index_state(db)
     next_offset = offset + limit if offset + limit < total else None

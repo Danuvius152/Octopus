@@ -149,6 +149,18 @@ class CredentialsMixin(DatabaseBase):
         async with self.transaction(write=True) as tx:
             return await self._update_credential(tx, credential_id, **fields)
 
+    async def commit_credential_refresh(self, captured: dict[str, Any], **fields: Any) -> bool:
+        """A provider result may only change the still-authorized secret it used."""
+        async with self.transaction(write=True) as tx:
+            current = await self._get_credential(tx, captured["id"], captured["user_id"])
+            identity = ("id", "user_id", "backend", "auth_type", "secret_encrypted", "status", "needs_reconnect")
+            if (current is None or any(current[key] != captured[key] for key in identity)
+                    or current["status"] != "active" or current["needs_reconnect"]
+                    or not await owner_is_available(tx, captured["user_id"])):
+                return False
+            await self._update_credential(tx, captured["id"], **fields)
+            return True
+
     async def _update_credential(self, tx: Transaction, credential_id: str, **fields: Any) -> None:
         meta_allowed = {
             "label",

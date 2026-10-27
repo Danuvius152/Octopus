@@ -40,9 +40,10 @@ if TYPE_CHECKING:
 
 
 class WikiError(Exception):
-    def __init__(self, message: str, status: int = 400) -> None:
+    def __init__(self, message: str, status: int = 400, *, response: dict | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.response = response or {}
 
 
 @dataclass(eq=False)
@@ -990,8 +991,9 @@ class WikiStore:
             relation = " FROM documents d LEFT JOIN managed_notes m ON m.path=d.path"
             predicate = " WHERE " + " AND ".join(filters) if filters else ""
             total = db.execute("SELECT count(*)" + relation + predicate, arguments).fetchone()[0]
+            columns = "d.id,d.path,d.title,d.revision,d.metadata" if view == "compact" else "d.*"
             rows = db.execute(
-                "SELECT d.*,m.metadata AS managed_metadata" + relation + predicate + " ORDER BY d.title,d.path LIMIT ? OFFSET ?",
+                "SELECT " + columns + ",m.metadata AS managed_metadata" + relation + predicate + " ORDER BY d.title,d.path LIMIT ? OFFSET ?",
                 [*arguments, limit, offset],
             ).fetchall()
             items = [compact(self, row) if view == "compact" else self.navigation(row, db=db) for row in rows]
@@ -1084,14 +1086,17 @@ class WikiStore:
             else:
                 start = min(start, page_end)
                 end = min(page_end, start + length)
+            from .line_coordinates import LineCoordinates
+
+            lines = LineCoordinates(text)
             return self.public(row, raw=raw, db=db) | {
                 "content": text[start:end],
                 "page": page,
                 "start": start - page_offset,
                 "end": end - page_offset,
                 "next_start": end - page_offset if end < page_end else None,
-                "line_start": text[:start].count("\n") + 1,
-                "line_end": text[:end].count("\n") + 1,
+                "line_start": lines.line(start),
+                "line_end": lines.line(end),
                 "freshness": "live", **self._index_state(db=db),
                 **({"source_location": location} if location is not None else {}),
             }, raw

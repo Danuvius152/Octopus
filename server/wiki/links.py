@@ -43,7 +43,9 @@ def source_span(text: str, location: str, *, parsed: format.DocumentFormat | Non
     lines = re.fullmatch(r"L(\d+)(?:\s*[-–]\s*L?(\d+))?", location, re.I)
     if lines:
         first, last = int(lines[1]), int(lines[2] or lines[1])
-        starts = [0, *(match.end() for match in re.finditer("\n", text))]
+        from .line_coordinates import LineCoordinates
+
+        starts = [0, *LineCoordinates(text).break_ends]
         if 1 <= first <= last <= len(starts):
             start, end = starts[first - 1], starts[last] if last < len(starts) else len(text)
             if start < end:

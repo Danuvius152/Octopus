@@ -83,6 +83,17 @@ def test_submission_errors_pass_through_unchanged(monkeypatch, status):
     assert wiki.maintain("request", "material") is error
 
 
+def test_http_conflict_keeps_existing_job_in_model_receipt(monkeypatch):
+    import httpx
+
+    detail = {"detail": "Different intent", "code": "maintenance_intent_conflict",
+              "existing_job": {"id": "original", "status": "running"}}
+    monkeypatch.setattr(wiki.httpx, "request", lambda *a, **kw: httpx.Response(409, json=detail))
+    result = wiki.maintain("second", "material", "new scope")
+    assert result == {"error": "Different intent", "status": 409,
+                      "code": detail["code"], "existing_job": detail["existing_job"]}
+
+
 def test_only_explicit_reused_items_have_bounded_locations(monkeypatch):
     items = [{
         "version": 1, "status": "done", "reused": True, "doc": str(index),

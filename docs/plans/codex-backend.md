@@ -55,6 +55,34 @@ anything still marked unverified.
   `claude_session_id` name) become backend-agnostic, not `if backend ==`
   forks.
 
+### Single-call capability verification (2026-10-27)
+
+The intended `run_oneshot` contract is one non-interactive text call without
+tools. The current Codex `exec --json` path does not yet enforce that contract.
+Its consumers include schedule parsing, `/showme` reference resolution, and
+research decomposition/synthesis. They retain their current behavior pending a
+decision about the single-call execution interface; ordinary sessions are not
+part of that decision.
+
+With installed Codex 0.164.0, an isolated loopback Responses probe still exposed
+tool definitions inside `input[].additional_tools` after all public feature
+switches were disabled. A live call using the selected existing login (auth
+symlink, temporary configuration/workspace, low effort) attempted
+`exec → apply_patch`; the actual tool result was `code-mode host is disabled`
+and the marker file was absent. A separate forced collaboration call was
+rejected as unsupported. These observations establish specific rejections,
+not a complete tool-free execution guarantee. The public
+[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+and installed protocol schema have not established a complete supported
+no-tools setting. No production configuration or saved agent fields were
+changed by these probes.
+
+R1 remains unaccepted until a supported capability restriction and real
+consumer/retirement checks pass. Disabling current consumers or changing their
+execution interface requires the explicit product choice described above;
+prompt prohibitions, read-only sandboxing and output filtering do not meet this
+contract.
+
 ## 2. Non-goals (v1)
 
 - **API-key (`OPENAI_API_KEY`) auth.** Explicitly out — the user wants

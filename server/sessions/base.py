@@ -548,6 +548,9 @@ class SessionManagerBase:
     ) -> None:
         raise NotImplementedError  # provided by a mixin
 
+    async def drain_credential_refreshes(self) -> None:
+        raise NotImplementedError  # provided by a mixin
+
     async def _persist_message(
         self,
         session: Session,
@@ -682,6 +685,9 @@ class SessionManagerBase:
         self._retired_dispatch_generations: frozenset[str] = frozenset()
         self._admission_closed = False
         self._owned_tasks: set[asyncio.Task[Any]] = set()
+        # Resolution owns refresh through provider completion and conditional writeback.
+        self._credential_refreshes: dict[tuple[str | None, str], asyncio.Task[HarnessCredential | None]] = {}
+        self._credential_refresh_closed = False
         # Short configuration operations share a lock, independently of turn
         # execution. Read/validate/write and turn snapshots must agree.
         self.configuration_lock = asyncio.Lock()
@@ -715,6 +721,8 @@ class SessionManagerBase:
         self._schedule_runner = runner
 
     async def initialize(self, db: Database, *, previous_writers_retired: bool = False) -> None:
+        await self.drain_credential_refreshes()
+        self._credential_refresh_closed = False
         if self._session_owners:
             await self.close_session_owners()
             self._session_owners.clear()
@@ -745,6 +753,7 @@ class SessionManagerBase:
         # prevents actually showed up.
         db.add_close_hook(self.close_session_owners)
         db.add_close_hook(self.drain_turns)
+        db.add_close_hook(self.drain_credential_refreshes)
         rows = await db.load_sessions()
         for row in rows:
             session = _session_from_row(row)

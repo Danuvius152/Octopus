@@ -14,8 +14,9 @@ from markdown_it.renderer import RendererHTML
 from . import format as document_format
 from .extract import HTML_BODY_VERSION, HTMLBodyAnalyzer
 from .formats import MARKDOWN_SQL
+from .line_coordinates import LineCoordinates
 
-VERSION = "sections-v9"
+VERSION = "sections-v10"
 _tokenizer = jieba.Tokenizer()
 jieba.setLogLevel(logging.WARNING)
 _letter = r"(?:(?![\u3400-\u9fff])[^\W_])"
@@ -240,11 +241,12 @@ def index(db, row, metadata, *, parsed: document_format.DocumentFormat | None = 
         tokens(" ".join(tags) + " " + metadata.get("description", "")),
     ]
     db.execute("DELETE FROM search_sections WHERE doc_id=?", (doc_id,))
+    lines = LineCoordinates(text)
     for part in chunks:
         content = text[part["start"] : part["end"]]
         # The heading already has its own field. A title that lists several
         # concepts must not outrank chapters that actually discuss them.
-        prose = re.sub(r"\A\ufeff?#{1,6}\s+[^\n]*(?:\n|$)", "", content)
+        prose = re.sub(r"\A\ufeff?#{1,6}[^\S\r\n]+[^\r\n]*(?:\r\n|\r|\n|$)", "", content)
         prose = re.sub(r"(?s)<!--.*?-->", "", prose)
         if part["section_role"] in {"related_notes", "curator_note"}:
             prose = ""
@@ -255,8 +257,8 @@ def index(db, row, metadata, *, parsed: document_format.DocumentFormat | None = 
                 part["title"],
                 part["start"],
                 part["end"],
-                text.count("\n", 0, part["start"]) + 1,
-                text.count("\n", 0, part["end"]) + 1,
+                lines.line(part["start"]),
+                lines.line(part["end"]),
                 part["section_role"],
                 int(part["readable_body"]),
             ),

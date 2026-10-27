@@ -18,6 +18,7 @@ from markdown_it.token import Token
 
 from .bounded_yaml import compose as compose_metadata
 from .bounded_yaml import load as load_metadata
+from .line_coordinates import LineCoordinates
 
 VERSION = "okf-parser-v11"
 _FRONT = re.compile(r"\A\ufeff?---\r?\n(.*?)\r?\n---(?:\r?\n|$)", re.S)
@@ -176,7 +177,7 @@ def markdown_line_offsets(text: str, start: int = 0) -> list[int]:
     offsets = [start]
     # CommonMark normalizes CRLF/CR to LF; other Unicode separators stay in
     # their original line. Keep offsets in the unmodified source coordinates.
-    offsets.extend(start + match.end() for match in re.finditer(r"\r\n|\r|\n", text))
+    offsets.extend(start + end for end in LineCoordinates(text).break_ends)
     if offsets[-1] < start + len(text):
         offsets.append(start + len(text))
     return offsets

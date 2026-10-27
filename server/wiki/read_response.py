@@ -3,6 +3,7 @@
 from collections import Counter
 
 from ..mcp_result import model_result_bytes as model_result_bytes
+from .line_coordinates import LineCoordinates
 from .model_response import fit_prefix, presentation
 from .store import WikiError
 
@@ -62,13 +63,14 @@ def _fit(build, characters):
 def compact_read(document, view="compact"):
     base = (compact_document(document) | compact_index(document) if view == "compact" else presentation(document)) | {"view": view}
     content = document["content"]
+    lines = LineCoordinates.passage(document)
 
     def build(length):
         passage = content[:length]
         shortened = length < len(content)
         return base | {key: document[key] for key in ("page", "start", "line_start")} | {
             "content": passage, "end": document["start"] + length,
-            "line_end": document["line_start"] + passage.count("\n"),
+            "line_end": lines.line(length),
             "next_start": document["start"] + length if shortened else document["next_start"],
             "status": "partial" if shortened else "ok", "response_budget_exhausted": shortened,
         }
@@ -80,6 +82,7 @@ def compact_batch(batch, view="compact"):
     base = (compact_index(batch) if view == "compact" else presentation(batch)) | {"budget_chars": batch["budget_chars"], "view": view}
     total = batch["characters_returned"]
     originals = {piece["id"]: piece for piece in batch["ranges"]}
+    coordinates = {key: LineCoordinates.passage(piece) for key, piece in originals.items()}
 
     def build(characters):
         remaining, ranges, replacements = characters, [], {}
@@ -91,7 +94,7 @@ def compact_batch(batch, view="compact"):
             end = original["start"] + count
             piece = original | {"id": f"{original['doc']}:{original['revision']}:{original['start']}:{end}",
                                 "end": end, "content": passage,
-                                "line_end": original["line_start"] + passage.count("\n")}
+                                "line_end": coordinates[original["id"]].line(count)}
             ranges.append(piece)
             replacements[original["id"]] = piece
             remaining -= count
@@ -108,7 +111,7 @@ def compact_batch(batch, view="compact"):
                     source = originals[original["range_id"]]
                     position = original["start"]
                     identifier = f"{source['doc']}:{source['revision']}:{position}:{position}"
-                    line = source["line_start"] + source["content"][:position - source["start"]].count("\n")
+                    line = coordinates[source["id"]].line(position - source["start"])
                     piece = source | {"id": identifier, "start": position, "end": position,
                                       "content": "", "line_start": line, "line_end": line}
                     empty_ranges[identifier] = piece

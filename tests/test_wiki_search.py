@@ -320,22 +320,23 @@ def test_directory_filter_and_pagination_only_read_the_requested_page(store, mon
     assert reads == []
 
 
-def test_document_source_filters_follow_managed_override_and_current_identity(store):
+@pytest.mark.parametrize("view", ["full", "compact"])
+def test_document_source_filters_follow_managed_override_and_current_identity(store, view):
     source = store.search("SSL")["items"][0]
     note = store.root / "引用.md"
     note.write_text("# 引用\n正文。\n<!-- octopus-wiki " + json.dumps({"sources": [{"doc": "native.txt", "path": "native.txt", "revision": "missing", "location": "text"}]}) + " -->\n")
     store.refresh()
-    assert store.documents(source="native.txt")["items"][0]["path"] == "引用.md"
+    assert store.documents(source="native.txt", view=view)["items"][0]["path"] == "引用.md"
     with store.connect() as db:
         db.execute("INSERT INTO managed_notes VALUES(?,?,?,?,?)", (
             "引用.md", "base", "rendered", "[]",
             json.dumps({"sources": [{"doc": source["id"], "revision": source["revision"]}]}),
         ))
-    assert store.documents(source="native.txt")["items"] == []
-    assert store.documents(source=source["id"])["total"] == 1
+    assert store.documents(source="native.txt", view=view)["items"] == []
+    assert store.documents(source=source["id"], view=view)["total"] == 1
     moved = store.root / "移动后的来源.md"
     (store.root / source["path"]).rename(moved)
-    assert store.documents(source="移动后的来源.md")["items"][0]["path"] == "引用.md"
+    assert store.documents(source="移动后的来源.md", view=view)["items"][0]["path"] == "引用.md"
 
 
 def test_current_revision_and_direct_rename_delete_refresh(store):
