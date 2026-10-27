@@ -1335,6 +1335,8 @@ class WikiWorker:
                 if not task.cancelled() and (error := task.exception()) is not None:
                     logger.error("Wiki cancellation failed for job=%s", job["id"],
                                  exc_info=(type(error), error, error.__traceback__))
+                elif not task.cancelled() and task.result() and cls.cancellations.get(key) is task:
+                    cls.cancellations.pop(key)
             stopping.add_done_callback(observed)
         return stopping
 
@@ -1352,6 +1354,8 @@ class WikiWorker:
         unprepared = (isinstance(owner, JobOwner) and owner.entered_attempt == current["attempt"]
                       and not job_items.references(current["items"]))
         await jobs._finish_cancelled(current, manager, unprepared=unprepared)
+        settled = await _io(jobs.get, job["id"])
+        return settled["settlement_phase"] == "confirmed"
 
     def __init__(self):
         self.manager = None

@@ -122,6 +122,7 @@ def test_status_transitions():
     mgr = ConnectorLoginManager()
     pl = mgr.start(provider=FakeProvider(), client_id="cid", redirect_uri="https://app/cb")
     assert pl.status == ConnectorLoginState.pending
+    mgr.resolve_callback(f"{pl.login_id}:{pl.state}")
     mgr.mark_success(pl.login_id, "inst-1")
     assert pl.status == ConnectorLoginState.success
     assert pl.installation_id == "inst-1"
@@ -130,10 +131,17 @@ def test_status_transitions():
     mgr.mark_error(pl2.login_id, "boom")
     assert pl2.status == ConnectorLoginState.error and pl2.message == "boom"
 
-    pl3 = mgr.start(provider=FakeProvider(), client_id="cid", redirect_uri="https://app/cb")
-    assert mgr.cancel(pl3.login_id) is True
-    assert pl3.status == ConnectorLoginState.cancelled
-    assert mgr.cancel("ghost") is False
+
+
+async def test_cancel_preserves_terminal_result():
+    mgr = ConnectorLoginManager()
+    pl = mgr.start(provider=FakeProvider(), client_id="cid", redirect_uri="https://app/cb")
+    assert await mgr.cancel(pl.login_id) is pl
+    assert pl.status == ConnectorLoginState.cancelled
+    mgr.mark_success(pl.login_id, "late-install")
+    mgr.mark_error(pl.login_id, "late-error")
+    assert pl.status == ConnectorLoginState.cancelled and pl.installation_id is None
+    assert await mgr.cancel("ghost") is None
 
 
 def test_expired_logins_are_gc_d():

@@ -18,6 +18,26 @@ from .transaction import Transaction
 
 class ResearchMixin(DatabaseBase):
 
+    async def confirm_research_outcome(
+        self, job_id: str, status: str, *, completed_at: str,
+        error: str | None = None, report_path: str | None = None, cost: float | None = None,
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """Select a terminal outcome once and return its committed decision."""
+        if status not in {"completed", "cancelled", "failed", "interrupted"}:
+            raise ValueError("Invalid research outcome")
+        if status == "completed" and not report_path:
+            raise ValueError("Completed research requires a saved report")
+        async with self.transaction(write=True) as tx:
+            cursor = await tx.execute(
+                "UPDATE research_jobs SET status=?, completed_at=?, error=?, report_path=?, cost=?, "
+                "phase=CASE WHEN ?='completed' THEN 'done' ELSE phase END "
+                "WHERE id=? AND status='running'",
+                (status, completed_at, error, report_path, cost, status, job_id),
+            )
+            won = cursor.rowcount == 1
+            row = await self._get_research_job(tx, job_id)
+        return won, row
+
     async def advance_research_delivery(self, job_id: str, request_id: str, stage: str, *, error: str | None = None) -> dict[str, Any] | None:
         async with self.transaction(write=True) as tx:
             row = await self._get_research_job(tx, job_id)
@@ -68,7 +88,7 @@ class ResearchMixin(DatabaseBase):
         """Patch progress, delivery status or the server-encoded context."""
         async with self.transaction(write=True) as tx:
             allowed = {
-                "status", "phase", "error", "report_path", "cost", "completed_at",
+                "phase", "error", "cost",
                 "injection_status", "injected_at", "knowledge_context",
             }
             updates = {k: v for k, v in fields.items() if k in allowed}

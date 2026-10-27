@@ -475,7 +475,8 @@ class OwnerRuntime:
             session._steer_queue.clear()
             for request in pending:
                 await self.complete(request, reason=reason)
-            session._dispatch_paused = isinstance(command, CloseExecution)
+            if reason != "archived":
+                session._dispatch_paused = isinstance(command, CloseExecution)
             await self._interrupt("shutdown" if reason == "shutdown" else "user")
             await self.owner.questions.handle(CloseSessionQuestions(reason, tuple(session._questions.values())))
             self.changed()

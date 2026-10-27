@@ -13,6 +13,7 @@ import sqlite3
 from typing import Any
 
 from .base import DatabaseBase
+from .users import owner_is_available
 
 
 class ConnectorsMixin(DatabaseBase):
@@ -32,8 +33,11 @@ class ConnectorsMixin(DatabaseBase):
         enable_by_default: bool = False,
         token_expires_at: str | None = None,
         user_id: str | None = None,
+        require_available_owner: bool = False,
     ) -> dict[str, Any]:
         async with self.transaction(write=True) as tx:
+            if require_available_owner and not await owner_is_available(tx, user_id):
+                raise ValueError("Account is unavailable")
             await tx.execute(
                 "INSERT INTO connector_installations "
                 "(id, kind, label, auth_type, external_account_id, scopes, "
@@ -125,14 +129,17 @@ class ConnectorsMixin(DatabaseBase):
             return row[0] if row else None
 
     async def update_connector_installation(
-        self, installation_id: str, **fields: Any
+        self, installation_id: str, *, require_available_owner: bool = False, **fields: Any,
     ) -> dict[str, Any] | None:
         async with self.transaction(write=True) as tx:
             # Batch kind deletion does not take individual manager locks.
             # Check existence in the same transaction as metadata and secret
             # writes, so a late update cannot recreate an orphan secret.
-            if await tx.fetch_one("SELECT 1 FROM connector_installations WHERE id = ?", (installation_id,)) is None:
+            existing = await tx.fetch_one("SELECT user_id FROM connector_installations WHERE id = ?", (installation_id,))
+            if existing is None:
                 return None
+            if require_available_owner and not await owner_is_available(tx, existing[0]):
+                raise ValueError("Account is unavailable")
             meta_allowed = {
                 "label",
                 "external_account_id",

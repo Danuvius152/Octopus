@@ -12,15 +12,20 @@ code↔token exchange are orchestrated by the router, which has the DB + registr
 
 from __future__ import annotations
 
+import asyncio
 import base64
 import hashlib
 import secrets
 import time
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
+from ..aio import complete_cleanup
 from ..oauth_providers import OAuthTokenSet
+
+if TYPE_CHECKING:
+    from ..connector_manager import ConnectorManager, PreparedInstallation
 
 # --- PKCE / state helpers (RFC 7636) --------------------------------------
 
@@ -91,6 +96,7 @@ class ConnectorOAuthProvider(Protocol):
 
 class ConnectorLoginState(str, Enum):
     pending = "pending"
+    processing = "processing"
     success = "success"
     error = "error"
     cancelled = "cancelled"
@@ -113,6 +119,8 @@ class PendingLogin:
     installation_id: str | None = None
     message: str | None = None
     created_at: float = field(default=0.0, repr=False)
+    finished_at: float | None = field(default=None, repr=False)
+    binding_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
 _LOGIN_TTL_SECONDS = 15 * 60
@@ -120,6 +128,10 @@ _LOGIN_TTL_SECONDS = 15 * 60
 
 class ConnectorLoginError(Exception):
     """Bad login_id or CSRF-state mismatch on the OAuth callback."""
+
+    def __init__(self, message: str, *, status: ConnectorLoginState | None = None):
+        super().__init__(message)
+        self.status = status
 
 
 class ConnectorLoginManager:
@@ -185,33 +197,77 @@ class ConnectorLoginManager:
             raise ConnectorLoginError("unknown or expired login")
         if not raw_state or not secrets.compare_digest(raw_state, pl.state):
             raise ConnectorLoginError("state mismatch (possible CSRF)")
+        if pl.status != ConnectorLoginState.pending:
+            raise ConnectorLoginError(f"Connection is {pl.status.value}; this callback has already been consumed", status=pl.status)
+        if self._now() - pl.created_at > _LOGIN_TTL_SECONDS:
+            self.mark_error(login_id, "Connection request expired; start a new connection")
+            raise ConnectorLoginError(pl.message)
+        pl.status = ConnectorLoginState.processing
         return pl
 
     def mark_success(self, login_id: str, installation_id: str) -> None:
         pl = self._pending.get(login_id)
-        if pl is not None:
+        if pl is not None and pl.status == ConnectorLoginState.processing:
             pl.status = ConnectorLoginState.success
             pl.installation_id = installation_id
+            pl.finished_at = self._now()
 
     def mark_error(self, login_id: str, message: str) -> None:
         pl = self._pending.get(login_id)
-        if pl is not None:
+        if pl is not None and pl.status in {ConnectorLoginState.pending, ConnectorLoginState.processing}:
             pl.status = ConnectorLoginState.error
             pl.message = message
+            pl.finished_at = self._now()
 
-    def cancel(self, login_id: str) -> bool:
+    async def cancel(self, login_id: str) -> PendingLogin | None:
         pl = self._pending.get(login_id)
         if pl is None:
-            return False
-        pl.status = ConnectorLoginState.cancelled
-        return True
+            return None
+        async with pl.binding_lock:
+            if pl.status in {ConnectorLoginState.pending, ConnectorLoginState.processing}:
+                pl.status = ConnectorLoginState.cancelled
+                pl.message = "Local connection cancelled; remote authorization is unchanged"
+                pl.finished_at = self._now()
+            return pl
+
+    async def complete_install(
+        self, login_id: str, manager: ConnectorManager, token_set: OAuthTokenSet,
+    ) -> dict:
+        pl = self._pending[login_id]
+        if pl.status != ConnectorLoginState.processing:
+            raise ConnectorLoginError(f"Connection is {pl.status.value}")
+        prepared = await manager.prepare_install(
+            kind=pl.kind, token_set=token_set, requested_label=pl.requested_label, user_id=pl.user_id,
+        )
+        return await complete_cleanup(self._bind_install(pl, manager, prepared))
+
+    async def _bind_install(
+        self, pl: PendingLogin, manager: ConnectorManager, prepared: PreparedInstallation,
+    ) -> dict:
+        # This short operation owns its commit even if the callback waiter
+        # disconnects. The same lock orders cancellation and its acknowledgment.
+        async with pl.binding_lock:
+            if pl.status != ConnectorLoginState.processing:
+                raise ConnectorLoginError(f"Connection is {pl.status.value}")
+            try:
+                installed = await manager.persist_install(prepared)
+            except BaseException:
+                # A lost commit acknowledgment is not proof of rollback.
+                # The service health gate decides whether normal failure
+                # handling is still safe; cancellation cannot claim success.
+                if manager.db.health.cause is not None:
+                    self.mark_error(pl.login_id, "Local connection saving is unconfirmed; inspect the original connection")
+                raise
+            self.mark_success(pl.login_id, installed["id"])
+            return installed
 
     def _gc(self) -> None:
         now = self._now()
         stale = [
             lid
             for lid, pl in self._pending.items()
-            if now - pl.created_at > _LOGIN_TTL_SECONDS
+            if pl.status != ConnectorLoginState.processing
+            and now - (pl.finished_at if pl.finished_at is not None else pl.created_at) > _LOGIN_TTL_SECONDS
         ]
         for lid in stale:
             self._pending.pop(lid, None)

@@ -54,15 +54,20 @@ def index(db, row, raw):
     ).fetchone()
     regions = owned[0] if owned else None
     origin = db.execute("SELECT state FROM material_origins WHERE doc_id=?", (row["id"],)).fetchone()
+    # Compute from the current bytes and proof on every read. Only the write
+    # can be omitted; an unchanged revision alone cannot certify the proof.
+    values = (
+        row["id"], row["path"], row["revision"],
+        revision(current_material(db, row, raw, regions)),
+        ownership(regions, origin[0] if origin else None),
+    )
+    previous = db.execute("SELECT doc_id,path,revision,original_hash,ownership FROM raw_materials WHERE doc_id=?",
+                          (row["id"],)).fetchone()
+    if previous is not None and tuple(previous) == values:
+        return
     db.execute(
         "INSERT OR REPLACE INTO raw_materials VALUES(?,?,?,?,?)",
-        (
-            row["id"],
-            row["path"],
-            row["revision"],
-            revision(current_material(db, row, raw, regions)),
-            ownership(regions, origin[0] if origin else None),
-        ),
+        values,
     )
 
 

@@ -3,6 +3,7 @@
 import base64
 import hashlib
 import json
+from contextlib import nullcontext
 
 from . import search_index
 from .formats import MARKDOWN_QUERY_CONTRACT, MARKDOWN_SQL
@@ -13,7 +14,8 @@ from .store import WikiError
 def pagination(store, cursor, offset, filters, *, db=None):
     if type(offset) is not int or not 0 <= offset <= 2**63 - 1:
         raise WikiError("Invalid pagination offset", 422)
-    epoch = store._index_state(db)["index_epoch"]
+    with store.connect() if db is None else nullcontext(db) as connection:
+        epoch = connection.execute("SELECT epoch FROM index_state WHERE singleton=1").fetchone()[0]
     fingerprint = hashlib.sha256(json.dumps(filters, sort_keys=True).encode()).hexdigest()
     if cursor is not None:
         if offset:

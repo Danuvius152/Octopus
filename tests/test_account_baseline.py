@@ -8,23 +8,28 @@ from pathlib import Path
 
 import pytest
 
+from server.account_baseline import (
+    RetainedLegacyInstallation,
+    persistent_database_file,
+    require_account_installation,
+)
 from tests.test_database_format import refuse_start
 from tests.test_service_runtime import installation_settings
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-@pytest.mark.parametrize("entry", ["database", "service"])
 @pytest.mark.parametrize("empty_main", [False, True])
 @pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
-def test_missing_or_empty_database_with_retained_sidecar_is_refused(tmp_path, entry, empty_main, suffix):
-    config, configuration = installation_settings(tmp_path)
+def test_missing_or_empty_database_with_retained_sidecar_is_refused(tmp_path, empty_main, suffix):
+    config, _ = installation_settings(tmp_path)
     database = Path(config.db_path)
     if empty_main:
         database.touch()
     sidecar = Path(str(database) + suffix)
     sidecar.write_bytes(b"retained recovery input\x00\xff")
-    refuse_start(configuration, entry, tmp_path)
+    with pytest.raises(RetainedLegacyInstallation):
+        persistent_database_file(config.db_path)
     assert database.exists() is empty_main
     if empty_main:
         assert database.read_bytes() == b""
@@ -33,29 +38,41 @@ def test_missing_or_empty_database_with_retained_sidecar_is_refused(tmp_path, en
 
 
 @pytest.mark.parametrize("entry", ["database", "service"])
-@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
-def test_database_alias_cannot_hide_target_recovery_files(tmp_path, entry, suffix):
+def test_public_startup_refuses_retained_recovery_before_admission(tmp_path, entry):
     config, configuration = installation_settings(tmp_path)
+    sidecar = Path(config.db_path + "-wal")
+    original = b"retained recovery input\x00\xff"
+    sidecar.write_bytes(original)
+    refuse_start(configuration, entry, tmp_path)
+    assert sidecar.read_bytes() == original
+    assert not Path(config.db_path).exists()
+    assert not Path(config.master_key_file).exists()
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+def test_database_alias_cannot_hide_target_recovery_files(tmp_path, suffix):
+    config, _ = installation_settings(tmp_path)
     actual = tmp_path / "actual.db"
     actual.touch()
     alias = Path(config.db_path)
     alias.symlink_to(actual.name)
     sidecar = Path(str(actual) + suffix)
     sidecar.write_bytes(b"original target recovery input\x00\xff")
-    refuse_start(configuration, entry, tmp_path)
+    with pytest.raises(RetainedLegacyInstallation):
+        persistent_database_file(config.db_path)
     assert alias.is_symlink() and os.readlink(alias) == actual.name
     assert actual.read_bytes() == b""
     assert sidecar.read_bytes() == b"original target recovery input\x00\xff"
     assert not Path(config.master_key_file).exists()
 
 
-@pytest.mark.parametrize("entry", ["database", "service"])
-def test_broken_database_alias_is_preserved_and_refused(tmp_path, entry):
-    config, configuration = installation_settings(tmp_path)
+def test_broken_database_alias_is_preserved_and_refused(tmp_path):
+    config, _ = installation_settings(tmp_path)
     actual = tmp_path / "absent-original.db"
     alias = Path(config.db_path)
     alias.symlink_to(actual.name)
-    refuse_start(configuration, entry, tmp_path)
+    with pytest.raises(RetainedLegacyInstallation):
+        persistent_database_file(config.db_path)
     assert alias.is_symlink() and os.readlink(alias) == actual.name
     assert not actual.exists()
     assert not Path(config.master_key_file).exists()
@@ -69,7 +86,10 @@ def test_empty_database_with_retained_resource_is_refused_before_key_creation(tm
     root.mkdir(parents=True)
     original = root / "retained-original.bin"
     original.write_bytes(b"retained resource\x00\xff")
-    refuse_start(configuration, "service", tmp_path)
+    with pytest.raises(RetainedLegacyInstallation):
+        require_account_installation(config)
+    if resource == "users_root":
+        refuse_start(configuration, "service", tmp_path)
     assert original.read_bytes() == b"retained resource\x00\xff"
     assert not Path(config.db_path).exists()
     assert not Path(config.master_key_file).exists()
@@ -140,7 +160,10 @@ async def test_handoff_protocol_inputs_are_refused_before_storage_changes(tmp_pa
     else:
         path.write_bytes(content)
     inode = path.lstat().st_ino
-    refuse_start(configuration, "service", tmp_path)
+    with pytest.raises(RetainedLegacyInstallation):
+        require_account_installation(config)
+    if artifact == "complete-journal" and not broken_link:
+        refuse_start(configuration, "service", tmp_path)
     assert path.lstat().st_ino == inode
     if broken_link:
         assert path.is_symlink() and os.readlink(path) == str(tmp_path / "absent-original")
@@ -225,15 +248,16 @@ async def test_wrong_type_state_container_is_refused_before_database_preparation
     container_path.parent.mkdir(parents=True, exist_ok=True)
     container_path.write_bytes(b"retained invalid container\x00\xff")
     identity = container_path.lstat().st_ino
-    refuse_start(configuration, "service", tmp_path)
+    with pytest.raises(RetainedLegacyInstallation):
+        require_account_installation(config)
+    if container == "owned-agent":
+        refuse_start(configuration, "service", tmp_path)
     assert container_path.lstat().st_ino == identity
     assert container_path.read_bytes() == b"retained invalid container\x00\xff"
     assert {path: path.read_bytes() for path in files} == files
 
 
 async def test_account_baseline_preserves_installation_markers_in_state_roots(owned_installation):
-    from server.account_baseline import require_account_installation
-
     config, _, user, _, _, files = owned_installation
     roots = [Path(config.users_root), Path(config.agents_dir),
              Path(config.users_root) / user["id"] / "agents"]

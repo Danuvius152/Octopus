@@ -19,6 +19,7 @@ from typing import Any
 from ..config import settings
 from ..credential_bindings import validate_credential_binding
 from ..harness import get_harness
+from ..knowledge import KnowledgeContext, OwnedTaskContext, receive_return
 from ..models import MessageContent, SessionDetail
 from ..users import owner_is_available
 from ..workspace import confine
@@ -41,6 +42,13 @@ _ARCHIVED_MESSAGE_WINDOW = 200
 
 
 class LifecycleMixin(SessionManagerBase):
+
+    def _session_lifecycle_lock(self, session_id: str) -> asyncio.Lock:
+        lock = self._session_lifecycle_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._session_lifecycle_locks[session_id] = lock
+        return lock
 
     async def require_active_agent(self, agent_id: str | None) -> dict[str, Any] | None:
         if agent_id in self._closed_agents:
@@ -403,23 +411,48 @@ class LifecycleMixin(SessionManagerBase):
         self, session: Session, *, replace: bool = False, successor: Session | None = None,
         only_request_id: str | None = None, automatic: bool = False,
     ) -> tuple[bool, Session | None]:
+        # A competing explicit archive cannot wait on the operation whose gate
+        # its caller may own. The lock covers the window before the Owner has
+        # processed the first archive's reservation command.
+        lifecycle_lock = self._session_lifecycle_lock(session.id)
+        if self.sessions.get(session.id) is session and (
+            lifecycle_lock.locked() or session._archive_reservation is not None
+        ):
+            if automatic:
+                return False, None
+            raise ValueError(f"Session {session.id} is already being archived")
+        async with lifecycle_lock:
+            if self.sessions.get(session.id) is not session:
+                return False, None
+            archived = await self._archive_reserved_session(
+                session, only_request_id=only_request_id, automatic=automatic,
+            )
+        # Subscriber I/O cannot hold a lifecycle lock: a result subscriber may
+        # itself need to restore this same session.
+        if archived:
+            return True, await self._finish_session_archive(session, replace=replace, successor=successor, dispatch_state=archived)
+        return False, None
+
+    async def _archive_reserved_session(
+        self, session: Session, *,
+        only_request_id: str | None = None, automatic: bool = False,
+    ) -> dict[str, Any] | None:
         """Own one reservation, resource deadline, archive effect and release.
 
         Explicit close may interrupt; autoarchive instead keeps its original
         idle/revision decision and rolls back a refused database projection.
-        A prepared rewind successor is never discarded on a failed tail.
         """
         owner = self._session_owners.get(id(session)) or self._session_owner(session)
         decision = None
         reservation = object()
         if automatic:
             if owner.failed:
-                return False, None
+                return None
             operation = asyncio.current_task()
             assert operation is not None
             decision = await owner.call_runtime(AutoArchive(operation))
             if decision is None:
-                return False, None
+                return None
             reservation = decision.reservation
         try:
             if not automatic:
@@ -435,16 +468,16 @@ class LifecycleMixin(SessionManagerBase):
                     # or successor writer is needed to reserve this archive.
                     await self._failed_owner_retirement(owner)
                     if not owner.runtime.can_close_request(only_request_id):
-                        return False, None
+                        return None
                     if session._archive_reservation not in {None, reservation}:
                         raise ValueError(f"Session {session.id} is already being archived")
                     session._archive_reservation = reservation
                 elif not accepted:
-                    return False, None
+                    return None
             await self.await_session_execution(session.id, timeout=_BACKEND_RETIRE_TIMEOUT)
             await self._join_session_owner_commands(session)
             if automatic and owner.failed:
-                return False, None
+                return None
             if self.db:
                 await self.db.update_session_field(session.id, archived=True)
             if decision is not None:
@@ -457,17 +490,20 @@ class LifecycleMixin(SessionManagerBase):
                 if not removed:
                     if self.db:
                         await self.db.update_session_field(session.id, archived=False)
-                    return False, None
+                    return None
             else:
                 self.sessions.pop(session.id, None)
                 self._session_removed(session)
-            return True, await self._finish_session_archive(session, replace=replace, successor=successor)
+            snapshot = self._session_dispatch_snapshot(session)
+            snapshot["revision"] += 1
+            self._archived_dispatch[session.id] = (session._dispatch_paused, snapshot["revision"], session._dispatch_order)
+            return snapshot
         finally:
             if self.sessions.get(session.id) is session and self._session_owners.get(id(session)) is owner:
                 await self._release_session_reservation(owner, ReleaseArchive(reservation))
 
     async def _finish_session_archive(
-        self, old: Session, *, replace: bool, successor: Session | None = None,
+        self, old: Session, *, replace: bool, dispatch_state: dict[str, Any], successor: Session | None = None,
     ) -> Session | None:
         """The archive effect is confirmed; publish or create its successor."""
 
@@ -478,6 +514,7 @@ class LifecycleMixin(SessionManagerBase):
                     "old_session_id": old.id,
                     "new_session_id": None,
                     "name": old.name,
+                    "dispatch_state": dispatch_state,
                 }, user_id=old.user_id,
             )
             return None
@@ -517,6 +554,7 @@ class LifecycleMixin(SessionManagerBase):
                 "model": new.model,
                 "reasoning_effort": new.reasoning_effort,
                 "service_tier": new.service_tier,
+                "dispatch_state": dispatch_state,
             }, user_id=old.user_id,
         )
         return new
@@ -648,7 +686,24 @@ class LifecycleMixin(SessionManagerBase):
         )
 
     async def _unarchive_session(
-        self, session_id: str, user_id: str | None = None
+        self, session_id: str, user_id: str | None = None, *, returning: OwnedTaskContext | None = None,
+    ) -> Session:
+        async with self._session_lifecycle_lock(session_id):
+            if returning is not None:
+                self._require_task_return(returning, session_id, user_id)
+            current = self.sessions.get(session_id)
+            if returning is not None and current is not None:
+                if current.user_id != user_id or current._admission_closed or self.session_owner_failed(session_id):
+                    raise ValueError("Original session admission is unavailable")
+                return current
+            session = await self._restore_archived_session(session_id, user_id, returning=returning)
+        await self._broadcast({"type": "session_unarchived", "session_id": session.id, "name": session.name,
+                               "session": session_info(session).model_dump(mode="json"),
+                               "dispatch_state": self._session_dispatch_snapshot(session)})
+        return session
+
+    async def _restore_archived_session(
+        self, session_id: str, user_id: str | None = None, *, returning: OwnedTaskContext | None = None,
     ) -> Session:
         """Flip archived=0 in the DB and reload the row into memory.
 
@@ -664,20 +719,54 @@ class LifecycleMixin(SessionManagerBase):
         )
         if match is None:
             raise ValueError(f"Archived session {session_id} not found")
+        message_state = await self.db.message_sequence_state(session_id)
+        if returning is not None:
+            await self.require_active_agent(match["agent_id"])
+            # Recheck after waiting for lifecycle admission and storage reads,
+            # before the operation that changes archived membership begins.
+            self._require_task_return(returning, session_id, user_id)
         await self.db.update_session_field(session_id, archived=False)
         # Reload into the in-memory map so writes (sendMessage etc.)
         # immediately route to this session.
         session = _session_from_row(match)
-        session.restore_message_state(*await self.db.message_sequence_state(session.id))
+        paused, revision, order = self._archived_dispatch.pop(session_id, (False, 0, 0))
+        session._dispatch_paused = paused
+        session._dispatch_revision, session._dispatch_order = revision + 1, order
+        session.restore_message_state(*message_state)
         self.sessions[session.id] = session
-        await self._broadcast(
-            {
-                "type": "session_unarchived",
-                "session_id": session.id,
-                "name": session.name,
-            }
-        )
         return session
+
+    def _require_task_return(self, owned: OwnedTaskContext, session_id: str, user_id: str | None) -> None:
+        if (self._admission_closed or self.session_owner_failed(session_id)
+                or receive_return(owned, session_id=session_id, user_id=user_id,
+                                  work_id=owned.return_binding.work_id) is None):
+            raise ValueError("Original task return admission is unavailable")
+
+    async def resolve_task_return(
+        self, owned: OwnedTaskContext | None, *, session_id: str, work_id: str | None,
+    ) -> tuple[Session, KnowledgeContext] | None:
+        """Restore only the fixed, still-authorized caller of independent work."""
+        if owned is None or self.db is None or self._admission_closed:
+            return None
+        binding = owned.return_binding
+        reference = binding.reference
+        if reference.session_id != session_id or binding.work_id != work_id:
+            return None
+        context = receive_return(owned, session_id=reference.session_id,
+                                 user_id=reference.user_id, work_id=binding.work_id)
+        if context is None or self.session_owner_failed(reference.session_id):
+            return None
+        row = await self.db.get_session_binding(reference.session_id)
+        if row is None or row["user_id"] != reference.user_id:
+            return None
+        try:
+            session = await self._run_agent_operation(row["agent_id"], lambda: self._unarchive_session(
+                reference.session_id, reference.user_id, returning=owned,
+            ))
+        except ValueError:
+            return None
+        context = receive_return(owned, session_id=session.id, user_id=session.user_id, work_id=binding.work_id)
+        return (session, context) if context is not None else None
 
     async def delete_session(self, session_id: str) -> bool:
         session = self.sessions.get(session_id)

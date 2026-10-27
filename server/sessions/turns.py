@@ -610,7 +610,7 @@ class TurnsMixin(SessionManagerBase):
         chat history on resume, which is the right cue.
         """
         from ..bg_tasks import render_delivery_prompt
-        from ..knowledge import decode_owned, receive_return
+        from ..knowledge import decode_owned
 
         existing = await self.source_receipt("bg", f"bg:{rec.id}", session_id=rec.session_id)
         if existing is not None:
@@ -618,27 +618,20 @@ class TurnsMixin(SessionManagerBase):
         if self.session_owner_failed(rec.session_id):
             logger.warning("Background task %s delivery stopped: destination owner is unavailable; output retained in the task record", rec.id)
             return False
-        session = self.sessions.get(rec.session_id)
-        if session is None:
-            logger.info(
-                "bg task %s completed for missing session %s; dropping result",
-                rec.id,
-                rec.session_id,
-            )
-            return False
         work_id = getattr(rec, "work_id", None)
-        knowledge_context = receive_return(
+        resolved = await self.resolve_task_return(
             decode_owned(getattr(rec, "knowledge_context", None)),
-            session_id=session.id, user_id=session.user_id, work_id=work_id,
+            session_id=rec.session_id, work_id=work_id,
         )
-        if knowledge_context is None:
+        if resolved is None:
             logger.info("bg task %s retained as material: no open original request contract", rec.id)
             await self.retain_result_notice(
-                session.id, f"bg:{rec.id}",
+                rec.session_id, f"bg:{rec.id}",
                 f"Background task {rec.id}: output retained in the task record. "
                 "The original request contract is missing, closed or could not be verified; no automatic continuation was started.",
             )
             return False
+        _, knowledge_context = resolved
         prompt = render_delivery_prompt(rec)
         receipt = await self.start_message(
             rec.session_id, prompt, attachment_ids=None,

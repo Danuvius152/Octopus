@@ -36,16 +36,37 @@ def test_evaluation_build_covers_initialization_and_initial_index(evaluation, tm
             return super().refresh()
 
     report_path = tmp_path / "report.json"
+
+    def populate(root):
+        (root / "note.md").write_text("# Evidence\n\nNeedle and its condition.\n")
+
+    monkeypatch.setattr(evaluation, "populate", populate)
+    monkeypatch.setattr(evaluation, "CASES", [("needle", "note.md")])
     monkeypatch.setattr(evaluation, "WikiStore", TimedStore)
     monkeypatch.setattr(evaluation.time, "perf_counter", lambda: clock[0])
     monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--private-output", str(report_path)])
     evaluation.main()
     report = json.loads(report_path.read_text())
     assert report["build_ms"] == 2000
-    assert len(report["corpus_revisions"]) == 8
-    assert len(report["queries"]) == 15
+    assert list(report["corpus_revisions"]) == ["note.md"]
+    assert len(report["queries"]) == 2
+    assert report["queries"][0]["chapter_top3"] == ["note.md"]
     assert stat.S_IMODE(report_path.stat().st_mode) == 0o600
     assert stores[0].events._closed
+
+
+@pytest.mark.wiki_perf
+def test_evaluation_default_corpus_and_query_matrix(evaluation, tmp_path, monkeypatch):
+    report_path = tmp_path / "full-report.json"
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--private-output", str(report_path)])
+    evaluation.main()
+    report = json.loads(report_path.read_text())
+    assert len(report["corpus_revisions"]) == 8
+    assert len(report["queries"]) == 15
+    for result in report["queries"]:
+        assert len(result["samples"]) == 5
+        assert [sample["first"] for sample in result["samples"]] == ["baseline", "chapter", "baseline", "chapter", "baseline"]
+    assert stat.S_IMODE(report_path.stat().st_mode) == 0o600
 
 
 def test_failed_evaluation_releases_its_observer(evaluation, tmp_path, monkeypatch):

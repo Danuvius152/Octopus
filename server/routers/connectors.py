@@ -12,6 +12,7 @@ parameter (login_id + random half) is the trust anchor instead.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from html import escape
 
@@ -261,7 +262,10 @@ async def oauth_callback(
     try:
         pl = _login_mgr.resolve_callback(state)
     except ConnectorLoginError as e:
-        return _callback_page("Connection failed", str(e))
+        title = {"success": "Connected", "processing": "Connection in progress", "cancelled": "Connection cancelled"}.get(
+            e.status.value if e.status is not None else "", "Connection failed",
+        )
+        return _callback_page(title, str(e))
 
     if error:
         _login_mgr.mark_error(pl.login_id, error)
@@ -270,15 +274,18 @@ async def oauth_callback(
         _login_mgr.mark_error(pl.login_id, "no authorization code")
         return _callback_page("Connection failed", "No authorization code returned.")
 
-    connector = await _require_manager().get(pl.kind)
-    if connector is None:
-        _login_mgr.mark_error(pl.login_id, "connector kind disappeared")
-        return _callback_page("Connection failed", "Connector no longer registered.")
-    creds = await _require_manager().resolve_client_creds(pl.kind)
-    if creds is None:
-        _login_mgr.mark_error(pl.login_id, "OAuth client not configured")
-        return _callback_page("Connection failed", "OAuth client not configured.")
     try:
+        connector = await _require_manager().get(pl.kind)
+        if connector is None:
+            _login_mgr.mark_error(pl.login_id, "connector kind disappeared")
+            return _callback_page("Connection failed", "Connector no longer registered.")
+        creds = await _require_manager().resolve_client_creds(pl.kind)
+        if creds is None:
+            _login_mgr.mark_error(pl.login_id, "OAuth client not configured")
+            return _callback_page("Connection failed", "OAuth client not configured.")
+        await _require_manager().require_available_owner(pl.user_id)
+        if pl.status.value != "processing":
+            return _callback_page("Connection cancelled", pl.message or "Local connection cancelled")
         token_set = await connector.oauth.exchange_code(
             client_id=creds[0],
             client_secret=creds[1],
@@ -287,18 +294,21 @@ async def oauth_callback(
             code_verifier=pl.verifier,
             state=pl.state,
         )
-        inst = await _require_manager().complete_install(
-            kind=pl.kind,
-            token_set=token_set,
-            requested_label=pl.requested_label,
-            user_id=pl.user_id,
-        )
+        inst = await _login_mgr.complete_install(pl.login_id, _require_manager(), token_set)
+    except asyncio.CancelledError:
+        # Before binding, the callback itself owns the remote operation. Once
+        # binding starts, complete_install settles it before cancellation exits;
+        # mark_error preserves any already-confirmed success or cancellation.
+        _login_mgr.mark_error(pl.login_id, "Connection interrupted; start a new connection")
+        raise
     except Exception as e:  # exchange / identity / persistence failure
         logger.warning("connector oauth callback failed: %s", e)
+        _require_manager().db.health.require_healthy()
         _login_mgr.mark_error(pl.login_id, str(e))
+        if pl.status.value == "cancelled":
+            return _callback_page("Connection cancelled", pl.message or "Local connection cancelled")
         return _callback_page("Connection failed", "Could not complete sign-in.")
 
-    _login_mgr.mark_success(pl.login_id, inst["id"])
     return _callback_page(
         "Connected", f"{connector.display_name} ({inst['label']}) is connected."
     )
@@ -322,15 +332,18 @@ async def oauth_status(
     )
 
 
-@router.post("/oauth/cancel", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/oauth/cancel", response_model=ConnectorOAuthStatusResponse)
 async def oauth_cancel(
     req: ConnectorOAuthCancelRequest,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
     pl = _login_mgr.get(req.login_id)
-    if pl is not None and pl.user_id == user_id:
-        _login_mgr.cancel(req.login_id)
+    if pl is None or pl.user_id != user_id:
+        raise HTTPException(status_code=404, detail="unknown or expired login")
+    result = await _login_mgr.cancel(req.login_id)
+    assert result is not None
+    return ConnectorOAuthStatusResponse(status=result.status.value, installation_id=result.installation_id, message=result.message)
 
 
 # --- installation management ----------------------------------------------

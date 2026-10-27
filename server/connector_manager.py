@@ -14,6 +14,7 @@ import json
 import re
 import time
 import uuid
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
@@ -26,7 +27,7 @@ from .database import Database
 from .monitor import Event as _MonEvent
 from .monitor import record as _mon_record
 from .oauth_providers import OAuthTokenSet
-from .users import UserManager
+from .users import UserManager, owner_is_available
 
 # Slugs reserved by routes / built-ins; a custom kind can't take these.
 _KIND_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{1,31}$")
@@ -38,6 +39,18 @@ _REFRESH_SKEW_SECONDS = 300
 
 class ConnectorError(Exception):
     """Connector business-rule violation; routes map this to 400/404."""
+
+
+@dataclass(frozen=True)
+class PreparedInstallation:
+    """Resolved remote identity; no local binding exists until persistence."""
+
+    kind: str
+    token_set: OAuthTokenSet = field(repr=False)
+    external_id: str
+    label: str
+    user_id: str | None
+    secret_key: str = field(repr=False)
 
 
 def _serialize_token_set(ts: OAuthTokenSet) -> str:
@@ -245,15 +258,34 @@ class ConnectorManager:
         connecting the same GitHub account get one installation each, since the
         tokens are separately theirs.
         """
+        prepared = await self.prepare_install(kind=kind, token_set=token_set, requested_label=requested_label, user_id=user_id)
+        return await self.persist_install(prepared)
+
+    async def prepare_install(
+        self, *, kind: str, token_set: OAuthTokenSet, requested_label: str | None = None,
+        user_id: str | None = None,
+    ) -> PreparedInstallation:
         connector = await resolve_connector(self.db, kind)
         if connector is None:
             raise ConnectorError(f"unknown connector kind: {kind}")
+        await self.require_available_owner(user_id)
         external_id, identity_label = await connector.fetch_external_identity(
             token_set
         )
         label = requested_label or identity_label
         secret_key = await UserManager(self.db).data_key_for(user_id)
-        return await self._store_installation(kind, token_set, external_id, label, user_id, secret_key)
+        return PreparedInstallation(kind, token_set, external_id, label, user_id, secret_key)
+
+    async def require_available_owner(self, user_id: str | None) -> None:
+        """Captured login ownership does not authorize a later remote call."""
+        if not await owner_is_available(self.db, user_id):
+            raise ConnectorError("Account is unavailable")
+
+    async def persist_install(self, prepared: PreparedInstallation) -> dict[str, Any]:
+        return await self._store_installation(
+            prepared.kind, prepared.token_set, prepared.external_id, prepared.label,
+            prepared.user_id, prepared.secret_key,
+        )
 
     async def _store_installation(
         self, kind: str, token_set: OAuthTokenSet, external_id: str, label: str,
@@ -280,6 +312,7 @@ class ConnectorManager:
                 needs_reconnect=False,
                 last_refresh_error_code=None,
                 secret_encrypted=blob,
+                require_available_owner=True,
             )
         else:
             iid = uuid.uuid4().hex[:12]
@@ -294,6 +327,7 @@ class ConnectorManager:
                 scopes=list(token_set.scopes),
                 token_expires_at=token_expires_at,
                 user_id=user_id,
+                require_available_owner=True,
             )
 
     async def update_installation(

@@ -10,7 +10,53 @@ from server.wiki.jobs import WikiJobs, WikiWorker
 from tests.test_wiki_job_events import enqueue
 from tests.test_wiki_jobs import Curator
 from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
+from tests.wiki_jobs import jobs as jobs
+
+
+async def test_confirmed_cancellations_release_finished_task_references(jobs):
+    root = str(jobs.store.state.resolve())
+    for index in range(4):
+        job = jobs.maintain(f"retire-{index}", "", "Create requested knowledge", [], None, [], "human",
+                            creation={"purpose": "requested_knowledge_page", "paths": [f"Library/new-{index}.md"]})
+        await jobs.cancel(job["id"], None)
+        await jobs.settle_cancelled(job["id"], None)
+        assert jobs.get(job["id"])["settlement_phase"] == "confirmed"
+    await asyncio.sleep(0)
+    assert not [key for key in WikiWorker.cancellations if key[0] == root]
+
+
+async def test_old_completion_does_not_remove_new_verification_owner(jobs, monkeypatch):
+    job = jobs.maintain("replacement-owner", "", "Create requested knowledge", [], None, [], "human",
+                        creation={"purpose": "requested_knowledge_page", "paths": ["Library/new.md"]})
+    key = (str(jobs.store.state.resolve()), job["id"], job["attempt"])
+    create_task = asyncio.create_task
+    finish = WikiJobs._finish_cancelled
+    replacement, entered, release = [], asyncio.Event(), asyncio.Event()
+
+    async def held_verification(owner, current, manager, **kwargs):
+        if replacement:
+            entered.set()
+            await release.wait()
+        await finish(owner, current, manager, **kwargs)
+
+    def register_before_observer(coro, **kwargs):
+        task = create_task(coro, **kwargs)
+        if kwargs.get("name", "").startswith("wiki-cancel-") and not replacement:
+            def replace_finished(done):
+                if not replacement:
+                    replacement.append(WikiWorker.cancel_attempt(jobs, jobs.get(job["id"]), None, verify=True))
+            task.add_done_callback(replace_finished)
+        return task
+
+    monkeypatch.setattr(WikiJobs, "_finish_cancelled", held_verification)
+    monkeypatch.setattr(asyncio, "create_task", register_before_observer)
+    try:
+        await jobs.cancel(job["id"], None)
+        await asyncio.wait_for(entered.wait(), 3)
+        assert WikiWorker.cancellations[key] is replacement[0]
+    finally:
+        release.set()
+        await asyncio.gather(*replacement, return_exceptions=True)
 
 
 async def test_confirmation_waits_for_original_unused_path_release(jobs, monkeypatch):

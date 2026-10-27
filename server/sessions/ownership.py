@@ -17,7 +17,10 @@ class OwnershipMixin(SessionManagerBase):
         """Read the original owner's permanent failure without installing one."""
         session = self.sessions.get(session_id)
         owner = self._session_owners.get(id(session)) if session is not None else None
-        return owner is not None and owner.failed
+        return (owner is not None and owner.failed) or any(
+            original.session.id == session_id and original.failed
+            for original in self._session_owners.values()
+        )
 
 
 

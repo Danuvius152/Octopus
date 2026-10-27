@@ -141,6 +141,8 @@ async def run_research(
     findings: list[Finding] = []
     for angle, res in zip(angles, search_results, strict=True):
         cost += res.cost or 0.0
+        if res.error:
+            continue
         findings.extend(
             parse_findings(res.text, angle=angle, max_findings=limits.max_findings_per_angle)
         )

@@ -29,6 +29,7 @@ type Flow =
   | { kind: "idle" }
   | { kind: "starting" }
   | { kind: "waiting"; loginId: string }
+  | { kind: "cancelling" }
   | { kind: "error"; message: string };
 
 type View = "catalog" | "setup" | "custom";
@@ -58,7 +59,7 @@ export function ConnectorsPage({
   const [open, setOpen] = useState(false);
   const [view, setView] = useState<View>("catalog");
   const [flow, setFlow] = useState<Flow>({ kind: "idle" });
-  const polling = useRef(false);
+  const polling = useRef<string | null>(null);
 
   // Setup-a-built-in form.
   const [setupKind, setSetupKind] = useState("");
@@ -96,8 +97,9 @@ export function ConnectorsPage({
   }, [token]);
 
   useEffect(() => {
-    if (!open) polling.current = false;
+    if (!open) polling.current = null;
   }, [open]);
+  useEffect(() => () => { polling.current = null; }, [token]);
 
   const resetDialog = () => {
     setView("catalog");
@@ -111,37 +113,41 @@ export function ConnectorsPage({
   // --- OAuth install (popup + poll) ---------------------------------------
 
   const connect = async (kind: string) => {
+    polling.current = null;
     setFlow({ kind: "starting" });
     try {
       const { login_id, authorize_url } = await startConnectorOAuth(token, kind);
       window.open(authorize_url, "_blank", "noopener,noreferrer");
       setFlow({ kind: "waiting", loginId: login_id });
-      polling.current = true;
+      polling.current = login_id;
       const deadline = Date.now() + 5 * 60 * 1000;
-      while (polling.current && Date.now() < deadline) {
+      while (polling.current === login_id && Date.now() < deadline) {
         await new Promise((r) => setTimeout(r, 1500));
-        if (!polling.current) return;
+        if (polling.current !== login_id) return;
         let st;
         try {
           st = await pollConnectorOAuth(token, login_id);
         } catch {
           continue;
         }
+        if (polling.current !== login_id) return;
         if (st.status === "success") {
-          setInstallations(await fetchInstallations(token));
-          polling.current = false;
+          const connected = await fetchInstallations(token);
+          if (polling.current !== login_id) return;
+          setInstallations(connected);
+          polling.current = null;
           setFlow({ kind: "idle" });
           setOpen(false);
           return;
         }
         if (st.status === "error" || st.status === "cancelled") {
-          polling.current = false;
+          polling.current = null;
           setFlow({ kind: "error", message: st.message || "Sign-in failed." });
           return;
         }
       }
-      if (polling.current) {
-        polling.current = false;
+      if (polling.current === login_id) {
+        polling.current = null;
         setFlow({ kind: "error", message: "Timed out waiting for sign-in." });
       }
     } catch (e) {
@@ -216,8 +222,32 @@ export function ConnectorsPage({
     }
   };
 
-  const handleOpenChange = (v: boolean) => {
-    if (!v && flow.kind === "waiting") cancelConnectorOAuth(token, flow.loginId);
+  const handleOpenChange = async (v: boolean) => {
+    if (!v && flow.kind === "cancelling") return;
+    if (!v && flow.kind === "waiting") {
+      const start = useSessionStore.getState();
+      const current = () => {
+        const store = useSessionStore.getState();
+        return store.accountGeneration === start.accountGeneration && store.dispatchGeneration === start.dispatchGeneration;
+      };
+      polling.current = null;
+      setFlow({ kind: "cancelling" });
+      try {
+        const result = await cancelConnectorOAuth(token, flow.loginId);
+        if (!current()) return;
+        if (result.status === "success") {
+          const connected = await fetchInstallations(token);
+          if (!current()) return;
+          setInstallations(connected);
+        } else if (result.status !== "cancelled") {
+          setFlow({ kind: "error", message: result.message || "Connection state could not be confirmed." });
+          return;
+        }
+      } catch (error) {
+        if (current()) setFlow({ kind: "error", message: (error as Error).message });
+        return;
+      }
+    }
     if (!v) resetDialog();
     setOpen(v);
   };
@@ -392,6 +422,9 @@ export function ConnectorsPage({
               {flow.kind === "starting" && (
                 <p className="text-sm text-muted-foreground">Starting sign-in…</p>
               )}
+              {flow.kind === "cancelling" && (
+                <p className="text-sm text-muted-foreground">Confirming connection cancellation…</p>
+              )}
               {flow.kind === "error" && (
                 <p className="text-sm text-destructive">{flow.message}</p>
               )}
@@ -430,7 +463,7 @@ export function ConnectorsPage({
                       <Button
                         size="sm"
                         className="btn-connector-connect"
-                        disabled={flow.kind === "waiting" || flow.kind === "starting"}
+                        disabled={flow.kind === "waiting" || flow.kind === "starting" || flow.kind === "cancelling"}
                         onClick={() => connect(c.kind)}
                       >
                         Connect

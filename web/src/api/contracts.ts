@@ -11309,11 +11309,13 @@ export interface operations {
         };
         responses: {
             /** @description Successful Response */
-            204: {
+            200: {
                 headers: {
                     [name: string]: unknown;
                 };
-                content?: never;
+                content: {
+                    "application/json": components["schemas"]["ConnectorOAuthStatusResponse"];
+                };
             };
             /** @description Validation Error */
             422: {

@@ -11,6 +11,7 @@ import {
   sessionInfoFromDetail,
 } from "../lib/hydrateSession";
 import { readRuntimeMetadata } from "../lib/toolIdentity";
+import { readDispatchState } from "../lib/sessionDispatch";
 import { refreshSchedules } from "../lib/refreshSchedules";
 import { refreshAgents } from "../lib/refreshAgents";
 import { refreshWikiJobs } from "../lib/wikiJobs";
@@ -76,6 +77,19 @@ export function handleWsMessage(data: Record<string, unknown>) {
   } = getState();
   const sessionId = data.session_id as string;
   const type = data.type as string;
+  if (type === "session_archived" || type === "session_unarchived") {
+    const id = type === "session_archived" ? data.old_session_id as string : sessionId;
+    const snapshot = readDispatchState(data.dispatch_state);
+    if (snapshot) {
+      getState().applyDispatchState(id, snapshot);
+      const state = getState();
+      if (state.dispatchGeneration !== snapshot.generation) return;
+      const previous = state.sessionMembership[id];
+      if (previous?.generation === snapshot.generation && previous.revision >= snapshot.revision) return;
+      useSessionStore.setState({ sessionMembership: { ...state.sessionMembership,
+        [id]: { generation: snapshot.generation, revision: snapshot.revision } } });
+    }
+  }
   // A second tab can miss research_started, including while its first list
   // read is in flight. Recover the full record rather than inventing a card
   // from a progress patch with no question or authoritative status.
@@ -487,6 +501,15 @@ export function handleWsMessage(data: Record<string, unknown>) {
         status: (data.status as ResearchJob["status"]) ?? "failed",
         error: (data.error as string) ?? null,
       });
+      break;
+    }
+
+    case "session_unarchived": {
+      const revived = data.session as SessionInfo | undefined;
+      if (!revived || revived.id !== sessionId || revived.archived) break;
+      const store = getState();
+      store.setSessions([...store.sessions.filter((item) => item.id !== sessionId), revived]);
+      store.setArchivedSessions(store.archivedSessions.filter((item) => item.id !== sessionId));
       break;
     }
 

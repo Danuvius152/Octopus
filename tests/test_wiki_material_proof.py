@@ -16,9 +16,8 @@ from server.wiki.revise import revise
 from server.wiki.store import WikiError, WikiStore, revision
 from server.wiki.tasks import tasks
 from tests import test_wiki_jobs as job_tests
+from tests.wiki_jobs import jobs as jobs
 
-jobs = job_tests.jobs
-client = job_tests.client
 PROFILE = {"type": "Synthesis", "x_wiki": {"profile": "article-v1", "body_dialect": "obsidian"}}
 ARGUMENT = "The original argument retains its exception and limit."
 

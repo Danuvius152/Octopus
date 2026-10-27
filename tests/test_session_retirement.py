@@ -219,16 +219,46 @@ async def test_second_archive_cannot_reopen_first_archives_admission(runtime, mo
     first = asyncio.create_task(manager.archive_session(session.id, replace=False))
     await asyncio.wait_for(entered.wait(), 2)
     try:
-        with pytest.raises(ValueError, match="already being archived"):
-            if contender == "archive":
-                await manager.archive_session(session.id, replace=False)
-            else:
-                await manager.evict_agent_sessions(session.agent_id)
+        async with asyncio.timeout(2):
+            with pytest.raises(ValueError, match="already being archived"):
+                if contender == "archive":
+                    await manager.archive_session(session.id, replace=False)
+                else:
+                    await manager.evict_agent_sessions(session.agent_id)
         late = await manager.start_message(session.id, "late return", source="bg")
         assert late.disposition == "closed"
     finally:
         release.set()
         await asyncio.wait_for(first, 2)
+
+
+async def test_competing_archive_is_rejected_before_owner_sets_reservation(runtime, monkeypatch):
+    from server.sessions.owner_runtime import CloseExecution
+
+    manager, session = runtime
+    owner = manager._session_owner(session)
+    call_runtime = owner.call_runtime
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def delayed(command):
+        if isinstance(command, CloseExecution) and command.reservation is not None:
+            entered.set()
+            await release.wait()
+        return await call_runtime(command)
+
+    monkeypatch.setattr(owner, "call_runtime", delayed)
+    first = asyncio.create_task(manager.archive_session(session.id, replace=False))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        assert session._archive_reservation is None
+        async with asyncio.timeout(2):
+            with pytest.raises(ValueError, match="already being archived"):
+                await manager.archive_session(session.id, replace=False)
+        assert manager.get_session(session.id) is session
+    finally:
+        release.set()
+        await asyncio.wait_for(first, 2)
+    assert manager.get_session(session.id) is None
 
 
 async def _retire_original_test_process(identity):

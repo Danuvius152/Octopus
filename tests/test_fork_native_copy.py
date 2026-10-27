@@ -253,11 +253,11 @@ async def test_codex_fork_cleanup_removes_unreadable_and_legacy_copies(
     assert original.exists()
 @pytest.mark.parametrize("authenticated", [False, True])
 def test_codex_native_copy_auth_uses_the_selected_isolated_home(tmp_path, monkeypatch, authenticated):
-    from tests.test_fork_native_copy_real import _codex_home_with_auth
+    from tests.cli_gate import codex_home_with_auth
 
     selected = tmp_path / "selected-codex"
     selected.mkdir()
     if authenticated:
         (selected / "auth.json").write_text("{}")
     monkeypatch.setenv("CODEX_HOME", str(selected))
-    assert _codex_home_with_auth() == (str(selected) if authenticated else None)
+    assert codex_home_with_auth() == (str(selected) if authenticated else None)

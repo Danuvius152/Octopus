@@ -547,6 +547,15 @@ async def test_run_oneshot_reaps_group_on_cancel(monkeypatch):
         return real(proc, sig)
 
     monkeypatch.setattr(run_mod, "_terminate_process_group", spy)
+    spawned = asyncio.Event()
+    spawn = asyncio.create_subprocess_exec
+
+    async def observed_spawn(*args, **kwargs):
+        process = await spawn(*args, **kwargs)
+        spawned.set()
+        return process
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", observed_spawn)
 
     def build_oneshot_argv(ctx):
         return ([sys.executable, "-c", "import time; time.sleep(30)"], {})
@@ -557,7 +566,7 @@ async def test_run_oneshot_reaps_group_on_cancel(monkeypatch):
     task = asyncio.create_task(
         Harness(profile).run_oneshot(OneShotContext(prompt="x"), timeout=30)
     )
-    await asyncio.sleep(0.4)  # let the subprocess spawn
+    await asyncio.wait_for(spawned.wait(), 3)
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -565,7 +574,7 @@ async def test_run_oneshot_reaps_group_on_cancel(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_cancelled_oneshot_reports_unconfirmed_process_retirement(tmp_path, monkeypatch):
+async def test_cancelled_oneshot_reports_unconfirmed_process_retirement(tmp_path, monkeypatch, short_process_shutdown):
     import os
     import signal
 
@@ -608,7 +617,7 @@ async def test_cancelled_oneshot_reports_unconfirmed_process_retirement(tmp_path
 @pytest.mark.asyncio
 @pytest.mark.parametrize("cleanup_wait", ["confirmed", "cancelled", "timeout"])
 async def test_cancelled_oneshot_retires_process_delivered_after_cancellation(
-    tmp_path, monkeypatch, cleanup_wait
+    tmp_path, monkeypatch, cleanup_wait, short_process_shutdown
 ):
     import os
     import signal

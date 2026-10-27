@@ -415,6 +415,24 @@ duplicate).
 
 ### 5.5 API routes
 
+The connector login manager claims each valid callback once, before exchange.
+The fifteen-minute TTL limits this claim; a timely claimed flow continues
+under the provider's existing network timeouts. Ordinary failure consumes the
+callback and requires a new connection request. If the callback task is
+interrupted before binding, it records a terminal error and keeps the callback
+consumed; confirmed cancellation or success remains authoritative.
+
+Cancellation remains effective during exchange and remote identity lookup.
+Only final local persistence and cancellation share the login's binding lock;
+the persistence operation keeps ownership through its commit acknowledgment
+even when the HTTP waiter leaves. Exchange and remote identity lookup each
+check current account availability before starting; the final write checks it
+again in its transaction. A winning cancellation prevents binding;
+an already committed binding returns `success` and its installation ID from
+`POST /api/connectors/oauth/cancel`. The dialog consumes this authoritative
+response and refreshes installations when already connected. Local cancellation
+does not revoke remote authorization or undo a remote token exchange.
+
 Add a new router `server/routers/connectors.py`. All routes are
 bearer-authenticated with `OCTOPUS_AUTH_TOKEN` *except* the OAuth
 callback (it's bounced into from the third party's browser redirect
@@ -427,7 +445,7 @@ GET    /api/connectors                               # installations (no secrets
 POST   /api/connectors/oauth/start                   # body: {kind}; returns {login_id, authorize_url}
 GET    /api/connectors/oauth/callback                # 3rd-party browser redirect lands here
 GET    /api/connectors/oauth/status/{login_id}       # frontend polls this while the popup is open
-POST   /api/connectors/oauth/cancel                  # body: {login_id}; drop an in-flight attempt
+POST   /api/connectors/oauth/cancel                  # body: {login_id}; returns authoritative status/installation_id/message
 PATCH  /api/connectors/{id}                          # body: {label?, enable_by_default?}
 DELETE /api/connectors/{id}                          # uninstall (cascades session_connectors)
 POST   /api/connectors/{id}/test                     # forced health check

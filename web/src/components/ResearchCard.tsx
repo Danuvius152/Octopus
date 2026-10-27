@@ -22,6 +22,8 @@ export function ResearchCard({ sessionId }: { sessionId: string }) {
   const token = useSessionStore((s) => s.token);
   const jobs = useSessionStore((s) => s.research[sessionId]) ?? EMPTY_JOBS;
   const confirmations = useRef(new Set<string>());
+  const viewGeneration = useRef(0);
+  useEffect(() => () => { viewGeneration.current += 1; }, [sessionId]);
   useEffect(() => {
     if (!token) return;
     for (const job of jobs) {
@@ -47,11 +49,22 @@ export function ResearchCard({ sessionId }: { sessionId: string }) {
   if (jobs.length === 0) return null;
 
   const cancel = async (job: ResearchJob) => {
+    const start = useSessionStore.getState();
+    const view = viewGeneration.current;
     try {
-      await fetch(`${API}/api/sessions/${sessionId}/research/${job.id}/cancel`, {
+      const response = await fetch(`${API}/api/sessions/${sessionId}/research/${job.id}/cancel`, {
         method: "POST",
         headers: { Authorization: `Bearer ${token}` },
       });
+      if (!response.ok) return;
+      const result: ResearchJob = await response.json();
+      const store = useSessionStore.getState();
+      if (store.accountGeneration !== start.accountGeneration || store.dispatchGeneration !== start.dispatchGeneration ||
+          store.activeSessionId !== start.activeSessionId || viewGeneration.current !== view ||
+          result.id !== job.id || result.session_id !== sessionId) return;
+      const current = store.research[sessionId]?.find((item) => item.id === job.id);
+      if (current?.status !== "running") return;
+      store.upsertResearch(sessionId, result);
     } catch {
       /* best-effort; the WS event will reconcile */
     }

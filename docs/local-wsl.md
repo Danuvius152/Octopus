@@ -148,7 +148,7 @@ Codex agent、普通新会话都使用同一份用户技能。凭据仍使用
 公共测试配置不自动开启并行。
 CLI 登录目录与 `TMPDIR` 放在同一本轮运行根下的平行目录，避免辅助程序安装限制。
 
-Wiki 规模和性能测量使用独立的 `wiki_perf` 标记，默认在收集阶段排除，
+Wiki 规模、性能测量和检索评测脚本的完整查询跑批使用独立的 `wiki_perf` 标记，默认在收集阶段排除，
 `scripts/check.sh`、Python pre-commit 与发布门禁都不运行。权限、事务、恢复和
 小规模跨批次等正确性检查仍在默认全量中。需要分析成本时单独执行：
 
@@ -209,6 +209,10 @@ CLI 默认模型额度不足时，使用当前对话的凭据、模型和显式�
     -m 'real and (real_codex or codex_bin) and not real_claude and not knowledge_eval'
 )
 ```
+
+维护请求的同义措辞扩展归入按需的 `knowledge_eval` 层，固定使用 low effort。
+常规实机验收仍覆盖完整维护、否定请求、指定范围及文档内容不能扩权。评估同义
+措辞时单独运行 `.venv/bin/pytest tests/test_wiki_intent_real.py --run-knowledge-evals -m knowledge_eval`。
 
 Wiki 自然问答使用独立的 `knowledge_eval` 标记，默认排除，不作发布必过项，
 也不记为通过。只为具体质量问题显式运行，不能为补一条文档记录重跑。

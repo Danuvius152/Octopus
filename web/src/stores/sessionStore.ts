@@ -326,6 +326,7 @@ interface SessionStore {
   mergeWikiJobs: (sessionId: string, cards: WikiJobCard[]) => void;
   dispatchGeneration: string | null;
   retiredDispatchGenerations: string[];
+  sessionMembership: Record<string, { generation: string; revision: number }>;
   applyDispatchState: (sessionId: string, state: unknown, start?: DispatchReadStart) => boolean;
 
   // Deferred /fork requests (session-fork.md). When `/fork` is typed
@@ -859,6 +860,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   }),
   dispatchGeneration: null,
   retiredDispatchGenerations: [],
+  sessionMembership: {},
   applyDispatchState: (sessionId, value, start) => {
     const snapshot = readDispatchState(value);
     if (!snapshot) {
@@ -881,7 +883,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       applied = true;
       return {
         dispatchGeneration: snapshot.generation,
-        ...(changed ? { closedQuestionIds: {}, pendingQuestions: {} } : {}),
+        ...(changed ? { closedQuestionIds: {}, pendingQuestions: {}, sessionMembership: {} } : {}),
         retiredDispatchGenerations: changed
           ? [...s.retiredDispatchGenerations, s.dispatchGeneration!] : s.retiredDispatchGenerations,
         // An equal revision confirms the existing content and invalidates

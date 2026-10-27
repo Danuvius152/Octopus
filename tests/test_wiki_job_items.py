@@ -8,7 +8,7 @@ from server.wiki import job_execution, job_items
 from server.wiki.history import WikiHistory
 from server.wiki.store import WikiError
 from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
+from tests.wiki_jobs import jobs as jobs
 
 
 @pytest.mark.parametrize("old", [

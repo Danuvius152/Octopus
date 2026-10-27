@@ -33,8 +33,8 @@ async def intake(tmp_path, monkeypatch):
     manager = SessionManager()
     await manager.initialize(db)
     agents = AgentManager(db)
-    reader = await agents.create_agent(name="Intake", backend="codex", mcp_servers=[], user_id=owner["id"])
-    weber = await agents.create_agent(name="Weber", backend="codex", mcp_servers=[], user_id=owner["id"])
+    reader = await agents.create_agent(name="Intake", backend="codex", mcp_servers=[], reasoning_effort="low", user_id=owner["id"])
+    weber = await agents.create_agent(name="Weber", backend="codex", mcp_servers=[], reasoning_effort="low", user_id=owner["id"])
     vault = tmp_path / "vault"
     (vault / "Library").mkdir(parents=True)
     (vault / "Library/chosen.md").write_text("# 个人记录\n\n今天把测量条件记在原处，便于下次复现。\n")
@@ -66,8 +66,8 @@ async def intake(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("prompt,selected", [
     ("/wiki 维护一下知识库", {"Library/chosen.md", "Library/other.md"}),
-    ("/wiki 维护本地知识库", {"Library/chosen.md", "Library/other.md"}),
-    ("/wiki 维护个人知识库", {"Library/chosen.md", "Library/other.md"}),
+    pytest.param("/wiki 维护本地知识库", {"Library/chosen.md", "Library/other.md"}, marks=pytest.mark.knowledge_eval),
+    pytest.param("/wiki 维护个人知识库", {"Library/chosen.md", "Library/other.md"}, marks=pytest.mark.knowledge_eval),
     ("/wiki 怎么维护知识库？", set()),
     ("/wiki 先不要维护知识库，说明将怎么做。", set()),
     ("/wiki 只整理 Library/chosen.md，其他文章不要动。", {"Library/chosen.md"}),

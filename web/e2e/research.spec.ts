@@ -10,7 +10,7 @@ import {
 
 const TOKEN = TEST_BEARER;
 const API = "http://localhost:8765/api";
-const OWNED = new Set(["Research E2E"]);
+const OWNED = new Set(["Research E2E", "Restored original caller"]);
 
 test.afterAll(async ({ request }) => {
   try {
@@ -69,6 +69,29 @@ async function importSession(request: APIRequestContext): Promise<{ id: string }
   expect(res.ok()).toBeTruthy();
   return res.json();
 }
+
+test("a restored original session reappears in the sidebar", async ({ page, request }) => {
+  const created = await request.post(`${API}/sessions/import`, {
+    headers: { Authorization: `Bearer ${TOKEN}` },
+    data: { name: "Restored original caller", messages: [{ role: "user", type: "text", content: "Original context" }] },
+  });
+  expect(created.ok(), await created.text()).toBeTruthy();
+  const session = await created.json();
+  await login(page);
+  const row = page.locator(".session-item", { hasText: "Restored original caller" });
+  await expect(row).toBeVisible();
+  const archived = await request.post(`${API}/sessions/${session.id}/archive?replace=false`, {
+    headers: { Authorization: `Bearer ${TOKEN}` },
+  });
+  expect(archived.ok(), await archived.text()).toBeTruthy();
+  await expect(row).toBeHidden();
+  const restored = await request.post(`${API}/sessions/${session.id}/unarchive`, {
+    headers: { Authorization: `Bearer ${TOKEN}` },
+  });
+  expect(restored.ok(), await restored.text()).toBeTruthy();
+  expect((await restored.json()).id).toBe(session.id);
+  await expect(row).toBeVisible();
+});
 
 test("the /research command surfaces a live research card", async ({ page, request }) => {
   const session = await importSession(request);

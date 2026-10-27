@@ -175,9 +175,28 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
   model processing and does not assert human reading. Restart reconciles
   committed outcomes or records unknown, without replaying the request.
   Terminal injection is **idempotent** (like delegations' `_terminal_injected`).
-  Cancellation is a **state transition recorded before** interrupting live work
-  (mirrors delegation cancel ordering). A boot sweep marks running jobs
+  Completion, cancellation, failure and interruption share one guarded
+  `running`-to-terminal transaction. Completion requires the report file and
+  its directory entry to be synced before committing the completed row.
+  A winning cancellation interrupts live work; cancellation after completion
+  returns the completed job and preserves its delivery. The card consumes this
+  response directly through its existing state merge. A boot sweep marks running jobs
   `interrupted`/`failed`; v1 does NOT resume mid-pipeline.
+
+Research captures execution configuration when admitted, including while it
+waits for a job slot. A new lawful return may restore its original archived
+session through SessionManager; the original account, agent, work and receipt
+still govern admission. Archive interrupts the current input and revokes all
+queued inputs, while later returns may wake the caller. Previously selected
+Stop remains paused; cancelled inputs are never replayed. Background tasks and
+delegations use this same return boundary, including delegated questions.
+Restoration carries dispatch ordering within the current service generation,
+so delayed lifecycle notifications cannot replace a newer list projection.
+
+A web leaf needs a successful provider terminal. Parseable text followed by
+EOF without that terminal remains diagnostic material and supplies neither
+search findings nor verification votes. Cleanup failures retain the original
+run and its result evidence separately from the retirement error.
 
 ## 7. Invocation + surfacing
 

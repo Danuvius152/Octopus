@@ -20,6 +20,7 @@ namespace package — `import conftest` is NOT reliable under pytest).
 from __future__ import annotations
 
 import functools
+import glob
 import os
 import shutil
 import subprocess
@@ -135,3 +136,17 @@ def codex_home_works(home: str | Path) -> bool:
 def codex_cli_works() -> bool:
     """Check actual usability of the ambient login, not auth.json presence."""
     return codex_home_works(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
+
+
+def codex_home_with_auth() -> str | None:
+    """Honor the selected home; only discover another login when none was set."""
+    selected = os.environ.get("CODEX_HOME")
+    if selected:
+        home = os.path.expanduser(selected)
+        return home if os.path.exists(os.path.join(home, "auth.json")) else None
+    host = os.path.expanduser("~/.codex")
+    if os.path.exists(os.path.join(host, "auth.json")):
+        return host
+    for path in glob.glob(os.path.expanduser("~/.octopus/codex/*/auth.json")):
+        return os.path.dirname(path)
+    return None

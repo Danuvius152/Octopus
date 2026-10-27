@@ -38,12 +38,21 @@ _LEAF_SYSTEM = (
 
 @dataclass
 class LeafResult:
-    """One leaf's outcome. `text` is the model's final reply (empty on error);
+    """One leaf's outcome. `text` retains the reply, including failed partials;
     `cost` is USD when the backend reports it; `error` is set on any failure."""
 
     text: str
     cost: float | None = None
     error: str | None = None
+
+
+class LeafRetirementError(RuntimeError):
+    """Keep the original run and business evidence when its cleanup fails."""
+
+    def __init__(self, run: Any, result: LeafResult) -> None:
+        super().__init__("Web leaf execution retirement is unconfirmed")
+        self.run = run
+        self.result = result
 
 
 async def run_web_leaf(
@@ -76,15 +85,17 @@ async def run_web_leaf(
     parts: list[str] = []
     cost = 0.0
     error: str | None = None
+    successful_terminal = False
     try:
         await run.start(prompt, working_dir, None, credential=credential)
 
         async def _consume() -> None:
-            nonlocal cost, error
+            nonlocal cost, error, successful_terminal
             async for ev in run.stream():
                 if ev.type == "text" and ev.content:
                     parts.append(ev.content)
                 elif ev.type == "result":
+                    successful_terminal = not ev.is_error
                     if ev.cost:
                         cost += ev.cost
                     if ev.is_error:
@@ -93,6 +104,8 @@ async def run_web_leaf(
                     error = error or (ev.content or "web leaf error")
 
         await asyncio.wait_for(_consume(), timeout=timeout)
+        if not successful_terminal:
+            error = error or "web leaf ended without a successful terminal"
     except TimeoutError:
         error = "web leaf timed out"
     except asyncio.CancelledError:
@@ -101,7 +114,12 @@ async def run_web_leaf(
         logger.exception("web research leaf crashed")
         error = str(e)
     finally:
-        await complete_cleanup(run.stop())
+        try:
+            await complete_cleanup(run.stop())
+        except Exception as retirement_error:
+            evidence = LeafResult("".join(parts).strip(), cost or None,
+                                  error or (None if successful_terminal else "web leaf has no successful terminal"))
+            raise LeafRetirementError(run, evidence) from retirement_error
     return LeafResult(text="".join(parts).strip(), cost=cost or None, error=error)
 
 

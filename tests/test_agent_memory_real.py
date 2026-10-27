@@ -99,7 +99,7 @@ async def test_claude_reads_per_agent_memory(tmp_path, monkeypatch):
 
 @pytest.mark.real_codex
 @pytest.mark.asyncio
-async def test_codex_reads_per_agent_memory(tmp_path, monkeypatch):
+async def test_codex_memory_read_emits_native_activity_and_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "agents"))
     aid = "memtest-codex"
     agent_memory.ensure_agent_dirs(aid)
@@ -108,9 +108,47 @@ async def test_codex_reads_per_agent_memory(tmp_path, monkeypatch):
     os.makedirs(wd)
     # This contract uses native file reads. Starting unrelated stdio MCP
     # servers adds processes and handshakes without exercising those tools.
-    cfg = dict(memory_dir=str(agent_memory.agent_memory_dir(aid)), mcp_servers=[])
-    out = await _recall("codex", cfg, wd)
-    assert CODENAME in out.upper()
+    run = get_harness("codex").create_run(RunConfig(
+        session_id="native_activity_acceptance",
+        memory_dir=str(agent_memory.agent_memory_dir(aid)), mcp_servers=[],
+    ))
+    run.bind_tool_context("native-metrics-request", "native-metrics-attempt")
+    ticks: list[float | None] = []
+    run.bind_activity(ticks.append)
+    await run.start(
+        "Consult your long-term memory about me: read your MEMORY.md and the file "
+        "it points to, then tell me my secret project codename. Also use the shell "
+        "to run exactly: sleep 2; printf 'NATIVE_ACTIVITY_ACCEPTED\\n'. "
+        "Do not change any files. Finish with the codename, or UNKNOWN if your "
+        "memory lacks it.", wd,
+    )
+    try:
+        events = await _drain(run)
+        assert CODENAME in _text(events).upper()
+        # Memory reads already exercise the real shell. Reuse this run for
+        # native identity, tool normalization and per-response measurements.
+        # Match the sentinel call explicitly: memory reads may precede it.
+        tu = next((e for e in events if e.type == "tool_use" and e.tool_name == "Bash"
+                   and "NATIVE_ACTIVITY_ACCEPTED" in (e.tool_input or {}).get("command", "")), None)
+        assert tu is not None, f"no sentinel shell call; saw {[e.type for e in events]}"
+        tr = next((e for e in events if e.type == "tool_result" and e.tool_use_id == tu.tool_use_id), None)
+        assert tr is not None and tr.is_error is False
+        assert "NATIVE_ACTIVITY_ACCEPTED" in (tr.content or "")
+        assert run._activity_observer.identity_confirmed, "Installed CLI native identity was not verified"
+        # Reasoning emission is optional; its acceptance has replay coverage.
+        assert ticks
+        responses = [e for e in events if e.type == "model_measurement"
+                     and e.raw.get("kind") == "codex_response"]
+        assert len(responses) >= 2, "Shell and final-answer responses need separate usage windows"
+        assert all(e.duration_ms and e.duration_ms > 0 for e in responses)
+        assert all(e.raw["model"] != "unknown" and e.raw["output_tokens"] > 0 for e in responses)
+        assert all(e.raw["reasoning_tokens"] <= e.raw["output_tokens"] for e in responses)
+        assert sum(e.duration_ms for e in responses) < next(e.duration_ms for e in events if e.type == "result")
+        assert any(e.type == "result" and not e.is_error for e in events)
+        assert "Sent prompt with event ID:" not in run.stderr_text
+        assert "SessionConfiguredEvent" not in run.stderr_text
+    finally:
+        await run.stop()
 
 
 @pytest.mark.real_claude

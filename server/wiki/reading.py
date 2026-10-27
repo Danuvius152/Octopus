@@ -30,19 +30,10 @@ def read(store, doc, user_id, *, start=0, length=16000, expected_revision=None,
     if location is not None and page is not None:
         raise WikiError('A source location cannot be combined with a page', 422)
     with WikiHistory(store).locked():
-        document = store.read(doc, start=start, length=length, expected_revision=expected_revision, page=page)
+        document = store.read(doc, start=start, length=length, expected_revision=expected_revision, page=page, location=location)
         details = sources(store, document, user_id, cursor=source_cursor, limit=source_limit)
         if source_cursor is not None:
             return {key: document[key] for key in ('id', 'path', 'revision')} | {'sources': details}
-        if location is not None:
-            with store.connect() as db:
-                text = db.execute('SELECT text FROM documents WHERE id=?', (document['id'],)).fetchone()[0]
-            first, end, boundary = window(text, start, length, location)
-            document = store.read(document['id'], start=first, length=max(1, end - first), expected_revision=document['revision'])
-            if first == end:
-                document.update(content='', end=first, line_end=document['line_start'])
-            document['next_start'] = end if end < boundary else None
-            document['source_location'] = location
         document['sources'] = details
         if view == 'compact' or task is not None:
             document = compact_read(document, view=view)

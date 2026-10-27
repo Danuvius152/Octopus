@@ -306,7 +306,7 @@ async def test_f20_departed_consumer_keeps_execution_counted_until_completion(
 
 @pytest.mark.parametrize("surface", ["harness", "backend", "oneshot"])
 @pytest.mark.parametrize("ignore_term", [False, True])
-async def test_f12_stop_retires_redirected_children_after_parent_exit(tmp_path, monkeypatch, surface, ignore_term):
+async def test_f12_stop_retires_redirected_children_after_parent_exit(tmp_path, monkeypatch, surface, ignore_term, short_process_shutdown):
     ready, writes = tmp_path / "child.pid", tmp_path / "writes"
     child = (
         "import os,signal,time\nfrom pathlib import Path\n"

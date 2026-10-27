@@ -62,7 +62,6 @@ from .knowledge import (
     decode_owned,
     derive,
     encode,
-    receive_return,
 )
 from .mcp_identity import McpScope, close_work, require_live_scope, work_is_open
 from .monitor import Event as _MonEvent
@@ -1130,7 +1129,7 @@ class DelegationManager:
             if self.session_mgr.session_owner_failed(rec.parent_session_id):
                 logger.warning("Delegation %s question delivery stopped: parent owner is unavailable; original question retained", rec.delegation_id)
                 return
-            context = self._return_context(rec)
+            context = await self._return_context(rec)
             if (context is None or self.session_mgr._admission_closed
                     or (retrying and not self.session_mgr.has_pending_question(rec.delegation_id, question_id))):
                 return
@@ -1290,9 +1289,9 @@ class DelegationManager:
                 await self._save_round(rec, _terminal_disposition="closed")
                 logger.info("Delegation %s terminal return suppressed by closed parent work", rec.delegation_id)
                 return
-            context = self._return_context(rec)
+            context = await self._return_context(rec)
             if context is None:
-                await self._save_round(rec, _terminal_disposition="unbound")
+                await self._save_round(rec, _terminal_disposition="closed" if self.session_mgr._admission_closed else "unbound")
                 logger.info("Delegation %s terminal retained without an admitted return contract", rec.delegation_id)
                 await self.session_mgr.retain_result_notice(
                     rec.parent_session_id, f"agent-terminal:{rec.work_id}",
@@ -1344,7 +1343,7 @@ class DelegationManager:
                 if self.session_mgr._admission_closed:
                     await self._save_round(rec, _terminal_disposition="closed")
                     return
-                context = self._return_context(rec)
+                context = await self._return_context(rec)
                 if context is None:
                     await self._save_round(rec, _terminal_disposition="closed")
                     return
@@ -1378,14 +1377,13 @@ class DelegationManager:
         logger.warning("Delegation %s delivery stopped: parent owner is unavailable; result retained in the child conversation", rec.delegation_id)
         return True
 
-    def _return_context(self, rec: DelegationRunState):
+    async def _return_context(self, rec: DelegationRunState):
         """Resolve the fixed immediate caller, independently of its retired lease."""
         assert self.session_mgr is not None
-        parent = self.session_mgr.get_session(rec.parent_session_id)
-        if parent is None:
-            return None
-        return receive_return(rec.owned_context, session_id=parent.id,
-                              user_id=parent.user_id, work_id=rec.parent_work_id)
+        resolved = await self.session_mgr.resolve_task_return(
+            rec.owned_context, session_id=rec.parent_session_id, work_id=rec.parent_work_id,
+        )
+        return resolved[1] if resolved is not None else None
 
 # Module-level singleton (mirrors the session_manager / bg_tasks
 # pattern). Wired in main.py's lifespan with .bind(...).

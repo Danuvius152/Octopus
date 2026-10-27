@@ -1,4 +1,7 @@
-"""Gated real-CLI tests for the full-copy fork strategy (session-fork.md).
+"""Claude real-CLI proof for full-copy forks (session-fork.md).
+
+Codex's full-copy proof shares the speed/resume transcript in
+test_backend_codex_real.py; it still resumes the copied file with the raw CLI.
 
 Each asserts the END-TO-END truth the unit tests can't: that the real CLI
 actually RESUMES a transcript the harness copied to a new id/location and recalls
@@ -13,17 +16,13 @@ fails to recall the copied context FAILS. Auto-skips entirely unless the backend
 CLI is installed and a signed-in home is found.
 """
 
-import glob
 import json
-import os
 import subprocess
 import uuid
 
 import pytest
 
 from server.harness import claude_code as cc
-from server.harness import codex as cx
-from server.harness.events import HarnessCredential
 from server.harness.run import _which_with_fallback
 
 pytestmark = pytest.mark.real
@@ -88,81 +87,3 @@ async def test_claude_native_copy_resume_recalls_context(tmp_path):
         import shutil
         for wd in (str(src), str(dst)):
             shutil.rmtree(cc._claude_project_dir(wd), ignore_errors=True)
-
-
-def _codex_home_with_auth() -> str | None:
-    """Honor selected CODEX_HOME without falling back to another credential.
-    Otherwise discover host auth or an Octopus per-credential directory.
-    (Presence only — a revoked token still passes here but the env-failure skip
-    below catches it at call time.)"""
-    selected = os.environ.get("CODEX_HOME")
-    if selected:
-        home = os.path.expanduser(selected)
-        return home if os.path.exists(os.path.join(home, "auth.json")) else None
-    host = os.path.expanduser("~/.codex")
-    if os.path.exists(os.path.join(host, "auth.json")):
-        return host
-    for p in glob.glob(os.path.expanduser("~/.octopus/codex/*/auth.json")):
-        return os.path.dirname(p)
-    return None
-
-
-@pytest.mark.codex_bin
-@pytest.mark.asyncio
-async def test_codex_native_copy_resume_recalls_context(tmp_path):
-    exe = _which_with_fallback("codex")
-    codex_home = _codex_home_with_auth()
-    if codex_home is None:
-        pytest.skip("no signed-in CODEX_HOME found")
-    src = tmp_path / "src"
-    src.mkdir()
-    dst = tmp_path / "dst"
-    dst.mkdir()
-    cred = HarnessCredential(backend="codex", auth_type="oauth", home_dir=codex_home)
-    env = {**os.environ, "CODEX_HOME": codex_home}
-
-    def _run(wd, extra):
-        return subprocess.run(
-            [exe, "exec", "--json", "--skip-git-repo-check", "-C", str(wd),
-             "--dangerously-bypass-approvals-and-sandbox",
-             "-c", 'model_reasoning_effort="low"', *extra],
-            capture_output=True, text=True, timeout=180, env=env,
-        )
-
-    r = _run(src, ["--", "Remember this exactly: the codeword is ZEBRA77. Acknowledge in 3 words."])
-    _skip_if_env_failure(r, "codex create")
-    assert r.returncode == 0, r.stderr
-    rid = None
-    for line in r.stdout.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            d = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(d, dict):
-            rid = d.get("session_id") or d.get("thread_id") or (
-                (d.get("payload") or {}).get("id") if isinstance(d.get("payload"), dict) else None
-            )
-        if rid:
-            break
-    assert rid, f"could not find rollout id in: {r.stdout[:500]}"
-
-    nid = str(uuid.uuid4())
-    art = await cx._fork_copy(
-        parent_working_dir=str(src), parent_resume_id=rid,
-        parent_credential=cred, dest_working_dir=str(dst), new_resume_id=nid,
-    )
-    assert art.needs_replay is False and art.resume_id == nid
-
-    try:
-        r2 = _run(dst, ["resume", nid, "--",
-                        "What is the codeword I told you earlier? Reply with ONLY the word."])
-        _skip_if_env_failure(r2, "codex resume")
-        assert r2.returncode == 0, r2.stderr
-        assert "ZEBRA77" in r2.stdout
-    finally:
-        copied = cx._find_rollout(cx._codex_sessions_dir(cred), nid)
-        if copied is not None:
-            copied.unlink(missing_ok=True)

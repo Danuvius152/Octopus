@@ -5,7 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { ResearchCard } from "./ResearchCard";
 import { useSessionStore, type ResearchJob } from "../stores/sessionStore";
@@ -119,5 +119,30 @@ describe("ResearchCard", () => {
         )
       ).toBe(true)
     );
+  });
+
+  it("merges the authoritative completed response without a broadcast", async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify(job({ status: "completed", phase: "done" }))));
+    useSessionStore.setState({ research: { s1: [job()] } });
+    render(<ResearchCard sessionId="s1" />);
+    fireEvent.click(screen.getByTitle("Cancel research"));
+    await waitFor(() => expect(screen.getByText(/Report ready/)).toBeTruthy());
+    expect(screen.queryByTitle("Cancel research")).toBeNull();
+  });
+
+  it.each(["account", "service", "session", "unmount"])("ignores a late cancel response after %s changes", async (change) => {
+    let reply!: (value: Response) => void;
+    fetchMock.mockImplementation(() => new Promise<Response>((resolve) => { reply = resolve; }));
+    useSessionStore.setState({ research: { s1: [job()] }, activeSessionId: "s1", dispatchGeneration: "service-a" });
+    const view = render(<ResearchCard sessionId="s1" />);
+    fireEvent.click(screen.getByTitle("Cancel research"));
+    await act(async () => {
+      if (change === "account") useSessionStore.setState({ accountGeneration: useSessionStore.getState().accountGeneration + 1 });
+      if (change === "service") useSessionStore.setState({ dispatchGeneration: "service-b" });
+      if (change === "session") useSessionStore.setState({ activeSessionId: "s2" });
+      if (change === "unmount") view.unmount();
+      reply(new Response(JSON.stringify(job({ status: "completed", phase: "done" }))));
+    });
+    expect(useSessionStore.getState().research.s1[0].status).toBe("running");
   });
 });

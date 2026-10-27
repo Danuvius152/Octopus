@@ -34,9 +34,10 @@ from ..knowledge import (
     decode_owned,
     derive,
     encode,
-    receive_return,
 )
 from ..mcp_identity import McpScope, work_is_open
+from ..sessions.base import Session
+from ..sessions.owner_runtime import capture_configuration
 from ..sessions.runtime_types import SessionOwnerUnavailable
 from ..workspace import paths_for
 from .orchestrator import (
@@ -154,7 +155,7 @@ class ResearchManager:
         ready: asyncio.Future[dict[str, Any]] = asyncio.get_running_loop().create_future()
         # Own the whole launch before SQLite or subscribers can suspend it.
         task = asyncio.create_task(
-            self._start_job(job_id, session_id, question, ready, owned),
+            self._start_job(job_id, session_id, question, ready, owned, capture_configuration(session)),
             name=f"research-{job_id}",
         )
         self._tasks[job_id] = task
@@ -182,6 +183,7 @@ class ResearchManager:
         self, job_id: str, session_id: str, question: str,
         ready: asyncio.Future[dict[str, Any]],
         owned: OwnedTaskContext,
+        configured: Session,
     ) -> None:
         assert self.db is not None
         try:
@@ -201,7 +203,7 @@ class ResearchManager:
             row = await self.db.get_research_job(job_id)
             assert row is not None
             ready.set_result(row)
-            await self._run_job(job_id, session_id, question)
+            await self._run_job(job_id, session_id, question, configured)
         except asyncio.CancelledError:
             await self._finalize_failed(
                 job_id, session_id,
@@ -212,15 +214,12 @@ class ResearchManager:
 
     # ------------------------------------------------------------------- run
 
-    async def _run_job(self, job_id: str, session_id: str, question: str) -> None:
+    async def _run_job(self, job_id: str, session_id: str, question: str, session: Session) -> None:
         assert self.session_mgr is not None and self.db is not None
         assert self._job_sem is not None
         report = None
         try:
             async with self._job_sem:  # bound concurrent jobs
-                session = self.session_mgr.get_session(session_id)
-                if session is None:
-                    raise ResearchError("session disappeared", status_code=404)
                 harness = get_harness(session.backend)
                 agent = await self.db.get_agent(session.agent_id) if session.agent_id else None
                 model = (agent or {}).get("model")
@@ -229,6 +228,7 @@ class ResearchManager:
                 database = self.db
 
                 async def authorize_spawn():
+                    await self.session_mgr.require_active_agent(session.agent_id)
                     await database.require_run_authority(user_id, credential_id, backend)
 
                 try:
@@ -309,10 +309,15 @@ class ResearchManager:
     ) -> None:
         assert self.db is not None
         report_path = self._write_report(job_id, report.report, user_id)
-        await self.db.update_research_job(
-            job_id, status="completed", phase="done", cost=report.cost,
+        if report_path is None:
+            await self._finalize_failed(job_id, session_id, "failed", "Research report could not be saved")
+            return
+        won, _ = await self.db.confirm_research_outcome(
+            job_id, "completed", cost=report.cost,
             completed_at=_now(), report_path=report_path,
         )
+        if not won:
+            return
         await self._broadcast({
             "type": "research_completed",
             "session_id": session_id,
@@ -348,15 +353,12 @@ class ResearchManager:
             if self._closing or self.session_mgr._admission_closed:
                 await self._settle_delivery(job_id, session_id, error="delivery suppressed: session admission is closed")
                 return
-            session = self.session_mgr.get_session(session_id)
             owned = decode_owned(row.get("knowledge_context")) if row else None
             work_id = owned.return_binding.work_id if owned else None
-            context = receive_return(
-                owned, session_id=session_id, user_id=session.user_id if session else None,
-                work_id=work_id,
-            )
+            resolved = await self.session_mgr.resolve_task_return(owned, session_id=session_id, work_id=work_id)
+            context = resolved[1] if resolved is not None else None
             if (row is None or row["session_id"] != session_id or row["status"] != "completed"
-                    or session is None or context is None):
+                    or resolved is None or resolved[0].id != session_id or context is None):
                 await self._settle_delivery(job_id, session_id,
                     error="delivery suppressed: original request contract is missing, closed or mismatched")
                 return
@@ -438,29 +440,21 @@ class ResearchManager:
 
     async def _finalize_failed(
         self, job_id: str, session_id: str, status: str, error: str
-    ) -> None:
+    ) -> tuple[bool, dict[str, Any] | None]:
         assert self.db is not None
-        try:
-            # Idempotent: if the job is already terminal (e.g. cancel() recorded
-            # it before interrupting), don't overwrite or re-broadcast (Vera
-            # review — avoids the cancel double-write/double-event).
-            row = await self.db.get_research_job(job_id)
-            if row is None or row["status"] != "running":
-                return
-            await self.db.update_research_job(
-                job_id, status=status, error=error, completed_at=_now()
-            )
-            await self._broadcast({
-                "type": "research_failed",
-                "session_id": session_id,
-                "research_id": job_id,
-                "status": status,
-                "error": error,
-            })
-        except Exception:
-            logger.exception("research %s: finalize(%s) failed", job_id, status)
-            if self._closing:
-                raise
+        won, row = await self.db.confirm_research_outcome(
+            job_id, status, error=error, completed_at=_now(),
+        )
+        if won:
+            assert row is not None
+            await self._publish_failed(row)
+        return won, row
+
+    async def _publish_failed(self, row: dict[str, Any]) -> None:
+        await self._broadcast({
+            "type": "research_failed", "session_id": row["session_id"],
+            "research_id": row["id"], "status": row["status"], "error": row["error"],
+        })
 
     # ---------------------------------------------------------------- cancel
 
@@ -479,31 +473,16 @@ class ResearchManager:
     async def cancel(self, job_id: str) -> dict[str, Any]:
         if self.db is None:
             raise ResearchError("ResearchManager not bound", status_code=500)
-        row = await self.db.get_research_job(job_id)
+        won, row = await self.db.confirm_research_outcome(
+            job_id, "cancelled", completed_at=_now(), error="cancelled by user",
+        )
         if row is None:
             raise ResearchError(f"research job {job_id} not found", status_code=404)
-        # Record cancelled + broadcast BEFORE interrupting live work, so the
-        # state transition is authoritative and the REST caller/UI never see a
-        # stale `running` (Vera review — cancel-as-state-transition). The
-        # CancelledError path's _finalize_failed is now idempotent, so it won't
-        # double-write. No-op if already terminal.
-        if row["status"] == "running":
-            await self.db.update_research_job(
-                job_id, status="cancelled", error="cancelled by user",
-                completed_at=_now(),
-            )
-            await self._broadcast({
-                "type": "research_failed",
-                "session_id": row["session_id"],
-                "research_id": job_id,
-                "status": "cancelled",
-                "error": "cancelled by user",
-            })
         task = self._tasks.get(job_id)
-        if task and not task.done():
+        if won and task and not task.done() and not task.cancelling():
             task.cancel()  # reaps in-flight leaves via CancelledError
-        row = await self.db.get_research_job(job_id)
-        assert row is not None  # written immediately above
+        if won:
+            await self._publish_failed(row)
         return row
 
     # --------------------------------------------------------------- helpers
@@ -539,6 +518,13 @@ class ResearchManager:
             path = os.path.join(_research_dir(user_id), f"{job_id}.md")
             with open(path, "w", encoding="utf-8") as fh:
                 fh.write(report)
+                fh.flush()
+                os.fsync(fh.fileno())
+            directory = os.open(os.path.dirname(path), os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
             return path
         except Exception:
             logger.exception("research %s: could not write report file", job_id)

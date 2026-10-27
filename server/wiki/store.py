@@ -571,13 +571,13 @@ class WikiStore:
     def identity(self, db, relative, stat) -> str:
         key = self.file_key(stat)
         identity = db.execute(
-            "SELECT id FROM document_identities WHERE path=?", (relative,)
+            "SELECT id,file_key FROM document_identities WHERE path=?", (relative,)
         ).fetchone()
         if identity is None:
             candidates = [
                 row
                 for row in db.execute(
-                    "SELECT id,path FROM document_identities WHERE file_key=? AND path IS NOT NULL",
+                    "SELECT id,path,file_key FROM document_identities WHERE file_key=? AND path IS NOT NULL",
                     (key,),
                 )
                 if not self.path(row["path"]).exists()
@@ -587,9 +587,10 @@ class WikiStore:
                 identity = candidates[0]
         if identity:
             doc_id = identity["id"]
-            db.execute(
-                "UPDATE document_identities SET file_key=? WHERE id=?", (key, doc_id)
-            )
+            if identity["file_key"] != key:
+                db.execute(
+                    "UPDATE document_identities SET file_key=? WHERE id=?", (key, doc_id)
+                )
         else:
             doc_id = uuid.uuid5(uuid.UUID(self.vault_id), relative).hex
             if db.execute(
@@ -661,10 +662,11 @@ class WikiStore:
             from . import materials
 
             materials.index(db, existing, raw)
-            db.execute(
-                "UPDATE documents SET signature=? WHERE id=?",
-                (signature, existing["id"]),
-            )
+            if existing["signature"] != signature:
+                db.execute(
+                    "UPDATE documents SET signature=? WHERE id=?",
+                    (signature, existing["id"]),
+                )
             if not search_index.current(db, existing):
                 search_index.index(db, existing, json.loads(existing["metadata"]))
                 db.execute("UPDATE index_state SET epoch=epoch+1 WHERE singleton=1")
@@ -1025,9 +1027,10 @@ class WikiStore:
         length: int = 16000,
         expected_revision: str | None = None,
         page: int | None = None,
+        location: str | None = None,
     ) -> dict[str, Any]:
         document, _ = self.read_snapshot(
-            doc, start=start, length=length, expected_revision=expected_revision, page=page
+            doc, start=start, length=length, expected_revision=expected_revision, page=page, location=location,
         )
         return document
 
@@ -1040,10 +1043,13 @@ class WikiStore:
         length: int = 16000,
         expected_revision: str | None = None,
         page: int | None = None,
+        location: str | None = None,
     ) -> tuple[dict[str, Any], bytes]:
         """Return the public read and the exact bytes from which it was indexed."""
         if start < 0 or not 1 <= length <= 24000 or (page is not None and page < 1):
             raise WikiError("Invalid read range", 422)
+        if location is not None and page is not None:
+            raise WikiError("A source location cannot be combined with a page", 422)
         with self.connect() as db:
             identity = self.resolve_identity(doc, db=db)
             if identity is not None and identity[1] is None:
@@ -1071,8 +1077,13 @@ class WikiStore:
                 page_offset = selected["start"]
                 start += selected["start"]
                 page_end = selected["end"]
-            start = min(start, page_end)
-            end = min(page_end, start + length)
+            if location is not None:
+                from .reading import window
+
+                start, end, page_end = window(text, start, length, location)
+            else:
+                start = min(start, page_end)
+                end = min(page_end, start + length)
             return self.public(row, raw=raw, db=db) | {
                 "content": text[start:end],
                 "page": page,
@@ -1082,6 +1093,7 @@ class WikiStore:
                 "line_start": text[:start].count("\n") + 1,
                 "line_end": text[:end].count("\n") + 1,
                 "freshness": "live", **self._index_state(db=db),
+                **({"source_location": location} if location is not None else {}),
             }, raw
 
     def resolve_identity(self, doc, *, db=None):

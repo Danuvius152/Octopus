@@ -4,6 +4,24 @@ import { act, renderHook } from "@testing-library/react";
 import { handleWsMessage, shouldApplyWsEvent, useWebSocket } from "./useWebSocket";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 
+it("restores the original session and rejects a delayed archive projection", () => {
+  const original = { id: "woken-original", name: "Original", archived: false } as SessionInfo;
+  useSessionStore.setState({ sessions: [], archivedSessions: [original], activeSessionId: "another-session", sessionMembership: {} });
+  const dispatch = { generation: "wake-service", revision: 12, paused: true, active_request_id: null, items: [] };
+  handleWsMessage({ type: "session_unarchived", session_id: original.id, session: original, dispatch_state: dispatch });
+  expect(useSessionStore.getState().sessions).toEqual([original]);
+  expect(useSessionStore.getState().archivedSessions).toEqual([]);
+  expect(useSessionStore.getState().activeSessionId).toBe("another-session");
+  handleWsMessage({ type: "session_archived", old_session_id: original.id, new_session_id: null,
+    dispatch_state: { ...dispatch, revision: 11 } });
+  expect(useSessionStore.getState().sessions).toEqual([original]);
+  handleWsMessage({ type: "session_archived", old_session_id: original.id, new_session_id: null,
+    dispatch_state: { ...dispatch, revision: 13 } });
+  expect(useSessionStore.getState().sessions).toEqual([]);
+  handleWsMessage({ type: "session_unarchived", session_id: original.id, session: original, dispatch_state: dispatch });
+  expect(useSessionStore.getState().sessions).toEqual([]);
+});
+
 it("tracks report completion separately from follow-up delivery", () => {
   useSessionStore.setState({ research: {} });
   handleWsMessage({ type: "research_started", session_id: "research-owner", research_id: "report", question: "Compare X" });

@@ -9,7 +9,7 @@ from server.wiki import job_events
 from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiWorker
 from tests.test_wiki_jobs import client as client
-from tests.test_wiki_jobs import jobs as jobs
+from tests.wiki_jobs import jobs as jobs
 
 
 def enqueue(jobs, key="event-contract"):

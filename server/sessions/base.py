@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import uuid
+import weakref
 from collections import deque
 from collections.abc import Awaitable, Callable, Coroutine
 from contextlib import AbstractAsyncContextManager
@@ -28,7 +29,7 @@ from ..oauth_errors import RefreshErrorCode
 from .submission import RequestCompletion, SubmissionReceipt
 
 if TYPE_CHECKING:
-    from ..knowledge import KnowledgeContext
+    from ..knowledge import KnowledgeContext, OwnedTaskContext
     from .owner import SessionOwner
     from .owner_questions import QuestionNotification
     from .owner_runtime import ReleaseArchive, ReserveFork
@@ -613,6 +614,14 @@ class SessionManagerBase:
     async def auto_archive_scheduled_session(self, session_id: str) -> bool:
         raise NotImplementedError  # provided by a mixin
 
+    async def resolve_task_return(
+        self, owned: OwnedTaskContext | None, *, session_id: str, work_id: str | None,
+    ) -> tuple[Session, KnowledgeContext] | None:
+        raise NotImplementedError  # provided by lifecycle
+
+    def _session_dispatch_snapshot(self, session: Session) -> dict[str, Any]:
+        raise NotImplementedError  # provided by turns
+
     async def _archive_original(
         self, session: Session, *, replace: bool = False, successor: Session | None = None,
         only_request_id: str | None = None, automatic: bool = False,
@@ -664,6 +673,11 @@ class SessionManagerBase:
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
         self._session_owners: dict[int, SessionOwner] = {}
+        # Serialize archive/restoration without retaining historical sessions.
+        self._session_lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        # Carry Stop and dispatch ordering to the next live owner in this
+        # service generation. No input or execution is retained here.
+        self._archived_dispatch: dict[str, tuple[bool, int, int]] = {}
         self._dispatch_generation = uuid.uuid4().hex
         self._retired_dispatch_generations: frozenset[str] = frozenset()
         self._admission_closed = False
@@ -714,6 +728,7 @@ class SessionManagerBase:
         self._wiki_dispatch_locks.clear()
         self._agent_operations.clear()
         self._agent_archive_tasks.clear()
+        self._archived_dispatch.clear()
         self._admission_closed = False
         self.db = db
         self._dispatch_generation = uuid.uuid4().hex

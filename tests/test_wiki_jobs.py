@@ -101,7 +101,7 @@ class Curator:
         scope = verify(mint(session_id, user_id=self.jobs.user_id, wiki_task_id=token))
         task = tasks.call(tasks.active[token], scope)
         try:
-            job = self.jobs.get(job_id)
+            job = original
             for item in job["items"]:
                 if item["status"] != "pending" or (
                     item.get("doc") not in task.document_ids

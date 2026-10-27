@@ -1,12 +1,11 @@
 """A missing claim is not a new source; private maps cannot contain prose."""
 
 import base64
-from contextlib import asynccontextmanager
+from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from server.mcp_identity import verify
 from server.wiki import material_proof, materials, origins, registry
 from server.wiki.curation import WikiCuration
 from server.wiki.history import WikiHistory
@@ -15,20 +14,18 @@ from server.wiki.store import WikiError, revision
 from server.wiki.tasks import tasks
 from tests import test_wiki_jobs as job_tests
 from tests import test_wiki_material_proof as map_tests
-from tests.test_wiki_grant_v2 import assigned
+from tests.wiki_jobs import assigned_worker
+from tests.wiki_jobs import jobs as jobs
 
-client = job_tests.client
-jobs = job_tests.jobs
 history = map_tests.history
 
 
-@asynccontextmanager
-async def activate(jobs, job, document, *, client):
+@contextmanager
+def activate(jobs, job, document):
     items = [{"doc": document["id"], "path": document["path"], "revision": document["revision"],
               "quality": document["quality"], "status": "pending"}]
     job = jobs.update(job["id"], items=items)
-    async with assigned(job, registry.config(jobs.user_id), client=client) as (headers, root):
-        task = tasks.call(root, verify(headers["Authorization"].removeprefix("Bearer ")))
+    with assigned_worker(jobs, job) as task:
         tasks.record_read(task, jobs.store.read(document["id"], expected_revision=document["revision"]))
         yield task
 
@@ -37,8 +34,8 @@ async def activate(jobs, job, document, *, client):
 @pytest.mark.parametrize("expired", [False, True])
 @pytest.mark.parametrize("restart", [False, True])
 @pytest.mark.parametrize("operation", ["normalize", "restructure"])
-async def test_missing_current_claim_cannot_recertify_an_intermediate_on_another_job(
-    jobs, client, source_kind, expired, restart, operation,
+def test_missing_current_claim_cannot_recertify_an_intermediate_on_another_job(
+    jobs, source_kind, expired, restart, operation,
 ):
     raw, path = map_tests.source_text(0, "\r\n", "\ufeff").encode(), "Library/continuity.md"
     if source_kind == "ingest":
@@ -48,7 +45,7 @@ async def test_missing_current_claim_cannot_recertify_an_intermediate_on_another
         WikiHistory(jobs.store).write(path, raw, None, "human", "Existing unproven source")
         first = jobs.maintain("first", "", "Preserve original", [path], None, [], "human")
         document = jobs.store.read(path)
-    async with activate(jobs, first, document, client=client) as first_task:
+    with activate(jobs, first, document) as first_task:
         WikiCuration(jobs.store).organize(path, document["revision"], "A generated summary.", [], [], None,
                                          "curator", "First source-preserving adaptation", task=first_task,
                                          frontmatter_patch=map_tests.PROFILE)
@@ -72,7 +69,7 @@ async def test_missing_current_claim_cannot_recertify_an_intermediate_on_another
         jobs = job_tests.WikiJobs(jobs.user_id)
     second = jobs.maintain("second", "", "Adjust metadata only", [path], None, [], "human")
     document = jobs.store.read(path)
-    async with activate(jobs, second, document, client=client) as second_task:
+    with activate(jobs, second, document) as second_task:
         curation = WikiCuration(jobs.store)
         if operation == "normalize":
             curation.organize(path, document["revision"], None, ["new-metadata"], [], None,

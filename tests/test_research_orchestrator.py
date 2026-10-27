@@ -151,7 +151,20 @@ async def test_run_research_survives_leaf_errors():
     assert report.report == "final report"
 
 
-@pytest.mark.parametrize("verdict", [LeafResult(text="", error="timeout"), LeafResult(text="garbage"),
+async def test_parseable_partial_search_is_excluded_from_findings():
+    async def reason(prompt):
+        return LeafResult(text='["angle"]' if "Decompose" in prompt else "report")
+
+    async def search(prompt):
+        return LeafResult(text='[{"claim":"partial claim","url":"u"}]', error="unexpected EOF")
+
+    report = await run_research("q", working_dir="/tmp", search=search, reason=reason)
+    assert report.findings == [] and report.sources == []
+
+
+@pytest.mark.parametrize("verdict", [LeafResult(text="", error="timeout"),
+                                    LeafResult(text='{"refuted": false, "verified": true}', error="unexpected EOF"),
+                                    LeafResult(text="garbage"),
                                     LeafResult(text='{"refuted": "unknown"}')])
 async def test_failed_verification_is_never_counted_as_verified(verdict):
     progress = []

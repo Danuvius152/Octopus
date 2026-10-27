@@ -353,6 +353,240 @@ async def test_oauth_flow_installs_and_reports_success(client):
     assert st.json()["installation_id"] == inst["id"]
 
 
+@pytest.mark.parametrize("prior", ["cancelled", "expired", "consumed"])
+async def test_oauth_callback_cannot_exchange_after_flow_closed(client, monkeypatch, prior):
+    await _configure(client)
+    started = await _start(client)
+    login_id = started.json()["login_id"]
+    login = connectors_mod._login_mgr.get(login_id)
+    params = {"code": "abc", "state": f"{login_id}:{login.state}"}
+    calls = []
+    exchange = FakeProvider.exchange_code
+
+    async def counted(provider, **kwargs):
+        calls.append(kwargs["code"])
+        return await exchange(provider, **kwargs)
+
+    monkeypatch.setattr(FakeProvider, "exchange_code", counted)
+    if prior == "cancelled":
+        await client.post("/api/connectors/oauth/cancel", json={"login_id": login_id})
+    elif prior == "expired":
+        monkeypatch.setattr(connectors_mod._login_mgr, "_now", lambda: login.created_at + 901)
+    else:
+        await client.get("/api/connectors/oauth/callback", params=params)
+    before = len(calls)
+    await client.get("/api/connectors/oauth/callback", params=params)
+    assert len(calls) == before
+    rows = (await client.get("/api/connectors")).json()
+    assert len(rows) == (1 if prior == "consumed" else 0)
+
+
+@pytest.mark.parametrize("stage", ["exchange", "identity", "commit", "commit_disconnected"])
+async def test_oauth_cancel_and_binding_choose_one_result(client, monkeypatch, stage):
+    await _configure(client)
+    login_id = (await _start(client)).json()["login_id"]
+    login = connectors_mod._login_mgr.get(login_id)
+    entered, release = asyncio.Event(), asyncio.Event()
+    if stage == "exchange":
+        host, name = FakeProvider, "exchange_code"
+    elif stage == "identity":
+        host, name = FakeConnector, "fetch_external_identity"
+    else:
+        host, name = connectors_mod._require_manager().db, "save_connector_installation"
+    original = getattr(host, name)
+
+    async def held(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(host, name, held)
+    callback = asyncio.create_task(client.get("/api/connectors/oauth/callback", params={
+        "code": "abc", "state": f"{login_id}:{login.state}",
+    }))
+    cancel = None
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        cancel = asyncio.create_task(client.post("/api/connectors/oauth/cancel", json={"login_id": login_id}))
+        if stage.startswith("commit"):
+            if stage == "commit_disconnected":
+                callback.cancel()
+            await asyncio.wait({cancel}, timeout=0.02)
+            assert not cancel.done(), "Cancellation cannot precede the binding commit acknowledgment"
+        else:
+            response = await asyncio.wait_for(cancel, 2)
+            assert response.status_code == 200 and response.json()["status"] == "cancelled"
+        release.set()
+        pages = await asyncio.wait_for(asyncio.gather(callback, return_exceptions=True), 3)
+        response = await cancel
+        expected = "success" if stage.startswith("commit") else "cancelled"
+        assert response.json()["status"] == expected
+        assert (await client.get(f"/api/connectors/oauth/status/{login_id}")).json()["status"] == expected
+        assert len((await client.get("/api/connectors")).json()) == (1 if stage.startswith("commit") else 0)
+        if stage == "commit_disconnected":
+            assert isinstance(pages[0], asyncio.CancelledError)
+        else:
+            assert ("is connected" in pages[0].text) is (stage == "commit")
+    finally:
+        release.set()
+        await asyncio.gather(callback, *([cancel] if cancel else []), return_exceptions=True)
+
+
+async def test_claimed_callback_crosses_ttl_and_concurrent_repeat_never_exchanges(client, monkeypatch):
+    await _configure(client)
+    login_id = (await _start(client)).json()["login_id"]
+    login = connectors_mod._login_mgr.get(login_id)
+    params = {"code": "abc", "state": f"{login_id}:{login.state}"}
+    entered, release = asyncio.Event(), asyncio.Event()
+    calls = []
+    exchange = FakeProvider.exchange_code
+
+    async def held(provider, **kwargs):
+        calls.append(kwargs["code"])
+        entered.set()
+        await release.wait()
+        return await exchange(provider, **kwargs)
+
+    monkeypatch.setattr(FakeProvider, "exchange_code", held)
+    callback = asyncio.create_task(client.get("/api/connectors/oauth/callback", params=params))
+    try:
+        await asyncio.wait_for(entered.wait(), 3)
+        monkeypatch.setattr(connectors_mod._login_mgr, "_now", lambda: login.created_at + 901)
+        await _start(client)  # GC must not retire a timely claimed callback.
+        duplicate = await asyncio.wait_for(client.get("/api/connectors/oauth/callback", params=params), 2)
+        assert "processing" in duplicate.text
+        release.set()
+        assert "is connected" in (await callback).text
+        assert calls == ["abc"]
+        assert (await client.get(f"/api/connectors/oauth/status/{login_id}")).json()["status"] == "success"
+    finally:
+        release.set()
+        await callback
+
+
+async def test_oauth_binding_rechecks_account_inside_persistence(client, monkeypatch):
+    await _configure(client)
+    login_id = (await _start(client)).json()["login_id"]
+    login = connectors_mod._login_mgr.get(login_id)
+    manager = connectors_mod._require_manager()
+    persist = manager.db.save_connector_installation
+
+    async def revoke_before_commit(**kwargs):
+        await manager.db.update_user_field(login.user_id, disabled_at="2026-10-27T00:00:00Z")
+        return await persist(**kwargs)
+
+    monkeypatch.setattr(manager.db, "save_connector_installation", revoke_before_commit)
+    await client.get("/api/connectors/oauth/callback", params={"code": "abc", "state": f"{login_id}:{login.state}"})
+    assert await manager.list_installations(user_id=login.user_id) == []
+    assert login.status.value == "error"
+
+
+@pytest.mark.parametrize("revoke_at", ["before_callback", "after_exchange"])
+async def test_revoked_oauth_account_cannot_start_next_remote_operation(client, monkeypatch, revoke_at):
+    await _configure(client)
+    login_id = (await _start(client)).json()["login_id"]
+    login = connectors_mod._login_mgr.get(login_id)
+    manager = connectors_mod._require_manager()
+    exchanges, identities = [], []
+    exchange = FakeProvider.exchange_code
+    identity = FakeConnector.fetch_external_identity
+
+    async def revoke():
+        await manager.db.update_user_field(login.user_id, disabled_at="2026-10-27T00:00:00Z")
+
+    async def counted_exchange(provider, **kwargs):
+        exchanges.append(kwargs["code"])
+        token_set = await exchange(provider, **kwargs)
+        if revoke_at == "after_exchange":
+            await revoke()
+        return token_set
+
+    async def counted_identity(connector, token_set):
+        identities.append(token_set.access_token)
+        return await identity(connector, token_set)
+
+    monkeypatch.setattr(FakeProvider, "exchange_code", counted_exchange)
+    monkeypatch.setattr(FakeConnector, "fetch_external_identity", counted_identity)
+    if revoke_at == "before_callback":
+        await revoke()
+    await client.get("/api/connectors/oauth/callback", params={
+        "code": "abc", "state": f"{login_id}:{login.state}",
+    })
+    assert exchanges == ([] if revoke_at == "before_callback" else ["abc"])
+    assert identities == []
+    assert login.status.value == "error"
+    assert await manager.list_installations(user_id=login.user_id) == []
+
+
+@pytest.mark.parametrize("stage", ["exchange", "identity"])
+@pytest.mark.parametrize("cancel_first", [False, True])
+async def test_interrupted_callback_before_binding_finishes_login(client, monkeypatch, stage, cancel_first):
+    await _configure(client)
+    login_id = (await _start(client)).json()["login_id"]
+    login = connectors_mod._login_mgr.get(login_id)
+    entered, release = asyncio.Event(), asyncio.Event()
+    host, name = ((FakeProvider, "exchange_code") if stage == "exchange"
+                  else (FakeConnector, "fetch_external_identity"))
+    original = getattr(host, name)
+    calls = []
+
+    async def held(*args, **kwargs):
+        calls.append(stage)
+        entered.set()
+        await release.wait()
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(host, name, held)
+    params = {"code": "abc", "state": f"{login_id}:{login.state}"}
+    callback = asyncio.create_task(client.get("/api/connectors/oauth/callback", params=params))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        if cancel_first:
+            cancelled = await client.post("/api/connectors/oauth/cancel", json={"login_id": login_id})
+            assert cancelled.json()["status"] == "cancelled"
+        callback.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(callback, 2)
+        expected = "cancelled" if cancel_first else "error"
+        assert (await client.get(f"/api/connectors/oauth/status/{login_id}")).json()["status"] == expected
+        assert (await client.get("/api/connectors")).json() == []
+        await client.get("/api/connectors/oauth/callback", params=params)
+        assert calls == [stage], "Interrupted callbacks remain consumed"
+        assert login.finished_at is not None
+        monkeypatch.setattr(connectors_mod._login_mgr, "_now", lambda: login.finished_at + 901)
+        await _start(client)
+        assert connectors_mod._login_mgr.get(login_id) is None
+    finally:
+        release.set()
+        callback.cancel()
+        await asyncio.gather(callback, return_exceptions=True)
+
+
+async def test_failed_callback_is_consumed_and_new_flow_can_connect(client, monkeypatch):
+    await _configure(client)
+    exchange = FakeProvider.exchange_code
+    calls = []
+
+    async def fail_once(provider, **kwargs):
+        calls.append(kwargs["code"])
+        if len(calls) == 1:
+            raise ValueError("Remote exchange failed")
+        return await exchange(provider, **kwargs)
+
+    monkeypatch.setattr(FakeProvider, "exchange_code", fail_once)
+    first = (await _start(client)).json()["login_id"]
+    login = connectors_mod._login_mgr.get(first)
+    params = {"code": "original", "state": f"{first}:{login.state}"}
+    await client.get("/api/connectors/oauth/callback", params=params)
+    await client.get("/api/connectors/oauth/callback", params=params)
+    assert calls == ["original"] and login.status.value == "error"
+    second = (await _start(client)).json()["login_id"]
+    next_login = connectors_mod._login_mgr.get(second)
+    await client.get("/api/connectors/oauth/callback", params={"code": "new", "state": f"{second}:{next_login.state}"})
+    assert calls == ["original", "new"] and next_login.status.value == "success"
+    assert len((await client.get("/api/connectors")).json()) == 1
+
+
 @pytest.mark.asyncio
 async def test_oauth_callback_rejects_bad_state(client):
     await _configure(client)

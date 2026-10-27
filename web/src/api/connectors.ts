@@ -70,12 +70,12 @@ export async function pollConnectorOAuth(
 export async function cancelConnectorOAuth(
   token: string,
   loginId: string
-): Promise<void> {
-  await fetch(`${API}/api/connectors/oauth/cancel`, {
+): Promise<ConnectorOAuthStatusResponse> {
+  return json(await fetch(`${API}/api/connectors/oauth/cancel`, {
     method: "POST",
     headers: authHeaders(token),
     body: JSON.stringify({ login_id: loginId }),
-  }).catch(() => {});
+  }));
 }
 
 export async function updateInstallation(

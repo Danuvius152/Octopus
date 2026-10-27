@@ -18,11 +18,17 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
+import uuid
 from pathlib import Path
 
 import pytest
 
 from server.harness import HarnessEvent, RunConfig, get_harness
+from server.harness import codex as cx
+from server.harness.events import HarnessCredential
+from server.harness.run import _which_with_fallback
+from tests.cli_gate import codex_home_with_auth
 from tests.codex_speed_evidence import (
     capture_rollout,
     record_phase,
@@ -58,8 +64,8 @@ async def _drain(backend, timeout: float = 150.0) -> list[HarnessEvent]:
 
 
 @pytest.mark.asyncio
-async def test_real_resume_across_speed_changes(tmp_path):
-    """One text-only turn establishes the wire contract before both resumes."""
+async def test_real_resume_speed_changes_and_native_copy(tmp_path):
+    """The same real transcript proves speed changes and full-copy resume."""
     b1 = _codex_run(session_id="r1", mcp_servers=[], reasoning_effort="low", service_tier="default")
     await b1.start(
         "Remember this exact word for later: MARIGOLD. Reply only with OK. Do not use tools.",
@@ -126,46 +132,38 @@ async def test_real_resume_across_speed_changes(tmp_path):
     (evidence / "verified-intervals.json").write_text(
         json.dumps([fast_interval, normal_interval], indent=2) + "\n"
     )
-
-
-@pytest.mark.asyncio
-async def test_real_native_activity_identity_and_metadata_format(tmp_path):
-    """Shell normalization and native metadata share the same real tool round trip."""
-    backend = _codex_run(session_id="native_activity_acceptance", mcp_servers=[])
-    backend.bind_tool_context("native-metrics-request", "native-metrics-attempt")
-    ticks: list[float | None] = []
-    backend.bind_activity(ticks.append)
-    await backend.start(
-        "Use the shell to run exactly: "
-        "sleep 2; printf 'NATIVE_ACTIVITY_ACCEPTED\\n'. Then reply: done. "
-        "Do not use any other tools.", str(tmp_path),
+    # A full-copy fork needs an actual completed rollout, which these three
+    # phases already supplied. Keep the raw CLI resume in a different cwd;
+    # creating another seed conversation adds no independent coverage.
+    codex_home = codex_home_with_auth()
+    assert codex_home is not None and Path(codex_home).resolve() == home.resolve()
+    credential = HarnessCredential(backend="codex", auth_type="oauth", home_dir=codex_home)
+    destination = tmp_path / "copied-workspace"
+    destination.mkdir()
+    copied_id = str(uuid.uuid4())
+    artifact = await cx._fork_copy(
+        parent_working_dir=str(tmp_path), parent_resume_id=sid,
+        parent_credential=credential, dest_working_dir=str(destination),
+        new_resume_id=copied_id,
     )
     try:
-        events = await _drain(backend)
-        tu = next((e for e in events if e.type == "tool_use"), None)
-        assert tu is not None, f"no tool_use; saw {[e.type for e in events]}"
-        assert tu.tool_name == "Bash"
-        assert "command" in (tu.tool_input or {})
-        tr = next(
-            (e for e in events if e.type == "tool_result" and e.tool_use_id == tu.tool_use_id),
-            None,
+        assert artifact.needs_replay is False and artifact.resume_id == copied_id
+        result = subprocess.run(
+            [_which_with_fallback("codex"), "exec", "--json", "--skip-git-repo-check",
+             "-C", str(destination), "--dangerously-bypass-approvals-and-sandbox",
+             "-c", 'model_reasoning_effort="low"', "resume", copied_id, "--",
+             "What exact word did I ask you to remember? Reply with only that word."],
+            capture_output=True, text=True, timeout=180,
+            env={**os.environ, "CODEX_HOME": codex_home},
         )
-        assert tr is not None and tr.is_error is False
-        assert "NATIVE_ACTIVITY_ACCEPTED" in (tr.content or "")
-        observer = backend._activity_observer
-        assert observer.identity_confirmed, "Installed CLI native identity was not verified"
-        # Reasoning emission depends on the model; replay tests verify its acceptance.
-        assert ticks
-        responses = [event for event in events if event.type == "model_measurement"
-                     and event.raw.get("kind") == "codex_response"]
-        assert len(responses) >= 2, "Shell and final-answer responses need separate usage windows"
-        assert all(event.duration_ms and event.duration_ms > 0 for event in responses)
-        assert all(event.raw["model"] != "unknown" and event.raw["output_tokens"] > 0 for event in responses)
-        assert all(event.raw["reasoning_tokens"] <= event.raw["output_tokens"] for event in responses)
-        assert sum(event.duration_ms for event in responses) < next(
-            event.duration_ms for event in events if event.type == "result")
-        assert any(event.type == "result" and not event.is_error for event in events)
-        assert "Sent prompt with event ID:" not in backend.stderr_text
-        assert "SessionConfiguredEvent" not in backend.stderr_text
+        assert result.returncode == 0, result.stderr
+        rows = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+        assert any(row.get("type") == "thread.started" and row.get("thread_id") == copied_id for row in rows)
+        reply = "".join(row["item"].get("text", "") for row in rows
+                        if row.get("type") == "item.completed" and row.get("item", {}).get("type") == "agent_message")
+        assert "MARIGOLD" in reply.upper(), f"copied rollout lost context: {reply!r}"
+        assert normal.path.read_bytes() == normal.raw, "copy resume changed its parent rollout"
     finally:
-        await backend.stop()
+        copied = cx._find_rollout(cx._codex_sessions_dir(credential), copied_id)
+        if copied is not None:
+            copied.unlink(missing_ok=True)

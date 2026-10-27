@@ -146,6 +146,86 @@ def _fake_report(question="q"):
     )
 
 
+async def test_cancel_confirmed_before_report_commit_cannot_become_completed(rm, mgr, db, monkeypatch):
+    entered, release = asyncio.Event(), asyncio.Event()
+    complete = rm._complete_report
+
+    async def held_completion(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        await complete(*args, **kwargs)
+
+    async def pipeline(*args, **kwargs):
+        return _fake_report()
+
+    injected = []
+    async def deliver(*args, **kwargs):
+        injected.append(args)
+        return accepted_receipt()
+
+    monkeypatch.setattr(rm, "_complete_report", held_completion)
+    monkeypatch.setattr(rm_mod, "run_research", pipeline)
+    monkeypatch.setattr(mgr, "start_message", deliver)
+    session = await _session(mgr, db)
+    job = await rm.start(session.id, "cancel before commit")
+    task = rm._tasks[job["id"]]
+    await asyncio.wait_for(entered.wait(), 2)
+    try:
+        assert (await rm.cancel(job["id"]))["status"] == "cancelled"
+    finally:
+        release.set()
+        await asyncio.gather(task, return_exceptions=True)
+    assert (await db.get_research_job(job["id"]))["status"] == "cancelled"
+    assert not injected
+
+
+async def test_report_write_failure_never_completes_or_delivers(rm, mgr, db, monkeypatch):
+    async def pipeline(*args, **kwargs):
+        return _fake_report()
+
+    monkeypatch.setattr(rm_mod, "run_research", pipeline)
+    def reject_report_sync(fd):
+        raise OSError("Report persistence refused")
+
+    monkeypatch.setattr(os, "fsync", reject_report_sync)
+    session = await _session(mgr, db)
+    job = await rm.start(session.id, "must save the report")
+    await rm._tasks[job["id"]]
+    row = await db.get_research_job(job["id"])
+    assert row["status"] == "failed"
+    assert row["injection_status"] == "pending"
+
+
+async def test_cancel_after_completion_preserves_pending_delivery(rm, mgr, db, monkeypatch):
+    entered, release = asyncio.Event(), asyncio.Event()
+    delivered = []
+
+    async def pipeline(*args, **kwargs):
+        return _fake_report()
+
+    async def deliver(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        delivered.append(args)
+        return accepted_receipt()
+
+    monkeypatch.setattr(rm_mod, "run_research", pipeline)
+    monkeypatch.setattr(mgr, "start_message", deliver)
+    session = await _session(mgr, db)
+    job = await rm.start(session.id, "completed before cancel")
+    task = rm._tasks[job["id"]]
+    await asyncio.wait_for(entered.wait(), 2)
+    try:
+        row = await rm.cancel(job["id"])
+        assert row["status"] == "completed"
+        assert Path(row["report_path"]).read_text().startswith("# Final report")
+    finally:
+        release.set()
+        await task
+    assert delivered
+    assert (await db.get_research_job(job["id"]))["injection_status"] == "delivered"
+
+
 @pytest.mark.parametrize("completion_kind", ["delivered", "notification_failed", "unavailable"])
 async def test_delivery_receipts_distinguish_queue_processing_and_current_browser_confirmation(
     rm, mgr, db, monkeypatch, completion_kind,
