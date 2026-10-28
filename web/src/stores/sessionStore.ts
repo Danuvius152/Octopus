@@ -241,6 +241,7 @@ interface SessionStore {
   setBackendToolPolicies: (policies: Record<string, ToolPolicySupport>) => void;
 
   sessions: SessionInfo[];
+  sessionRead: ListReadState;
   setSessions: (s: SessionInfo[]) => void;
   updateSessionStatus: (id: string, status: SessionStatus) => void;
 
@@ -424,7 +425,7 @@ export interface ResearchJob {
     browser_confirmed_at?: string;
   } | null;
   error?: string | null;
-  injection_status?: "pending" | "delivered" | "failed";
+  injection_status?: "pending" | "delivered" | "failed" | "unknown";
 }
 
 export interface BgTask {
@@ -607,6 +608,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   setBackendToolPolicies: (backendToolPolicies) => set({ backendToolPolicies }),
 
   sessions: [],
+  sessionRead: unreadList(),
   setSessions: (sessions) => set({ sessions }),
   archivedSessions: [],
   setArchivedSessions: (archivedSessions) => set({ archivedSessions }),

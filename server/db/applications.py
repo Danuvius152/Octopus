@@ -8,12 +8,63 @@ changed.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .base import DatabaseBase
+from .transaction import Transaction
+
+
+class ApplicationDeleting(ValueError):
+    """Admission refused while the application's deletion remains unfinished."""
+
+
+async def require_application_writable(tx: Transaction, session_id: str) -> None:
+    blocked = await tx.fetch_one(
+        "SELECT 1 FROM applications a JOIN sessions s ON "
+        "(a.id=s.app_id OR a.session_id=s.id) AND a.user_id IS s.user_id "
+        "WHERE s.id=? AND a.deletion IS NOT NULL LIMIT 1", (session_id,),
+    )
+    if blocked:
+        raise ApplicationDeleting("Application deletion is unfinished; retry deletion before writing")
 
 
 class ApplicationsMixin(DatabaseBase):
+
+    async def require_application_session_writable(self, session_id: str) -> None:
+        async with self.transaction(write=False) as tx:
+            await require_application_writable(tx, session_id)
+
+    async def set_application_deletion(self, app_id: str, state: dict[str, Any]) -> None:
+        async with self.transaction(write=True) as tx:
+            await tx.execute("UPDATE applications SET deletion=? WHERE id=?", (json.dumps(state), app_id))
+
+    async def application_session_ids(self, app_id: str) -> list[str]:
+        """Exact current and retained build/conversation relationships, no cwd inference."""
+        async with self.transaction(write=False) as tx:
+            rows = await tx.fetch_all(
+                "SELECT s.id FROM sessions s JOIN applications a ON "
+                "(s.app_id=a.id OR s.id=a.session_id) AND s.user_id IS a.user_id WHERE a.id=?",
+                (app_id,),
+            )
+            return [row[0] for row in rows]
+
+    async def retain_application_session_owner(self, session_id: str) -> str | None:
+        """Keep a legacy builder's known relationship before replacing it."""
+        async with self.transaction(write=True) as tx:
+            rows = await tx.fetch_all(
+                "SELECT s.app_id, a.id FROM sessions s LEFT JOIN applications a ON "
+                "a.session_id=s.id AND a.user_id IS s.user_id WHERE s.id=?",
+                (session_id,),
+            )
+            owners = {value for row in rows for value in row if value is not None}
+            if len(owners) > 1:
+                raise ValueError("Application builder has multiple owners")
+            if not owners:
+                return None
+            app_id = owners.pop()
+            await tx.execute("UPDATE sessions SET app_id=? WHERE id=? AND app_id IS NULL", (app_id, session_id))
+            return app_id
 
 
     async def save_application(
@@ -152,10 +203,23 @@ class ApplicationsMixin(DatabaseBase):
         async with self.transaction(write=True) as tx:
             await self._set_pinned(tx, "applications", app_id, pinned)
 
-    async def reorder_application_pins(self, ordered_ids: list[str]) -> None:
-        """The sidebar order of the pinned applications — see `_reorder_pins`."""
+    async def reorder_application_pins(
+        self, ordered_ids: list[str], *, user_id: str | None = None,
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Validate, reorder and capture changed rows in the same commit."""
         async with self.transaction(write=True) as tx:
+            scope = "archived=0" + (" AND user_id=?" if user_id is not None else "")
+            params = (user_id,) if user_id is not None else ()
+            rows = await tx.fetch_all(f"SELECT {self._APPLICATION_COLS} FROM applications WHERE {scope} ORDER BY created_at ASC", params)
+            before = {row["id"]: row for row in map(self._row_to_application, rows)}
+            stray = [identifier for identifier in ordered_ids if identifier not in before or not before[identifier]["pinned"]]
+            if stray:
+                raise ValueError(f"Not a pinned application: {', '.join(stray)}")
             await self._reorder_pins(tx, "applications", ordered_ids)
+            rows = await tx.fetch_all(f"SELECT {self._APPLICATION_COLS} FROM applications WHERE {scope} ORDER BY created_at ASC", params)
+            after = [self._row_to_application(row) for row in rows]
+            changed = [row for row in after if row["pin_order"] != before[row["id"]]["pin_order"]]
+            return after, changed
 
     async def delete_application(self, app_id: str) -> bool:
         async with self.transaction(write=True) as tx:

@@ -69,7 +69,7 @@ async def test_publication_rejects_incompatible_current_structure_or_facts_witho
 async def test_publication_verification_leaves_current_messages_and_input_facts_unchanged(installation):
     path = Path(installation.db_path)
     before = path.read_bytes()
-    assert verify_storage(installation)['main_format_version'] == 4
+    assert verify_storage(installation)['main_format_version'] == 5
     assert path.read_bytes() == before
     database = Database(str(path))
     await database.initialize()
@@ -88,5 +88,5 @@ async def test_publication_uses_the_same_main_database_alias_as_current_startup(
     alias.symlink_to(original)
     installation.db_path = str(alias)
     before = original.read_bytes()
-    assert verify_storage(installation)['main_format_version'] == 4
+    assert verify_storage(installation)['main_format_version'] == 5
     assert original.read_bytes() == before

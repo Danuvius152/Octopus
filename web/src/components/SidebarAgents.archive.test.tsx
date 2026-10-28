@@ -9,7 +9,8 @@ const dispatch = { generation: "service", revision: 1, paused: false, items: [],
 
 beforeEach(() => {
   useSessionStore.setState(useSessionStore.getInitialState(), true);
-  useSessionStore.setState({ token: "tok", agents: [agent], sessions: [session],
+  useSessionStore.getState().setToken("tok");
+  useSessionStore.setState({ agents: [agent], sessions: [session],
     activeAgentId: "ag1", activeSessionId: "s1", dispatchGeneration: "service" });
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });

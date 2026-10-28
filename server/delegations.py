@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from .session_manager import SessionManager
 
 from .bg_tasks import bg_task_manager
+from .db.applications import ApplicationDeleting
 from .knowledge import (
     OwnedTaskContext,
     capture,
@@ -189,6 +190,8 @@ class DelegationManager:
         self._records: dict[str, DelegationRunState] = {}
         self._rounds: dict[str, DelegationRunState] = {}
         self._commands: set[asyncio.Task[Any]] = set()
+        self._parent_commands: dict[str, set[asyncio.Task[Any]]] = {}
+        self._closed_parents: set[str] = set()
         self._completion_handoffs: dict[asyncio.Future[Any], Callable[[asyncio.Future[Any]], None]] = {}
         self.session_mgr: SessionManager | None = None
         self.db: Database | None = None
@@ -200,6 +203,7 @@ class DelegationManager:
         on repeat calls (last writer wins on the key)."""
         self.session_mgr = session_mgr
         self.db = db
+        self._closed_parents.clear()
         session_mgr.on_broadcast(self.BROADCAST_KEY, self._on_broadcast)
         db.add_close_hook(self._before_database_close)
 
@@ -215,12 +219,17 @@ class DelegationManager:
             "knowledge_context": encode(rec.owned_context) if rec.owned_context is not None else None,
         }, sort_keys=True, separators=(",", ":"))
 
-    def _start_command(self, operation: Coroutine[Any, Any, _T]) -> asyncio.Task[_T]:
+    def _start_command(
+        self, operation: Coroutine[Any, Any, _T], *, parent_session_id: str | None = None,
+    ) -> asyncio.Task[_T]:
         """Register before scheduling so drain sees completion-created commands."""
         assert self.session_mgr is not None
         task = asyncio.create_task(operation, name="delegation-command")
         self._commands.add(task)
         self.session_mgr._own_task(task)
+        pending = self._parent_commands.setdefault(parent_session_id, set()) if parent_session_id is not None else None
+        if pending is not None:
+            pending.add(task)
 
         def finished(done: asyncio.Task[Any]) -> None:
             # A failed/cancelled cleanup still owns its resources. Ordinary
@@ -229,13 +238,15 @@ class DelegationManager:
                 done.exception() is None or isinstance(done.exception(), DelegationError)
             ):
                 self._commands.discard(done)
+                if pending is not None:
+                    pending.discard(done)
 
         task.add_done_callback(finished)
         return task
 
-    async def _command(self, operation: Coroutine[Any, Any, _T]) -> _T:
+    async def _command(self, operation: Coroutine[Any, Any, _T], *, parent_session_id: str | None = None) -> _T:
         """Own the complete operation; an HTTP waiter only owns its wait."""
-        task = self._start_command(operation)
+        task = self._start_command(operation, parent_session_id=parent_session_id)
         await asyncio.wait({task})
         return task.result()
 
@@ -447,7 +458,7 @@ class DelegationManager:
         return await self._command(self._start_delegation(
             parent_session_id=parent_session_id, agent_name=agent_name,
             request=request, files=files, scope=scope,
-        ))
+        ), parent_session_id=parent_session_id)
 
     async def _start_delegation(
         self,
@@ -477,6 +488,10 @@ class DelegationManager:
                 f"Parent session {parent_session_id!r} not found",
                 status_code=404,
             )
+        try:
+            await self.db.require_application_session_writable(parent_session_id)
+        except ApplicationDeleting as error:
+            raise DelegationError(str(error), status_code=409) from error
 
         try:
             caller = capture(parent, scope, prompt=request)
@@ -649,7 +664,7 @@ class DelegationManager:
             raise DelegationError(
                 f"No delegation {delegation_id!r}", status_code=404
             )
-        self._require_caller(scope, rec.parent_session_id, scope.work_id if scope else None)
+        self._require_caller(scope, rec.parent_session_id, scope.work_id if scope else None, allow_closed=True)
         # Fix the complete ownership branch before the first await. A later
         # follow-up replaces the registry record, never these captured objects.
         branch = [rec]
@@ -701,7 +716,7 @@ class DelegationManager:
         return await self._command(self._follow_up_delegation(
             parent_session_id=parent_session_id, delegation_id=delegation_id,
             request=request, scope=scope,
-        ))
+        ), parent_session_id=parent_session_id)
 
     async def _follow_up_delegation(
         self, *, parent_session_id: str, delegation_id: str, request: str,
@@ -710,6 +725,10 @@ class DelegationManager:
         assert self.session_mgr is not None and self.db is not None
         if not request or not request.strip():
             raise DelegationError("request must be a non-empty string", status_code=400)
+        try:
+            await self.db.require_application_session_writable(parent_session_id)
+        except ApplicationDeleting as error:
+            raise DelegationError(str(error), status_code=409) from error
         parent = self.session_mgr.get_session(parent_session_id)
         if parent is None:
             raise DelegationError("Parent session is no longer live", status_code=404)
@@ -829,8 +848,27 @@ class DelegationManager:
 
     # ----------------------------------------------------------- internals
 
-    @staticmethod
-    def _require_caller(scope: McpScope | None, session_id: str, work_id: str | None) -> None:
+    def close_session(self, session_id: str) -> None:
+        self._closed_parents.add(session_id)
+
+    def reopen_session(self, session_id: str) -> None:
+        self._closed_parents.discard(session_id)
+
+    async def retire_session(self, session_id: str) -> None:
+        """Join startup, then retire exact rounds, including completed rounds' BG."""
+        self.close_session(session_id)
+        pending = tuple(self._parent_commands.get(session_id, ()))
+        results = await asyncio.gather(*(asyncio.shield(task) for task in pending), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException) and not isinstance(result, DelegationError):
+                raise result
+        rounds = [rec for rec in self._rounds.values() if rec.parent_session_id == session_id]
+        for rec in rounds:
+            await self.cancel_delegation(rec.delegation_id, work_id=rec.work_id, reason="Application writer retired")
+
+    def _require_caller(self, scope: McpScope | None, session_id: str, work_id: str | None, *, allow_closed: bool = False) -> None:
+        if not allow_closed and session_id in self._closed_parents:
+            raise DelegationError("Caller session admission is closed", status_code=409)
         try:
             require_live_scope(scope, session_id)
         except ValueError as exc:

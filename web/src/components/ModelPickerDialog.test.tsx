@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { ModelPickerDialog } from "./ModelPickerDialog";
+import { sessions } from "../lib/sessionList";
 import { useSessionStore, type Agent, type SessionInfo } from "../stores/sessionStore";
 
 const session = {
@@ -23,7 +24,8 @@ const json = (data: unknown, status = 200) => new Response(JSON.stringify(data),
 });
 
 beforeEach(() => {
-  useSessionStore.setState({ token: "token", sessions: [session], agents: [], backendModels: {} });
+  useSessionStore.getState().setToken("token");
+  useSessionStore.setState({ sessions: [session], agents: [], backendModels: {} });
   fetchMock = vi.fn(async (_url: unknown, init?: RequestInit) => {
     if (init?.method === "PATCH") return json({ ...session, ...JSON.parse(String(init.body)) });
     return json(catalog);
@@ -47,6 +49,31 @@ it("defaults to Normal and changes only speed while retaining the conversation",
   expect(useSessionStore.getState().sessions[0]).toMatchObject({
     model: "model-a", reasoning_effort: null, service_tier: "fast", claude_session_id: "original-thread",
   });
+});
+
+it("confirms a model write that succeeds after reconnect has already read the old settings", async () => {
+  const accountGeneration = useSessionStore.getState().accountGeneration;
+  const first = { socket: {}, accountGeneration }, second = { socket: {}, accountGeneration };
+  let finish!: (response: Response) => void;
+  let saved = false;
+  fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+    if (init?.method === "PATCH") return new Promise<Response>((resolve) => { finish = resolve; });
+    if (String(url).endsWith("/api/sessions")) return json([{ ...session, service_tier: saved ? "fast" : null }]);
+    return json(catalog);
+  });
+  await act(async () => { sessions.connect(first); });
+  render(<ModelPickerDialog session={session} open onOpenChange={vi.fn()} />);
+  await waitFor(() => expect(screen.getByLabelText("Speed")).toBeEnabled());
+  fireEvent.change(screen.getByLabelText("Speed"), { target: { value: "fast" } });
+  fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
+  await waitFor(() => expect(finish).toBeTypeOf("function"));
+  await act(async () => { sessions.disconnect(first); sessions.connect(second); });
+  expect(useSessionStore.getState().sessions[0].service_tier).toBeNull();
+  await act(async () => { saved = true; finish(json({ ...session, service_tier: "fast" })); });
+  await waitFor(() => expect(useSessionStore.getState().sessions[0].service_tier).toBe("fast"));
+  expect(fetchMock.mock.calls.filter(([url]) => String(url).endsWith("/api/sessions"))).toHaveLength(3);
+  expect(fetchMock.mock.calls.filter(([, init]) => init?.method === "PATCH")).toHaveLength(1);
+  sessions.disconnect(second);
 });
 
 it("can explicitly use Normal over an agent's Fast default and restore inheritance", async () => {

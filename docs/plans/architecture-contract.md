@@ -103,6 +103,21 @@ KILL 和活跃成员退出确认；普通完成广播及父会话返回都在退
 不重跑命令，也不重复已确认的记录或完成广播。关停无法排空时明确失败，不能
 提前关闭依赖。覆盖范围限于启动时捕获的进程组，不追踪主动脱离该组的任意后代。
 
+应用彻底删除由应用生命周期记录未完成阶段，关闭相关写入，再让原资源 owner
+确认开发执行、BG、确切委派轮次、应用对话及后端进程组/reader 退休。会话归档、
+删除或替换不得先抹掉仍承担清理责任的关联；缺失历史不补造。失败保留资料、应用行
+及原身份，重启保持关闭并等待显式重试。成功后保留开发聊天原有行为，不设永久
+只读；详细阶段与文件边界归 [applications.md](applications.md#5-rest-surface)。
+
+当前 Research 投递已区分接纳错误：`AdmissionIntegrityError` 是效果发生前的永久
+完整性拒绝；`SessionAdmissionBusy`、`SessionMailboxFull` 与配额拒绝表示可重试的
+明确未接纳。丢失 ACK 后先核实原 source receipt；暂不可读或无可核实回执时保留
+`unknown`，不把后来的拒绝当作早先未接纳的证据。永久拒绝与接纳未知都保留完成
+报告；程序错误和 `SubmissionConflict` 保留原异常、诊断及原任务，不进入普通
+重试循环。存储失信仍沿 fail-stop。恢复只观察原回执，详见
+[Research 合同](native-deep-research.md#6-researchmanager-async-job-like-bgdelegationsscheduler)。
+这些局部错误分类不表示三来源统一返回接管设计已经实施。
+
 ## 公开接口与账户配置
 
 - 全局新建会话或 schedule 显式指定所属 `agent_id`；agent-scoped URL 提供该

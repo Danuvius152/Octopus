@@ -149,7 +149,11 @@ def _application_resources(applications: list[dict]) -> tuple[list[Path], set[Pa
     excluded = set()
     for application in applications:
         code = Path(application["app_dir"]).resolve()
-        roots.append(code)
+        deletion = json.loads(application["deletion"]) if application.get("deletion") else None
+        if code.is_dir():
+            roots.append(code)
+        elif not (deletion and deletion["phase"] == "files" and not deletion["keep_files"] and not code.exists()):
+            raise ValueError(f"Application code is missing: {code}")
         data = Path(data_dir_for(str(code)))
         if data.exists():
             roots.append(data)
@@ -189,12 +193,10 @@ def _copy_source(config: Settings, user_id: str, staging: Path, home: Path) -> d
                  for variable, default in _PROVIDER_HOMES.values()),
                 *(Path(str(paths["db_path"]) + suffix) for suffix in ("", "-wal", "-shm", "-journal")), paths["master_key_file"]}
     for app in applications:
-        if app["status"] == "building":
+        if app["status"] == "building" and app.get("deletion") is None:
             raise ValueError("Application build must settle on the source before exporting")
         app_dir = Path(app["app_dir"]).resolve()
         _relative(app_dir, home)
-        if not app_dir.is_dir():
-            raise ValueError(f"Application code is missing: {app_dir}")
     app_roots, app_exclusions = _application_resources(applications)
     roots.extend(app_roots)
     excluded.update(app_exclusions)

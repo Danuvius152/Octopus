@@ -1,4 +1,5 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
+import { sessions as sessionList, type SessionObservation } from "../lib/sessionList";
 import { useEffect, useMemo, useState } from "react";
 import { IconGitFork, IconX } from "@tabler/icons-react";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
@@ -196,7 +197,7 @@ export function ForkDialog({
   parentName: string;
   initialSeq?: number;
   onClose: () => void;
-  onForked: (fork: SessionInfo) => void;
+  onForked: (fork: SessionInfo, observation: SessionObservation) => void;
 }) {
   const token = useSessionStore((s) => s.token);
   const headers = useMemo(
@@ -280,6 +281,7 @@ export function ForkDialog({
 
   const createFork = async () => {
     if (selectedSeq === null || !preview) return;
+    const observation = sessionList.capture();
     setCreating(true);
     setError(null);
     try {
@@ -300,7 +302,9 @@ export function ForkDialog({
         return;
       }
       const fork: SessionInfo = await res.json();
-      onForked(fork);
+      const applied = await sessionList.created(fork, observation, sessionId);
+      if (!sessionList.accountCurrent(observation)) return;
+      if (applied && sessionList.current(observation)) onForked(fork, observation);
       onClose();
     } catch {
       setError("Fork failed.");

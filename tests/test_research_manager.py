@@ -56,6 +56,36 @@ async def _session(mgr, db, *, backend="claude-code"):
     return await mgr.create_session(agent["id"], "S", backend=backend)
 
 
+@pytest.mark.parametrize("kind", ["conflict", "value", "program"])
+async def test_unclassified_delivery_error_preserves_original_exception_and_completed_report(rm, mgr, db, monkeypatch, kind):
+    from server.submission_models import SubmissionConflict
+
+    session = await _session(mgr, db)
+    failure = SubmissionConflict("Original identity conflict") if kind == "conflict" else ValueError("Original value bug") if kind == "value" else RuntimeError("Original programming bug")
+    attempts = []
+
+    async def report(*args, **kwargs):
+        return _fake_report()
+
+    async def reject(*args, **kwargs):
+        attempts.append(kwargs["delivery_id"])
+        raise failure
+
+    monkeypatch.setattr(rm_mod, "run_research", report)
+    monkeypatch.setattr(mgr, "start_message", reject)
+    job = await rm.start(session.id, "Preserve the original exception")
+    with pytest.raises(type(failure)) as caught:
+        await asyncio.wait_for(asyncio.shield(rm._tasks[job["id"]]), 2)
+    assert caught.value is failure
+    row = await db.get_research_job(job["id"])
+    assert row["status"] == "completed"
+    assert type(failure).__name__ in row["error"] and str(failure) in row["error"]
+    assert "Final report" in Path(row["report_path"]).read_text()
+    assert attempts == [f"research:{job['id']}"]
+    with pytest.raises(type(failure)):
+        await rm.shutdown()
+
+
 async def test_unavailable_binding_finishes_job_and_does_not_poison_shutdown(rm, mgr, db, monkeypatch):
     session = await _session(mgr, db)
     await db.save_credential("revoked", session.backend, "owned", "api_key", "", "now", user_id=session.user_id)

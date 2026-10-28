@@ -53,6 +53,13 @@ export async function archiveApplication(
   );
 }
 
+export async function deleteApplication(token: string, id: string, keepFiles: boolean): Promise<void> {
+  const response = await fetch(`${API}/api/applications/${id}?keep_files=${keepFiles}`, {
+    method: "DELETE", headers: authHeaders(token),
+  });
+  if (!response.ok) await json(response);
+}
+
 export async function unarchiveApplication(
   token: string,
   id: string

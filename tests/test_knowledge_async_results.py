@@ -192,8 +192,8 @@ async def main():
             stream.write(sql + "\\n")
     await database.conn.set_trace_callback(record)
 
-    # Supplying the captured contract reaches the INSERT, rather than failing
-    # the optional internal-action session lookup's earlier read transaction.
+    # The captured contract reaches the INSERT and its admission check in one
+    # transaction, without an earlier internal-action session lookup commit.
     try:
         await manager.start_task(
             session_id="parent", command="touch must-not-run", working_dir=working_dir,
@@ -220,7 +220,8 @@ asyncio.run(main())
     inserts = [sql for sql in statements if sql.startswith("INSERT INTO bg_tasks ")]
     assert len(inserts) == 1
     assert statements.count("COMMIT") == int(committed)
-    assert not any(sql.startswith(("SELECT", "UPDATE", "ROLLBACK")) for sql in statements)
+    after_insert = statements[statements.index(inserts[0]) + 1:]
+    assert not any(sql.startswith(("SELECT", "UPDATE", "ROLLBACK")) for sql in after_insert)
 
     notices = []
     async def notice(value):

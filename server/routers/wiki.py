@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from fastapi.dependencies.utils import request_params_to_args
+from fastapi.dependencies.utils import request_body_to_args, request_params_to_args
 from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
@@ -57,58 +57,56 @@ async def app_wiki(request: Request, app_id: str, operation: str, session_mgr: S
     user_id = row.get("user_id")
     if registry.config(user_id).get("app_id") != app_id:
         raise WikiError("This application is not bound to this wiki", 403)
-    handlers: dict[
-        tuple[str, str], tuple[Callable[..., Any], type[BaseModel] | None]
-    ] = {
-        ("GET", "config"): (get_config, None),
-        ("GET", "info"): (info, None),
-        ("GET", "image"): (image, None),
-        ("GET", "search"): (search, None),
-        ("GET", "read"): (read, None),
-        ("POST", "read-many"): (read_many, ReadBatch),
-        ("GET", "blocks"): (get_blocks, None),
-        ("GET", "history"): (history, None),
-        ("PUT", "document"): (edit_document, Edit),
-        ("POST", "restore"): (restore, Restore),
-        ("POST", "publish"): (publish, Publish),
-        ("POST", "restructure"): (restructure, Restructure),
-        ("POST", "organize"): (organize, Organize),
-        ("POST", "revise"): (revise_document, None),
-        ("POST", "snapshot"): (snapshot, None),
+    handlers: dict[tuple[str, str], Callable[..., Any]] = {
+        ("GET", "config"): get_config,
+        ("GET", "info"): info,
+        ("GET", "image"): image,
+        ("GET", "search"): search,
+        ("GET", "read"): read,
+        ("POST", "read-many"): read_many,
+        ("GET", "blocks"): get_blocks,
+        ("GET", "history"): history,
+        ("PUT", "document"): edit_document,
+        ("POST", "restore"): restore,
+        ("POST", "publish"): publish,
+        ("POST", "restructure"): restructure,
+        ("POST", "organize"): organize,
+        ("POST", "revise"): revise_document,
+        ("POST", "snapshot"): snapshot,
     }
     handlers |= {
-        ("POST", "maintain"): (maintain, Maintenance),
-        ("POST", "curate"): (curate, Curate),
-        ("GET", "jobs"): (list_jobs, None),
-        ("GET", "documents"): (documents, None),
-        ("GET", "graph"): (graph, None),
-        ("GET", "maintenance-status"): (maintenance_status, None),
-        ("POST", "maintenance-selections"): (create_maintenance_selection, MaintenanceSelectionRequest),
-        ("POST", "maintain-batch"): (maintain_batch, MaintenanceBatchRequest),
-        ("GET", "snapshots"): (snapshots, None),
-        ("POST", "snapshot/restore"): (restore_snapshot, SnapshotRestore),
+        ("POST", "maintain"): maintain,
+        ("POST", "curate"): curate,
+        ("GET", "jobs"): list_jobs,
+        ("GET", "documents"): documents,
+        ("GET", "graph"): graph,
+        ("GET", "maintenance-status"): maintenance_status,
+        ("POST", "maintenance-selections"): create_maintenance_selection,
+        ("POST", "maintain-batch"): maintain_batch,
+        ("GET", "snapshots"): snapshots,
+        ("POST", "snapshot/restore"): restore_snapshot,
     }
     if operation.startswith("maintenance-selections/") and request.method == "GET" and len(operation.split("/")) == 2:
-        handlers[("GET", operation)] = (get_maintenance_selection, None)
+        handlers[("GET", operation)] = get_maintenance_selection
     if operation.startswith("jobs/"):
         parts = operation.split("/")
         if len(parts) == 2 and request.method == "GET":
-            handlers[("GET", operation)] = (get_job, None)
+            handlers[("GET", operation)] = get_job
         elif len(parts) == 3 and parts[2] == "details" and request.method == "GET":
-            handlers[("GET", operation)] = (job_details, None)
+            handlers[("GET", operation)] = job_details
         elif len(parts) == 4 and parts[2] == "outputs" and request.method == "GET":
-            handlers[("GET", operation)] = (job_output, None)
+            handlers[("GET", operation)] = job_output
         elif (
             len(parts) == 3
             and request.method == "POST"
             and parts[2] in {"cancel", "retry", "verify"}
         ):
             controls: dict[str, Callable[..., Any]] = {"cancel": cancel_job, "retry": retry_job, "verify": verify_job}
-            handlers[("POST", operation)] = (controls[parts[2]], JobControlRequest)
+            handlers[("POST", operation)] = controls[parts[2]]
     handler = handlers.get((request.method, operation))
     if handler is None:
         raise WikiError("Knowledge operation not found", 404)
-    function, schema = handler
+    function = handler
     kwargs = {"request": request, "user_id": user_id, "_": "app"}
     if function is retry_job:
         kwargs["session_mgr"] = session_mgr
@@ -124,13 +122,17 @@ async def app_wiki(request: Request, app_id: str, operation: str, session_mgr: S
                 kwargs["receipt_id"] = operation.split("/")[3]
         elif operation.startswith("maintenance-selections/"):
             kwargs["selection_id"] = operation.split("/")[1]
-        if operation == "revise":
-            from pydantic import TypeAdapter
-
-            kwargs["body"] = TypeAdapter(Revision).validate_python(await request.json())
-        elif schema:
-            payload = await request.json() if await request.body() else {}
-            kwargs["body"] = None if payload is None and schema is JobControlRequest else schema.model_validate(payload)
+        if route.dependant.body_params:
+            raw = await request.body()
+            content_type = request.headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            is_json = not content_type or content_type == "application/json" or (
+                content_type.startswith("application/") and content_type.endswith("+json")
+            )
+            payload = (await request.json() if is_json else raw) if raw else None
+            body, errors = await request_body_to_args(route.dependant.body_params, payload, route._embed_body_fields)
+            if errors:
+                raise WikiError(f"Invalid knowledge request: {errors}", 422)
+            kwargs |= body
     except (ValueError, KeyError, ValidationError) as exc:
         raise WikiError(f"Invalid knowledge request: {exc}", 422)
     # The same handlers enforce task grants when an MCP credential reaches this app path.

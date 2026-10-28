@@ -124,6 +124,39 @@ async def _create_app(am, db, *, name="Todo App", **extra) -> dict:
     )
 
 
+@pytest.mark.parametrize("action", ["archive", "delete"])
+async def test_build_history_retires_its_background_writers_before_losing_link(
+    am, db, mgr, sent, monkeypatch, tmp_path, action,
+):
+    from server import bg_tasks
+
+    background = bg_tasks.BgTaskManager()
+
+    async def discard(_):
+        return False
+
+    background.bind(db, discard, discard)
+    monkeypatch.setattr(bg_tasks, "bg_task_manager", background)
+    row = await _create_app(am, db)
+    unrelated = await mgr.create_session(agent_id=row["agent_id"])
+    own = await background.start_task(
+        session_id=row["session_id"], command="sleep 120", working_dir=row["app_dir"],
+    )
+    other = await background.start_task(
+        session_id=unrelated.id, command="sleep 120", working_dir=row["app_dir"],
+    )
+    try:
+        if action == "archive":
+            await mgr.archive_session(row["session_id"], replace=False)
+        else:
+            await mgr.delete_session(row["session_id"])
+        assert own.id not in background._running
+        assert other.id in background._running
+        assert (await db.get_application(row["id"])) is not None
+    finally:
+        await background.shutdown()
+
+
 @pytest.mark.asyncio
 async def test_application_creation_reports_failed_build_when_admission_is_closed(am, db, mgr):
     mgr.close_admission()
@@ -134,6 +167,65 @@ async def test_application_creation_reports_failed_build_when_admission_is_close
     assert not mgr.session_is_executing(mgr.get_session(row["session_id"]))
     assert mgr.dispatch_snapshot(row["session_id"])["items"] == []
     assert not await db.load_messages(row["session_id"])
+
+
+@pytest.mark.parametrize("legacy_state", ["live", "archived", "restored_during_build"])
+async def test_delete_retires_replaced_legacy_builder_history(am, db, mgr, sent, models, monkeypatch, legacy_state):
+    from server import bg_tasks
+
+    background = bg_tasks.BgTaskManager()
+
+    async def discard(_):
+        return False
+
+    background.bind(db, discard, discard)
+    monkeypatch.setattr(bg_tasks, "bg_task_manager", background)
+    row = await _create_app(am, db)
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
+    # Builders created before this change have only applications.session_id.
+    original = mgr.get_session(row["session_id"])
+    if legacy_state == "live":
+        original.app_id = None
+    else:
+        await mgr.archive_session(original.id, replace=False)
+    # Construct the old persisted shape; ordinary session settings deliberately
+    # cannot change this identity field.
+    async with db.transaction(write=True) as tx:
+        await tx.execute("UPDATE sessions SET app_id=NULL WHERE id=?", (original.id,))
+    stored = next(item for item in await db.load_sessions(include_archived=True) if item["id"] == original.id)
+    assert stored["app_id"] is None
+    if legacy_state == "live":
+        target = await mgr.archive_session(original.id, replace=True)
+    else:
+        restored = []
+        if legacy_state == "restored_during_build":
+            retain = db.retain_application_session_owner
+
+            async def restore_before_retention(session_id):
+                if not restored:
+                    restored.append(await mgr.unarchive_session(original.id))
+                return await retain(session_id)
+
+            monkeypatch.setattr(db, "retain_application_session_owner", restore_before_retention)
+        await am.request_build(row["id"], "Rebuild with a new development session")
+        if restored:
+            assert restored[0].app_id is None
+            target = await mgr.archive_session(original.id, replace=True)
+        else:
+            target = await mgr.unarchive_session(original.id)
+        assert (await am.get_application(row["id"]))["session_id"] != original.id
+    assert target is not None
+    task = await background.start_task(
+        session_id=target.id, command="sleep 120", working_dir=row["app_dir"],
+    )
+    try:
+        await am.delete_application(row["id"])
+        assert task.id not in background._running
+        assert (await background.get_task(task.id)).status == "cancelled"
+        assert await db.get_application(row["id"]) is None
+        assert not Path(row["app_dir"]).exists()
+    finally:
+        await background.shutdown()
 
 
 # ---------------------------------------------------------------------------
@@ -812,6 +904,230 @@ async def test_delete_can_keep_the_files(am, db, sent):
     assert os.path.isdir(row["app_dir"])
 
 
+async def test_delete_retirement_failure_keeps_files_record_and_closed_admission(
+    am, db, mgr, sent, monkeypatch,
+):
+    from server.app_backends import backend_supervisor
+
+    row = await _create_app(am, db)
+    events = []
+    mgr.on_broadcast("delete-test", lambda message: _capture(events, message))
+
+    async def fail_stop(_):
+        raise RuntimeError("reader did not exit")
+
+    monkeypatch.setattr(backend_supervisor, "stop", fail_stop)
+    with pytest.raises(ApplicationError, match="reader did not exit"):
+        await am.delete_application(row["id"])
+    retained = await am.get_application(row["id"])
+    assert retained["deletion"]["phase"] == "retiring"
+    assert "reader did not exit" in retained["deletion"]["error"]
+    assert Path(row["app_dir"]).is_dir()
+    assert not any(event["type"] == "application_deleted" for event in events)
+    with pytest.raises(ApplicationError, match="delet"):
+        await am.request_build(row["id"], "keep writing")
+
+
+async def test_delete_closes_other_sessions_when_one_builder_is_forking(am, db, mgr, sent, models):
+    from server.sessions.owner_runtime import ReserveFork
+
+    row = await _create_app(am, db)
+    await models.emit(mgr, {"type": "result", "session_id": row["session_id"]})
+    builder = mgr.get_session(row["session_id"])
+    conversation = await mgr.create_session(agent_id=row["agent_id"], origin="app", app_id=row["id"])
+    await mgr.interrupt(conversation.id)
+    pending = await SessionManager.start_message(mgr, conversation.id, "queued app input", source="bg")
+    owner = mgr._session_owner(builder)
+    await owner.call_runtime(ReserveFork(True))
+    try:
+        with pytest.raises(ApplicationError, match="fork or archive"):
+            await am.delete_application(row["id"])
+        assert (await asyncio.wait_for(pending.wait(), .2)).state == "withdrawn"
+        assert (await am.get_application(row["id"]))["deletion"]["phase"] == "retiring"
+        assert Path(row["app_dir"]).is_dir()
+    finally:
+        await owner.call_runtime(ReserveFork(False))
+
+
+async def _capture(events, message):
+    events.append(message)
+
+
+async def test_delete_waiter_cancellation_and_duplicate_requests_share_cleanup(am, db, mgr, sent, monkeypatch):
+    from server.app_backends import backend_supervisor
+
+    row = await _create_app(am, db)
+    stopping, release = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def stop(_):
+        nonlocal calls
+        calls += 1
+        stopping.set()
+        await release.wait()
+
+    monkeypatch.setattr(backend_supervisor, "stop", stop)
+    first = asyncio.create_task(am.delete_application(row["id"]))
+    await asyncio.wait_for(stopping.wait(), 2)
+    second = asyncio.create_task(am.delete_application(row["id"]))
+    with pytest.raises(ApplicationError, match="keep_files"):
+        await am.delete_application(row["id"], keep_files=True)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    assert Path(row["app_dir"]).exists()
+    assert (await am.get_application(row["id"]))["deletion"] is not None
+    release.set()
+    await asyncio.wait_for(second, 2)
+    assert calls == 1
+    assert await db.get_application(row["id"]) is None
+    assert not Path(row["app_dir"]).exists()
+    # Success releases the temporary admission block on retained history.
+    session = mgr.get_session(row["session_id"])
+    from server.sessions.base import QueuedPrompt
+    from server.sessions.owner_runtime import Submit
+
+    receipt = await mgr._session_owner(session).call_runtime(Submit(QueuedPrompt("new instruction", [])))
+    assert receipt.accepted
+    await mgr.interrupt(session.id)
+
+
+async def test_partial_file_failure_retries_only_files_and_restart_keeps_admission_closed(
+    am, db, mgr, sent, monkeypatch,
+):
+    from server import applications
+    from server.app_backends import backend_supervisor
+    from server.db.applications import ApplicationDeleting
+    from server.sessions.base import QueuedPrompt
+    from server.sessions.owner_runtime import Submit
+
+    row = await _create_app(am, db)
+    data = Path(row["app_dir"] + ".data")
+    data.mkdir()
+    (data / "keep.txt").write_text("still here")
+    real_remove = applications.shutil.rmtree
+    stops = 0
+
+    async def stop(_):
+        nonlocal stops
+        stops += 1
+
+    def remove(path):
+        if path == str(data):
+            raise PermissionError("data directory locked")
+        return real_remove(path)
+
+    monkeypatch.setattr(backend_supervisor, "stop", stop)
+    monkeypatch.setattr(applications.shutil, "rmtree", remove)
+    with pytest.raises(ApplicationError, match="locked"):
+        await am.delete_application(row["id"])
+    assert not Path(row["app_dir"]).exists()
+    assert (data / "keep.txt").read_text() == "still here"
+    assert (await am.get_application(row["id"]))["deletion"]["phase"] == "files"
+    am.shutdown()
+    await mgr.close_session_owners()
+    restarted = SessionManager()
+    await restarted.initialize(db, previous_writers_retired=True)
+    restored = ApplicationManager()
+    restored.bind(restarted, db)
+    try:
+        await restored.refresh_icons()
+        assert data.exists()  # opening never resumes file deletion
+        session = restarted.get_session(row["session_id"])
+        receipt = await restarted._session_owner(session).call_runtime(Submit(QueuedPrompt("write again", [])))
+        assert not receipt.accepted
+        with pytest.raises(ApplicationDeleting):
+            await db.require_application_session_writable(session.id)
+        monkeypatch.setattr(applications.shutil, "rmtree", real_remove)
+        await restored.delete_application(row["id"])
+        assert stops == 1
+        assert not data.exists()
+        assert await db.get_application(row["id"]) is None
+    finally:
+        restored.shutdown()
+        await restarted.close_session_owners()
+
+
+async def test_delete_joins_background_process_handle_that_arrives_late(am, db, mgr, sent, monkeypatch):
+    from server import bg_tasks
+
+    row = await _create_app(am, db)
+    background = bg_tasks.BgTaskManager()
+
+    async def discard(_):
+        return False
+
+    background.bind(db, discard, discard)
+    monkeypatch.setattr(bg_tasks, "bg_task_manager", background)
+    real_spawn = asyncio.create_subprocess_exec
+    spawned, release = asyncio.Event(), asyncio.Event()
+    processes = []
+
+    async def delayed_spawn(*args, **kwargs):
+        proc = await real_spawn(*args, **kwargs)
+        processes.append(proc)
+        spawned.set()
+        await release.wait()
+        return proc
+
+    monkeypatch.setattr(bg_tasks.asyncio, "create_subprocess_exec", delayed_spawn)
+    startup = asyncio.create_task(background.start_task(
+        session_id=row["session_id"], command="sleep 120", working_dir=row["app_dir"],
+    ))
+    deletion = None
+    try:
+        await asyncio.wait_for(spawned.wait(), 2)
+        deletion = asyncio.create_task(am.delete_application(row["id"]))
+        # Observe the persisted boundary, not an assumed scheduling delay.
+        async with asyncio.timeout(2):
+            while (await am.get_application(row["id"]))["deletion"] is None:
+                await asyncio.sleep(0)
+        assert Path(row["app_dir"]).exists()
+        assert not deletion.done()
+        release.set()
+        await startup
+        await asyncio.wait_for(deletion, 5)
+        assert processes[0].returncode is not None
+        assert not Path(row["app_dir"]).exists()
+    finally:
+        release.set()
+        await asyncio.gather(startup, *([deletion] if deletion else []), return_exceptions=True)
+        await background.shutdown()
+
+
+@pytest.mark.parametrize("phase", ["retiring", "files"])
+async def test_account_snapshot_keeps_unfinished_deletion_without_execution_authority(
+    am, db, sent, tmp_path, phase,
+):
+    import sqlite3
+    from contextlib import closing
+
+    from server.crypto import master_key
+    from server.db.portability import snapshot_account
+    from server.storage_verification import verify_main
+
+    row = await _create_app(am, db)
+    state = {"phase": phase, "keep_files": True, "error": "original cleanup failure"}
+    await db.set_application_deletion(row["id"], state)
+    target = tmp_path / "export.sqlite3"
+    with closing(sqlite3.connect(":memory:")) as source:
+        source.row_factory = sqlite3.Row
+        await db.conn.backup(source)
+        snapshot_account(source, target, row["user_id"], key=master_key())
+    with closing(sqlite3.connect(target)) as copy:
+        assert verify_main(copy) == 5
+        assert copy.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
+        saved = copy.execute("SELECT session_id,deletion FROM applications WHERE id=?", (row["id"],)).fetchone()
+        assert saved[0] is None
+        assert json.loads(saved[1]) == state
+    restored = Database(str(target))
+    await restored.initialize()
+    try:
+        assert (await restored.get_application(row["id"]))["deletion"] == state
+    finally:
+        await restored.close()
+
+
 @pytest.mark.asyncio
 async def test_delete_refuses_to_touch_a_dir_outside_the_root(
     am, db, tmp_path, sent
@@ -824,8 +1140,9 @@ async def test_delete_refuses_to_touch_a_dir_outside_the_root(
         await tx.execute("UPDATE applications SET app_dir=? WHERE id=?", (str(outside), row["id"]))
     assert (await db.get_application(row["id"]))["app_dir"] == str(outside)
 
-    await am.delete_application(row["id"])
-    assert await db.get_application(row["id"]) is None
+    with pytest.raises(ApplicationError, match="outside"):
+        await am.delete_application(row["id"])
+    assert (await db.get_application(row["id"]))["deletion"]["phase"] == "files"
     assert (outside / "keepme.txt").exists()
 
 
@@ -849,9 +1166,9 @@ async def test_owned_application_cannot_delete_another_managed_roots_files(
         await tx.execute("UPDATE applications SET app_dir=? WHERE id=?", (str(outside), row["id"]))
     assert (await db.get_application(row["id"]))["app_dir"] == str(outside)
 
-    await am.delete_application(row["id"], user_id=row["user_id"])
-
-    assert await db.get_application(row["id"]) is None
+    with pytest.raises(ApplicationError, match="outside"):
+        await am.delete_application(row["id"], user_id=row["user_id"])
+    assert (await db.get_application(row["id"]))["deletion"]["phase"] == "files"
     assert (outside / "keep.txt").read_text() == "other resources"
 
 
@@ -860,6 +1177,26 @@ async def test_delete_keeps_the_build_session(am, db, mgr, sent):
     row = await _create_app(am, db)
     await am.delete_application(row["id"])
     assert mgr.get_session(row["session_id"]) is not None
+
+
+async def test_reorder_reports_its_committed_rows_when_membership_changes_after_commit(am, db, mgr, sent, monkeypatch):
+    first = await _create_app(am, db, name="First")
+    second = await _create_app(am, db, name="Second")
+    reorder = db.reorder_application_pins
+    events = []
+    mgr.on_broadcast("order-test", lambda message: _capture(events, message))
+
+    async def interleaved(ids, **kwargs):
+        result = await reorder(ids, **kwargs)
+        await db.save_application(app_id="late", name="Late", app_dir=first["app_dir"] + "-late",
+                                  created_at="later", updated_at="later", user_id=first["user_id"])
+        return result
+
+    monkeypatch.setattr(db, "reorder_application_pins", interleaved)
+    result = await am.reorder_pins([second["id"], first["id"]], user_id=first["user_id"])
+    assert {row["id"] for row in result} == {first["id"], second["id"]}
+    assert {event["application_id"] for event in events} == {first["id"], second["id"]}
+    assert (await db.get_application("late"))["pinned"]
 
 
 # ---------------------------------------------------------------------------

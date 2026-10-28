@@ -16,6 +16,7 @@ from typing import Any
 
 import aiosqlite
 
+from .applications import ApplicationDeleting
 from .base import DatabaseBase
 from .transaction import Transaction
 
@@ -134,6 +135,10 @@ class SessionsMixin(DatabaseBase):
         app_id: str | None = None,
     ) -> None:
         async with self.transaction(write=True) as tx:
+            if app_id is not None:
+                app = await tx.fetch_one("SELECT deletion FROM applications WHERE id=? AND user_id IS ?", (app_id, user_id))
+                if app is not None and app[0] is not None:
+                    raise ApplicationDeleting("Application deletion is unfinished")
             await insert_session(tx, dict(
                 id=session_id, name=name, working_dir=working_dir, created_at=created_at,
                 claude_session_id=claude_session_id, credential_id=credential_id, agent_id=agent_id,

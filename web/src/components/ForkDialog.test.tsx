@@ -5,12 +5,14 @@
  * summary and gate the single revert checkbox on the preflight result.
  */
 
-import { afterEach, describe, expect, it } from "vitest";
-import { cleanup, render, screen } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import { ForkConfirmView, type ForkPreview } from "./ForkDialog";
+import { ForkConfirmView, ForkDialog, type ForkPreview } from "./ForkDialog";
+import { sessions } from "../lib/sessionList";
+import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 
-afterEach(cleanup);
+afterEach(() => { cleanup(); useSessionStore.getState().setToken(""); vi.unstubAllGlobals(); });
 
 function makePreview(overrides: Partial<ForkPreview> = {}): ForkPreview {
   return {
@@ -101,4 +103,49 @@ describe("ForkConfirmView", () => {
     expect(screen.getByText("Files modified (0)")).toBeTruthy();
     expect(screen.getByText("None")).toBeTruthy();
   });
+});
+
+it.each(["current", "reconnect", "token", "account"])("handles a successful rewind in the %s scope", async (scope) => {
+  useSessionStore.getState().setToken("fork-account");
+  useSessionStore.setState({ dispatchGeneration: "service" });
+  const parent = { id: "parent", name: "Parent", archived: false, status: "idle" } as SessionInfo;
+  const fork = { ...parent, id: "fork", forked_from_session_id: parent.id };
+  const accountGeneration = useSessionStore.getState().accountGeneration;
+  const first = { socket: {}, accountGeneration }, second = { socket: {}, accountGeneration };
+  let finish!: (response: Response) => void;
+  let saved = false;
+  const fetcher = vi.fn(async (url: string, init?: RequestInit) => {
+    if (init?.method === "POST") return new Promise<Response>((resolve) => { finish = resolve; });
+    if (url.includes("fork-preview")) return Response.json(makePreview());
+    if (new URL(url).pathname.endsWith("/api/sessions")) return Response.json(saved ?
+      url.includes("include_archived=true") ? [fork, { ...parent, archived: true }] : [fork] : [parent]);
+    return Response.json({ ...parent, messages: [] });
+  });
+  vi.stubGlobal("fetch", fetcher);
+  await act(async () => { sessions.connect(first); });
+  const onClose = vi.fn(), onForked = vi.fn();
+  render(<ForkDialog sessionId={parent.id} parentName={parent.name} initialSeq={2} onClose={onClose} onForked={onForked} />);
+  await waitFor(() => expect(screen.getByRole("button", { name: "Rewind" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "Rewind" }));
+  await waitFor(() => expect(finish).toBeTypeOf("function"));
+  const foreign = { ...parent, id: "other-account", name: "Other account" };
+  await act(async () => {
+    if (scope === "reconnect") { sessions.disconnect(first); sessions.connect(second); }
+    if (scope === "token") useSessionStore.getState().setToken("another-token");
+    if (scope === "account") useSessionStore.setState({ accountGeneration: accountGeneration + 1 });
+    if (scope === "token" || scope === "account") useSessionStore.setState({ sessions: [foreign] });
+  });
+  await act(async () => { saved = true; finish(Response.json(fork)); });
+  if (scope === "current" || scope === "reconnect") {
+    await waitFor(() => expect(useSessionStore.getState().sessions).toEqual([fork]));
+    expect(useSessionStore.getState().archivedSessions).toEqual([{ ...parent, archived: true }]);
+    expect(onClose).toHaveBeenCalledOnce();
+  } else {
+    expect(useSessionStore.getState().sessions).toEqual([foreign]);
+    expect(onClose).not.toHaveBeenCalled();
+  }
+  expect(onForked).toHaveBeenCalledTimes(scope === "current" ? 1 : 0);
+  expect(fetcher.mock.calls.filter(([url]) => new URL(url).pathname.endsWith("/api/sessions"))).toHaveLength(scope === "reconnect" ? 3 : 1);
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  sessions.disconnect(second);
 });

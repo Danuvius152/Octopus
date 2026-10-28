@@ -1,5 +1,6 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 import { test, expect, type Page } from "./test";
+import { systemAgentId } from "./system-agent";
 
 const TOKEN = TEST_BEARER;
 const AGENTS_API = "http://localhost:8765/api/agents";
@@ -88,6 +89,55 @@ test.describe("Agents", () => {
     await expect(page.locator(".chat-header .crumb-current")).toHaveText("Agent Thread");
     // The header breadcrumb carries the agent, then the session.
     await expect(page.locator(".chat-header")).toContainText("E2E Researcher");
+  });
+
+  test("a delayed create receipt cannot revive a session archived by another client", async ({ page, request }) => {
+    const witnessResponse = await request.post(SESSIONS_API, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+      data: { agent_id: await systemAgentId(request, SESSIONS_API, { Authorization: `Bearer ${TOKEN}` }), name: "E2E Archive witness" },
+    });
+    expect(witnessResponse.ok()).toBe(true);
+    const witness = await witnessResponse.json();
+    await page.reload();
+    let created!: (id: string) => void;
+    const serverCreated = new Promise<string>((resolve) => { created = resolve; });
+    let release!: () => void;
+    const receipt = new Promise<void>((resolve) => { release = resolve; });
+    await page.route("**/api/agents/*/sessions", async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      const response = await route.fetch();
+      created((await response.json()).id);
+      await receipt;
+      await route.fulfill({ response });
+    });
+    const agent = page.locator(".agent-item", { hasText: "Octo" });
+    await agent.locator(".btn-session-add").click();
+    const witnessRow = page.locator(".session-item .session-name", { hasText: "E2E Archive witness" });
+    await expect(witnessRow).toBeVisible();
+    await page.locator('.session-create input[placeholder="Session name"]').fill("E2E Delayed creation");
+    await page.locator("button.btn-create").click();
+    const id = await serverCreated;
+    try {
+      const archived = await request.post(`${SESSIONS_API}/${id}/archive?replace=false`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      expect(archived.ok()).toBe(true);
+      const witnessed = await request.post(`${SESSIONS_API}/${witness.id}/archive?replace=false`, {
+        headers: { Authorization: `Bearer ${TOKEN}` },
+      });
+      expect(witnessed.ok()).toBe(true);
+      // This later event on the same socket proves the earlier archive handler
+      // ran before the delayed creation response is released.
+      await expect(witnessRow).toHaveCount(0);
+      const confirmed = page.waitForResponse((response) => response.url().endsWith("/api/sessions") && response.request().method() === "GET");
+      release();
+      await confirmed;
+      await expect(page.locator(".session-item .session-name", { hasText: "E2E Delayed creation" })).toHaveCount(0);
+    } finally {
+      release();
+      await request.delete(`${SESSIONS_API}/${id}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+      await request.delete(`${SESSIONS_API}/${witness.id}`, { headers: { Authorization: `Bearer ${TOKEN}` } });
+    }
   });
 
   test("edits an agent's system prompt and it persists", async ({ page }) => {

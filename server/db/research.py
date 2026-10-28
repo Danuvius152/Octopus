@@ -71,6 +71,11 @@ class ResearchMixin(DatabaseBase):
             cursor = await tx.execute(f"SELECT {self._RESEARCH_COLS} FROM research_jobs WHERE delivery_receipt IS NOT NULL")
             return [row for raw in await cursor.fetchall() if (row := self._row_to_research_job(raw))["delivery_receipt"]["stage"] in {"queued", "processing", "unknown"}]
 
+    async def unconfirmed_research_admissions(self) -> list[dict[str, Any]]:
+        async with self.transaction(write=False) as tx:
+            rows = await tx.fetch_all(f"SELECT {self._RESEARCH_COLS} FROM research_jobs WHERE status='completed' AND injection_status='unknown'")
+            return [self._row_to_research_job(row) for row in rows]
+
 
     async def create_research_job(
         self, job_id: str, session_id: str, question: str, created_at: str,

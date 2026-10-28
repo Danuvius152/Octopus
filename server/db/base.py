@@ -50,6 +50,7 @@ class DatabaseBase:
     def _row_to_application(self, row: sqlite3.Row) -> dict[str, Any]:
         record = self._APPLICATION_COLS.read(row)
         record.update(archived=bool(record["archived"]), pinned=bool(record["pinned"]))
+        record["deletion"] = json.loads(record["deletion"]) if record["deletion"] else None
         return record
 
     def _row_to_bg_task(self, row: sqlite3.Row) -> dict[str, Any]:
@@ -109,7 +110,7 @@ class DatabaseBase:
     )
     _APPLICATION_COLS = RecordProjection(
         "id", "name", "description", "icon", "icon_src", "agent_id", "session_id", "app_dir", "entrypoint", "status", "error",
-        "archived", "created_at", "updated_at", "last_built_at", "pinned", "pin_order", "user_id",
+        "archived", "created_at", "updated_at", "last_built_at", "pinned", "pin_order", "user_id", "deletion",
     )
 
     # The position after every existing one, for a row being pinned now: it

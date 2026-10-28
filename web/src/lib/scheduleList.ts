@@ -44,7 +44,12 @@ export class ScheduleList {
     return !this.closed && scope.account === now.account && scope.generation === now.generation &&
       scope.token === now.token && scope.connection === now.connection;
   }
+  private sameAccount(scope: Scope): boolean {
+    const now = this.scope();
+    return !this.closed && scope.account === now.account && scope.token === now.token;
+  }
   currentGuard(): () => boolean { const scope = this.scope(); return () => this.current(scope); }
+  accountGuard(): () => boolean { const scope = this.scope(); return () => this.sameAccount(scope); }
   private state(patch: Partial<ListReadState>): void {
     useSessionStore.setState((state) => ({ scheduleRead: { ...state.scheduleRead, ...patch } }));
   }
@@ -140,6 +145,7 @@ export class ScheduleList {
         useSessionStore.setState((state) => ({ schedules: [...state.schedules.filter((item) => item.id !== row.id), row] }));
         this.change++;
       }
+      if (!this.current(scope) && this.sameAccount(scope)) this.invalidate();
       return value;
     } catch (error) {
       if (!this.current(scope)) throw new ListWriteError("The operation belongs to an earlier connection", "obsolete");

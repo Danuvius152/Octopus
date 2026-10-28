@@ -1,4 +1,4 @@
-import { addSessionInfo, loadSessionSnapshots, sessionInfoFromDetail } from "./hydrateSession";
+import { loadSessionSnapshots } from "./hydrateSession";
 import { useSessionStore } from "../stores/sessionStore";
 
 /** Make `sessionId` the active chat session and load its snapshot.
@@ -23,7 +23,6 @@ export async function selectSession(
       // A session created server-side (an application's build session, a
       // delegation child) may not be in the sidebar list yet. We already have
       // its detail in hand — adopt it rather than spending another request.
-      addSessionInfo(sessionInfoFromDetail(data));
       if (useSessionStore.getState().activeSessionId === sessionId && typeof data.agent_id === "string") {
         useSessionStore.getState().setActiveAgentId(data.agent_id);
       }

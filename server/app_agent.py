@@ -239,20 +239,19 @@ class AppAgentManager:
         mgr = self.session_mgr
         if mgr is None:
             return 0
-        victims = [
-            s.id
-            for s in mgr.list_sessions()
-            if s.origin == ORIGIN_APP and s.app_id == app_id
-        ]
-        for sid in victims:
-            try:
+        async with self._admission_locks.setdefault(app_id, asyncio.Lock()):
+            rows = await mgr.db.load_sessions(include_archived=True)
+            victims = [s["id"] for s in rows if s["origin"] == ORIGIN_APP and s["app_id"] == app_id]
+            for sid in victims:
+                if mgr.get_session(sid) is None:
+                    await mgr.retire_application_session_work(sid)
+                    await mgr.db.delete_session(sid)
+                    continue
                 await mgr.delete_session(sid)
                 if turn := self._turns.get(sid):
                     if not turn.done.is_set():
                         self._fail_turn(turn, "The conversation was deleted")
                     self._release_turn(turn)
-            except Exception:
-                logger.exception("could not delete app conversation %s", sid)
         return len(victims)
 
     # ------------------------------------------------------------ write-side
@@ -376,6 +375,9 @@ class AppAgentManager:
         # One app's creation and registration form one admission boundary.
         # Other apps remain independent; cancellation releases the lock.
         async with self._admission_locks.setdefault(app_id, asyncio.Lock()):
+            current = await mgr.db.get_application(app_id)
+            if current is None or current.get("deletion") is not None:
+                raise AppAgentError("Application is unavailable or deletion is unfinished", status_code=409)
             session, first_turn, turn = await self._register_turn(
                 app_row, conversation_id=conversation_id, agent=agent, title=title,
             )

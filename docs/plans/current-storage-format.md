@@ -2,7 +2,7 @@
 
 > **Status:** implemented — Validation and release handoff are tracked separately from production deployment.
 
-The main database uses format **4**, and Wiki uses format **17**. Each database
+The main database uses format **5**, and Wiki uses format **17**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
 before a writer opens; a genuinely empty database creates the complete current
 layout and marker in one transaction. Startup does not interpret older layouts,
@@ -38,6 +38,31 @@ there is no global row factory or storage format change.
 
 ## Publication boundary
 
+Main format 5 adds the nullable, checked `applications.deletion` JSON column
+after `pin_order`. It records only unfinished deletion (`retiring`/`files`,
+`keep_files`, optional error); successful deletion removes the owning app row.
+Existing `sessions.app_id` records new development sessions and their archive
+successors; the current app-session reference remains valid for existing rows.
+No historical relationship is inferred from working directories. Research
+additionally retains an `unknown` admission observation in its existing status
+field, without converting it into permission to replay an input.
+
+A format-4 installation requires a finite publication conversion after its
+original writers retire: append that exact checked column as NULL for existing
+apps, preserve all other rows/receipts, and commit marker 5 in the same SQLite
+transaction. Verify the candidate's complete declarations and retained facts
+before reopening admission. Ordinary startup never performs this conversion.
+Code implementation and fresh-format/account-snapshot tests do not establish
+that the running installation was converted or deployed.
+
+Account snapshots retain unfinished deletion and its original file choice/error
+while excluding sessions, BG and delegation execution history. Clearing the
+exported `session_id` does not reopen the app or restore an in-flight grant.
+Cold opening keeps it closed and does not delete files; an explicit retry owns
+the remaining phase. Application HTTP, process, cold-open and account-snapshot
+regressions cover these facts in `tests/test_applications.py` and
+`tests/test_delegation_work.py`.
+
 The existing private publisher under `~/.octopus/ops/publication/tools/` owns
 this sequence:
 
@@ -61,7 +86,7 @@ inspection of committed facts; it does not trust an older success receipt, resto
 old databases or replay model/tool effects. An already running candidate is
 verified without another conversion or restart.
 
-The dispatch-return release starts from the observed main 4 / Wiki 16
+The preceding dispatch-return release started from the observed main 4 / Wiki 16
 installation. Main has no physical format change. The finite Wiki handoff adds
 `dispatch_generation` to the existing job state and subscription uniqueness,
 preserves subscription IDs, snapshots and ACKs, and commits marker 17 with

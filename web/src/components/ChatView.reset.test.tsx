@@ -9,10 +9,9 @@ import { handleWsMessage } from "../hooks/useWebSocket";
 const session = { id: "reset-parent", name: "Reset", status: "running", backend: "codex", created_at: "2026-10-26", working_dir: "/tmp" } as SessionInfo;
 const question = (id: string): PendingQuestion => ({ question_id: id, questions: [{ question: `Question ${id}?`, header: "Decision", options: [{ label: "Yes", description: "Continue" }] }] });
 
-beforeEach(() => {
-  mockChatViewport();
+function seedInteractions() {
   useSessionStore.setState({
-    token: "synthetic-token", accountGeneration: 1, activeSessionId: session.id, mainView: "chat",
+    activeSessionId: session.id, mainView: "chat",
     sessions: [session], archivedSessions: [], agents: [], messages: {}, streamingText: {},
     lastAppliedSeq: {}, oldestSeq: {}, hasMoreMessages: {},
     pendingQuestions: {}, closedQuestionIds: {}, pendingForks: {}, credentials: [], backendModels: {},
@@ -20,6 +19,11 @@ beforeEach(() => {
   });
   handleWsMessage({ type: "question_request", session_id: session.id, seq: 0, ...question("original") });
   useSessionStore.getState().setPendingFork(session.id, "original fork");
+}
+beforeEach(() => {
+  mockChatViewport();
+  useSessionStore.getState().setToken("synthetic-token");
+  seedInteractions();
 });
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
@@ -93,7 +97,10 @@ it("does not launch the captured deferred fork when idle arrives before reset co
 it.each(["account", "service", "focus"].flatMap((change) => [200, 503].map((status) => ({ change, status }))))("a stale reset response after $change change ($status) leaves current interactions intact", async ({ change, status }) => {
   const { resolve } = await startReset();
   act(() => {
-    if (change === "account") useSessionStore.setState({ accountGeneration: 2 });
+    if (change === "account") {
+      useSessionStore.getState().setToken("another-account");
+      seedInteractions();
+    }
     else if (change === "service") useSessionStore.setState({ dispatchGeneration: "service-b" });
     else {
       useSessionStore.getState().setActiveSessionId("different-session");

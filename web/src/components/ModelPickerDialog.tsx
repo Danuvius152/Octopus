@@ -1,4 +1,5 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
+import { sessions as sessionList } from "../lib/sessionList";
 import { useEffect, useMemo, useState } from "react";
 import { IconCheck, IconCpu } from "@tabler/icons-react";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
@@ -85,6 +86,7 @@ export function ModelPickerDialog({
     if (model !== (session.model ?? null)) changes.model = model;
     if (reasoning !== (session.reasoning_effort ?? null)) changes.reasoning_effort = reasoning;
     if ((serviceTier || null) !== (session.service_tier ?? null)) changes.service_tier = serviceTier || null;
+    const observation = sessionList.capture();
     setBusy(true);
     setError(null);
     try {
@@ -103,11 +105,8 @@ export function ModelPickerDialog({
       const updated: SessionInfo = await res.json();
       // Keep the list in step so the composer hint and this dialog agree
       // without a refetch.
-      useSessionStore
-        .getState()
-        .setSessions(
-          useSessionStore.getState().sessions.map((s) => (s.id === updated.id ? { ...s, ...updated } : s))
-        );
+      sessionList.patch(updated.id, { model: updated.model, reasoning_effort: updated.reasoning_effort, service_tier: updated.service_tier }, observation);
+      if (!sessionList.current(observation)) return;
       onApplied?.(updated);
       onOpenChange(false);
     } catch (e) {

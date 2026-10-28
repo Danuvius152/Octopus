@@ -326,3 +326,150 @@ async def test_work_closed_while_return_waits_for_restore_keeps_session_archived
     archived = await manager.list_archived_sessions(user_id=session.user_id)
     assert session.id in {row["id"] for row in archived}
     assert not any(event["type"] == "session_unarchived" for event in notices)
+
+
+async def test_permanent_transcript_rejection_retains_report_and_never_retries_after_recovery(returning_research, monkeypatch):
+    from pathlib import Path
+
+    db, manager, research, started, release, processed = returning_research
+    agent = await db.get_system_agent()
+    session = await manager.create_session(agent["id"], "Damaged transcript")
+    job = await research.start(session.id, "Keep the completed report")
+    task = research._tasks[job["id"]]
+    await started.wait()
+    await manager.archive_session(session.id, replace=False)
+    async with db.transaction(write=True) as tx:
+        await tx.execute("DROP INDEX messages_unique_sequence")
+        for _ in range(2):
+            await tx.execute("INSERT INTO messages(session_id,seq,role,type,content,created_at) VALUES(?,0,'user','text','\"duplicate\"','now')", (session.id,))
+    attempts = []
+    original = manager.start_message
+
+    async def observe(*args, **kwargs):
+        attempts.append(kwargs.get("delivery_id"))
+        return await original(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "start_message", observe)
+    release.set()
+    await asyncio.wait_for(asyncio.shield(task), 2)
+    saved = await db.get_research_job(job["id"])
+    assert saved["status"] == "completed" and saved["injection_status"] == "failed"
+    assert "duplicate sequences" in saved["error"]
+    assert Path(saved["report_path"]).read_text() == "# Saved report"
+    assert attempts == [f"research:{job['id']}"] and processed.empty()
+    async with db.transaction(write=True) as tx:
+        await tx.execute("DELETE FROM messages WHERE id=(SELECT MAX(id) FROM messages WHERE session_id=?)", (session.id,))
+    await manager.archive_session(session.id, replace=False)
+    await manager.unarchive_session(session.id)
+    await research.recover_interrupted()
+    await research._inject_report(job["id"], session.id, saved["question"], ResearchReport(saved["question"], "# Saved report", [], [], [], 0, 0))
+    assert attempts == [f"research:{job['id']}"] and processed.empty()
+
+
+@pytest.mark.parametrize("receipt_temporarily_unavailable", [False, True])
+async def test_report_lost_ack_reconciles_original_input_without_repeating_research(
+    returning_research, monkeypatch, receipt_temporarily_unavailable,
+):
+    db, manager, research, started, release, processed = returning_research
+    agent = await db.get_system_agent()
+    session = await manager.create_session(agent["id"], "Lost report ACK")
+    await manager.interrupt(session.id)
+    submit, lookup = manager.start_message, manager.source_receipt
+    attempts, lookups = [], []
+
+    async def lost_ack(*args, **kwargs):
+        attempts.append(kwargs["delivery_id"])
+        await submit(*args, **kwargs)
+        raise TimeoutError("Original admission ACK was lost")
+
+    async def original_receipt(*args, **kwargs):
+        lookups.append("lookup")
+        if receipt_temporarily_unavailable and len(lookups) == 2:
+            raise TimeoutError("Original receipt temporarily unreadable")
+        return await lookup(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "start_message", lost_ack)
+    monkeypatch.setattr(manager, "source_receipt", original_receipt)
+    job = await research.start(session.id, "Reconcile the report")
+    task = research._tasks[job["id"]]
+    await started.wait()
+    release.set()
+    await asyncio.wait_for(asyncio.shield(task), 2)
+    if receipt_temporarily_unavailable:
+        assert (await db.get_research_job(job["id"]))["injection_status"] == "unknown"
+        await research.recover_interrupted()
+    saved = await db.get_research_job(job["id"])
+    assert saved["status"] == "completed" and saved["injection_status"] == "delivered"
+    original = await db.get_source_submission("research", f"research:{job['id']}", session_id=session.id)
+    assert saved["delivery_receipt"]["request_id"] == original["request_id"]
+    assert attempts == [f"research:{job['id']}"]
+    assert len(manager.dispatch_snapshot(session.id)["items"]) == 1
+    await manager.resume_dispatch(session.id)
+    assert job["id"] in await asyncio.wait_for(processed.get(), 2)
+    assert processed.empty()
+
+
+async def test_unconfirmed_report_is_not_overwritten_by_later_refusal_or_restart(returning_research, monkeypatch):
+    from pathlib import Path
+
+    from server.sessions.runtime_types import AdmissionIntegrityError
+
+    db, manager, research, started, release, processed = returning_research
+    agent = await db.get_system_agent()
+    session = await manager.create_session(agent["id"], "Unconfirmed original")
+    attempts = []
+
+    async def unknown(*args, **kwargs):
+        attempts.append(kwargs["delivery_id"])
+        if len(attempts) > 1:
+            raise AdmissionIntegrityError("Later permanent refusal cannot erase original uncertainty")
+        raise TimeoutError("Original admission could not be confirmed")
+
+    monkeypatch.setattr(manager, "start_message", unknown)
+    job = await research.start(session.id, "Preserve uncertainty")
+    task = research._tasks[job["id"]]
+    await started.wait()
+    release.set()
+    await asyncio.wait_for(task, 2)
+    await research.recover_interrupted()
+    await research._inject_report(job["id"], session.id, job["question"], ResearchReport(job["question"], "# Saved report", [], [], [], 0, 0))
+    saved = await db.get_research_job(job["id"])
+    assert saved["status"] == "completed" and saved["injection_status"] == "unknown"
+    assert "Original admission" in saved["error"] and "Later permanent" not in saved["error"]
+    assert Path(saved["report_path"]).read_text() == "# Saved report"
+    assert attempts == [f"research:{job['id']}"] and processed.empty()
+
+
+async def test_real_fork_reservation_delays_report_using_its_original_delivery_identity(returning_research, monkeypatch):
+    from server.sessions.owner_runtime import ReserveFork
+    from server.sessions.runtime_types import SessionAdmissionBusy
+
+    db, manager, research, started, release, processed = returning_research
+    agent = await db.get_system_agent()
+    session = await manager.create_session(agent["id"], "Fork reservation")
+    job = await research.start(session.id, "Wait for the original lifecycle")
+    task = research._tasks[job["id"]]
+    await started.wait()
+    owner = manager._session_owner(session)
+    await owner.call_runtime(ReserveFork(True))
+    refused = asyncio.Event()
+    resolve = manager.resolve_task_return
+
+    async def observe(*args, **kwargs):
+        try:
+            return await resolve(*args, **kwargs)
+        except SessionAdmissionBusy:
+            refused.set()
+            raise
+
+    monkeypatch.setattr(manager, "resolve_task_return", observe)
+    release.set()
+    await asyncio.wait_for(refused.wait(), 2)
+    assert await db.get_source_submission("research", f"research:{job['id']}", session_id=session.id) is None
+    await owner.call_runtime(ReserveFork(False))
+    await asyncio.wait_for(task, 3)
+    assert job["id"] in await asyncio.wait_for(processed.get(), 2)
+    await research.wait_for_idle()
+    saved = await db.get_research_job(job["id"])
+    assert saved["status"] == "completed" and saved["delivery_receipt"]["stage"] == "processed"
+    assert processed.empty()

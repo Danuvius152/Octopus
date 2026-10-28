@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .applications import require_application_writable
 from .base import DatabaseBase
 
 
@@ -31,6 +32,7 @@ class BgTasksMixin(DatabaseBase):
         knowledge_context: str | None = None,
     ) -> None:
         async with self.transaction(write=True) as tx:
+            await require_application_writable(tx, session_id)
             await tx.execute(
                 "INSERT INTO bg_tasks "
                 "(id, session_id, command, description, working_dir, status, "

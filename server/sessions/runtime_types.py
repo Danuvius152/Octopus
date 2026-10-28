@@ -184,3 +184,11 @@ class SessionMailboxFull(ValueError):
     """This command was refused before taking ownership of any effects."""
 
     code = "mailbox_full"
+
+
+class AdmissionIntegrityError(ValueError):
+    """A permanent integrity refusal before this input takes effect."""
+
+
+class SessionAdmissionBusy(ValueError):
+    """A lifecycle reservation refused input before it could take effect."""

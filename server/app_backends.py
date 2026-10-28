@@ -448,6 +448,10 @@ class BackendSupervisor:
         async with st.lock:
             await self._stop_state(st)
 
+    def close_application(self, app_id: str) -> None:
+        """Seal install/start before joining their original state in stop()."""
+        self._blocked_apps.add(app_id)
+
     async def _stop_state(self, st: BackendState) -> None:
         if st._spawn is not None:
             spawn = st._spawn

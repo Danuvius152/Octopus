@@ -3311,6 +3311,18 @@ export interface components {
              */
             entrypoint: string;
         };
+        /** ApplicationDeletion */
+        ApplicationDeletion: {
+            /**
+             * Phase
+             * @enum {string}
+             */
+            phase: "retiring" | "files";
+            /** Keep Files */
+            keep_files: boolean;
+            /** Error */
+            error?: string | null;
+        };
         /** ApplicationRead */
         ApplicationRead: {
             /** Id */
@@ -3342,6 +3354,7 @@ export interface components {
             status: components["schemas"]["ApplicationStatus"];
             /** Error */
             error?: string | null;
+            deletion?: components["schemas"]["ApplicationDeletion"] | null;
             /**
              * Archived
              * @default false

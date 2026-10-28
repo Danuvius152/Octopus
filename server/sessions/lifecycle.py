@@ -31,8 +31,14 @@ from .base import (
     resolve_working_dir,
 )
 from .owner import SessionOwnerUnavailable
-from .owner_runtime import AutoArchive, CloseExecution, ReleaseArchive
+from .owner_runtime import (
+    AutoArchive,
+    CloseExecution,
+    ReleaseApplication,
+    ReleaseArchive,
+)
 from .presentation import session_info
+from .runtime_types import SessionAdmissionBusy
 
 # The window an archived open returns, matching the live one in
 # `routers/sessions.MESSAGE_WINDOW`. Declared here rather than imported to keep
@@ -42,6 +48,71 @@ _ARCHIVED_MESSAGE_WINDOW = 200
 
 
 class LifecycleMixin(SessionManagerBase):
+
+    async def retire_application_writers(self, session_ids: list[str]) -> None:
+        # Close every original Session before draining sources that may return
+        # to another captured Session. Archived histories stay unloaded.
+        captured = [self.sessions[sid] for sid in session_ids if sid in self.sessions]
+
+        async def close(session: Session) -> None:
+            owner = self._session_owners.get(id(session)) or self._session_owner(session)
+            if owner.failed:
+                await self._failed_owner_retirement(owner)
+            else:
+                await owner.call_runtime(CloseExecution("application_deleted"))
+
+        results = await asyncio.gather(*(close(session) for session in captured), return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                raise result
+        for session in captured:
+            await self.await_session_execution(session.id, timeout=_BACKEND_RETIRE_TIMEOUT)
+            await self._join_session_owner_commands(session)
+        for sid in session_ids:
+            await self.retire_application_session_work(sid)
+
+    async def release_application_writers(self, session_ids: list[str]) -> None:
+        for sid in session_ids:
+            session = self.sessions.get(sid)
+            if session is not None and session.origin == "application":
+                owner = self._session_owners.get(id(session))
+                if owner is not None and not owner.failed:
+                    await owner.call_runtime(ReleaseApplication())
+                self.reopen_application_session_work(session.id)
+
+    async def retire_application_session_work(self, session_id: str) -> None:
+        """Retire independent writers before their session relationship can vanish.
+
+        Original owners retain startup and failed-cleanup handles. This method
+        runs outside SessionOwner; no Owner waits for another Owner's work.
+        """
+        from ..bg_tasks import bg_task_manager
+        from ..delegations import delegation_manager
+
+        if bg_task_manager._db is self.db:
+            bg_task_manager.close_session(session_id)
+        if delegation_manager.db is self.db:
+            delegation_manager.close_session(session_id)
+        if delegation_manager.db is self.db:
+            await delegation_manager.retire_session(session_id)
+        if bg_task_manager._db is self.db:
+            await bg_task_manager.retire_session(session_id)
+
+    async def _retire_application_history(self, session: Session) -> None:
+        if session.origin != "application":
+            return
+        if session.app_id is None and self.db is not None:
+            session.app_id = await self.db.retain_application_session_owner(session.id)
+        await self.retire_application_session_work(session.id)
+
+    def reopen_application_session_work(self, session_id: str) -> None:
+        from ..bg_tasks import bg_task_manager
+        from ..delegations import delegation_manager
+
+        if bg_task_manager._db is self.db:
+            bg_task_manager.reopen_session(session_id)
+        if delegation_manager.db is self.db:
+            delegation_manager.reopen_session(session_id)
 
     def _session_lifecycle_lock(self, session_id: str) -> asyncio.Lock:
         lock = self._session_lifecycle_locks.get(session_id)
@@ -477,6 +548,7 @@ class LifecycleMixin(SessionManagerBase):
                     return None
             await self.await_session_execution(session.id, timeout=_BACKEND_RETIRE_TIMEOUT)
             await self._join_session_owner_commands(session)
+            await self._retire_application_history(session)
             if automatic and owner.failed:
                 return None
             if self.db:
@@ -527,7 +599,7 @@ class LifecycleMixin(SessionManagerBase):
             # Replacement belongs to this already registered lifecycle command.
             new = await self._create_session(
                 agent_id=old.agent_id, name=old.name, working_dir=old.working_dir,
-                credential_id=old.credential_id, origin=old.origin, backend=old.backend,
+                credential_id=old.credential_id, origin=old.origin, backend=old.backend, app_id=old.app_id,
             )
             new.model, new.reasoning_effort, new.service_tier = old.model, old.reasoning_effort, old.service_tier
             if self.db:
@@ -692,6 +764,8 @@ class LifecycleMixin(SessionManagerBase):
                 self._require_task_return(returning, session_id, user_id)
             current = self.sessions.get(session_id)
             if returning is not None and current is not None:
+                if current._archive_reservation is not None or current._forking:
+                    raise SessionAdmissionBusy("Original session is busy (forking or archiving)")
                 if current.user_id != user_id or current._admission_closed or self.session_owner_failed(session_id):
                     raise ValueError("Original session admission is unavailable")
                 return current
@@ -712,6 +786,7 @@ class LifecycleMixin(SessionManagerBase):
         """
         if self.db is None:
             raise ValueError("DB not initialized")
+        await self.db.require_application_session_writable(session_id)
         rows = await self.db.load_sessions(include_archived=True, user_id=user_id)
         match = next(
             (r for r in rows if r["id"] == session_id and r["archived"]), None
@@ -733,6 +808,7 @@ class LifecycleMixin(SessionManagerBase):
         session._dispatch_revision, session._dispatch_order = revision + 1, order
         session.restore_message_state(*message_state)
         self.sessions[session.id] = session
+        self.reopen_application_session_work(session.id)
         return session
 
     def _require_task_return(self, owned: OwnedTaskContext, session_id: str, user_id: str | None) -> None:
@@ -762,6 +838,8 @@ class LifecycleMixin(SessionManagerBase):
             session = await self._run_agent_operation(row["agent_id"], lambda: self._unarchive_session(
                 reference.session_id, reference.user_id, returning=owned,
             ))
+        except SessionAdmissionBusy:
+            raise
         except ValueError:
             return None
         context = receive_return(owned, session_id=session.id, user_id=session.user_id, work_id=binding.work_id)
@@ -790,6 +868,7 @@ class LifecycleMixin(SessionManagerBase):
         await owner.call_runtime(CloseExecution("deleted"))
         await self.await_session_execution(session_id, timeout=_BACKEND_RETIRE_TIMEOUT)
         await self._join_session_owner_commands(session)
+        await self._retire_application_history(session)
         # Materialize descendant ID references before removing the parent row:
         # the ancestor chain cannot resolve a deleted parent afterward.
         await self._blit_attachments_to_descendant_forks(session_id)

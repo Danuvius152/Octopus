@@ -6,16 +6,20 @@ import { mockChatViewport } from "./chatViewport.test-support";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { handleWsMessage } from "../hooks/useWebSocket";
 import { loadOlderMessages } from "../lib/transcript";
+import { sessions as sessionList, type SessionObservation } from "../lib/sessionList";
 
 const { child } = vi.hoisted(() => ({ child: {
   id: "fork-child", name: "Fork", status: "idle", backend: "codex", agent_id: "agent",
   created_at: "2026-10-19", working_dir: "/tmp", forked_from_session_id: "parent",
 } }));
 
-// Drive ChatView's real rewind callback at its dialog boundary. Duplicate is
-// driven through the actual slash-command watcher and POST response below.
-vi.mock("./ForkDialog", () => ({ ForkDialog: ({ onForked }: { onForked: (value: unknown) => void }) =>
-  <button onClick={() => onForked(child)}>Confirm test rewind</button> }));
+// The real dialog confirms the list before calling ChatView's navigation.
+// Duplicate is driven through the actual slash-command watcher and POST below.
+vi.mock("./ForkDialog", () => ({ ForkDialog: ({ onForked }: { onForked: (value: unknown, observation: SessionObservation) => void }) =>
+  <button onClick={async () => {
+    const observation = sessionList.capture();
+    if (await sessionList.created(child as SessionInfo, observation, child.forked_from_session_id)) onForked(child, observation);
+  }}>Confirm test rewind</button> }));
 
 const parent = { ...child, id: "parent", name: "Parent", forked_from_session_id: null } as SessionInfo;
 const dispatch = (generation: string) => ({ generation, revision: 0, paused: false, active_request_id: null, items: [] });
@@ -27,6 +31,7 @@ const detail = () => ({ ...child,
 
 beforeEach(() => {
   mockChatViewport();
+  useSessionStore.getState().setToken("synthetic-token");
   useSessionStore.setState({
   token: "synthetic-token", activeSessionId: parent.id, activeAgentId: "agent",
   sessions: [parent], archivedSessions: [], agents: [], credentials: [], backendModels: {},
@@ -58,7 +63,7 @@ function mount() {
 }
 
 async function launch(mode: string) {
-  fireEvent.change(screen.getByRole("textbox"), { target: { value: mode === "rewind" ? "/rewind" : "/fork" } });
+  fireEvent.change(screen.getByRole("textbox"), { target: { value: mode === "rewind" ? "/rewind" : mode === "archive" ? "/archive" : "/fork" } });
   fireEvent.click(document.querySelector<HTMLButtonElement>(".btn-send")!);
   if (mode === "rewind") await act(async () => fireEvent.click(screen.getByText("Confirm test rewind")));
 }
@@ -114,6 +119,32 @@ it.each(["rewind", "duplicate"])("%s rejects an old service response after a new
   expect(useSessionStore.getState().oldestSeq[child.id]).toBeUndefined();
 });
 
+it.each([false, true])("confirms a successful duplicate without losing foreground intent (focus changed: %s)", async (moved) => {
+  let finishPost!: (response: Response) => void;
+  let finishList!: (response: Response) => void;
+  const other = { ...parent, id: "other", status: "running" } as SessionInfo;
+  useSessionStore.setState({ sessions: [parent, other] });
+  const fetcher = mockSessionFetch(async (url: string) => {
+    if (url.endsWith("/duplicate")) return new Promise<Response>((resolve) => { finishPost = resolve; });
+    const path = new URL(url).pathname;
+    if (path === "/api/sessions") return new Promise<Response>((resolve) => { finishList = resolve; });
+    if (path === `/api/sessions/${child.id}`) return Response.json(detail());
+    throw new Error(`Unexpected session request: ${url}`);
+  });
+  mount();
+  await launch("duplicate");
+  await waitFor(() => expect(finishPost).toBeTypeOf("function"));
+  act(() => handleWsMessage({ type: "status", session_id: other.id, status: "idle" }));
+  await act(async () => finishPost(Response.json(child)));
+  await waitFor(() => expect(finishList).toBeTypeOf("function"));
+  expect(useSessionStore.getState().activeSessionId).toBe(parent.id);
+  if (moved) act(() => useSessionStore.getState().setActiveSessionId(other.id));
+  await act(async () => finishList(Response.json([parent, { ...other, status: "idle" }, child])));
+  await waitFor(() => expect(useSessionStore.getState().activeSessionId).toBe(moved ? other.id : child.id));
+  expect(useSessionStore.getState().sessions.some((row) => row.id === parent.id)).toBe(true);
+  expect(fetcher.mock.calls.filter(([url]) => url.endsWith("/duplicate"))).toHaveLength(1);
+});
+
 it("a deferred background duplicate keeps focus and never fetches child detail", async () => {
   const fetcher = mockSessionFetch(async (url: string) => {
     expect(url).toContain("/duplicate");
@@ -141,4 +172,36 @@ it.each(["missing", "unavailable"])("waits for a confirmed queue before forking 
   expect(useSessionStore.getState().pendingForks.parent).toBeDefined();
   act(() => handleWsMessage({ type: "dispatch_state", session_id: parent.id, dispatch_state: dispatch("old-service") }));
   await waitFor(() => expect(fetcher).toHaveBeenCalledWith(expect.stringContaining("/parent/duplicate")));
+});
+
+it.each(["archive", "duplicate", "background duplicate"])("discards %s side effects when the account changes after list acceptance", async (mode) => {
+  const other = { ...parent, id: "other" };
+  const foreign = { ...parent, id: "foreign", agent_id: "foreign-agent" };
+  const fetcher = mockSessionFetch(async (url: string) => {
+    if (url.endsWith("/duplicate") || url.endsWith("/archive")) return Response.json(child);
+    if (new URL(url).pathname === `/api/sessions/${child.id}`) return Response.json(detail());
+    throw new Error(`Unexpected session request: ${url}`);
+  });
+  if (mode === "background duplicate") useSessionStore.setState({ sessions: [{ ...parent, status: "running" }, other] });
+  const unsubscribe = useSessionStore.subscribe((state) => {
+    if (!state.sessions.some((row) => row.id === child.id)) return;
+    unsubscribe();
+    queueMicrotask(() => {
+      useSessionStore.getState().setToken("foreign-token");
+      useSessionStore.setState({ sessions: [foreign], activeSessionId: foreign.id, activeAgentId: foreign.agent_id });
+    });
+  });
+  try {
+    mount();
+    await launch(mode === "background duplicate" ? "duplicate" : mode);
+    if (mode === "background duplicate") act(() => useSessionStore.setState({ activeSessionId: other.id, sessions: [parent, other] }));
+    await waitFor(() => expect(useSessionStore.getState().token).toBe("foreign-token"));
+    expect(useSessionStore.getState().activeSessionId).toBe(foreign.id);
+    expect(useSessionStore.getState().activeAgentId).toBe(foreign.agent_id);
+    expect(useSessionStore.getState().messages[parent.id]).toBeUndefined();
+    expect(useSessionStore.getState().messages[child.id]).toBeUndefined();
+    expect(fetcher.mock.calls.some(([url]) => new URL(url).pathname === `/api/sessions/${child.id}`)).toBe(false);
+  } finally {
+    unsubscribe();
+  }
 });

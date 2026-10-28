@@ -113,7 +113,7 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | [Octopus 架构约定与未完成范围](plans/architecture-contract.md) | implemented | 当前架构、数据演进和接口约定；七项执行扩展仍暂停，部署状态另行核验。 |
 | [Rotating the installation access token](plans/token-rotation.md) | retired | Installation-token rotation and recovery are removed; current account authentication remains. |
 | [共享 Wiki：未来计划与应用协同](plans/wiki-future-plan.md) | proposed | Sapphire、SmartReader 与条件性扩展的统一计划；保留未完成合同，不把本文当作开发或生产写入授权。 |
-| [前端应用与计划列表：统一更新入口](plans/frontend-list-reconciliation.md) | implemented | 应用与计划列表的读取、推送和操作回执由各自业务模块统一处理；发布仍按仓库验收流程进行。 |
+| [前端应用、计划与会话列表：统一更新入口](plans/frontend-list-reconciliation.md) | implemented | 应用、计划与会话列表的读取、推送和操作回执由各自业务模块统一处理；发布仍按仓库验收流程进行。 |
 | [运行时接口修补：接管、记录与调用身份](plans/runtime-interface-repair.md) | completed | Q13–Q30 中已确认实施的修补全部通过本机验收；按 Q31 合并 main 并上线 `01c16a6` 独立服务快照，已验证并清理两个旧 release；Q25 脱敏未纳入。 |
 
 <!-- END plans-index -->

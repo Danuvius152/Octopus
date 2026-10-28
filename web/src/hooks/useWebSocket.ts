@@ -2,16 +2,15 @@ import { accountFetch as fetch } from "../lib/accountFetch";
 import { useCallback, useEffect, useRef } from "react";
 import { newSubmissionId, type SubmissionReply } from "../lib/submission";
 import {
-  addSessionInfo,
   loadSessionSnapshot,
   loadBgTaskSnapshot,
   loadResearchSnapshot,
   loadResearchAfterDetail,
-  sessionInfoFromDetail,
 } from "../lib/hydrateSession";
 import { readRuntimeMetadata } from "../lib/toolIdentity";
 import { readDispatchState } from "../lib/sessionDispatch";
 import { schedules } from "../lib/scheduleList";
+import { sessions as sessionList } from "../lib/sessionList";
 import { refreshAgents } from "../lib/refreshAgents";
 import { applications, type ListEventSource } from "../lib/applicationList";
 import { refreshWikiJobs } from "../lib/wikiJobs";
@@ -62,9 +61,9 @@ export function shouldApplyWsEvent(
  * store, and the token cases are ones a regression would silently sign
  * everyone out (or fail to). */
 export function handleWsMessage(data: Record<string, unknown>, source?: ListEventSource) {
+  if (!sessionList.accepts(source)) return;
   const {
     addMessage: addMessageRaw,
-    updateSessionStatus,
     applyDispatchState,
     addPendingQuestion,
     removePendingQuestion,
@@ -268,7 +267,7 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
     }
 
     case "status":
-      updateSessionStatus(sessionId, data.status as SessionStatus);
+      sessionList.patch(sessionId, { status: data.status as SessionStatus });
       break;
 
     case "recovery":
@@ -477,9 +476,7 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
     case "session_unarchived": {
       const revived = data.session as SessionInfo | undefined;
       if (!revived || revived.id !== sessionId || revived.archived) break;
-      const store = getState();
-      store.setSessions([...store.sessions.filter((item) => item.id !== sessionId), revived]);
-      store.setArchivedSessions(store.archivedSessions.filter((item) => item.id !== sessionId));
+      sessionList.row(revived);
       break;
     }
 
@@ -525,14 +522,14 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
           archived: false,
         });
       }
-      store.setSessions(next);
+      sessionList.archive(oldId);
+      if (newId) {
+        const replacement = next.find((row) => row.id === newId);
+        if (replacement) sessionList.row(replacement);
+      }
       // Keep the archived session resolvable (so e.g. a fork's now-archived
       // parent renders its name in the fork banner instead of "(deleted
       // session)", and its "open parent" link works).
-      if (prev) {
-        const restArchived = store.archivedSessions.filter((s) => s.id !== oldId);
-        store.setArchivedSessions([{ ...prev, archived: true }, ...restArchived]);
-      }
       if (store.activeSessionId === oldId) {
         store.setActiveSessionId(newId);
         if (newId) {
@@ -556,18 +553,13 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
       // one (Vera review) — gives the sidebar the right working_dir, backend,
       // fork flags, etc. Re-dedupe inside the callback in case the initiating
       // tab's own add raced in first.
-      const tok = store.token;
-      if (!tok) break;
-      void fetch(`${window.location.origin}/api/sessions/${forkId}`, {
-        headers: { Authorization: `Bearer ${tok}` },
-      })
-        .then((r) => (r.ok ? r.json() : null))
-        .then((detail) => {
-          if (detail) addSessionInfo(sessionInfoFromDetail(detail));
-        })
-        .catch(() => {});
+      if (!store.token) break;
+      void loadSessionSnapshot(forkId, store).catch(() => {});
       break;
     }
+    case "session_deleted":
+      sessionList.remove(sessionId);
+      break;
   }
 }
 
@@ -603,6 +595,7 @@ export function useWebSocket() {
         getState().setConnected(true);
         applications.connect({ socket: ws, accountGeneration });
         schedules.connect({ socket: ws, accountGeneration });
+        sessionList.connect({ socket: ws, accountGeneration });
         if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
 
         // Re-fetch state after reconnect
@@ -610,12 +603,6 @@ export function useWebSocket() {
         const { activeSessionId, token: t } = snapshotStart;
         if (t) {
           void refreshAgents().catch(() => {});
-          fetch(`${window.location.origin}/api/sessions`, {
-            headers: { Authorization: `Bearer ${t}` },
-          })
-            .then((r) => (r.ok ? r.json() : null))
-            .then((sessions) => sessions && getState().setSessions(sessions))
-            .catch(() => {});
 
           if (activeSessionId) {
             loadSessionSnapshot(activeSessionId, snapshotStart).then((detail) => {
@@ -644,6 +631,7 @@ export function useWebSocket() {
         if (wsRef.current !== ws || getState().accountGeneration !== accountGeneration || getState().token !== token) return;
         applications.disconnect({ socket: ws, accountGeneration });
         schedules.disconnect({ socket: ws, accountGeneration });
+        sessionList.disconnect({ socket: ws, accountGeneration });
         for (const pending of submissions.current.values()) {
           pending.finish({ accepted: false, state: "unknown", message: "Admission was not confirmed. Retry confirmation with the same submission identity." });
         }
@@ -711,6 +699,7 @@ export function useWebSocket() {
       reconnectTimer.current = undefined;
       if (wsRef.current) applications.disconnect({ socket: wsRef.current, accountGeneration });
       if (wsRef.current) schedules.disconnect({ socket: wsRef.current, accountGeneration });
+      if (wsRef.current) sessionList.disconnect({ socket: wsRef.current, accountGeneration });
       wsRef.current?.close();
       wsRef.current = null;
     };

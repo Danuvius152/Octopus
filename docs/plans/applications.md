@@ -130,10 +130,40 @@ the sidebar and the app view update live.
 | `DELETE /api/applications/{id}` | drop the row; `keep_files=true` keeps the dir |
 | `GET /apps/{id}/{path}` | the app itself (cookie/bearer/query auth) |
 
-`DELETE` removes the directory by default, but **only** after confirming it
-sits under `settings.applications_dir` — a hand-edited `app_dir` pointing at
-`/` can't make us `rmtree` it. The build session is never deleted: sessions
-are history, and history is precious.
+`DELETE` is a server-owned operation. Concurrent requests share cleanup; a
+cancelled HTTP waiter does not cancel it, and conflicting `keep_files` choices
+are refused. The row's independent `deletion` fact records `retiring` or `files`,
+the original file-retention choice and any failure. Build status does not stand
+in for deletion progress.
+
+The operation first closes input/start admission, then joins the original
+development executions, exact delegated rounds and independent BG, application
+conversations, and backend process group/readers. Session archive or deletion
+retires a builder's independent work before its association can disappear.
+New builders and archive successors retain `sessions.app_id`; before archiving,
+deleting or replacing the application's reference to a legacy builder, its exact
+ownership is retained in that field. This includes builders archived before the
+format handoff and a restore that races the replacement. All captured sessions
+receive close commands even when another session refuses retirement; no such
+failure permits file cleanup. No cwd or empty-work-ID
+guess identifies ownership, and no deleted history is reconstructed. A completed
+delegation may still own BG; an unrelated later human task in its child survives.
+
+Only confirmed retirement allows file cleanup. All code, `.data` and `.runtime`
+targets must be inside the account's managed root before the first removal.
+Missing targets are complete; other filesystem errors preserve the application
+row, remaining files and retry responsibility. Cleanup is not a filesystem
+transaction. Only completed cleanup permits row deletion and its success event.
+`keep_files=true` skips file removal, with the same retirement requirement.
+
+An unfinished deletion remains closed after restart; startup neither runs the
+app nor resumes file deletion. Explicit retry continues its unconfirmed phase.
+The app view displays the reason and a retry action. Account transfer preserves
+this lifecycle fact without restoring execution authority; see
+[storage handoff](current-storage-format.md) and [account transfer](../backup-and-migrate.md#account-export-and-import).
+Build histories remain readable and retain their ordinary archive/restore/input
+behavior after successful deletion. A later new instruction may recreate their
+working directory; this change retires original writers, not future human work.
 
 ## 6. The build brief
 
@@ -216,15 +246,8 @@ never litter the developer's real applications root.
   different plan, and one that shouldn't be bolted onto this one halfway.
 * **Sharing / publishing.** Apps are served behind the same token as the rest
   of Octopus. Public publishing is a hosting decision, not a UI one.
-* **Interrupting an in-flight build on delete.** Deleting an application
-  removes the row and the directory, but does not stop a build turn that is
-  already running in its session — and that turn will happily recreate the
-  directory it was writing to. The result is an orphan: files on disk with no
-  row, so nothing lists it, nothing reaps it, and it stays there. Observed in
-  practice (a delete at T, the directory back at T+2min). Left as-is on the
-  owner's call — it needs a delete to reach into the session manager and
-  interrupt a turn, which is a bigger seam than the symptom warrants. The
-  cleanup is `rm -rf` on the stale directory.
+* **Permanent closure of development history after deletion.** Successful
+  deletion does not make the retained chat read-only or move its working dir.
 * **Versioning / rollback.** The build directory is the app. Git-anchoring an
   application the way `/rewind` anchors a turn needs the app dir to be a repo,
   which is a real design question rather than an increment of this one.

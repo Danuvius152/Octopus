@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..submission_models import InputRecoveryUnavailable
+from .applications import require_application_writable
 from .base import DatabaseBase
 from .schedules import ScheduleChangedError
 from .transaction import Transaction
@@ -108,6 +109,7 @@ class ClientSubmissionsMixin(DatabaseBase):
             existing = await self._get_client_submission(tx, session_id, client_id)
             if existing is not None:
                 return False, existing
+            await require_application_writable(tx, session_id)
             if schedule is not None:
                 # The fire consumes exactly the definition it authorized. No
                 # session or input can survive a missing or concurrently edited

@@ -1,6 +1,7 @@
 import { accountFetch as fetch } from "./accountFetch";
 import { useSessionStore, type Message } from "../stores/sessionStore";
 import type { MessageInput } from "./turnOutcome";
+import { sessions } from "./sessionList";
 
 const API = window.location.origin;
 
@@ -20,10 +21,7 @@ export function applyTranscript(
   if (data.transcript_integrity === "duplicate_seq") {
     store.setMessages(sessionId, []);
     store.setMessageWindow(sessionId, null, false);
-    store.setSessions(store.sessions.map((session) => session.id === sessionId
-      ? { ...session, transcript_integrity: "duplicate_seq" } : session));
-    store.setArchivedSessions(store.archivedSessions.map((session) => session.id === sessionId
-      ? { ...session, transcript_integrity: "duplicate_seq" } : session));
+    sessions.patch(sessionId, { transcript_integrity: "duplicate_seq" });
     return;
   }
   const messages = (data.messages as MessageInput[]) || [];

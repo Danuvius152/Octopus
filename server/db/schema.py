@@ -9,7 +9,7 @@ from ..account_baseline import persistent_database_file
 from ..sqlite_schema import statements
 from .transaction import Transaction
 
-CURRENT_VERSION = 4
+CURRENT_VERSION = 5
 _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
 
 
@@ -116,7 +116,11 @@ CREATE TABLE applications (
     last_built_at TEXT,
     -- Sidebar shortcut + its place among the pinned (sidebar-pins.md).
     pinned INTEGER NOT NULL DEFAULT 1,
-    pin_order INTEGER
+    pin_order INTEGER,
+    -- Application lifecycle owns this unfinished deletion, never build status.
+    deletion TEXT CHECK (deletion IS NULL OR COALESCE((json_valid(deletion)
+        AND json_extract(deletion, '$.phase') IN ('retiring', 'files')
+        AND json_type(deletion, '$.keep_files') IN ('true', 'false')), 0))
 );
 
 CREATE TABLE auth_tokens (
@@ -313,7 +317,7 @@ CREATE TABLE research_jobs (
     cost REAL,
     created_at TEXT NOT NULL,
     completed_at TEXT,
-    injection_status TEXT NOT NULL DEFAULT 'pending',  -- pending|delivered|failed
+    injection_status TEXT NOT NULL DEFAULT 'pending',  -- pending|delivered|failed|unknown
     injected_at TEXT,
     delivery_receipt TEXT,
     knowledge_context TEXT,

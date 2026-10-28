@@ -1,5 +1,5 @@
-import { accountFetch as fetch } from "../lib/accountFetch";
 import { selectSession } from "../lib/selectSession";
+import { loadSessionSnapshot } from "../lib/hydrateSession";
 /**
  * Renders one of the three turn-injection artifacts a delegation can
  * produce, parsed from the user-message text the backend's
@@ -125,8 +125,6 @@ export function AgentDelegationEventCard({
   const [expanded, setExpanded] = useState(event.kind !== "reply");
   const sessions = useSessionStore((s) => s.sessions);
   const archivedSessions = useSessionStore((s) => s.archivedSessions);
-  const setSessions = useSessionStore((s) => s.setSessions);
-  const setArchivedSessions = useSessionStore((s) => s.setArchivedSessions);
   const token = useSessionStore((s) => s.token);
   // Resolve from BOTH stores: after DelegationManager auto-archives
   // the child on terminal delivery, the row lives in archivedSessions
@@ -149,29 +147,7 @@ export function AgentDelegationEventCard({
     if (!event.delegationId) return;
     if (childSession) return;
     let cancelled = false;
-    fetch(
-      `${window.location.origin}/api/sessions/${encodeURIComponent(
-        event.delegationId
-      )}`,
-      { headers: { Authorization: `Bearer ${token}` } }
-    )
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (cancelled || !data) return;
-        const store = useSessionStore.getState();
-        if (data.archived) {
-          const existing = store.archivedSessions;
-          if (!existing.some((s) => s.id === data.id)) {
-            store.setArchivedSessions([...existing, data]);
-          }
-        } else {
-          const existing = store.sessions;
-          if (!existing.some((s) => s.id === data.id)) {
-            store.setSessions([...existing, data]);
-          }
-        }
-      })
-      .catch(() => {});
+    void loadSessionSnapshot(event.delegationId, useSessionStore.getState(), undefined, () => !cancelled).catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -180,8 +156,6 @@ export function AgentDelegationEventCard({
     childSession,
     archivedSessions,
     token,
-    setSessions,
-    setArchivedSessions,
   ]);
 
   const openChild = () => {

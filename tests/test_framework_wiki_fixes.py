@@ -36,6 +36,8 @@ async def runtime(tmp_path, monkeypatch):
 
 async def test_app_waits_for_its_request_after_prioritized_human_correction(runtime, monkeypatch):
     manager, db, agent, root = runtime
+    await db.save_application(app_id="app", name="Reader", app_dir=str(root),
+                              created_at="time", updated_at="time", user_id=agent["user_id"], status="ready")
     session = await manager.create_session(agent["id"], "App", str(root), backend="codex", origin="app", app_id="app")
     await manager.interrupt(session.id)
     seen = []
@@ -124,6 +126,9 @@ async def test_app_wrappers_preserve_only_the_original_first_line_selection(runt
 
     monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: Run())
     row = {"id": "reader", "name": "Reader", "agent_id": agent["id"], "user_id": agent["user_id"], "app_dir": str(root / "reader")}
+    await db.save_application(app_id=row["id"], name=row["name"], app_dir=row["app_dir"],
+                              agent_id=agent["id"], user_id=agent["user_id"],
+                              created_at="time", updated_at="time", status="ready")
     try:
         first = await apps.ask(row, message=request, context="Context also mentions Library/evil.md")
         await apps.ask(row, message=request, context="Library/evil.md", conversation_id=first["conversation_id"])

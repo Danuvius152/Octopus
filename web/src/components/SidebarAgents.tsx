@@ -1,5 +1,5 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import {
   IconArchive,
   IconCheck,
@@ -12,9 +12,10 @@ import {
 import { reorderAgentPins, setAgentPinned } from "../api/agents";
 import { fetchInstallations } from "../api/connectors";
 import { selectSession } from "../lib/selectSession";
-import { loadSessionSnapshot, sessionInfoFromDetail } from "../lib/hydrateSession";
+import { loadSessionSnapshot } from "../lib/hydrateSession";
 import { sidebarAgents } from "../lib/sidebarPins";
 import { refreshAgents, withAgentRequest } from "../lib/refreshAgents";
+import { sessions as sessionList } from "../lib/sessionList";
 import { useSessionStore, type Agent, type SessionInfo } from "../stores/sessionStore";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
 import { SortablePin, SortablePins, type DragHandle } from "./SortablePins";
@@ -44,7 +45,7 @@ export function SidebarAgents() {
   const token = useSessionStore((s) => s.token);
   const agents = useSessionStore((s) => s.agents);
   const sessions = useSessionStore((s) => s.sessions);
-  const setSessions = useSessionStore((s) => s.setSessions);
+  const sessionRead = useSessionStore((s) => s.sessionRead);
   const activeAgentId = useSessionStore((s) => s.activeAgentId);
   const setActiveAgentId = useSessionStore((s) => s.setActiveAgentId);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
@@ -77,20 +78,10 @@ export function SidebarAgents() {
 
   const headers = { Authorization: `Bearer ${token}` };
 
-  const fetchSessions = useCallback(async () => {
-    try {
-      const res = await fetch(`${API}/api/sessions`, { headers });
-      if (res.ok) setSessions((await res.json()) as SessionInfo[]);
-    } catch {
-      // ignore
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [token, setSessions]);
-
   useEffect(() => {
     if (!token) return;
     void refreshAgents().catch(() => {});
-    fetchSessions();
+    void sessionList.refresh();
     fetch(`${API}/api/backends`, { headers })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => {
@@ -176,6 +167,7 @@ export function SidebarAgents() {
   };
 
   const createSession = async (agentId: string) => {
+    const observation = sessionList.capture();
     try {
       const res = await fetch(`${API}/api/agents/${agentId}/sessions`, {
         method: "POST",
@@ -189,9 +181,9 @@ export function SidebarAgents() {
       });
       if (!res.ok) return;
       const session: SessionInfo = await res.json();
-      setSessions([...useSessionStore.getState().sessions, session]);
-      closeCreateRow();
-      selectSession(session.id, agentId);
+      if (sessionList.accountCurrent(observation)) closeCreateRow();
+      const accepted = await sessionList.created(session, observation);
+      if (accepted && sessionList.current(observation)) selectSession(session.id, agentId);
     } catch {
       // ignore
     }
@@ -225,18 +217,15 @@ export function SidebarAgents() {
   // (sidebar-pins.md §6). Nothing in the sidebar destroys anything.
   const archiveSession = async (id: string) => {
     const start = useSessionStore.getState();
+    const observation = sessionList.capture(start);
     const current = () => {
       const store = useSessionStore.getState();
-      return store.accountGeneration === start.accountGeneration && store.dispatchGeneration === start.dispatchGeneration;
+      return sessionList.current(observation) && store.token === start.token;
     };
-    const adoptArchived = (archived?: SessionInfo) => {
+    const finishArchived = () => {
       if (!current()) return;
       const store = useSessionStore.getState();
-      const info = archived ?? store.sessions.find((s) => s.id === id);
-      store.setSessions(store.sessions.filter((s) => s.id !== id));
-      if (info) store.setArchivedSessions([
-        { ...info, archived: true }, ...store.archivedSessions.filter((s) => s.id !== id),
-      ]);
+      if (store.sessions.some((row) => row.id === id)) return;
       if (store.activeSessionId === id) store.setActiveSessionId(null);
       setArchiveError("");
     };
@@ -251,7 +240,8 @@ export function SidebarAgents() {
         if (current()) setArchiveError(typeof body?.detail === "string" ? body.detail : `Could not archive session (HTTP ${res.status}).`);
         return;
       }
-      adoptArchived();
+      sessionList.archive(id, observation);
+      finishArchived();
     } catch (failure) {
       if (!current()) return;
       // The POST may have succeeded before its response was lost. Confirm the
@@ -259,7 +249,7 @@ export function SidebarAgents() {
       try {
         const detail = await loadSessionSnapshot(id, start);
         if (detail?.archived === true) {
-          adoptArchived(sessionInfoFromDetail(detail));
+          finishArchived();
           return;
         }
       } catch {
@@ -562,6 +552,10 @@ export function SidebarAgents() {
         }}
       />
       {archiveError && <p role="alert" className="px-2 text-xs text-destructive">{archiveError}</p>}
+      {sessionRead.error && <p role="alert" className="px-2 text-xs text-destructive">
+        Sessions not synchronized: {sessionRead.error}
+        <button className="ml-2 underline" onClick={() => void sessionList.refresh()}>Refresh sessions</button>
+      </p>}
 
       <div className="agent-list-items flex flex-col">
         <SortablePins

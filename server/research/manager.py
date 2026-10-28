@@ -39,7 +39,13 @@ from ..knowledge import (
 from ..mcp_identity import McpScope, work_is_open
 from ..sessions.base import Session
 from ..sessions.owner_runtime import capture_configuration
-from ..sessions.runtime_types import SessionOwnerUnavailable
+from ..sessions.runtime_types import (
+    AdmissionIntegrityError,
+    QuotaExceeded,
+    SessionAdmissionBusy,
+    SessionMailboxFull,
+    SessionOwnerUnavailable,
+)
 from ..workspace import paths_for
 from .orchestrator import (
     ResearchLimits,
@@ -133,6 +139,12 @@ class ResearchManager:
         if self.db is None:
             return 0
         n = await self.db.mark_in_flight_research_jobs_interrupted(_now())
+        if self.session_mgr is not None:
+            for row in await self.db.unconfirmed_research_admissions():
+                existing = await self.session_mgr.source_receipt("research", f"research:{row['id']}", session_id=row["session_id"])
+                if existing is not None:
+                    await self._advance_delivery(row["id"], row["session_id"], existing[1].request_id, "unknown")
+                    await self._settle_delivery(row["id"], row["session_id"])
         for row in await self.db.pending_research_deliveries():
             request_id = row["delivery_receipt"]["request_id"]
             outcome = await self.db.get_committed_terminal(row["session_id"], request_id)
@@ -348,7 +360,21 @@ class ResearchManager:
             "unverified": sum(getattr(f, "verification", "unverified") != "verified" for f in report.findings),
             "injection_status": "pending",
         })
-        await self._inject_report(job_id, session_id, question, report)
+        try:
+            await self._inject_report(job_id, session_id, question, report)
+        except Exception as error:
+            # Keep unexpected errors visible without reclassifying them as a
+            # refusal or permission to retry. Storage still owns fail-stop.
+            self.db.health.require_healthy()
+            row = await self.db.get_research_job(job_id)
+            if row is not None and row["injection_status"] != "failed":
+                message = f"Report delivery stopped ({type(error).__name__}): {error}"
+                if row.get("error"):
+                    message = f"{row['error']}\n{message}"
+                await self.db.update_research_job(job_id, error=message)
+                await self._broadcast({"type": "research_delivery", "session_id": session_id,
+                                       "research_id": job_id, "injection_status": row["injection_status"], "error": message})
+            raise
 
     async def _inject_report(
         self, job_id: str, session_id: str, question: str, report: Any
@@ -362,12 +388,14 @@ class ResearchManager:
         )
         while True:
             row = await self.db.get_research_job(job_id)
-            if row and row.get("injection_status") == "delivered":
+            if row and row.get("injection_status") in {"delivered", "failed"}:
                 return
             existing = await self.session_mgr.source_receipt("research", f"research:{job_id}", session_id=session_id)
             if existing is not None:
                 receipt = existing[1]
                 break
+            if row and row.get("injection_status") == "unknown":
+                return  # Observation may reconcile; absence never authorizes replay.
             if self.session_mgr.session_owner_failed(session_id):
                 await self._settle_delivery(job_id, session_id, error="delivery suppressed: destination owner is unavailable")
                 return
@@ -376,14 +404,14 @@ class ResearchManager:
                 return
             owned = decode_owned(row.get("knowledge_context")) if row else None
             work_id = owned.return_binding.work_id if owned else None
-            resolved = await self.session_mgr.resolve_task_return(owned, session_id=session_id, work_id=work_id)
-            context = resolved[1] if resolved is not None else None
-            if (row is None or row["session_id"] != session_id or row["status"] != "completed"
-                    or resolved is None or resolved[0].id != session_id or context is None):
-                await self._settle_delivery(job_id, session_id,
-                    error="delivery suppressed: original request contract is missing, closed or mismatched")
-                return
             try:
+                resolved = await self.session_mgr.resolve_task_return(owned, session_id=session_id, work_id=work_id)
+                context = resolved[1] if resolved is not None else None
+                if (row is None or row["session_id"] != session_id or row["status"] != "completed"
+                        or resolved is None or resolved[0].id != session_id or context is None):
+                    await self._settle_delivery(job_id, session_id,
+                        error="delivery suppressed: original request contract is missing, closed or mismatched")
+                    return
                 receipt = await self.session_mgr.start_message(
                     session_id, prompt, source="research", delivery_id=f"research:{job_id}",
                     work_id=work_id, knowledge_context=context,
@@ -394,8 +422,26 @@ class ResearchManager:
                     await self._settle_delivery(job_id, session_id, error="delivery suppressed: session admission is closed")
                     return
                 break
-            except Exception:
-                logger.exception("research %s: admission acknowledgment pending; retrying the same report", job_id)
+            except AdmissionIntegrityError as error:
+                await self._settle_delivery(job_id, session_id, error=str(error))
+                return
+            except (SessionAdmissionBusy, SessionMailboxFull, QuotaExceeded):
+                # These types guarantee refusal before effects; retry the same
+                # report identity after capacity/lifecycle admission changes.
+                pass
+            except (SessionOwnerUnavailable, TimeoutError) as error:
+                # A missing acknowledgment may follow COMMIT. Reconcile the
+                # exact original receipt before classifying destination loss.
+                await self._settle_delivery(job_id, session_id, error=f"Report admission is unconfirmed: {error}", unknown=True)
+                try:
+                    existing = await self.session_mgr.source_receipt("research", f"research:{job_id}", session_id=session_id)
+                except (SessionOwnerUnavailable, TimeoutError):
+                    logger.warning("research %s: original receipt observation unavailable; report admission remains unknown", job_id, exc_info=True)
+                    return
+                if existing is None:
+                    return
+                receipt = existing[1]
+                break
             if not self._closing:
                 await asyncio.sleep(1)
         self._delivery_jobs[receipt.request_id] = (job_id, session_id)
@@ -432,13 +478,13 @@ class ResearchManager:
             await self._advance_delivery(job_id, session_id, receipt.request_id, "unknown", error="Delivery observation stopped; the request was not replayed.")
             raise
 
-    async def _settle_delivery(self, job_id: str, session_id: str, *, error: str | None = None) -> None:
+    async def _settle_delivery(self, job_id: str, session_id: str, *, error: str | None = None, unknown: bool = False) -> None:
         """Persist and publish delivery independently of report completion."""
         assert self.db is not None and self.session_mgr is not None
-        status = "failed" if error else "delivered"
+        status = "unknown" if unknown else "failed" if error else "delivered"
         await self.db.update_research_job(job_id, injection_status=status, error=error,
                                           injected_at=None if error else _now())
-        if error:
+        if error and not unknown:
             row = await self.db.get_research_job(job_id)
             location = (row or {}).get("report_path") or "the research job record"
             try:

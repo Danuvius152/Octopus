@@ -320,7 +320,19 @@ export function ApplicationView({
       </div>}
 
       <div className="application-frame-wrap flex-1 min-h-0 bg-background relative">
-        {app.status === "ready" ? (
+        {app.deletion ? (
+          <div className="p-6 space-y-3" role="alert">
+            <p>Application deletion is unfinished.</p>
+            <p className="text-sm text-muted-foreground">{app.deletion.error || "Stopping work and cleaning up files…"}</p>
+            <Button disabled={busy} onClick={async () => {
+              const current = applicationList.currentGuard();
+              setOperation({ current });
+              try { await applicationList.remove(app.id, app.deletion!.keep_files); }
+              catch (e) { if (current()) setError(e instanceof Error ? e.message : "Deletion is unfinished"); }
+              finally { if (current()) setOperation(null); }
+            }}>Retry deletion</Button>
+          </div>
+        ) : app.status === "ready" ? (
           <iframe
             key={src}
             className="application-frame w-full h-full border-0 bg-white"

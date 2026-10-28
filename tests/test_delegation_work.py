@@ -52,6 +52,7 @@ async def work_runtime(monkeypatch, tmp_path, short_process_shutdown):
         transport=httpx.ASGITransport(app=app), base_url="http://test",
         headers={"Authorization": "Bearer " + token},
     )
+    manager.work_test_app = app
     manager.work_test_bg = bg
     starts = asyncio.Queue()
 
@@ -94,6 +95,86 @@ async def assert_no_queued_messages(manager, session_id):
     else:
         assert next(row for row in await manager.db.load_sessions(include_archived=True)
                     if row["id"] == session_id)["archived"]
+
+
+async def test_application_delete_retires_direct_and_completed_delegated_writers_only(work_runtime, monkeypatch, tmp_path):
+    import shlex
+
+    from server import bg_tasks
+    from server import delegations as delegation_module
+    from server.applications import ApplicationManager
+    from server.routers import applications as app_routes
+
+    manager, delegations, parent, starts = work_runtime
+    db, background = manager.db, manager.work_test_bg
+    monkeypatch.setattr(bg_tasks, "bg_task_manager", background)
+    monkeypatch.setattr(delegation_module, "delegation_manager", delegations)
+    apps = ApplicationManager()
+    apps.bind(manager, db)
+    monkeypatch.setattr(app_routes, "_manager", apps)
+    manager.work_test_app.include_router(app_routes.router)
+    agent = await AgentManager(db).create_agent(name="Application builder", backend="codex", user_id=parent.user_id)
+    app = await apps.create_application(name="Writer ownership", description="A small page", agent_id=agent["id"])
+    await asyncio.wait_for(starts.get(), 3)
+    sid = app["session_id"]
+    await manager.await_session_execution(sid, timeout=5)
+    direct = await manager.start_message(sid, "held direct development chat")
+    await asyncio.wait_for(starts.get(), 3)
+    rec = await delegations.start_delegation(parent_session_id=sid, agent_name="Worker", request="controlled delegated writer")
+    context = await asyncio.wait_for(starts.get(), 3)
+    await wait_live_scope(context)
+    credential = next(entry.credential for entry in context.mcp_servers if entry.key == "bg")
+    release = tmp_path / "release-writers"
+
+    def command(name):
+        return f"while ! test -f {shlex.quote(str(release))}; do sleep .01; done; touch {shlex.quote(str(tmp_path / name))}"
+
+    own = await background.start_task(session_id=sid, working_dir=app["app_dir"], command=command("late-direct"))
+    response = await manager.work_test_client.post(f"/api/sessions/{rec.delegation_id}/bg-tasks",
+        headers={"Authorization": f"Bearer {credential}"}, json={"command": command("late-delegated")})
+    assert response.status_code == 201, response.text
+    child_bg = response.json()["id"]
+    (tmp_path / "release").write_text("finish delegated round")
+    await wait_state(delegations, rec.delegation_id, "completed")
+    await delegations.confirm_recording()
+    independent = await background.start_task(session_id=rec.delegation_id, working_dir=app["app_dir"], command="sleep 120")
+    from server.app_backends import backend_supervisor
+
+    stopping, finish_stop = asyncio.Event(), asyncio.Event()
+    original_stop = backend_supervisor.stop
+
+    async def stop(app_id):
+        stopping.set()
+        await finish_stop.wait()
+        await original_stop(app_id)
+
+    monkeypatch.setattr(backend_supervisor, "stop", stop)
+    deletion = None
+    try:
+        deletion = asyncio.create_task(manager.work_test_client.delete(f"/api/applications/{app['id']}"))
+        await asyncio.wait_for(stopping.wait(), 3)
+        refused_bg = await manager.work_test_client.post(f"/api/sessions/{sid}/bg-tasks", json={"command": "touch forbidden"})
+        refused_delegation = await manager.work_test_client.post(f"/api/sessions/{sid}/delegations", json={"agent_name": "Worker", "request": "new work"})
+        assert refused_bg.status_code == 400 and "closed" in refused_bg.text, refused_bg.text
+        assert refused_delegation.status_code == 409 and "deletion" in refused_delegation.text, refused_delegation.text
+        finish_stop.set()
+        deleted = await asyncio.wait_for(deletion, 3)
+        assert deleted.status_code == 204, deleted.text
+        assert (await direct.wait()).outcome.status == "interrupted"
+        assert (await background.get_task(own.id)).status == "cancelled"
+        assert (await background.get_task(child_bg)).status == "cancelled"
+        assert (await background.get_task(independent.id)).status == "running"
+        assert rec.state == "completed"
+        release.write_text("original writers must already be retired")
+        assert not (tmp_path / "late-direct").exists()
+        assert not (tmp_path / "late-delegated").exists()
+        assert await db.get_application(app["id"]) is None
+        assert manager.get_session(sid) is not None
+    finally:
+        finish_stop.set()
+        if deletion is not None:
+            await asyncio.gather(deletion, return_exceptions=True)
+        apps.shutdown()
 
 
 async def test_follow_up_has_new_work_and_stale_cancel_cannot_stop_it(work_runtime):

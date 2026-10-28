@@ -15,6 +15,7 @@ import {
 } from "./ui/dialog";
 import { loadSessionSnapshots } from "../lib/hydrateSession";
 import { selectSession } from "../lib/selectSession";
+import { sessions as sessionList } from "../lib/sessionList";
 
 const API_URL = window.location.origin;
 
@@ -29,10 +30,8 @@ interface Props {
 export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
   const token = useSessionStore((s) => s.token);
   const agents = useSessionStore((s) => s.agents);
-  const sessions = useSessionStore((s) => s.sessions);
-  const setSessions = useSessionStore((s) => s.setSessions);
   const archived = useSessionStore((s) => s.archivedSessions);
-  const setArchived = useSessionStore((s) => s.setArchivedSessions);
+  const read = useSessionStore((s) => s.sessionRead);
   const setActiveAgentId = useSessionStore((s) => s.setActiveAgentId);
   const setActiveSessionId = useSessionStore((s) => s.setActiveSessionId);
 
@@ -42,22 +41,12 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
   };
 
   const fetchArchived = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_URL}/api/sessions?include_archived=true`, {
-        headers: { Authorization: `Bearer ${token}` },
-      });
-      if (res.ok) {
-        const all: SessionInfo[] = await res.json();
-        setArchived(all.filter((s) => s.archived));
-      }
-    } catch {
-      // ignore
-    }
-  }, [token, setArchived]);
+    await sessionList.refresh(true);
+  }, []);
 
   useEffect(() => {
     if (open) fetchArchived();
-  }, [open, fetchArchived]);
+  }, [open, token, fetchArchived]);
 
   // Select an archived session for read-only viewing. ChatView detects the
   // active session is archived (it's in archivedSessions) and renders the
@@ -75,6 +64,7 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
   };
 
   const unarchive = async (s: SessionInfo) => {
+    const observation = sessionList.capture();
     try {
       const res = await fetch(`${API_URL}/api/sessions/${s.id}/unarchive`, {
         method: "POST",
@@ -84,10 +74,10 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
         const revived: SessionInfo = await res.json();
         // Dedupe on insert in case a session_unarchived broadcast already
         // landed in the live list.
-        setSessions([...sessions.filter((x) => x.id !== revived.id), revived]);
-        setArchived(archived.filter((x) => x.id !== s.id));
-        await selectSession(revived.id, revived.agent_id);
+        const accepted = await sessionList.restored(revived, observation);
+        if (!sessionList.accountCurrent(observation)) return;
         onOpenChange(false);
+        if (accepted && sessionList.current(observation)) await selectSession(revived.id, revived.agent_id);
       }
     } catch {
       // ignore
@@ -109,6 +99,7 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="archived-sessions-dialog max-w-xl">
+        {read.error && <p role="alert">Sessions not synchronized: {read.error}</p>}
         <DialogHeader>
           <DialogTitle>Archived sessions</DialogTitle>
           <DialogDescription>

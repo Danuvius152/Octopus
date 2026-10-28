@@ -775,6 +775,12 @@ class SessionManagerBase:
         rows = await db.load_sessions()
         for row in rows:
             session = _session_from_row(row)
+            from ..db.applications import ApplicationDeleting
+
+            try:
+                await db.require_application_session_writable(session.id)
+            except ApplicationDeleting:
+                session._admission_closed = True
             session.restore_message_state(*await db.message_sequence_state(session.id))
             self.sessions[session.id] = session
         logger.info("Loaded %d sessions from database", len(rows))

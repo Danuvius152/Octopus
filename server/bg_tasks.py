@@ -208,6 +208,7 @@ class _RunningTask:
 @dataclass
 class _StartingTask:
     work_id: str | None
+    session_id: str
     stop_reason: str | None = None
     running: _RunningTask | None = None
     owner: asyncio.Task[Any] | None = None
@@ -234,6 +235,7 @@ class BgTaskManager:
         self._started: bool = False
         self._shutting_down = False
         self._cleanup_tasks: set[asyncio.Task[None]] = set()
+        self._closed_sessions: set[str] = set()
 
     # ------------------------------------------------------------------ wiring
 
@@ -245,6 +247,7 @@ class BgTaskManager:
     ) -> None:
         """Wire up dependencies. Called once from main.py lifespan."""
         self._shutting_down = False
+        self._closed_sessions.clear()
         self._db = db
         self._deliver_cb = deliver_cb
         self._broadcast_cb = broadcast_cb
@@ -339,6 +342,8 @@ class BgTaskManager:
         assert self._db is not None, "BgTaskManager not bound"
         if self._shutting_down:
             raise BgTaskError("Background task manager is shutting down")
+        if session_id in self._closed_sessions:
+            raise BgTaskError("Background task session admission is closed")
         try:
             require_live_scope(scope, session_id)
         except ValueError as exc:
@@ -397,7 +402,9 @@ class BgTaskManager:
             work_id=work_id,
             knowledge_context=encode(owned_context),
         )
-        reservation = _StartingTask(work_id, owner=asyncio.current_task())
+        if session_id in self._closed_sessions:
+            raise BgTaskError("Background task session admission is closed")
+        reservation = _StartingTask(work_id, session_id, owner=asyncio.current_task())
         self._starting[task_id] = reservation
 
         # Capture and commit ownership before any OS process can execute.
@@ -516,6 +523,25 @@ class BgTaskManager:
         """Retire captured processes and startup reservations owned by a round."""
         starting = [item for item in self._starting.values() if item.work_id == work_id]
         running = [item for item in self._running.values() if item.record.work_id == work_id]
+        await self._retire_captured(starting, running)
+
+    def close_session(self, session_id: str) -> None:
+        """Seal startup before a session loses its resource relationship."""
+        self._closed_sessions.add(session_id)
+
+    def reopen_session(self, session_id: str) -> None:
+        self._closed_sessions.discard(session_id)
+
+    async def retire_session(self, session_id: str) -> None:
+        self.close_session(session_id)
+        await self._retire_captured(
+            [item for item in self._starting.values() if item.session_id == session_id],
+            [item for item in self._running.values() if item.record.session_id == session_id],
+        )
+
+    async def _retire_captured(
+        self, starting: list[_StartingTask], running: list[_RunningTask],
+    ) -> None:
         for item in starting:
             item.stop_reason = item.stop_reason or "work_cancelled"
         owners = {item.owner for item in starting if item.owner is not None}

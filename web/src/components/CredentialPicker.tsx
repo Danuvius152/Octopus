@@ -1,4 +1,5 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
+import { sessions as sessionList } from "../lib/sessionList";
 import { useState } from "react";
 import { IconCheck, IconChevronDown } from "@tabler/icons-react";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
@@ -27,7 +28,6 @@ export function CredentialPicker({ session }: { session: SessionInfo }) {
   const token = useSessionStore((s) => s.token);
   const credentials = useSessionStore((s) => s.credentials);
   const agents = useSessionStore((s) => s.agents);
-  const setSessions = useSessionStore((s) => s.setSessions);
   const [busy, setBusy] = useState(false);
 
   const agent = agents.find((a) => a.id === session.agent_id);
@@ -38,6 +38,7 @@ export function CredentialPicker({ session }: { session: SessionInfo }) {
 
   const choose = async (credentialId: string | null) => {
     if (busy) return;
+    const observation = sessionList.capture();
     setBusy(true);
     try {
       const res = await fetch(`${API}/api/sessions/${session.id}`, {
@@ -50,8 +51,7 @@ export function CredentialPicker({ session }: { session: SessionInfo }) {
       });
       if (!res.ok) return;
       const updated: SessionInfo = await res.json();
-      const all = useSessionStore.getState().sessions;
-      setSessions(all.map((s) => (s.id === updated.id ? updated : s)));
+      sessionList.patch(updated.id, { credential_id: updated.credential_id }, observation);
     } finally {
       setBusy(false);
     }

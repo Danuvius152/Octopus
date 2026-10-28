@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
-import { useSessionStore, type BgTask, type SubagentRun } from "../stores/sessionStore";
+import { useSessionStore, type BgTask, type SubagentRun, type SessionInfo } from "../stores/sessionStore";
 import { handleWsMessage } from "../hooks/useWebSocket";
 import { hydrateSession, loadBgTaskSnapshot, loadSessionSnapshots, loadSessionSnapshot } from "./hydrateSession";
 import { selectSession } from "./selectSession";
@@ -150,4 +150,26 @@ it("routes a selected archived detail to read-only history and its owning agent"
   expect(useSessionStore.getState().sessions).toEqual([]);
   expect(useSessionStore.getState().archivedSessions).toEqual([expect.objectContaining({ id: "archived" })]);
   expect(useSessionStore.getState().activeAgentId).toBe("archive-owner");
+});
+
+it("keeps a newer list status when a previously requested detail finishes", async () => {
+  const running = { id: "session", status: "running", archived: false } as SessionInfo;
+  useSessionStore.setState({ sessions: [running], dispatchGeneration: "service" });
+  const response = deferred();
+  vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("/api/sessions") ? Promise.resolve(json([{ ...running, status: "idle" }])) : response.promise));
+  const loading = loadSessionSnapshot("session");
+  handleWsMessage({ type: "status", session_id: "session", status: "idle" });
+  response.resolve(json({ ...running, messages: [], dispatch_state: dispatch("service") }));
+  await loading;
+  expect(useSessionStore.getState().sessions[0].status).toBe("idle");
+});
+
+it("rejects list fields from a detail whose dispatch revision is already known to be older", async () => {
+  const idle = { id: "session", status: "idle", archived: false } as SessionInfo;
+  useSessionStore.setState({ sessions: [idle], dispatchGeneration: "service" });
+  useSessionStore.getState().applyDispatchState("session", { ...dispatch("service"), revision: 5 });
+  vi.stubGlobal("fetch", vi.fn(async () => json({ ...idle, status: "running", messages: [],
+    dispatch_state: { ...dispatch("service"), revision: 4 } })));
+  await loadSessionSnapshot("session");
+  expect(useSessionStore.getState().sessions[0].status).toBe("idle");
 });

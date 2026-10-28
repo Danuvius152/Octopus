@@ -10,7 +10,7 @@ from server.bg_tasks import BgTaskManager
 from server.knowledge import AdmittedRequest, decode_context, derive
 from server.research import manager as research_module
 from server.research.manager import ResearchManager
-from server.sessions.runtime_types import SessionMailboxFull
+from server.sessions.runtime_types import SessionMailboxFull, SessionOwnerUnavailable
 from tests.test_research_manager import _fake_report
 from tests.test_submission_recovery import runtime as runtime
 
@@ -84,7 +84,7 @@ async def test_research_owner_retries_admission_without_rerunning_the_report_or_
             raise SessionMailboxFull("Temporary input capacity")
         receipt = await start(*args, **kwargs)
         if attempts == 1:
-            raise ConnectionError("Accepted return acknowledgment lost")
+            raise SessionOwnerUnavailable("Accepted return acknowledgment lost")
         return receipt
 
     monkeypatch.setattr(manager, "start_message", intercept)
@@ -121,7 +121,7 @@ async def test_research_shutdown_confirms_a_committed_report_after_its_acknowled
         manager.close_admission()
         research.begin_shutdown()
         accepted.set()
-        raise ConnectionError("Accepted report acknowledgment lost during shutdown")
+        raise SessionOwnerUnavailable("Accepted report acknowledgment lost during shutdown")
 
     monkeypatch.setattr(manager, "start_message", lose_ack)
     monkeypatch.setattr(research_module, "run_research", report)

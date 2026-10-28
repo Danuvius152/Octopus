@@ -325,6 +325,12 @@ export class ApplicationList {
 
   create(input: api.NewApplication): Promise<Application> { return this.write((token) => api.createApplication(token, input), (row) => this.row(row)); }
   build(id: string, prompt: string): Promise<Application> { return this.write((token) => api.buildApplication(token, id, prompt), (row) => this.row(row)); }
+  remove(id: string, keepFiles: boolean): Promise<void> {
+    return this.write((token) => api.deleteApplication(token, id, keepFiles), () => {
+      const state = useSessionStore.getState();
+      this.commit(state.applications.filter((row) => row.id !== id), state.archivedApplications.filter((row) => row.id !== id), id);
+    });
+  }
   archive(id: string): Promise<Application> { return this.write((token) => api.archiveApplication(token, id), (row) => this.row(row)); }
   restore(id: string): Promise<Application> { return this.write((token) => api.unarchiveApplication(token, id), (row) => this.row(row)); }
   setPinned(id: string, pinned: boolean): Promise<Application> { return this.write((token) => api.setApplicationPinned(token, id, pinned), (row) => this.row(row), {}); }

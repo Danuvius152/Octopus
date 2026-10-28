@@ -193,6 +193,28 @@ delegations use this same return boundary, including delegated questions.
 Restoration carries dispatch ordering within the current service generation,
 so delayed lifecycle notifications cannot replace a newer list projection.
 
+Report delivery preserves its original `research:{job_id}` identity. A typed
+`AdmissionIntegrityError` permanently ends automatic delivery while retaining
+the completed report and reason; restart or repairing the target never resends
+it. Only explicit capacity refusals (`SessionMailboxFull`, `QuotaExceeded`) and
+`SessionAdmissionBusy` permit the existing delayed retry. Arbitrary `ValueError`
+and programming errors are not retry classifications. They retain the original
+exception, task and diagnostic on the completed job; the card shows delivery
+stopped, without changing the research outcome or asserting non-acceptance.
+Storage failures preserve the original fail-stop boundary.
+
+A lost admission ACK first resolves the exact original source receipt. A found
+receipt supplies the existing input and subsequent processing status, even if
+the destination Owner has since failed. An unreadable or absent receipt after
+an unconfirmed attempt leaves `injection_status=unknown` and the report retained;
+neither a later rejection nor a restart authorizes replay. Startup may reconcile
+that original receipt, without rerunning research, reopening a failed Owner or
+submitting another input. Source cancellation and shutdown remain separate from
+input acceptance and resource retirement. The regression seams are the real
+SessionManager admission, SQLite receipts and a controlled report generator in
+`test_research_session_return.py`, with source-failure coverage in
+`test_research_manager.py` and `test_source_return_owner_failure.py`.
+
 Pipeline owners and report-delivery observers share one task registry and one
 registration entry. `wait_for_idle()` joins both phases without closing admission;
 a completed report alone does not mean its follow-up receipt has settled. Done

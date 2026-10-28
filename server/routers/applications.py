@@ -301,6 +301,8 @@ async def _application_for_request(request: Request, app_id: str) -> dict:
         raise _http_error(error)
     if not await owner_is_available(manager._require_db(), row.get("user_id")):
         raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
+    if row.get("deletion") is not None:
+        raise HTTPException(status.HTTP_409_CONFLICT, "Application deletion is unfinished; retry deletion")
     return row
 
 

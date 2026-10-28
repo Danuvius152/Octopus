@@ -28,6 +28,7 @@ content and applications. It does not use a fixed instance-specific file list.
 | Content | Account archive behavior |
 | --- | --- |
 | Account and agents | Preserve account ID, username, password verifier, required keys/DEK, agent configuration, ownership and credential associations |
+| Unfinished application deletion | Preserve its phase, original keep-files choice and failure, and collect the remaining code/data. Only `files` with `keep_files=false` permits an already removed code directory; other missing code remains an error. Runtime stays excluded. A retained build status does not resume a writer or block transfer once live writes are retired. Excluded session/BG/delegation history does not restore execution authority. The imported app remains closed; opening the account neither runs it nor resumes file removal. Explicit retry continues the remaining phase. |
 | Account files | Preserve memory, ordinary workspace files, attachments, research materials, application code/configuration and `.data`; reinstall rebuildable `.runtime` dependencies |
 | Wiki | Preserve registered vault content, sources/proofs, content history, business identities and the durable facts needed for query and maintenance, including a registered external vault within the supported home layout |
 | API configuration | Preserve account-stored endpoints/keys and saved credential associations |

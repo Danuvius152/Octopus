@@ -885,6 +885,12 @@ class ApplicationBackend(BaseModel):
     log_tail: list[str] = Field(default_factory=list)
 
 
+class ApplicationDeletion(BaseModel):
+    phase: Literal["retiring", "files"]
+    keep_files: bool
+    error: str | None = None
+
+
 class ApplicationRead(BaseModel):
     model_config = {"use_enum_values": True}
 
@@ -910,6 +916,7 @@ class ApplicationRead(BaseModel):
     entrypoint: str = "index.html"
     status: ApplicationStatus = ApplicationStatus.building
     error: str | None = None
+    deletion: ApplicationDeletion | None = None
     # Archived applications keep their row and files but can't be opened;
     # the Applications page lists them with a Restore.
     archived: bool = False

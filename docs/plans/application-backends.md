@@ -179,6 +179,14 @@ including a process handle that arrives after its startup waiter is cancelled.
 Shutdown seals admission, joins captured operations and retires their resources;
 it reports incomplete cleanup instead of reusing an unconfirmed slot.
 
+Application deletion seals install/start admission before joining the original
+backend state. A late spawn, unconfirmed group exit or undrained reader keeps
+deletion in its retirement phase, preserving files and the application row.
+The supervisor's original handle and slot remain available for retry. The
+[application lifecycle](applications.md#5-rest-surface) owns the persisted
+unfinished-deletion fact; startup and app routes keep it closed until explicit
+retry, including when files are being retained.
+
 Regression coverage in `tests/test_app_backend_capacity.py` exercises four real
 STARTING processes and a refused fifth proxy request, failed and cancelled
 startup, late spawn handoff, failed retirement, concurrent LRU admission, shared

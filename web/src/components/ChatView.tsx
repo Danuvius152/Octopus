@@ -1,5 +1,6 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
 import { schedules } from "../lib/scheduleList";
+import { sessions as sessionList, type SessionObservation } from "../lib/sessionList";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconArrowUp,
@@ -677,6 +678,7 @@ export function ChatView({
     // empty chat under the same sidebar entry.
     if (trimmed.toLowerCase() === "/archive") {
       setInput("");
+      const observation = sessionList.capture();
       try {
         const token = useSessionStore.getState().token;
         const res = await fetch(
@@ -693,15 +695,12 @@ export function ChatView({
         // landed in this tab before the HTTP response. Dedupe by id
         // on both removal AND insertion so the two paths converge to
         // the same list regardless of arrival order.
+        const accepted = await sessionList.created(fresh, observation, activeSessionId);
+        if (!accepted || !sessionList.current(observation)) return;
         const store = useSessionStore.getState();
         // The archived session is going away — drop any deferred /fork for it.
         store.clearPendingFork(activeSessionId);
         clearForkBackoff(activeSessionId);
-        const next = store.sessions.filter(
-          (s) => s.id !== activeSessionId && s.id !== fresh.id
-        );
-        next.push(fresh);
-        store.setSessions(next);
         store.setActiveSessionId(fresh.id);
         store.setMessages(fresh.id, []);
         store.setPendingQuestions(fresh.id, []);
@@ -727,6 +726,7 @@ export function ChatView({
         return;
       }
       const store = useSessionStore.getState();
+      const observation = sessionList.capture(store);
       const notice = (content: string, isError = false) =>
         store.addMessage(activeSessionId, {
           role: "system",
@@ -757,11 +757,8 @@ export function ChatView({
           return;
         }
         const updated = await res.json();
-        store.setSessions(
-          store.sessions.map((x) =>
-            x.id === updated.id ? { ...x, ...updated } : x
-          )
-        );
+        sessionList.patch(updated.id, { model: updated.model }, observation);
+        if (!sessionList.current(observation)) return;
         notice(
           updated.model
             ? `Model for this session: ${updated.model} — from the next turn.`
@@ -829,7 +826,7 @@ export function ChatView({
       setInput("");
       const store = useSessionStore.getState();
       const sid = activeSessionId;
-      const currentScheduleOperation = schedules.currentGuard();
+      const currentScheduleOperation = schedules.accountGuard();
       const addNotice = (content: string, isError = false) =>
         currentScheduleOperation() && useSessionStore.getState().addMessage(sid, { role: "system", type: "notice", content, is_error: isError });
 
@@ -1234,30 +1231,11 @@ export function ChatView({
     void selectSession(forkParentSession.id, forkParentSession.agent_id);
   };
 
-  // A fork was just created: add it to the store, switch to it (the prefilled
-  // input effect populates the composer from fork_prefilled_prompt), and load
-  // its copied history. (session-rewind.md §6.1)
-  const handleForked = async (fork: SessionInfo) => {
+  // The dialog confirmed the fork in SessionList; switch to it and load its
+  // copied history. The composer adopts fork_prefilled_prompt (§6.1).
+  const handleForked = async (fork: SessionInfo, observation: SessionObservation) => {
+    if (!sessionList.current(observation)) return;
     const store = useSessionStore.getState();
-    // A fork is a rewind: it replaces its parent, which the backend archives.
-    // Drop the parent from the live list here too so the swap is correct on
-    // this tab regardless of when the `session_archived` broadcast lands.
-    const parentId = fork.forked_from_session_id ?? null;
-    const parent = parentId
-      ? store.sessions.find((s) => s.id === parentId)
-      : undefined;
-    const next = store.sessions.filter(
-      (s) => s.id !== fork.id && s.id !== parentId
-    );
-    next.push(fork);
-    store.setSessions(next);
-    // Keep the (now-archived) parent in archivedSessions so the fork banner can
-    // still resolve its name and the "open parent" button works — otherwise it
-    // renders "(deleted session)".
-    if (parent) {
-      const rest = store.archivedSessions.filter((s) => s.id !== parent.id);
-      store.setArchivedSessions([{ ...parent, archived: true }, ...rest]);
-    }
     if (fork.agent_id) store.setActiveAgentId(fork.agent_id);
     store.setActiveSessionId(fork.id);
     try {
@@ -1275,13 +1253,12 @@ export function ChatView({
   // a notice on the parent instead of yanking the view away.
   const handleDuplicated = async (
     fork: SessionInfo,
-    { switchTo }: { switchTo: boolean } = { switchTo: true }
+    { switchTo, observation }: { switchTo: boolean; observation: SessionObservation }
   ) => {
+    const accepted = await sessionList.created(fork, observation);
+    if (!accepted || !sessionList.current(observation)) return;
     const store = useSessionStore.getState();
-    const next = store.sessions.filter((s) => s.id !== fork.id);
-    next.push(fork);
-    store.setSessions(next);
-    if (!switchTo) {
+    if (!switchTo || store.activeSessionId !== fork.forked_from_session_id) {
       const parentId = fork.forked_from_session_id;
       if (parentId)
         store.addMessage(parentId, {
@@ -1311,6 +1288,7 @@ export function ChatView({
     { switchTo }: { switchTo: boolean }
   ): Promise<"ok" | "retry" | "fail"> => {
     const store = useSessionStore.getState();
+    const observation = sessionList.capture(store);
     const addNotice = (content: string, isError = false) =>
       store.addMessage(sid, { role: "system", type: "notice", content, is_error: isError });
     try {
@@ -1347,7 +1325,7 @@ export function ChatView({
       }
       const fork = await res.json();
       store.clearPendingFork(sid);
-      await handleDuplicated(fork, { switchTo });
+      await handleDuplicated(fork, { switchTo, observation });
       return "ok";
     } catch {
       // Network error — don't strand a deferred fork forever; surface it.

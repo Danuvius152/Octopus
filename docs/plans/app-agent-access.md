@@ -74,6 +74,12 @@ through conversation creation and turn registration, so concurrent requests
 cannot exceed either the execution or conversation cap.
 This is distinct from `ApplicationManager`'s build-status consumer, which also
 observes the original completion, including direct chat in the build session.
+Application deletion closes conversation creation and input admission before
+retirement. Per-conversation retirement errors propagate to application cleanup;
+they cannot be logged and skipped before files are removed. Archived conversation
+rows are deleted without restoring a model. Development histories are retained;
+application-owned conversations are removed. See the
+[application lifecycle](applications.md#5-rest-surface) for failure, retry and restart.
 See the [architecture contract](architecture-contract.md#输入完成与资源退休)
 for the shared ownership and retirement rules. Deployment is verified separately.
 

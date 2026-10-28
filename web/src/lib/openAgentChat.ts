@@ -1,6 +1,7 @@
 import { accountFetch as fetch } from "./accountFetch";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 import { selectSession } from "./selectSession";
+import { sessions as sessionList } from "./sessionList";
 
 const API = window.location.origin;
 
@@ -24,6 +25,7 @@ export async function openAgentChat(agentId: string): Promise<void> {
     await selectSession(latest.id, agentId);
     return;
   }
+  const observation = sessionList.capture();
   const res = await fetch(`${API}/api/agents/${agentId}/sessions`, {
     method: "POST",
     headers: {
@@ -34,7 +36,7 @@ export async function openAgentChat(agentId: string): Promise<void> {
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   const session = (await res.json()) as SessionInfo;
-  const store = useSessionStore.getState();
-  store.setSessions([...store.sessions, session]);
+  const accepted = await sessionList.created(session, observation);
+  if (!accepted || !sessionList.current(observation)) return;
   await selectSession(session.id, agentId);
 }

@@ -93,3 +93,33 @@ async def test_shared_query_defaults_types_and_bounds_match_the_main_route(bound
         assert main.status_code == bridged.status_code, (operation, params, main.text, bridged.text)
         assert main.status_code in {200, 422}, (operation, params, main.text)
         assert jobs.list()["items"] == [], (operation, params)
+
+
+@pytest.mark.parametrize("operation", ["verify", "cancel", "retry"])
+@pytest.mark.parametrize("body,valid", [
+    ("", True), ("null", True), ("{}", True),
+    ('{"expected_attempt":0}', True), ('{"expected_attempt":true}', False),
+    ('{"expected_attempt":-1}', False), ('{"expected_attempt":"one"}', False),
+    ('{"unexpected":1}', False), ('{"operation_id":""}', False),
+    ('[]', False), ('false', False), ('"text"', False), ('{', False),
+])
+async def test_job_control_body_contract_matches_without_rejected_effects(bound, monkeypatch, operation, body, valid):
+    client, jobs, headers = bound
+    calls = []
+
+    async def control(self, job_id, *args, **kwargs):
+        calls.append((job_id, kwargs))
+        return {"id": job_id}
+
+    if operation == "retry":
+        def retry(self, job_id, **kwargs):
+            calls.append((job_id, kwargs))
+            return {"id": job_id}
+        monkeypatch.setattr(WikiJobs, operation, retry)
+    else:
+        monkeypatch.setattr(WikiJobs, operation, control)
+    expected = 200 if valid and (operation != "verify" or body not in {"", "null"}) else 422
+    for base, auth in (("/api/wiki", client.headers), ("/apps/parameters/wiki", headers)):
+        response = await client.post(f"{base}/jobs/original/{operation}", headers={**auth, "Content-Type": "application/json"}, content=body)
+        assert response.status_code == expected, (base, body, response.text)
+    assert len(calls) == (2 if expected == 200 else 0)

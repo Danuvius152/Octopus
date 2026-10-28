@@ -1,6 +1,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { afterEach, expect, it, vi } from "vitest";
 import { useSessionStore } from "../stores/sessionStore";
+import type { SessionInfo } from "../stores/sessionStore";
 import { applications } from "../lib/applicationList";
 import { useWebSocket } from "./useWebSocket";
 
@@ -48,5 +49,28 @@ it("reconnects both domain lists and loaded archives without another change noti
     act(() => first.onmessage?.({ data: JSON.stringify({ type: "application_updated", application: { id: "old", status: "failed" } }) }));
     expect(useSessionStore.getState().applications).toEqual([]);
     expect(useSessionStore.getState().unseenFailedApplications).toEqual([]);
+  } finally { hook.unmount(); }
+});
+
+it("keeps a newer idle observation when the reconnect's running snapshot arrives late", async () => {
+  Socket.instances = [];
+  vi.stubGlobal("WebSocket", Socket);
+  const running = { id: "s", name: "Session", status: "running", archived: false } as SessionInfo;
+  useSessionStore.setState({ token: "session-bearer", accountGeneration: useSessionStore.getState().accountGeneration + 1,
+    activeSessionId: null, dispatchGeneration: "service", connected: false });
+  useSessionStore.setState({ sessions: [running] });
+  const replies: ((response: Response) => void)[] = [];
+  vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("/api/sessions")
+    ? new Promise<Response>((resolve) => replies.push(resolve)) : Promise.resolve(Response.json([]))));
+  const hook = renderHook(() => useWebSocket());
+  try {
+    const socket = Socket.instances[0];
+    await act(async () => { socket.readyState = 1; socket.onopen?.(); });
+    act(() => socket.onmessage?.({ data: JSON.stringify({ type: "status", session_id: "s", status: "idle" }) }));
+    await act(async () => { replies[0](Response.json([running])); });
+    expect(useSessionStore.getState().sessions[0].status).toBe("idle");
+    expect(replies).toHaveLength(2);
+    await act(async () => { replies[1](Response.json([{ ...running, status: "idle" }])); });
+    expect(useSessionStore.getState().sessions[0].status).toBe("idle");
   } finally { hook.unmount(); }
 });

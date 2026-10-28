@@ -51,7 +51,9 @@ from .owner_questions import (
 )
 from .publication import Publication
 from .runtime_types import (
+    AdmissionIntegrityError,
     QuotaExceeded,
+    SessionAdmissionBusy,
     SessionMailboxFull,
     SessionOwnerUnavailable,
     _Attempt,
@@ -135,6 +137,11 @@ class CloseExecution:
 
 
 @dataclass(frozen=True)
+class ReleaseApplication:
+    """The application row was removed; retain the development conversation."""
+
+
+@dataclass(frozen=True)
 class ReserveFork:
     reserve: bool
 
@@ -184,7 +191,7 @@ class IdlePublication:
 
 
 RuntimeCommand = (Submit | Resume | Interrupt | CancelRequest | Reset | CloseWork | RetireProcess | RetireHeldProcess
-                  | CloseExecution | ReserveFork | ReleaseArchive | AutoArchive | FinishAutoArchive
+                  | CloseExecution | ReleaseApplication | ReserveFork | ReleaseArchive | AutoArchive | FinishAutoArchive
                   | IdleEvent | CorrelatedControl | RecoveryDismissed)
 
 
@@ -457,7 +464,13 @@ class OwnerRuntime:
             return WorkRetirement(resources)
         if isinstance(command, (Reset, CloseExecution)):
             if isinstance(command, CloseExecution):
-                if command.reason == "deleted" and (session._forking or session._archive_reservation is not None):
+                if command.reason == "application_deleted":
+                    # A conflicting lifecycle operation still owns its resources,
+                    # but unfinished application deletion already forbids dispatch.
+                    session._admission_closed = True
+                    session._dispatch_paused = True
+                if command.reason in {"deleted", "application_deleted"} and (session._forking or session._archive_reservation is not None):
+                    self.changed()
                     raise ForkError("A fork or archive is still using this session; retry deletion when it completes",
                                     reason="session_lifecycle_busy", status_code=409)
                 if not self.can_close_request(command.only_request_id):
@@ -487,6 +500,10 @@ class OwnerRuntime:
                     or session._run.held_since != command.held_since):
                 return None
             return self.retire(command.backend, "held_process_reaped")
+        if isinstance(command, ReleaseApplication):
+            if manager.sessions.get(session.id) is session and session._archive_reservation is None:
+                session._admission_closed = False
+            return True
         if isinstance(command, ReserveFork):
             if command.reserve:
                 from ..delegations import delegation_manager
@@ -578,7 +595,7 @@ class OwnerRuntime:
             raise ValueError(f"Session {session.id} not found")
         await manager.require_active_agent(session.agent_id)
         if session._transcript_integrity != "ok":
-            raise ValueError("Transcript has duplicate sequences; export and review it before continuing")
+            raise AdmissionIntegrityError("Transcript has duplicate sequences; export and review it before continuing")
         closed = (manager._admission_closed or session._admission_closed
                   or session.agent_id in manager._closed_agents or not work_is_open(request.work_id))
         if closed:
@@ -586,7 +603,7 @@ class OwnerRuntime:
         await require_retired_writers(manager, session.id)
         if session._forking or (session._archive_reservation is not None
                 and not (session._dispatch_paused and self._auto_archive_operation is not None)):
-            raise ValueError(f"Session {session.id} is busy (forking or archiving)")
+            raise SessionAdmissionBusy(f"Session {session.id} is busy (forking or archiving)")
         request.knowledge_context = request.knowledge_context or for_entry(
             session, request.prompt if request.trusted_request is None else request.trusted_request,
             request_id=request.request_id, selected=request.wiki_mode,

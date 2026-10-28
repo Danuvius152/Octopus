@@ -127,7 +127,9 @@ export function ResearchCard({ sessionId }: { sessionId: string }) {
                     ? "Report accepted for follow-up; processing unconfirmed"
                     : job.injection_status === "failed"
                       ? `Report retained as material${job.error ? ` — ${job.error}` : ""}`
-                      : "Report ready; delivery pending"}
+                      : job.injection_status === "unknown"
+                        ? `Report admission is unconfirmed; report retained${job.error ? ` — ${job.error}` : ""}`
+                        : job.error ? `Report delivery stopped; report retained — ${job.error}` : "Report ready; delivery pending"}
                   {typeof job.verified === "number"
                     ? ` · ${job.verified} verified finding${job.verified === 1 ? "" : "s"}`
                     : ""}

@@ -98,3 +98,51 @@ it.each([409, 503])("confirms HTTP %i write errors without replaying writes", as
   expect(calls.filter((call) => call.init?.method === "PATCH")).toHaveLength(1);
   expect(calls).toHaveLength(2);
 });
+
+it.each(["PATCH", "POST", "DELETE"])("confirms a late %s success on the current connection without repeating the write", async (method) => {
+  const accountGeneration = useSessionStore.getState().accountGeneration;
+  const old = { socket: {}, accountGeneration };
+  list.connect(old); await flush();
+  calls[0].reply.resolve(Response.json([row()])); await flush();
+  const write = method === "PATCH" ? list.setEnabled("old", false) : method === "DELETE" ? list.remove("old") :
+    list.createFromText({ agent_id: "agent", session_id: "origin", timezone: "UTC", text: "later" });
+  list.disconnect(old);
+  list.connect({ socket: {}, accountGeneration }); await flush();
+  calls[2].reply.resolve(Response.json([row()])); await flush();
+  calls[1].reply.resolve(method === "POST" ? Response.json(row("new")) : new Response(null, { status: 204 }));
+  await write; await flush();
+  expect(calls).toHaveLength(4);
+  expect(useSessionStore.getState().scheduleRead.stale).toBe(true);
+  expect(useSessionStore.getState().schedules.map((item) => item.id)).toEqual(["old"]);
+  calls[3].reply.resolve(Response.json(method === "DELETE" ? [] : method === "POST" ? [row(), row("new")] : [row("old", false)]));
+  await flush();
+  expect(useSessionStore.getState().scheduleRead.stale).toBe(false);
+  expect(calls.filter((call) => call.init?.method === method)).toHaveLength(1);
+  if (method === "PATCH") expect(useSessionStore.getState().schedules[0].enabled).toBe(false);
+});
+
+it("keeps a reconnect-crossing write successful when its confirmation fails", async () => {
+  const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+  list.connect(source); await flush(); calls[0].reply.resolve(Response.json([row()])); await flush();
+  const saved = list.setEnabled("old", false);
+  list.disconnect(source); list.connect({ ...source, socket: {} }); await flush();
+  calls[2].reply.resolve(Response.json([row()])); await flush();
+  calls[1].reply.resolve(new Response(null, { status: 204 })); await expect(saved).resolves.toBeUndefined(); await flush();
+  calls[3].reply.reject(new Error("confirmation offline")); await flush();
+  expect(useSessionStore.getState().scheduleRead).toMatchObject({ stale: true, error: "confirmation offline" });
+  await vi.advanceTimersByTimeAsync(60_000);
+  expect(calls.filter((call) => call.init?.method === "PATCH")).toHaveLength(1);
+  expect(calls).toHaveLength(4);
+  const refresh = list.refresh(); calls[4].reply.resolve(Response.json([row("old", false)])); await refresh;
+  expect(useSessionStore.getState().scheduleRead.stale).toBe(false);
+});
+
+it.each(["account", "token", "logout", "dispose"])("does not confirm old write success after %s", async (kind) => {
+  const saved = list.setEnabled("old", false).catch((error: unknown) => error);
+  if (kind === "account") useSessionStore.setState({ accountGeneration: useSessionStore.getState().accountGeneration + 1 });
+  if (kind === "token") useSessionStore.setState({ token: "replacement-token" });
+  if (kind === "logout") useSessionStore.getState().setToken("");
+  if (kind === "dispose") list.dispose();
+  calls[0].reply.resolve(new Response(null, { status: 204 })); await saved; await flush();
+  expect(calls).toHaveLength(1);
+});

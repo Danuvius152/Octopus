@@ -330,10 +330,12 @@ class ApplicationManager:
         # Only projection writers share this short-lived coordination. No
         # request result or application status is copied into this map.
         self._build_updates: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
+        self._deletions: dict[str, tuple[bool, asyncio.Task[None]]] = {}
 
     def bind(self, session_mgr: SessionManager, db: Database) -> None:
         self.session_mgr = session_mgr
         self.db = db
+        db.add_close_hook(self._join_deletions)
         session_mgr.on_broadcast(self.BROADCAST_KEY, self._on_broadcast)
         session_mgr.on_request_complete(self.BROADCAST_KEY, self._on_completion)
 
@@ -346,6 +348,16 @@ class ApplicationManager:
         if self.db is None:
             raise ApplicationError("ApplicationManager not bound", status_code=500)
         return self.db
+
+    async def _join_deletions(self) -> None:
+        tasks = [task for _, task in self._deletions.values() if not task.done()]
+        if tasks:
+            await asyncio.gather(*(asyncio.shield(task) for task in tasks), return_exceptions=True)
+
+    @staticmethod
+    def require_writable(row: dict[str, Any]) -> None:
+        if row.get("deletion") is not None:
+            raise ApplicationError("Application deletion is unfinished; retry deletion", status_code=409)
 
     # ------------------------------------------------------------------ reads
 
@@ -424,29 +436,31 @@ class ApplicationManager:
         app_dir = allocate_app_dir(name, owner_id)
         os.makedirs(app_dir, exist_ok=True)
         now = _now()
-        await db.save_application(
-            app_id=app_id,
-            name=name,
-            description=description,
-            icon=icon,
-            agent_id=agent_id,
-            session_id=None,
-            app_dir=app_dir,
-            entrypoint=entrypoint,
-            status=STATUS_BUILDING,
-            created_at=now,
-            updated_at=now,
-            user_id=owner_id,
-        )
+        async with self._build_updates.setdefault(app_id, asyncio.Lock()):
+            await db.save_application(
+                app_id=app_id,
+                name=name,
+                description=description,
+                icon=icon,
+                agent_id=agent_id,
+                session_id=None,
+                app_dir=app_dir,
+                entrypoint=entrypoint,
+                status=STATUS_BUILDING,
+                created_at=now,
+                updated_at=now,
+                user_id=owner_id,
+            )
 
-        session = await self.session_mgr.create_session(
-            agent_id=agent_id,
-            name=f"Build: {name}",
-            working_dir=app_dir,
-            origin="application",
-            backend=(agent.get("backend") or "claude-code"),
-        )
-        await db.update_application(app_id, session_id=session.id, updated_at=_now())
+            session = await self.session_mgr.create_session(
+                agent_id=agent_id,
+                name=f"Build: {name}",
+                working_dir=app_dir,
+                origin="application",
+                app_id=app_id,
+                backend=(agent.get("backend") or "claude-code"),
+            )
+            await db.update_application(app_id, session_id=session.id, updated_at=_now())
 
         # Announce the row BEFORE the first turn starts, so the `created`
         # event can never land after an `updated` one produced by that turn
@@ -463,9 +477,11 @@ class ApplicationManager:
             instructions=instructions,
         )
         try:
-            receipt = await self.session_mgr.start_message(session.id, prompt, source="application")
-            if not receipt.accepted:
-                raise ApplicationError("Session admission is closed; the build did not start", status_code=409)
+            async with self._build_updates.setdefault(app_id, asyncio.Lock()):
+                self.require_writable(await self.get_application(app_id))
+                receipt = await self.session_mgr.start_message(session.id, prompt, source="application")
+                if not receipt.accepted:
+                    raise ApplicationError("Session admission is closed; the build did not start", status_code=409)
         except Exception as exc:
             logger.exception("Failed to start build session for application %s", app_id)
             await db.update_application(
@@ -476,7 +492,8 @@ class ApplicationManager:
             )
             row = await db.get_application(app_id)
             await self._broadcast_application("application_updated", row)
-        assert row is not None  # written immediately above
+        if row is None:
+            raise ApplicationError("Application was deleted during creation", status_code=409)
         return row
 
     # ------------------------------------------------------------------ build
@@ -513,6 +530,7 @@ class ApplicationManager:
         row = await self.get_application(app_id, user_id)
 
         prompt = (prompt or "").strip()
+        self.require_writable(row)
         if not prompt:
             raise ApplicationError("prompt must be a non-empty string")
 
@@ -529,11 +547,16 @@ class ApplicationManager:
                     "asking for changes",
                     status_code=409,
                 )
+            if session_id is not None:
+                # A builder archived before attribution was retained still has
+                # this exact relationship; save it before repointing the app.
+                await db.retain_application_session_owner(session_id)
             session = await self.session_mgr.create_session(
                 agent_id=agent_id,
                 name=f"Build: {row['name']}",
                 working_dir=row["app_dir"],
                 origin="application",
+                app_id=app_id,
                 backend=(agent.get("backend") or "claude-code"),
             )
             await db.update_application(app_id, session_id=session.id)
@@ -697,23 +720,12 @@ class ApplicationManager:
         db = self._require_db()
         if len(set(ordered_ids)) != len(ordered_ids):
             raise ApplicationError("An application appears twice in the order")
-        before = {
-            a["id"]: a for a in await db.load_applications(user_id=user_id)
-        }
-        stray = [
-            i for i in ordered_ids if i not in before or not before[i]["pinned"]
-        ]
-        if stray:
-            raise ApplicationError(
-                f"Not a pinned application: {', '.join(stray)}"
-            )
-        await db.reorder_application_pins(ordered_ids)
-        after = await db.load_applications(user_id=user_id)
-        # Other clients mirror rows from these events; only the rows whose
-        # position actually moved need to travel.
-        for row in after:
-            if row["pin_order"] != before[row["id"]]["pin_order"]:
-                await self._broadcast_application("application_updated", row)
+        try:
+            after, changed = await db.reorder_application_pins(ordered_ids, user_id=user_id)
+        except ValueError as exc:
+            raise ApplicationError(str(exc)) from exc
+        for row in changed:
+            await self._broadcast_application("application_updated", row)
         return after
 
     # ----------------------------------------------------------------- delete
@@ -721,55 +733,77 @@ class ApplicationManager:
     async def delete_application(
         self, app_id: str, *, keep_files: bool = False, user_id: str | None = None
     ) -> None:
-        """Drop the row and (by default) the directory. The build session is
-        never deleted — sessions are history.
-
-        The app's *conversations* are the exception (app-agent-access.md §3):
-        they belong to a program that no longer exists, they can't be reached
-        once its `/apps/{id}/` surface is gone, and leaving them would grow a
-        pile of threads nothing points at. Archiving doesn't touch them — a
-        restored app finds its history where it left it.
-        """
-        db = self._require_db()
-        row = await self.get_application(app_id, user_id)
-
-        from .app_agent import app_agent_manager
-
-        try:
-            await app_agent_manager.delete_conversations_for_app(app_id)
-        except Exception:
-            logger.exception(
-                "failed deleting agent conversations for application %s", app_id
-            )
-
-        # Stop the backend FIRST. A running server outlives its application
-        # otherwise: nothing points at it any more, so neither the reaper nor
-        # shutdown can reach it, and it keeps holding its port and its files
-        # open while we delete the directory underneath it.
-        try:
-            from .app_backends import backend_supervisor
-
-            await backend_supervisor.stop(app_id)
-        except Exception:
-            logger.exception("failed stopping backend for application %s", app_id)
-
-        if not keep_files:
-            app_dir = row["app_dir"]
-            if is_inside_root(app_dir, row.get("user_id")):
-                shutil.rmtree(app_dir, ignore_errors=True)
-                # The data and runtime directories are siblings, so rmtree on
-                # the code directory leaves them behind. Deleting an
-                # application means deleting its state too.
-                for extra in (data_dir_for(app_dir), runtime_dir_for(app_dir)):
-                    if is_inside_root(extra, row.get("user_id")):
-                        shutil.rmtree(extra, ignore_errors=True)
+        """Take cleanup ownership; cancellation only ends this HTTP wait."""
+        async with self._build_updates.setdefault(app_id, asyncio.Lock()):
+            row = await self.get_application(app_id, user_id)
+            state = row.get("deletion")
+            if state is not None and state["keep_files"] != keep_files:
+                raise ApplicationError("Deletion already owns a different keep_files choice", status_code=409)
+            active = self._deletions.get(app_id)
+            if active is not None and not active[1].done() and active[0] != keep_files:
+                raise ApplicationError("Deletion already owns a different keep_files choice", status_code=409)
+            if active is None or active[1].done():
+                state = state or {"phase": "retiring", "keep_files": keep_files, "error": None}
+                # The operation owns this write too: an abandoned HTTP wait
+                # cannot strand an acknowledged phase without its executor.
+                task = asyncio.create_task(self._delete_owned(row, state), name=f"delete-application-{app_id}")
+                self._deletions[app_id] = (keep_files, task)
+                if self.session_mgr is not None:
+                    self.session_mgr._own_task(task)
             else:
-                logger.warning(
-                    "Refusing to delete application dir outside the managed "
-                    "root: %s",
-                    app_dir,
-                )
-        await db.delete_application(app_id)
+                task = active[1]
+        await asyncio.shield(task)
+
+    async def _delete_owned(self, row: dict[str, Any], state: dict[str, Any]) -> None:
+        from .app_agent import app_agent_manager
+        from .app_backends import backend_supervisor
+
+        db = self._require_db()
+        app_id = row["id"]
+        state = dict(state, error=None)
+        async with self._build_updates.setdefault(app_id, asyncio.Lock()):
+            await db.set_application_deletion(app_id, state)
+            backend_supervisor.close_application(app_id)
+        session_ids = await db.application_session_ids(app_id)
+        try:
+            if state["phase"] == "retiring":
+                if self.session_mgr is None:
+                    raise ApplicationError("ApplicationManager not bound", status_code=500)
+                # Close the original Sessions before independent-work drain;
+                # no stopped BG/delegation return can wake a new execution.
+                await self.session_mgr.retire_application_writers(session_ids)
+                await backend_supervisor.stop(app_id)
+                if app_agent_manager.session_mgr is self.session_mgr:
+                    await app_agent_manager.delete_conversations_for_app(app_id)
+                state = dict(state, phase="files")
+                await db.set_application_deletion(app_id, state)
+            if not state["keep_files"]:
+                paths = (row["app_dir"], data_dir_for(row["app_dir"]), runtime_dir_for(row["app_dir"]))
+                # Validate all targets before touching the first one.
+                if any(not is_inside_root(path, row.get("user_id")) for path in paths):
+                    raise ApplicationError("Application files are outside the managed account root", status_code=409)
+                for path in paths:
+                    try:
+                        await asyncio.to_thread(shutil.rmtree, path)
+                    except FileNotFoundError:
+                        # Only an absent target is complete; a missing child
+                        # inside a still-present directory remains an error.
+                        if os.path.lexists(path):
+                            raise
+            await db.delete_application(app_id)
+        except Exception as exc:
+            db.health.require_healthy()
+            state = dict(state, error=str(exc))
+            await db.set_application_deletion(app_id, state)
+            await self._broadcast_application("application_updated", await db.get_application(app_id))
+            if isinstance(exc, ApplicationError):
+                raise
+            raise ApplicationError(f"Application deletion unfinished: {exc}", status_code=409) from exc
+        # Only confirmed deletion releases the temporary prohibition. History
+        # remains usable; a future human input may recreate its working dir.
+        if self.session_mgr is not None:
+            await self.session_mgr.release_application_writers(session_ids)
+        self._deletions.pop(app_id, None)
         await self._broadcast_application("application_deleted", row)
 
     # ------------------------------------------------------------- build eval
@@ -798,6 +832,11 @@ class ApplicationManager:
         db = self._require_db()
         changed = 0
         for row in await db.load_applications(include_archived=False):
+            if row.get("deletion") is not None:
+                from .app_backends import backend_supervisor
+
+                backend_supervisor.close_application(row["id"])
+                continue
             try:
                 found = discover_icon_src(row["app_dir"], row["entrypoint"])
             except Exception:
@@ -822,7 +861,7 @@ class ApplicationManager:
         hit an error *after* writing a perfectly good app)."""
         db = self._require_db()
         row = await db.get_application(app_id)
-        if row is None:
+        if row is None or row.get("deletion") is not None:
             return None
         built = self.is_built(row)
         if built:
@@ -881,7 +920,7 @@ class ApplicationManager:
         for candidate in rows:
             async with self._build_updates.setdefault(candidate["id"], asyncio.Lock()):
                 row = await self.db.get_application(candidate["id"])
-                if row is None or row["session_id"] != sid:
+                if row is None or row.get("deletion") is not None or row["session_id"] != sid:
                     continue
                 session = self.session_mgr.get_session(sid) if self.session_mgr is not None else None
                 # Progress can outlive its writer and completion. Read the
@@ -911,7 +950,7 @@ class ApplicationManager:
         for candidate in rows:
             async with self._build_updates.setdefault(candidate["id"], asyncio.Lock()):
                 row = await self.db.get_application(candidate["id"])
-                if row is None or row["session_id"] != session_id:
+                if row is None or row.get("deletion") is not None or row["session_id"] != session_id:
                     continue
                 if not self._completion_is_current(session_id, completion.request_id):
                     continue
