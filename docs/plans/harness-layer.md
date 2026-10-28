@@ -22,7 +22,8 @@ confirmed resource retirement are separate facts. See the
 for the current contract and verification boundary; these guarantees
 do not establish later native-tail finality or cross-request lease changes.
 
-Design note (2026-10-23): the proposed [Codex app-server migration](../review/codex-app-server-feasibility-20261023.md)
+Design note (consolidated 2026-10-28): the proposed
+[Codex app-server migration](../review/future.md#codex-app-server-interfaces)
 keeps this public Harness/Profile boundary, but JSONL serialization alone no
 longer describes the protocol differences. Private protocol implementations
 may vary while one HarnessRun retains resource ownership. Steering, process

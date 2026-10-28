@@ -282,7 +282,7 @@ def pytest_addoption(parser):
     group = parser.getgroup("knowledge evaluation")
     group.addoption(
         "--run-knowledge-evals", action="store_true", default=False,
-        help="Run optional knowledge-answer evaluations (not release gates)",
+        help="Run optional knowledge-answer and maintenance-intent evaluations (not release gates)",
     )
     group.addoption(
         "--knowledge-eval-output", metavar="DIR",

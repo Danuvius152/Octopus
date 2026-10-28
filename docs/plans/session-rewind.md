@@ -15,6 +15,15 @@ rewind work. The June 2026 stdin workaround was later superseded by
 kept open; Codex exec closes stdin after spawn. Historical timings and failures
 apply to the versions and spawn paths tested, not every current CLI invocation.
 
+Use §5 for the behavioral rationale, §9 for the original decisions and §10
+for intentionally deferred scope. The implementation phases in §7 and test
+results in §8 belong to the original work, rather than an outstanding task list.
+Current completion and retirement constraints are in the
+[execution contract](architecture-contract.md#输入完成与资源退休); current verification
+requirements are in [testing.md](../testing.md). This separation preserves
+existing section links without treating original protocol experiments as a
+new implementation instruction.
+
 > **Origin (2026-06-06).** Inspired by Pi agent's `/tree`: rewind a
 > conversation to a prior user message and try again — edited,
 > redone, or replaced with a new instruction.

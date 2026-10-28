@@ -29,7 +29,7 @@ content and applications. It does not use a fixed instance-specific file list.
 | --- | --- |
 | Account and agents | Preserve account ID, username, password verifier, required keys/DEK, agent configuration, ownership and credential associations |
 | Unfinished application deletion | Preserve its phase, original keep-files choice and failure, and collect the remaining code/data. Only `files` with `keep_files=false` permits an already removed code directory; other missing code remains an error. Runtime stays excluded. A retained build status does not resume a writer or block transfer once live writes are retired. Excluded session/BG/delegation history does not restore execution authority. The imported app remains closed; opening the account neither runs it nor resumes file removal. Explicit retry continues the remaining phase. |
-| Account files | Preserve memory, ordinary workspace files, attachments, research materials, application code/configuration and `.data`; reinstall rebuildable `.runtime` dependencies |
+| Account files | Preserve private agent memory and the same account's `agents/shared-memory/`, ordinary workspace files, attachments, research materials, application code/configuration and `.data`; reinstall rebuildable `.runtime` dependencies |
 | Wiki | Preserve registered vault content, sources/proofs, content history, business identities and the durable facts needed for query and maintenance, including a registered external vault within the supported home layout |
 | API configuration | Preserve account-stored endpoints/keys and saved credential associations |
 | Chats and native continuity | Exclude old sessions/messages, native transcripts/resume state and extra external/fork work trees collected solely for old conversations; ordinary files already inside the account's included roots remain included |
@@ -105,7 +105,9 @@ a standalone target with `OCTOPUS_ENV_FILE` pointing at that file, or use the
 configuration with the existing managed-service setup procedure. Then verify:
 
 1. Sign in with the original account password; check the expected account and
-   unchanged agent settings, memory and ordinary files.
+   unchanged agent settings, private and shared memory, their relative links
+   and ordinary files. Arbitrary absolute links inside Markdown are not rebased;
+   use the account's project-location note to resolve a changed checkout path.
 2. Check Wiki contents, sources, identities/history and normal query/maintenance
    access through the restored account's scoped tools.
 3. Reinstall application runtime dependencies; verify retained code and `.data`

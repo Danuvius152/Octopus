@@ -13,14 +13,8 @@ document responsible for one kind of information:
 | [`post-mortems/`](post-mortems/) | Specific incidents and their evidence, rather than an ever-growing current-state checklist. |
 | [`review/`](review/) | Dated code and behavior reviews, with evidence, scope and remediation impact. |
 
-Update the responsible document when facts change and link to it from the
-others. Revise its current section and remove superseded claims; consolidate
-overlapping plans instead of appending dated corrections or repeated progress
-reports. Keep decisions and conventions, with the reasons and constraints that
-still apply. Git preserves implementation history; standalone experiments and
-post-mortems retain the version and conditions needed to interpret their evidence.
-Keep transient logs in task artifacts. Documentation-only work stays
-uncommitted unless the user requests a commit; it does not trigger deployment.
+Writing, ownership and maintenance rules live in [docs/AGENTS.md](AGENTS.md).
+Repository actions follow [the root rules](../AGENTS.md#repository-and-upstream-maintenance).
 
 ## Current
 
@@ -57,10 +51,11 @@ Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验
   对比 before-takeover 与本地新版本，审查旧兼容、旧接口和重复状态；含跨机器搬迁建议，尚未实施。
 - **[架构约定与未完成范围](plans/architecture-contract.md)** —
   Owner、事务、输入/完成、账户、存储和搬迁的有效决策与 Conventions；
-  七项执行扩展的暂停范围和恢复条件。当前组件与操作分别查架构概览和用户指南。
-- **[Codex exec → app-server 可行性与实施设计](review/codex-app-server-feasibility-20261023.md)** —
-  基于当前 Harness/Owner 与本机 Codex 0.164.0 schema，区分请求内交互迁移和完整
-  原生尾部；列明权限、输入、问题、完成、恢复及验收挑战。仅设计，未恢复暂停票。
+  七项执行扩展的暂停范围和恢复条件；[待处理返回接管设计](plans/architecture-contract.md#待处理返回接管设计未实现)已确认、未实现。
+  当前组件与操作分别查架构概览和用户指南。
+- **[Codex app-server 迁移设计](review/future.md#codex-app-server-scope)** —
+  区分请求内交互与完整原生尾部，统一接口、输入/问题、资源退休、阶段出口与验收。
+  已按当前文本 worker 修正轻量调用边界；仅设计，未恢复暂停范围。
 
 ## Design records — [`plans/`](plans/)
 
@@ -106,7 +101,6 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 | [Three small affordances: message time, composer history, `/model`](plans/composer-and-time.md) | shipped | hover a message for its time, ArrowUp for what you sent, `/model` to switch model for one session. |
 | [Turn safety (Layer 1): timeout + process-group reaping](plans/turn-safety.md) | shipped | Bounded automatic recovery after idle stops, an optional whole-turn duration cap, and process-group reaping. |
 | [共享 Wiki：开发过程总结与当前合同](plans/wiki-development-summary.md) | shipped | Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验收已完成；保留当前合同、证据边界和开发方法。 |
-| [AI 与数字人研究工作流改进计划](plans/ai-digital-human-research-workflow-20261024.md) | proposed | 对照 Pika 的行为流程与 prompt，改进研究证据、PDF 转 Markdown、阅读写作与 Wiki 续接；面向 AI 与数字人。 |
 | [Codex / DSH 兼容与 DeepSeek backend 可行性方案](plans/deepseek-harness-backend.md) | proposed | 保留 Claude 原生支持与 Codex，评估以 API key 增加 DeepSeek backend；DSH 接口按适配度选择，尚未实施。 |
 | [Codex performance in Monitor](plans/codex-performance-monitor.md) | completed | effective output TPS implemented and validated for local Codex; client windows, model grouping and passive collection. |
 | [Current storage and publication handoff](plans/current-storage-format.md) | implemented | Validation and release handoff are tracked separately from production deployment. |
@@ -123,6 +117,25 @@ fails if it has drifted. Regenerate the table when a plan's status changes.
 Research captured while reverse-engineering the CLIs' stream protocols and a
 post-mortem on a tricky pipeline. Cited from code where relevant.
 
+- **[评审意见取舍与开发顺序指导（2026-10-28）](review/Octopus_Review_Action_Guide_2026-10-28.md)** —
+  2026-10-29 更新：N1、N2、N4–N7 七票已完成，N3 与三来源返回接管仍待实施；
+  保留 Codex app-server／DeepSeek Harness 接入及独立 Wiki 优化的依赖与验收标准。
+- **[全库架构审查 HTML 报告（2026-10-28）](review/architecture-review-codebase-20261028.html)** —
+  基于 `0df8b78` 的七项架构改进候选、独立缺陷发现及验证边界；原复现附件、
+  源码 manifest 与既有审查 bug.md 未入包，报告已标明此证据缺口。后续合同见
+  [前端应用与计划列表更新合同](plans/frontend-list-reconciliation.md)，已实施统一业务入口。
+- **[接管前与当前版本架构对照图（2026-10-28）](review/architecture-before-after-20261028-131512.html)** —
+  固定比较 `before-takeover@88d2284` 与 `main@0df8b78`；四组前后架构图覆盖整体、
+  请求与完成、Wiki、账户与存储，另列模型接缝与未实施的深化候选，可离线查看。
+- **[返回接管新设计与架构分析 HTML 报告（2026-10-28）](review/architecture-review-20261028.html)** —
+  完整收录已确认的返回接管设计、接口、失败语义、接入与验收场景，并保留基于
+  `0df8b78` 的三个改进候选；可离线阅读和交接，尚未实施。后续合同由
+  [待处理返回接管设计](plans/architecture-contract.md#待处理返回接管设计未实现)维护。
+- **[Octopus 综合评审与后续规划（2026-10-28）](review/future.md)** —
+  合并三份综合评审与三份 app-server 设计，按 `0df8b78` 取舍过时内容，统一运行时、
+  Wiki、AGENTS/Memory 的后续顺序、依赖、验收和暂停范围。
+- **[AI 与数字人研究工作流改进计划](review/ai-research-workflow.md)** —
+  对照 Pika 2.1.7 的通用研究流程，涵盖证据、PDF 阅读写作、实验与续接；尚未实施。
 - **[cli-protocol-notes.md](cli-protocol-notes.md)** — the Claude Code CLI's
   `--print` stream-JSON protocol.
 - **[codex-protocol-notes.md](codex-protocol-notes.md)** — the Codex CLI's

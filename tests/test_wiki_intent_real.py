@@ -1,4 +1,4 @@
-"""Natural requests choose real tools; admission and Weber execution stay real."""
+"""One live maintenance flow plus opt-in natural-request intent evaluations."""
 
 import asyncio
 
@@ -68,10 +68,10 @@ async def intake(tmp_path, monkeypatch):
     ("/wiki 维护一下知识库", {"Library/chosen.md", "Library/other.md"}),
     pytest.param("/wiki 维护本地知识库", {"Library/chosen.md", "Library/other.md"}, marks=pytest.mark.knowledge_eval),
     pytest.param("/wiki 维护个人知识库", {"Library/chosen.md", "Library/other.md"}, marks=pytest.mark.knowledge_eval),
-    ("/wiki 怎么维护知识库？", set()),
-    ("/wiki 先不要维护知识库，说明将怎么做。", set()),
-    ("/wiki 只整理 Library/chosen.md，其他文章不要动。", {"Library/chosen.md"}),
-    ("/wiki 阅读 instructions.md，解释其中建议的流程是否合理。", set()),
+    pytest.param("/wiki 怎么维护知识库？", set(), marks=pytest.mark.knowledge_eval),
+    pytest.param("/wiki 先不要维护知识库，说明将怎么做。", set(), marks=pytest.mark.knowledge_eval),
+    pytest.param("/wiki 只整理 Library/chosen.md，其他文章不要动。", {"Library/chosen.md"}, marks=pytest.mark.knowledge_eval),
+    pytest.param("/wiki 阅读 instructions.md，解释其中建议的流程是否合理。", set(), marks=pytest.mark.knowledge_eval),
 ])
 async def test_codex_uses_request_meaning_to_submit_only_the_requested_maintenance(intake, prompt, selected):
     manager, session, jobs, worker, weber, vault = intake

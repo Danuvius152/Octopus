@@ -2,100 +2,42 @@
 
 > **Status:** shipped — The connector framework: OAuth, per-agent enablement, one MCP namespace per kind.
 
-Status: ✅ **LANDED & live-verified (2026-05-21).** This plan is kept for
-history; the sections below describe the original design. What actually shipped
-diverged in a few deliberate ways (see the banner just below). The how-to lives
-in `docs/connectors-setup.md`.
+## Current contract and design decisions
 
-> ## ✅ SHIPPED — what's live vs. this plan (2026-05-21)
->
-> Built agent-scoped, Gmail + GitHub, fully browser-only, and verified against
-> live Google + GitHub. Where the implementation differs from the plan text:
->
-> 1. **Enablement is agent-scoped** — `agent_connectors(agent_id, installation_id)`
->    join, not the `session_connectors` in the body. SessionManager loads an
->    agent's enabled connectors each turn and merges their MCP entries into both
->    backends (Claude `--mcp-config`, Codex `-c mcp_servers.*`).
-> 2. **OAuth client config is IN-APP**, not env-only. `connector_oauth_clients`
->    stores per-kind client id + encrypted secret set from the "Set up" dialog;
->    `ConnectorManager.resolve_client_creds` is DB-first then env fallback. A
->    browser-only user never touches server env. Routes:
->    `GET/PUT/DELETE /api/connectors/{kind}/oauth-client`.
-> 3. **Custom connectors** (NOT in the original plan): define a new kind from
->    the browser (`custom_connectors` table + `server/connectors/custom.py`
->    `GenericOAuthProvider`/`CustomConnector`/`resolve_connector`); one generic
->    `request` MCP server (`server/mcp_servers/connectors/custom.py`) gives the
->    agent authenticated HTTP to the kind's API base. Routes:
->    `POST /api/connectors/custom`, `DELETE /api/connectors/custom/{kind}`.
-> 4. **Redirect URI is derived from the browser request** (`X-Forwarded-Proto`/
->    `Host`), not `OCTOPUS_PUBLIC_BASE_URL` — works behind a tunnel with zero
->    server config (env var remains an override).
-> 5. **Provider methods take client_id/client_secret explicitly** (resolved per
->    request) rather than reading settings, so DB-stored creds work.
-> 6. **Built-in connectors carry in-app setup guidance** (`setup_url` +
->    `setup_steps`) shown in the Set-up dialog.
-> 7. **Notion dropped**; **GitHub** is the second built-in. **No mitmproxy** —
->    typed MCP tools, as the body's §11 already chose.
+Current connectors are account-owned installations, enabled per agent through
+`agent_connectors`. Each turn loads that agent's enabled installations and
+renders their backend-neutral MCP entries through the selected harness.
+`ConnectorManager` owns persistent token refresh and per-installation locking;
+MCP calls still check the current installation and account before using tokens.
 
-> ## ⚠️ REVISION — v1 is Gmail + GitHub; Notion dropped (2026-05-20)
->
-> The connector set changed. **v1 now ships Gmail + GitHub** — the two
-> services the user uses every day — **not Notion + Gmail.** **Notion is
-> removed entirely:** the user migrated their documents to Obsidian (local
-> Markdown the agent already reads/writes directly via the filesystem, so a
-> Notion connector buys nothing). Apply these deltas alongside the
-> agent-scoping revision below; the OAuth / MCP-server / truncation / refresh
-> machinery is connector-agnostic and stands unchanged:
->
-> 1. **GitHub replaces Notion as the "first connector end-to-end."** Phase B
->    (§9) builds **GitHub**, not Notion; Phase C stays Gmail. §6.1 (Notion) is
->    void — a GitHub descriptor + MCP server takes its place (issues, PRs,
->    repo + file reads, code search, create/comment).
-> 2. **Wherever the body says "Notion" as a shipped v1 connector, read
->    "GitHub"** — §1 goal list, §5.1 file layout, the §5.8 system-prompt
->    example, the §6 title, and §8's fixtures (a fake-GitHub HTTP stub
->    replaces fake-Notion). §6.3 moves `github` *out* of "not in v1."
-> 3. **GitHub specifics are not yet verified** (treat as §13 items, don't
->    fabricate): authorization-code flow against
->    `github.com/login/oauth/authorize` → `/access_token`, identity via
->    `GET /user`, scopes ~ `repo` + `read:org`. A classic OAuth app's tokens
->    don't expire (like Notion's did), so the refresh path stays dead code
->    unless we adopt GitHub-App expiring tokens. The exact tool list + names
->    (under the 60-char cap, §5.3) get pinned down at implementation.
-> 4. **Env vars (§7): `OCTOPUS_NOTION_OAUTH_*` → `OCTOPUS_GITHUB_OAUTH_*`;**
->    `OCTOPUS_GMAIL_OAUTH_*` stays. `docs/connectors-setup.md` documents
->    GitHub OAuth-app registration instead of Notion.
+Gmail and GitHub are the built-in kinds; browser-defined custom OAuth kinds use
+the generic connector and MCP module. OAuth client configuration is DB-first,
+with environment fallback. The browser request determines the redirect origin
+unless an explicit public-base override applies. Typed MCP tools avoid proxying
+arbitrary CLI traffic. These choices keep enablement with the durable agent and
+let browser users configure providers without editing server environment files.
 
-> ## ⚠️ REVISION — connectors are AGENT-scoped (2026-05-19)
->
-> This plan was written for **per-session** connector enablement. The
-> first-class Agents refactor (`agent-refactor.md`, now landed) supersedes
-> that: connectors are **agent-scoped**, exactly like the agent's built-in
-> MCP set (agent-refactor.md §5.5 / §5.7, decision #5). Apply these deltas
-> when implementing — the rest of the plan (OAuth flow, MCP-server modules,
-> truncation, Notion/Gmail specifics, testing) stands unchanged:
->
-> 1. **`session_connectors` → `agent_connectors`** (PK `(agent_id,
->    installation_id)`, FK `agent_id → agents(id) ON DELETE CASCADE`).
->    Enablement is per-agent; there is **no per-session connector table**.
-> 2. **Effective MCP set for a turn = `agent.mcp_servers` (built-in) ∪ the
->    agent's enabled connectors.** `SessionManager._make_backend` already
->    loads the owning agent every turn (the live-reference point) — read the
->    agent's connectors there and merge into the backend's MCP config.
-> 3. **UI moves from the new-session form / per-session sidebar dots (§4.1,
->    §4.2) to the Agent settings dialog** (`AgentSettings.tsx`) — a connector
->    toggle list per agent, beside the built-in-MCP checkboxes. The sidebar
->    `CONNECTORS` section becomes the install/catalog manager (installations
->    are global; enablement is per-agent).
-> 4. **Both backends are ready.** Claude MCP injection is the existing
->    `--mcp-config` path (§5.6); Codex MCP injection is **settled** by
->    `codex-backend.md` §5.3 (per-session `-c mcp_servers.<key>.*` overrides,
->    `CodexBackend._mcp_config_args`) — this answers the §10.1 open question.
->    `connector.mcp_entry()` should return a backend-neutral
->    `{command,args,env}` that each backend renders into its own config shape.
-> 5. **External prerequisite for end-to-end verification:** real OAuth client
->    registration (Notion/Google) per §7. The §8 fake-Notion/Gmail HTTP
->    fixtures allow building + testing Phases A–B without live clients.
+Setup instructions live in [connector setup](../connectors-setup.md), component
+relationships in [architecture](../architecture.md#connector-system-serverconnectors--connector_managerpy),
+and account, authorization and cleanup constraints in the
+[architecture contract](architecture-contract.md#公开接口与账户配置). Current implementation
+is in [connector_manager.py](../../server/connector_manager.py),
+[connectors/](../../server/connectors/) and [connector routes](../../server/routers/connectors.py).
+Exact routes and schemas come from the running FastAPI `/docs` and `/openapi.json`.
+
+## Original design and version-bound evidence
+
+The numbered sections below retain the May 2026 design and its decisions. Their
+per-session enablement, Notion connector, old UI/file names and future-tense
+implementation phases are historical proposals, not current contracts. The
+shipped implementation selected agent-scoped enablement and GitHub instead of
+Notion; it added in-app OAuth clients and custom kinds. The original May 21
+record reported live Google/GitHub verification; it does not establish current
+provider access or deployment. Historical open questions in §10 and §13 have
+the same boundary. New behavior must be checked against current source and the
+[verification policy](../testing.md), rather than implemented from those lists.
+There is no outstanding implementation phase authorized by this shipped plan;
+new connector kinds or protocol changes need their own requested scope.
 
 ## 1. Goal
 

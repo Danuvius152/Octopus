@@ -206,13 +206,18 @@ CLI 默认模型额度不足时，使用当前对话的凭据、模型和显式�
   ln -s "$CODEX_HOME" "$octopus_test_root/credentials/selected" || exit
   TMPDIR="$octopus_test_root" OCTOPUS_CODEX_HOME_DIR="$octopus_test_root/credentials" \
     .venv/bin/pytest tests/ -v \
+    --ignore=tests/test_codex_login_real.py \
     -m 'real and (real_codex or codex_bin) and not real_claude and not knowledge_eval'
 )
 ```
 
-维护请求的同义措辞扩展归入按需的 `knowledge_eval` 层，固定使用 low effort。
-常规实机验收仍覆盖完整维护、否定请求、指定范围及文档内容不能扩权。评估同义
-措辞时单独运行 `.venv/bin/pytest tests/test_wiki_intent_real.py --run-knowledge-evals -m knowledge_eval`。
+维护请求的同义措辞、询问、否定、指定范围及文档内指令辨识归入按需的
+`knowledge_eval` 层，固定使用 low effort。这些用例检查模型是否理解请求，
+保留原有工具调用、入队范围和文件未被提交者改写的断言。常规实机验收保留一条
+完整的维护提交 → Weber 执行 → 持久化结算链路，以及 Wiki 读取、原生助手、
+resume 指令更新和大任务导出协议；授权、写入范围、事务及恢复仍由默认离线测试覆盖。
+评估维护意图时单独运行
+`.venv/bin/pytest tests/test_wiki_intent_real.py --run-knowledge-evals -m knowledge_eval`。
 
 Wiki 自然问答使用独立的 `knowledge_eval` 标记，默认排除，不作发布必过项，
 也不记为通过。只为具体质量问题显式运行，不能为补一条文档记录重跑。
@@ -255,7 +260,7 @@ octopus_knowledge_evidence=$(mktemp -d /tmp/octopus-wiki-evals.XXXXXX)
 同进程因注册绑定更新而重叠的 Store 租约共享观察器与尚未提交的事件，最后一个
 租约释放后才关闭。需要离线打开 Store 时，应先停止拥有该索引的后端。
 
-当前 Wiki 格式为16；实际运行提交及格式以对应发布验收为准。每库只保留一个
+当前代码要求 Wiki 格式17、主库格式5；实际运行提交及格式以对应发布验收为准。每库只保留一个
 `PRAGMA user_version` 当前标记，启动、注册及恢复打开时等值匹配，失配在写入前
 拒绝。新空库直接建立完整当前结构；普通重开不解释或转换旧格式。完整存量结构、
 来源、授权、任务、通知/ACK及文章证明由发布交接核验，格式变化须在旧 writer
@@ -356,7 +361,7 @@ push、构建、重启或发布。用户明确要求文档提交时才提交，�
    退出，并确认 unit 没有剩余进程或启动任务。保持启动屏蔽，在此边界执行本次
    存量检查、必要的有限转换和当前格式完整核验；通过后才安装/解除屏蔽并幂等
    启动候选。任一库未准备、提交结果未知或跨库部分完成时保持业务关闭，按同一
-   发布计划和实际提交事实前向继续。候选启动只匹配主库4/Wiki17的当前标记，
+   发布计划和实际提交事实前向继续。候选启动只匹配主库5/Wiki17的当前标记，
    不补做旧格式转换；不变格式的发布也执行完整只读核验。首次受管安装还须完成
    上面的 unit/profile 过渡。具体合同见[当前存储格式](plans/current-storage-format.md)。
    确认实际 MainPID、工作目录、cgroup 和配置绑定属于目标，`/health` 为 ok、

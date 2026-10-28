@@ -28,6 +28,15 @@ DSH 协议依据本机 npm 包 `@deepseek-ai/dsh@0.2.1-rc.2` 的 README、类型
 阅读源码仅证明该包的协议形状，不等于配置桥、resume、工具限制或取消已经联调通过。末尾官方文档链接
 便于追溯；其 `master` 会变化，不替代锁定包的兼容性证据。
 
+## 内容状态与证据边界
+
+当前已实现的后端合同归 [Harness 层](../architecture.md#harness-layer-serverharness)
+和[架构约定](architecture-contract.md)，本方案不新增已交付能力。
+§1.3–1.5与§2.3给出选型及取舍理由，SDK、ACP、headless 均是待验证候选；
+§3–9是条件实现和验收设计，headless 专属内容只约束选定该路线后的实现。
+§9全部工作包尚未实施，§10另列显式延后范围，技术可行不等于实施授权。
+上述 Octopus 基线、DSH 锁定包及§11是版本限定证据，不是当前 CLI 或真实模型验收。
+
 ## 1. 当前代码与原方案的差异
 
 | 原方案的假设 | 当前事实与修订 |
@@ -172,7 +181,8 @@ T0 使用已锁定包、临时根和本地假 provider，先验证最可能推�
 | 问题和事件是否阻塞协议 | Octopus ask→answer 与 Stop、审批拒绝、慢 UI/满队列同时发生；持续处理 response/control，有界失败，无静默丢正文或自动授权 |
 | 运维成本是否可接受 | 锁定客户端/runtime 版本、正常退出/崩溃/升级、冷 resume；记录私有模块与兼容代码，而非仅估代码行数 |
 
-Codex 的[迁移可行性文档](../review/codex-app-server-feasibility-20261023.md) §4.5–4.6
+综合规划的[公共协议接缝](../review/future.md#harness-protocol-contract)与
+[Codex 接入设计](../review/future.md#codex-app-server-interfaces)
 定义共享接缝：一个公共 Harness/Profile，一个资源 owner，各后端私有协议；start、
 stream、stop 及可选 steer/answer 的含义不随 provider 改变。DSH T2 与 Codex F1/F2
 协调 `RuntimeProfile`、LaunchPlan、owner 传参及退出接口；不在业务 manager 中

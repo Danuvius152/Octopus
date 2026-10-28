@@ -55,6 +55,7 @@ for (const noCrypto of [false, true]) {
       await expect(input).toHaveValue("keep my HTTP draft");
       await expect(page.locator(".agent-list-header")).toBeVisible();
     } finally {
+      await page.unrouteAll({ behavior: "wait" });
       await request.delete(`${API}/sessions/${session.id}`, { headers });
     }
   });

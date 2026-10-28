@@ -58,6 +58,19 @@ it("retains an explicitly supplied earlier service identity", async () => {
   expect(useSessionStore.getState().messages.s).toBeUndefined();
 });
 
+it.each(["detail", "select"])("%s accepts its initial service after another session first establishes that generation", async (entry) => {
+  const response = deferred();
+  vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("bg-tasks") ? Promise.resolve(json([])) : response.promise));
+  const loaded = entry === "detail" ? loadSessionSnapshot("selected") : selectSession("selected");
+  handleWsMessage({ type: "dispatch_state", session_id: "other", dispatch_state: dispatch("service") });
+  response.resolve(json({ id: "selected", status: "idle", archived: false,
+    dispatch_state: dispatch("service"), messages: [{ role: "user", type: "text", seq: 0, content: "sent history" }] }));
+  await loaded;
+  expect(useSessionStore.getState().messages.selected).toEqual([expect.objectContaining({ content: "sent history" })]);
+  expect(useSessionStore.getState().dispatchStates.selected.generation).toBe("service");
+  expect(useSessionStore.getState().sessions.some((row) => row.id === "selected")).toBe(true);
+});
+
 it.each(["detail", "background"])("rejects a %s response after an account switch", async (kind) => {
   const response = deferred();
   vi.stubGlobal("fetch", vi.fn(() => response.promise));

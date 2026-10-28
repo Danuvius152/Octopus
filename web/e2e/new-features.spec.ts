@@ -2713,6 +2713,7 @@ test.describe("Composer history", () => {
     await page
       .locator(".session-item .session-name", { hasText: "History Session" })
       .click();
+    await expect(page.locator(".msg", { hasText: "second thing I asked" })).toBeVisible();
 
     const box = page.locator(".chat-input-bar textarea");
     await box.click();

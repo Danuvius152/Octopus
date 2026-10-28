@@ -52,6 +52,12 @@ original writers retire: append that exact checked column as NULL for existing
 apps, preserve all other rows/receipts, and commit marker 5 in the same SQLite
 transaction. Verify the candidate's complete declarations and retained facts
 before reopening admission. Ordinary startup never performs this conversion.
+The finite handoff checks integrity, foreign keys and exact `table_xinfo`
+column order inside that transaction, alongside the candidate's current
+verifier. Preservation compares typed row multisets over every original
+column, including duplicate rows and NULL/TEXT/BLOB/numeric distinctions.
+Fresh format-4 conversion requires the new column to be NULL; format-5 reentry
+verifies and retains any already committed unfinished deletion.
 Code implementation and fresh-format/account-snapshot tests do not establish
 that the running installation was converted or deployed.
 

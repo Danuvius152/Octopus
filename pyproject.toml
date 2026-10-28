@@ -162,7 +162,7 @@ addopts = "--strict-markers"
 markers = [
     "real: real provider or supervisor integration; deselect with -m 'not real'",
     "supervisor: isolated systemd user-unit checks; no provider CLI or production service mutations",
-    "knowledge_eval: optional natural knowledge-answer evaluation; requires --run-knowledge-evals",
+    "knowledge_eval: optional knowledge-answer and maintenance-intent evaluations; requires --run-knowledge-evals",
     "wiki_perf: optional Wiki scale and performance measurements; requires --run-wiki-perf",
     "real_claude: needs a claude CLI that is installed AND signed in",
     "real_codex: needs a codex CLI that is installed AND signed in",

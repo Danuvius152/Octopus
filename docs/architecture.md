@@ -414,66 +414,19 @@ correlated `submission` or `command_receipt`, including refusals.
 ## REST API
 
 Business endpoints require `Authorization: Bearer <token>` from an account or
-an authorized MCP scope. Owned resources are scoped to that account; admin-only
-routes are marked below. Auth state, login and invite registration have their
+an authorized MCP scope. Owned resources are scoped to that account; administrative
+operations require the corresponding account authority. Auth state, login and invite registration have their
 own admission rules; setup checks its dedicated proof on an empty installation.
 
-```
-# Accounts & auth
-GET                /api/auth/state                       # does this install have accounts yet?
-POST               /api/auth/setup                       # empty installation: setup proof, username, password
-POST               /api/auth/login | /register | /logout # register uses an invite code
-POST               /api/auth/password                    # change password (re-wraps the DEK)
-GET                /api/auth/identity | /workspace
-PUT                /api/auth/users/{id}/extra-roots      # admin: grant workspace roots
-GET/POST/DELETE    /api/auth/invites[/{code}]            # admin: mint / list / revoke
-GET                /api/auth/users                       # admin: list people
-POST               /api/auth/users/{id}/disabled         # admin: disable / enable
+Use the running FastAPI instance's `/docs` and `/openapi.json` for the exact
+methods, request models and response schemas. For a checkout, follow the router
+registrations in [main.py](../server/main.py) to [routers/](../server/routers/).
+The schema describes that instance or revision, not whichever service happens
+to be deployed elsewhere. The WebSocket protocol remains documented above.
 
-# Agents — durable assistant definitions that own sessions and schedules
-GET/POST           /api/agents
-GET/PATCH/DELETE   /api/agents/{id}
-POST               /api/agents/{id}/archive
-GET/POST           /api/agents/{id}/sessions
-GET/POST           /api/agents/{id}/schedules
-POST               /api/agents/{id}/schedules/from_text
-GET/POST/.../DELETE/api/agents/{id}/connectors        # per-agent enablement
-
-# Sessions + per-session sub-resources
-GET/POST           /api/sessions
-GET/DELETE         /api/sessions/{id}
-POST               /api/sessions/import
-POST               /api/sessions/{id}/reset            # clear stuck-busy state
-POST               /api/sessions/{id}/archive | /unarchive
-POST/GET           /api/sessions/{id}/attachments[/{aid}]
-GET                /api/sessions/{id}/files[/meta]
-POST               /api/sessions/{id}/showme/resolve      # /showme reference → path
-POST/GET           /api/sessions/{id}/bg-tasks[/{tid}][/cancel]
-POST/GET           /api/sessions/{id}/questions[/{qid}/answer]
-POST/GET           /api/sessions/{id}/delegations           # ask_agent: start, list
-POST               /api/sessions/{id}/delegations/{did}/follow-up # ask_agent: continue same child session
-POST               /api/sessions/{id}/delegations/{did}/cancel  # stop a delegation (cascades to descendants)
-POST               /api/sessions/{id}/delegations/{did}/answer   # answer a child's question
-POST               /api/sessions/{id}/fork                       # /rewind: fork conversation to a prior message
-POST               /api/sessions/{id}/duplicate                  # /fork: filesystem copy onto a new working dir
-POST               /api/sessions/{id}/research                   # /research: start a deep-research job
-GET                /api/sessions/{id}/research                   # list jobs for this session
-GET                /api/sessions/{id}/research/{rid}             # job detail + phase progress
-POST               /api/sessions/{id}/research/{rid}/cancel      # cancel in-flight job
-
-# Schedules (interval + cron), credentials, connectors, notifiers
-GET/POST           /api/schedules
-GET/PATCH/DELETE   /api/schedules/{id}
-GET/POST/PATCH/DELETE  /api/credentials/...            # + OAuth + Codex login
-GET                /api/connectors/catalog
-PUT/DELETE         /api/connectors/{kind}/oauth-client
-POST/GET/PATCH/DELETE /api/connectors[/{id}]
-POST/DELETE        /api/connectors/custom[/{kind}]
-GET/POST/PATCH/DELETE  /api/notifiers[/{id}]
-
-GET                /api/backends                        # harnesses usable here
-GET                /health
-```
+Password changes update the verifier and revoke other account bearers while
+preserving the caller's token. They do not re-wrap the account DEK; key ownership
+is described under [accounts and isolation](#accounts--isolation).
 
 ## Data model
 
@@ -519,7 +472,7 @@ conversion. Do not duplicate the schema in docs.
   `cron`+`timezone`, `recurrence_label`, `origin_session_id`, `enabled`.
 - **`backend_credentials`** + **`credential_secrets`** — credential metadata and
   its secret, stored split; the secret is Fernet-encrypted under the owning
-  account's DEK (install-era rows under the access token); refresh/`needs_reconnect` lifecycle.
+  account's DEK; refresh/`needs_reconnect` lifecycle.
 - **`connector_installations`** + **`connector_installation_secrets`**,
   **`agent_connectors`**, **`connector_oauth_clients`**, **`custom_connectors`** —
   the connector tables (see Connector system).
@@ -537,30 +490,35 @@ by both backends (design: [`plans/memory.md`](plans/memory.md)):
 - **Claude Code** points its auto-memory there via the
   `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` env var — **not** `CLAUDE_CONFIG_DIR`, so
   auth and `--resume` transcripts are untouched.
-- **Codex** has no usable native memory in headless `exec`, so the dir is named
-  in an injected `developer_instructions` blurb and the model reads/writes it
-  with ordinary file tools. `CODEX_HOME` is untouched.
+- **Codex** receives the directory in an injected `developer_instructions`
+  blurb and reads/writes it with ordinary file tools. Octopus leaves Codex's
+  native automatic-memory pipeline disabled; memory wiring does not relocate
+  the selected credential's `CODEX_HOME`.
 
 Memory is decoupled from both harnesses' config/auth dirs. The dir is
 provisioned on agent create, kept on archive, removed on hard delete.
+Common Wiki agreements and brief collaboration/checkout pointers use the same
+account's existing `agents/shared-memory/`, outside any individual agent's
+deletion lifecycle. Development, review and research memory stays with its
+responsible role. Persona, memory
+and project-document ownership and task-based reading are defined in the
+[memory contract](plans/memory.md#current-content-ownership).
 
 ## Configuration (`OCTOPUS_*`)
 
-| Setting | Default | Purpose |
-|---|---|---|
-| `auth_token` | `changeme` | The **install token**: pre-account API/WS auth, and the Fernet key for install-era secrets. Per-account requests use a session bearer instead. |
-| `master_key` / `master_key_file` | — / `~/.octopus/master.key` | Wraps each account's DEK. Hand it in from a secret manager, or let the server create one on first boot. |
-| `users_root` | `~/.octopus/users` | One directory per account (`<id>/` → workspace, agent memory, applications, uploads). |
-| `max_concurrent_turns_per_user` | `4` | Per-account cap on simultaneously running turns (`0` disables). |
-| `host` / `port` | `0.0.0.0` / `8000` | Bind address. |
-| `default_working_dir` | `.` | Workspace base for the install-era (no-account) owner; accounts work under `users_root/<id>/`. |
-| `db_path` | `octopus.db` | SQLite file. |
-| `attachments_dir` / `large_prompts_dir` / `agents_dir` / `codex_home_dir` | under `~/.octopus/` | Historical roots and installation resources. Current uploads and prompt spills use `users_root/<owner>/attachments/` and `users_root/<owner>/large-prompts/`. |
-| `enable_tunnel` | `false` | Start a Cloudflare Tunnel. |
-| `ask_user_question_timeout_seconds` | `1800` | Auto-answer an unanswered question (so headless sessions don't wedge). |
-| `public_base_url` | computed | Stable public host for connector OAuth redirect URIs (tunnel). |
-| `gmail_/github_oauth_client_id`/`_secret` | — | Optional env fallback for connector OAuth clients (in-app config takes precedence). |
-| `research_max_concurrent_jobs` | `2` | Max simultaneous deep-research jobs across all sessions. |
+The complete setting names, defaults and environment-file selection live in
+[Settings](../server/config.py); environment names use the `OCTOPUS_` prefix.
+See [local configuration](local-wsl.md#配置和数据) for this installation's actual
+paths and service binding, and [backup and migration](backup-and-migrate.md) for
+the resources those settings select.
+
+`OCTOPUS_AUTH_TOKEN` is an explicitly configured setup proof for creating the
+first administrator on an empty installation; its default is empty. It is not
+business API/WebSocket authentication or a data-encryption key. Accounts use
+bearer tokens; the master key wraps account DEKs. Existing account data and
+configuration follow the [account contract](plans/architecture-contract.md#公开接口与账户配置).
+Connector OAuth clients resolve in-app configuration before environment fallback;
+their operating instructions are in [connector setup](connectors-setup.md).
 
 ## Key design decisions
 

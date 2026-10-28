@@ -32,9 +32,16 @@ shortcut. Do the real thing the first time.
 
 ## Scope and completion
 
-Complete the behavior the user authorized, including its real consumers,
-failure paths and removal of the replaced path. Stop when the agreed
-acceptance conditions and applicable checks are satisfied.
+Completeness means the behavior the user authorized, its real consumers,
+failure paths and removal of the replaced path. The quality standard above
+does not expand the task to adjacent products or speculative requirements.
+
+For changes to ownership, concurrency, lifecycle, authorization, persistence
+or an external protocol, briefly state the affected facts, writers, commit
+points, consumers and failure scope before implementation. Revise that model
+when evidence invalidates it, before adding another state, retry or fallback.
+Routine local edits need no new plan. Stop when the agreed acceptance
+conditions and applicable checks are satisfied.
 
 Preserve concurrent work, current user data and saved agent configuration.
 A design choice or feasibility report does not authorize implementation,
@@ -147,13 +154,9 @@ the service does not publish the development tree.
 - Resolve the nvm JS toolchain and `~/.local/bin` Codex on PATH for noninteractive
   checks. Current versions, proxies, credential isolation and service procedures
   live in [local-wsl.md](docs/local-wsl.md).
-- Read only task-relevant references. Keep current behavior in its owning guide,
-  and durable decisions, rationale and conventions in the owning `docs/plans/`
-  document. Revise the current section when behavior changes; consolidate
-  overlapping plans instead of appending dated corrections, repeated status
-  reports or new plans for the same subject. Git preserves superseded history;
-  standalone experiments and post-mortems retain their version and conditions.
-  Link to the owning fact elsewhere.
+- Read only task-relevant references. For documentation, persona or memory
+  changes, read [documentation rules](docs/AGENTS.md) and use the existing
+  [documentation index](docs/README.md) to find the owner.
 
 ## Agent skills and local tasks
 

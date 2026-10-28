@@ -51,9 +51,10 @@ type OnDetail = (detail: Record<string, unknown>) => void;
 async function applyDetailResponse(sessionId: string, res: Response, start: SnapshotStart, observation: SessionObservation, onDetail?: OnDetail, current = () => true) {
   if (!res.ok) throw new Error(`Could not load session state (HTTP ${res.status}).`);
   const data: Record<string, unknown> = await res.json();
-  if (!current() || !sessions.current(observation)) return null;
+  const dispatch = readDispatchState(data.dispatch_state);
+  if (!current() || !sessions.current(observation, dispatch?.generation)) return null;
   if (!applySessionSnapshot(sessionId, data, start)) return null;
-  sessions.detail(sessionInfoFromDetail(data), observation, readDispatchState(data.dispatch_state));
+  sessions.detail(sessionInfoFromDetail(data), observation, dispatch);
   // Adopt detail in this same synchronous step, before an account change
   // can clear the applied transcript and start a new sidebar list.
   onDetail?.(data);

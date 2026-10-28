@@ -105,7 +105,7 @@ root; use the PATH setup in [local-wsl.md](local-wsl.md#本机测试).
 |-------|---------|------------------------------|
 | Backend hermetic | `.venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" -n 4 --dist=loadfile --max-worker-restart=0 -q` | Full correctness, including Wiki sources/jobs/maintenance, permissions, transactions and recovery. No live model or external network dependency; guards reject real model CLI execution and production callback port 8000. |
 | Wiki performance (opt-in) | `.venv/bin/pytest tests/ --run-wiki-perf -m wiki_perf -v -s` | Large-dataset projection and grant-lookup cost measurements. Outside default full checks and release gates; small correctness and query-boundary checks remain in the hermetic tier. |
-| Live Codex pytest | `.venv/bin/pytest tests/ -m "real and (real_codex or codex_bin) and not real_claude and not knowledge_eval" -v` | Actual Codex execution, streaming/tools, scheduling, memory, fork, research, Wiki and login contracts. Use the isolated credential setup in [本机测试](local-wsl.md#本机测试). |
+| Live Codex pytest | `.venv/bin/pytest tests/ --ignore=tests/test_codex_login_real.py -m "real and (real_codex or codex_bin) and not real_claude and not knowledge_eval" -v` | Actual Codex execution, streaming/tools, scheduling, memory, fork, research and Wiki through the selected existing login. New device authentication is excluded from routine release checks. Use the isolated credential setup in [本机测试](local-wsl.md#本机测试). |
 | Supervisor integration | `.venv/bin/pytest tests/ -m "real and supervisor" -v` | Isolated systemd user units: installation ownership, environment/token handling, process retirement and managed restart. No provider CLI or production-service mutation. |
 | Frontend unit | `cd web && bun run test` | Stores, HTTP/WS events, components, input lifecycle, account/service generation boundaries and Wiki job cards. Vitest tests are colocated with source. |
 | Offline browser E2E | `cd web && bun run test:e2e:fast` | Real browser plus isolated backend: login/accounts, sessions, input recovery, sidebar/pins, attachments, Wiki cards and page readiness. Uses a test-only harness and verifies an offline execution audit; actual provider behavior needs the live tier. |
@@ -125,6 +125,11 @@ root; use the PATH setup in [local-wsl.md](local-wsl.md#本机测试).
 - **Persistent state stays in temporary test roots**, including databases,
   account/Wiki/workspace paths and provider output. Live tests reference the
   existing selected credentials without copying secrets or changing defaults.
+  Before installation, migration or supervisor write checks, resolve every
+  resource and provider home outside the managed installation and account
+  workspaces. Inspect all EnvironmentFiles actually loaded by the unit,
+  including repeated properties; verify configuration before claiming or
+  installing resources.
 - **Browser E2E uses separate offline and live buckets.** The package scripts
   isolate servers; `@llm` selects real-provider cases and the offline bucket
   excludes them. Run Codex browser checks with one worker. The combined
@@ -141,7 +146,10 @@ root; use the PATH setup in [local-wsl.md](local-wsl.md#本机测试).
   Both are excluded from `scripts/check.sh` and the Python pre-commit hook.
   Setup and evidence rules are in
   [本机测试](local-wsl.md#本机测试). Assess answers against recorded source
-  versions; execution success alone is not semantic acceptance.
+  versions; execution success alone is not semantic acceptance. Natural-language
+  maintenance intent variations also use this tier, retaining their tool and
+  effect assertions. The default live tier keeps the full maintenance flow and
+  Wiki protocol checks; authorization and write boundaries remain hermetic gates.
 - **`wiki_perf` is independently opt-in**, including when answer evaluations are
   enabled. Keep correctness cases at the smallest useful size and reuse setup
   across read-only variations; mark dedicated scale/cost measurements instead
