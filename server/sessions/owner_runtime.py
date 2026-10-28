@@ -25,7 +25,6 @@ from ..harness.events import HarnessPreparationError
 from ..harness.model_settings import effective_settings
 from ..large_prompts import spill_if_large
 from ..models import AttachmentMetadata, MessageContent, MessageRole, SessionStatus
-from ..users import owner_is_available
 from .base import (
     _MAX_PENDING_STEERS,
     ActiveRun,
@@ -562,6 +561,7 @@ class OwnerRuntime:
         from .client_submissions import input_digest
 
         session, manager, request = self.owner.session, self.owner.manager, command.request
+        database = manager.input_database()
         payload: dict[str, Any] = {"content": request.prompt, "attachment_ids": request.attachment_ids,
                    "attachments": list(command.attachments), "wiki_mode": request.wiki_mode}
         if command.recovery_of:
@@ -570,15 +570,12 @@ class OwnerRuntime:
         client_id = command.client_id or (
             f"{request.source}:{request.delivery_id}" if request.delivery_id else request.request_id
         )
-        if manager.db is not None:
-            existing = await manager.db.get_client_submission(session.id, client_id)
-            if existing is not None:
-                return self._existing_input(existing, digest)
+        existing = await database.get_client_submission(session.id, client_id)
+        if existing is not None:
+            return self._existing_input(existing, digest)
         new_session = command.schedule is not None and session.origin == "schedule" and session.id not in manager.sessions
         if not new_session and manager.sessions.get(session.id) is not session:
             raise ValueError(f"Session {session.id} not found")
-        if request.delivery_id and request.delivery_id in session._delivery_receipts:
-            return replace(session._delivery_receipts[request.delivery_id], disposition="duplicate")
         await manager.require_active_agent(session.agent_id)
         if session._transcript_integrity != "ok":
             raise ValueError("Transcript has duplicate sequences; export and review it before continuing")
@@ -599,7 +596,7 @@ class OwnerRuntime:
         if command.recovery_of:
             from ..submission_models import InputRecoveryUnavailable
 
-            original = await manager.db.get_client_submission(session.id, command.recovery_of) if manager.db else None
+            original = await database.get_client_submission(session.id, command.recovery_of)
             context = saved_context(session.id, original) if original else None
             if context is None or context.origin.user_id != session.user_id:
                 raise InputRecoveryUnavailable("The original input has no verifiable request context; it cannot be recovered.")
@@ -643,31 +640,29 @@ class OwnerRuntime:
         disposition = "accepted"
         if steering:
             disposition = "steered"
-        if manager.db is not None:
-            from ..knowledge import encode
+        from ..knowledge import encode
 
-            payload.update(source=request.source, delivery_id=request.delivery_id, work_id=request.work_id,
-                           question_session_id=request.question_session_id, question_id=request.question_id,
-                           trusted_request=request.trusted_request, knowledge=encode(request.knowledge_context),
-                           priority=request.priority, order=request.order)
-            created, row = await manager.db.admit_client_submission(
-                session.id, client_id, digest, request.request_id, payload=payload,
-                receipt={"accepted": True, "disposition": disposition}, recovery_of=command.recovery_of,
-                schedule=command.schedule,
-                new_session={key: getattr(session, key) for key in (
-                    "id", "name", "working_dir", "created_at", "credential_id", "agent_id", "origin", "backend", "user_id",
-                )} if new_session else None,
-            )
-            if not created:
-                return self._existing_input(row, digest)
-            request.durable_client_input = True
+        payload.update(source=request.source, delivery_id=request.delivery_id, work_id=request.work_id,
+                       question_session_id=request.question_session_id, question_id=request.question_id,
+                       trusted_request=request.trusted_request, knowledge=encode(request.knowledge_context),
+                       priority=request.priority, order=request.order)
+        created, row = await database.admit_client_submission(
+            session.id, client_id, digest, request.request_id, payload=payload,
+            receipt={"accepted": True, "disposition": disposition}, recovery_of=command.recovery_of,
+            schedule=command.schedule,
+            new_session={key: getattr(session, key) for key in (
+                "id", "name", "working_dir", "created_at", "credential_id", "agent_id", "origin", "backend", "user_id",
+            )} if new_session else None,
+        )
+        if not created:
+            return self._existing_input(row, digest)
         if new_session:
             manager.sessions[session.id] = session
         if queued:
             request.queued_event = notification
         session._dispatch_order = request.order
         if steering:
-            session._steer_queue.append(request)
+            session._steer_queue.append(self._pending_input(request))
         else:
             session._pending_queue.append(self._pending_input(request))
         receipt = manager._new_receipt(session, request, disposition)
@@ -677,9 +672,7 @@ class OwnerRuntime:
         return receipt
 
     @staticmethod
-    def _pending_input(request: QueuedPrompt) -> PendingInput | QueuedPrompt:
-        if not request.durable_client_input:
-            return request
+    def _pending_input(request: QueuedPrompt) -> PendingInput:
         return PendingInput(request.request_id, request.source, request.summary, request.work_id,
                             request.priority, request.order, request.queued_event)
 
@@ -689,9 +682,9 @@ class OwnerRuntime:
             from ..submission_models import SubmissionConflict
 
             raise SubmissionConflict("This submission identity already belongs to different input.")
-        from .submission import receipt_for_input
+        from .submission import observed_input_receipt
 
-        return receipt_for_input(row, self.owner.session._request_completions.get(row["request_id"]))
+        return observed_input_receipt(row, self.owner.session)
 
     async def _interrupt(
         self, cause: Literal["user", "shutdown"], *, retain_unstarted: bool = False,
@@ -831,7 +824,9 @@ class OwnerRuntime:
     def end_completions(self) -> None:
         """Manager takes over only the ended writer's original observations."""
         session, manager, execution = self.owner.session, self.owner.manager, self.current
-        inputs = {request.request_id: request for request in (*session._pending_queue, *session._steer_queue)}
+        inputs: dict[str, PendingInput | QueuedPrompt] = {
+            request.request_id: request for request in (*session._pending_queue, *session._steer_queue)
+        }
         if execution is not None:
             inputs[execution.request.request_id] = execution.request
             inputs.update((request.request_id, request) for request in
@@ -865,10 +860,11 @@ class OwnerRuntime:
             return
         completion = self.completion(request, settlement=settlement, reason=reason,
             actual_request_id=actual_request_id, notification_state="delivered" if published else "failed")
-        if request.durable_client_input and manager.db is not None and not (
+        if not (
             completion.state == "completed" and completion.recording_state == "committed"
             and completion.request_id == request.request_id
         ):
+            assert manager.db is not None
             await manager.db.complete_client_submission(
                 session.id, request.request_id, owner=actual_request_id or request.request_id,
                 state="done" if completion.state == "completed" and completion.recording_state == "committed" else
@@ -979,7 +975,7 @@ class OwnerRuntime:
                     or self._idle_action is not None):
                 return
             pending = session._pending_queue[eligible]
-            request = await load_pending_input(manager, session.id, pending) if isinstance(pending, PendingInput) else pending
+            request = await load_pending_input(manager, session.id, pending)
             # Retain the projection while loading. An awaited database read
             # must not make admitted work disappear or leave a stale quota
             # decision in force before this Owner reserves its active slot.
@@ -1117,9 +1113,8 @@ class OwnerRuntime:
 
     async def _prepare_input(self, configured: Session, request: QueuedPrompt) -> _PreparedInput | None:
         manager = self.owner.manager
-        if request.durable_client_input:
-            if not await claim_input(manager, configured.id, request.request_id):
-                return None
+        if not await claim_input(manager, configured.id, request.request_id):
+            return None
         await require_retired_writers(manager, configured.id)
         if configured.user_id is None:
             raise AttachmentUnavailable()
@@ -1613,7 +1608,7 @@ class OwnerRuntime:
         if steer is None:
             if not session._steer_open or not session._steer_queue or not execution.start_ended:
                 return
-            request = session._steer_queue[0]
+            request = await load_pending_input(manager, session.id, session._steer_queue[0])
             prepared = self.task(self._prepare_steer(
                 capture_configuration(session), replace(request), session._run.knowledge_context,
                 execution.request.request_id,
@@ -1627,7 +1622,7 @@ class OwnerRuntime:
                 merged, prepared = steer.prepared.result()
                 if (not session._steer_open or self.current is not steer.execution
                         or session._run.backend is not steer.backend
-                        or not any(request is steer.request for request in session._steer_queue)):
+                        or not any(request.request_id == steer.request.request_id for request in session._steer_queue)):
                     self.steer = None
                     return
                 steer.merged = merged
@@ -1654,12 +1649,11 @@ class OwnerRuntime:
                 # The original record owns a possibly submitted frame from
                 # this handoff onward. Stop cannot put it back in the queue.
                 request.started = True
-                if request in session._steer_queue:
-                    session._steer_queue.remove(request)
+                session._steer_queue[:] = [item for item in session._steer_queue if item.request_id != request.request_id]
                 session._inline_requests.setdefault(execution.request.request_id, []).append(request)
                 steer.write = self.task(self._write_steer(
                     steer.backend, request.prompt, session.id, session.user_id, request.request_id,
-                    execution.request.request_id, request.durable_client_input,
+                    execution.request.request_id,
                 ), f"steer-write-{request.request_id}")
             except (asyncio.CancelledError, Exception) as error:
                 if isinstance(error, Exception):
@@ -1680,8 +1674,7 @@ class OwnerRuntime:
             await self.complete(request, reason="steer_delivery_unknown", actual_request_id=execution.request.request_id)
         if delivered:
             request.started = True
-            if request in session._steer_queue:
-                session._steer_queue.remove(request)
+            session._steer_queue[:] = [item for item in session._steer_queue if item.request_id != request.request_id]
             assert steer.message is not None
             execution.frames.append(manager._tag_persisted({"type": "steered", "session_id": session.id,
                 "content": request.prompt, "tool_input": steer.message.tool_input}, steer.seq, steer.message))
@@ -1695,17 +1688,15 @@ class OwnerRuntime:
             if not steer.write.cancelled() and steer.write.exception() is None:
                 request.started = False
                 await self.complete(request, reason="account_unavailable")
-            if request in session._steer_queue:
-                session._steer_queue.remove(request)
+            session._steer_queue[:] = [item for item in session._steer_queue if item.request_id != request.request_id]
             session._steer_open = False
         self.steer = None
         self.owner.wake()
 
     async def _prepare_steer(self, configured: Session, request: QueuedPrompt, previous: Any, owner: str) -> tuple[Any, _PreparedInput]:
         from ..knowledge import AdmittedRequest, RequestRef, revise
-        if request.durable_client_input:
-            if not await claim_input(self.owner.manager, configured.id, request.request_id, owner=owner):
-                raise ValueError("Steer input could not be claimed")
+        if not await claim_input(self.owner.manager, configured.id, request.request_id, owner=owner):
+            raise ValueError("Steer input could not be claimed")
         assert request.knowledge_context is not None
         merged = revise(previous, AdmittedRequest(RequestRef(configured.id, request.request_id, configured.user_id),
                                                  request.knowledge_context, request.work_id),
@@ -1715,25 +1706,22 @@ class OwnerRuntime:
 
     async def _write_steer(
         self, backend: HarnessRun, prompt: str, session_id: str, user_id: str | None,
-        request_id: str, owner_request_id: str, durable: bool,
+        request_id: str, owner_request_id: str,
     ) -> bool:
         from ..mcp_identity import McpScope, scope_is_live
         database = self.owner.manager.db
-        if durable and database is not None:
-            group = getattr(backend, "process_group_id", None)
-            if isinstance(group, int):
-                await database.note_submission_process(session_id, owner_request_id, group)
-            available = await database.set_steer_delivery(session_id, request_id, confirmed=False)
-        else:
-            available = database is None or await owner_is_available(database, user_id)
+        assert database is not None
+        group = getattr(backend, "process_group_id", None)
+        if isinstance(group, int):
+            await database.note_submission_process(session_id, owner_request_id, group)
+        available = await database.set_steer_delivery(session_id, request_id, confirmed=False)
         # This check is at actual frame submission, after the final DB await.
         # It captures the original run lease; no current Session is consulted.
         if not available or not scope_is_live(McpScope(session_id, user_id=user_id,
                     run_lease_id=backend.run_lease_id, work_id=backend.work_id)):
             return False
         await backend.send_user_frame(prompt)
-        if durable and database is not None:
-            await database.set_steer_delivery(session_id, request_id, confirmed=True)
+        await database.set_steer_delivery(session_id, request_id, confirmed=True)
         return True
 
     async def _idle_event(self, command: IdleEvent) -> bool | IdlePublication:

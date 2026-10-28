@@ -59,6 +59,7 @@ const installation = (o: Partial<ConnectorInstallationInfo> = {}) =>
 beforeEach(() => {
   useSessionStore.setState({
     token: "tok",
+    accountGeneration: useSessionStore.getState().accountGeneration + 1,
     identity: null,
     mainView: "chat",
     schedules: [],
@@ -85,6 +86,7 @@ it.each([
 
 afterEach(() => {
   cleanup();
+  useSessionStore.getState().setToken("");
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });

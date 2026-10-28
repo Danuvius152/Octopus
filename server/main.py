@@ -64,6 +64,7 @@ from .service_health import ServiceHealth
 from .service_installation import InstallationOwner, read_service_profile
 from .session_manager import session_manager
 from .sessions.owner import SessionOwnerUnavailable
+from .submission_models import InputAdmissionNotReady
 from .tunnel import CloudflareTunnel
 from .users import UserManager
 from .wiki import WikiError
@@ -361,6 +362,11 @@ app = FastAPI(title="Octopus", version="0.1.0", lifespan=lifespan)
 @app.exception_handler(SessionOwnerUnavailable)
 async def _session_owner_unavailable(_request: Request, exc: SessionOwnerUnavailable) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": str(exc)})
+
+
+@app.exception_handler(InputAdmissionNotReady)
+async def _input_not_ready(_request: Request, exc: InputAdmissionNotReady) -> JSONResponse:
+    return JSONResponse(status_code=503, content={"detail": str(exc), "code": exc.code})
 
 
 

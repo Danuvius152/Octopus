@@ -408,10 +408,35 @@ exists (lines 60-86 of `server/database.py`) so a future
 `serverOnly` flag can keep refresh tokens out of the subprocess env
 if we add scoped MCP servers later.
 
-`UNIQUE (kind, external_account_id)` prevents two installations of
-the same account; the install flow upserts on conflict (re-OAuth on
-the same workspace overwrites the row rather than creating a
-duplicate).
+The unique nonempty provider identity is scoped by Octopus account,
+connector kind and external account ID. OAuth authorization uses one short
+database transaction to choose the installation ID and commit its metadata
+and encrypted secret. Concurrent first callbacks both return that same ID;
+the secret always belongs to the row actually inserted or selected. Empty
+provider identities remain separate installations. Plain installation CRUD
+retains its duplicate-rejection behavior.
+
+The manager serializes authorization by that account/kind/identity while
+resolving the installation, then uses its existing per-installation lock for
+reauthorization, refresh, metadata changes and deletion. Local save order
+determines the active authorization; opening a login page does not reserve a
+later priority. Reauthorization preserves the ID, creation time, owner, agent
+links and unrelated configuration, while updating the label, scopes, expiry,
+secret and reconnect state. A captured installation deleted before its save
+is refused rather than recreated. Remote identity and provider refresh calls
+never hold a database transaction; unrelated installations can refresh in
+parallel. A prior refresh settles before a queued reauthorization commits,
+so it cannot overwrite the new credentials or mark their status with its old
+error. Refresh writes also recheck current account availability in their
+transaction, including failure recording. A failed secret write rolls back
+the metadata and identity selection together.
+
+Real temporary-database and controlled-provider tests cover concurrent first
+callbacks through the HTTP login flow, authorization/refresh/deletion order,
+account revocation, rollback, identity isolation and preserved agent links.
+This local serialization does not constrain a provider's remote revocation
+policy for multiple authorizations. Public installation responses continue
+to exclude token material.
 
 ### 5.5 API routes
 

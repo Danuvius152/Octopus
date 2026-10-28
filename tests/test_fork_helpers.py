@@ -243,6 +243,211 @@ async def test_safe_revert_runs_when_clean_and_head_matches(git_repo):
     assert "octopus: pre-fork stash fork123" in out
 
 
+@pytest.mark.parametrize("name", [
+    "中文文件.txt", "with spaces.txt", 'quotes"and\\slash.txt', "line\nbreak.txt",
+    " leading and trailing ", "left -> right.txt", "literal*[?].txt", ":(exclude)a.py",
+    "--option.txt", "sub/新目录/文件.txt", "non-utf8-\udcff.txt",
+])
+@pytest.mark.parametrize("tracked", [True, False])
+async def test_safe_revert_preserves_literal_filenames_and_recoverable_stash(git_repo, name, tracked):
+    path = git_repo / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if tracked:
+        path.write_text("original\n")
+        _git(git_repo, "add", "-A")
+        _git(git_repo, "commit", "-qm", "filename baseline")
+    head, clean = await fh.capture_git_anchor(str(git_repo))
+    path.write_text("agent edit\n")
+    record = await fh.safe_revert_files(str(git_repo), [str(path)], head, clean, "literal-path")
+    assert record["status"] == "completed", record
+    assert record["files"] == [name]
+    if tracked:
+        assert path.read_text() == "original\n"
+    else:
+        assert not path.exists()
+    _git(git_repo, "stash", "apply", record["stash_ref"])
+    assert path.read_text() == "agent edit\n"
+
+
+@pytest.mark.parametrize("staged", [False, True])
+async def test_safe_revert_restores_file_type_and_stash_recovers_original_type(git_repo, staged):
+    head, clean = await fh.capture_git_anchor(str(git_repo))
+    path = git_repo / "a.py"
+    original = path.read_bytes()
+    path.unlink()
+    path.symlink_to("missing-target")
+    if staged:
+        _git(git_repo, "add", "--", path.name)
+    record = await fh.safe_revert_files(str(git_repo), [path.name], head, clean, "type-change")
+    assert record["status"] == "completed", record
+    assert record["files"] == [path.name]
+    assert not path.is_symlink() and path.read_bytes() == original
+    _, reverted_clean = await fh.capture_git_anchor(str(git_repo))
+    assert reverted_clean is True
+    _git(git_repo, "stash", "apply", "--index", record["stash_ref"])
+    assert path.is_symlink() and str(path.readlink()) == "missing-target"
+    recovered = subprocess.run(["git", "status", "--porcelain=v1", "-z"],
+                               cwd=git_repo, capture_output=True, check=True).stdout
+    assert recovered == (b"T " if staged else b" T") + b" a.py\0"
+
+
+async def test_safe_revert_checks_both_rename_locations_and_restores_stash(git_repo):
+    head, clean = await fh.capture_git_anchor(str(git_repo))
+    destination = "renamed 中文\n -> file.py"
+    _git(git_repo, "mv", "--", "a.py", destination)
+    refused = await fh.safe_revert_files(str(git_repo), [destination], head, clean, "incomplete-rename")
+    assert refused["status"] == "refused" and (git_repo / destination).exists()
+    record = await fh.safe_revert_files(str(git_repo), ["a.py", destination], head, clean, "rename")
+    assert record["status"] == "completed", record
+    assert set(record["files"]) == {"a.py", destination}
+    assert (git_repo / "a.py").read_text() == "v1\n"
+    assert not (git_repo / destination).exists()
+    _git(git_repo, "stash", "apply", "--index", record["stash_ref"])
+    assert not (git_repo / "a.py").exists()
+    assert (git_repo / destination).read_text() == "v1\n"
+
+
+@pytest.mark.parametrize("staged,recreated", [(False, False), (True, False), (True, True)])
+async def test_safe_revert_restores_deleted_paths_and_preserves_original_staging(git_repo, staged, recreated):
+    path = git_repo / "a.py"
+    head, clean = await fh.capture_git_anchor(str(git_repo))
+    if staged:
+        _git(git_repo, "rm", "--", "a.py")
+    else:
+        path.unlink()
+    if recreated:
+        path.write_text("new untracked contents")
+    record = await fh.safe_revert_files(str(git_repo), ["a.py"], head, clean, "deletion")
+    assert record["status"] == "completed", record
+    assert path.read_text() == "v1\n"
+    recovered = subprocess.run(["git", "stash", "apply", "--index", record["stash_ref"]],
+                               cwd=git_repo, capture_output=True)
+    if recreated:
+        # Native Git also reports this collision for a whole-tree stash, even
+        # though it restores the original staged deletion + untracked content.
+        assert recovered.returncode == 1 and b"could not restore untracked files" in recovered.stderr
+    else:
+        assert recovered.returncode == 0, recovered.stderr
+    assert path.exists() is recreated
+    if recreated:
+        assert path.read_text() == "new untracked contents"
+    state = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=git_repo,
+                           capture_output=True, check=True).stdout
+    assert (b"a.py" in state) is staged
+
+
+async def test_safe_revert_preserves_whitespace_in_repository_root(git_repo):
+    root = git_repo.with_name("repository \n")
+    git_repo.rename(root)
+    head, clean = await fh.capture_git_anchor(str(root))
+    (root / "a.py").write_text("agent")
+    record = await fh.safe_revert_files(str(root), ["a.py"], head, clean, "root-whitespace")
+    assert record["status"] == "completed", record
+    assert (root / "a.py").read_text() == "v1\n"
+    _git(root, "stash", "apply", record["stash_ref"])
+    assert (root / "a.py").read_text() == "agent"
+
+
+async def test_failed_restore_keeps_original_changes_in_a_named_stash(git_repo, monkeypatch):
+    head, clean = await fh.capture_git_anchor(str(git_repo))
+    _git(git_repo, "rm", "a.py")
+    real_git = fh._git
+
+    async def git(cwd, *args, **kwargs):
+        if "restore" in args:
+            return 1, "", "restore denied"
+        return await real_git(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(fh, "_git", git)
+    record = await fh.safe_revert_files(str(git_repo), ["a.py"], head, clean, "failed-restore")
+    assert record["status"] == "failed" and record["ran"] is False
+    assert record["stash_ref"] == "stash@{0}" and "restore denied" in record["error"]
+    # Recovery does not depend on the failed restore's current tree.
+    _git(git_repo, "reset", "--hard", "HEAD")
+    _git(git_repo, "stash", "apply", "--index", record["stash_ref"])
+    assert not (git_repo / "a.py").exists()
+
+
+async def test_safe_revert_consumes_real_copy_records(git_repo):
+    source = git_repo / "a.py"
+    source.write_text("original line\n" * 50)
+    _git(git_repo, "add", "-A")
+    _git(git_repo, "commit", "-qm", "copy baseline")
+    _git(git_repo, "config", "status.renames", "copies")
+    head, clean = await fh.capture_git_anchor(str(git_repo))
+    copy = git_repo / "copy 中文.py"
+    copy.write_bytes(source.read_bytes())
+    source.write_text("different line\n" * 50)
+    _git(git_repo, "add", "-A")
+    actual = subprocess.run(["git", "status", "--porcelain=v1", "-z"], cwd=git_repo,
+                            capture_output=True, check=True).stdout
+    assert b"C  " in actual, "The integration must actually exercise Git's copy record"
+    record = await fh.safe_revert_files(str(git_repo), ["a.py", copy.name], head, clean, "copy")
+    assert record["status"] == "completed", record
+    assert source.read_text() == "original line\n" * 50 and not copy.exists()
+    _git(git_repo, "stash", "apply", "--index", record["stash_ref"])
+    assert source.read_text() == "different line\n" * 50
+    assert copy.read_text() == "original line\n" * 50
+
+
+async def test_copy_source_is_not_itself_a_changed_path(git_repo, monkeypatch):
+    head, clean = await fh.capture_git_anchor(str(git_repo))
+    copy = git_repo / "copy.py"
+    copy.write_bytes((git_repo / "a.py").read_bytes())
+    _git(git_repo, "add", "copy.py")
+    real_git = fh._git
+
+    async def git(cwd, *args, **kwargs):
+        if args[0] == "status":
+            # A copy record carries its clean source as metadata, not a write.
+            return 0, "C  copy.py\0a.py\0", ""
+        return await real_git(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(fh, "_git", git)
+    record = await fh.safe_revert_files(str(git_repo), ["copy.py"], head, clean, "clean-copy-source")
+    assert record["status"] == "completed" and record["files"] == ["copy.py"]
+    assert not copy.exists() and (git_repo / "a.py").read_text() == "v1\n"
+    _git(git_repo, "stash", "apply", "--index", record["stash_ref"])
+    assert copy.read_text() == "v1\n"
+
+
+@pytest.mark.parametrize("touched", ["cwd", "repo", "absolute"])
+async def test_safe_revert_from_a_subdirectory(git_repo, touched):
+    subdir = git_repo / "sub"
+    subdir.mkdir()
+    path = subdir / "file \n.txt"
+    path.write_text("original")
+    _git(git_repo, "add", "-A")
+    _git(git_repo, "commit", "-qm", "subdirectory baseline")
+    head, clean = await fh.capture_git_anchor(str(subdir))
+    path.write_text("agent")
+    names = {"cwd": path.name, "repo": "sub/" + path.name, "absolute": str(path)}
+    record = await fh.safe_revert_files(str(subdir), [names[touched]], head, clean, "subdir")
+    assert record["status"] == "completed", record
+    assert path.read_text() == "original"
+    _git(git_repo, "stash", "apply", record["stash_ref"])
+    assert path.read_text() == "agent"
+
+
+@pytest.mark.parametrize("porcelain", [" M a.py", "bad\0", "XX a.py\0", "R  renamed\0", " M \0"])
+async def test_safe_revert_refuses_malformed_git_status(git_repo, monkeypatch, porcelain):
+    head, clean = await fh.capture_git_anchor(str(git_repo))
+    path = git_repo / "a.py"
+    path.write_text("agent")
+    real_git = fh._git
+
+    async def git(cwd, *args, **kwargs):
+        if args[0] == "status":
+            return 0, porcelain, ""
+        return await real_git(cwd, *args, **kwargs)
+
+    monkeypatch.setattr(fh, "_git", git)
+    record = await fh.safe_revert_files(str(git_repo), ["a.py"], head, clean, "malformed")
+    assert record["status"] == "refused" and "parsed safely" in record["refused_reason"]
+    assert path.read_text() == "agent"
+    assert subprocess.run(["git", "stash", "list"], cwd=git_repo, capture_output=True, check=True).stdout == b""
+
+
 @pytest.mark.asyncio
 async def test_safe_revert_removes_untracked_agent_file(git_repo):
     # Regression for the real-CLI failure: an agent-created (untracked) file

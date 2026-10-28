@@ -212,14 +212,17 @@ async def test_archive_with_unusable_owner_leaves_original_unchanged(creation, o
     assert await resources(env) == before
 
 
-async def test_archive_without_database_keeps_explicit_owner(tmp_path):
-    manager = SessionManager()
-    original = await manager.create_session("in-memory-agent", "Original", str(tmp_path))
+async def test_archive_with_database_keeps_explicit_owner(creation):
+    manager = creation.manager
+    original = await manager.create_session(creation.a, "Original", str(creation.workspace))
     replacement = await manager.archive_session(original.id)
     assert replacement.id != original.id
-    assert replacement.agent_id == "in-memory-agent"
-    assert replacement.working_dir == str(tmp_path)
+    assert replacement.agent_id == creation.a
+    assert replacement.working_dir == str(creation.workspace)
     assert manager.get_session(original.id) is None
+    saved = {row["id"]: row for row in await creation.db.load_sessions(include_archived=True)}
+    assert saved[original.id]["archived"]
+    assert saved[replacement.id]["agent_id"] == original.agent_id
 
 
 @pytest.mark.parametrize("owner, expected", [

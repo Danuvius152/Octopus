@@ -31,19 +31,9 @@ class CredentialsMixin(DatabaseBase):
                     raise ValueError("Credential is unavailable. Reconnect it or choose an active credential before sending new work.")
 
     def _row_to_credential(self, row: sqlite3.Row) -> dict[str, Any]:
-        return {
-            "id": row[0],
-            "backend": row[1],
-            "label": row[2],
-            "auth_type": row[3],
-            "secret_encrypted": row[4],
-            "created_at": row[5],
-            "status": row[6] or "active",
-            "token_expires_at": row[7],
-            "needs_reconnect": bool(row[8]),
-            "last_refresh_error_code": row[9],
-            "user_id": row[10],
-        }
+        record = self._CREDENTIAL_COLS.read(row)
+        record.update(status=record["status"] or "active", needs_reconnect=bool(record["needs_reconnect"]))
+        return record
 
     async def save_credential(
         self,
@@ -85,9 +75,8 @@ class CredentialsMixin(DatabaseBase):
         credential for somebody's fire, and the pre-accounts install.
         """
         async with self.transaction(write=False) as tx:
-            cols = ", ".join(self._CREDENTIAL_COLS)
             sql = (
-                f"SELECT {cols} FROM backend_credentials c "
+                f"SELECT {self._CREDENTIAL_COLS} FROM backend_credentials c "
                 "LEFT JOIN credential_secrets s ON s.credential_id = c.id"
             )
             params: list[Any] = []
@@ -109,9 +98,8 @@ class CredentialsMixin(DatabaseBase):
     async def _get_credential(
         self, tx: Transaction, credential_id: str, user_id: str | None = None
     ) -> dict[str, Any] | None:
-        cols = ", ".join(self._CREDENTIAL_COLS)
         sql = (
-            f"SELECT {cols} FROM backend_credentials c "
+            f"SELECT {self._CREDENTIAL_COLS} FROM backend_credentials c "
             "LEFT JOIN credential_secrets s ON s.credential_id = c.id "
             "WHERE c.id = ?"
         )

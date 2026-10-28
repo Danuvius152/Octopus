@@ -318,9 +318,10 @@ async def get_recoverable_inputs(session_manager: SessionMgr, session_id: str,
                                 before: int | None = Query(None, gt=0), limit: int = Query(20, ge=1, le=100),
                                 user_id: ScopeUser = None, _: str = Depends(verify_token)):
     from ..sessions.client_submissions import status_from_row
+    database = session_manager.input_database()
     if not await session_manager.session_belongs_to(session_id, user_id):
         raise HTTPException(404, "Session not found")
-    rows, cursor = await session_manager.db.list_recoverable_submissions(session_id, before=before, limit=limit)
+    rows, cursor = await database.list_recoverable_submissions(session_id, before=before, limit=limit)
     items = []
     for row in rows:
         status = status_from_row(session_id, row, include_input=False)

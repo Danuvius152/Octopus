@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import json
 import signal
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -92,6 +93,250 @@ async def _make_session_row(db, session_id: str, working_dir: str) -> None:
         working_dir=working_dir,
         created_at="2026-05-18T00:00:00Z",
     )
+
+
+def _redirected_writer(tmp_path: Path, *, ignore_term: bool = True) -> tuple[str, Path, Path]:
+    import shlex
+    import sys
+
+    ready, output = tmp_path / "writer.ready", tmp_path / "writes"
+    child = (
+        "import os,signal,time\nfrom pathlib import Path\n"
+        + ("signal.signal(signal.SIGTERM,signal.SIG_IGN)\n" if ignore_term else "")
+        + f"Path({str(ready)!r}).write_text(str(os.getpgrp()))\n"
+        + f"with open({str(output)!r},'ab',buffering=0) as f:\n"
+        + " while True:\n  f.write(b'x'); time.sleep(.005)\n"
+    )
+    command = (
+        shlex.join([sys.executable, "-c", child])
+        + " >/dev/null 2>&1 & "
+        + f"while [ ! -f {shlex.quote(str(ready))} ]; do sleep .01; done; exit 0"
+    )
+    return command, ready, output
+
+
+@pytest.mark.parametrize("ignore_term", [False, True])
+async def test_normal_completion_retires_redirected_descendant_before_delivery(
+    manager, db, tmp_path, monkeypatch, ignore_term,
+):
+    import os
+
+    from server import bg_tasks
+    from server.process_groups import group_has_live_members_after_kill
+
+    await _make_session_row(db, "orphan-writer", str(tmp_path))
+    monkeypatch.setattr(bg_tasks, "_TERM_GRACE_SECONDS", 0.03)
+    command, ready, output = _redirected_writer(tmp_path, ignore_term=ignore_term)
+    try:
+        record = await manager.start_task(
+            session_id="orphan-writer", command=command, working_dir=str(tmp_path),
+        )
+        await _wait_for(lambda: bool(manager._delivered_))
+        delivered = manager._delivered_[0]
+        assert delivered.id == record.id
+        assert delivered.status == "completed" and delivered.exit_code == 0
+        assert delivered.stop_reason is None
+        pgid = int(ready.read_text())
+        assert not group_has_live_members_after_kill(pgid), "Completion returned with a live writer"
+        size = output.stat().st_size
+        await asyncio.sleep(0.04)
+        assert output.stat().st_size == size
+        await manager.cancel_task(record.id)
+        await manager.shutdown()
+        persisted = await manager.get_task(record.id)
+        assert persisted.status == "completed" and persisted.stop_reason is None
+    finally:
+        if ready.exists():
+            try:
+                os.killpg(int(ready.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+async def test_completed_command_retries_recording_after_retiring_resources(
+    manager, db, tmp_path, monkeypatch,
+):
+    from server import bg_tasks
+    from server.process_groups import group_has_live_members_after_kill
+
+    await _make_session_row(db, "record-failure", str(tmp_path))
+    real_update = db.update_bg_task
+    recording_failed = asyncio.Event()
+
+    async def fail_recording(task_id, **fields):
+        recording_failed.set()
+        raise RuntimeError("record unavailable")
+
+    monkeypatch.setattr(db, "update_bg_task", fail_recording)
+    monkeypatch.setattr(bg_tasks, "_TERM_GRACE_SECONDS", 0.03)
+    command, ready, _ = _redirected_writer(tmp_path)
+    record = await manager.start_task(
+        session_id="record-failure", command="echo x >> executions; " + command,
+        working_dir=str(tmp_path),
+    )
+    await asyncio.wait_for(recording_failed.wait(), 2)
+    pgid = int(ready.read_text())
+    assert not group_has_live_members_after_kill(pgid)
+    assert not manager._delivered_
+    monkeypatch.setattr(db, "update_bg_task", real_update)
+    await manager.shutdown()
+    result = await manager.get_task(record.id)
+    assert (result.status, result.stop_reason) == ("completed", None)
+    assert (tmp_path / "executions").read_text() == "x\n"
+    assert [item.id for item in manager._delivered_] == [record.id]
+
+
+async def test_delivery_retry_preserves_original_completed_command(db, tmp_path, monkeypatch):
+    from server import bg_tasks
+
+    await _make_session_row(db, "delivery-retry", str(tmp_path))
+    manager = BgTaskManager()
+    failed = asyncio.Event()
+    succeeded = asyncio.Event()
+    attempts, broadcasts = [], []
+    allow_delivery = False
+
+    async def deliver(record):
+        attempts.append(record.id)
+        if not allow_delivery:
+            failed.set()
+            raise RuntimeError("delivery unavailable")
+        succeeded.set()
+
+    async def broadcast(event):
+        broadcasts.append(event)
+
+    manager.bind(db, deliver, broadcast)
+    await manager.start()
+    monkeypatch.setattr(bg_tasks, "_ORCHESTRATION_DRAIN_SECONDS", 0.03)
+    record = await manager.start_task(
+        session_id="delivery-retry", command="echo x >> executions", working_dir=str(tmp_path),
+    )
+    try:
+        await asyncio.wait_for(failed.wait(), 2)
+        result = await manager.get_task(record.id)
+        assert result.status == "completed" and result.stop_reason is None
+        with pytest.raises(RuntimeError, match="shutdown incomplete"):
+            await manager.shutdown()
+        allow_delivery = True
+        await asyncio.wait_for(succeeded.wait(), 2)
+        await manager.shutdown()
+        assert len(attempts) >= 2 and set(attempts) == {record.id}
+        assert len([event for event in broadcasts if event["type"] == "bg_completed"]) == 1
+        assert (tmp_path / "executions").read_text() == "x\n"
+    finally:
+        allow_delivery = True
+        await manager.shutdown()
+
+
+@pytest.mark.parametrize("fault", ["term_denied", "kill_denied", "exit_unconfirmed"])
+async def test_retirement_failure_keeps_original_result_for_later_shutdown(
+    manager, db, tmp_path, monkeypatch, fault,
+):
+    import os
+
+    from server import bg_tasks
+    from server.process_groups import group_has_live_members_after_kill
+
+    await _make_session_row(db, "retirement-retry", str(tmp_path))
+    command, ready, output = _redirected_writer(tmp_path)
+    failed = asyncio.Event()
+    real_killpg = os.killpg
+    real_confirm = bg_tasks._group_has_live_members_after_kill
+    inject_failure = True
+    loop = asyncio.get_running_loop()
+
+    def killpg(pgid, sig):
+        if inject_failure and ((fault == "term_denied" and sig == signal.SIGTERM)
+                               or (fault == "kill_denied" and sig == signal.SIGKILL)):
+            failed.set()
+            raise PermissionError("retirement signal denied")
+        real_killpg(pgid, sig)
+
+    def confirm(pgid):
+        if inject_failure and fault == "exit_unconfirmed":
+            loop.call_soon_threadsafe(failed.set)
+            raise TimeoutError("retirement unconfirmed")
+        return real_confirm(pgid)
+
+    monkeypatch.setattr(bg_tasks.os, "killpg", killpg)
+    monkeypatch.setattr(bg_tasks, "_group_has_live_members_after_kill", confirm)
+    monkeypatch.setattr(bg_tasks, "_TERM_GRACE_SECONDS", 0.03)
+    monkeypatch.setattr(bg_tasks, "_STARTUP_DRAIN_SECONDS", 0.03)
+    monkeypatch.setattr(bg_tasks, "_ORCHESTRATION_DRAIN_SECONDS", 0.03)
+    try:
+        record = await manager.start_task(
+            session_id="retirement-retry", command=command, working_dir=str(tmp_path),
+        )
+        await asyncio.wait_for(failed.wait(), 2)
+        with pytest.raises(RuntimeError, match="shutdown incomplete"):
+            await manager.shutdown()
+        assert not manager._delivered_
+        assert (await manager.get_task(record.id)).status == "running"
+        if fault != "exit_unconfirmed":
+            size = output.stat().st_size
+            await _wait_for(lambda: output.stat().st_size > size)
+        inject_failure = False
+        await manager.shutdown()
+        assert not group_has_live_members_after_kill(int(ready.read_text()))
+        result = await manager.get_task(record.id)
+        assert (result.status, result.exit_code, result.stop_reason) == ("completed", 0, None)
+        assert [item.id for item in manager._delivered_] == [record.id]
+    finally:
+        inject_failure = False
+        await manager.shutdown()
+        if ready.exists():
+            try:
+                real_killpg(int(ready.read_text()), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@pytest.mark.parametrize("action", ["cancel_task", "cancel_work", "shutdown"])
+async def test_cancel_during_normal_retirement_joins_cleanup_without_changing_success(
+    manager, db, tmp_path, monkeypatch, action,
+):
+    import os
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from server import bg_tasks
+    from server.knowledge import capture, derive
+
+    await _make_session_row(db, "completion-cancel", str(tmp_path))
+    command, _, _ = _redirected_writer(tmp_path)
+    owned = derive(capture(SimpleNamespace(id="completion-cancel", user_id=None, agent_id=None), None,
+                           prompt=command), command)
+    work_id = f"bg-completion-cancel-{action}"
+    owned = replace(owned, return_binding=replace(owned.return_binding, work_id=work_id))
+    term_started = asyncio.Event()
+    signals = []
+    real_killpg = os.killpg
+
+    def killpg(pgid, sig):
+        real_killpg(pgid, sig)
+        if sig != 0:
+            signals.append(sig)
+        if sig == signal.SIGTERM:
+            term_started.set()
+
+    monkeypatch.setattr(bg_tasks.os, "killpg", killpg)
+    monkeypatch.setattr(bg_tasks, "_TERM_GRACE_SECONDS", 0.1)
+    record = await manager.start_task(
+        session_id="completion-cancel", command=command, working_dir=str(tmp_path), owned_context=owned,
+    )
+    await asyncio.wait_for(term_started.wait(), 2)
+    if action == "cancel_task":
+        assert await manager.cancel_task(record.id)
+        await _wait_for(lambda: bool(manager._delivered_))
+    elif action == "cancel_work":
+        await manager.cancel_work(work_id)
+    else:
+        await manager.shutdown()
+    result = await manager.get_task(record.id)
+    assert (result.status, result.exit_code, result.stop_reason) == ("completed", 0, None)
+    assert signals == [signal.SIGTERM, signal.SIGKILL]
+    assert len(manager._delivered_) == 1
 
 
 async def test_shutdown_drains_group_kill_created_while_stopping(manager, db, tmp_path, monkeypatch):
@@ -574,7 +819,11 @@ async def test_an_unsent_signal_does_not_claim_a_user_cancellation(
     )
     await _wait_for((tmp_path / "ready").exists)
 
-    def denied(*args):
+    real_killpg = os.killpg
+
+    def denied(pgid, sig):
+        # Deny a real signal to a live group; absent groups still report ESRCH.
+        real_killpg(pgid, 0)
         raise PermissionError("test signal denied")
 
     monkeypatch.setattr(os, "killpg", denied)

@@ -1034,13 +1034,34 @@ M including M=0):
    refuse the revert. (A real human-vs-agent attribution would
    require pre/post-tool blob hashing — deferred to §10.)
 
-If all four hold and the user opts in, `fork_session` runs
-(via `subprocess` in `working_dir`):
+Git status uses porcelain v1 with NUL record boundaries and
+`--untracked-files=all`; newline, quoting and arrows are filename
+contents. Rename records contribute both the destination and source;
+copy records contribute only the changed destination. Malformed records
+refuse the operation. Repository-relative, cwd-relative and absolute
+agent paths retain the existing normalization. Git operations receive
+literal pathspecs, so wildcard or pathspec-magic filenames cannot widen
+the selected set.
+
+If all four hold and the user opts in, `fork_session` saves the
+original changes and index in a named stash. Ordinary tracked and
+untracked paths use:
 
 ```bash
-git stash push -u -m "octopus: pre-fork stash $FORK_ID" -- <files>
-git checkout HEAD -- <files>
+git --literal-pathspecs stash push -u -m "octopus: pre-fork stash $FORK_ID" -- <present-paths>
 ```
+
+Staged deletions, including rename sources, are no longer in the
+index; passing those absent names to `stash push` fails inside Git.
+The preflight therefore identifies staged deletions using a NUL-delimited
+diff with rename detection disabled. The stash captures their original
+index along with the present paths, then a literal `git restore` from
+the captured HEAD restores only those deleted paths in both index and
+working tree. If there are only staged deletions, native `stash create`
+and `stash store` save that snapshot before the same restore. Untracked
+paths are removed by stash rather than checked out from a HEAD in which
+they did not exist. A failed restore retains its named stash in the
+failure record. These operations do not revert the fork itself.
 
 The stash is named so the user can `git stash pop` later if they
 change their mind. The stash ref is captured into
@@ -1050,6 +1071,14 @@ which gets cleared after first turn) so a future "undo my fork
 revert" affordance has a stable anchor. The §5.6.4 first-turn
 note reads from the same durable slot when rendering its "files
 WERE restored" line.
+
+Regression tests use real temporary repositories for tracked/untracked literal
+filenames, rename and copy records, staged deletions, cwd normalization,
+stash recovery and the full fork consumer. The four safety checks remain.
+Native Git can report an untracked-file collision when applying a stash that
+contains a staged deletion and a recreated untracked file at the same name;
+the tests verify the recovered content and index separately, including that
+diagnostic, rather than treating the exit code alone as recovery evidence.
 
 If any condition fails, the checkbox is **disabled with an
 inline tooltip** explaining which check failed: "Working tree
@@ -1460,21 +1489,18 @@ Five phases, each ends with the full verification suite green.
   as best-effort. Backend route
   `GET /api/sessions/{id}/fork-preview?rewind_to_msg_seq=M`
   returns the summary for the popover.
-- **`_safe_revert_files(working_dir, agent_touched_paths,
-  fork_head, fork_id)`** in `server/session_manager.py` — runs
-  the 4-check §5.6.3 preflight (incl. the new clean-tree-at-fork
-  check), then `git stash push -u -m "octopus: pre-fork stash
-  $FORK_ID"` + `git checkout HEAD -- <files>`. Returns a result
-  tuple capturing files restored and the stash ref so the
-  caller can write it to **`fork_revert_record`** (the durable
-  slot — round-6 split).
+- **`safe_revert_files(working_dir, agent_touched_paths,
+  fork_head, fork_clean, fork_id)`** in `server/fork_helpers.py` runs
+  the four-check §5.6.3 preflight, then its literal-path stash and staged-deletion
+  restore. The result records restored paths, refusal/error and the recovery
+  stash in **`fork_revert_record`**, separately from fork creation.
 - **Git capture at user-message insert time** (round-3 fresh
   SHOULD-FIX #3 — earlier draft said `_run_backend` but the
   safe anchor must be captured *as the user message row is
   written*, not after the backend spawn): wherever
   `session_manager.send_message` records the user message
   (`session_manager.py:882`), capture `git rev-parse HEAD` and
-  `git status --porcelain | wc -l == 0` and write them onto
+  whether NUL-delimited porcelain v1 status is empty and write them onto
   that row's `git_head` / `git_status_clean` columns in the
   same INSERT. Backend-agnostic (subprocess in `working_dir`).
 - **REST route** `POST /api/sessions/{id}/fork` in

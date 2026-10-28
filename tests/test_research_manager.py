@@ -146,6 +146,153 @@ def _fake_report(question="q"):
     )
 
 
+@pytest.fixture
+async def pending_report(rm, mgr, db, monkeypatch):
+    from server.sessions.submission import SubmissionReceipt
+
+    completion = asyncio.get_running_loop().create_future()
+    async def pipeline(*args, **kwargs):
+        return _fake_report()
+    async def accept(*args, **kwargs):
+        return SubmissionReceipt("accepted", "observed-report", completion)
+    monkeypatch.setattr(rm_mod, "run_research", pipeline)
+    monkeypatch.setattr(mgr, "start_message", accept)
+    session = await _session(mgr, db)
+    job = await rm.start(session.id, "Wait for report processing")
+    await rm._tasks[job["id"]]  # Establish that the primary pipeline has ended.
+    yield job, completion
+
+
+async def test_report_observer_failure_remains_visible_to_shutdown(rm, db, pending_report, monkeypatch):
+    from server.models import TurnOutcome
+    from server.sessions.submission import RequestCompletion
+
+    job, completion = pending_report
+    failed = asyncio.Event()
+    advance = db.advance_research_delivery
+    async def reject_terminal(job_id, request_id, stage, **kwargs):
+        if stage == "processed":
+            failed.set()
+            raise OSError("report observation recording failed")
+        return await advance(job_id, request_id, stage, **kwargs)
+    monkeypatch.setattr(db, "advance_research_delivery", reject_terminal)
+    completion.set_result(RequestCompletion("observed-report", "observed-report", "completed",
+        TurnOutcome(request_id="observed-report", status="success"), "committed"))
+    await asyncio.wait_for(failed.wait(), 2)
+    await asyncio.sleep(0)
+    with pytest.raises(OSError, match="observation recording failed"):
+        await rm.shutdown()
+    assert (await db.get_research_job(job["id"]))["delivery_receipt"]["stage"] == "queued"
+
+
+async def test_natural_drain_waits_for_report_processing_without_a_browser(rm, db, pending_report):
+    from server.models import TurnOutcome
+    from server.sessions.submission import RequestCompletion
+
+    job, completion = pending_report
+    draining = asyncio.create_task(rm.wait_for_idle())
+    await asyncio.sleep(0)
+    assert not draining.done()
+    assert (await db.get_research_job(job["id"]))["status"] == "completed"
+    completion.set_result(RequestCompletion("observed-report", "observed-report", "completed",
+        TurnOutcome(request_id="observed-report", status="success"), "committed"))
+    await asyncio.wait_for(draining, 2)
+    receipt = (await db.get_research_job(job["id"]))["delivery_receipt"]
+    assert receipt["stage"] == "processed"
+    assert "browser_confirmed_version" not in receipt
+
+
+async def test_observer_shutdown_timeout_retains_original_cancellation_cleanup(rm, mgr, db, pending_report, monkeypatch):
+    job, _ = pending_report
+    cleaning, release = asyncio.Event(), asyncio.Event()
+    advance = db.advance_research_delivery
+    async def held_unknown(job_id, request_id, stage, **kwargs):
+        if stage == "unknown":
+            cleaning.set()
+            await release.wait()
+        return await advance(job_id, request_id, stage, **kwargs)
+    monkeypatch.setattr(db, "advance_research_delivery", held_unknown)
+    retry = None
+    try:
+        with pytest.raises(TimeoutError, match=job["id"]):
+            await rm.shutdown(timeout=.01)
+        assert cleaning.is_set()
+        with pytest.raises(rm_mod.ResearchError, match="shutting down"):
+            await rm.start((await db.get_research_job(job["id"]))["session_id"], "refused")
+        retry = asyncio.create_task(rm.shutdown())
+        await asyncio.sleep(0)
+        assert not retry.done()
+        release.set()
+        await asyncio.wait_for(retry, 2)
+        row = await db.get_research_job(job["id"])
+        assert row["status"] == "completed" and row["delivery_receipt"]["stage"] == "unknown"
+    finally:
+        release.set()
+        if retry is not None:
+            await retry
+
+
+async def test_old_task_callback_cannot_retire_its_replacement(rm):
+    first, second = asyncio.Event(), asyncio.Event()
+    retired = []
+    old = asyncio.create_task(first.wait())
+    replacement = asyncio.create_task(second.wait())
+    rm._register_task("same-owner", old, on_retired=lambda: retired.append("old"))
+    rm._register_task("same-owner", replacement, on_retired=lambda: retired.append("replacement"))
+    first.set()
+    await old
+    draining = asyncio.create_task(rm.wait_for_idle())
+    await asyncio.sleep(0)
+    assert not draining.done() and retired == []
+    second.set()
+    await asyncio.wait_for(draining, 2)
+    assert retired == ["replacement"]
+
+
+async def test_shutdown_joins_observer_created_by_original_pipeline_cleanup(rm, mgr, db, monkeypatch):
+    from server.sessions.submission import RequestCompletion, SubmissionReceipt
+
+    accepted, release, cleaning, cleaned = (asyncio.Event() for _ in range(4))
+    completion = asyncio.get_running_loop().create_future()
+    settle, advance = rm._settle_delivery, db.advance_research_delivery
+    async def pipeline(*args, **kwargs):
+        return _fake_report()
+    async def accept(*args, **kwargs):
+        return SubmissionReceipt("accepted", "late-observer", completion)
+    async def held_settlement(*args, **kwargs):
+        await settle(*args, **kwargs)
+        accepted.set()
+        await release.wait()
+    async def held_unknown(job_id, request_id, stage, **kwargs):
+        if stage == "unknown":
+            cleaning.set()
+            await cleaned.wait()
+        return await advance(job_id, request_id, stage, **kwargs)
+    monkeypatch.setattr(rm_mod, "run_research", pipeline)
+    monkeypatch.setattr(mgr, "start_message", accept)
+    monkeypatch.setattr(rm, "_settle_delivery", held_settlement)
+    monkeypatch.setattr(db, "advance_research_delivery", held_unknown)
+    session = await _session(mgr, db)
+    job = await rm.start(session.id, "Admission already committed")
+    await asyncio.wait_for(accepted.wait(), 2)
+    rm.begin_shutdown()
+    release.set()
+    try:
+        with pytest.raises(TimeoutError, match=job["id"]):
+            await rm.shutdown(timeout=.02)
+        assert cleaning.is_set()
+        cleaned.set()
+        await rm.shutdown()
+        row = await db.get_research_job(job["id"])
+        assert row["status"] == "completed" and row["delivery_receipt"]["stage"] == "unknown"
+    finally:
+        release.set()
+        cleaned.set()
+        if not completion.done():
+            completion.set_result(RequestCompletion("late-observer", "late-observer", "unavailable"))
+        await rm.wait_for_idle()
+
+
 async def test_cancel_confirmed_before_report_commit_cannot_become_completed(rm, mgr, db, monkeypatch):
     entered, release = asyncio.Event(), asyncio.Event()
     complete = rm._complete_report
@@ -255,7 +402,7 @@ async def test_delivery_receipts_distinguish_queue_processing_and_current_browse
         future.set_result(RequestCompletion("report-follow-up", "report-follow-up", "completed",
             TurnOutcome(request_id="report-follow-up", status="success"), "committed",
             notification_state="failed" if completion_kind == "notification_failed" else "delivered"))
-    await rm._delivery_tasks[row["id"]]
+    await rm.wait_for_idle()
     final = (await db.get_research_job(row["id"]))["delivery_receipt"]
     if completion_kind == "unavailable":
         assert final["stage"] == "unknown" and "processed_at" not in final

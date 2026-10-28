@@ -1,11 +1,7 @@
-import { useCallback, useEffect } from "react";
+import { useEffect, useState } from "react";
 import { IconPin, IconPinnedOff, IconPlus } from "@tabler/icons-react";
-import {
-  fetchApplications,
-  reorderApplicationPins,
-  setApplicationPinned,
-} from "../api/applications";
-import { sidebarApplications, withPinOrder } from "../lib/sidebarPins";
+import { applications as applicationList, orderedApplicationPins } from "../lib/applicationList";
+import { sidebarApplications } from "../lib/sidebarPins";
 import { useSessionStore, type Application } from "../stores/sessionStore";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
 import { SortablePin, SortablePins, type DragHandle } from "./SortablePins";
@@ -26,8 +22,12 @@ import { AppIcon } from "./AppIcon";
  */
 export function SidebarApplications() {
   const token = useSessionStore((s) => s.token);
+  const accountGeneration = useSessionStore((s) => s.accountGeneration);
   const applications = useSessionStore((s) => s.applications);
-  const setApplications = useSessionStore((s) => s.setApplications);
+  const read = useSessionStore((s) => s.applicationReads.live);
+  const ordering = useSessionStore((s) => s.applicationOrdering);
+  const pinOrder = useSessionStore((s) => s.applicationPinOrder);
+  const [error, setError] = useState<string | null>(null);
   const activeApplicationId = useSessionStore((s) => s.activeApplicationId);
   const mainView = useSessionStore((s) => s.mainView);
   const openApplication = useSessionStore((s) => s.openApplication);
@@ -36,46 +36,36 @@ export function SidebarApplications() {
     (s) => s.unseenFailedApplications
   );
 
-  const load = useCallback(async () => {
-    try {
-      setApplications(await fetchApplications(token));
-    } catch {
-      // The sidebar isn't the place to shout about a failed poll.
-    }
-  }, [token, setApplications]);
-
   useEffect(() => {
-    if (token) load();
-  }, [token, load]);
+    if (token) void applicationList.refresh();
+  }, [token, accountGeneration]);
 
-  // Optimistic, then the server's list (the reply is every live app); a
-  // failure reloads rather than leaving an order nobody saved.
   const reorder = async (orderedIds: string[]) => {
-    setApplications(
-      withPinOrder(useSessionStore.getState().applications, orderedIds)
-    );
+    const current = applicationList.currentGuard();
+    setError(null);
     try {
-      setApplications(await reorderApplicationPins(token, orderedIds));
-    } catch {
-      load();
+      await applicationList.reorder(orderedIds);
+    } catch (e) {
+      if (current()) setError(e instanceof Error ? e.message : "Could not save sidebar order");
     }
   };
 
   const setPinned = async (app: Application, pinned: boolean) => {
+    const current = applicationList.currentGuard();
+    setError(null);
     try {
-      useSessionStore
-        .getState()
-        .upsertApplication(await setApplicationPinned(token, app.id, pinned));
-    } catch {
-      load();
+      await applicationList.setPinned(app.id, pinned);
+    } catch (e) {
+      if (current()) setError(e instanceof Error ? e.message : "Could not update sidebar");
     }
   };
 
-  const { pinned, present } = sidebarApplications(applications, {
+  const { present } = sidebarApplications(applications, {
     mainView,
     activeApplicationId,
     unseenFailedApplications,
   });
+  const pinned = orderedApplicationPins(applications, pinOrder);
 
   const renderApp = (app: Application, handle: DragHandle) => {
     const isActive =
@@ -109,6 +99,7 @@ export function SidebarApplications() {
           />
         )}
         <button
+          disabled={ordering}
           className={`${
             isPinned ? "btn-application-unpin" : "btn-application-pin"
           } inline-flex size-5 shrink-0 items-center justify-center rounded-md text-gray-600 opacity-0 transition-opacity hover:bg-gray-200 hover:text-gray-900 group-hover/app:opacity-100 ${
@@ -150,9 +141,10 @@ export function SidebarApplications() {
           ids={pinned.map((a) => a.id)}
           nameOf={(id) => applications.find((a) => a.id === id)?.name ?? id}
           onReorder={reorder}
+          disabled={ordering}
         >
           {pinned.map((app) => (
-            <SortablePin key={app.id} id={app.id}>
+            <SortablePin key={app.id} id={app.id} disabled={ordering}>
               {(handle) => renderApp(app, handle)}
             </SortablePin>
           ))}
@@ -160,7 +152,9 @@ export function SidebarApplications() {
         {present.map((app) => (
           <div key={app.id}>{renderApp(app, {})}</div>
         ))}
-        {applications.length === 0 && (
+        {(error || read.error) && <p role="alert" className="px-2.5 text-xs text-destructive">{error || read.error}</p>}
+        {read.loading && !read.loaded && applications.length === 0 && <p className="px-2.5 text-xs">Loading applications…</p>}
+        {read.loaded && !read.error && applications.length === 0 && (
           <button
             type="button"
             className="application-empty px-2.5 py-1.5 text-left text-[12.5px] text-gray-700 transition-colors hover:text-gray-900"

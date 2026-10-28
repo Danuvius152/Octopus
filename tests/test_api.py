@@ -1,5 +1,6 @@
 """End-to-end tests for REST API using FastAPI TestClient."""
 
+import asyncio
 from datetime import UTC
 
 import pytest
@@ -60,6 +61,35 @@ async def test_list_sessions_empty(client):
     resp = await client.get("/api/sessions", headers=client.headers)
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
+
+
+async def test_http_submission_is_explicitly_refused_while_recovery_is_incomplete(client, monkeypatch):
+    db = session_manager.db
+    agent = (await db.load_agents())[0]
+    session = await session_manager.create_session(agent["id"], "Readiness")
+    entered, release = asyncio.Event(), asyncio.Event()
+    load = db.load_sessions
+    async def held_load(*args, **kwargs):
+        rows = await load(*args, **kwargs)
+        entered.set()
+        await release.wait()
+        return rows
+    monkeypatch.setattr(db, "load_sessions", held_load)
+    initializing = asyncio.create_task(session_manager.initialize(db))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        reply = await client.post(f"/api/sessions/{session.id}/submissions", json={
+            "client_request_id": "not-yet", "content": "Keep this draft",
+        })
+        assert reply.status_code == 200
+        assert reply.json()["accepted"] is False and reply.json()["code"] == "service_not_ready"
+        assert "state" not in reply.json()
+        status = await client.get(f"/api/sessions/{session.id}/submissions/not-yet")
+        assert status.status_code == 503 and status.json()["code"] == "service_not_ready"
+        assert await db.get_client_submission(session.id, "not-yet") is None
+    finally:
+        release.set()
+        await initializing
 
 
 @pytest.mark.asyncio

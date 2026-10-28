@@ -48,6 +48,7 @@ function mount(schedules: Schedule[]) {
 }
 
 beforeEach(() => {
+  useSessionStore.setState({ token: "tok", accountGeneration: useSessionStore.getState().accountGeneration + 1 });
   vi.stubGlobal(
     "fetch",
     vi.fn(
@@ -62,6 +63,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  useSessionStore.getState().setToken("");
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });

@@ -306,7 +306,7 @@ describe("shouldApplyWsEvent", () => {
 describe("schedules_changed", () => {
   beforeEach(() => {
     useSessionStore.getState().setToken("tok");
-    useSessionStore.getState().setSchedules([]);
+    useSessionStore.setState({ schedules: [] });
   });
 
   it("refetches the schedule list into the store", async () => {

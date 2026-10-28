@@ -5,9 +5,10 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { ApplicationFormPage } from "./ApplicationFormPage";
+import { applications as applicationList } from "../lib/applicationList";
 import { useSessionStore, type Agent, type Application } from "../stores/sessionStore";
 
 const agent = { id: "ag1", name: "Octo", avatar: "🐙", is_system: true, backend: "claude-code" } as unknown as Agent;
@@ -52,12 +53,14 @@ function mount(
 }
 
 beforeEach(() => {
+  useSessionStore.setState({ token: "tok", accountGeneration: useSessionStore.getState().accountGeneration + 1 });
   fetchMock = vi.fn(async () => new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } }));
   vi.stubGlobal("fetch", fetchMock);
 });
 
 afterEach(() => {
   cleanup();
+  useSessionStore.getState().setToken("");
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -82,7 +85,7 @@ describe("ApplicationFormPage", () => {
             status: 201,
             headers: { "Content-Type": "application/json" },
           })
-        : new Response("[]", { status: 200, headers: { "Content-Type": "application/json" } })
+        : json([application({ archived: false })])
     );
     mount();
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Habit Tracker" } });
@@ -106,16 +109,17 @@ describe("ApplicationFormPage", () => {
   });
 
   it("lists every application on the All tab, by section", async () => {
-    fetchMock.mockImplementation(async (url: unknown) =>
-      String(url).includes("archived=true")
-        ? json([application({ id: "a9", name: "Old Report" })])
-        : json([])
-    );
-    const { container } = mount("all", [
+    const live = [
       application({ id: "a1", archived: false, pin_order: 2 }),
       application({ id: "a2", name: "Reader", archived: false, pin_order: 1 }),
       application({ id: "a3", name: "Scratch", archived: false, pinned: false }),
-    ]);
+    ];
+    fetchMock.mockImplementation(async (url: unknown) =>
+      String(url).includes("archived=true")
+        ? json([application({ id: "a9", name: "Old Report" })])
+        : json(live)
+    );
+    const { container } = mount("all", live);
     await waitFor(() => expect(screen.getByText("Old Report")).toBeTruthy());
     const names = (section: string) =>
       [...container.querySelectorAll(`.library-${section} .library-name`)].map(
@@ -130,9 +134,11 @@ describe("ApplicationFormPage", () => {
 
   it("opens, pins and unpins from a row", async () => {
     const scratch = application({ id: "a3", name: "Scratch", archived: false, pinned: false });
-    fetchMock.mockImplementation(async (url: unknown) =>
-      String(url).endsWith("/a3/pin") ? json({ ...scratch, pinned: true, pin_order: 2 }) : json([])
-    );
+    let row = scratch;
+    fetchMock.mockImplementation(async (url: unknown) => {
+      if (String(url).endsWith("/a3/pin")) { row = { ...row, pinned: true, pin_order: 2 }; return json(row); }
+      return json(String(url).includes("archived=true") ? [] : [row]);
+    });
     mount("all", [scratch]);
     fireEvent.click(screen.getByLabelText("Pin Scratch to the sidebar"));
     await waitFor(() =>
@@ -146,11 +152,13 @@ describe("ApplicationFormPage", () => {
   it("archives a row into the Archived section", async () => {
     vi.stubGlobal("confirm", vi.fn(() => true));
     const live = application({ archived: false });
-    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) =>
-      String(url).endsWith("/a1/archive") && init?.method === "POST"
-        ? json({ ...live, archived: true })
-        : json([])
-    );
+    let row = live;
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if (String(url).endsWith("/a1/archive") && init?.method === "POST") {
+        row = { ...row, archived: true }; return json(row);
+      }
+      return json(row.archived === String(url).includes("archived=true") ? [row] : []);
+    });
     const { container } = mount("all", [live]);
     fireEvent.click(screen.getByLabelText("Archive Habit Tracker"));
     await waitFor(() =>
@@ -165,7 +173,7 @@ describe("ApplicationFormPage", () => {
     fetchMock.mockImplementation(async (url: unknown) =>
       String(url).includes("archived=true")
         ? json([application({ id: "a9", name: "Old Report" })])
-        : json([])
+        : json([application({ archived: false })])
     );
     mount("all", [application({ archived: false })]);
     await waitFor(() => expect(screen.getByText("Old Report")).toBeTruthy());
@@ -174,11 +182,14 @@ describe("ApplicationFormPage", () => {
   });
 
   it("restore puts it back pinned and stays on the page", async () => {
+    let restored = false;
     fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
-      if (String(url).includes("/unarchive") && init?.method === "POST")
+      if (String(url).includes("/unarchive") && init?.method === "POST") {
+        restored = true;
         return json(application({ archived: false }));
-      if (String(url).includes("archived=true")) return json([application()]);
-      return json([]);
+      }
+      if (String(url).includes("archived=true")) return json(restored ? [] : [application()]);
+      return json(restored ? [application({ archived: false })] : []);
     });
     const { container } = mount("all");
     await waitFor(() => expect(screen.getByText("Habit Tracker")).toBeTruthy());
@@ -216,6 +227,157 @@ describe("ApplicationFormPage", () => {
     fireEvent.change(screen.getByLabelText(/What problem/), { target: { value: "d" } });
     fireEvent.click(screen.getByRole("button", { name: /Start Build/ }));
     await waitFor(() => expect(screen.getByText(/already exists/)).toBeTruthy());
+  });
+
+  it("keeps a successful but conflicted creation pending through a failed confirmation, then opens on refresh", async () => {
+    let finishWrite!: (response: Response) => void;
+    let synchronized = false;
+    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === "POST") return new Promise<Response>((resolve) => { finishWrite = resolve; });
+      return synchronized ? json([application({ archived: false })]) : json({ detail: "offline" }, 503);
+    });
+    mount();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "x" } });
+    fireEvent.change(screen.getByLabelText(/What problem/), { target: { value: "d" } });
+    fireEvent.click(screen.getByRole("button", { name: /Start Build/ }));
+    await act(async () => {
+      applicationList.receive({ type: "application_updated", application: application({ id: "other", archived: false, session_id: null }) });
+      finishWrite(json(application({ archived: false }), 201));
+    });
+    expect(await screen.findByText(/Created. Synchronizing/)).toBeTruthy();
+    expect(await screen.findByText(/List not synchronized/)).toBeTruthy();
+    expect(useSessionStore.getState().activeApplicationId).not.toBe("a1");
+    expect((screen.getByRole("button", { name: /Starting/ }) as HTMLButtonElement).disabled).toBe(true);
+    synchronized = true;
+    fireEvent.click(screen.getByRole("button", { name: /Refresh applications/ }));
+    await waitFor(() => expect(useSessionStore.getState().activeApplicationId).toBe("a1"));
+    expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit)?.method === "POST")).toHaveLength(1);
+  });
+
+  it("retains a confirmed creation across disconnect and opens it after reconnect synchronization", async () => {
+    let finishWrite!: (response: Response) => void;
+    let synchronized = false;
+    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === "POST") return new Promise<Response>((resolve) => { finishWrite = resolve; });
+      return synchronized ? json([application({ archived: false })]) : json({ detail: "offline" }, 503);
+    });
+    mount();
+    const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+    await act(async () => { applicationList.connect(source); });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "x" } });
+    fireEvent.change(screen.getByLabelText(/What problem/), { target: { value: "d" } });
+    fireEvent.click(screen.getByRole("button", { name: /Start Build/ }));
+    await act(async () => {
+      applicationList.receive({ type: "application_updated", application: application({ id: "other", archived: false, session_id: null }) }, source);
+      finishWrite(json(application({ archived: false }), 201));
+    });
+    expect(await screen.findByText(/Created. Synchronizing/)).toBeTruthy();
+    act(() => { applicationList.disconnect(source); });
+    expect(screen.getByText(/Created. Synchronizing/)).toBeTruthy();
+    expect((screen.getByRole("button", { name: /Starting/ }) as HTMLButtonElement).disabled).toBe(true);
+    synchronized = true;
+    await act(async () => { applicationList.connect({ ...source, socket: {} }); });
+    await waitFor(() => expect(useSessionStore.getState().activeApplicationId).toBe("a1"));
+    expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit)?.method === "POST")).toHaveLength(1);
+  });
+
+  it("confirms creation in the current connection when its success arrives after reconnect", async () => {
+    let finishWrite!: (response: Response) => void;
+    let created = false;
+    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === "POST") return new Promise<Response>((resolve) => { finishWrite = resolve; });
+      return json(created ? [application({ archived: false })] : []);
+    });
+    mount();
+    const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
+    await act(async () => { applicationList.connect(source); });
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "x" } });
+    fireEvent.change(screen.getByLabelText(/What problem/), { target: { value: "d" } });
+    fireEvent.click(screen.getByRole("button", { name: /Start Build/ }));
+    await act(async () => {
+      applicationList.disconnect(source);
+      applicationList.connect({ ...source, socket: {} });
+    });
+    await act(async () => {
+      created = true;
+      finishWrite(json(application({ archived: false }), 201));
+    });
+    await waitFor(() => expect(useSessionStore.getState().activeApplicationId).toBe("a1"));
+    expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit)?.method === "POST")).toHaveLength(1);
+  });
+
+  it.each(["account", "navigation"])("does not open a pending creation after %s changes", async (change) => {
+    let finishWrite!: (response: Response) => void;
+    let synchronized = false;
+    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) => {
+      if (init?.method === "POST") return new Promise<Response>((resolve) => { finishWrite = resolve; });
+      return synchronized ? json([application({ archived: false })]) : json({ detail: "offline" }, 503);
+    });
+    mount();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "x" } });
+    fireEvent.change(screen.getByLabelText(/What problem/), { target: { value: "d" } });
+    fireEvent.click(screen.getByRole("button", { name: /Start Build/ }));
+    await act(async () => {
+      applicationList.receive({ type: "application_updated", application: application({ id: "other", archived: false, session_id: null }) });
+      finishWrite(json(application({ archived: false }), 201));
+    });
+    expect(await screen.findByText(/Created. Synchronizing/)).toBeTruthy();
+    await act(async () => {
+      if (change === "account") useSessionStore.setState({ accountGeneration: useSessionStore.getState().accountGeneration + 1 });
+      else {
+        useSessionStore.getState().showChat();
+        useSessionStore.setState({ mainView: "application-create" });
+      }
+      synchronized = true;
+      await applicationList.refresh();
+    });
+    await waitFor(() => expect(useSessionStore.getState().applications[0]?.id).toBe("a1"));
+    expect(useSessionStore.getState().activeApplicationId).not.toBe("a1");
+    expect(useSessionStore.getState().mainView).toBe("application-create");
+    if (change === "account") expect(screen.queryByText(/Created. Synchronizing/)).toBeNull();
+  });
+
+  it("ends creation busy state after synchronization without taking back tab navigation", async () => {
+    let finishWrite!: (response: Response) => void;
+    let created = false;
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if (init?.method === "POST") return new Promise<Response>((resolve) => { finishWrite = resolve; });
+      return json(created && !String(url).includes("archived=true") ? [application({ archived: false })] : []);
+    });
+    mount();
+    fireEvent.change(screen.getByLabelText("Name"), { target: { value: "x" } });
+    fireEvent.change(screen.getByLabelText(/What problem/), { target: { value: "d" } });
+    fireEvent.click(screen.getByRole("button", { name: /Start Build/ }));
+    fireEvent.click(screen.getByRole("button", { name: /^All/ }));
+    await act(async () => {
+      created = true;
+      finishWrite(json(application({ archived: false }), 201));
+    });
+    await waitFor(() => expect(screen.getByText("Habit Tracker")).toBeTruthy());
+    expect(useSessionStore.getState().mainView).toBe("application-create");
+    expect(useSessionStore.getState().pageTab).toBe("all");
+    fireEvent.click(screen.getByRole("button", { name: /^Create$/ }));
+    expect(screen.queryByText(/Created. Synchronizing/)).toBeNull();
+    expect((screen.getByRole("button", { name: /Start Build/ }) as HTMLButtonElement).disabled).toBe(false);
+    expect(useSessionStore.getState().activeApplicationId).not.toBe("a1");
+    expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit)?.method === "POST")).toHaveLength(1);
+  });
+
+  it("disables All pin controls while a sidebar ordering operation is pending", async () => {
+    const live = application({ archived: false });
+    let finish!: (response: Response) => void;
+    fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
+      if (init?.method === "PUT") return new Promise<Response>((resolve) => { finish = resolve; });
+      return json(String(url).includes("archived=true") ? [] : [live]);
+    });
+    mount("all", [live]);
+    let saving!: Promise<Application[]>;
+    act(() => { saving = applicationList.reorder([live.id]); });
+    expect((screen.getByLabelText("Unpin Habit Tracker from the sidebar") as HTMLButtonElement).disabled).toBe(true);
+    fireEvent.click(screen.getByLabelText("Unpin Habit Tracker from the sidebar"));
+    expect(fetchMock.mock.calls.some(([url]) => String(url).endsWith("/unpin"))).toBe(false);
+    await act(async () => { finish(json([live])); await saving; });
+    expect((screen.getByLabelText("Unpin Habit Tracker from the sidebar") as HTMLButtonElement).disabled).toBe(false);
   });
 });
 

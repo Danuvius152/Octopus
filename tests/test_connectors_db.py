@@ -3,6 +3,7 @@ CRUD + the agent-scoped enable join, including cascade + dedup invariants."""
 
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from datetime import UTC, datetime
 
@@ -97,6 +98,28 @@ async def test_duplicate_account_rejected(db):
     await _make_installation(db, "i-1", kind="gmail", external_account_id="me@x.com")
     with pytest.raises(sqlite3.IntegrityError):
         await _make_installation(db, "i-2", kind="gmail", external_account_id="me@x.com")
+
+
+async def test_oauth_authorization_atomically_resolves_identity_and_its_secret(db):
+    from tests.accounts import create_account
+
+    owner, _ = await create_account(db)
+
+    async def authorize(candidate, label):
+        return await db.authorize_connector_installation(
+            installation_id=candidate, kind="gmail", label=label,
+            external_account_id="same-account", secret_encrypted="sealed-" + label,
+            scopes=[label], created_at=_now(), token_expires_at=None, user_id=owner["id"],
+        )
+
+    first, second = await asyncio.gather(authorize("first-candidate", "first"), authorize("second-candidate", "second"))
+    assert first["id"] == second["id"]
+    rows = await db.load_connector_installations(owner["id"])
+    assert len(rows) == 1
+    current = rows[0]
+    assert await db.get_connector_secret(current["id"]) == "sealed-" + current["label"]
+    unused = "second-candidate" if current["id"] == "first-candidate" else "first-candidate"
+    assert await db.get_connector_secret(unused) is None
 
 
 @pytest.mark.asyncio

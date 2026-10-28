@@ -128,7 +128,8 @@ stacking, are unchanged from scheduled-runs.md §1-2.
 ## 6. The list moves while you watch
 
 Every schedule mutation now broadcasts `{"type": "schedules_changed"}` and
-the client refetches (`refreshSchedules`). Without it, a schedule an agent
+the client refetches through `schedules.refresh()` in the
+[schedule list module](../../web/src/lib/scheduleList.ts). Without it, a schedule an agent
 sets mid-conversation is invisible until the user reloads — which looks
 exactly like the tool having failed. The payload is deliberately empty:
 one code path, whether the change came from this browser, another tab, or

@@ -4,6 +4,7 @@ import { ChatView } from "./ChatView";
 import { mockChatViewport } from "./chatViewport.test-support";
 import { VirtuosoMockContext } from "react-virtuoso";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
+import { schedules } from "../lib/scheduleList";
 import commandCasesText from "../../../tests/fixtures/wiki-command-cases.json?raw";
 
 const commandCases: { message: string; mode: "read" | "maintain" | null }[] = JSON.parse(commandCasesText);
@@ -24,6 +25,39 @@ beforeEach(() => {
   });
 });
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
+
+it("does not restore schedules deleted during a slash-command creation", async () => {
+  useSessionStore.getState().setToken("schedule-token");
+  const old = { id: "old", name: "old", enabled: true } as ReturnType<typeof useSessionStore.getState>["schedules"][number];
+  useSessionStore.setState({ sessions: [{ ...session, agent_id: "owner" }], activeSessionId: session.id, schedules: [old] });
+  useSessionStore.getState().applyDispatchState(session.id, {
+    generation: "schedule-service", revision: 1, paused: false, active_request_id: null, items: [],
+  });
+  let finish!: (response: Response) => void;
+  let serverRows = [old];
+  const fetch = vi.fn(async (url: string, init?: RequestInit) => {
+    if (init?.method === "POST" && url.endsWith("/from_text")) return new Promise<Response>((resolve) => { finish = resolve; });
+    return Response.json(url.endsWith("/api/schedules") ? serverRows : []);
+  });
+  vi.stubGlobal("fetch", fetch);
+  try {
+    const { input, send } = setup();
+    fireEvent.change(input, { target: { value: "/schedule tomorrow remind me" } });
+    fireEvent.click(send);
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => url.endsWith("/from_text"))).toBe(true));
+    serverRows = [];
+    await act(async () => { schedules.changed(); });
+    await waitFor(() => expect(useSessionStore.getState().schedules).toEqual([]));
+    const created = { ...old, id: "new", name: "Reminder", recurrence_label: "Tomorrow" };
+    serverRows = [created];
+    await act(async () => { finish(Response.json(created)); });
+    await waitFor(() => expect(useSessionStore.getState().schedules.map((row) => row.id)).toEqual(["new"]));
+    expect(useSessionStore.getState().messages[session.id].some((message) => String(message.content).includes('Scheduled "Reminder"'))).toBe(true);
+    const call = fetch.mock.calls.find(([url]) => url.endsWith("/from_text"))!;
+    expect(call[0]).toContain("/api/agents/owner/");
+    expect(JSON.parse(String(call[1]?.body))).toMatchObject({ session_id: session.id, text: "tomorrow remind me", timezone: expect.any(String) });
+  } finally { act(() => useSessionStore.getState().setToken("")); vi.unstubAllGlobals(); }
+});
 
 it("keeps correction separate from paused results and resumes only on the explicit button", async () => {
   const paused = {
@@ -157,6 +191,16 @@ it("keeps a rejected Wiki draft and protects subsequent editing during restorati
   expect(input).toHaveValue("  /wiki maintain Library/a.md  ");
   expect(screen.queryByRole("button", { name: "Use local Wiki for this message" })).not.toBeInTheDocument();
   expect(sendMessage).toHaveBeenCalledTimes(1);
+});
+
+it("retains a service-not-ready draft for explicit retry without treating it as unknown", async () => {
+  const sendMessage = vi.fn(async () => ({ accepted: false, code: "service_not_ready", message: "Service input admission is not ready (initializing)." }));
+  const { input, send } = setup(sendMessage);
+  fireEvent.change(input, { target: { value: "Wait for recovery 中文" } });
+  await act(async () => fireEvent.click(send));
+  fireEvent.click(screen.getByRole("button", { name: "Restore draft" }));
+  expect(input).toHaveValue("Wait for recovery 中文");
+  expect(sendMessage).toHaveBeenCalledOnce();
 });
 
 it("retains an unconfirmed draft after a missing receipt and confirms the original identity without resending", async () => {

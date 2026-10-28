@@ -112,8 +112,14 @@ def _files(session_id: str, identifiers: list[str], *, user_id: str) -> list[dic
 async def load_pending_input(manager: SessionManager, session_id: str, pending: PendingInput) -> QueuedPrompt:
     from .base import QueuedPrompt
 
-    row = await manager.db.get_submission_for_request(session_id, pending.request_id)
-    if row is None or row["execution_state"] != "pending" or row["payload"] is None:
+    row = await manager.input_database().get_submission_for_request(session_id, pending.request_id)
+    # Stop can retain an unstarted original claim in this process's queue.
+    # It is reloadable only under that same generation and before any frame
+    # delivery; restart/unknown inputs never re-enter this queue.
+    retained_claim = row is not None and row["execution_state"] == "running" and (
+        row["execution_generation"] == manager._dispatch_generation and row["delivery_state"] == "none"
+    )
+    if row is None or not (row["execution_state"] == "pending" or retained_claim) or row["payload"] is None:
         raise ValueError("The queued input is no longer pending")
     payload = row["payload"]
     context = saved_context(session_id, row)
@@ -126,7 +132,6 @@ async def load_pending_input(manager: SessionManager, session_id: str, pending: 
         source=payload["source"], priority=pending.priority, request_id=row["request_id"],
         delivery_id=payload["delivery_id"], work_id=payload["work_id"], order=payload["order"],
         question_session_id=payload["question_session_id"], question_id=payload["question_id"],
-        durable_client_input=True,
     )
 
 
@@ -173,7 +178,7 @@ def status_from_row(session_id: str, row: dict[str, Any], *, include_input=True)
 
 
 async def submission_status(manager: SessionManager, session_id: str, client_id: str) -> dict[str, Any] | None:
-    row = await manager.db.get_client_submission(session_id, client_id)
+    row = await manager.input_database().get_client_submission(session_id, client_id)
     return status_from_row(session_id, row) if row is not None else None
 
 
@@ -185,12 +190,13 @@ async def submit_client_message(manager: SessionManager, session_id: str, conten
         payload["recovery_of_client_id"] = recovery_of_client_id
     digest = input_digest(payload)
     base = {"session_id": session_id, "client_request_id": client_id}
-    existing = await manager.db.get_client_submission(session_id, client_id)
-    if existing is not None:
-        if existing["payload_sha256"] != digest:
-            return {**base, "accepted": False, "code": "submission_conflict", "message": "This submission identity already belongs to different input."}
-        return status_from_row(session_id, existing)
     try:
+        database = manager.input_database()
+        existing = await database.get_client_submission(session_id, client_id)
+        if existing is not None:
+            if existing["payload_sha256"] != digest:
+                return {**base, "accepted": False, "code": "submission_conflict", "message": "This submission identity already belongs to different input."}
+            return status_from_row(session_id, existing)
         receipt = await manager.start_message(
             session_id, content, attachment_ids=attachment_ids, steerable=True,
             client_request_id=client_id, recovery_of_client_id=recovery_of_client_id,
@@ -212,11 +218,10 @@ async def submit_client_message(manager: SessionManager, session_id: str, conten
 
 
 async def claim_input(manager: SessionManager, session_id: str, request_id: str, *, owner: str | None = None) -> bool:
-    if manager.db is None:
-        return True
-    if not await manager.db.claim_client_submission(session_id, request_id, owner or request_id, manager._dispatch_generation):
+    database = manager.input_database()
+    if not await database.claim_client_submission(session_id, request_id, owner or request_id, manager._dispatch_generation):
         return False
-    stored = await manager.db.get_submission_for_request(session_id, request_id)
+    stored = await database.get_submission_for_request(session_id, request_id)
     if stored is not None:
         payload = stored["payload"]
         if payload is not None:
@@ -231,9 +236,7 @@ async def claim_input(manager: SessionManager, session_id: str, request_id: str,
 
 async def require_retired_writers(manager: SessionManager, session_id: str) -> None:
     from ..execution_identity import process_group_exited
-    if manager.db is None:
-        return
-    for row in await manager.db.uncertain_submission_writers(session_id):
+    for row in await manager.input_database().uncertain_submission_writers(session_id):
         if row["execution_generation"] in manager._retired_dispatch_generations:
             continue
         if row["delivery_state"] != "unknown" and row["terminal"] is not None:

@@ -7,6 +7,28 @@ stable identity together. The dispatch queue holds an identity and display
 projection; execution reads the saved input. Model and tool effects begin
 only after the claim commits.
 
+Manager construction, listeners and in-memory inspection need no database.
+Execution admission opens only after initialization, input recovery, session
+loading and incomplete-fork recovery all succeed. An assigned database pointer
+alone proves no readiness. Uninitialized, initializing or failed recovery returns
+an explicit `service_not_ready` refusal without saving, queueing or spawning the
+input; its identity may be submitted explicitly after the condition clears.
+Status queries in that phase are unavailable, rather than proof that an input
+does not exist. Shutdown remains a separate admission condition and existing
+accepted identities retain their original receipts and content-conflict checks.
+
+All input sources use this boundary, including internal messages, inline steer,
+one-shot schedules and their new sessions, application turns/builds, independent
+task returns and explicit input recovery. Both queues hold only pending identity
+and display/scheduling projections; execution and steer preparation reload the
+saved content and attachment evidence. A retained unstarted claim may continue
+only in its original process generation before frame delivery. Restart unknown
+and uncertain steer inputs never acquire that permission. Required attachments
+are rechecked at claim; a changed file rejects execution as a whole. Once an
+input is accepted, missing or untrustworthy storage fails its original owner;
+there is no in-memory execution or successful-completion fallback. Resource
+retirement and empty-manager shutdown still run under their own lifecycle.
+
 ## Receipts and results
 
 Supply one `client_request_id` for an input, and retain it when confirming a

@@ -15,6 +15,13 @@ class InputRecoveryUnavailable(ValueError):
     code = "recovery_unavailable"
 
 
+class InputAdmissionNotReady(ValueError):
+    code = "service_not_ready"
+
+    def __init__(self, phase: str):
+        super().__init__(f"Service input admission is not ready ({phase}). Your input was not accepted; retry after initialization succeeds.")
+
+
 class ClientSubmissionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

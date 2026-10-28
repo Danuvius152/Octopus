@@ -11,11 +11,10 @@ import {
 } from "@tabler/icons-react";
 import {
   applicationUrl,
-  archiveApplication,
-  buildApplication,
   primeAppCookie,
 } from "../api/applications";
 import { selectSession } from "../lib/selectSession";
+import { applications as applicationList } from "../lib/applicationList";
 import { useSessionStore } from "../stores/sessionStore";
 import { PageHeader } from "./PageHeader";
 import { Button } from "./ui/button";
@@ -47,10 +46,9 @@ export function ApplicationView({
 }) {
   const token = useSessionStore((s) => s.token);
   const applications = useSessionStore((s) => s.applications);
+  const read = useSessionStore((s) => s.applicationReads.live);
   const activeApplicationId = useSessionStore((s) => s.activeApplicationId);
   const agents = useSessionStore((s) => s.agents);
-  const upsertApplication = useSessionStore((s) => s.upsertApplication);
-  const removeApplication = useSessionStore((s) => s.removeApplication);
 
   const sessions = useSessionStore((s) => s.sessions);
 
@@ -70,7 +68,8 @@ export function ApplicationView({
   );
 
   const [request, setRequest] = useState("");
-  const [busy, setBusy] = useState(false);
+  const [operation, setOperation] = useState<{ current: () => boolean } | null>(null);
+  const busy = !!operation?.current();
   const [error, setError] = useState<string | null>(null);
   const [iterateOpen, setIterateOpen] = useState(false);
   // Bumped to force the iframe to re-navigate (a same-src assignment is a
@@ -79,7 +78,6 @@ export function ApplicationView({
   const [nonce, setNonce] = useState(0);
   const lastBuiltRef = useRef<string | null>(null);
 
-  const status = app?.status;
   const lastBuiltAt = app?.last_built_at ?? null;
 
   useEffect(() => {
@@ -99,11 +97,6 @@ export function ApplicationView({
   useMemo(() => {
     if (token) primeAppCookie(token);
   }, [token]);
-
-  // A pending request is cleared once its turn actually starts.
-  useEffect(() => {
-    if (status === "building") setBusy(false);
-  }, [status]);
 
   const src = useMemo(
     () => (app ? applicationUrl(app.id, nonce) : ""),
@@ -126,11 +119,11 @@ export function ApplicationView({
       )
     )
       return;
+    const current = applicationList.currentGuard();
     try {
-      await archiveApplication(token, app.id);
-      removeApplication(app.id);
-    } catch {
-      // The WS event would have done this too; leave the view as-is.
+      await applicationList.archive(app.id);
+    } catch (e) {
+      if (current()) setError(e instanceof Error ? e.message : "Failed to archive");
     }
   };
 
@@ -141,17 +134,19 @@ export function ApplicationView({
   const askForChanges = async () => {
     const prompt = request.trim();
     if (!prompt || busy) return;
-    setBusy(true);
+    const current = applicationList.currentGuard();
+    setOperation({ current });
     setError(null);
     try {
-      upsertApplication(await buildApplication(token, app.id, prompt));
+      await applicationList.build(app.id, prompt);
+      if (!current()) return;
       setRequest("");
       // The status badge in this same header takes over from here.
       setIterateOpen(false);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to start the build");
+      if (current()) setError(e instanceof Error ? e.message : "Failed to start the build");
     } finally {
-      setBusy(false);
+      if (current()) setOperation(null);
     }
   };
 
@@ -275,11 +270,6 @@ export function ApplicationView({
                 </Button>
               }
             >
-              {error && (
-                <div className="application-compose-error mb-2 rounded-lg border-[0.7px] border-destructive/40 bg-destructive/10 px-3 py-1.5 text-xs text-destructive">
-                  {error}
-                </div>
-              )}
               <textarea
                 className="application-request-input w-full min-h-[72px] max-h-40 resize-none rounded-xl border-[0.7px] border-gray-400 bg-card px-3 py-2 text-sm text-foreground placeholder:text-muted-foreground outline-none transition-colors focus:border-primary/70 focus:ring-[3px] focus:ring-primary/10"
                 value={request}
@@ -323,6 +313,11 @@ export function ApplicationView({
           </>
         }
       />
+
+      {(error || read.error) && <div role="alert" className="application-compose-error px-3 py-2 text-xs text-destructive">
+        {error || `List not synchronized: ${read.error}`}
+        {read.error && <button onClick={() => void applicationList.refresh()} className="ml-2 underline">Refresh applications</button>}
+      </div>}
 
       <div className="application-frame-wrap flex-1 min-h-0 bg-background relative">
         {app.status === "ready" ? (

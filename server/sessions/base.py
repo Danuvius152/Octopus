@@ -220,7 +220,6 @@ class QueuedPrompt:
     question_session_id: str | None = None
     question_id: str | None = None
     recorded_input: RecordedInput | None = None
-    durable_client_input: bool = False
     queued_event: dict[str, Any] | None = field(default=None, repr=False)
 
     @property
@@ -243,10 +242,6 @@ class PendingInput:
     @property
     def started(self) -> bool:
         return False
-
-    @property
-    def durable_client_input(self) -> bool:
-        return True
 
 
 @dataclass
@@ -386,7 +381,7 @@ class Session:
     _deletion_task: asyncio.Task | None = field(default=None, repr=False)
     _command_receipts: dict[str, tuple[str, dict[str, Any]]] = field(default_factory=dict, repr=False)
     _questions: dict[str, PendingQuestion] = field(default_factory=dict, repr=False)
-    _pending_queue: list[PendingInput | QueuedPrompt] = field(default_factory=list, repr=False)
+    _pending_queue: list[PendingInput] = field(default_factory=list, repr=False)
     _dispatch_paused: bool = field(default=False, repr=False)
     _admission_closed: bool = field(default=False, repr=False)
     _archive_reservation: object | None = field(default=None, repr=False)
@@ -400,7 +395,7 @@ class Session:
     # CLI mid-turn rather than queued behind the turn (inline-steering.md §8).
     # The owner captures one prepared/write operation at a time and receives
     # its result independently of the backend's stdout progress.
-    _steer_queue: list[QueuedPrompt] = field(default_factory=list, repr=False)
+    _steer_queue: list[PendingInput] = field(default_factory=list, repr=False)
     # Set while a turn can still accept a steer: from the moment the stream
     # starts after the initial input completes until `result` is seen. Only
     # the owner accepts steers or changes this window.
@@ -684,6 +679,7 @@ class SessionManagerBase:
         self._dispatch_generation = uuid.uuid4().hex
         self._retired_dispatch_generations: frozenset[str] = frozenset()
         self._admission_closed = False
+        self._input_state: Literal["uninitialized", "initializing", "ready", "failed"] = "uninitialized"
         self._owned_tasks: set[asyncio.Task[Any]] = set()
         # Resolution owns refresh through provider completion and conditional writeback.
         self._credential_refreshes: dict[tuple[str | None, str], asyncio.Task[HarnessCredential | None]] = {}
@@ -721,6 +717,29 @@ class SessionManagerBase:
         self._schedule_runner = runner
 
     async def initialize(self, db: Database, *, previous_writers_retired: bool = False) -> None:
+        if self._input_state == "initializing":
+            raise RuntimeError("SessionManager initialization is already in progress")
+        self._input_state = "initializing"
+        self._admission_closed = False
+        try:
+            await self._initialize_storage(db, previous_writers_retired=previous_writers_retired)
+        except BaseException:
+            self._input_state = "failed"
+            raise
+        self._input_state = "ready"
+
+    def input_database(self) -> Database:
+        """Only completed initialization/recovery authorizes input operations."""
+        from ..submission_models import InputAdmissionNotReady
+
+        if self._input_state != "ready":
+            raise InputAdmissionNotReady(self._input_state)
+        if self.db is None:
+            raise InputAdmissionNotReady("failed")
+        self.db.health.require_healthy()
+        return self.db
+
+    async def _initialize_storage(self, db: Database, *, previous_writers_retired: bool) -> None:
         await self.drain_credential_refreshes()
         self._credential_refresh_closed = False
         if self._session_owners:
@@ -737,7 +756,6 @@ class SessionManagerBase:
         self._agent_operations.clear()
         self._agent_archive_tasks.clear()
         self._archived_dispatch.clear()
-        self._admission_closed = False
         self.db = db
         self._dispatch_generation = uuid.uuid4().hex
         self._retired_dispatch_generations = frozenset()
@@ -857,9 +875,7 @@ class SessionManagerBase:
             return True
         if self.get_session(session_id, user_id) is not None:
             return True
-        if self.db is None:
-            return False
-        rows = await self.db.load_sessions(include_archived=True, user_id=user_id)
+        rows = await self.input_database().load_sessions(include_archived=True, user_id=user_id)
         return any(row["id"] == session_id for row in rows)
 
     def get_session(

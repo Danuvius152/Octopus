@@ -1,4 +1,5 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
+import { schedules } from "../lib/scheduleList";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   IconArrowUp,
@@ -828,8 +829,9 @@ export function ChatView({
       setInput("");
       const store = useSessionStore.getState();
       const sid = activeSessionId;
+      const currentScheduleOperation = schedules.currentGuard();
       const addNotice = (content: string, isError = false) =>
-        store.addMessage(sid, { role: "system", type: "notice", content, is_error: isError });
+        currentScheduleOperation() && useSessionStore.getState().addMessage(sid, { role: "system", type: "notice", content, is_error: isError });
 
       const args = trimmed.slice("/schedule".length).trim();
       if (!args) {
@@ -847,41 +849,13 @@ export function ChatView({
         return;
       }
       try {
-        const res = await fetch(
-          `${window.location.origin}/api/agents/${agentId}/schedules/from_text`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `Bearer ${store.token}`,
-            },
-            body: JSON.stringify({
-              text: args,
-              timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-              // Remember the originating session so each fire appends its run
-              // into this conversation instead of a throwaway one.
-              session_id: sid,
-            }),
-          }
-        );
-        if (!res.ok) {
-          let detail = `Couldn't create schedule (HTTP ${res.status}).`;
-          try {
-            const body = await res.json();
-            if (typeof body?.detail === "string") detail = body.detail;
-          } catch {
-            // keep the generic message
-          }
-          addNotice(detail, true);
-          return;
-        }
-        const created = await res.json();
-        store.setSchedules([...store.schedules, created]);
+        const created = await schedules.createFromText({ agent_id: agentId, text: args,
+          timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, session_id: sid });
         addNotice(
           `📅 Scheduled "${created.name}" — ${created.recurrence_label}. Manage in Schedules.`
         );
-      } catch {
-        addNotice("Couldn't create schedule — network error.", true);
+      } catch (error) {
+        addNotice(error instanceof Error ? error.message : "Couldn't create schedule — result unknown.", true);
       }
       return;
     }

@@ -1,38 +1,27 @@
-import { accountFetch as fetch } from "../lib/accountFetch";
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useState } from "react";
 import { IconArrowRight, IconClock, IconTrash } from "@tabler/icons-react";
 import { useSessionStore, type Agent, type Schedule } from "../stores/sessionStore";
-import { refreshSchedules } from "../lib/refreshSchedules";
+import { schedules as scheduleList } from "../lib/scheduleList";
 import { selectSession } from "../lib/selectSession";
 import { PageHeader } from "./PageHeader";
 
-const API = window.location.origin;
-
 function ScheduleKnowledgeControl({ schedule }: { schedule: Schedule }) {
-  const token = useSessionStore((s) => s.token);
-  const [saving, setSaving] = useState(false);
+  const [operation, setOperation] = useState<{ current: () => boolean } | null>(null);
+  const saving = !!operation?.current();
   const [error, setError] = useState<string | null>(null);
   const missing = schedule.invalid_reason === "knowledge_contract_missing";
   const mode = missing ? "" : schedule.wiki_mode ?? "auto";
 
   const change = async (wikiMode: string) => {
-    setSaving(true);
+    const current = scheduleList.currentGuard();
+    setOperation({ current });
     setError(null);
     try {
-      const response = await fetch(`${API}/api/schedules/${schedule.id}`, {
-        method: "PATCH",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify({ wiki_mode: wikiMode }),
-      });
-      if (!response.ok) {
-        const body = await response.json().catch(() => null);
-        throw new Error(typeof body?.detail === "string" ? body.detail : "Could not update Wiki maintenance.");
-      }
-      await refreshSchedules();
+      await scheduleList.setWikiMode(schedule.id, wikiMode);
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Could not update Wiki maintenance.");
+      if (current()) setError(cause instanceof Error ? cause.message : "Could not update Wiki maintenance.");
     } finally {
-      setSaving(false);
+      if (current()) setOperation(null);
     }
   };
 
@@ -101,39 +90,30 @@ export function SchedulesPage({
   onToggleSidebar: () => void;
 }) {
   const token = useSessionStore((s) => s.token);
+  const accountGeneration = useSessionStore((s) => s.accountGeneration);
   const agents = useSessionStore((s) => s.agents);
   const schedules = useSessionStore((s) => s.schedules);
   const showChat = useSessionStore((s) => s.showChat);
-
-  const headers = {
-    Authorization: `Bearer ${token}`,
-    "Content-Type": "application/json",
-  };
-
-  // Shared with the WebSocket `schedules_changed` handler, so a schedule an
-  // agent sets for itself shows up here without a reload.
-  const fetchSchedules = useCallback(() => refreshSchedules(), []);
+  const read = useSessionStore((s) => s.scheduleRead);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    fetchSchedules();
-  }, [fetchSchedules]);
+    if (token) void scheduleList.refresh();
+  }, [token, accountGeneration]);
+
+  const change = async (operation: () => Promise<void>) => {
+    const current = scheduleList.currentGuard(); setError(null);
+    try { await operation(); }
+    catch (cause) { if (current()) setError(cause instanceof Error ? cause.message : "Could not change schedule"); }
+  };
 
   const toggle = async (sched: Schedule) => {
-    await fetch(`${API}/api/schedules/${sched.id}`, {
-      method: "PATCH",
-      headers,
-      body: JSON.stringify({ enabled: !sched.enabled }),
-    });
-    fetchSchedules();
+    await change(() => scheduleList.setEnabled(sched.id, !sched.enabled));
   };
 
   const remove = async (sched: Schedule) => {
     if (!window.confirm(`Delete the schedule "${sched.name}"?`)) return;
-    await fetch(`${API}/api/schedules/${sched.id}`, {
-      method: "DELETE",
-      headers,
-    });
-    fetchSchedules();
+    await change(() => scheduleList.remove(sched.id));
   };
 
   const agentById = (id: string): Agent | undefined =>
@@ -157,7 +137,11 @@ export function SchedulesPage({
       />
 
       <div className="page-body">
-        {schedules.length === 0 ? (
+        {(error || read.error) && <div role="alert" className="mb-3 text-sm text-destructive">
+          {error || `List not synchronized: ${read.error}`}
+          {read.error && <button onClick={() => void scheduleList.refresh()} className="ml-2 underline">Refresh schedules</button>}
+        </div>}
+        {schedules.length === 0 && (!read.loaded || read.error) ? <p>Schedules have not finished loading.</p> : schedules.length === 0 ? (
           <div className="schedules-empty card px-6 py-12 text-center">
             <IconClock size={22} className="mx-auto mb-3 text-gray-600" />
             <p className="text-sm text-gray-900">No schedules yet.</p>

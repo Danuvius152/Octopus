@@ -25,7 +25,7 @@ from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
-from .aio import drain_cancelled
+from .aio import complete_cleanup, drain_cancelled
 from .applications import (
     app_scope_token,
     backend_script,
@@ -136,6 +136,9 @@ class BackendState:
     process: asyncio.subprocess.Process | None = field(default=None, repr=False)
     log: deque[str] = field(default_factory=lambda: deque(maxlen=LOG_TAIL_LINES), repr=False)
     lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    # Serialize this app's admission while its lifecycle lock is released
+    # for another app's retirement. Stop/install never acquire this lock.
+    _admission: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     _readers: list[asyncio.Task[None]] = field(default_factory=list, repr=False)
     _waiter: asyncio.Task[int] | None = field(default=None, repr=False)
     _operation: asyncio.Task[Any] | None = field(default=None, repr=False)
@@ -163,6 +166,10 @@ class BackendSupervisor:
         self._reaper: asyncio.Task[None] | None = None
         self._shutting_down = False
         self._blocked_apps: set[str] = set()
+        # Event-loop-owned reservations. Selection/insertion/release contain
+        # no await; each original state keeps its slot until cleanup confirms
+        # its spawn, process group and readers have all retired.
+        self._slots: dict[int, BackendState] = {}
 
     # ---------------------------------------------------------------- state
 
@@ -225,7 +232,7 @@ class BackendSupervisor:
             try:
                 return await self._install(st)
             except asyncio.CancelledError:
-                await self._stop_state(st)
+                await complete_cleanup(self._stop_state(st))
                 raise
             finally:
                 st._operation = None
@@ -326,19 +333,26 @@ class BackendSupervisor:
             st.state = ABSENT
             return st
 
-        async with st.lock:
-            if self._shutting_down or app_id in self._blocked_apps:
-                raise RuntimeError("Application backend supervisor is shutting down")
-            st._operation = asyncio.current_task()
-            try:
-                return await self._ensure_running(st)
-            except asyncio.CancelledError:
-                await self._stop_state(st)
-                raise
-            finally:
-                st._operation = None
+        async with st._admission:
+            while True:
+                async with st.lock:
+                    if self._shutting_down or app_id in self._blocked_apps:
+                        raise RuntimeError("Application backend supervisor is shutting down")
+                    st._operation = asyncio.current_task()
+                    try:
+                        result = await self._ensure_running(st)
+                        if result is not None:
+                            return result
+                    except BaseException:
+                        await complete_cleanup(self._stop_state(st))
+                        raise
+                    finally:
+                        st._operation = None
+                # Never hold A's lifecycle lock while stopping B. A different
+                # app may take the freed slot, so recheck under A's lock.
+                await self._evict_one()
 
-    async def _ensure_running(self, st: BackendState) -> BackendState:
+    async def _ensure_running(self, st: BackendState) -> BackendState | None:
         if st.state == RUNNING and st.process and st.process.returncode is None:
             return st
         if (
@@ -348,14 +362,16 @@ class BackendSupervisor:
         ):
             return st  # don't retry a crash in a tight loop
 
-        if st.process is not None or st._readers:
+        if st.process is not None or st._readers or st._spawn is not None:
             await self._stop_state(st)
 
         if not st.installed and not await self._install(st):
             st.failed_at = time.monotonic()
             return st
 
-        await self._evict_if_over_cap(keep=st.app_id)
+        if len(self._slots) >= MAX_RUNNING:
+            return None
+        self._slots[id(st)] = st
         await self._start_locked(st)
         return st
 
@@ -363,6 +379,7 @@ class BackendSupervisor:
         script = backend_script(st.app_dir, "start.sh")
         if script is None:
             st.state = ABSENT
+            self._slots.pop(id(st), None)
             return
         port = _free_port()
         st.state = STARTING
@@ -388,6 +405,7 @@ class BackendSupervisor:
             st.error = f"start.sh could not be run: {exc}"
             st.failed_at = time.monotonic()
             self._log(st, st.error)
+            await self._stop_state(st)
             return
 
         st.process = proc
@@ -402,6 +420,7 @@ class BackendSupervisor:
                 st.error = f"start.sh exited {proc.returncode} before binding port {port}"
                 st.failed_at = time.monotonic()
                 self._log(st, st.error)
+                await self._stop_state(st)
                 return
             if await asyncio.to_thread(_port_accepts, port):
                 st.state = RUNNING
@@ -430,6 +449,18 @@ class BackendSupervisor:
             await self._stop_state(st)
 
     async def _stop_state(self, st: BackendState) -> None:
+        if st._spawn is not None:
+            spawn = st._spawn
+            try:
+                spawned = await asyncio.shield(spawn)
+            except Exception:
+                if not spawn.done() or spawn.cancelled():
+                    raise
+                # A confirmed spawn failure created no process.
+            else:
+                st.process = spawned
+                st.pid = spawned.pid
+            st._spawn = None
         proc = st.process
         if proc is not None:
             _kill_group(proc, signal.SIGTERM)
@@ -474,6 +505,7 @@ class BackendSupervisor:
         st.port = None
         st.started_at = None
         st._waiter = None
+        self._slots.pop(id(st), None)
         if st.state not in (FAILED, ABSENT):
             st.state = STOPPED
 
@@ -500,18 +532,22 @@ class BackendSupervisor:
 
     # ---------------------------------------------------------------- reaper
 
-    async def _evict_if_over_cap(self, *, keep: str) -> None:
-        running = [
-            s
-            for s in self._backends.values()
-            if s.state == RUNNING and s.app_id != keep
-        ]
-        if len(running) < MAX_RUNNING:
-            return
-        running.sort(key=lambda s: s.last_used)
-        for st in running[: len(running) - MAX_RUNNING + 1]:
+    async def _evict_one(self) -> None:
+        # Selection and acquisition of an unlocked lock do not suspend. Other
+        # admissions cannot choose this lifecycle once its stop has begun.
+        candidates = [st for st in self._slots.values() if st.state == RUNNING and not st.lock.locked()]
+        if not candidates:
+            raise BackendCapacityError("Application backend capacity is unavailable; all slots are starting or retiring")
+        st = min(candidates, key=lambda item: item.last_used)
+        async with st.lock:
+            st._operation = asyncio.current_task()
             self._log(st, "stopped to stay under the running-backend cap")
-            await self._stop_state(st)
+            try:
+                await complete_cleanup(self._stop_state(st))
+            except Exception as exc:
+                raise BackendCapacityError("Application backend capacity is unavailable; retirement unconfirmed") from exc
+            finally:
+                st._operation = None
 
     async def reap_idle(self) -> int:
         now = time.monotonic()
@@ -550,7 +586,7 @@ class BackendSupervisor:
         if self._reaper is not None and not self._reaper.done() and not self._reaper.cancelling():
             self._reaper.cancel()
         current = asyncio.current_task()
-        for st in self._backends.values():
+        for st in self._owned_states():
             task = st._operation
             if task is not None and task is not current and not task.done() and not task.cancelling():
                 task.cancel()
@@ -566,16 +602,17 @@ class BackendSupervisor:
                 self._reaper = None
             else:
                 failures.append("application backend reaper did not exit")
-        operations = {st._operation for st in self._backends.values() if st._operation is not None}
-        spawns = {st._spawn for st in self._backends.values() if st._spawn is not None}
+        states = self._owned_states()
+        operations = {st._operation for st in states if st._operation is not None}
+        spawns = {st._spawn for st in states if st._spawn is not None}
         owners = operations | spawns
         pending: set[asyncio.Task[Any]] = set()
         if owners:
             _, pending = await asyncio.wait(
                 owners, timeout=_TERM_TIMEOUT_SECONDS + _KILL_TIMEOUT_SECONDS + _TASK_DRAIN_SECONDS,
             )
-        for app_id in list(self._backends):
-            st = self._backends[app_id]
+        for st in states:
+            app_id = st.app_id
             if st._operation in pending or st._spawn in pending:
                 failures.append(f"Application {app_id} startup cleanup did not exit")
                 continue
@@ -605,6 +642,13 @@ class BackendSupervisor:
                 st.lock.release()
         if failures:
             raise RuntimeError("Application backend shutdown incomplete: " + "; ".join(failures))
+
+    def _owned_states(self) -> list[BackendState]:
+        return list({id(st): st for st in (*self._backends.values(), *self._slots.values())}.values())
+
+
+class BackendCapacityError(RuntimeError):
+    """This request did not obtain a backend slot; the application did not fail."""
 
 
 def _kill_group(proc: asyncio.subprocess.Process, sig: int = signal.SIGKILL) -> None:

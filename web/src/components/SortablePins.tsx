@@ -36,6 +36,7 @@ export function SortablePins({
   nameOf,
   onReorder,
   children,
+  disabled = false,
 }: {
   ids: string[];
   /** The row's name, for what a screen reader announces. */
@@ -43,6 +44,7 @@ export function SortablePins({
   /** The full pinned order after a drop that changed it. */
   onReorder: (orderedIds: string[]) => void;
   children: ReactNode;
+  disabled?: boolean;
 }) {
   const sensors = useSensors(
     useSensor(MouseSensor, { activationConstraint: { distance: 6 } }),
@@ -55,7 +57,7 @@ export function SortablePins({
   );
 
   const onDragEnd = ({ active, over }: DragEndEvent) => {
-    if (!over || active.id === over.id) return;
+    if (disabled || !over || active.id === over.id) return;
     const from = ids.indexOf(String(active.id));
     const to = ids.indexOf(String(over.id));
     if (from < 0 || to < 0) return;
@@ -116,10 +118,12 @@ export function SortablePin({
   id,
   className,
   children,
+  disabled = false,
 }: {
   id: string;
   className?: string;
   children: (handle: DragHandle) => ReactNode;
+  disabled?: boolean;
 }) {
   const {
     attributes,
@@ -128,7 +132,7 @@ export function SortablePin({
     transform,
     transition,
     isDragging,
-  } = useSortable({ id });
+  } = useSortable({ id, disabled });
   const style: CSSProperties = {
     transform: CSS.Translate.toString(transform ? { ...transform, x: 0 } : null),
     transition,

@@ -216,7 +216,8 @@ async def test_shutdown_owns_install_spawn_before_its_process_handle_arrives(tmp
             installation.cancel()
             await asyncio.sleep(0)
             installation.cancel()
-            await asyncio.gather(installation, return_exceptions=True)
+            await asyncio.sleep(0)
+            assert not installation.done(), "Cancellation must retain the outstanding spawn handoff"
         supervisor.begin_shutdown()
         cleanup = asyncio.create_task(supervisor.shutdown())
         await asyncio.sleep(0)
@@ -263,7 +264,7 @@ async def test_shutdown_owns_completed_spawn_cancelled_before_its_waiter_resumes
         await asyncio.sleep(0)
         release_handle.set()
         await asyncio.gather(installation, return_exceptions=True)
-        assert processes[0].returncode is None
+        assert processes[0].returncode is not None, "The cancelled owner must retire its captured process"
         await supervisor.shutdown()
         assert processes[0].returncode is not None
         assert supervisor.get("completed-spawn").process is None

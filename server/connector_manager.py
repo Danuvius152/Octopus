@@ -94,7 +94,7 @@ def _env_client_creds(kind: str) -> tuple[str, str] | None:
 class ConnectorManager:
     def __init__(self, db: Database) -> None:
         self.db = db
-        self._locks: dict[str, asyncio.Lock] = {}
+        self._locks: dict[str | tuple[str | None, str, str], asyncio.Lock] = {}
 
     async def get(self, kind: str):
         """A connector by kind — built-in (code) or custom (DB), else None."""
@@ -282,17 +282,19 @@ class ConnectorManager:
             raise ConnectorError("Account is unavailable")
 
     async def persist_install(self, prepared: PreparedInstallation) -> dict[str, Any]:
-        return await self._store_installation(
-            prepared.kind, prepared.token_set, prepared.external_id, prepared.label,
-            prepared.user_id, prepared.secret_key,
-        )
+        if prepared.external_id:
+            # Installation identity does not exist yet on a first callback.
+            # Serialize its resolution before taking the chosen installation's
+            # normal refresh/update/delete lock. No provider I/O occurs here.
+            async with self._lock((prepared.user_id, prepared.kind, prepared.external_id)):
+                return await self._store_installation(prepared)
+        return await self._store_installation(prepared)
 
-    async def _store_installation(
-        self, kind: str, token_set: OAuthTokenSet, external_id: str, label: str,
-        user_id: str | None, secret_key: str,
-    ) -> dict[str, Any]:
+    async def _store_installation(self, prepared: PreparedInstallation) -> dict[str, Any]:
         """Persist an authorization under its captured account DEK."""
-        blob = encrypt(_serialize_token_set(token_set), secret_key)
+        kind, token_set = prepared.kind, prepared.token_set
+        external_id, user_id = prepared.external_id, prepared.user_id
+        blob = encrypt(_serialize_token_set(token_set), prepared.secret_key)
         token_expires_at = _expires_iso(token_set.expires_at_epoch)
 
         existing = (
@@ -302,33 +304,18 @@ class ConnectorManager:
             if external_id
             else None
         )
-        if existing is not None:
-            iid = existing["id"]
-            return await self.update_installation(
-                iid, user_id,
-                label=label,
-                scopes=list(token_set.scopes),
-                token_expires_at=token_expires_at,
-                needs_reconnect=False,
-                last_refresh_error_code=None,
-                secret_encrypted=blob,
-                require_available_owner=True,
-            )
-        else:
-            iid = uuid.uuid4().hex[:12]
-            return await self.db.save_connector_installation(
-                installation_id=iid,
-                kind=kind,
-                label=label,
-                auth_type="oauth",
-                secret_encrypted=blob,
-                created_at=datetime.now(UTC).isoformat(),
-                external_account_id=external_id or None,
-                scopes=list(token_set.scopes),
-                token_expires_at=token_expires_at,
-                user_id=user_id,
-                require_available_owner=True,
-            )
+        iid = existing["id"] if existing is not None else uuid.uuid4().hex[:12]
+        async with self._lock(iid):
+            try:
+                return await self.db.authorize_connector_installation(
+                    installation_id=iid, kind=kind, label=prepared.label,
+                    secret_encrypted=blob, created_at=datetime.now(UTC).isoformat(),
+                    external_account_id=external_id or None, scopes=list(token_set.scopes),
+                    token_expires_at=token_expires_at, user_id=user_id,
+                    expected_existing_id=existing["id"] if existing is not None else None,
+                )
+            except ValueError as exc:
+                raise ConnectorError(str(exc)) from exc
 
     async def update_installation(
         self, installation_id: str, user_id: str | None = None, **fields: Any
@@ -372,12 +359,23 @@ class ConnectorManager:
 
     # --- token access (the internal /token route) ------------------------
 
-    def _lock(self, installation_id: str) -> asyncio.Lock:
+    def _lock(self, installation_id: str | tuple[str | None, str, str]) -> asyncio.Lock:
         lock = self._locks.get(installation_id)
         if lock is None:
             lock = asyncio.Lock()
             self._locks[installation_id] = lock
         return lock
+
+    async def _save_refresh_result(self, installation_id: str, **fields: Any) -> None:
+        """Commit under the original installation lock and current account."""
+        try:
+            saved = await self.db.update_connector_installation(
+                installation_id, require_available_owner=True, **fields,
+            )
+        except ValueError as exc:
+            raise ConnectorError(str(exc)) from exc
+        if saved is None:
+            raise ConnectorError("connector installation not found")
 
     async def get_access_token(
         self, installation_id: str, user_id: str | None = None
@@ -390,6 +388,7 @@ class ConnectorManager:
         """
         secret_key = await UserManager(self.db).data_key_for(user_id)
         async with self._lock(installation_id):
+            await self.require_available_owner(user_id)
             inst = await self.db.get_connector_installation(installation_id, user_id)
             if inst is None or inst.get("user_id") != user_id:
                 raise ConnectorError("connector installation not found")
@@ -419,27 +418,23 @@ class ConnectorManager:
                         refresh_token=ts.refresh_token,
                     )
                 except Exception as e:  # provider/transport failure → reconnect
-                    saved = await self.db.update_connector_installation(
+                    await self._save_refresh_result(
                         installation_id,
                         needs_reconnect=True,
                         last_refresh_error_code=getattr(e, "code", "refresh_failed"),
                     )
-                    if not saved:
-                        raise ConnectorError("connector installation not found") from e
                     raise ConnectorError(f"token refresh failed: {e}") from e
                 # Providers may omit the refresh token when the old one stands.
                 if new_ts.refresh_token is None:
                     new_ts.refresh_token = ts.refresh_token
                 ts = new_ts
-                saved = await self.db.update_connector_installation(
+                await self._save_refresh_result(
                     installation_id,
                     secret_encrypted=encrypt(_serialize_token_set(ts), secret_key),
                     token_expires_at=_expires_iso(ts.expires_at_epoch),
                     needs_reconnect=False,
                     last_refresh_error_code=None,
                 )
-                if not saved:
-                    raise ConnectorError("connector installation not found")
 
             connector = await resolve_connector(self.db, inst["kind"])
             return {

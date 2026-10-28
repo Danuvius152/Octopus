@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import uuid
+from collections.abc import Callable
 from dataclasses import asdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -91,7 +92,6 @@ class ResearchManager:
         self._job_sem: asyncio.Semaphore | None = None
         self._closing = False
         self._shutdown_tasks: dict[str, asyncio.Task] | None = None
-        self._delivery_tasks: dict[str, asyncio.Task] = {}
         self._delivery_jobs: dict[str, tuple[str, str]] = {}
 
     def bind(self, session_mgr: SessionManager, db: Database) -> None:
@@ -101,6 +101,32 @@ class ResearchManager:
         self._closing = False
         self._shutdown_tasks = None
         session_mgr.on_broadcast("research.delivery", self._on_delivery_progress)
+
+    def _register_task(self, key: str, task: asyncio.Task, *, on_retired: Callable[[], None] | None = None) -> None:
+        """One owner for pipeline and delivery work, retaining failed teardown."""
+        self._tasks[key] = task
+        if self._shutdown_tasks is not None:
+            # A shielded original pipeline may hand off its accepted receipt
+            # after shutdown captured it. This is the same cleanup responsibility.
+            self._shutdown_tasks[key] = task
+        def finished(done: asyncio.Task) -> None:
+            error = None if done.cancelled() else done.exception()
+            if error is not None:
+                logger.error("research %s cleanup failed", key, exc_info=error)
+            elif self._tasks.get(key) is done:
+                self._tasks.pop(key)
+                if on_retired is not None:
+                    on_retired()
+        task.add_done_callback(finished)
+
+    async def wait_for_idle(self) -> None:
+        """Drain current pipelines and the delivery observers they create.
+
+        This does not close admission. Cancelling a waiter never cancels the
+        original research or receipt observation.
+        """
+        while self._tasks:
+            await asyncio.gather(*(asyncio.shield(task) for task in tuple(self._tasks.values())))
 
     async def recover_interrupted(self) -> int:
         """Boot sweep — mark prior-process `running` jobs interrupted."""
@@ -158,21 +184,16 @@ class ResearchManager:
             self._start_job(job_id, session_id, question, ready, owned, capture_configuration(session)),
             name=f"research-{job_id}",
         )
-        self._tasks[job_id] = task
         self._contexts[job_id] = owned
+        self._register_task(job_id, task, on_retired=lambda: self._contexts.pop(job_id, None))
 
         def finished(done: asyncio.Task) -> None:
             error = None if done.cancelled() else done.exception()
-            if error is None:
-                self._tasks.pop(job_id, None)
-                self._contexts.pop(job_id, None)
             if not ready.done():
                 ready.set_exception(error or ResearchError(
                     "ResearchManager is shutting down" if self._closing else "research launch cancelled",
                     status_code=503,
                 ))
-            if error is not None:
-                logger.error("research %s cleanup failed", job_id, exc_info=error)
 
         task.add_done_callback(finished)
         # A cancelled HTTP waiter does not surrender ownership of admitted work.
@@ -383,16 +404,8 @@ class ResearchManager:
         await self._advance_delivery(job_id, session_id, receipt.request_id, "processing" if processing else "queued")
         await self._settle_delivery(job_id, session_id)
         task = asyncio.create_task(self._observe_delivery(job_id, session_id, receipt), name=f"research-delivery-{job_id}")
-        self._delivery_tasks[job_id] = task
-        self._tasks[f"delivery:{job_id}"] = task
-        def finished(done):
-            if self._delivery_tasks.get(job_id) is done:
-                self._delivery_tasks.pop(job_id, None)
-            self._delivery_jobs.pop(receipt.request_id, None)
-            self._tasks.pop(f"delivery:{job_id}", None)
-            if not done.cancelled() and done.exception() is not None:
-                logger.error("Research delivery observation failed", exc_info=done.exception())
-        task.add_done_callback(finished)
+        self._register_task(f"delivery:{job_id}", task,
+                            on_retired=lambda: self._delivery_jobs.pop(receipt.request_id, None))
 
     async def _advance_delivery(self, job_id, session_id, request_id, stage, *, error=None):
         receipt = await self.db.advance_research_delivery(job_id, request_id, stage, error=error)
@@ -407,6 +420,8 @@ class ResearchManager:
 
     async def _observe_delivery(self, job_id, session_id, receipt):
         try:
+            if self._closing:
+                raise asyncio.CancelledError
             completion = await receipt.wait()
             successful = (completion.state == "completed" and completion.recording_state == "committed"
                           and completion.outcome is not None and completion.outcome.status == "success")
@@ -492,7 +507,7 @@ class ResearchManager:
         if self._closing:
             return
         self._closing = True
-        self._shutdown_tasks = {**self._tasks, **{f"delivery:{key}": task for key, task in self._delivery_tasks.items()}}
+        self._shutdown_tasks = dict(self._tasks)
         if self.session_mgr is not None:
             self.session_mgr.remove_broadcast("research.delivery")
         for task in self._shutdown_tasks.values():
@@ -505,11 +520,15 @@ class ResearchManager:
         tasks = self._shutdown_tasks or {}
         if not tasks:
             return
-        done, pending = await asyncio.wait(tasks.values(), timeout=timeout)
-        if pending:
-            jobs = ", ".join(job_id for job_id, task in tasks.items() if task in pending)
-            raise TimeoutError(f"research shutdown retirement unconfirmed: {jobs}")
-        for task in done:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            _, pending = await asyncio.wait(tuple(tasks.values()), timeout=max(0, deadline - asyncio.get_running_loop().time()))
+            if pending:
+                jobs = ", ".join(job_id for job_id, task in tasks.items() if task in pending)
+                raise TimeoutError(f"research shutdown retirement unconfirmed: {jobs}")
+            if all(task.done() for task in tasks.values()):
+                break
+        for task in tasks.values():
             if not task.cancelled():
                 task.result()
 

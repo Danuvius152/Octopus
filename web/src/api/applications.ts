@@ -5,6 +5,7 @@ import { accountFetch as fetch } from "../lib/accountFetch";
  * are served under `/apps/{id}/` and rendered in an iframe. */
 
 import type { ApplicationCreate, ApplicationRead, ApplicationUpdate } from ".";
+import { ListWriteError } from "../lib/listState";
 
 const API = window.location.origin;
 
@@ -22,18 +23,18 @@ async function json<T>(res: Response): Promise<T> {
     const body = await res.json().catch(() => null);
     const detail =
       body && typeof body.detail === "string" ? body.detail : `HTTP ${res.status}`;
-    throw new Error(detail);
+    throw new ListWriteError(detail, res.status < 500 && res.status !== 408 ? "refused" : "unknown");
   }
   return res.json() as Promise<T>;
 }
 
 export async function fetchApplications(
   token: string,
-  opts: { archived?: boolean } = {}
+  opts: { archived?: boolean; signal?: AbortSignal } = {}
 ): Promise<ApplicationRead[]> {
   const query = opts.archived ? "?archived=true" : "";
   return json(
-    await fetch(`${API}/api/applications${query}`, { headers: authHeaders(token) })
+    await fetch(`${API}/api/applications${query}`, { headers: authHeaders(token), signal: opts.signal })
   );
 }
 

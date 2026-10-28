@@ -159,8 +159,31 @@ what a daemonizing `start.sh` looks like from the outside.
 **Idle stop.** After `APP_BACKEND_IDLE_TIMEOUT` (default 15 minutes) with no
 proxied request, the process is stopped. The next request starts it again.
 Same reasoning as the CLI-process reaper in `inline-steering.md` §7, and the
-same hard bound: a cap on concurrently running backends, least-recently-used
-first, so N applications cannot pin N servers' worth of memory.
+same hard bound: at most four admitted backend lifecycles, including startup,
+running processes and unconfirmed retirement. The supervisor reserves a slot
+atomically on its event loop before spawn; only confirmed spawn failure or
+retirement of the original process group and output readers releases it.
+Dependency installation does not consume a backend slot.
+
+When full, admission stops an eligible RUNNING instance in least-recently-used
+order under that instance's lifecycle lock, with no requesting-app lifecycle
+lock held. Requests for the same app serialize admission, including eviction,
+so concurrent opens share a single start without retiring extra victims.
+Stop and install use only the lifecycle lock; admission never nests two apps'
+lifecycle locks. Startup and retirement do not hold a global capacity lock.
+If all slots are starting, busy or retiring, the new request gets HTTP 503 without forwarding its
+body. The same rule applies when a Wiki mutation reacquires backend admission.
+Capacity refusal does not mark the application failed or start crash backoff;
+there is no capacity wait queue. Failed retirement retains the original slot,
+including a process handle that arrives after its startup waiter is cancelled.
+Shutdown seals admission, joins captured operations and retires their resources;
+it reports incomplete cleanup instead of reusing an unconfirmed slot.
+
+Regression coverage in `tests/test_app_backend_capacity.py` exercises four real
+STARTING processes and a refused fifth proxy request, failed and cancelled
+startup, late spawn handoff, failed retirement, concurrent LRU admission, shared
+startup and admission, installation isolation and mutation re-admission.
+Process-group exit evidence supplements observable HTTP and backend behavior.
 
 **Rebuild restarts.** A build turn rewrites the code; the running process is
 still executing the old one. On build completion: stop, reinstall if needed,

@@ -3,6 +3,7 @@ import { useCallback, useEffect } from "react";
 import { IconActivity, IconBolt, IconClock, IconSettings } from "@tabler/icons-react";
 import { useSessionStore, type CredentialInfo, type Schedule } from "../stores/sessionStore";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
+import { schedules as scheduleList } from "../lib/scheduleList";
 
 const API = window.location.origin;
 
@@ -32,10 +33,11 @@ function nextRunLabel(schedules: Schedule[]): string | null {
  */
 export function SidebarManage() {
   const token = useSessionStore((s) => s.token);
+  const accountGeneration = useSessionStore((s) => s.accountGeneration);
   const mainView = useSessionStore((s) => s.mainView);
   const openManage = useSessionStore((s) => s.openManage);
   const schedules = useSessionStore((s) => s.schedules);
-  const setSchedules = useSessionStore((s) => s.setSchedules);
+  const scheduleRead = useSessionStore((s) => s.scheduleRead);
   const credentials = useSessionStore((s) => s.credentials);
   const setCredentials = useSessionStore((s) => s.setCredentials);
   const installations = useSessionStore((s) => s.connectorInstallations);
@@ -44,20 +46,17 @@ export function SidebarManage() {
   const load = useCallback(async () => {
     const headers = { Authorization: `Bearer ${token}` };
     try {
-      const [sRes, cRes] = await Promise.all([
-        fetch(`${API}/api/schedules`, { headers }),
-        fetch(`${API}/api/credentials`, { headers }),
-      ]);
-      if (sRes.ok) setSchedules((await sRes.json()) as Schedule[]);
+      void scheduleList.refresh();
+      const cRes = await fetch(`${API}/api/credentials`, { headers });
       if (cRes.ok) setCredentials((await cRes.json()) as CredentialInfo[]);
     } catch {
       // ignore
     }
-  }, [token, setSchedules, setCredentials]);
+  }, [token, setCredentials]);
 
   useEffect(() => {
     if (token) load();
-  }, [token, load]);
+  }, [token, accountGeneration, load]);
 
   const connectorError = installations.some((i) => i.needs_reconnect);
   const credentialError = credentials.some(
@@ -79,7 +78,7 @@ export function SidebarManage() {
           onClick={() => openManage("schedules")}
           summary={
             <>
-              {schedules.length}
+              {scheduleRead.error ? "not synchronized" : scheduleRead.loading && !scheduleRead.loaded && !schedules.length ? "loading…" : schedules.length}
               {next && <span className="text-gray-600"> · {next}</span>}
             </>
           }

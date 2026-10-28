@@ -33,12 +33,12 @@ export function sessionInfoFromDetail(detail: Record<string, unknown>): SessionI
  * transcript the sidebar and chat header can't name. No-op when it's already
  * there.
  */
-export async function hydrateSession(sessionId: string): Promise<void> {
+export async function hydrateSession(sessionId: string, current = () => true): Promise<void> {
   const store = useSessionStore.getState();
   if (!sessionId || !store.token) return;
   if (store.sessions.some((s) => s.id === sessionId)) return;
   try {
-    await loadSessionSnapshot(sessionId, store, (data) => addSessionInfo(sessionInfoFromDetail(data)));
+    await loadSessionSnapshot(sessionId, store, (data) => addSessionInfo(sessionInfoFromDetail(data)), current);
   } catch {
     // The mount fetch / reconnect refetch will pick it up.
   }
@@ -47,9 +47,10 @@ export async function hydrateSession(sessionId: string): Promise<void> {
 type SnapshotStart = ReturnType<typeof useSessionStore.getState>;
 type OnDetail = (detail: Record<string, unknown>) => void;
 
-async function applyDetailResponse(sessionId: string, res: Response, start: SnapshotStart, onDetail?: OnDetail) {
+async function applyDetailResponse(sessionId: string, res: Response, start: SnapshotStart, onDetail?: OnDetail, current = () => true) {
   if (!res.ok) throw new Error(`Could not load session state (HTTP ${res.status}).`);
   const data: Record<string, unknown> = await res.json();
+  if (!current()) return null;
   if (!applySessionSnapshot(sessionId, data, start)) return null;
   // Adopt detail in this same synchronous step, before an account change
   // can clear the applied transcript and start a new sidebar list.
@@ -65,14 +66,14 @@ async function applyBgResponse(sessionId: string, res: Response, start: Snapshot
 
 /** Capture the merge baseline before starting this detail request. Callers
  * with an earlier operation identity can pass that original store snapshot. */
-export async function loadSessionSnapshot(sessionId: string, start = useSessionStore.getState(), onDetail?: OnDetail) {
+export async function loadSessionSnapshot(sessionId: string, start = useSessionStore.getState(), onDetail?: OnDetail, current = () => true) {
   try {
     const res = await fetch(`${API}/api/sessions/${sessionId}`, {
       headers: { Authorization: `Bearer ${start.token}` },
     });
-    return await applyDetailResponse(sessionId, res, start, onDetail);
+    return await applyDetailResponse(sessionId, res, start, onDetail, current);
   } catch (error) {
-    useSessionStore.getState().setDispatchUnavailable(sessionId, true, start);
+    if (current()) useSessionStore.getState().setDispatchUnavailable(sessionId, true, start);
     throw error;
   }
 }

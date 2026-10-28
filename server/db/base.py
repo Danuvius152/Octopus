@@ -12,6 +12,7 @@ import aiosqlite
 
 from ..account_baseline import require_account_database
 from ..service_health import ServiceHealth
+from .projection import RecordProjection
 from .schema import initialize_main_storage, require_current_main_format
 from .transaction import Transaction
 
@@ -43,91 +44,32 @@ class DatabaseBase:
     checker honest about what it may touch.
     """
 
-    # Row mappers for the tables more than one domain reads. Each sits beside
-    # the column list it consumes — they are one unit, and separating them is
-    # how a column gets added to one and not the other.
+    # Complete SELECTs and field mappings share one explicit declaration.
+    # Conversion remains local to the domain; partial queries stay independent.
 
-    @staticmethod
-    def _row_to_application(row: sqlite3.Row) -> dict[str, Any]:
-        return {
-            "id": row[0],
-            "name": row[1],
-            "description": row[2],
-            "icon": row[3],
-            "icon_src": row[4],
-            "agent_id": row[5],
-            "session_id": row[6],
-            "app_dir": row[7],
-            "entrypoint": row[8],
-            "status": row[9],
-            "error": row[10],
-            "archived": bool(row[11]),
-            "created_at": row[12],
-            "updated_at": row[13],
-            "last_built_at": row[14],
-            "pinned": bool(row[15]),
-            "pin_order": row[16],
-            "user_id": row[17],
-        }
-    @staticmethod
-    def _row_to_bg_task(row: sqlite3.Row) -> dict[str, Any]:
-        return {
-            "id": row[0],
-            "session_id": row[1],
-            "command": row[2],
-            "description": row[3],
-            "working_dir": row[4],
-            "status": row[5],
-            "exit_code": row[6],
-            "stdout": row[7] or "",
-            "stderr": row[8] or "",
-            "truncated": bool(row[9]),
-            "started_at": row[10],
-            "completed_at": row[11],
-            "idle_timeout_seconds": row[12],
-            "timeout_seconds": row[13],
-            "stop_reason": row[14],
-            "work_id": row[15],
-            "knowledge_context": row[16],
-        }
-    @staticmethod
-    def _row_to_connector(row: sqlite3.Row) -> dict[str, Any]:
+    def _row_to_application(self, row: sqlite3.Row) -> dict[str, Any]:
+        record = self._APPLICATION_COLS.read(row)
+        record.update(archived=bool(record["archived"]), pinned=bool(record["pinned"]))
+        return record
+
+    def _row_to_bg_task(self, row: sqlite3.Row) -> dict[str, Any]:
+        record = self._BG_TASK_COLS.read(row)
+        record.update(stdout=record["stdout"] or "", stderr=record["stderr"] or "", truncated=bool(record["truncated"]))
+        return record
+
+    def _row_to_connector(self, row: sqlite3.Row) -> dict[str, Any]:
+        record = self._CONNECTOR_COLS.read(row)
         try:
-            scopes = json.loads(row[5]) if row[5] else []
+            record["scopes"] = json.loads(record["scopes"]) if record["scopes"] else []
         except (json.JSONDecodeError, TypeError):
-            scopes = []
-        return {
-            "id": row[0],
-            "kind": row[1],
-            "label": row[2],
-            "auth_type": row[3],
-            "external_account_id": row[4],
-            "scopes": scopes,
-            "enable_by_default": bool(row[6]),
-            "needs_reconnect": bool(row[7]),
-            "token_expires_at": row[8],
-            "last_refresh_error_code": row[9],
-            "created_at": row[10],
-            "user_id": row[11],
-        }
-    @staticmethod
-    def _row_to_research_job(row: sqlite3.Row) -> dict[str, Any]:
-        return {
-            "id": row[0],
-            "session_id": row[1],
-            "question": row[2],
-            "status": row[3],
-            "phase": row[4],
-            "error": row[5],
-            "report_path": row[6],
-            "cost": row[7],
-            "created_at": row[8],
-            "completed_at": row[9],
-            "injection_status": row[10],
-            "injected_at": row[11],
-            "knowledge_context": row[12],
-            "delivery_receipt": json.loads(row[13]) if row[13] else None,
-        }
+            record["scopes"] = []
+        record.update(enable_by_default=bool(record["enable_by_default"]), needs_reconnect=bool(record["needs_reconnect"]))
+        return record
+
+    def _row_to_research_job(self, row: sqlite3.Row) -> dict[str, Any]:
+        record = self._RESEARCH_COLS.read(row)
+        record["delivery_receipt"] = json.loads(record["delivery_receipt"]) if record["delivery_receipt"] else None
+        return record
 
     # Column lists and canned SQL shared by the domain mixins.
     #
@@ -136,62 +78,38 @@ class DatabaseBase:
     # research jobs and application threads, so `sessions` needs those column
     # lists too. Putting them here states that overlap once instead of
     # duplicating three tuples, and every mixin inherits this class anyway.
-    _CREDENTIAL_COLS = (
-        "c.id",
-        "c.backend",
-        "c.label",
-        "c.auth_type",
-        "s.secret_encrypted",
-        "c.created_at",
-        "c.status",
-        "c.token_expires_at",
-        "c.needs_reconnect",
-        "c.last_refresh_error_code",
-        # Appended, never inserted: these rows are mapped by POSITION below.
-        # It is here because the secret is encrypted with its *owner's* key —
-        # a row that cannot say who owns it is a row nothing can decrypt
-        # (multi-tenancy.md §4).
-        "c.user_id",
+    _CREDENTIAL_COLS = RecordProjection(
+        ("id", "c.id"), ("backend", "c.backend"), ("label", "c.label"), ("auth_type", "c.auth_type"),
+        ("secret_encrypted", "s.secret_encrypted"), ("created_at", "c.created_at"), ("status", "c.status"),
+        ("token_expires_at", "c.token_expires_at"), ("needs_reconnect", "c.needs_reconnect"),
+        ("last_refresh_error_code", "c.last_refresh_error_code"), ("user_id", "c.user_id"),
     )
-    _CONNECTOR_COLS = (
-        "id, kind, label, auth_type, external_account_id, scopes, "
-        "enable_by_default, needs_reconnect, token_expires_at, "
-        "last_refresh_error_code, created_at, "
-        # Appended, never inserted — see `_CREDENTIAL_COLS`. Same reason: the
-        # stored token is encrypted with its owner's key.
-        "user_id"
+    _CONNECTOR_COLS = RecordProjection(
+        "id", "kind", "label", "auth_type", "external_account_id", "scopes", "enable_by_default",
+        "needs_reconnect", "token_expires_at", "last_refresh_error_code", "created_at", "user_id",
     )
-    _CUSTOM_COLS = (
-        "kind, display_name, authorize_url, token_url, scopes, pkce, "
-        "api_base, created_at, updated_at"
+    _CUSTOM_COLS = RecordProjection(
+        "kind", "display_name", "authorize_url", "token_url", "scopes", "pkce", "api_base", "created_at", "updated_at",
     )
-    _AGENT_COLS = (
-        "id, name, description, avatar, system_prompt, model, credential_id, "
-        "mcp_servers, tool_allow, tool_deny, is_system, archived, "
-        "created_at, updated_at, backend, subagents, pinned, pin_order, "
-        # Appended, never inserted: `_row_to_agent` maps by position.
-        "user_id, reasoning_effort, service_tier"
+    _AGENT_COLS = RecordProjection(
+        *((name, f"a.{name}") for name in (
+            "id", "name", "description", "avatar", "system_prompt", "model", "credential_id", "mcp_servers",
+            "tool_allow", "tool_deny", "is_system", "archived", "created_at", "updated_at", "backend", "subagents",
+            "pinned", "pin_order", "user_id", "reasoning_effort", "service_tier",
+        )),
+        ("active_session_count", "(SELECT COUNT(*) FROM sessions s WHERE s.agent_id = a.id AND s.archived = 0)"),
     )
-    # Subquery counting live (non-archived) sessions for an agent — shared
-    # by load_agents and get_agent so the UI can show "3 sessions".
-    _ACTIVE_SESSION_COUNT = (
-        "(SELECT COUNT(*) FROM sessions s "
-        " WHERE s.agent_id = a.id AND s.archived = 0)"
+    _BG_TASK_COLS = RecordProjection(
+        "id", "session_id", "command", "description", "working_dir", "status", "exit_code", "stdout", "stderr",
+        "truncated", "started_at", "completed_at", "idle_timeout_seconds", "timeout_seconds", "stop_reason", "work_id", "knowledge_context",
     )
-    _BG_TASK_COLS = (
-        "id, session_id, command, description, working_dir, status, "
-        "exit_code, stdout, stderr, truncated, started_at, completed_at, "
-        "idle_timeout_seconds, timeout_seconds, stop_reason, work_id, knowledge_context"
+    _RESEARCH_COLS = RecordProjection(
+        "id", "session_id", "question", "status", "phase", "error", "report_path", "cost", "created_at", "completed_at",
+        "injection_status", "injected_at", "knowledge_context", "delivery_receipt",
     )
-    _RESEARCH_COLS = (
-        "id, session_id, question, status, phase, error, report_path, cost, "
-        "created_at, completed_at, injection_status, injected_at, knowledge_context, delivery_receipt"
-    )
-    _APPLICATION_COLS = (
-        "id, name, description, icon, icon_src, agent_id, session_id, "
-        "app_dir, entrypoint, status, error, archived, created_at, "
-        # Appended, never inserted: `_row_to_application` maps by position.
-        "updated_at, last_built_at, pinned, pin_order, user_id"
+    _APPLICATION_COLS = RecordProjection(
+        "id", "name", "description", "icon", "icon_src", "agent_id", "session_id", "app_dir", "entrypoint", "status", "error",
+        "archived", "created_at", "updated_at", "last_built_at", "pinned", "pin_order", "user_id",
     )
 
     # The position after every existing one, for a row being pinned now: it

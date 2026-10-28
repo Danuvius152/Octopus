@@ -86,7 +86,7 @@ class AgentsMixin(DatabaseBase):
         """Full installation rows for an agent's enabled connectors — the
         join SessionManager reads at spawn time to build the MCP set."""
         async with self.transaction(write=False) as tx:
-            cols = ", ".join(f"ci.{c}" for c in self._CONNECTOR_COLS.split(", "))
+            cols = self._CONNECTOR_COLS.sql("ci")
             cursor = await tx.execute(
                 f"SELECT {cols} FROM connector_installations ci "
                 "JOIN agent_connectors ac ON ac.installation_id = ci.id "
@@ -96,43 +96,18 @@ class AgentsMixin(DatabaseBase):
             rows = await cursor.fetchall()
             return [self._row_to_connector(row) for row in rows]
 
-    @staticmethod
-    def _row_to_agent(row: sqlite3.Row) -> dict[str, Any]:
+    def _row_to_agent(self, row: sqlite3.Row) -> dict[str, Any]:
+        agent = self._AGENT_COLS.read(row)
         try:
-            mcp_servers = json.loads(row[7]) if row[7] else []
+            agent["mcp_servers"] = json.loads(agent["mcp_servers"]) if agent["mcp_servers"] else []
         except (json.JSONDecodeError, TypeError):
-            mcp_servers = []
-        agent = {
-            "id": row[0],
-            "name": row[1],
-            "description": row[2] or "",
-            "avatar": row[3],
-            "system_prompt": row[4] or "",
-            "model": row[5],
-            "credential_id": row[6],
-            "mcp_servers": mcp_servers,
-            "tool_allow": row[8] or "",
-            "tool_deny": row[9] or "",
-            "is_system": bool(row[10]),
-            "archived": bool(row[11]),
-            "created_at": row[12],
-            "updated_at": row[13],
-            "backend": row[14] or "claude-code",
-            "subagents": _load_json_list(row[15]),
-            "pinned": bool(row[16]),
-            "pin_order": row[17],
-            "user_id": row[18],
-            "reasoning_effort": row[19],
-            "service_tier": row[20],
-        }
-        # The active-session count that `load_agents` / `get_agent` append
-        # after the columns. Derived from the column list rather than written
-        # as a literal, because a literal is what just broke: adding `user_id`
-        # to `_AGENT_COLS` shifted this by one and eighty tests went red with
-        # "active_session_count: input should be a valid integer".
-        trailing = len(DatabaseBase._AGENT_COLS.split(", "))
-        if len(row) > trailing:
-            agent["active_session_count"] = row[trailing]
+            agent["mcp_servers"] = []
+        for field in ("description", "system_prompt", "tool_allow", "tool_deny"):
+            agent[field] = agent[field] or ""
+        for field in ("is_system", "archived", "pinned"):
+            agent[field] = bool(agent[field])
+        agent["backend"] = agent["backend"] or "claude-code"
+        agent["subagents"] = _load_json_list(agent["subagents"])
         return agent
 
     async def save_agent(
@@ -190,9 +165,8 @@ class AgentsMixin(DatabaseBase):
         account and run a turn there.
         """
         async with self.transaction(write=False) as tx:
-            cols = ", ".join(f"a.{c}" for c in self._AGENT_COLS.split(", "))
             query = (
-                f"SELECT {cols}, {self._ACTIVE_SESSION_COUNT} FROM agents a"
+                f"SELECT {self._AGENT_COLS} FROM agents a"
             )
             where: list[str] = []
             params: list[Any] = []
@@ -214,8 +188,7 @@ class AgentsMixin(DatabaseBase):
         """One agent, or None — including when it exists and belongs to someone
         else, which a caller must not be able to tell from "no such agent"."""
         async with self.transaction(write=False) as tx:
-            cols = ", ".join(f"a.{c}" for c in self._AGENT_COLS.split(", "))
-            sql = f"SELECT {cols}, {self._ACTIVE_SESSION_COUNT} FROM agents a WHERE a.id = ?"
+            sql = f"SELECT {self._AGENT_COLS} FROM agents a WHERE a.id = ?"
             params: list[Any] = [agent_id]
             if user_id is not None:
                 sql += " AND a.user_id = ?"
@@ -238,9 +211,8 @@ class AgentsMixin(DatabaseBase):
         agent called "Octo" would be told somebody else already had one.
         """
         async with self.transaction(write=False) as tx:
-            cols = ", ".join(f"a.{c}" for c in self._AGENT_COLS.split(", "))
             query = (
-                f"SELECT {cols}, {self._ACTIVE_SESSION_COUNT} FROM agents a "
+                f"SELECT {self._AGENT_COLS} FROM agents a "
                 "WHERE a.name = ?"
             )
             params: list[Any] = [name]
@@ -266,9 +238,8 @@ class AgentsMixin(DatabaseBase):
         `user_id=None` still finds it.
         """
         async with self.transaction(write=False) as tx:
-            cols = ", ".join(f"a.{c}" for c in self._AGENT_COLS.split(", "))
             sql = (
-                f"SELECT {cols}, {self._ACTIVE_SESSION_COUNT} FROM agents a "
+                f"SELECT {self._AGENT_COLS} FROM agents a "
                 "WHERE a.is_system = 1"
             )
             params: list[Any] = []

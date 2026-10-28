@@ -11,7 +11,6 @@ import json
 import time
 import uuid
 from copy import deepcopy
-from dataclasses import replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
@@ -59,7 +58,7 @@ from .owner_runtime import (
     WorkRetirement,
 )
 from .runtime_types import QuotaExceeded, _Attempt, _Decision, _Settlement, _Turn
-from .submission import RequestCompletion, SubmissionReceipt, receipt_for_input
+from .submission import RequestCompletion, SubmissionReceipt, observed_input_receipt
 
 if TYPE_CHECKING:
     from ..knowledge import KnowledgeContext
@@ -72,7 +71,7 @@ class TurnsMixin(SessionManagerBase):
     async def dismiss_recoverable_input(self, session_id: str, client_id: str) -> bool:
         """Keep the confirmed recovery edit available after runtime retirement."""
 
-        if not await self.db.dismiss_client_submission(session_id, client_id):
+        if not await self.input_database().dismiss_client_submission(session_id, client_id):
             return False
         session = self.sessions.get(session_id)
         if session is not None:
@@ -148,9 +147,8 @@ class TurnsMixin(SessionManagerBase):
                     **(settlement.stored.tool_input or {}),
                     "attempt_context": {"request_id": settlement.request_id, "attempt_id": settlement.attempt_id},
                 }
-            if self.db:
-                settlement.seq = session._next_message_seq
-                session._next_message_seq += 1
+            settlement.seq = session._next_message_seq
+            session._next_message_seq += 1
             event = {
                 "type": "result", "session_id": session.id,
                 "request_id": settlement.request_id, "work_id": settlement.work_id,
@@ -183,32 +181,30 @@ class TurnsMixin(SessionManagerBase):
         if execution is None or execution.settlement is not settlement:
             raise SessionOwnerUnavailable("The original execution is no longer owned")
         stored = settlement.stored
-        if self.db:
-            try:
-                await self.db.record_terminal(
-                    request_id=settlement.request_id, session_id=session.id,
-                    seq=settlement.seq, role=stored.role.value, type=stored.type,
-                    content=stored.content, is_error=stored.is_error,
-                    session_id_ref=stored.session_id, cost=stored.cost,
-                    created_at=stored.created_at,
-                    **({"tool_input": stored.tool_input} if stored.tool_input is not None else {}),
-                )
-            except ValueError as error:
-                if str(error) != "terminal record conflict":
-                    raise
-                settlement.recording_state = "failed"
-                event = {"type": "recording_failed", "session_id": session.id,
-                         "request_id": settlement.request_id, "recording_state": "failed",
-                         "terminal": False, "message": "This request conflicts with an already recorded outcome."}
-                settlement.event = event
-                execution.frames.append(event)
-                owner.wake()
-                return event
-            # The transaction has returned its acknowledgement. A later
-            # projection failure must not erase this original committed fact.
-            settlement.recording_state = "committed"
-            session.restore_message_state(*await self.db.message_sequence_state(session.id))
+        assert self.db is not None
+        try:
+            await self.db.record_terminal(
+                request_id=settlement.request_id, session_id=session.id,
+                seq=settlement.seq, role=stored.role.value, type=stored.type,
+                content=stored.content, is_error=stored.is_error,
+                session_id_ref=stored.session_id, cost=stored.cost,
+                created_at=stored.created_at,
+                **({"tool_input": stored.tool_input} if stored.tool_input is not None else {}),
+            )
+        except ValueError as error:
+            if str(error) != "terminal record conflict":
+                raise
+            settlement.recording_state = "failed"
+            event = {"type": "recording_failed", "session_id": session.id,
+                     "request_id": settlement.request_id, "recording_state": "failed",
+                     "terminal": False, "message": "This request conflicts with an already recorded outcome."}
+            settlement.event = event
+            execution.frames.append(event)
+            owner.wake()
+            return event
+        # Original commit acknowledgement precedes projection and publication.
         settlement.recording_state = "committed"
+        session.restore_message_state(*await self.db.message_sequence_state(session.id))
         execution.frames.append(deepcopy(settlement.event))
         owner.wake()
         return settlement.event
@@ -266,7 +262,7 @@ class TurnsMixin(SessionManagerBase):
         git_status_clean: bool | None = None,
         sequence: int | None = None,
     ) -> int | None:
-        """Persist and return the assigned seq (or None if no DB).
+        """Persist and return the assigned seq.
 
         Callers tag broadcast/yield events with this seq so clients can
         dedupe against the snapshot returned by GET /api/sessions/{id}
@@ -276,8 +272,7 @@ class TurnsMixin(SessionManagerBase):
         user-message rows (session-rewind.md §5.6.3); None elsewhere.
         """
         self._require_session_writer(session)
-        if not self.db:
-            return None
+        assert self.db is not None
         seq = session._next_message_seq if sequence is None else sequence
         session._next_message_seq = max(session._next_message_seq, seq + 1)
         # Decided here rather than in the DB layer so the caller's own
@@ -455,16 +450,28 @@ class TurnsMixin(SessionManagerBase):
         delivery_id: str | None = None, work_id: str | None = None,
         question_session_id: str | None = None, question_id: str | None = None,
         request_id: str | None = None, trusted_request: str | None = None,
-        knowledge_context: KnowledgeContext | None = None, durable_client_input: bool = False,
+        knowledge_context: KnowledgeContext | None = None,
         client_request_id: str | None = None, recovery_of_client_id: str | None = None,
         schedule: dict[str, Any] | None = None,
     ) -> SubmissionReceipt:
+        database = self.input_database()
         session = self.sessions.get(session_id)
         if session is None:
             raise ValueError(f"Session {session_id} not found")
         if self._admission_closed:
-            if delivery_id and delivery_id in session._delivery_receipts:
-                return replace(session._delivery_receipts[delivery_id], disposition="duplicate")
+            from ..submission_models import SubmissionConflict
+            from .client_submissions import input_digest
+
+            identity = client_request_id or (f"{source}:{delivery_id}" if delivery_id else request_id)
+            if identity:
+                row = await database.get_client_submission(session.id, identity)
+                if row is not None:
+                    payload: dict[str, Any] = {"content": prompt, "attachment_ids": list(attachment_ids or []), "wiki_mode": wiki_mode}
+                    if recovery_of_client_id:
+                        payload["recovery_of_client_id"] = recovery_of_client_id
+                    if row["payload_sha256"] != input_digest(payload):
+                        raise SubmissionConflict("This submission identity already belongs to different input.")
+                    return observed_input_receipt(row, session)
             return SubmissionReceipt.closed(request_id or uuid.uuid4().hex, "shutdown")
         from .client_submissions import _files
 
@@ -475,7 +482,6 @@ class TurnsMixin(SessionManagerBase):
             prompt, list(attachment_ids or []), wiki_mode=wiki_mode, source=source,
             delivery_id=delivery_id, work_id=work_id, question_session_id=question_session_id,
             question_id=question_id, trusted_request=trusted_request, knowledge_context=knowledge_context,
-            durable_client_input=durable_client_input,
             **({"request_id": request_id} if request_id else {}),
         )
         owner = self._session_owners.get(id(session)) or self._session_owner(session)
@@ -483,14 +489,12 @@ class TurnsMixin(SessionManagerBase):
 
     async def source_receipt(self, source: str, delivery_id: str, *, session_id: str | None = None) -> tuple[str, SubmissionReceipt] | None:
         """Confirm the original acceptance even after its target or caller retires."""
-        if self.db is None:
-            return None
-        row = await self.db.get_source_submission(source, delivery_id, session_id=session_id)
+        database = self.input_database()
+        row = await database.get_source_submission(source, delivery_id, session_id=session_id)
         if row is None:
             return None
         session = self.sessions.get(row["session_id"])
-        future = session._request_completions.get(row["request_id"]) if session is not None else None
-        return row["session_id"], receipt_for_input(row, future)
+        return row["session_id"], observed_input_receipt(row, session)
 
     async def start_one_shot(self, schedule: dict[str, Any], prompt: str, context: KnowledgeContext) -> tuple[str, SubmissionReceipt]:
         """Prepare the target; Owner commits target, input and consumption once."""
@@ -1353,8 +1357,8 @@ class TurnsMixin(SessionManagerBase):
         credential_id, backend = effective["credential_id"], session.backend
 
         async def authorize_spawn() -> None:
-            if database is not None:
-                await database.require_run_authority(user_id, credential_id, backend)
+            assert database is not None, "Execution requires its admitted input database"
+            await database.require_run_authority(user_id, credential_id, backend)
 
         return RunConfig(
             session_id=session.id,

@@ -129,6 +129,41 @@ async def receipt_frame(outgoing, kind):
             return result
 
 
+async def test_unready_ws_input_is_unaccepted_and_same_identity_can_be_retried_after_recovery(runtime, monkeypatch, tmp_path):
+    manager, db, bearer = runtime
+    agent = await db.get_system_agent()
+    session = await manager.create_session(agent["id"], "Recovery barrier", str(tmp_path))
+    starts = hold_model_runs(manager, monkeypatch)
+    entered, release = asyncio.Event(), asyncio.Event()
+    load = db.load_sessions
+    async def held_load(*args, **kwargs):
+        rows = await load(*args, **kwargs)
+        entered.set()
+        await release.wait()
+        return rows
+    monkeypatch.setattr(db, "load_sessions", held_load)
+    payload = {"type": "send_message", "session_id": session.id, "content": "Retain my identity", "client_request_id": "retry-after-recovery"}
+    async with connection(manager, bearer) as browser:
+        initializing = asyncio.create_task(manager.initialize(db))
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            await browser[0].put({"type": "websocket.receive", "text": json.dumps(payload)})
+            refused = await receipt_frame(browser[1], "submission")
+            assert refused["accepted"] is False and refused["code"] == "service_not_ready"
+            assert "state" not in refused and starts.empty()
+            assert await db.get_client_submission(session.id, payload["client_request_id"]) is None
+        finally:
+            release.set()
+            await initializing
+        await browser[0].put({"type": "websocket.receive", "text": json.dumps(payload)})
+        accepted = await receipt_frame(browser[1], "submission")
+        assert accepted["accepted"] is True
+        await asyncio.wait_for(starts.get(), 2)
+        assert starts.empty()
+        assert (await db.get_client_submission(session.id, payload["client_request_id"]))["request_id"] == accepted["request_id"]
+        await manager.interrupt(session.id)
+
+
 async def test_submission_identity_survives_ack_loss_reconnect_and_manager_restart(runtime, monkeypatch, tmp_path):
     manager, db, bearer = runtime
     agent = await db.get_system_agent()

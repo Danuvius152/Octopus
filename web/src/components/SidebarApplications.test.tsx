@@ -6,9 +6,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 import { SidebarApplications } from "./SidebarApplications";
+import { handleWsMessage } from "../hooks/useWebSocket";
+import { applications as applicationList } from "../lib/applicationList";
 import { useSessionStore, type Application } from "../stores/sessionStore";
 
 function application(overrides: Partial<Application> = {}): Application {
@@ -38,6 +40,7 @@ let fetchMock: ReturnType<typeof vi.fn>;
 beforeEach(() => {
   useSessionStore.setState({
     token: "tok",
+    accountGeneration: useSessionStore.getState().accountGeneration + 1,
     applications: [],
     activeApplicationId: null,
     mainView: "chat",
@@ -49,11 +52,27 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  useSessionStore.getState().setToken("");
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
 
 describe("SidebarApplications", () => {
+  it("keeps an observed ready push when an older building snapshot returns", async () => {
+    let finishRead!: (value: Response) => void;
+    const oldRead = new Promise<Response>((resolve) => { finishRead = resolve; });
+    fetchMock.mockImplementationOnce(() => oldRead);
+    const ready = application({ status: "ready", session_id: null });
+    fetchMock.mockImplementation(async () => new Response(JSON.stringify([ready])));
+    render(<SidebarApplications />);
+    await act(async () => {
+      handleWsMessage({ type: "application_updated", application: ready });
+      finishRead(new Response(JSON.stringify([{ ...ready, status: "building" }]), { status: 200 }));
+    });
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2));
+    expect(useSessionStore.getState().applications[0]?.status).toBe("ready");
+  });
+
   it("seeds the list from GET /api/applications", async () => {
     fetchMock.mockImplementation(
       async () =>
@@ -84,9 +103,9 @@ describe("SidebarApplications", () => {
     expect(useSessionStore.getState().activeApplicationId).toBeNull();
   });
 
-  it("offers the create flow when there are none", () => {
+  it("offers the create flow when there are none", async () => {
     render(<SidebarApplications />);
-    fireEvent.click(screen.getByText(/No applications yet/));
+    fireEvent.click(await screen.findByText(/No applications yet/));
     expect(useSessionStore.getState().mainView).toBe("application-create");
   });
 
@@ -139,14 +158,11 @@ describe("SidebarApplications", () => {
 
   it("unpin POSTs and takes the row out of the sidebar", async () => {
     useSessionStore.setState({ applications: [application()] });
-    fetchMock.mockImplementation(async (url: unknown) =>
-      String(url).endsWith("/a1/unpin")
-        ? new Response(JSON.stringify(application({ pinned: false })), {
-            status: 200,
-            headers: { "Content-Type": "application/json" },
-          })
-        : new Response("[]", { status: 200 })
-    );
+    let row = application();
+    fetchMock.mockImplementation(async (url: unknown) => {
+      if (String(url).endsWith("/a1/unpin")) { row = { ...row, pinned: false }; return new Response(JSON.stringify(row)); }
+      return new Response(JSON.stringify([row]));
+    });
     render(<SidebarApplications />);
     fireEvent.click(screen.getByLabelText("Unpin Habit Tracker from the sidebar"));
     await waitFor(() => expect(screen.queryByText("Habit Tracker")).toBeNull());
@@ -158,6 +174,25 @@ describe("SidebarApplications", () => {
     useSessionStore.setState({ applications: [application()] });
     render(<SidebarApplications />);
     expect(screen.queryByLabelText("Delete Habit Tracker")).toBeNull();
+  });
+
+  it("blocks pin buttons and keyboard dragging while an order write is pending", async () => {
+    const rows = [application(), application({ id: "a2", name: "Second", pin_order: 2 })];
+    useSessionStore.setState({ applications: rows });
+    let finish!: (response: Response) => void;
+    fetchMock.mockImplementation(async (_url: unknown, init?: RequestInit) => init?.method === "PUT"
+      ? new Promise<Response>((resolve) => { finish = resolve; }) : new Response(JSON.stringify(rows)));
+    const { container } = render(<SidebarApplications />);
+    let saving!: Promise<Application[]>;
+    act(() => { saving = applicationList.reorder(["a2", "a1"]); });
+    for (const button of container.querySelectorAll(".btn-application-unpin")) expect((button as HTMLButtonElement).disabled).toBe(true);
+    const first = container.querySelector(".application-item")!;
+    expect(first.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.keyDown(first, { key: " ", code: "Space" });
+    fireEvent.keyDown(first, { key: "ArrowDown", code: "ArrowDown" });
+    fireEvent.keyDown(first, { key: " ", code: "Space" });
+    expect(fetchMock.mock.calls.filter(([, init]) => (init as RequestInit)?.method === "PUT")).toHaveLength(1);
+    await act(async () => { finish(new Response(JSON.stringify(rows))); await saving; });
   });
 
   it("an unpinned app shows while open, building, or failed unseen", () => {
@@ -205,7 +240,7 @@ describe("SidebarApplications", () => {
       activeApplicationId: "a1",
       mainView: "application",
     });
-    useSessionStore.getState().removeApplication("a1");
+    handleWsMessage({ type: "application_deleted", application_id: "a1" });
     expect(useSessionStore.getState().mainView).toBe("chat");
     expect(useSessionStore.getState().activeApplicationId).toBeNull();
   });

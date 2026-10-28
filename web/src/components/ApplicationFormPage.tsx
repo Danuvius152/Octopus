@@ -1,17 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   IconAppWindow,
   IconArchive,
   IconSparkles,
 } from "@tabler/icons-react";
-import {
-  archiveApplication,
-  createApplication,
-  fetchApplications,
-  setApplicationPinned,
-  unarchiveApplication,
-} from "../api/applications";
-import { pinnedInOrder } from "../lib/sidebarPins";
+import { applications as applicationList, orderedApplicationPins } from "../lib/applicationList";
 import {
   useSessionStore,
   type Application,
@@ -39,40 +32,56 @@ export function ApplicationFormPage({
   onToggleSidebar: () => void;
 }) {
   const token = useSessionStore((s) => s.token);
+  const accountGeneration = useSessionStore((s) => s.accountGeneration);
   const agents = useSessionStore((s) => s.agents);
   const activeAgentId = useSessionStore((s) => s.activeAgentId);
-  const upsertApplication = useSessionStore((s) => s.upsertApplication);
   const openApplication = useSessionStore((s) => s.openApplication);
-  const removeApplication = useSessionStore((s) => s.removeApplication);
   const showChat = useSessionStore((s) => s.showChat);
   const applications = useSessionStore((s) => s.applications);
   const tab = useSessionStore((s) => s.pageTab);
   const setTab = useSessionStore((s) => s.setPageTab);
 
-  const [archived, setArchived] = useState<Application[]>([]);
+  const archived = useSessionStore((s) => s.archivedApplications);
+  const reads = useSessionStore((s) => s.applicationReads);
+  const ordering = useSessionStore((s) => s.applicationOrdering);
+  const pinOrder = useSessionStore((s) => s.applicationPinOrder);
   const [name, setName] = useState("");
   const [icon, setIcon] = useState("");
   const [description, setDescription] = useState("");
   const [instructions, setInstructions] = useState("");
   const [pickedAgentId, setPickedAgentId] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
+  const [operation, setOperation] = useState<{ current: () => boolean } | null>(null);
+  const [created, setCreated] = useState<{ id: string; current: () => boolean; canNavigate: () => boolean } | null>(null);
+  const navigation = useRef(0);
+  const busy = !!operation?.current() || !!created?.current();
   const [error, setError] = useState<string | null>(null);
 
-  const loadArchived = useCallback(async () => {
-    try {
-      setArchived(await fetchApplications(token, { archived: true }));
-    } catch {
-      // The tab simply shows empty; the create flow is unaffected.
-    }
-  }, [token]);
+  useEffect(() => useSessionStore.subscribe((state, before) => {
+    if ((state.mainView !== before.mainView || state.pageTab !== before.pageTab) &&
+      (state.mainView !== "application-create" || state.pageTab !== "form")) navigation.current++;
+  }), []);
 
   useEffect(() => {
-    // Fetch-on-mount: the state lands in a promise callback, not in the
-    // effect body, so there's no cascading render — the lint rule can't see
-    // through the async boundary.
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    void loadArchived();
-  }, [loadArchived]);
+    if (token && tab === "all") {
+      void applicationList.refresh();
+      void applicationList.refresh("archived");
+    }
+  }, [token, accountGeneration, tab]);
+
+  useEffect(() => {
+    if (!created) return;
+    const synchronized = () => {
+      const state = useSessionStore.getState();
+      if (!created.current() || !state.applications.some((row) => row.id === created.id)) return;
+      setCreated(null);
+      if (created.canNavigate() && state.mainView === "application-create" && state.pageTab === "form") {
+        openApplication(created.id);
+      }
+    };
+    const unsubscribe = useSessionStore.subscribe(synchronized);
+    synchronized();
+    return unsubscribe;
+  }, [created, openApplication]);
 
   // Derived, not synced through an effect, so a late-arriving agent list can't
   // stomp a choice the user already made.
@@ -91,54 +100,56 @@ export function ApplicationFormPage({
 
   const submit = async () => {
     if (!canSubmit) return;
-    setBusy(true);
+    const current = applicationList.accountGuard();
+    const startNavigation = navigation.current;
+    setOperation({ current });
     setError(null);
     try {
-      const app = await createApplication(token, {
+      const app = await applicationList.create({
         name: name.trim(),
         description: description.trim(),
         agent_id: agentId,
         icon: icon.trim() || null,
         instructions: instructions.trim(),
       });
-      upsertApplication(app);
-      openApplication(app.id);
+      if (current()) setCreated({ id: app.id, current, canNavigate: () => navigation.current === startNavigation });
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to create application");
-      setBusy(false);
+      if (current()) setError(e instanceof Error ? e.message : "Failed to create application");
+    } finally {
+      if (current()) setOperation(null);
     }
   };
 
   // Restoring stays on the All tab: the app reappears under "In sidebar"
   // (the server pins what it restores), which is the confirmation.
   const restore = async (app: Application) => {
+    const current = applicationList.currentGuard();
     setError(null);
     try {
-      upsertApplication(await unarchiveApplication(token, app.id));
-      setArchived((cur) => cur.filter((a) => a.id !== app.id));
+      await applicationList.restore(app.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to restore");
+      if (current()) setError(e instanceof Error ? e.message : "Failed to restore");
     }
   };
 
   const archive = async (app: Application) => {
     if (!window.confirm(`Archive "${app.name}"? Its files are kept.`)) return;
+    const current = applicationList.currentGuard();
     setError(null);
     try {
-      const row = await archiveApplication(token, app.id);
-      removeApplication(app.id);
-      setArchived((cur) => [...cur, row]);
+      await applicationList.archive(app.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to archive");
+      if (current()) setError(e instanceof Error ? e.message : "Failed to archive");
     }
   };
 
   const togglePin = async (app: Application, pinned: boolean) => {
+    const current = applicationList.currentGuard();
     setError(null);
     try {
-      upsertApplication(await setApplicationPinned(token, app.id, pinned));
+      await applicationList.setPinned(app.id, pinned);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to update the sidebar");
+      if (current()) setError(e instanceof Error ? e.message : "Failed to update the sidebar");
     }
   };
 
@@ -185,11 +196,24 @@ export function ApplicationFormPage({
               {error}
             </div>
           )}
+          {created?.current() && <p role="status">Created. Synchronizing the application…</p>}
+          {(tab === "all" || created?.current()) && (reads.live.error || reads.archived.error) && (
+            <div role="alert">
+              <p>List not synchronized: {reads.live.error || reads.archived.error}</p>
+              <Button variant="outline" onClick={() => {
+                void applicationList.refresh();
+                if (tab === "all") void applicationList.refresh("archived");
+              }}>Refresh applications</Button>
+            </div>
+          )}
 
           {tab === "all" ? (
             <ApplicationLibrary
               live={applications}
               archived={archived}
+              ordering={ordering}
+              pinOrder={pinOrder}
+              loaded={reads.live.loaded && reads.archived.loaded && !reads.live.error && !reads.archived.error}
               onOpen={(a) => openApplication(a.id)}
               onTogglePin={togglePin}
               onArchive={archive}
@@ -366,6 +390,9 @@ function ApplicationLibrary({
   onArchive,
   onRestore,
   onCreate,
+  ordering,
+  pinOrder,
+  loaded,
 }: {
   live: Application[];
   archived: Application[];
@@ -374,9 +401,12 @@ function ApplicationLibrary({
   onArchive: (app: Application) => void;
   onRestore: (app: Application) => void;
   onCreate: () => void;
+  ordering: boolean;
+  pinOrder: string[] | null;
+  loaded: boolean;
 }) {
   const ordered = [
-    ...pinnedInOrder(live),
+    ...orderedApplicationPins(live, pinOrder),
     ...live.filter((a) => a.pinned === false),
     ...archived,
   ];
@@ -388,6 +418,7 @@ function ApplicationLibrary({
     icon: <AppIcon app={a} />,
     meta: a.status,
     pinned: a.pinned !== false,
+    pinDisabled: ordering,
     archived: !!a.archived,
   }));
 
@@ -433,7 +464,7 @@ function ApplicationLibrary({
         );
       }}
       empty={
-        <>
+        loaded ? <>
           <IconAppWindow size={22} className="mx-auto mb-3 text-gray-600" />
           <p className="text-sm text-gray-900">No applications yet.</p>
           <button
@@ -443,7 +474,7 @@ function ApplicationLibrary({
           >
             Describe one for an agent to build
           </button>
-        </>
+        </> : <p>Applications have not finished loading.</p>
       }
     />
   );

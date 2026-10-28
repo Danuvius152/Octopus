@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, Literal
 
 from ..models import TurnOutcome
+
+if TYPE_CHECKING:
+    from .base import Session
 
 
 @dataclass(frozen=True)
@@ -55,3 +58,18 @@ def receipt_for_input(row: dict[str, Any], future: asyncio.Future[RequestComplet
             notification_state="unavailable",
         ))
     return SubmissionReceipt("duplicate" if row["receipt"] and row["receipt"]["accepted"] else "closed", request_id, future)
+
+
+def observed_input_receipt(row: dict[str, Any], session: Session | None) -> SubmissionReceipt:
+    """Keep the original observed completion after durable identity checks.
+
+    The saved row proves admission; only the original process can also know
+    its exact notification/retirement outcome. Reconstruct only without that
+    observation, never replacing a known completion with an inference.
+    """
+    if session is not None:
+        original = session._delivery_receipts.get((row["payload"] or {}).get("delivery_id"))
+        if original is not None and original.request_id == row["request_id"]:
+            return replace(original, disposition="duplicate")
+    future = session._request_completions.get(row["request_id"]) if session is not None else None
+    return receipt_for_input(row, future)

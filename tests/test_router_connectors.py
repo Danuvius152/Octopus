@@ -112,6 +112,37 @@ async def _install(client, code="abc"):
     return insts[-1], login_id
 
 
+async def test_two_first_oauth_callbacks_commit_one_installation_and_both_succeed(client, monkeypatch):
+    await _configure(client)
+    started = [await _start(client) for _ in range(2)]
+    login_ids = [response.json()["login_id"] for response in started]
+    logins = [connectors_mod._login_mgr.get(login_id) for login_id in login_ids]
+    both = asyncio.Event()
+    calls = 0
+
+    async def identity(connector, token_set):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            both.set()
+        await both.wait()
+        return "same-provider-account", "Shared account"
+
+    monkeypatch.setattr(FakeConnector, "fetch_external_identity", identity)
+    pages = await asyncio.wait_for(asyncio.gather(*(
+        client.get("/api/connectors/oauth/callback", params={"code": str(index), "state": f"{login_ids[index]}:{login.state}"})
+        for index, login in enumerate(logins)
+    )), 3)
+    assert all(page.status_code == 200 and "is connected" in page.text for page in pages)
+    statuses = [(await client.get(f"/api/connectors/oauth/status/{login_id}")).json() for login_id in login_ids]
+    assert all(status["status"] == "success" for status in statuses)
+    assert statuses[0]["installation_id"] == statuses[1]["installation_id"]
+    installations = (await client.get("/api/connectors")).json()
+    assert len(installations) == 1
+    assert installations[0]["id"] == statuses[0]["installation_id"]
+    assert "secret_encrypted" not in installations[0] and "access_token" not in installations[0]
+
+
 async def _new_agent(client, name="Researcher"):
     r = await client.post("/api/agents", json={"name": name}, headers=client.headers)
     assert r.status_code == 201, r.text
@@ -392,7 +423,7 @@ async def test_oauth_cancel_and_binding_choose_one_result(client, monkeypatch, s
     elif stage == "identity":
         host, name = FakeConnector, "fetch_external_identity"
     else:
-        host, name = connectors_mod._require_manager().db, "save_connector_installation"
+        host, name = connectors_mod._require_manager().db, "authorize_connector_installation"
     original = getattr(host, name)
 
     async def held(*args, **kwargs):
@@ -469,13 +500,13 @@ async def test_oauth_binding_rechecks_account_inside_persistence(client, monkeyp
     login_id = (await _start(client)).json()["login_id"]
     login = connectors_mod._login_mgr.get(login_id)
     manager = connectors_mod._require_manager()
-    persist = manager.db.save_connector_installation
+    persist = manager.db.authorize_connector_installation
 
     async def revoke_before_commit(**kwargs):
         await manager.db.update_user_field(login.user_id, disabled_at="2026-10-27T00:00:00Z")
         return await persist(**kwargs)
 
-    monkeypatch.setattr(manager.db, "save_connector_installation", revoke_before_commit)
+    monkeypatch.setattr(manager.db, "authorize_connector_installation", revoke_before_commit)
     await client.get("/api/connectors/oauth/callback", params={"code": "abc", "state": f"{login_id}:{login.state}"})
     assert await manager.list_installations(user_id=login.user_id) == []
     assert login.status.value == "error"

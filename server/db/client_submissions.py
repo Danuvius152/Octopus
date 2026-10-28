@@ -20,6 +20,7 @@ _SELECT = (
     f"SELECT {','.join('i.' + column for column in _COLUMNS)},successor.client_id,m.content "
     "FROM client_submissions i LEFT JOIN messages m ON m.session_id=i.session_id "
     "AND m.terminal_request_id=COALESCE(i.execution_owner,i.request_id) "
+    "AND (i.execution_owner IS NULL OR i.execution_owner=i.request_id OR i.delivery_state<>'none') "
     "LEFT JOIN client_submissions successor ON successor.session_id=i.session_id AND successor.recovery_of=i.client_id "
 )
 

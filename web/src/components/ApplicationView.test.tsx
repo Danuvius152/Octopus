@@ -6,6 +6,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -14,6 +15,7 @@ import {
 } from "@testing-library/react";
 
 import { ApplicationView } from "./ApplicationView";
+import { applications as applicationList } from "../lib/applicationList";
 import { useSessionStore, type Application } from "../stores/sessionStore";
 
 function application(overrides: Partial<Application> = {}): Application {
@@ -69,9 +71,10 @@ function mount(app: Application) {
 }
 
 beforeEach(() => {
+  useSessionStore.setState({ token: "tok", accountGeneration: useSessionStore.getState().accountGeneration + 1 });
   fetchMock = vi.fn(
-    async () =>
-      new Response(JSON.stringify(application()), {
+    async (_url: unknown, init?: RequestInit) =>
+      new Response(JSON.stringify(init?.method === "POST" ? application() : [application()]), {
         status: 200,
         headers: { "Content-Type": "application/json" },
       })
@@ -97,6 +100,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  useSessionStore.getState().setToken("");
   restoreCookie?.();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
@@ -156,9 +160,7 @@ describe("ApplicationView", () => {
     const before = container
       .querySelector("iframe.application-frame")!
       .getAttribute("src");
-    useSessionStore.getState().upsertApplication(
-      application({ last_built_at: "2026-02-02T00:00:00Z" })
-    );
+    act(() => applicationList.receive({ type: "application_updated", application: application({ last_built_at: "2026-02-02T00:00:00Z", session_id: null }) }));
     rerender(<ApplicationView onToggleSidebar={() => {}} />);
     expect(
       container.querySelector("iframe.application-frame")!.getAttribute("src")

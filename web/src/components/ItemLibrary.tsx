@@ -17,6 +17,7 @@ export interface LibraryItem {
   archived: boolean;
   /** Pinned and not allowed to change — the Default Agent. */
   pinLocked?: boolean;
+  pinDisabled?: boolean;
 }
 
 /** The All tab of the Agents and Applications pages (sidebar-pins.md §6).
@@ -197,6 +198,7 @@ function PinToggle({
           : "text-gray-600 hover:bg-gray-100 hover:text-gray-900"
       }`}
       onClick={() => onTogglePin(item, !item.pinned)}
+      disabled={item.pinDisabled}
       aria-pressed={item.pinned}
       title={item.pinned ? "Unpin from sidebar" : "Pin to sidebar"}
       aria-label={

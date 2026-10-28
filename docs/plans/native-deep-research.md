@@ -193,6 +193,19 @@ delegations use this same return boundary, including delegated questions.
 Restoration carries dispatch ordering within the current service generation,
 so delayed lifecycle notifications cannot replace a newer list projection.
 
+Pipeline owners and report-delivery observers share one task registry and one
+registration entry. `wait_for_idle()` joins both phases without closing admission;
+a completed report alone does not mean its follow-up receipt has settled. Done
+callbacks release only the registration they still own. Observation failures
+remain visible to draining and shutdown instead of disappearing after logging.
+Shutdown closes admission, captures the original registry once and cancels each
+live owner at most once. A timeout preserves that snapshot for a later join,
+including cancellation cleanup still writing an unknown delivery result. Observers
+handed off by a shielded original pipeline during shutdown join that
+same snapshot and settle unknown without replaying the accepted request. Request
+to job/session routing and exact-version browser confirmation remain separate
+facts; neither is a second task registry or a prerequisite for business delivery.
+
 A web leaf needs a successful provider terminal. Parseable text followed by
 EOF without that terminal remains diagnostic material and supplies neither
 search findings nor verification votes. Cleanup failures retain the original

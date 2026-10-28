@@ -90,7 +90,7 @@ async def _git(working_dir: str, *args: str, timeout: float = 10.0) -> tuple[int
         return (-1, "", "git timed out")
     return (
         proc.returncode if proc.returncode is not None else -1,
-        out.decode(errors="replace"),
+        os.fsdecode(out),
         err.decode(errors="replace"),
     )
 
@@ -104,10 +104,10 @@ async def capture_git_anchor(working_dir: str) -> tuple[str | None, bool | None]
     if rc != 0 or not out.strip():
         return (None, None)
     head = out.strip()
-    rc2, out2, _ = await _git(working_dir, "status", "--porcelain")
+    rc2, out2, _ = await _git(working_dir, "status", "--porcelain=v1", "-z", "--untracked-files=all")
     if rc2 != 0:
         return (head, None)
-    return (head, out2.strip() == "")
+    return (head, not out2)
 
 
 # ------------------------------------------------------------------ classifier
@@ -397,26 +397,39 @@ def render_first_turn_note(
 
 
 def _porcelain_paths(porcelain: str) -> list[str]:
-    """Repo-relative paths from `git status --porcelain` output. Handles the
-    XY-prefix and rename `old -> new` form (keeps the new path)."""
+    """Changed paths in porcelain v1 -z: destination, then rename/copy source.
+
+    NUL is Git's record boundary; quotes, whitespace and arrows are filename
+    bytes. Rename changes both locations; copying does not change its source.
+    Refuse malformed output rather than silently omitting a dirty path.
+    """
+    if not porcelain:
+        return []
+    if not porcelain.endswith("\0"):
+        raise ValueError("Unterminated Git status record")
+    records = iter(porcelain[:-1].split("\0"))
     paths: list[str] = []
-    for line in porcelain.splitlines():
-        if len(line) < 4:
-            continue
-        rest = line[3:]
-        if " -> " in rest:
-            rest = rest.split(" -> ", 1)[1]
-        rest = rest.strip().strip('"')
-        if rest:
-            paths.append(rest)
-    return paths
+    for record in records:
+        if len(record) < 4 or record[2] != " ":
+            raise ValueError("Malformed Git status record")
+        status, path = record[:2], record[3:]
+        if status != "??" and (status == "  " or any(char not in " MTADRCU" for char in status)):
+            raise ValueError("Unrecognized Git status")
+        paths.append(path)
+        if "R" in status or "C" in status:
+            source = next(records, None)
+            if not source:
+                raise ValueError("Missing Git rename/copy source")
+            if "R" in status:
+                paths.append(source)
+    return list(dict.fromkeys(paths))
 
 
 async def _git_toplevel(working_dir: str) -> str | None:
     rc, out, _ = await _git(working_dir, "rev-parse", "--show-toplevel")
     if rc != 0 or not out.strip():
         return None
-    return out.strip()
+    return out.removesuffix("\n")
 
 
 def _norm(path: str, base: str) -> str:
@@ -449,10 +462,13 @@ async def safe_revert_preflight(
         return (False, "Not a git repo", [])
     if not fork_head or fork_head != out.strip():
         return (False, "HEAD has moved since the fork-point", [])
-    rc2, porcelain, _ = await _git(working_dir, "status", "--porcelain")
+    rc2, porcelain, _ = await _git(working_dir, "status", "--porcelain=v1", "-z", "--untracked-files=all")
     if rc2 != 0:
         return (False, "Not a git repo", [])
-    dirty_rel = _porcelain_paths(porcelain)
+    try:
+        dirty_rel = _porcelain_paths(porcelain)
+    except ValueError:
+        return (False, "Git status could not be parsed safely", [])
     # Dirty porcelain paths are repo-top-relative; agent-touched paths may be
     # absolute, cwd-relative, or repo-relative. Normalize each touched path
     # against BOTH the working_dir (the agent's cwd) and the repo top so a
@@ -509,29 +525,47 @@ async def safe_revert_files(
         }
     top = await _git_toplevel(working_dir) or working_dir
     stash_msg = f"octopus: pre-fork stash {fork_id}"
-    # `git stash push -u -- <paths>` both saves the agent's changes AND
-    # restores the working tree to HEAD for those paths: tracked modifications
-    # revert, untracked files (added by the agent) are removed. That alone
-    # reproduces the fork-point state — no `git checkout HEAD -- <paths>` is
-    # needed, and it would in fact error on untracked paths that were never in
-    # HEAD (`pathspec '…' did not match`).
-    rc, _out, err = await _git(
-        top, "stash", "push", "-u", "-m", stash_msg, "--", *dirty
-    )
-    if rc != 0:
-        return {
-            "ran": False,
-            "files": dirty,
-            "stash_ref": None,
-            "status": "failed",
-            "refused_reason": None,
-            "error": f"git stash failed: {err.strip()[:500]}",
-        }
-    return {
-        "ran": True,
-        "files": dirty,
-        "stash_ref": "stash@{0}",
-        "status": "completed",
-        "refused_reason": None,
-        "error": None,
+    result: dict[str, Any] = {
+        "ran": False, "files": dirty, "stash_ref": None, "status": "failed",
+        "refused_reason": None, "error": None,
     }
+    # Staged deletions (including rename sources) no longer exist in the index.
+    # `stash push -u -- old-name` creates a stash, then fails in git-add. Save
+    # their original index in the stash, but restore those HEAD paths explicitly.
+    rc, removed, err = await _git(
+        top, "--literal-pathspecs", "diff", "--cached", "--no-renames",
+        "--name-only", "--diff-filter=D", "-z", "--", *dirty,
+    )
+    if rc != 0 or (removed and not removed.endswith("\0")):
+        result["error"] = f"git staged-deletion lookup failed: {err.strip()[:500]}"
+        return result
+    deleted = removed[:-1].split("\0") if removed else []
+    deleted_set = set(deleted)
+    present = [path for path in dirty if path not in deleted_set or os.path.lexists(os.path.join(top, path))]
+    if present:
+        # -u also saves untracked files; every path keeps its literal meaning.
+        rc, _out, err = await _git(
+            top, "--literal-pathspecs", "stash", "push", "-u", "-m", stash_msg, "--", *present,
+        )
+    else:
+        # Only staged deletions remain. Git's native create/store saves their
+        # index and working-tree snapshot without widening the mutation scope.
+        rc, commit, err = await _git(top, "stash", "create", stash_msg)
+        if rc == 0 and commit.strip():
+            rc, _out, err = await _git(top, "stash", "store", "-m", stash_msg, commit.strip())
+        elif rc == 0:
+            rc, err = -1, "Git did not produce a deletion snapshot"
+    if rc != 0:
+        result["error"] = f"git stash failed: {err.strip()[:500]}"
+        return result
+    result["stash_ref"] = "stash@{0}"
+    if deleted:
+        rc, _out, err = await _git(
+            top, "--literal-pathspecs", "restore", f"--source={fork_head}",
+            "--staged", "--worktree", "--", *deleted,
+        )
+        if rc != 0:
+            result["error"] = f"git restore failed (original changes remain in stash): {err.strip()[:500]}"
+            return result
+    result.update(ran=True, status="completed")
+    return result

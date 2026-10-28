@@ -23,6 +23,19 @@ creation transaction; the Registry publishes only the completed ledger. There
 is no separate no-jobs layout or later job attachment. This assembly change
 uses the complete current declarations and protocol set.
 
+## Complete record projections
+
+Complete-record SELECTs for agents, applications, background tasks, research
+jobs, connector installations, custom connectors and credentials use explicit
+`RecordProjection` declarations in `server/db/base.py`. Each declaration supplies
+both SQL expressions and output field names; readers require the exact declared
+length before applying their existing domain conversions. Agent active-session
+counts are an explicit derived field, and credential JOIN expressions name the
+metadata owner and separate secret source. Reordering a declaration does not
+require editing a second positional map. These internal records do not widen
+public response schemas. Partial/aggregate queries retain their own projections;
+there is no global row factory or storage format change.
+
 ## Publication boundary
 
 The existing private publisher under `~/.octopus/ops/publication/tools/` owns

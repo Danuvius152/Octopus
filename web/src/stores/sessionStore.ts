@@ -2,6 +2,7 @@ import { create } from "zustand";
 import { mergeCardSnapshot } from "../lib/cardSnapshots";
 import { agentRequestIsCurrent, beginAgentRequest, canApplyAgent, endAgentRequest, recordAgentChanges, recordAgentSnapshot, type AgentRequest } from "../lib/agentUpdates";
 import { withPinOrder } from "../lib/sidebarPins";
+import { unreadList, type ListReadState } from "../lib/listState";
 import type { ControlCommandStatus } from "../lib/submission";
 import { normalizeMessage, type MessageInput } from "../lib/turnOutcome";
 import { readDispatchState, type DispatchState } from "../lib/sessionDispatch";
@@ -190,11 +191,12 @@ interface SessionStore {
 
   // Applications (applications.md §7) — agent-built static web apps listed
   // in the sidebar and rendered in the main pane. WS `application_*` events
-  // keep this list live; ApplicationList seeds it once on mount.
+  // enter ApplicationList, which also owns snapshots and operation receipts.
   applications: Application[];
-  setApplications: (a: Application[]) => void;
-  upsertApplication: (a: Application) => void;
-  removeApplication: (id: string) => void;
+  archivedApplications: Application[];
+  applicationReads: Record<"live" | "archived", ListReadState>;
+  applicationPinOrder: string[] | null;
+  applicationOrdering: boolean;
 
   // What the main pane shows. Octopus has no URL router, so this is the
   // routing state: "chat" (the session transcript), "application" (the
@@ -286,7 +288,7 @@ interface SessionStore {
   setLastAppliedSeq: (sessionId: string, seq: number) => void;
 
   schedules: Schedule[];
-  setSchedules: (s: Schedule[]) => void;
+  scheduleRead: ListReadState;
 
   credentials: CredentialInfo[];
   setCredentials: (c: CredentialInfo[]) => void;
@@ -548,32 +550,10 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   setActiveAgentId: (activeAgentId) => set({ activeAgentId }),
 
   applications: [],
-  setApplications: (applications) => set({ applications }),
-  upsertApplication: (application) =>
-    set((s) => {
-      const idx = s.applications.findIndex((a) => a.id === application.id);
-      const applications =
-        idx >= 0
-          ? [
-              ...s.applications.slice(0, idx),
-              application,
-              ...s.applications.slice(idx + 1),
-            ]
-          : [...s.applications, application];
-      return { applications };
-    }),
-  removeApplication: (id) =>
-    set((s) => ({
-      applications: s.applications.filter((a) => a.id !== id),
-      unseenFailedApplications: s.unseenFailedApplications.filter(
-        (a) => a !== id
-      ),
-      // Deleting the app you're looking at drops you back to chat rather
-      // than leaving a frame pointed at a 404.
-      ...(s.activeApplicationId === id
-        ? { activeApplicationId: null, mainView: "chat" as MainView }
-        : {}),
-    })),
+  archivedApplications: [],
+  applicationReads: { live: unreadList(), archived: unreadList() },
+  applicationPinOrder: null,
+  applicationOrdering: false,
 
   mainView: "chat",
   activeApplicationId: null,
@@ -786,7 +766,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     })),
 
   schedules: [],
-  setSchedules: (schedules) => set({ schedules }),
+  scheduleRead: unreadList(),
 
   credentials: [],
   setCredentials: (credentials) => set({ credentials }),

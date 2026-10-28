@@ -122,6 +122,38 @@ async def steering(tmp_path, monkeypatch):
         await db.close()
 
 
+async def test_unsent_claimed_steer_survives_stop_without_inheriting_the_parent_terminal(steering, monkeypatch):
+    env = steering
+    original = await env.manager.start_message(env.session.id, "Initial comparison")
+    assert await asyncio.wait_for(env.started.get(), 2) == "Initial comparison"
+    entered, release = asyncio.Event(), asyncio.Event()
+    claim = env.db.claim_client_submission
+    async def held_claim(*args, **kwargs):
+        result = await claim(*args, **kwargs)
+        entered.set()
+        await release.wait()
+        return result
+    monkeypatch.setattr(env.db, "claim_client_submission", held_claim)
+    correction = await env.manager.start_message(env.session.id, "Retained correction", steerable=True)
+    try:
+        assert correction.disposition == "steered"
+        await asyncio.wait_for(entered.wait(), 2)
+        await env.manager.interrupt(env.session.id)
+        release.set()
+        assert (await asyncio.wait_for(original.wait(), 2)).outcome.status == "interrupted"
+        stored = await env.db.get_submission_for_request(env.session.id, correction.request_id)
+        assert stored["delivery_state"] == "none" and stored["terminal"] is None
+        assert env.frames.empty()
+        assert env.manager.dispatch_snapshot(env.session.id)["items"][0]["request_id"] == correction.request_id
+        await env.manager.resume_dispatch(env.session.id)
+        assert await asyncio.wait_for(env.started.get(), 2) == "Retained correction"
+        completed = await asyncio.wait_for(correction.wait(), 2)
+        assert completed.state == "completed" and completed.request_id == correction.request_id
+        assert completed.outcome.status == "success"
+    finally:
+        release.set()
+
+
 async def test_steered_input_and_knowledge_are_independently_committed_before_frame(steering):
     env = steering
     original = await env.manager.start_message(env.session.id, "Initial comparison")

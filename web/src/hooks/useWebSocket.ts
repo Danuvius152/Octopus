@@ -7,19 +7,18 @@ import {
   loadBgTaskSnapshot,
   loadResearchSnapshot,
   loadResearchAfterDetail,
-  hydrateSession,
   sessionInfoFromDetail,
 } from "../lib/hydrateSession";
 import { readRuntimeMetadata } from "../lib/toolIdentity";
 import { readDispatchState } from "../lib/sessionDispatch";
-import { refreshSchedules } from "../lib/refreshSchedules";
+import { schedules } from "../lib/scheduleList";
 import { refreshAgents } from "../lib/refreshAgents";
+import { applications, type ListEventSource } from "../lib/applicationList";
 import { refreshWikiJobs } from "../lib/wikiJobs";
 import type { WikiMessageMode } from "../lib/wikiComposer";
 import {
   useSessionStore,
   type Agent,
-  type Application,
   type BgTask,
   type Message,
   type PendingQuestion,
@@ -62,7 +61,7 @@ export function shouldApplyWsEvent(
 /** Exported for tests: the whole switch is a side-effecting reducer over the
  * store, and the token cases are ones a regression would silently sign
  * everyone out (or fail to). */
-export function handleWsMessage(data: Record<string, unknown>) {
+export function handleWsMessage(data: Record<string, unknown>, source?: ListEventSource) {
   const {
     addMessage: addMessageRaw,
     updateSessionStatus,
@@ -165,7 +164,7 @@ export function handleWsMessage(data: Record<string, unknown>) {
     // tab, or an agent using its own schedule tool (schedule-tool.md §6).
     // The payload says only that the list moved; we refetch it.
     case "schedules_changed":
-      void refreshSchedules();
+      schedules.changed(source);
       break;
 
     case "assistant_text":
@@ -350,40 +349,11 @@ export function handleWsMessage(data: Record<string, unknown>) {
       }
       break;
 
-    // Applications (applications.md §4/§7). Global events — no session_id,
-    // because the sidebar shows applications regardless of which session is
-    // open. The row comes down whole, so the store just mirrors it.
     case "application_created":
-    case "application_updated": {
-      const row = data.application as Application | undefined;
-      if (!row) break;
-      const before = getState().applications.find((a) => a.id === row.id);
-      const { mainView, activeApplicationId } = getState();
-      // A build that failed where nobody could see it: an unpinned app keeps
-      // a place in the sidebar until it's opened (sidebar-pins.md §5).
-      if (
-        row.status === "failed" &&
-        before?.status !== "failed" &&
-        !(mainView === "application" && activeApplicationId === row.id)
-      ) {
-        getState().noteApplicationFailed(row.id);
-      }
-      getState().upsertApplication(row);
-      // The build session was created server-side, so the sidebar list
-      // doesn't have it yet — pull it in so it's listed under its agent and
-      // the chat header can name it when the user opens it.
-      if (row.session_id) void hydrateSession(row.session_id);
-      break;
-    }
-
-    // Archived rows leave every open client's list, exactly like deleted ones;
-    // the Applications page fetches the archive itself.
+    case "application_updated":
     case "application_archived":
     case "application_deleted": {
-      const id =
-        (data.application_id as string) ||
-        (data.application as Application | undefined)?.id;
-      if (id) getState().removeApplication(id);
+      applications.receive(data, source);
       break;
     }
 
@@ -605,6 +575,7 @@ export function useWebSocket() {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const token = useSessionStore((s) => s.token);
+  const accountGeneration = useSessionStore((s) => s.accountGeneration);
   const dispatchGeneration = useSessionStore((s) => s.dispatchGeneration);
   useEffect(() => {
     if (token && dispatchGeneration !== null) void refreshAgents().catch(() => {});
@@ -617,7 +588,6 @@ export function useWebSocket() {
 
   useEffect(() => {
     if (!token) return;
-    const accountGeneration = getState().accountGeneration;
     const pendingSubmissions = submissions.current;
     const pendingControls = controls.current;
 
@@ -631,6 +601,8 @@ export function useWebSocket() {
       ws.onopen = () => {
         if (wsRef.current !== ws || getState().accountGeneration !== accountGeneration || getState().token !== token) return;
         getState().setConnected(true);
+        applications.connect({ socket: ws, accountGeneration });
+        schedules.connect({ socket: ws, accountGeneration });
         if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
 
         // Re-fetch state after reconnect
@@ -643,15 +615,6 @@ export function useWebSocket() {
           })
             .then((r) => (r.ok ? r.json() : null))
             .then((sessions) => sessions && getState().setSessions(sessions))
-            .catch(() => {});
-
-          // Applications: a build that finished while we were disconnected
-          // would otherwise leave the sidebar showing "building" forever.
-          fetch(`${window.location.origin}/api/applications`, {
-            headers: { Authorization: `Bearer ${t}` },
-          })
-            .then((r) => (r.ok ? r.json() : null))
-            .then((apps) => apps && getState().setApplications(apps))
             .catch(() => {});
 
           if (activeSessionId) {
@@ -679,6 +642,8 @@ export function useWebSocket() {
 
       ws.onclose = (event) => {
         if (wsRef.current !== ws || getState().accountGeneration !== accountGeneration || getState().token !== token) return;
+        applications.disconnect({ socket: ws, accountGeneration });
+        schedules.disconnect({ socket: ws, accountGeneration });
         for (const pending of submissions.current.values()) {
           pending.finish({ accepted: false, state: "unknown", message: "Admission was not confirmed. Retry confirmation with the same submission identity." });
         }
@@ -723,7 +688,7 @@ export function useWebSocket() {
               pending.finish({ accepted: data.accepted === true, message: data.message, code: data.code });
             }
           } else {
-            handleWsMessage(data);
+            handleWsMessage(data, { socket: ws, accountGeneration });
           }
         } catch {
           // ignore
@@ -744,10 +709,12 @@ export function useWebSocket() {
       pendingControls.clear();
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current);
       reconnectTimer.current = undefined;
+      if (wsRef.current) applications.disconnect({ socket: wsRef.current, accountGeneration });
+      if (wsRef.current) schedules.disconnect({ socket: wsRef.current, accountGeneration });
       wsRef.current?.close();
       wsRef.current = null;
     };
-  }, [token]);
+  }, [token, accountGeneration]);
 
   const send = useCallback((data: Record<string, unknown>) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {

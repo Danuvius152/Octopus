@@ -31,7 +31,7 @@ from fastapi.responses import (
 
 from .. import deps
 from ..app_agent import AppAgentError, app_agent_manager
-from ..app_backends import ABSENT, RUNNING, backend_supervisor
+from ..app_backends import ABSENT, RUNNING, BackendCapacityError, backend_supervisor
 from ..applications import (
     ApplicationError,
     ApplicationManager,
@@ -376,7 +376,10 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
     """
     row = await _application_for_request(request, app_id)
 
-    state = await backend_supervisor.ensure_running(app_id, row["app_dir"])
+    try:
+        state = await backend_supervisor.ensure_running(app_id, row["app_dir"])
+    except BackendCapacityError as exc:
+        raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
     if state.state == ABSENT:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
@@ -411,7 +414,10 @@ async def proxy_application_api(request: Request, app_id: str, path: str):
         if mutation:
             # A preceding uncertain writer may have stopped its backend while
             # this request waited for the shared vault lock.
-            state = await backend_supervisor.ensure_running(app_id, row["app_dir"])
+            try:
+                state = await backend_supervisor.ensure_running(app_id, row["app_dir"])
+            except BackendCapacityError as exc:
+                raise HTTPException(status.HTTP_503_SERVICE_UNAVAILABLE, str(exc)) from exc
             if state.state != RUNNING or not state.port:
                 raise HTTPException(503, state.error or "Application backend stopped")
             url = f"http://127.0.0.1:{state.port}/api/{path}"

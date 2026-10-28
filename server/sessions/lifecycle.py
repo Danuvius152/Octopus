@@ -186,6 +186,7 @@ class LifecycleMixin(SessionManagerBase):
         parent_session_id: str | None = None, delegation_request: str | None = None,
         app_id: str | None = None,
     ) -> Session:
+        self.input_database()
         return await self._run_agent_operation(
             agent_id, lambda: self._create_session(
                 agent_id, name, working_dir, credential_id, origin, backend,
@@ -628,9 +629,8 @@ class LifecycleMixin(SessionManagerBase):
         job here rather than `list_sessions`'. Caller turns them into Pydantic
         models for the response.
         """
-        if self.db is None:
-            return []
-        rows = await self.db.load_sessions(include_archived=True, user_id=user_id)
+        database = self.input_database()
+        rows = await database.load_sessions(include_archived=True, user_id=user_id)
         out: list[dict[str, Any]] = []
         for row in rows:
             if not row["archived"]:
@@ -647,9 +647,8 @@ class LifecycleMixin(SessionManagerBase):
         from the DB. Returns None if the id isn't an archived row — or isn't
         one of `user_id`'s, which a caller must not be able to tell apart.
         """
-        if self.db is None:
-            return None
-        rows = await self.db.load_sessions(include_archived=True, user_id=user_id)
+        database = self.input_database()
+        rows = await database.load_sessions(include_archived=True, user_id=user_id)
         match = next(
             (r for r in rows if r["id"] == session_id and r["archived"]), None
         )

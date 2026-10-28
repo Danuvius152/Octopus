@@ -18,6 +18,53 @@ from .users import owner_is_available
 
 class ConnectorsMixin(DatabaseBase):
 
+    async def authorize_connector_installation(
+        self, *, installation_id: str, kind: str, label: str,
+        secret_encrypted: str, created_at: str, external_account_id: str | None,
+        scopes: list[str], token_expires_at: str | None, user_id: str | None,
+        expected_existing_id: str | None = None,
+    ) -> dict[str, Any]:
+        """Commit one OAuth authorization, preserving the existing identity.
+
+        A captured reauthorization target must still exist. First authorizations
+        resolve a conflicting identity inside this same metadata/secret commit.
+        Empty provider identities remain separate installations.
+        """
+        async with self.transaction(write=True) as tx:
+            if not await owner_is_available(tx, user_id):
+                raise ValueError("Account is unavailable")
+            if expected_existing_id is not None:
+                existing = await tx.fetch_one(
+                    "SELECT id FROM connector_installations WHERE id=? AND user_id IS ? "
+                    "AND kind=? AND external_account_id=?",
+                    (expected_existing_id, user_id, kind, external_account_id),
+                )
+                if existing is None:
+                    raise ValueError("connector installation not found")
+            row = await tx.fetch_one(
+                "INSERT INTO connector_installations "
+                "(id, kind, label, auth_type, external_account_id, scopes, "
+                "enable_by_default, needs_reconnect, token_expires_at, created_at, user_id) "
+                "VALUES (?, ?, ?, 'oauth', ?, ?, 0, 0, ?, ?, ?) "
+                "ON CONFLICT(COALESCE(user_id, ''), kind, external_account_id) "
+                "WHERE external_account_id IS NOT NULL DO UPDATE SET "
+                "label=excluded.label, scopes=excluded.scopes, "
+                "token_expires_at=excluded.token_expires_at, "
+                "needs_reconnect=0, last_refresh_error_code=NULL "
+                f"RETURNING {self._CONNECTOR_COLS}",
+                (installation_id, kind, label, external_account_id, json.dumps(scopes),
+                 token_expires_at, created_at, user_id),
+            )
+            assert row is not None
+            installation = self._row_to_connector(row)
+            await tx.execute(
+                "INSERT INTO connector_installation_secrets(installation_id, secret_encrypted) "
+                "VALUES (?, ?) ON CONFLICT(installation_id) DO UPDATE SET "
+                "secret_encrypted=excluded.secret_encrypted",
+                (installation["id"], secret_encrypted),
+            )
+            return installation
+
 
     async def save_connector_installation(
         self,
@@ -106,12 +153,9 @@ class ConnectorsMixin(DatabaseBase):
         async with self.transaction(write=False) as tx:
             sql = (
                 f"SELECT {self._CONNECTOR_COLS} FROM connector_installations "
-                "WHERE kind = ? AND external_account_id = ?"
+                "WHERE kind = ? AND external_account_id = ? AND user_id IS ?"
             )
-            params: list[Any] = [kind, external_account_id]
-            if user_id is not None:
-                sql += " AND user_id = ?"
-                params.append(user_id)
+            params: list[Any] = [kind, external_account_id, user_id]
             cursor = await tx.execute(sql, params)
             row = await cursor.fetchone()
             return self._row_to_connector(row) if row else None
@@ -249,25 +293,14 @@ class ConnectorsMixin(DatabaseBase):
             return cursor.rowcount
     # --- custom (user-defined) connector definitions ----------------------
 
-    @staticmethod
-    def _row_to_custom(row: sqlite3.Row) -> dict[str, Any]:
-        # Columns: kind, display_name, authorize_url, token_url, scopes, pkce,
-        # api_base, created_at, updated_at.
+    def _row_to_custom(self, row: sqlite3.Row) -> dict[str, Any]:
+        record = self._CUSTOM_COLS.read(row)
         try:
-            scopes = json.loads(row[4]) if row[4] else []
+            record["scopes"] = json.loads(record["scopes"]) if record["scopes"] else []
         except (json.JSONDecodeError, TypeError):
-            scopes = []
-        return {
-            "kind": row[0],
-            "display_name": row[1],
-            "authorize_url": row[2],
-            "token_url": row[3],
-            "scopes": scopes,
-            "pkce": bool(row[5]),
-            "api_base": row[6],
-            "created_at": row[7],
-            "updated_at": row[8],
-        }
+            record["scopes"] = []
+        record["pkce"] = bool(record["pkce"])
+        return record
 
     async def save_custom_connector(
         self,

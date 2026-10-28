@@ -68,6 +68,13 @@ Owner 串行修改活动状态；慢准备、spawn、stdin、reader 和退休在
 | `notification_state` | delivered、failed、unavailable 独立于业务结果；通知失败不抹掉已提交结果 |
 | 原 execution/preparation/reader/retirement 引用 | CloseWork、归档与撤权等待真实资源；外部关闭另行排空 publisher，不能反向等待正在调用自己的 subscriber |
 
+执行输入只在 `SessionManager.initialize()` 的输入恢复、会话载入与 fork 恢复全部
+成功后开放。数据库引用非空不证明就绪；未初始化、初始化中或恢复失败明确返回
+`service_not_ready`，不保存、排队或启动输入。所有来源与 steer 共用持久接纳和
+claim，没有无数据库执行分支；待执行队列只持身份与展示/调度投影，正文和附件
+从原持久输入读取。结果记录、通知及资源退休仍分别确认，构造、监听、内存查询
+和空资源关闭不依赖执行就绪。详见[输入接纳与恢复](../input-reliability.md)。
+
 每个原 receipt 只有一个 completion Future。Delegation 在读取正文前固定原轮次
 和嵌套分类；广播只上送问题，不独立结算 result/error 或保存第二份回复正文。
 构建状态、App ask/SSE、Research、Wiki 和 scheduler 消费原请求完成事实。
@@ -87,6 +94,14 @@ mailbox、控制入口及顺序 publisher 按实际内容计预算，背压到�
 重启不自动归档；人工追问和 parent follow-up 是新 request/round，显式归档与
 schedule 策略仍有效。可靠跨请求返回走现有独立工作机制；完整原生尾部及更强
 的送达、授权切换保证仍属下方暂停范围，不能从 stdin 能力或首个 result 推断。
+
+BG 在 shell 和输出结束后固定原业务结果，再主动对原进程组执行 TERM、宽限、
+KILL 和活跃成员退出确认；普通完成广播及父会话返回都在退休确认后发生。
+正常收尾不设置取消原因，之后的取消与关停复用原清理而不改写成功结果。
+记录、退休或投递失败均保留原 owner 和结果；退休先于结果持久化，存储失败
+不能遗失 writer。后续取消或关停可重试未完成阶段；通知重试沿用原任务身份，
+不重跑命令，也不重复已确认的记录或完成广播。关停无法排空时明确失败，不能
+提前关闭依赖。覆盖范围限于启动时捕获的进程组，不追踪主动脱离该组的任意后代。
 
 ## 公开接口与账户配置
 

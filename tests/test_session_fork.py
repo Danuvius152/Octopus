@@ -499,14 +499,15 @@ def _git(cwd, *args):
 
 
 @pytest.mark.asyncio
-async def test_fork_with_revert_restores_files(manager, tmp_path, monkeypatch):
+@pytest.mark.parametrize("name", ["a.py", "中文 \n -> file.py"])
+async def test_fork_with_revert_restores_files(manager, tmp_path, monkeypatch, name):
     monkeypatch.setenv("HOME", str(tmp_path))
     repo = tmp_path / "repo"
     repo.mkdir()
     _git(repo, "init", "-q")
     _git(repo, "config", "user.email", "t@t.t")
     _git(repo, "config", "user.name", "t")
-    (repo / "a.py").write_text("v1\n")
+    (repo / name).write_text("v1\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qm", "init")
     head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=repo,
@@ -521,16 +522,16 @@ async def test_fork_with_revert_restores_files(manager, tmp_path, monkeypatch):
                                     git_head=head, git_status_clean=True)
     await manager.db.append_message(session_id=parent.id, seq=1, role="assistant",
                                     type="tool_use", tool_name="Edit",
-                                    tool_input={"file_path": str(repo / "a.py")},
+                                    tool_input={"file_path": str(repo / name)},
                                     tool_use_id="e1")
     parent._message_count = 2
     # The agent's edit is now on disk (dirty tree).
-    (repo / "a.py").write_text("agent-edited\n")
+    (repo / name).write_text("agent-edited\n")
 
     fork = await manager.fork_session(parent.id, 0, revert_files=True)
     rec = json.loads(fork.fork_revert_record)
     assert rec["status"] == "completed"
-    assert (repo / "a.py").read_text() == "v1\n"   # restored to fork-point
+    assert (repo / name).read_text() == "v1\n"   # restored to fork-point
     assert fork.fork_status == "ready"
 
 

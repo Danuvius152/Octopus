@@ -91,7 +91,7 @@ async def test_new_research_return_restores_original_session_and_stop(returning_
         assert processed.empty()
         await manager.resume_dispatch(session.id)
     assert f"[deep-research:{job['id']}]" in await asyncio.wait_for(processed.get(), 2)
-    await research._delivery_tasks[job["id"]]
+    await research.wait_for_idle()
     assert (await db.get_research_job(job["id"]))["delivery_receipt"]["stage"] == "processed"
 
 
