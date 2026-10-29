@@ -19,6 +19,22 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllGlobals());
 
+it("keeps the sidebar order when selecting sessions and receiving their details", async () => {
+  const rows = ["first", "middle", "last"].map((id) => ({ id, name: id, archived: false, agent_id: "agent" } as SessionInfo));
+  useSessionStore.setState({ sessions: rows, dispatchGeneration: "service" });
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => {
+    const selected = rows.find((row) => url.endsWith(`/api/sessions/${row.id}`));
+    return json(selected ? { ...selected, message_count: 3, messages: [], dispatch_state: dispatch("service") } : []);
+  }));
+
+  for (const id of ["first", "middle", "first"]) {
+    await selectSession(id);
+    expect(useSessionStore.getState().activeSessionId).toBe(id);
+    expect(useSessionStore.getState().sessions.map((row) => row.id)).toEqual(["first", "middle", "last"]);
+    expect(useSessionStore.getState().sessions.find((row) => row.id === id)?.message_count).toBe(3);
+  }
+});
+
 it("captures detail state before fetch and keeps newer WS rows, questions and subagents", async () => {
   const running = { tool_call_id: "call", status: "running", name: "Worker" } as SubagentRun;
   useSessionStore.getState().upsertSubagent("s", running);

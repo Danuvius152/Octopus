@@ -23,6 +23,18 @@ beforeEach(() => {
 });
 afterEach(() => { list.dispose(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
+it.each([false, true])("updates a session in place in the archived=%s list", (archived) => {
+  for (const id of ["first", "middle", "last"]) list.row({ ...row(id), archived });
+  const key = archived ? "archivedSessions" : "sessions";
+  const before = useSessionStore.getState()[key].map((item) => item.id);
+
+  expect(list.row({ ...row("middle", "idle"), name: "Updated", archived })).toBe(true);
+
+  const after = useSessionStore.getState()[key];
+  expect(after.map((item) => item.id)).toEqual(before);
+  expect(after.find((item) => item.id === "middle")).toMatchObject({ name: "Updated", status: "idle" });
+});
+
 it.each(["archive", "delete"])("does not let a stale snapshot resurrect a session after %s", async (action) => {
   const old = list.refresh();
   if (action === "archive") list.archive("old");

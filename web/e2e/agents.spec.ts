@@ -13,6 +13,7 @@ const OWNED_AGENTS = new Set([
   "E2E Persisted",
   "E2E Rail",
   "E2E Codex Agent",
+  "E2E Stable sessions",
 ]);
 const OWNED_SESSIONS = new Set(["Agent Thread"]);
 
@@ -62,6 +63,40 @@ test.describe("Agents", () => {
     await expect(
       page.locator(".agent-item .agent-name", { hasText: "Octo" })
     ).toBeVisible();
+  });
+
+  test("selecting sessions keeps their sidebar positions", async ({ page, request }) => {
+    const headers = { Authorization: `Bearer ${TOKEN}` };
+    const response = await request.post(AGENTS_API, { headers, data: { name: "E2E Stable sessions" } });
+    expect(response.ok()).toBe(true);
+    const agent = await response.json();
+    const sessions: { id: string; name: string }[] = [];
+    for (const name of ["Stable first", "Stable middle", "Stable last"]) {
+      const created = await request.post(`${AGENTS_API}/${agent.id}/sessions`, { headers, data: { name } });
+      expect(created.ok()).toBe(true);
+      sessions.push(await created.json());
+    }
+    try {
+      await page.reload();
+      await page.locator(".agent-item", { hasText: agent.name }).click();
+      const rail = page.locator(".agent-group", { hasText: agent.name }).locator(".session-rail");
+      const names = rail.locator(".session-name");
+      await expect(names).toHaveCount(3);
+      const order = await names.allTextContents();
+
+      for (const name of [order[0], order[1], order[0]]) {
+        const selected = sessions.find((session) => session.name === name)!;
+        // Research is requested after the selected detail has been applied,
+        // so the assertion cannot pass before the list update that used to move it.
+        const applied = page.waitForRequest((request) => request.url().endsWith(`/api/sessions/${selected.id}/research`));
+        await rail.locator(".session-item", { hasText: name }).click();
+        await applied;
+        await expect(page.locator(".chat-header .crumb-current")).toHaveText(name);
+        await expect(names).toHaveText(order);
+      }
+    } finally {
+      for (const session of sessions) await request.delete(`${SESSIONS_API}/${session.id}`, { headers });
+    }
   });
 
   test("creates an agent and a session under it", async ({ page }) => {

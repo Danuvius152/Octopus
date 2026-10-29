@@ -75,6 +75,13 @@ everyone else). A drop sends the whole pinned order with
 The client applies the new order optimistically and rolls back to the
 server's list if the request fails.
 
+Session details and events replace an existing session at its current list
+position. Selecting a session refreshes its data without moving it to the
+bottom; a new session is appended. This keeps the session rail still while
+switching conversations and leaves agent pin order under the user's control.
+`lib/sessionList.test.ts`, `lib/hydrateSession.test.ts` and
+`e2e/agents.spec.ts` cover repeated selection and in-place updates.
+
 ## 4. Schema
 
 The rollout SQL and backfill description below are historical. The complete

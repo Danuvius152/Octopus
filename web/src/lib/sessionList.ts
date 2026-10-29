@@ -204,8 +204,15 @@ export class SessionList {
   row(info: SessionInfo, observation?: SessionObservation, establishedGeneration?: string | null): boolean {
     if (!info.id || !this.canApply(observation, establishedGeneration)) return false;
     const store = useSessionStore.getState();
-    this.commit(info.archived ? store.sessions.filter((row) => row.id !== info.id) : [...store.sessions.filter((row) => row.id !== info.id), info],
-      info.archived ? [...store.archivedSessions.filter((row) => row.id !== info.id), info] : store.archivedSessions.filter((row) => row.id !== info.id));
+    // Details and events update existing rows in place; opening a session
+    // must not move it down the sidebar. Only a new identity is appended.
+    const replace = (rows: SessionInfo[], belongs: boolean) => {
+      if (!belongs) return rows.filter((row) => row.id !== info.id);
+      return rows.some((row) => row.id === info.id)
+        ? rows.map((row) => row.id === info.id ? info : row)
+        : [...rows, info];
+    };
+    this.commit(replace(store.sessions, !info.archived), replace(store.archivedSessions, !!info.archived));
     return true;
   }
   patch(id: string, fields: Partial<SessionInfo>, observation?: SessionObservation): boolean {
