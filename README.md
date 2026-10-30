@@ -203,7 +203,10 @@ codes** for anyone else who should have their own account. If setup committed
 but its response was lost, sign in with the same credentials. Login also
 completes missing account directories after a filesystem failure; it preserves
 the original account and DEK. Then pick **Octo**, create a session and start
-chatting. For phone access, `octopus serve --tunnel` gives you a public HTTPS URL.
+chatting. For standalone phone access, install `cloudflared` and use
+`octopus serve --tunnel` for a public HTTPS URL. An existing managed service can
+instead use a separate tunnel to its local port; see this installation's
+[manual phone access](docs/user-guide.md#6-手机远程访问cloudflare-tunnel).
 
 Auth for the agent's backend uses your existing CLI login (`claude login` /
 `codex login`) by default — or add an API key under **Credentials** and attach

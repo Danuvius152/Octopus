@@ -35,6 +35,7 @@ content and applications. It does not use a fixed instance-specific file list.
 | Chats and native continuity | Exclude old sessions/messages, native transcripts/resume state and extra external/fork work trees collected solely for old conversations; ordinary files already inside the account's included roots remain included |
 | Schedules and execution | Exclude recurring/one-shot definitions, enablement, pending triggers and live process/PID/socket/lease state; no post-import schedule activation step |
 | Login state | Exclude model CLI subscription tokens, refresh tokens and authentication caches wherever stored; target credentials require reauthorization. Octopus account password/key material remains included; sign in again on the target |
+| Host network entry | Host-level tunnel binaries, systemd units and proxy settings outside account roots are not account resources. Reinstall them separately; importing an account does not open a public tunnel |
 
 Knowledge history and source/effect evidence are not executable work and must
 not be discarded as a cache. Exclusion from an archive does not delete or
@@ -145,6 +146,7 @@ make startup succeed. Cross-file publication is not one global transaction.
 | Provider state | The selected credential's effective Codex home or used Claude configuration, with transcripts/indexes and necessary login state; host defaults may be unrelated |
 | Wiki | Every actual vault, registration/configuration, state directory, `index.sqlite3`, history/blobs and pending-effect evidence; roots may lie outside the Octopus directory |
 | Service ownership | Active service profile and resource bindings as evidence for restoration; target bindings must be verified or explicitly reconstructed |
+| Host network entry | Inventory separately managed tunnel units and private proxy settings outside the account tree. On this WSL installation, preserve or reconstruct `~/.config/systemd/user/octopus-tunnel.service` and `~/.config/octopus-tunnel/proxy.env` (0600); reinstall the verified `~/.local/bin/cloudflared` binary using [local instructions](local-wsl.md#手机公网入口). Live processes and temporary public URLs are not restored |
 
 `index.sqlite3` includes durable identities, source bindings, grants, jobs and
 filesystem-event records; its name does not make it disposable. Application
@@ -190,7 +192,9 @@ root. Do not bypass checks by deleting markers or rebuilding the Wiki database.
    completed inputs, delegation returns or one-shot schedules.
 3. Establish an explicit activation rule for restored automatic producers. Source
    and target schedulers must not run the same restored work concurrently. An
-   incomplete restore stays identifiable and closed to business.
+   incomplete restore stays identifiable and closed to business. Preserve this
+   installation's manual tunnel policy: no startup enablement or automatic
+   restart; only an explicit user request authorizes opening its public entry.
 4. Check accounts, permissions, memory, attachments, fork/external files,
    application state and Wiki identities/history. HTTP health or a loaded page
    is only readiness evidence.

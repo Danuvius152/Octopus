@@ -30,6 +30,8 @@ Codex。Claude 是否安装、是否做过专项实测，不改变这一默认�
 - 初始工作目录：`~/.octopus/workspace`。创建账户后，项目按账户分配工作目录。
 - 代理记忆、应用、附件、账户目录等持久数据：`~/.octopus/`。
 - 用户服务：`~/.config/systemd/user/octopus.service`。
+- 手机公网入口：独立的 `octopus-tunnel.service`，只在用户明确要求时手动启动，
+  不自启、不自动重启；安装与启停见[手机公网入口](#手机公网入口)。
 - 旧部署的代码覆盖配置：`~/.config/systemd/user/octopus.service.d/runtime-release.conf`。
 - 旧部署的代理环境文件：`~/.octopus/proxy.env`，权限 `0600`；首次受管安装时捕获其有效值。
 - 服务时区：`Asia/Shanghai`。
@@ -107,7 +109,8 @@ Python 依赖及兼容边界统一在 `pyproject.toml` 声明，当前 FastMCP �
 
 本机使用 Windows 的 `http://127.0.0.1:7890` HTTP 代理。HTTP/HTTPS 的
 大写和小写代理变量均已持久写入 `~/.bashrc`，新终端不依赖上一终端的环境。
-服务使用同一代理地址，配置保存在 `proxy.env` 中。`~/.bashrc` 另补充明确的
+服务使用同一代理地址，当前配置保存在受管 unit 的原生 Environment 中；旧
+`proxy.env` 不是当前加载来源。`~/.bashrc` 另补充明确的
 `localhost`、`127.0.0.1` 和 `::1` 绕过规则，Codex 的外网请求继续走代理。
 Windows 风格的 `127.*`
 不能代替 HTTPX 所需的明确地址，否则 MCP 回调和应用后端请求可能收到代理的 502。
@@ -184,8 +187,8 @@ Ubuntu 24.04 Chromium 构建，并已安装官方浏览器依赖。运行浏览�
 
 交互终端已通过 `.bashrc` 加载 PATH、HTTP/HTTPS 代理及本机绕过规则。
 下面 PATH 和 NO_PROXY 的 `export` 用于不会加载 `.bashrc` 的非交互 shell；
-systemd 服务通过自身的 PATH 和
-`proxy.env` 获取这些设置。
+systemd 服务通过 unit 的原生 Environment 获取 PATH 和代理设置；独立手机
+隧道使用自己的私有代理文件，见[手机公网入口](#手机公网入口)。
 
 ```bash
 export PATH="$HOME/.nvm/versions/node/v24.21.0/bin:$HOME/.local/bin:$PATH"
@@ -345,14 +348,152 @@ Codex 登录位置保持原绑定。共享依赖的改变仍会影响正式服�
 本地开发的 `bun run dev` 使用 5173 端口；8000 提供服务快照的 `web/dist`。
 开发目录改动不会直接出现在 8000，不能靠反复重启把未验收源码带入正式服务。
 
+### 手机公网入口
+
+本机使用 Cloudflare Quick Tunnel，将公网 HTTPS 请求转到现有的
+`http://127.0.0.1:8000`。入口由独立的用户服务 `octopus-tunnel.service`
+管理，Octopus 的内置 `OCTOPUS_ENABLE_TUNNEL` 保持 `false`，受管 profile
+和中央配置也保持原绑定。开关隧道不重启后端、不改变现有账户和会话。
+
+**只有用户明确要求时才启动隧道。** 本机不执行 `enable`，不配置 Windows、
+WSL、登录或定时自启，进程退出后也不由 systemd 自动重启。已手动启动的服务
+脱离操作终端运行；cloudflared 进程仍在时会自行重连网络，进程退出或 WSL
+关闭后则需要再次明确要求并手动启动。关闭公网入口只停止这个独立服务。
+
+#### 安装与配置
+
+2026-10-30 已安装官方 `cloudflared 2026.10.6` Linux amd64 二进制到
+`~/.local/bin/cloudflared`，与官方发布的 SHA-256 校验一致。下载来源见
+[Cloudflare 下载说明](https://developers.cloudflare.com/tunnel/downloads/)及
+[该版本发布页](https://github.com/cloudflare/cloudflared/releases/tag/2026.10.6)。
+此方式无需 sudo；使用绝对路径启动，不依赖交互终端的 PATH。
+
+如需重建这份安装，先将下面的 `<账户工作区>` 替换为 Account 页面显示的
+workspace 绝对路径。升级时先查看官方发布与校验值，替换版本和摘要；安装前
+先按下文停止隧道，结束公网连接。主 Octopus 服务继续运行。
+
+```bash
+(
+  set -euo pipefail
+  octopus_tunnel_task='<账户工作区>/cloudflared-install'
+  mkdir -p "$octopus_tunnel_task" "$HOME/.local/bin"
+  curl --fail --location --connect-timeout 15 --max-time 180 \
+    https://github.com/cloudflare/cloudflared/releases/download/2026.10.6/cloudflared-linux-amd64 \
+    --output "$octopus_tunnel_task/cloudflared-linux-amd64"
+  printf '1d356dac769d0dbf62ebe588c4034824bbff98d5790c2f844cc99e0e2f57462d  %s\n' \
+    "$octopus_tunnel_task/cloudflared-linux-amd64" | sha256sum --check
+  install -m 0755 "$octopus_tunnel_task/cloudflared-linux-amd64" \
+    "$HOME/.local/bin/cloudflared"
+  "$HOME/.local/bin/cloudflared" --version
+)
+```
+
+`~/.config/octopus-tunnel/proxy.env` 为隧道独有的代理环境文件，目录权限
+`0700`，文件权限 `0600`。安装时只从实际 Octopus 服务进程提取
+`HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY`、`NO_PROXY` 及其小写形式；
+不复制整个服务配置、setup 证明、账户 bearer 或模型凭据。两种 `NO_PROXY`
+均保留已有绕过规则并包含 `127.0.0.1,localhost,::1`，确保连接本地后端。
+主服务代理发生变化时，需要同步检查这份独立配置；它不自动叠加开发 `.env`
+或旧的 `~/.octopus/proxy.env`。
+
+重建时先创建 `~/.config/octopus-tunnel/` 和权限 `0600` 的 `proxy.env`；
+把实际有效的代理键逐行写入，形式为 `HTTPS_PROXY="http://127.0.0.1:7890"`。
+绕过规则按上一段保留；无需联网代理时文件可为空。代理值不要写进 unit 或 Git。
+
+`~/.config/systemd/user/octopus-tunnel.service` 的实际定义为：
+
+```ini
+[Unit]
+Description=Octopus public HTTPS via Cloudflare Quick Tunnel
+After=octopus.service
+
+[Service]
+Type=simple
+WorkingDirectory=%h
+EnvironmentFile=%h/.config/octopus-tunnel/proxy.env
+ExecStart=%h/.local/bin/cloudflared tunnel --no-autoupdate --url http://127.0.0.1:8000
+Restart=no
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=yes
+```
+
+该 unit 没有 `[Install]` 段，`is-enabled` 应报告 `static`，没有自启目标；
+`After` 只规定启动顺序，不会自动启动隧道或后端。`--no-autoupdate` 禁止
+独立二进制自行更新、重启。创建或修改后只校验和重载定义，不自动启动：
+
+```bash
+systemd-analyze --user verify "$HOME/.config/systemd/user/octopus-tunnel.service"
+systemctl --user daemon-reload
+systemctl --user is-enabled octopus-tunnel
+```
+
+#### 手动使用与故障处理
+
+先确认 `octopus.service` 运行且 `http://127.0.0.1:8000/ready` 返回 200。
+需要开放公网入口且用户已经明确要求时执行：
+
+```bash
+systemctl --user start octopus-tunnel
+systemctl --user status octopus-tunnel --no-pager
+```
+
+`start` 在服务已运行时不创建第二份。日志出现网址后，还须看到
+`Registered tunnel connection` 并实际验证公网 `/ready` 返回 200。
+下面只读取当前仍在运行的这次启动，服务已停止时不会输出旧网址；启动初期
+尚未生成网址时，稍后再读日志。
+
+```bash
+if systemctl --user is-active --quiet octopus-tunnel; then
+  octopus_tunnel_invocation=$(systemctl --user show octopus-tunnel --property=InvocationID --value)
+  journalctl --user -u octopus-tunnel \
+    "_SYSTEMD_INVOCATION_ID=$octopus_tunnel_invocation" --no-pager -o cat \
+    | rg --only-matching 'https://[a-z0-9-]+\.trycloudflare\.com'
+fi
+```
+
+手机打开此 HTTPS 网址，用现有 Octopus 账户名和密码登录。公网健康检查和
+登录页可以匿名打开，业务 API、会话与 WebSocket 仍须账户身份。域名不是
+登录凭据；不要把 setup 证明当作手机登录令牌。
+
+查看日志：
+
+```bash
+journalctl --user -u octopus-tunnel -n 80 --no-pager
+```
+
+关闭公网入口：
+
+```bash
+systemctl --user stop octopus-tunnel
+```
+
+查看日志不会启动服务。退出日志查看器也不会停止服务。隧道异常退出时查看
+原因，只有用户再次明确要求后才执行 `start`；不要为隧道故障重启 Octopus。
+如果只停止后端，隧道进程仍保留，公网会暂时返回后端不可用；后端恢复后沿用
+原网址。重启隧道则会生成新网址，原浏览器入口需要更新。
+
+Quick Tunnel 无需 Cloudflare 账户或域名，提供临时网址，没有可用性保证，
+不支持 SSE。主聊天使用 WebSocket；Applications 的 SSE 流式对话需要正式
+Cloudflare Tunnel，固定域名也需要正式隧道。见
+[Quick Tunnel 官方限制](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)。
+电脑、WSL 和服务须持续运行；systemd 不能阻止 Windows 睡眠或 WSL 退出，
+保持 WSL 的方法见[用户指南](user-guide.md#电脑需要保持什么状态)。
+
+2026-10-30 已核验公网首页和 `/ready` 返回 200、未登录会话 API 返回 401；
+390×844 手机尺寸浏览器正常显示账户登录页，无横向溢出和页面异常，WSS 能
+完成握手并以 4001 拒绝无效凭据。核验未登录用户账户或调用模型。隧道 unit
+为 `static`、`Restart=no`，原 Octopus 服务进程保持运行。
+
 ### 自动发布
 
 本节只适用于已授权、完成必要本机检查并推送 main 的代码改变，按用户已授权
 流程直接发布；用户本次另有指令时优先遵循。只提交本任务已验证的代码及必要
 相关文档，排除并行工作，不能把整个脏工作树一起收进提交。
 
-纯文档改动完成链接、索引和差异检查后留在工作区，不自动 stage、commit、
-push、构建、重启或发布。用户明确要求文档提交时才提交，提交本身也不触发发布。
+文档改动完成链接、索引和差异检查后，按[根仓库规则](../AGENTS.md#repository-and-upstream-maintenance)
+提交、推送；用户当次要求暂不提交时保留工作区。纯文档交付不触发应用构建、
+完整产品测试、模型调用、重启或发布。
 
 用户说“发布”或“上线”即授权执行本节流程。将必要发布检查纳入验证阶段一次完成，
 复用同版本、同环境的有效测试和审查结果；只补缺失或因后续变更失效的检查，

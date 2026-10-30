@@ -32,7 +32,7 @@ See [documentation rules](AGENTS.md) and [repository action rules](../AGENTS.md#
 | Applications and their processes | [Applications](implemented/applications.md), [backends](implemented/application-backends.md), [agent access](implemented/app-agent-access.md) |
 | Wiki, trusted requests or research | [Wiki contract](implemented/wiki-development-summary.md), [knowledge requests](knowledge-requests.md), [research](implemented/native-deep-research.md) |
 | Lists, ordering, navigation or mobile UI | [List reconciliation](implemented/frontend-list-reconciliation.md), [sidebar pins](implemented/sidebar-pins.md), [mobile](implemented/mobile.md) |
-| Tests, publication or local operations | [Testing](testing.md), [local WSL](local-wsl.md), [local task lifecycle](agents/issue-tracker.md) |
+| Tests, publication or local operations | [Testing](testing.md), [local WSL](local-wsl.md), [manual phone tunnel](local-wsl.md#手机公网入口), [local task lifecycle](agents/issue-tracker.md) |
 | Unfinished architecture or backend work | [Engineering roadmap](plans/engineering-runtime-roadmap.md), [return admission](plans/task-return-admission.md), [paused execution scope](plans/runtime-execution-scope.md), [DeepSeek](plans/deepseek-harness-backend.md) |
 | Future Wiki and application work | [Wiki future plan](plans/wiki-future-plan.md) |
 

@@ -5,22 +5,24 @@
 
 ## 1. 当前安装状态
 
-2026-10-10 核对结果：
+2026-10-30 核对结果：
 
 | 项目 | 本机情况 |
 | --- | --- |
 | 运行环境 | Windows 上的 WSL / Ubuntu，已启用 systemd |
 | 项目目录 | `/home/jack/Octopus` |
+| 服务代码 | `/home/jack/.octopus/releases/current` 指向已发布工作树 |
 | Python 环境 | 项目内 `.venv`，使用 pip |
 | 默认 AI 后端 | Codex，Linux CLI 已使用 ChatGPT 账户登录 |
 | 后台服务 | 用户级 `octopus.service`，已启用且正在运行 |
 | 后端监听 | `127.0.0.1:8000`，`/health` 返回 `{"status":"ok"}` |
 | Windows 访问 | <http://localhost:8000> |
 | 前端 | 已构建，后台服务直接提供 `web/dist` |
-| Octopus 登录 | 尚未创建账户，目前使用安装令牌 |
-| 手机隧道 | 尚未启用，WSL 中尚未安装 `cloudflared` |
+| Octopus 登录 | 已有账户，电脑和手机均使用用户名、密码 |
+| 手机隧道 | 已安装 `cloudflared`，独立的 `octopus-tunnel.service` 仅在明确要求时手动启动 |
 
-这些是核对时的状态；本文的安装和隧道配置命令供手动执行。
+这些是核对时的状态。隧道不自启、退出后不自动重启；当前是否开放公网入口，
+以第 6 节的状态检查为准。
 
 ## 2. 日常启动和关闭
 
@@ -60,8 +62,9 @@ curl --noproxy '*' --fail --silent --show-error \
 | 查看近期日志 | `journalctl --user -u octopus -n 100 --no-pager` |
 | 实时查看日志 | `journalctl --user -u octopus -f` |
 
-重启或停止服务会中断正在执行的智能体任务，宜在任务完成后操作。
-启用手机隧道后，服务停止也会关闭隧道，重启会生成新的访问网址。
+重启或停止服务前，先等执行中、排队和待回报任务自然结束，具体流程见
+[本机服务管理](local-wsl.md#服务管理)。手机隧道由独立服务管理；Octopus
+重启不会重建隧道，但后端停止期间公网入口无法提供业务服务。
 
 ### 停止、恢复处理与控制提示
 
@@ -104,13 +107,14 @@ Resume 和 Dismiss 都不能绕过它。
 
 ### 登录 Octopus
 
-当前首次登录使用项目 `.env` 中的 `OCTOPUS_AUTH_TOKEN`。用本机编辑器查看并
-复制其值到登录框；不要把令牌写入文档或提交到 Git。
+当前安装已有账户，电脑和手机都使用同一个用户名、密码登录。
+管理员可以在 Account 页面创建邀请，供其他人注册独立账户。
 
-登录后，可以通过左下角账户菜单进入 **Account → Claim this install**，设置
-用户名和密码并点击 **Create account**。第一个账户成为管理员，并接管已有
-智能体、会话等数据。此后电脑和手机都使用用户名、密码登录，原安装令牌
-不再作为登录凭据。管理员可以在 Account 页面创建邀请，供其他人注册。
+全新空安装首次进入时，开户页才会要求配置中的 `OCTOPUS_AUTH_TOKEN` 作为
+setup 证明，同时设置首个管理员的用户名和密码。证明只用于开户，不能登录
+业务页面或访问 API；开户响应丢失后使用原账户登录。存在未归属的旧业务资料
+时会拒绝开户，不能用“认领安装”绕过。配置来源见第 8 节，令牌不要写入文档
+或提交到 Git。
 
 Octopus 网页登录与 Codex 模型登录是两回事。本机已登录 Codex，新会话选择
 **Codex** 并沿用已有 CLI 登录即可。
@@ -243,87 +247,65 @@ Vera 不会自动得到 Octo 的完整聊天记录，因此委托应说明目标
 
 ## 6. 手机远程访问：Cloudflare Tunnel
 
-项目内置入口是 `octopus serve --tunnel`。在这台已配置后台服务的机器上，
-使用 `.env` 启用同一功能，继续由现有服务管理进程即可。
+本机使用独立的 `octopus-tunnel.service`，把现有 Octopus 服务接到公网。
+**只有用户明确要求时才启动隧道**：不设置 Windows／WSL 自启，也不设置
+进程退出后的自动重启。关闭操作终端不会直接停止已启动的隧道。
 
 ```text
-手机浏览器 → HTTPS / Cloudflare Tunnel → WSL 的 localhost:8000 → Octopus
+手机浏览器 → 公网 HTTPS / Cloudflare Tunnel → WSL 的 127.0.0.1:8000 → Octopus
 ```
 
-### 第一步：在 Ubuntu / WSL 安装 cloudflared
+### 第一步：确认安装与服务
 
-使用 [Cloudflare 官方 apt 仓库](https://pkg.cloudflare.com/index.html)
-推荐的通用 Debian 系发行版配置，在 Ubuntu 终端执行：
+本机已将 Cloudflare 官方 Linux 二进制安装到 `~/.local/bin/cloudflared`。
+安装、校验和用户服务定义统一见[本机手机公网入口](local-wsl.md#手机公网入口)。
+日常使用不需要重新安装，也不需要修改 Octopus 的配置或重启后端。
+
+在 Ubuntu／WSL 中检查：
 
 ```bash
-sudo mkdir -p --mode=0755 /usr/share/keyrings
-curl -fsSL https://pkg.cloudflare.com/cloudflare-main.gpg \
-  -o /tmp/octopus-cloudflare-main.gpg
-sudo install -m 0644 /tmp/octopus-cloudflare-main.gpg \
-  /usr/share/keyrings/cloudflare-main.gpg
-printf '%s\n' \
-  'deb [signed-by=/usr/share/keyrings/cloudflare-main.gpg] https://pkg.cloudflare.com/cloudflared any main' \
-  | sudo tee /etc/apt/sources.list.d/cloudflared.list
-sudo apt-get update
-sudo apt-get install cloudflared
-cloudflared --version
-```
-
-逐条确认成功再执行下一条。安装位置是运行 Octopus 的 WSL，后台服务已有
-`/usr/bin` 路径，可以找到通过 apt 安装的 `cloudflared`。
-
-### 第二步：启用后台服务的隧道
-
-用编辑器打开 `/home/jack/Octopus/.env`，将已有的隧道设置改为以下值；没有则
-新增该行，避免保留重复设置：
-
-```dotenv
-OCTOPUS_ENABLE_TUNNEL=true
-```
-
-保留现有 `OCTOPUS_HOST=127.0.0.1` 和 `OCTOPUS_PORT=8000`。隧道连接本地
-服务，无需为手机访问开放路由器端口或改变后端监听地址。
-
-在 Ubuntu 中重启：
-
-```bash
-systemctl --user restart octopus
+~/.local/bin/cloudflared --version
 systemctl --user status octopus --no-pager
+systemctl --user status octopus-tunnel --no-pager
 ```
 
-隧道初始化可能需要等待；项目最多等待约 60 秒获取网址。查看当前服务进程的
-启动日志，避免复制到以前运行留下的旧网址：
+隧道尚未启动时，最后一条显示 `inactive` 是正常状态。
+
+### 第二步：按需启动并获取网址
+
+确认 Octopus 正常运行后，在需要手机访问时执行：
 
 ```bash
-octopus_server_pid=$(systemctl --user show octopus --property=MainPID --value)
-journalctl --user -u octopus "_PID=$octopus_server_pid" -b --no-pager -o cat \
-  | rg 'Tunnel URL:|Cloudflare Tunnel active:'
+systemctl --user start octopus-tunnel
 ```
 
-成功时日志中会出现类似以下内容；示例域名不能直接使用：
+等待日志出现公网网址与 `Registered tunnel connection`。使用
+[本机手机公网入口中的命令](local-wsl.md#手机公网入口)读取**本次启动**的网址，
+避免复制到旧日志中的失效地址。成功时类似以下内容；示例域名不能直接使用：
 
 ```text
-Tunnel URL: https://example-random-name.trycloudflare.com
+https://example-random-name.trycloudflare.com
 ```
 
-若暂时没有网址，使用 `journalctl --user -u octopus -f` 查看启动过程。
+若暂时没有网址，使用 `journalctl --user -u octopus-tunnel -f` 查看启动过程；
+从日志查看器按 `Ctrl+C` 退出不会停止隧道。
 同时可运行第 2 节的 `/health` 检查，确认 Octopus 本地服务正常。
 
 ### 第三步：在手机浏览器登录
 
 1. 在手机 Safari / Chrome 打开日志给出的完整 `https://…trycloudflare.com` 网址。
-2. 使用与电脑相同的 Octopus 登录方式：尚未创建账户时使用安装令牌，创建后
-   使用用户名和密码。
+2. 使用与电脑相同的 Octopus 用户名和密码登录。
 3. 打开侧栏抽屉，选择智能体和会话；可以继续电脑上的同一会话。
 4. 手机输入框的回车用于换行，点击发送按钮发送消息。
 5. 可通过浏览器“添加到主屏幕”保存入口；网址变化后需要更新入口。
 
 手机不需要与电脑处在同一个 Wi-Fi，也不需要安装 Codex。文件读写和代码
 执行仍发生在电脑的 WSL 中。启用隧道后，可以先用手机访问同一网址的
-`/health`，再登录并确认能看到已有会话。
+`/ready`，再登录并确认能看到已有会话。后端仍监听 `127.0.0.1:8000`，
+无需开放路由器端口或改为 `0.0.0.0`。
 
-本项目启动的是 **Quick Tunnel**：不需要 Cloudflare 账户或自有域名，生成
-临时公开 HTTPS 网址。网址在隧道退出后失效，每次重新启动会变化；新的网址
+本机这个入口使用 **Quick Tunnel**：不需要 Cloudflare 账户或自有域名，生成
+临时公开 HTTPS 网址。网址在隧道退出后失效，重新启动会变化；新的网址
 属于新的浏览器站点，可能需要重新登录。该服务不提供可用性保证。
 参见 [Cloudflare Quick Tunnels 文档](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/)。
 
@@ -344,25 +326,26 @@ wsl -d Ubuntu --exec /usr/bin/sleep infinity
 
 这不阻止 Windows 睡眠或关机，也不是 Windows 开机自启配置。
 
-### 直接使用 README 的前台命令
+### 项目内置入口与本机配置
 
-需要在终端直接看到网址和日志时，可以停掉后台服务后运行：
+README 的 `octopus serve --tunnel` 用于启用项目内置隧道。当前受管安装由
+数据库旁的中央配置和服务 profile 绑定，普通 `serve` 会转交 systemd；直接
+添加 `--tunnel` 会与已绑定的 `enable_tunnel=false` 冲突。仅修改开发目录
+`/home/jack/Octopus/.env` 再重启服务不会启用当前受管服务的隧道。
 
-```bash
-systemctl --user stop octopus
-cd /home/jack/Octopus
-export PATH="$HOME/.nvm/versions/node/v24.21.0/bin:$HOME/.local/bin:$PATH"
-.venv/bin/octopus serve --tunnel
-```
-
-保持该终端运行。结束时按 `Ctrl+C`，再用 `systemctl --user start octopus`
-恢复后台服务；后台是否启用隧道仍取决于 `.env`。前台和后台只能运行一份，
-否则会争用 8000 端口。
+本机保留内置隧道关闭，由独立用户服务连接现有 8000 端口。配置边界见
+[本机服务管理](local-wsl.md#服务管理)。
 
 ### 关闭手机入口和长期网址
 
-关闭隧道时，将 `.env` 中 `OCTOPUS_ENABLE_TUNNEL` 改为 `false`，再执行
-`systemctl --user restart octopus`。电脑继续通过 <http://localhost:8000> 访问。
+关闭公网入口时执行：
+
+```bash
+systemctl --user stop octopus-tunnel
+```
+
+关闭隧道不影响 Octopus 的本地服务和现有任务，电脑继续通过
+<http://localhost:8000> 访问。以后只有再次明确要求并手动启动才开放入口。
 
 需要固定域名时，应配置普通 Cloudflare Tunnel，并将其指向本机 8000 服务；
 项目的 `--tunnel` 参数只创建临时隧道。普通隧道的域名配置见
@@ -375,19 +358,16 @@ Applications 中调用 `/apps/{id}/agent/chat` 的应用则使用 SSE，因此�
 
 ## 7. 更新后的部署与本地开发
 
-普通使用只需启动服务。源码更新后，若有前端变化，按项目要求先重启后端，
-运行第 2 节的健康检查并确认正常，然后构建前端：
+普通使用只需启动服务。8000 端口提供的是
+`~/.octopus/releases/current` 中已发布的后端和 `web/dist`；开发目录中的编辑
+和构建不会直接更新正式页面。已授权的源码发布须完成相应检查，再按
+[自动发布流程](local-wsl.md#自动发布)切换配套后端和静态资源，等待现有任务
+自然结束。单独重启服务不能发布开发目录中的改动。
 
-```bash
-cd /home/jack/Octopus/web
-export PATH="$HOME/.nvm/versions/node/v24.21.0/bin:$HOME/.local/bin:$PATH"
-bun run build
-```
-
-刷新浏览器；启用了 Quick Tunnel 时，先查看重启后生成的新网址。
-8000 端口提供的是构建后的 `web/dist`，编辑 `web/src` 后必须构建才能看到变化。
-需要前端实时开发时，在 `web` 中执行 `bun dev`，在电脑访问
-<http://localhost:5173>。手机隧道仍指向 8000 的正常服务。
+前端实时开发在开发目录 `web` 中执行 `bun dev`，电脑访问
+<http://localhost:5173>。开发目录的本地构建命令为 `cd web && bun run build`，
+工具链见 [local-wsl.md](local-wsl.md#本机测试)。手机隧道仍指向 8000 的
+已发布服务；仅重启后端不会改变独立隧道的网址。
 
 重装依赖、代理配置、完整测试和同步上游的本机细节见
 [local-wsl.md](local-wsl.md)；同步之前应先保存已有源码改动。
@@ -396,11 +376,15 @@ bun run build
 
 | 内容 | 本机路径或入口 |
 | --- | --- |
-| 服务配置、安装令牌 | `/home/jack/Octopus/.env` |
+| 当前服务配置、setup 证明 | `/home/jack/.octopus/octopus.db.service.env`，权限 `0600` |
+| 安装身份与路径绑定 | `/home/jack/.octopus/octopus.db.service.json` |
+| 开发配置 | `/home/jack/Octopus/.env`，不叠加到当前受管服务 |
 | 主数据库：智能体角色、prompt、会话、定时任务等 | `/home/jack/.octopus/octopus.db` |
 | 监控数据库 | `/home/jack/.octopus/octopus-metrics.db` |
 | 用户服务定义 | `/home/jack/.config/systemd/user/octopus.service` |
-| 服务的网络代理环境 | `/home/jack/.octopus/proxy.env` |
+| 服务的网络代理环境 | `octopus.service` 的原生 Environment，见 [本机服务管理](local-wsl.md#服务管理) |
+| 隧道程序、用户服务 | `~/.local/bin/cloudflared`、`~/.config/systemd/user/octopus-tunnel.service` |
+| 隧道的网络代理环境 | `~/.config/octopus-tunnel/proxy.env`，权限 `0600` |
 | 智能体记忆、应用、附件和账户数据 | `/home/jack/.octopus/` 下的相应目录 |
 | Codex 自身登录和会话数据 | 本机 `~/.codex/` |
 | 智能体 prompt 参考文件 | [agent-prompts.md](agent-prompts.md) |
@@ -417,13 +401,14 @@ bun run build
 | --- | --- |
 | 电脑打不开 `localhost:8000` | 确认 WSL 正在运行，查看用户服务状态、日志和 `/health` |
 | 提示 8000 端口已占用 | 检查是否同时启动了后台服务和前台 `octopus serve`，保留一份 |
-| 页面显示旧界面或静态文件 404 | 更新后构建 `web/dist`，然后刷新当前页面 |
-| 手机网址失效 | 检查电脑、WSL、服务状态，从当前服务进程日志重新获取网址 |
-| 隧道启动后没有网址 | 检查 `cloudflared --version`、`.env` 设置和服务启动日志；隧道失败时本地服务仍可运行 |
-| 隧道中途退出、本地服务仍正常 | 查看日志，重启 Octopus 重新建立隧道并获取新网址；当前实现不会单独自动重启隧道 |
-| 创建账户后原令牌不能登录 | 改用刚创建的用户名和密码 |
+| 页面显示旧界面或静态文件 404 | 核对 `releases/current` 的已发布版本及配套资产，按正式流程发布后刷新 |
+| 手机网址失效 | 检查电脑、WSL、两个服务的状态；按第 6 节读取本次隧道的网址 |
+| 隧道启动后没有网址 | 检查 `~/.local/bin/cloudflared --version` 和隧道日志；代理配置见本机手机公网入口 |
+| 隧道中途退出、本地服务仍正常 | 查看隧道日志；仅在明确要求时重新 `start octopus-tunnel`，获取新网址，不重启 Octopus |
+| 关闭终端后手机无法连接 | 检查 Windows 是否睡眠、WSL 是否退出；用户服务不能阻止 WSL 关闭 |
+| 安装令牌不能登录 | 当前安装使用账户名和密码；setup 证明只用于全新空安装开户 |
 | 新会话工作目录被拒绝 | 到 Account 的 Where you can work 添加实际目录，再使用 WSL 路径 |
 | 提示找不到 `codex` 或 `bun` | 新开 Ubuntu 终端加载 nvm，或使用上文的 PATH 设置 |
-| Codex 外网请求失败 | 检查 Windows 的本机代理及 `/home/jack/.octopus/proxy.env`，参见 local-wsl.md |
+| Codex 外网请求失败 | 检查 Windows 的本机代理及受管服务的实际代理环境，参见 local-wsl.md |
 | 本地 MCP 回调出现代理 502 | 检查 `NO_PROXY` / `no_proxy` 明确包含 `127.0.0.1,localhost,::1` |
 | 想用手机上传的文件 | 使用聊天附件入口；`/showme` 的路径指向服务器文件系统 |
