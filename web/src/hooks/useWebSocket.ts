@@ -3,9 +3,8 @@ import { useCallback, useEffect, useRef } from "react";
 import { newSubmissionId, type SubmissionReply } from "../lib/submission";
 import {
   loadSessionSnapshot,
-  loadBgTaskSnapshot,
+  loadSessionSnapshots,
   loadResearchSnapshot,
-  loadResearchAfterDetail,
 } from "../lib/hydrateSession";
 import { readRuntimeMetadata } from "../lib/toolIdentity";
 import { readDispatchState } from "../lib/sessionDispatch";
@@ -605,13 +604,7 @@ export function useWebSocket() {
           void refreshAgents().catch(() => {});
 
           if (activeSessionId) {
-            loadSessionSnapshot(activeSessionId, snapshotStart).then((detail) => {
-              if (detail && wsRef.current === ws) return loadResearchAfterDetail(activeSessionId, detail, snapshotStart);
-            }).catch(() => {});
-            // Bg tasks: same reload, independent endpoint. Chat history
-            // contains bg_run tool_use blocks whose chips need the bg
-            // task records to render correctly after a reconnect.
-            loadBgTaskSnapshot(activeSessionId, snapshotStart).catch(() => {});
+            void loadSessionSnapshots(activeSessionId, snapshotStart).catch(() => {});
             fetch(
               `${window.location.origin}/api/sessions/${activeSessionId}/delegations`,
               { headers: { Authorization: `Bearer ${t}` } }

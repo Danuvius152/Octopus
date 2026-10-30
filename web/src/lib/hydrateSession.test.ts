@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useSessionStore, type BgTask, type SubagentRun, type SessionInfo } from "../stores/sessionStore";
 import { handleWsMessage } from "../hooks/useWebSocket";
-import { hydrateSession, loadBgTaskSnapshot, loadSessionSnapshots, loadSessionSnapshot } from "./hydrateSession";
+import { hydrateSession, loadBgTaskSnapshot, loadResearchSnapshot, loadSessionSnapshots, loadSessionSnapshot } from "./hydrateSession";
 import { selectSession } from "./selectSession";
 
 function deferred() {
@@ -135,7 +135,7 @@ it.each(["hydrate", "select"])("%s adopts detail in the same account as the tran
   }
 });
 
-it("starts selection requests together, waits for both and adopts detail before reading bg", async () => {
+it("shows selected history and finishes navigation while background data is still pending", async () => {
   const detail = deferred();
   const background = deferred();
   const fetcher = vi.fn((url: string) => url.endsWith("bg-tasks") ? background.promise : detail.promise);
@@ -144,31 +144,92 @@ it("starts selection requests together, waits for both and adopts detail before 
   expect(fetcher).toHaveBeenCalledTimes(2);
   expect(useSessionStore.getState().activeSessionId).toBe("selected");
   expect(useSessionStore.getState().activeAgentId).toBe("agent");
-  detail.resolve(json({ id: "selected", name: "Child", messages: [], dispatch_state: dispatch("service") }));
-  await Promise.resolve();
-  expect(useSessionStore.getState().sessions).toEqual([]);
-  // A malformed bg body still leaves the accepted detail in the sidebar.
-  background.resolve(new Response("invalid JSON"));
-  await loaded;
+  detail.resolve(json({ id: "selected", name: "Child", messages: [{ role: "assistant", type: "text", content: "History", seq: 0 }], dispatch_state: dispatch("service") }));
+  try {
+    await vi.waitFor(() => expect(useSessionStore.getState().messages.selected?.[0].content).toBe("History"));
+    await loaded;
+  } finally {
+    background.resolve(json([]));
+  }
   expect(useSessionStore.getState().sessions).toEqual([expect.objectContaining({ id: "selected", name: "Child" })]);
   expect(useSessionStore.getState().sessions[0]).not.toHaveProperty("messages");
 });
 
-it("keeps paired request failure atomic and leaves archived detail out of the live list", async () => {
+it("keeps archived history available when background refresh fails", async () => {
   const detail = deferred();
   const background = deferred();
   vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("bg-tasks") ? background.promise : detail.promise));
   const loaded = loadSessionSnapshots("archived");
-  const rejection = expect(loaded).rejects.toThrow("offline");
   detail.resolve(json({ id: "archived", archived: true, messages: [], dispatch_state: null }));
   background.reject(new Error("offline"));
-  await rejection;
-  expect(useSessionStore.getState().messages.archived).toBeUndefined();
+  await loaded;
+  await vi.waitFor(() => expect(useSessionStore.getState().sessionAuxiliaryErrors.archived?.background).toBeTruthy());
+  expect(useSessionStore.getState().messages.archived).toEqual([]);
+  expect(useSessionStore.getState().dispatchUnavailable.archived).toBeUndefined();
 
   vi.stubGlobal("fetch", vi.fn(async (url: string) => json(url.endsWith("bg-tasks") ? [] : { id: "archived", archived: true, messages: [], dispatch_state: null })));
   await loadSessionSnapshots("archived");
   expect(useSessionStore.getState().messages.archived).toEqual([]);
   expect(useSessionStore.getState().sessions).toEqual([]);
+});
+
+it("keeps a background body from an obsolete service out of the current cards", async () => {
+  useSessionStore.getState().applyDispatchState("s", dispatch("old"));
+  const background = deferred();
+  vi.stubGlobal("fetch", vi.fn(() => background.promise));
+  const loaded = loadBgTaskSnapshot("s");
+  useSessionStore.getState().applyDispatchState("s", dispatch("new"));
+  background.resolve(json([{ id: "retired", status: "running" }]));
+  await loaded;
+  expect(useSessionStore.getState().bgTasks.s).toBeUndefined();
+  expect(useSessionStore.getState().sessionAuxiliaryErrors.s).toBeUndefined();
+});
+
+it.each(["background", "research"] as const)("a newer %s success retires an older failure", async (kind) => {
+  const first = deferred();
+  const second = deferred();
+  vi.stubGlobal("fetch", vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise));
+  const reader = kind === "background" ? loadBgTaskSnapshot : loadResearchSnapshot;
+  const older = reader("s");
+  const oldFailure = expect(older).rejects.toThrow("offline");
+  const newer = reader("s");
+  second.resolve(json([]));
+  await newer;
+  first.reject(new Error("offline"));
+  await oldFailure;
+  expect(useSessionStore.getState().sessionAuxiliaryErrors.s).toBeUndefined();
+});
+
+it("does not let a pending research body delay selected history", async () => {
+  const research = deferred();
+  vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("/research") ? research.promise : Promise.resolve(json(
+    url.endsWith("/bg-tasks") ? [] : { id: "s", dispatch_state: dispatch("service"), messages: [] },
+  ))));
+  await selectSession("s");
+  expect(useSessionStore.getState().messages.s).toEqual([]);
+  research.resolve(json([]));
+  await Promise.resolve();
+});
+
+it("holds early auxiliary data until the detail accepts its service", async () => {
+  const detail = deferred();
+  vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("/bg-tasks") ? Promise.resolve(json([{ id: "bg", status: "running" }])) :
+    url.endsWith("/research") ? Promise.resolve(json([])) : detail.promise));
+  const loaded = loadSessionSnapshots("s");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  expect(useSessionStore.getState().bgTasks.s).toBeUndefined();
+  detail.resolve(json({ id: "s", messages: [], dispatch_state: dispatch("service") }));
+  await loaded;
+  await vi.waitFor(() => expect(useSessionStore.getState().bgTasks.s?.[0].id).toBe("bg"));
+});
+
+it("does not publish auxiliary data when authoritative detail fails", async () => {
+  vi.stubGlobal("fetch", vi.fn(async (url: string) => url.endsWith("/bg-tasks") ? json([{ id: "bg", status: "running" }]) :
+    new Response(null, { status: 503 })));
+  await expect(loadSessionSnapshots("s")).rejects.toThrow("HTTP 503");
+  expect(useSessionStore.getState().bgTasks.s).toBeUndefined();
+  expect(useSessionStore.getState().dispatchUnavailable.s).toBe(true);
+  expect(useSessionStore.getState().sessionAuxiliaryErrors.s).toBeUndefined();
 });
 
 it("routes a selected archived detail to read-only history and its owning agent", async () => {

@@ -72,6 +72,10 @@ In production `octopus serve` serves everything from one port (default 8000):
 - The frontend uses `window.location.origin` for REST and derives `ws://`/`wss://`
   from `window.location.protocol`, so it works behind any proxy, tunnel, or
   HTTPS terminator with no config.
+- HTTP responses negotiate GZip above 1 KiB (compression level 5), reducing
+  long conversation transfers without changing the JSON contract. SSE and
+  already encoded responses pass through; WebSockets keep their existing
+  transport. The declared Starlette floor includes SSE exclusion support.
 
 In development, Vite serves the SPA on port 5173 with HMR and proxies `/api`,
 `/ws`, `/health` to the backend on 8000.

@@ -4,9 +4,10 @@ import { useSessionStore } from "../stores/sessionStore";
 import { applyTranscript } from "./transcript";
 import { readDispatchState } from "./sessionDispatch";
 import { sessions, type SessionObservation } from "./sessionList";
-import type { PendingQuestion, SubagentRun } from "../stores/sessionStore";
+import type { BgTask, PendingQuestion, ResearchJob, SessionAuxiliaryKind, SubagentRun } from "../stores/sessionStore";
 
 const API = window.location.origin;
+const SNAPSHOT_TIMEOUT_MS = 30_000;
 
 /** Fields `GET /api/sessions/{id}` adds on top of SessionInfo. */
 const DETAIL_ONLY_FIELDS = [
@@ -61,19 +62,13 @@ async function applyDetailResponse(sessionId: string, res: Response, start: Snap
   return data;
 }
 
-async function applyBgResponse(sessionId: string, res: Response, start: SnapshotStart): Promise<void> {
-  if (res.ok) {
-    useSessionStore.getState().setBgTasks(sessionId, await res.json(), start.bgTasks[sessionId] || []);
-  }
-}
-
 /** Capture the merge baseline before starting this detail request. Callers
  * with an earlier operation identity can pass that original store snapshot. */
 export async function loadSessionSnapshot(sessionId: string, start = useSessionStore.getState(), onDetail?: OnDetail, current = () => true) {
   const observation = sessions.capture(start);
   try {
     const res = await fetch(`${API}/api/sessions/${sessionId}`, {
-      headers: { Authorization: `Bearer ${start.token}` },
+      headers: { Authorization: `Bearer ${start.token}` }, signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
     });
     return await applyDetailResponse(sessionId, res, start, observation, onDetail, current);
   } catch (error) {
@@ -84,42 +79,69 @@ export async function loadSessionSnapshot(sessionId: string, start = useSessionS
 
 /** Background cards merge against the live records observed before fetch. */
 export async function loadBgTaskSnapshot(sessionId: string, start = useSessionStore.getState()): Promise<void> {
-  const res = await fetch(`${API}/api/sessions/${sessionId}/bg-tasks`, {
-    headers: { Authorization: `Bearer ${start.token}` },
-  });
-  await applyBgResponse(sessionId, res, start);
+  return loadAuxiliarySnapshot(sessionId, "background", start);
 }
 
 // Outstanding reads own only response ordering, never research status. A
 // response invalidates earlier reads after it applies; settled groups expire.
-const researchReads = new Map<string, Set<symbol>>();
+const auxiliaryReads: Record<SessionAuxiliaryKind, Map<string, Set<symbol>>> = {
+  background: new Map(), research: new Map(),
+};
 
-/** Selection, archived viewing and reconnect retain their original event
- * baseline. The store distinguishes per-job updates from snapshot writes. */
-export async function loadResearchSnapshot(sessionId: string, start = useSessionStore.getState()): Promise<void> {
-  const before = useSessionStore.getState();
-  if (!start.token || start.accountGeneration !== before.accountGeneration || start.dispatchGeneration !== before.dispatchGeneration) return;
-  const reads = researchReads.get(sessionId) ?? new Set<symbol>();
+async function loadAuxiliarySnapshot(
+  sessionId: string, kind: SessionAuxiliaryKind, start: SnapshotStart,
+  acceptedDetail?: Promise<Record<string, unknown> | null>,
+): Promise<void> {
+  const observation = sessions.capture(start);
+  if (!start.token || !sessions.current(observation)) return;
+  const group = auxiliaryReads[kind];
+  const reads = group.get(sessionId) ?? new Set<symbol>();
   const read = Symbol();
-  reads.add(read);
-  researchReads.set(sessionId, reads);
+  reads.add(read); group.set(sessionId, reads);
+  useSessionStore.getState().setSessionAuxiliaryError(sessionId, kind, null);
+  const label = kind === "background" ? "background task details" : "research updates";
+  // Start alongside detail, handling rejection immediately. Only its accepted
+  // service generation can authorize this paired read's eventual publication.
+  const response = fetch(`${API}/api/sessions/${sessionId}/${kind === "background" ? "bg-tasks" : "research"}`, {
+    headers: { Authorization: `Bearer ${start.token}` }, signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
+  }).then(async (res) => {
+    if (!res.ok) throw new Error(`Could not refresh ${label} (HTTP ${res.status}).`);
+    const rows: unknown = await res.json();
+    if (!Array.isArray(rows)) throw new Error(`Could not read ${label}.`);
+    return rows;
+  }).then((rows) => ({ rows }), (error: unknown) => ({ error }));
   try {
-    const res = await fetch(`${API}/api/sessions/${sessionId}/research`, {
-      headers: { Authorization: `Bearer ${start.token}` },
-    });
-    if (!res.ok) throw new Error(`Could not load research (HTTP ${res.status}).`);
-    const jobs = await res.json();
-    const current = useSessionStore.getState();
-    if (!reads.has(read) || start.accountGeneration !== current.accountGeneration || start.dispatchGeneration !== current.dispatchGeneration) return;
-    current.setResearch(sessionId, jobs, start.research[sessionId] || []);
+    const detail = acceptedDetail ? await acceptedDetail.catch(() => null) : undefined;
+    if (acceptedDetail && !detail) return;
+    const generation = detail ? readDispatchState(detail.dispatch_state)?.generation : undefined;
+    const result = await response;
+    if (!reads.has(read) || !sessions.current(observation, generation)) {
+      if ("error" in result) throw result.error;
+      return;
+    }
+    // A newer completion retires older successes and failures alike.
     for (const older of reads) {
       reads.delete(older);
       if (older === read) break;
     }
+    const store = useSessionStore.getState();
+    if ("error" in result) {
+      store.setSessionAuxiliaryError(sessionId, kind, `Could not refresh ${label}.`);
+      throw result.error;
+    }
+    if (kind === "background") store.setBgTasks(sessionId, result.rows as BgTask[], start.bgTasks[sessionId] || []);
+    else store.setResearch(sessionId, result.rows as ResearchJob[], start.research[sessionId] || []);
+    store.setSessionAuxiliaryError(sessionId, kind, null);
   } finally {
     reads.delete(read);
-    if (!reads.size && researchReads.get(sessionId) === reads) researchReads.delete(sessionId);
+    if (!reads.size && group.get(sessionId) === reads) group.delete(sessionId);
   }
+}
+
+/** Selection, archived viewing and reconnect retain their original event
+ * baseline. The store distinguishes per-job updates from snapshot writes. */
+export async function loadResearchSnapshot(sessionId: string, start = useSessionStore.getState()): Promise<void> {
+  return loadAuxiliarySnapshot(sessionId, "research", start);
 }
 
 /** The accepted detail establishes the service identity without replacing the
@@ -137,23 +159,12 @@ export async function loadSessionSnapshots(
   sessionId: string, start = useSessionStore.getState(),
   onDetail?: OnDetail,
 ) {
-  const headers = { Authorization: `Bearer ${start.token}` };
-  const observation = sessions.capture(start);
-  try {
-    const [detailRes, bgRes] = await Promise.all([
-      fetch(`${API}/api/sessions/${sessionId}`, { headers }),
-      fetch(`${API}/api/sessions/${sessionId}/bg-tasks`, { headers }),
-    ]);
-    const detail = await applyDetailResponse(sessionId, detailRes, start, observation, onDetail);
-    await Promise.all([
-      applyBgResponse(sessionId, bgRes, start),
-      ...(detail ? [loadResearchAfterDetail(sessionId, detail, start).catch(() => {})] : []),
-    ]);
-    return detail;
-  } catch (error) {
-    if (sessions.current(observation)) useSessionStore.getState().setDispatchUnavailable(sessionId, true, start);
-    throw error;
-  }
+  const detail = loadSessionSnapshot(sessionId, start, onDetail);
+  // Auxiliary readers own their visible errors; they cannot block navigation
+  // or turn a successful authoritative detail into unavailable queue state.
+  void loadAuxiliarySnapshot(sessionId, "background", start, detail).catch(() => {});
+  void detail.then((accepted) => accepted && loadResearchAfterDetail(sessionId, accepted, start)).catch(() => {});
+  return detail;
 }
 
 /** One queue-state path for selection, archived viewing and reconnect. */

@@ -14,6 +14,7 @@ from fastapi import Depends, FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.gzip import GZipMiddleware
 
 from . import deps
 from . import monitor as monitor_pkg
@@ -357,6 +358,7 @@ async def _shutdown_service(db, started, schedule_runner, metrics, sampler_task,
 
 
 app = FastAPI(title="Octopus", version="0.1.0", lifespan=lifespan)
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 
 @app.exception_handler(SessionOwnerUnavailable)

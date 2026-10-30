@@ -8,6 +8,54 @@ const agent = (id: string, name: string): Agent => ({ id, name, backend: "codex"
 beforeEach(() => useSessionStore.setState({ ...useSessionStore.getInitialState(), token: "synthetic-token", accountGeneration: 1, dispatchGeneration: "service-a", agents: [agent("a", "Old A"), agent("b", "Old B")] }));
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); });
 
+it("immediately acknowledges a pending creation and submits it only once", async () => {
+  let finish!: (response: Response) => void;
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "POST") return new Promise<Response>((resolve) => { finish = resolve; });
+    if (url.endsWith("/api/agents")) return Promise.resolve(Response.json([agent("a", "Old A")]));
+    if (url.endsWith("/api/backends")) return Promise.resolve(Response.json({ available: ["codex"] }));
+    return Promise.resolve(Response.json([]));
+  });
+  vi.stubGlobal("fetch", fetcher);
+  render(<SidebarAgents />);
+  fireEvent.click(await screen.findByLabelText("New session for Old A"));
+  const name = screen.getByPlaceholderText("Session name");
+  fireEvent.change(name, { target: { value: "New chat" } });
+  const create = screen.getByRole("button", { name: "Create session" });
+  fireEvent.click(create);
+  try {
+    expect(screen.getByText("Creating session…")).toHaveAttribute("role", "status");
+    expect(create).toBeDisabled();
+    fireEvent.click(create);
+    fireEvent.keyDown(name, { key: "Enter" });
+    expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+  } finally {
+    await act(async () => finish(new Response(JSON.stringify({ detail: "Unavailable" }), { status: 503 })));
+  }
+  expect(screen.getByRole("alert")).toHaveTextContent("Unavailable");
+  expect(create).toBeEnabled();
+});
+
+it("reconciles an uncertain creation without offering an immediate duplicate submission", async () => {
+  let fail!: (error: Error) => void;
+  const fetcher = vi.fn((url: string, init?: RequestInit) => {
+    if (init?.method === "POST") return new Promise<Response>((_resolve, reject) => { fail = reject; });
+    if (url.endsWith("/api/agents")) return Promise.resolve(Response.json([agent("a", "Old A")]));
+    if (url.endsWith("/api/backends")) return Promise.resolve(Response.json({ available: ["codex"] }));
+    return Promise.resolve(Response.json([]));
+  });
+  vi.stubGlobal("fetch", fetcher);
+  render(<SidebarAgents />);
+  fireEvent.click(await screen.findByLabelText("New session for Old A"));
+  fireEvent.click(screen.getByRole("button", { name: "Create session" }));
+  const before = fetcher.mock.calls.filter(([url]) => url.endsWith("/api/sessions")).length;
+  await act(async () => fail(new Error("timeout")));
+  expect(screen.getByRole("alert")).toHaveTextContent("Creation could not be confirmed");
+  expect(screen.queryByRole("button", { name: "Create session" })).toBeNull();
+  await waitFor(() => expect(fetcher.mock.calls.filter(([url]) => url.endsWith("/api/sessions")).length).toBeGreaterThan(before));
+  expect(fetcher.mock.calls.filter(([, init]) => init?.method === "POST")).toHaveLength(1);
+});
+
 it("merges offline additions while preserving updates and archive events newer than the GET", async () => {
   let finish!: (response: Response) => void;
   vi.stubGlobal("fetch", vi.fn((url: string) => {

@@ -816,6 +816,7 @@ async def test_http_chat_streams_server_sent_events(client, account_token):
     ) as resp:
         assert resp.status_code == 200
         assert resp.headers["content-type"].startswith("text/event-stream")
+        assert "content-encoding" not in resp.headers
         assert resp.headers["cache-control"] == "no-store"
         text = "".join([chunk async for chunk in resp.aiter_text()])
 

@@ -27,6 +27,7 @@ import { TranscriptIntegrityNotice } from "./TranscriptIntegrityNotice";
 import { MessageBubble } from "./MessageBubble";
 import { DispatchQueue } from "./DispatchQueue";
 import { CommandNotices } from "./CommandNotices";
+import { SessionAuxiliaryNotice } from "./SessionAuxiliaryNotice";
 import { MessageTime } from "./MessageTime";
 import { ModelPickerDialog } from "./ModelPickerDialog";
 import { isImeComposing } from "../lib/composerKeys";
@@ -1644,6 +1645,7 @@ export function ChatView({
 
       {activeSessionId && <DispatchQueue key={activeSessionId} sessionId={activeSessionId} archived={isArchived} readOnly={isArchived || transcriptDamaged} />}
       {activeSessionId && <CommandNotices sessionId={activeSessionId} />}
+      {activeSessionId && <SessionAuxiliaryNotice sessionId={activeSessionId} />}
 
       {activeSessionId && <RecoverableInputs key={`recovery-${activeSessionId}`} sessionId={activeSessionId} connected={connected}
         disabled={isArchived || transcriptDamaged || input.length > 0 || pendingAttachments.length > 0}

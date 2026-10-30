@@ -40,6 +40,7 @@ async def test_health(client):
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "ok"
+    assert "content-encoding" not in resp.headers
 
 
 @pytest.mark.asyncio
@@ -61,6 +62,22 @@ async def test_list_sessions_empty(client):
     resp = await client.get("/api/sessions", headers=client.headers)
     assert resp.status_code == 200
     assert isinstance(resp.json(), list)
+
+
+async def test_large_session_detail_negotiates_compression_without_changing_history(client):
+    agent = (await session_manager.db.load_agents())[0]
+    session = await session_manager.create_session(agent["id"], "Long mobile history")
+    text = "A preserved conversation with code and tool results.\n" * 2_000
+    await session_manager.db.append_message(session.id, 0, "assistant", "text", text)
+    compressed = await client.get(f"/api/sessions/{session.id}", headers={"Accept-Encoding": "gzip"})
+    identity = await client.get(f"/api/sessions/{session.id}", headers={"Accept-Encoding": "identity"})
+    assert compressed.status_code == identity.status_code == 200
+    assert compressed.json() == identity.json()
+    assert compressed.json()["messages"][0]["content"] == text
+    assert compressed.headers.get("content-encoding") == "gzip"
+    assert "accept-encoding" in compressed.headers.get("vary", "").lower()
+    assert "content-encoding" not in identity.headers
+    assert compressed.num_bytes_downloaded < len(identity.content) // 5
 
 
 async def test_http_submission_is_explicitly_refused_while_recovery_is_incomplete(client, monkeypatch):

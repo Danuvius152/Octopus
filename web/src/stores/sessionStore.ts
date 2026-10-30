@@ -43,6 +43,7 @@ export type ConnectorCatalogEntry = ApiConnectorCatalogEntry;
 export type ConnectorInstallationInfo = ApiConnectorInstallationInfo;
 export type Schedule = ScheduleInfo;
 export type AttachmentMetadata = ApiAttachmentMetadata;
+export type SessionAuxiliaryKind = "background" | "research";
 
 // `Message` is a UI-only shape: it's how WS events are normalized for
 // rendering, not 1-to-1 with `MessageContent` from the contract (which has
@@ -365,6 +366,8 @@ interface SessionStore {
   bgTasks: Record<string, BgTask[]>;
   upsertBgTask: (sessionId: string, task: BgTask) => void;
   setBgTasks: (sessionId: string, tasks: BgTask[], baseline?: BgTask[]) => void;
+  sessionAuxiliaryErrors: Record<string, Partial<Record<SessionAuxiliaryKind, string>>>;
+  setSessionAuxiliaryError: (sessionId: string, kind: SessionAuxiliaryKind, error: string | null) => void;
 
   // Agent-to-agent delegations spawned by a parent session.
   // Keyed by parent sessionId → list of delegation records. The
@@ -865,7 +868,7 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       applied = true;
       return {
         dispatchGeneration: snapshot.generation,
-        ...(changed ? { closedQuestionIds: {}, pendingQuestions: {}, sessionMembership: {} } : {}),
+        ...(changed ? { closedQuestionIds: {}, pendingQuestions: {}, sessionMembership: {}, sessionAuxiliaryErrors: {} } : {}),
         retiredDispatchGenerations: changed
           ? [...s.retiredDispatchGenerations, s.dispatchGeneration!] : s.retiredDispatchGenerations,
         // An equal revision confirms the existing content and invalidates
@@ -937,6 +940,18 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   closeViewer: () => set({ viewer: null }),
 
   bgTasks: {},
+  sessionAuxiliaryErrors: {},
+  setSessionAuxiliaryError: (sessionId, kind, error) => set((s) => {
+    const current = s.sessionAuxiliaryErrors[sessionId];
+    if ((current?.[kind] ?? null) === error) return s;
+    const next = { ...current };
+    if (error) next[kind] = error;
+    else delete next[kind];
+    const errors = { ...s.sessionAuxiliaryErrors };
+    if (Object.keys(next).length) errors[sessionId] = next;
+    else delete errors[sessionId];
+    return { sessionAuxiliaryErrors: errors };
+  }),
   upsertBgTask: (sessionId, task) =>
     set((s) => {
       const current = s.bgTasks[sessionId] || [];

@@ -1,8 +1,9 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   IconArchive,
   IconCheck,
+  IconLoader2,
   IconPin,
   IconPinnedOff,
   IconPlus,
@@ -16,6 +17,7 @@ import { loadSessionSnapshot } from "../lib/hydrateSession";
 import { sidebarAgents } from "../lib/sidebarPins";
 import { refreshAgents, withAgentRequest } from "../lib/refreshAgents";
 import { sessions as sessionList } from "../lib/sessionList";
+import { isImeComposing } from "../lib/composerKeys";
 import { useSessionStore, type Agent, type SessionInfo } from "../stores/sessionStore";
 import { SidebarSectionHeader } from "./SidebarSectionHeader";
 import { SortablePin, SortablePins, type DragHandle } from "./SortablePins";
@@ -73,10 +75,20 @@ export function SidebarAgents() {
   const [formCredentialId, setFormCredentialId] = useState("");
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [archiveError, setArchiveError] = useState("");
+  const [creating, setCreating] = useState(false);
+  const [createError, setCreateError] = useState("");
+  const creation = useRef<symbol | null>(null);
   const credentials = useSessionStore((s) => s.credentials);
   const availableBackends = useSessionStore((s) => s.availableBackends);
 
   const headers = { Authorization: `Bearer ${token}` };
+
+  useEffect(() => {
+    creation.current = null;
+    setCreating(false);
+    setCreateError("");
+    setFormAgentId(null);
+  }, [token]);
 
   useEffect(() => {
     if (!token) return;
@@ -151,6 +163,8 @@ export function SidebarAgents() {
   };
 
   const openCreateRow = (agentId: string) => {
+    if (creation.current) return;
+    setCreateError("");
     setActiveAgentId(agentId);
     setExpanded((prev) => new Set(prev).add(agentId));
     setFormAgentId(agentId);
@@ -167,10 +181,17 @@ export function SidebarAgents() {
   };
 
   const createSession = async (agentId: string) => {
+    if (creation.current) return;
+    const operation = Symbol();
+    creation.current = operation;
+    setCreating(true);
+    setCreateError("");
+    const start = useSessionStore.getState();
     const observation = sessionList.capture();
     try {
       const res = await fetch(`${API}/api/agents/${agentId}/sessions`, {
         method: "POST",
+        signal: AbortSignal.timeout(30_000),
         headers: { ...headers, "Content-Type": "application/json" },
         body: JSON.stringify({
           name: newName.trim() || null,
@@ -179,13 +200,30 @@ export function SidebarAgents() {
           backend: formBackend || null,
         }),
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        const body = await res.json().catch(() => null);
+        if (sessionList.accountCurrent(observation)) setCreateError(typeof body?.detail === "string"
+          ? body.detail : `Could not create session (HTTP ${res.status}).`);
+        return;
+      }
       const session: SessionInfo = await res.json();
       if (sessionList.accountCurrent(observation)) closeCreateRow();
       const accepted = await sessionList.created(session, observation);
-      if (accepted && sessionList.current(observation)) selectSession(session.id, agentId);
+      const current = useSessionStore.getState();
+      if (accepted && sessionList.current(observation) && current.activeSessionId === start.activeSessionId && current.mainView === start.mainView) {
+        void selectSession(session.id, agentId);
+      }
     } catch {
-      // ignore
+      if (sessionList.accountCurrent(observation)) {
+        closeCreateRow();
+        setCreateError("Creation could not be confirmed. Check the session list before creating another conversation.");
+        void sessionList.refresh();
+      }
+    } finally {
+      if (creation.current === operation) {
+        creation.current = null;
+        setCreating(false);
+      }
     }
   };
 
@@ -362,6 +400,7 @@ export function SidebarAgents() {
               }}
               title="New session"
               aria-label={`New session for ${a.name}`}
+              disabled={creating}
             >
               <IconPlus size={14} />
             </button>
@@ -371,7 +410,7 @@ export function SidebarAgents() {
         {isExpanded && (
           <div className="session-rail ml-[15px] mt-0.5 mb-1 flex flex-col gap-0.5 border-l-[1.5px] border-gray-400/70 pl-3">
             {formAgentId === a.id && (
-              <div className="session-create rounded-lg border border-primary-100 bg-primary-50/60 p-2">
+              <fieldset disabled={creating} aria-busy={creating} aria-label="New session" className="session-create rounded-lg border border-primary-100 bg-primary-50/60 p-2">
                 <div className="flex items-center gap-1.5">
                   <input
                     className="min-w-0 flex-1 rounded-md border border-gray-400 bg-card px-2 py-1 text-[13px] text-gray-900 outline-none placeholder:text-gray-600 focus:border-primary"
@@ -380,7 +419,7 @@ export function SidebarAgents() {
                     autoFocus
                     onChange={(e) => setNewName(e.target.value)}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter") createSession(a.id);
+                      if (e.key === "Enter" && !isImeComposing(e)) { e.preventDefault(); void createSession(a.id); }
                       if (e.key === "Escape") closeCreateRow();
                     }}
                   />
@@ -391,7 +430,7 @@ export function SidebarAgents() {
                     title="Create session"
                     aria-label="Create session"
                   >
-                    <IconCheck size={13} />
+                    {creating ? <IconLoader2 size={13} className="animate-spin" aria-hidden /> : <IconCheck size={13} />}
                   </button>
                   <button
                     type="button"
@@ -404,6 +443,7 @@ export function SidebarAgents() {
                   </button>
                 </div>
 
+                {creating && <p role="status" className="mt-1 text-xs text-muted-foreground">Creating session…</p>}
                 {/* Overrides stay one click away: a session normally
                   * inherits the agent's engine, credential and the
                   * server's default working dir, and the design's
@@ -459,7 +499,7 @@ export function SidebarAgents() {
                     )}
                   </div>
                 )}
-              </div>
+              </fieldset>
             )}
             {visible.map((s) => {
               const isActive =
@@ -552,6 +592,7 @@ export function SidebarAgents() {
         }}
       />
       {archiveError && <p role="alert" className="px-2 text-xs text-destructive">{archiveError}</p>}
+      {createError && <p role="alert" className="px-2 text-xs text-destructive">{createError}</p>}
       {sessionRead.error && <p role="alert" className="px-2 text-xs text-destructive">
         Sessions not synchronized: {sessionRead.error}
         <button className="ml-2 underline" onClick={() => void sessionList.refresh()}>Refresh sessions</button>
