@@ -175,7 +175,7 @@ export function ModelPickerDialog({
             inherited={`Agent default (${agent?.service_tier === "fast" ? "Fast" : "Normal"})`}
           />
         )}
-        {session.backend === "codex" && (
+        {(session.backend === "codex" || session.backend === "claude-code") && (
           <ReasoningEffortSelect
             id="session-reasoning-effort" value={effort} onChange={setEffort}
             model={typed || agent?.model} catalog={catalog} disabled={busy}

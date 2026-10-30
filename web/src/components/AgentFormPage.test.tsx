@@ -156,28 +156,32 @@ describe("AgentFormPage", () => {
     expect(screen.queryByRole("checkbox", { name: /GitHub account/ })).toBeNull();
   });
 
-  it("saves Codex model, reasoning and Fast defaults", async () => {
+  it.each(["codex", "claude-code"] as const)("saves %s model and reasoning defaults", async (backend) => {
     fetchMock.mockImplementation(async (url: unknown, init?: RequestInit) => {
-      if (String(url).includes("/backends/codex/models")) return json({
+      if (String(url).includes(`/backends/${backend}/models`)) return json({
         default_model: "model-a", default_reasoning_effort: "max",
         models: [{ id: "model-a", name: "Model A", reasoning_efforts: ["low", "high", "max"] }],
         reasoning_efforts: ["low", "high", "max"],
         service_tiers: ["default", "fast"], default_service_tier: "default",
       });
-      return init?.method === "POST" ? json(agent({ name: "Reasoner", backend: "codex" }), 201) : json([]);
+      return init?.method === "POST" ? json(agent({ name: "Reasoner", backend }), 201) : json([]);
     });
-    mount(null, [], "form", "codex");
+    mount(null, [], "form", backend);
     fireEvent.change(screen.getByLabelText("Name"), { target: { value: "Reasoner" } });
     await waitFor(() => expect(screen.getByLabelText("Reasoning effort")).toBeEnabled());
     fireEvent.change(screen.getByLabelText("Model"), { target: { value: "model-a" } });
     fireEvent.change(screen.getByLabelText("Reasoning effort"), { target: { value: "high" } });
-    expect(screen.getByLabelText("Speed")).toHaveDisplayValue("Normal (default)");
-    fireEvent.change(screen.getByLabelText("Speed"), { target: { value: "fast" } });
+    if (backend === "codex") {
+      expect(screen.getByLabelText("Speed")).toHaveDisplayValue("Normal (default)");
+      fireEvent.change(screen.getByLabelText("Speed"), { target: { value: "fast" } });
+    } else {
+      expect(screen.queryByLabelText("Speed")).toBeNull();
+    }
     fireEvent.click(screen.getByRole("button", { name: "Create Agent" }));
     await waitFor(() => expect(fetchMock.mock.calls.some(([, init]) => init?.method === "POST")).toBe(true));
     const request = fetchMock.mock.calls.find(([, init]) => init?.method === "POST");
     expect(JSON.parse(String(request?.[1].body))).toMatchObject({
-      model: "model-a", reasoning_effort: "high", backend: "codex", service_tier: "fast",
+      model: "model-a", reasoning_effort: "high", backend, service_tier: backend === "codex" ? "fast" : null,
     });
   });
 

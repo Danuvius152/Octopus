@@ -1582,7 +1582,7 @@ export function ChatView({
             useSessionStore.getState().addMessage(activeSessionId, {
               role: "system",
               type: "notice",
-              content: `Model for this session: ${updated.model || "the agent's default"}${updated.backend === "codex" ? `; reasoning effort: ${updated.reasoning_effort || "the agent's default"}; speed: ${(updated.service_tier || activeAgent?.service_tier) === "fast" ? "Fast" : "Normal"}` : ""} — from the next turn.`,
+              content: `Model for this session: ${updated.model || "the agent's default"}; reasoning effort: ${updated.reasoning_effort || "the agent's default"}${updated.backend === "codex" ? `; speed: ${(updated.service_tier || activeAgent?.service_tier) === "fast" ? "Fast" : "Normal"}` : ""} — from the next turn.`,
             })
           }
         />

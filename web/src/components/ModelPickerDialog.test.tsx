@@ -96,13 +96,15 @@ it("can explicitly use Normal over an agent's Fast default and restore inheritan
   expect(JSON.parse(String(requests[1][1].body))).toEqual({ service_tier: null });
 });
 
-it("changes effort alone and preserves the model, thread and concurrent sessions", async () => {
+it.each(["codex", "claude-code"] as const)("%s changes effort alone and preserves the model, thread and concurrent sessions", async (backend) => {
+  const selected = { ...session, backend };
+  useSessionStore.setState({ sessions: [selected] });
   const close = vi.fn();
-  render(<ModelPickerDialog session={session} open onOpenChange={close} />);
+  render(<ModelPickerDialog session={selected} open onOpenChange={close} />);
   const selector = screen.getByLabelText("Reasoning effort");
   await waitFor(() => expect(selector).toBeEnabled());
   expect(selector).toHaveTextContent("Agent default (max)");
-  act(() => useSessionStore.setState({ sessions: [session, { ...session, id: "added-elsewhere" }] }));
+  act(() => useSessionStore.setState({ sessions: [selected, { ...selected, id: "added-elsewhere" }] }));
   fireEvent.change(selector, { target: { value: "high" } });
   fireEvent.click(screen.getByRole("button", { name: "Save settings" }));
   await waitFor(() => expect(close).toHaveBeenCalledWith(false));

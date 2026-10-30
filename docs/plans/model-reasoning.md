@@ -48,8 +48,10 @@ Codex reads its own `models_cache.json` and the model/effort defaults from
 values. Missing or damaged caches leave free-form model selection and basic
 reasoning levels available. The advertised levels for a known model constrain
 the picker and explicit effort updates. Model names remain free-form so a new
-model does not require an Octopus release. Claude Code retains its existing
-model shortlist and does not expose a reasoning-effort control.
+model does not require an Octopus release. Claude Code advertises the request
+levels low, medium, high, xhigh and max for its aliases and free-form models.
+These are CLI request levels, not a guarantee of distinct model capabilities.
+Claude defaults remain unspecified so clearing both overrides follows the CLI.
 
 The model catalog includes `service_tiers` and `default_service_tier`.
 Codex maps its advertised `priority` tier to Fast and also understands the
@@ -70,6 +72,17 @@ Speed renders as `-c service_tier="fast"` or `-c service_tier="default"`
 before `resume`, with the Fast feature enabled. Normal is always explicit so
 resuming a thread that previously used Fast does not retain that tier.
 One-shot schedule parsing and file-reference resolution use the same setting.
+
+Claude Code renders explicit effort as `--effort` and sets
+`CLAUDE_CODE_EFFORT_LEVEL` in the child environment to the same value: that
+environment variable takes precedence over the CLI flag. When both overrides
+are empty, neither is changed. Turn and one-shot calls share this rule; host
+configuration is never rewritten. The existing process replacement mechanism
+applies changes on the next turn while preserving the resume id.
+DeepSeek maps low to low, medium/high/xhigh to high, and max to max; Octopus
+passes the selected request level through without provider-specific conversion.
+See [Claude effort precedence](https://code.claude.com/docs/en/model-config#adjust-effort-level)
+and [DeepSeek thinking mode](https://api-docs.deepseek.com/guides/thinking_mode/).
 
 CLI configuration discovery describes the selected runtime's user config;
 workspace-specific CLI overrides can still affect settings inherited from the
@@ -94,6 +107,13 @@ while recalling the original word from the same backend thread.
 The CLI's applied-thread-settings records verify Fast (`priority`) followed by
 Normal (`default`). Concurrent PATCH, fork/reload and stale-form regressions
 cover the independent settings bindings.
+
+Claude coverage uses its production renderer/parser with a hermetic STREAM_JSON
+subprocess. It verifies low → high → cleared session → cleared agent settings,
+child environment precedence, process replacement, a stable resume id and
+preserved history. Agent/session UI tests cover saving Claude effort independently
+of model selection. This coverage does not establish live Claude or DeepSeek
+model behavior; this installation's live release checks remain Codex-only.
 
 Local delivery on 2026-10-11 passed all eight ordinary check gates (1,360
 backend tests and 306 frontend tests), 69 browser regressions, nine real Codex

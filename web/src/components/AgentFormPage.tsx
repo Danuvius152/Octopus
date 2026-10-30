@@ -51,7 +51,7 @@ function agentFields(draft: AgentDraft) {
     system_prompt: draft.systemPrompt,
     credential_id: draft.credentialId || null,
     model: draft.model.trim() || null,
-    reasoning_effort: draft.backend === "codex" ? draft.reasoningEffort || null : null,
+    reasoning_effort: draft.reasoningEffort || null,
     service_tier: draft.backend === "codex" ? draft.serviceTier : null,
     backend: draft.backend,
     tool_allow: draft.toolAllow,
@@ -539,7 +539,7 @@ export function AgentFormPage({
                       model={model} catalog={catalog} disabled={busy}
                     />
                   )}
-                  {backend === "codex" && (
+                  {(backend === "codex" || backend === "claude-code") && (
                     <ReasoningEffortSelect
                       id="agent-reasoning-effort" value={reasoningEffort} onChange={setReasoningEffort}
                       model={model} catalog={catalog} disabled={busy}

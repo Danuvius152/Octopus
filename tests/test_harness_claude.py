@@ -22,6 +22,38 @@ from server.harness.events import HarnessCredential, HarnessOneshotError
 from server.harness.profile import OneShotContext, TurnContext
 
 
+@pytest.mark.parametrize("effort", [None, "low", "medium", "high", "xhigh", "max"])
+@pytest.mark.parametrize("oneshot", [False, True])
+def test_effort_overrides_only_child_environment(tmp_path, monkeypatch, effort, oneshot):
+    import os
+
+    monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "max")
+    if oneshot:
+        argv, kw = build_oneshot_argv(OneShotContext(prompt="hello", reasoning_effort=effort))
+    else:
+        argv, kw = build_turn_argv(TurnContext(
+            prompt="hello", working_dir=str(tmp_path), resume_id="original-thread",
+            system_prompt="", reasoning_effort=effort, model=None,
+            tool_allow=None, tool_deny=None, mcp_servers=[], credential=None,
+        ))
+        assert argv[argv.index("--resume") + 1] == "original-thread"
+    assert kw["env"]["CLAUDE_CODE_EFFORT_LEVEL"] == (effort or "max")
+    assert os.environ["CLAUDE_CODE_EFFORT_LEVEL"] == "max"
+    if effort:
+        assert argv[argv.index("--effort") + 1] == effort
+        if oneshot:
+            assert argv.index("--effort") < argv.index("--")
+    else:
+        assert "--effort" not in argv
+
+
+def test_effort_catalog_covers_aliases_and_custom_models():
+    catalog = get_harness("claude-code").profile.model_settings(None)
+    for model in [None, "opus", "sonnet", "haiku", "deepseek-flash"]:
+        assert catalog.efforts_for(model) == ["low", "medium", "high", "xhigh", "max"]
+    assert catalog.default_reasoning_effort is None
+
+
 def _assemble_ctx(
     *, prompt, wd, resume, credential, model=None, mcp_servers=None,
     tool_allow=None, tool_deny=None, persona=None, session_id=None, connectors=(),

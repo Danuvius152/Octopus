@@ -30,6 +30,7 @@ from .events import (
 )
 from .harness import Harness
 from .login import LoginMethod
+from .model_settings import ModelOption, ModelSettings
 from .profile import (
     EventParser,
     McpServerEntry,
@@ -44,6 +45,25 @@ from .profile import (
 from .registry import register
 
 logger = logging.getLogger(__name__)
+
+_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
+
+def model_settings(credential: HarnessCredential | None) -> ModelSettings:
+    """Advertise CLI request levels; aliases may target third-party models."""
+    return ModelSettings(
+        models=[ModelOption(id=name, name=name, reasoning_efforts=list(_EFFORTS))
+                for name in ("opus", "sonnet", "haiku")],
+        reasoning_efforts=list(_EFFORTS),
+    )
+
+
+def _apply_effort(argv: list[str], env: dict[str, str], effort: str | None) -> None:
+    if effort:
+        argv += ["--effort", effort]
+        # Claude prioritizes the environment over --effort. Override only this
+        # child process so an explicit selection wins over the host default.
+        env["CLAUDE_CODE_EFFORT_LEVEL"] = effort
 
 
 # System-prompt addendum teaching the model about our in-process MCP tools
@@ -333,6 +353,7 @@ def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
 
     env = os.environ.copy()
     _apply_env_credential(env, ctx.credential)
+    _apply_effort(argv, env, ctx.reasoning_effort)
     # Per-agent memory (docs/plans/memory.md §3): point Claude's auto-memory
     # dir at the agent's canonical store via the dedicated override. We do NOT
     # touch CLAUDE_CONFIG_DIR — that's the root of Claude's *session transcript*
@@ -602,9 +623,10 @@ def build_oneshot_argv(ctx: OneShotContext) -> tuple[list[str], dict[str, Any]]:
     argv = ["claude", "--print", "--output-format=json"]
     if ctx.model:
         argv += ["--model", ctx.model]
-    argv += ["--", ctx.prompt]
     env = os.environ.copy()
     _apply_env_credential(env, ctx.credential)
+    _apply_effort(argv, env, ctx.reasoning_effort)
+    argv += ["--", ctx.prompt]
     return argv, {"cwd": ctx.working_dir or os.getcwd(), "env": env}
 
 
@@ -880,6 +902,7 @@ _CLAUDE_TRANSIENT_ERROR_PATTERNS = (
 
 
 CLAUDE_CODE = RuntimeProfile(
+    model_settings=model_settings,
     tool_policy=ToolPolicySupport(deny=True),
     # The aliases `claude --model` documents. Aliases rather than pinned ids on
     # purpose: they keep meaning the newest model of each tier, so this list

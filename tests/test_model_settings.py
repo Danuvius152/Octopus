@@ -139,14 +139,15 @@ async def client(catalog_home):
 
 
 @pytest.mark.asyncio
-async def test_independent_overrides_preserve_history_resume_and_reload(client):
+@pytest.mark.parametrize("backend", ["codex", "claude-code"])
+async def test_independent_overrides_preserve_history_resume_and_reload(client, backend):
     response = await client.post("/api/agents", headers=client.headers, json={
-        "name": "Reasoner", "backend": "codex", "model": "model-a", "reasoning_effort": "low",
+        "name": "Reasoner", "backend": backend, "model": "model-a", "reasoning_effort": "low",
     })
     assert response.status_code == 201, response.text
     agent = response.json()
     response = await client.post("/api/sessions/import", headers=client.headers, json={
-        "name": "Existing conversation", "agent_id": agent["id"], "backend": "codex",
+        "name": "Existing conversation", "agent_id": agent["id"], "backend": backend,
         "claude_session_id": "original-thread", "messages": [
             {"role": "user", "type": "text", "content": "Remember MARIGOLD"},
             {"role": "assistant", "type": "text", "content": "OK"},
@@ -176,9 +177,10 @@ async def test_independent_overrides_preserve_history_resume_and_reload(client):
     assert restored.get_session(session_id).reasoning_effort == "high"
     assert restored.get_session(session_id).claude_session_id == "original-thread"
 
-    rejected = await client.patch(path, headers=client.headers, json={"model": "model-b"})
-    assert rejected.status_code == 400
-    assert current.model is None
+    if backend == "codex":
+        rejected = await client.patch(path, headers=client.headers, json={"model": "model-b"})
+        assert rejected.status_code == 400
+        assert current.model is None
     valid = await client.patch(path, headers=client.headers, json={"model": "model-b", "reasoning_effort": "medium"})
     assert valid.status_code == 200
     cleared = await client.patch(path, headers=client.headers, json={"reasoning_effort": None})
@@ -197,7 +199,7 @@ async def test_independent_overrides_preserve_history_resume_and_reload(client):
 
 @pytest.mark.asyncio
 async def test_invalid_effort_and_backend_are_rejected(client):
-    for backend, effort in (("codex", "typo"), ("claude-code", "high")):
+    for backend, effort in (("codex", "typo"), ("claude-code", "ultra")):
         response = await client.post("/api/agents", headers=client.headers, json={
             "name": "Invalid", "backend": backend, "reasoning_effort": effort,
         })
