@@ -14,7 +14,7 @@ import {
 export default function globalTeardown(): void {
   rmSync(E2E_AGENTS_DIR, { recursive: true, force: true });
   // Same for the application directories agents built during the run
-  // (docs/plans/applications.md §9).
+  // (docs/implemented/applications.md §8).
   rmSync(E2E_APPLICATIONS_DIR, { recursive: true, force: true });
   // And the metrics database, so the next run starts with nothing recorded —
   // which is the premise one of the Monitor tests asserts against.

@@ -8,22 +8,33 @@ verification and repository actions.
 
 - Current guides describe current behavior. Architecture explains component
   relationships, state ownership, failures and extension points.
-- `plans/` owns durable contracts, decisions, rationale and remaining scope by
-  subject. Revise the current section when behavior changes; consolidate
-  overlapping plans. Distinguish current contracts, proposed work and
-  version-bound evidence. Record genuine dependencies in the owning plan.
+- `implemented/` owns contracts the current code actually follows, by subject:
+  behavior, ownership, limits and necessary reasons. Revise the owning contract
+  when behavior changes; code/doc disagreement needs investigation, not a move
+  based only on an old plan's completion label.
+- `plans/` owns unfinished changes (`proposed`, `in-progress` or `paused`), their
+  dependencies and completion conditions. On completion, integrate the current
+  contract and rationale into `implemented/` and remove the superseded plan;
+  a mixed document must be split before moving it.
 - [testing.md](testing.md) owns verification policy; [local-wsl.md](local-wsl.md)
   owns local operating procedures. Link to their details from other documents.
-- Reviews and post-mortems retain the revision, conditions and evidence needed
-  to interpret them. Git preserves superseded implementation timelines; dated
-  evidence does not establish current behavior or deployment.
+- `review/`, repository `.scratch/` and the account workspace are temporary.
+  New task materials and isolated worktrees use the account workspace under
+  [local task conventions](agents/issue-tracker.md); existing `.scratch/` work
+  retains its active references until completion. Test state has separate roots.
+  Transfer useful decisions, reasons, applicability and regression evidence to
+  their durable owner before cleanup. Preserve active tasks and recovery state.
+  Use `post-mortems/` selectively for incidents whose causal evidence helps
+  future diagnosis. Git preserves superseded timelines; dated evidence does not
+  establish current behavior or deployment.
 - Persona owns role and collaboration behavior. Memory owns stable user
-  preferences, locations and pointers, kept with the responsible role. Shared
+  preferences, role methods and a few project entry points, kept with the
+  responsible role. Detailed project navigation belongs in `docs/README.md`. Shared
   memory holds agreements that actually apply across roles; shared Wiki query
   access does not make development, review or research memory common.
   Engineering contracts belong in the
   owning project documents; runtime permissions come from the current tools
-  and operation context. See [the memory contract](plans/memory.md).
+  and operation context. See [the memory contract](implemented/memory.md).
 
 ## Writing and maintenance
 
@@ -31,6 +42,8 @@ verification and repository actions.
   behavior, timing, ownership, failure and consequences for its consumers.
 - Preserve conditions, exceptions, negative guarantees and useful rationale
   when shortening. Remove repetition and implementation-session narration.
+- Ordinary fixes update their existing owner when needed; they do not require
+  a separate plan, decision record, post-mortem and memory entry each time.
 - Check current behavior against code and evidence. Label proposals and
   unverified claims; distinguish implementation, validation and deployment.
 - Use source or existing generators for exhaustive API/configuration lists.
@@ -42,7 +55,7 @@ verification and repository actions.
 ## Verification
 
 Check changed facts against their strongest available source, changed local
-links and anchors, the generated plans index and `git diff --check`. Follow
+links and anchors, both generated indexes and `git diff --check`. Follow
 [testing.md](testing.md#release-and-documentation-checks) for applicable checks.
 
 Prompt text that reaches a model can change behavior. Identify the actual

@@ -1,4 +1,4 @@
-"""Per-agent native-memory provisioning (docs/plans/memory.md §6).
+"""Per-agent native-memory provisioning (docs/implemented/memory.md, Verification).
 
 Pure path derivation + idempotent provisioning of the one canonical per-agent
 memory dir. Memory is decoupled from both harnesses' config/auth dirs, so there

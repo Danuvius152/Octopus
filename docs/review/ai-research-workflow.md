@@ -2,7 +2,7 @@
 
 > **Status:** proposed — 对照 Pika 的行为流程与 prompt，改进研究证据、PDF 转 Markdown、阅读写作、实验执行与 Wiki 续接；面向计算机、AI 与数字人。
 
-日期：2026-10-24；2026-10-28 对照 Pika 2.1.7 修订通用研究流程，并保留第 11 节的执行扩展。本文是后续设计建议，未实施功能变更。Wiki 当前合同仍以[开发总结](../plans/wiki-development-summary.md)和实时操作卡为准，应用整合仍由[Wiki 未来计划](../plans/wiki-future-plan.md)管理；本文只补充研究工作流的改进，不另建一套 Wiki 规则。
+日期：2026-10-24；2026-10-28 对照 Pika 2.1.7 修订通用研究流程，并保留第 11 节的执行扩展。本文是后续设计建议，未实施功能变更。Wiki 当前合同仍以[当前契约](../implemented/wiki-development-summary.md)和实时操作卡为准，应用整合仍由[Wiki 未来计划](../plans/wiki-future-plan.md)管理；本文只补充研究工作流的改进，不另建一套 Wiki 规则。
 
 ## 1. 建议先做什么
 
@@ -349,7 +349,7 @@ Pika 的作者画像来自其自身语料，其具体人格和文风不能迁移
 | §5.2、§5.7 引用的写回交接、成组文件交付和浏览阅读检查 | 具体保留项、必要附件与实际读者入口；不迁移其固定目录、数学网页或独立归档系统。 |
 | 四个现有 skill 的 `agents/openai.yaml` | 默认 prompt 如何约定具体任务行为。 |
 | [research schema](../../server/research/schemas.py)、[orchestrator](../../server/research/orchestrator.py)、[leaf](../../server/research/leaf.py)、[manager](../../server/research/manager.py)、[已有测试](../../tests/test_research_orchestrator.py) | 当前字段、核验与综合的数据流、上下文隔离、报告持久化和错误行为。 |
-| 初稿编写时取得的 Wiki `query`、`retrieval`、`entry` 指南；[Wiki 总结](../plans/wiki-development-summary.md)、[未来计划](../plans/wiki-future-plan.md)、[直接依赖实现](../../server/wiki/maintenance_dependencies.py) | 已有能力、维护入口、当时材料范围与条件性扩展，避免重复规划；执行时仍核实时合同。 |
+| 初稿编写时取得的 Wiki `query`、`retrieval`、`entry` 指南；[Wiki 总结](../implemented/wiki-development-summary.md)、[未来计划](../plans/wiki-future-plan.md)、[直接依赖实现](../../server/wiki/maintenance_dependencies.py) | 已有能力、维护入口、当时材料范围与条件性扩展，避免重复规划；执行时仍核实时合同。 |
 
 初稿读取基线为 2026-10-24 的本地工作树，Git HEAD 为 `1947fadf3dc8978a8daf422f4bc1fce5c6b9f940`；工作树存在其他未提交改动，因此此 SHA 不代表全部已读文件的精确内容，也不代表线上部署版本。Wiki 三份指南由编写初稿的当轮工具取得，未通过文件方式绕读受限 worker 指南。PDF 补充依据是所列参考包文档与局部实现；本次未执行实际 PDF 转换或比较转换器质量。
 
@@ -413,7 +413,7 @@ Pika 的作者画像来自其自身语料，其具体人格和文风不能迁移
 
 参考计算执行的 `wait` 只限制查询等待时间；响应丢失后继续查同一作业，恢复前确认原尝试停止，checkpoint 还须绑定输入、代码和实际可恢复内容。多机合同进一步要求原子准入和过期执行者隔离：租约或心跳过期本身不能证明进程停止，也不能直接释放额度。[执行与恢复](/home/jack/ref/pika_math_learning_toolkit-2.1.7/payload/math-science-computation/references/computation-execution.md)、[多机准入合同](/home/jack/ref/pika_math_learning_toolkit-2.1.7/payload/compute-fleet-manager/references/runtime.md)
 
-**Octopus 已经具有这类职责分离，应在实验消费者上接续。** 当前架构合同区分接纳、业务提交、通知和资源退休；`BgTaskManager` 保存终态后按同一 task ID 重试交付，不重跑命令；research 也分开记录研究完成与送达。可学习之处在于将实验核验接到这些事实，不能据参考包再建一套会话执行状态机。[完成与退休合同](../plans/architecture-contract.md#输入完成与资源退休)、[后台任务实现](../../server/bg_tasks.py)、[研究管理实现](../../server/research/manager.py)
+**Octopus 已经具有这类职责分离，应在实验消费者上接续。** 当前架构合同区分接纳、业务提交、通知和资源退休；`BgTaskManager` 保存终态后按同一 task ID 重试交付，不重跑命令；research 也分开记录研究完成与送达。可学习之处在于将实验核验接到这些事实，不能据参考包再建一套会话执行状态机。[完成与退休合同](../implemented/architecture-contract.md#输入完成与资源退休)、[后台任务实现](../../server/bg_tasks.py)、[研究管理实现](../../server/research/manager.py)
 
 实施时先把下列职责映射到现有 owner 与所选实验执行器：
 

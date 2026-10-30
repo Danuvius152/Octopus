@@ -1,6 +1,6 @@
 import { enterAccountCredentials } from "./current-account";
 /**
- * The Monitor page (docs/plans/polish-2026-09.md §9).
+ * The Monitor page (docs/2026-09-25-polish-pass.md).
  *
  * The case it exists for is in this repo's own history: the Gmail connector
  * was unavailable for eleven consecutive days, a daily schedule failed on each

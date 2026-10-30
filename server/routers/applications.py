@@ -1,4 +1,4 @@
-"""REST + static-file routes for applications (docs/plans/applications.md §3/§5).
+"""REST + static-file routes for applications (docs/implemented/applications.md §3/§5).
 
 Two routers live here:
 

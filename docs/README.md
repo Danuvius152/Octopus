@@ -1,154 +1,123 @@
 # Octopus docs
 
-**Start with `architecture.md`** for how the system works today. Keep each
-document responsible for one kind of information:
+Start with [architecture.md](architecture.md) for the system's current component
+relationships. Use the task table below to find the owning contract; this index
+owns detailed project navigation so memory only needs a project entry point.
 
 | Location | Responsibility |
 | --- | --- |
-| Current guides and `architecture.md` | Product behavior, architecture and user instructions. |
-| [`plans/`](plans/) | Durable decisions, rationale, conventions and remaining scope, maintained by subject. Current architecture decisions live in [`architecture-contract.md`](plans/architecture-contract.md). |
-| [`local-wsl.md`](local-wsl.md) | Current local environment and operating procedures; repository action policy lives in [`AGENTS.md`](../AGENTS.md#repository-and-upstream-maintenance). |
-| [`testing.md`](testing.md) | Verification policy, suite selection, evidence reuse and release gates. |
-| [`agents/issue-tracker.md`](agents/issue-tracker.md) | Local specs and tickets under `.scratch/`; no external tracker. |
-| [`post-mortems/`](post-mortems/) | Specific incidents and their evidence, rather than an ever-growing current-state checklist. |
-| [`review/`](review/) | Dated code and behavior reviews, with evidence, scope and remediation impact. |
+| Current guides and `architecture.md` | Product use, component relationships and operating procedures. |
+| [`implemented/`](implemented/) | Contracts the code currently follows, with necessary reasons, limits and evidence boundaries. |
+| [`plans/`](plans/) | Unfinished changes: proposed, in progress or paused, with dependencies and acceptance conditions. |
+| [`testing.md`](testing.md) | Verification policy, test selection, evidence reuse and release gates. |
+| [`post-mortems/`](post-mortems/) | Selected incidents whose causal evidence is useful for future diagnosis. |
+| Account workspace | Default for new temporary task materials, experiments and isolated source worktrees; see [task conventions](agents/issue-tracker.md). |
+| `review/` and existing repository `.scratch/` | Temporary review reports and existing task materials. Transfer lasting conclusions to their owner before cleanup. |
 
-Writing, ownership and maintenance rules live in [docs/AGENTS.md](AGENTS.md).
-Repository actions follow [the root rules](../AGENTS.md#repository-and-upstream-maintenance).
+`implemented` describes the current code, not a deployment claim. A completed
+plan is distilled into its current contract and reasons; obsolete execution
+timelines remain in Git. Mixed documents keep unfinished scope in `plans` with
+a link from the current contract. Ordinary fixes update the relevant owner
+without generating a plan, decision record, post-mortem and memory entry each.
+See [documentation rules](AGENTS.md) and [repository action rules](../AGENTS.md#repository-and-upstream-maintenance).
 
-## Current
+## Find the owner by task
 
-本机默认使用 Codex，Claude 当前不可用。发布与审阅应明确标注真实模型验证
-仅覆盖 Codex，Claude 实机测试未执行；具体门禁见
-[AGENTS.md](../AGENTS.md#verification)，环境见
-[local-wsl.md](local-wsl.md#本机测试)。
+| Task | Start here |
+| --- | --- |
+| Responsibilities, execution, completion or retirement | [Architecture](architecture.md), [architecture contract](implemented/architecture-contract.md), [input reliability](input-reliability.md) |
+| Harnesses, steering, retry or native helpers | [Harness boundary](implemented/harness-layer.md), [Codex](implemented/codex-backend.md), [steering](implemented/inline-steering.md), [native subagents](implemented/native-subagents.md) |
+| Agent configuration, model settings or memory | [Agents](implemented/agent-refactor.md), [model settings](implemented/model-reasoning.md), [memory](implemented/memory.md) |
+| Account isolation, storage evolution or migration | [Account contract](implemented/multi-tenancy.md), [storage and handoff](implemented/current-storage-format.md), [backup and migration](backup-and-migrate.md) |
+| Applications and their processes | [Applications](implemented/applications.md), [backends](implemented/application-backends.md), [agent access](implemented/app-agent-access.md) |
+| Wiki, trusted requests or research | [Wiki contract](implemented/wiki-development-summary.md), [knowledge requests](knowledge-requests.md), [research](implemented/native-deep-research.md) |
+| Lists, ordering, navigation or mobile UI | [List reconciliation](implemented/frontend-list-reconciliation.md), [sidebar pins](implemented/sidebar-pins.md), [mobile](implemented/mobile.md) |
+| Tests, publication or local operations | [Testing](testing.md), [local WSL](local-wsl.md), [local task lifecycle](agents/issue-tracker.md) |
+| Unfinished architecture or backend work | [Engineering roadmap](plans/engineering-runtime-roadmap.md), [return admission](plans/task-return-admission.md), [paused execution scope](plans/runtime-execution-scope.md), [DeepSeek](plans/deepseek-harness-backend.md) |
+| Future Wiki and application work | [Wiki future plan](plans/wiki-future-plan.md) |
 
-Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验收已完成（2026-10-17）。开发过程、当前合同和证据集中在总结；Sapphire、SmartReader 等后续功能单列未来计划。
+## Guides
 
-随后选定的 Wiki A01/A02/A03/A05 整改已交付；当前合同、验收范围和历史证据见
-**[2026-10-17 缺陷修复交接](https://github.com/Danuvius152/Octopus/blob/b19f6f9deaa36245d80ed3c283d6e64dc257d978/docs/plans/wiki-bug-remediation-20261017.md)**。
+- [User guide](user-guide.md): startup, agents and phone access for this WSL + Codex installation.
+- [Connector setup](connectors-setup.md): GitHub, Gmail and custom OAuth from the browser.
+- [Agent prompts](agent-prompts.md): copyable role and system prompt snapshots; editing this file does not update saved agent settings.
+- [Local environment](local-wsl.md#本机测试): offline checks cover Claude Code and Codex; routine live validation uses Codex only. Current gates are in [testing.md](testing.md).
 
-- **[共享 Wiki 开发过程总结](plans/wiki-development-summary.md)** — 本期已完成；实际交付、当前合同、证据边界与开发方法。
-- **[共享 Wiki 未来计划](plans/wiki-future-plan.md)** — Sapphire、SmartReader、共享能力及有触发条件的后续工作。
-- **[全库实现审查（2026-10-23，核验关闭于 10-25）](https://github.com/Danuvius152/Octopus/blob/fe2200fbbaa705b99b6a392e188bbb2423b21ae2/docs/review/review-20261023.md)** — F01–F20 均已由 Octo 修复、Vera 独立核验关闭；记录最终修复候选的完整离线验证及证据边界。
-- **[user-guide.md](user-guide.md)** — practical instructions for this local
-  WSL + Codex installation: startup, agents, and phone access with the
-  project's Cloudflare Tunnel integration.
-- **[local-wsl.md](local-wsl.md)** — machine-specific environment, checks,
-  service management and the authorized code-deployment procedure.
-- **[architecture.md](architecture.md)** — the current system design: harness
-  layer, agents, sessions, backends, MCP tools, connectors, the
-  WebSocket protocol, the data model, and key decisions. The doc to read first.
-- **[connectors-setup.md](connectors-setup.md)** — user how-to for setting up
-  GitHub / Gmail / custom OAuth connectors entirely from the browser.
-- **[agent-prompts.md](agent-prompts.md)** — copyable One-line role and System
-  prompt configurations for Octo, Vera, and Weber on the Codex harness.
-- **[knowledge-requests.md](knowledge-requests.md)** — trusted request contract and
-  async work ownership in `server/knowledge.py`.
-- **[backup-and-migrate.md](backup-and-migrate.md)** — persistent state, CLI
-  transcripts and configuration to include in a backup or migration.
-- **[迁移机制审查（2026-10-23）](https://github.com/Danuvius152/Octopus/blob/fe2200fbbaa705b99b6a392e188bbb2423b21ae2/docs/review/migration-scope-and-portability-20261023.md)** —
-  对比 before-takeover 与本地新版本，审查旧兼容、旧接口和重复状态；含跨机器搬迁建议，尚未实施。
-- **[架构约定与未完成范围](plans/architecture-contract.md)** —
-  Owner、事务、输入/完成、账户、存储和搬迁的有效决策与 Conventions；
-  七项执行扩展的暂停范围和恢复条件；[待处理返回接管设计](plans/architecture-contract.md#待处理返回接管设计未实现)已确认、未实现。
-  当前组件与操作分别查架构概览和用户指南。
-- **[Codex app-server 迁移设计](review/future.md#codex-app-server-scope)** —
-  区分请求内交互与完整原生尾部，统一接口、输入/问题、资源退休、阶段出口与验收。
-  已按当前文本 worker 修正轻量调用边界；仅设计，未恢复暂停范围。
+## Current contracts — implemented
 
-## Design records — [`plans/`](plans/)
+Both tables are generated from the status line below each document's title.
+Run `.venv/bin/python scripts/gen-docs-index.py` after adding, moving or changing
+an entry. `scripts/check.sh` checks that the indexes match and that each status
+belongs in its directory. The script checks structure; maintainers verify claims
+against code and distinguish tests from deployment.
+The two marker regions must be unique, ordered and disjoint; structural errors
+leave the README unchanged.
 
-Keep one owning document per subject for decisions, conventions and remaining
-work. Completion updates that document; it does not start a new dated plan for
-the same contract. **Code comments cite filenames and sections**, so update
-incoming references when merging documents. Preserve useful rationale and
-scoped evidence; use Git history for superseded execution timelines.
+<!-- BEGIN implemented-index (generated by scripts/gen-docs-index.py) -->
 
-Each plan states its own status on one line under its title; the table below is
-generated from those lines by `scripts/gen-docs-index.py`, and `scripts/check.sh`
-fails if it has drifted. Regenerate the table when a plan's status changes.
+| Contract | Status | What |
+|---|---|---|
+| [/fork: full conversation and working-directory copy](implemented/session-fork.md) | implemented | Native transcript copy with explicit replay fallback; original session and files remain unchanged. |
+| [Accounts, authorization and owned data](implemented/multi-tenancy.md) | implemented | Account authentication, scoped business state, per-account keys and managed paths. |
+| [Agent memory: native files and content ownership](implemented/memory.md) | implemented | Per-agent durable Markdown, role-specific preferences and a small project entry surface. |
+| [Agents and their conversations](implemented/agent-refactor.md) | implemented | Account-owned agent configuration, session inheritance and agent lifecycle. |
+| [Applications that can talk to the agents](implemented/app-agent-access.md) | implemented | The conversations a *running* application holds with an agent, over a per-app scoped token. |
+| [Applications with a backend — the run contract](implemented/application-backends.md) | implemented | An app declares a backend with an executable `start.sh`; Octopus allocates a port, supervises it, proxies to it and reaps it when idle. |
+| [Applications: hosting, builds and deletion](implemented/applications.md) | implemented | Account-owned applications with independent build, backend and deletion lifecycles. |
+| [Codex performance in Monitor](implemented/codex-performance-monitor.md) | implemented | Passive effective output TPS, response windows, model grouping and interpretation limits. |
+| [Codex: interactive execution and tool-free text calls](implemented/codex-backend.md) | implemented | Native exec turns, scoped instructions and a separate subscription text worker. |
+| [Connectors: installations, enablement and token ownership](implemented/connectors.md) | implemented | Account-owned OAuth installations, agent-scoped enablement and typed MCP tools. |
+| [Console redesign — the blue workspace UI](implemented/console-redesign.md) | implemented | The blue workspace UI — design tokens, the two-level sidebar, and every manage surface as a page rather than a dialog. |
+| [Current storage and publication handoff](implemented/current-storage-format.md) | implemented | Validation and release handoff are tracked separately from production deployment. |
+| [Harness credential refresh and re-authorization](implemented/harness-credential-reauth.md) | implemented | Owned proactive refresh and reactive rejection; reauthorization preserves credential identity. |
+| [Harness transient-error retry](implemented/harness-transient-retry.md) | implemented | Bounded provider retry; partial work requires a resumable continuation and quota is not retried. |
+| [Harness: current runtime boundary](implemented/harness-layer.md) | implemented | One public Harness with runtime profiles, shared execution ownership and explicit capabilities. |
+| [Input steering, streaming and held processes](implemented/inline-steering.md) | implemented | Claude stream-JSON steering and process reuse; Codex exec queues later input. |
+| [Message time, composer history and model selection](implemented/composer-and-time.md) | implemented | Original timestamps, human-only prompt history and session model controls. |
+| [Model, reasoning and speed settings](implemented/model-reasoning.md) | implemented | Independent model, reasoning and Normal/Fast speed controls with runtime discovery and preserved conversation history. |
+| [Named-agent delegation: conversations and work rounds](implemented/agent-collaboration.md) | implemented | Asynchronous same-account collaboration with original-receipt completion and exact-work cancellation. |
+| [Native research: pipeline, report and return ownership](implemented/native-deep-research.md) | implemented | Bounded native leaves with distinct research completion, follow-up processing and retirement. |
+| [Native sub-agents, surfaced](implemented/native-subagents.md) | implemented | The CLIs' own sub-agents surfaced as one event and one card — including the ones that finish after the turn that started them. |
+| [Octopus on a phone](implemented/mobile.md) | implemented | Octopus on a phone — the drawer that puts itself away, 16px fields, touch targets, and safe-area insets. |
+| [Octopus 当前跨模块契约](implemented/architecture-contract.md) | implemented | 当前所有权、输入、完成、资源退休、账户与数据保证；不代表生产部署。 |
+| [Scheduled runs: what a fire is, and what stops it stacking](implemented/scheduled-runs.md) | implemented | What a scheduled fire is: the overlap guard, the `[scheduled:…]` marker, and the link from "last run" to the run. |
+| [Session rewind: conversation branching and safe file revert](implemented/session-rewind.md) | implemented | Rewind before a user message, replay the retained prefix and optionally revert attributable file changes. |
+| [Sidebar pins: visibility, ordering and attention](implemented/sidebar-pins.md) | implemented | Pins are shortcuts independent of archive; selection updates sessions in place. |
+| [The schedule an agent sets for itself](implemented/schedule-tool.md) | implemented | `mcp__schedule__*` over session-scoped routes: an agent sets, lists, re-times and pauses its own schedules. |
+| [Turn safety: watchdogs and process retirement](implemented/turn-safety.md) | implemented | Bounded idle recovery, optional logical-turn deadline and confirmed process-group retirement. |
+| [共享 Wiki：当前契约与设计理由](implemented/wiki-development-summary.md) | implemented | 当前检索、维护、权限、效果证据及恢复边界；后续产品范围单列。 |
+| [前端列表：读取、推送与操作回执契约](implemented/frontend-list-reconciliation.md) | implemented | 应用、计划及会话列表各有统一业务入口，保留排序、身份和重连边界。 |
+
+<!-- END implemented-index -->
+
+## Unfinished work — plans
+
+A plan records intended behavior and the conditions for doing it. Its presence
+does not authorize implementation or turn a proposed capability into a current
+guarantee.
 
 <!-- BEGIN plans-index (generated by scripts/gen-docs-index.py) -->
 
 | Plan | Status | What |
 |---|---|---|
-| [Multi-tenancy, second pass: Connectors, Schedules, Harness](plans/multi-tenancy-gaps.md) | in-progress | Proposal: close the gaps a read-only review found where accounts can reach each other's work through the Manage surfaces, and make each class of gap structurally impossible. |
-| [/fork — duplicate a session onto a copied working directory](plans/session-fork.md) | shipped | Duplicate a session onto an independent full copy of its working directory. |
-| [Agent Collaboration — Tech Plan (agent-to-agent delegation)](plans/agent-collaboration.md) | shipped | Agent-to-agent delegation — the `mcp__ask_agent__*` tools, one hop, replies injected as follow-up turns. Reverses the "no A2A" carve-out in `agent-refactor.md` §40-41. |
-| [Agent Memory — Tech Plan (native, agent-written, per-agent)](plans/memory.md) | shipped | Per-agent native memory: one markdown directory per agent, shared by both harnesses. |
-| [Applications that can talk to the agents](plans/app-agent-access.md) | shipped | The conversations a *running* application holds with an agent, over a per-app scoped token. |
-| [Applications with a backend — the run contract](plans/application-backends.md) | shipped | An app declares a backend with an executable `start.sh`; Octopus allocates a port, supervises it, proxies to it and reaps it when idle. |
-| [Applications — agent-built web apps, rendered in-app](plans/applications.md) | shipped | Agent-built web apps rendered in-app, with a build session and a status derived from the entrypoint on disk. |
-| [Codex Backend — Tech Plan](plans/codex-backend.md) | shipped | The Codex backend — the second harness, and what having a second one had to prove. |
-| [Connectors — Tech Plan](plans/connectors.md) | shipped | The connector framework: OAuth, per-agent enablement, one MCP namespace per kind. |
-| [Console redesign — the blue workspace UI](plans/console-redesign.md) | shipped | The blue workspace UI — design tokens, the two-level sidebar, and every manage surface as a page rather than a dialog. |
-| [Harness credential re-authorization (reactive 401 detection)](plans/harness-credential-reauth.md) | shipped | Reactive 401 detection: flag a credential that died mid-turn as `needs_reconnect` and offer re-authorization. |
-| [Harness transient-error retry](plans/harness-transient-retry.md) | shipped | Bounded retry on transient provider failures, kept distinct from auth failures and quota errors. |
-| [Inline steering — and the turn latency that pays for it](plans/inline-steering.md) | shipped | A message typed mid-turn reaches the agent already running, and the held CLI process that makes a turn cheap to start. |
-| [Model, reasoning and speed settings](plans/model-reasoning.md) | shipped | Independent model, reasoning and Normal/Fast speed controls with runtime discovery and preserved conversation history. |
-| [Multi-tenancy (`user-1.0`)](plans/multi-tenancy.md) | shipped | one site, many users: the label becomes a username, the token becomes a password, and every user gets their own directory, rows and keys. |
-| [Native sub-agents, surfaced](plans/native-subagents.md) | shipped | The CLIs' own sub-agents surfaced as one event and one card — including the ones that finish after the turn that started them. |
-| [Octopus on a phone](plans/mobile.md) | shipped | Octopus on a phone — the drawer that puts itself away, 16px fields, touch targets, and safe-area insets. |
-| [Octopus-native deep research](plans/native-deep-research.md) | shipped | Octopus-orchestrated deep research: scoped fan-out of web-search sub-turns, adversarially verified, then synthesized. |
-| [Polish pass, September 2026](plans/polish-2026-09.md) | shipped | The September 2026 polish pass: size debt, migration safety, the MCP sidecar footprint, gates, docs, and monitoring. All eleven items in §10 landed; the changes and four defects are recorded in docs/2026-09-25-polish-pass.md. |
-| [Scheduled runs: what a fire is, and what stops it stacking](plans/scheduled-runs.md) | shipped | What a scheduled fire is: the overlap guard, the `[scheduled:…]` marker, and the link from "last run" to the run. |
-| [Session Tree-Rewind — Tech Plan (`/rewind`)](plans/session-rewind.md) | shipped | Branch a conversation at any prior user message, with an optional git revert of the working tree. |
-| [Sidebar pins: the sidebar is shortcuts, the page is everything](plans/sidebar-pins.md) | shipped | The sidebar lists pinned agents and applications; the Agents and Applications pages list all of them. |
-| [Tech Plan: First-Class Harness Layer](plans/harness-layer.md) | shipped | One `Harness` plus a `RuntimeProfile` per backend — the single boundary for all model/runtime interaction. |
-| [Tech Plan: Introduce first-class Agents into Octopus](plans/agent-refactor.md) | shipped | First-class Agents: the durable definition that owns sessions, schedules and memory. |
-| [The schedule an agent sets for itself](plans/schedule-tool.md) | shipped | `mcp__schedule__*` over session-scoped routes: an agent sets, lists, re-times and pauses its own schedules. |
-| [Three small affordances: message time, composer history, `/model`](plans/composer-and-time.md) | shipped | hover a message for its time, ArrowUp for what you sent, `/model` to switch model for one session. |
-| [Turn safety (Layer 1): timeout + process-group reaping](plans/turn-safety.md) | shipped | Bounded automatic recovery after idle stops, an optional whole-turn duration cap, and process-group reaping. |
-| [共享 Wiki：开发过程总结与当前合同](plans/wiki-development-summary.md) | shipped | Wiki 本期核心、Markdown 资料迁移、默认增量维护与普通入口验收已完成；保留当前合同、证据边界和开发方法。 |
-| [Codex / DSH 兼容与 DeepSeek backend 可行性方案](plans/deepseek-harness-backend.md) | proposed | 保留 Claude 原生支持与 Codex，评估以 API key 增加 DeepSeek backend；DSH 接口按适配度选择，尚未实施。 |
-| [Codex performance in Monitor](plans/codex-performance-monitor.md) | completed | effective output TPS implemented and validated for local Codex; client windows, model grouping and passive collection. |
-| [Current storage and publication handoff](plans/current-storage-format.md) | implemented | Validation and release handoff are tracked separately from production deployment. |
-| [Octopus 架构约定与未完成范围](plans/architecture-contract.md) | implemented | 当前架构、数据演进和接口约定；七项执行扩展仍暂停，部署状态另行核验。 |
-| [Rotating the installation access token](plans/token-rotation.md) | retired | Installation-token rotation and recovery are removed; current account authentication remains. |
+| [Codex / DSH 兼容与 DeepSeek backend 可行性方案](plans/deepseek-harness-backend.md) | proposed | 推荐 SDK runtime 与同宿主薄插件，调用公开 Agent steer 并复用原生等待/退出；具体设计已更新，尚未实施。 |
+| [Multi-tenancy: remaining policy and hardening proposals](plans/multi-tenancy-gaps.md) | proposed | Re-scope the remaining account-policy choices against current code before implementing them. |
+| [Octopus 工程收敛与运行时路线](plans/engineering-runtime-roadmap.md) | proposed | 已选择的四阶段方向与范围；各项修复、接口收敛及后端迁移仍须分别实施和验收。 |
 | [共享 Wiki：未来计划与应用协同](plans/wiki-future-plan.md) | proposed | Sapphire、SmartReader 与条件性扩展的统一计划；保留未完成合同，不把本文当作开发或生产写入授权。 |
-| [前端应用、计划与会话列表：统一更新入口](plans/frontend-list-reconciliation.md) | implemented | 应用、计划与会话列表的读取、推送和操作回执由各自业务模块统一处理；发布仍按仓库验收流程进行。 |
-| [运行时接口修补：接管、记录与调用身份](plans/runtime-interface-repair.md) | completed | Q13–Q30 中已确认实施的修补全部通过本机验收；按 Q31 合并 main 并上线 `01c16a6` 独立服务快照，已验证并清理两个旧 release；Q25 脱敏未纳入。 |
+| [待处理返回接管设计](plans/task-return-admission.md) | proposed | 设计方向已确认；统一返回接管接口尚未实施。 |
+| [运行时执行扩展：暂停范围与恢复条件](plans/runtime-execution-scope.md) | paused | 保留原七项执行扩展的身份、依赖与恢复条件，不自动恢复实施。 |
 
 <!-- END plans-index -->
 
-## Reference notes
+## Protocol and incident references
 
-Research captured while reverse-engineering the CLIs' stream protocols and a
-post-mortem on a tricky pipeline. Cited from code where relevant.
+- [Claude CLI protocol](cli-protocol-notes.md), [Codex CLI protocol](codex-protocol-notes.md) and [system prompt observations](cli-system-prompt-notes.md): version-bound observations cited by code.
+- [Background pipeline hardening](post-mortems/2026-05-18-bg-pipeline-hardening.md): four background-result pipeline failures; historical `server/backends/` paths now live under `server/harness/`.
+- [SessionOwner scope creep](post-mortems/2026-10-21-session-owner-scope-creep.md): missed consumers, incomplete interface convergence and tests that missed the target fault.
+- [Account setup retirement](post-mortems/2026-10-24-account-setup-retirement.md): identity fixtures, cold recovery assumptions and verification scope.
 
-- **[评审意见取舍与开发顺序指导（2026-10-28）](review/Octopus_Review_Action_Guide_2026-10-28.md)** —
-  2026-10-29 更新：N1、N2、N4–N7 七票已完成，N3 与三来源返回接管仍待实施；
-  保留 Codex app-server／DeepSeek Harness 接入及独立 Wiki 优化的依赖与验收标准。
-- **[全库架构审查 HTML 报告（2026-10-28）](review/architecture-review-codebase-20261028.html)** —
-  基于 `0df8b78` 的七项架构改进候选、独立缺陷发现及验证边界；原复现附件、
-  源码 manifest 与既有审查 bug.md 未入包，报告已标明此证据缺口。后续合同见
-  [前端应用与计划列表更新合同](plans/frontend-list-reconciliation.md)，已实施统一业务入口。
-- **[接管前与当前版本架构对照图（2026-10-28）](review/architecture-before-after-20261028-131512.html)** —
-  固定比较 `before-takeover@88d2284` 与 `main@0df8b78`；四组前后架构图覆盖整体、
-  请求与完成、Wiki、账户与存储，另列模型接缝与未实施的深化候选，可离线查看。
-- **[返回接管新设计与架构分析 HTML 报告（2026-10-28）](review/architecture-review-20261028.html)** —
-  完整收录已确认的返回接管设计、接口、失败语义、接入与验收场景，并保留基于
-  `0df8b78` 的三个改进候选；可离线阅读和交接，尚未实施。后续合同由
-  [待处理返回接管设计](plans/architecture-contract.md#待处理返回接管设计未实现)维护。
-- **[Octopus 综合评审与后续规划（2026-10-28）](review/future.md)** —
-  合并三份综合评审与三份 app-server 设计，按 `0df8b78` 取舍过时内容，统一运行时、
-  Wiki、AGENTS/Memory 的后续顺序、依赖、验收和暂停范围。
-- **[AI 与数字人研究工作流改进计划](review/ai-research-workflow.md)** —
-  对照 Pika 2.1.7 的通用研究流程，涵盖证据、PDF 阅读写作、实验与续接；尚未实施。
-- **[cli-protocol-notes.md](cli-protocol-notes.md)** — the Claude Code CLI's
-  `--print` stream-JSON protocol.
-- **[codex-protocol-notes.md](codex-protocol-notes.md)** — the Codex CLI's
-  `exec --json` event schema.
-- **[cli-system-prompt-notes.md](cli-system-prompt-notes.md)** — observed
-  system-prompt behavior.
-- **[post-mortems/](post-mortems/)** — incident write-ups (kept here because
-  code/tests cite them inline).
-  - [`2026-05-18-bg-pipeline-hardening.md`](post-mortems/2026-05-18-bg-pipeline-hardening.md):
-    post-mortem on four `mcp__bg__run` → model-turn pipeline bugs.
-  - [`2026-10-21-session-owner-scope-creep.md`](post-mortems/2026-10-21-session-owner-scope-creep.md):
-    SessionOwner 合并交付的范围失控——切在实现入口、共同接口未收敛、测试未触发目标故障。
-  - [`2026-10-24-account-setup-retirement.md`](post-mortems/2026-10-24-account-setup-retirement.md):
-    08/09 开户与旧接管退役——身份夹具迁移、冷恢复前提遗漏及门禁证据收束。
-  Note: the `server/backends/*` paths in the 2026-05-18 doc predate the harness
-  refactor — that code now lives under `server/harness/`.
+Fixed historical evidence, when needed: [Wiki remediation](https://github.com/Danuvius152/Octopus/blob/b19f6f9deaa36245d80ed3c283d6e64dc257d978/docs/plans/wiki-bug-remediation-20261017.md),
+[repository review closed on 2026-10-25](https://github.com/Danuvius152/Octopus/blob/fe2200fbbaa705b99b6a392e188bbb2423b21ae2/docs/review/review-20261023.md),
+and [migration review](https://github.com/Danuvius152/Octopus/blob/fe2200fbbaa705b99b6a392e188bbb2423b21ae2/docs/review/migration-scope-and-portability-20261023.md).
+These snapshots preserve their original revision and scope; current behavior is
+maintained in the contracts above.

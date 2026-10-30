@@ -1680,7 +1680,7 @@ def test_mcp_bg_list_summary(monkeypatch):
 
 def test_build_args_registers_bg_mcp_over_http_scoped_to_the_session(tmp_path):
     """The bg namespace reaches the model as an HTTP server this app hosts, not
-    a subprocess to spawn (docs/plans/polish-2026-09.md §4 B1).
+    a subprocess to spawn (docs/2026-09-25-polish-pass.md).
 
     Two things this pins. The key is still `bg`, because both CLIs build the
     tool name from it — change the key and `mcp__bg__run` silently becomes

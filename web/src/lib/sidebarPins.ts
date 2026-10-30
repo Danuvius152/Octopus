@@ -1,4 +1,4 @@
-/** What the sidebar lists (docs/plans/sidebar-pins.md).
+/** What the sidebar lists (docs/implemented/sidebar-pins.md).
  *
  * The sidebar is a set of shortcuts: pinned agents and applications, in the
  * order the user dragged them into. Everything else is on the Agents and

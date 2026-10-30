@@ -1,6 +1,6 @@
 """Metadata-only client response windows, never server decoder timings.
 
-See docs/plans/codex-performance-monitor.md. Usage can be written after a tool
+See docs/implemented/codex-performance-monitor.md. Usage can be written after a tool
 finishes: the last generated item, not the usage timestamp, ends the window.
 """
 from __future__ import annotations

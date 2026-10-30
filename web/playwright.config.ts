@@ -20,7 +20,7 @@ const backendLoop = offline ? " --loop asyncio" : "";
 // in global-teardown. Exported so the teardown deletes the exact same path.
 export const E2E_AGENTS_DIR = path.join(os.tmpdir(), "octopus-e2e-agents");
 
-// Same isolation for agent-built applications (docs/plans/applications.md §9):
+// Same isolation for agent-built applications (docs/implemented/applications.md §8):
 // the e2e backend writes app directories under here instead of the
 // developer's real ~/.octopus/applications. Removed in global-teardown.
 export const E2E_APPLICATIONS_DIR = path.join(
@@ -133,7 +133,7 @@ export default defineConfig({
         OCTOPUS_DB_PATH: ":memory:",
         // Not the repo's octopus-metrics.db: see E2E_METRICS_DB above.
         OCTOPUS_METRICS_DB_PATH: E2E_METRICS_DB,
-        // Per-agent memory dirs (docs/plans/memory.md) live under here; keep
+        // Per-agent memory dirs (docs/implemented/memory.md) live under here; keep
         // them out of the developer's real ~/.octopus/agents. Cleaned in
         // e2e/global-teardown.ts.
         OCTOPUS_AGENTS_DIR: E2E_AGENTS_DIR,

@@ -1,4 +1,4 @@
-"""A REAL sub-agent run, end to end (docs/plans/native-subagents.md).
+"""A REAL sub-agent run, end to end (docs/implemented/native-subagents.md).
 
 The unit suite pins the normalization against captured payloads. This proves
 the contract still holds against the installed CLI: a turn that spawns a

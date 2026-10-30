@@ -67,7 +67,7 @@ def _hermetic_execution_boundary(request, monkeypatch):
 
 # Isolate per-agent state (the canonical memory dir each agent gets) under a
 # throwaway temp root, so creating agents in tests never litters the
-# developer's real ~/.octopus/agents (docs/plans/memory.md). Set before any
+# developer's real ~/.octopus/agents (docs/implemented/memory.md). Set before any
 # import of Settings; cleaned at process exit. Per-test fixtures may still
 # point agents_dir at their own tmp_path — that just overrides this default.
 _TEST_AGENTS_DIR = tempfile.mkdtemp(prefix="octopus-test-agents-")
@@ -361,7 +361,7 @@ def mcp_scope(monkeypatch):
     """Put a tool call in a session's scope, the way a real HTTP request does.
 
     The MCP namespaces are served in-process now rather than spawned per session
-    (docs/plans/polish-2026-09.md §4 B1), so a tool's session no longer arrives
+    (docs/2026-09-25-polish-pass.md), so a tool's session no longer arrives
     as `OCTOPUS_SESSION_ID` in a process environment — one process serves every
     session, and the session comes from the verified scope of the request. Tests
     that used to `monkeypatch.setenv` establish a scope instead.

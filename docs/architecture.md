@@ -10,14 +10,15 @@ attached API key).
 One install can host **multiple accounts**, each a fully isolated Octopus of
 its own (see **Accounts & isolation** below); it stays a personal product —
 there is no cross-account sharing. Design:
-[`plans/multi-tenancy.md`](plans/multi-tenancy.md).
+[`implemented/multi-tenancy.md`](implemented/multi-tenancy.md).
 
-This doc describes the *current* system design. Per-initiative design history
-lives in [`plans/`](plans/); CLI/stream-protocol research notes live in the
+This doc describes the *current* system design. Detailed current contracts and
+their reasons live in [`implemented/`](implemented/); unfinished changes live
+in [`plans/`](plans/). CLI/stream-protocol research notes live in the
 `*-notes.md` files. `server/db/schema.py` (`_SCHEMA`) is the source of truth for
 the data model — this doc describes it conceptually rather than pasting SQL.
 
-The [architecture contract](plans/architecture-contract.md) owns cross-component
+The [architecture contract](implemented/architecture-contract.md) owns cross-component
 decisions, conventions and the paused execution scope.
 Obsolete online interfaces, installation-era adoption/rotation and startup
 migration chains have since been retired. Current SessionOwner, transaction,
@@ -25,7 +26,7 @@ authorization and Wiki recovery responsibilities remain the foundation.
 `_SCHEMA` now declares the complete current main layout; startup creates empty
 storage or requires its exact current marker. Publication owns retained-layout
 verification and any finite conversion, as described in the
-[current storage contract](plans/current-storage-format.md).
+[current storage contract](implemented/current-storage-format.md).
 
 ## System Overview
 
@@ -95,13 +96,13 @@ The chat header and `/model` offer independent session overrides for model and
 reasoning effort. Both inherit agent defaults when cleared, apply on the next
 logical turn, and retain the conversation's resume id. Model metadata comes
 from the selected runtime, with credential ownership checked before reading.
-See [model and reasoning settings](plans/model-reasoning.md).
+See [model and reasoning settings](implemented/model-reasoning.md).
 
 - A **Session** is one conversation thread (an instance of talking to an agent).
   It carries the backend resume id, working dir, origin (`user` | `schedule` |
   `delegation` | `fork` | `application` | `app`), an optional `parent_session_id` (set when the
   session was spawned by another agent via `mcp__ask_agent__ask` — see
-  [`plans/agent-collaboration.md`](plans/agent-collaboration.md)), and an
+  [`implemented/agent-collaboration.md`](implemented/agent-collaboration.md)), and an
   `archived` flag.
 - `SessionManager` reads the owning agent's config *directly each turn*, so
   editing an agent is picked up by its open sessions on their next turn (no
@@ -131,7 +132,7 @@ removing it only enables already durable, complete data.
 ## Accounts & isolation
 
 One install serves several people, each fully isolated (design:
-[`plans/multi-tenancy.md`](plans/multi-tenancy.md)):
+[`implemented/multi-tenancy.md`](implemented/multi-tenancy.md)):
 
 - **Accounts.** A `users` row is a username, a scrypt password hash, an admin
   flag, and a wrapped **data-encryption key** (DEK). Signup is invite-only
@@ -178,19 +179,19 @@ One install serves several people, each fully isolated (design:
 | `crypto.py` | Encryption at rest: a server-held **master key** wraps each account's data-encryption key (DEK), which Fernet-encrypts that account's secrets. A password only authenticates. |
 | `models.py` | Pydantic request/response models + enums (`SessionStatus`, `MessageRole`, agent/schedule/connector/credential DTOs). |
 | `session_manager.py` | Session entry points, registration and cross-session quota; delegates mutable per-session behavior to SessionOwner. |
-| `sessions/` | SessionOwner serializes mutable execution, input, question and lifecycle state; managed Harness I/O reports original results. Completion consumers follow [the execution contract](plans/architecture-contract.md#输入完成与资源退休): business outcome, notification delivery and retirement have separate authorities. |
-| `harness/` | The single boundary for all model/runtime interaction (see below). Also normalizes **native sub-agents** ([`plans/native-subagents.md`](plans/native-subagents.md)): Claude Code's `system/task_*` events and Codex's `collab_tool_call` items collapse onto one `SubagentUpdate`, keyed on the spawning tool call's id, and `agents.subagents` renders to `--agents` so an Octopus agent can bring its own helpers. |
+| `sessions/` | SessionOwner serializes mutable execution, input, question and lifecycle state; managed Harness I/O reports original results. Completion consumers follow [the execution contract](implemented/architecture-contract.md#输入完成与资源退休): business outcome, notification delivery and retirement have separate authorities. |
+| `harness/` | The single boundary for all model/runtime interaction (see below). Also normalizes **native sub-agents** ([`implemented/native-subagents.md`](implemented/native-subagents.md)): Claude Code's `system/task_*` events and Codex's `collab_tool_call` items collapse onto one `SubagentUpdate`, keyed on the spawning tool call's id, and `agents.subagents` renders to `--agents` so an Octopus agent can bring its own helpers. |
 | `agent_manager.py` | Agent CRUD (the durable assistant definitions). |
 | `agent_memory.py` | Per-agent native memory provisioning under the owning account's `agents/<id>/memory/`. |
-| `delegations.py` | Named-agent delegation and continuation by `delegation_id` ([design](plans/agent-collaboration.md)). The original request's completion determines each round's reply or error; question events relay pending questions separately. Owns cycle/depth guards, delivery identity, continuation and descendant cancellation. Completion does not by itself archive an ordinary delegation session or prove its execution has retired. |
+| `delegations.py` | Named-agent delegation and continuation by `delegation_id` ([design](implemented/agent-collaboration.md)). The original request's completion determines each round's reply or error; question events relay pending questions separately. Owns cycle/depth guards, delivery identity, continuation and descendant cancellation. Completion does not by itself archive an ordinary delegation session or prove its execution has retired. |
 | `scheduler.py` | `ScheduleRunner` — APScheduler runner for recurring prompts, **interval and cron**, fired per agent into fresh auto-archiving sessions. |
 | `schedule_ai.py` | Natural-language `/schedule` parsing — turns "every weekday at 9am" into a cron/interval spec via the agent's own harness (backend-agnostic). |
-| `database.py` / `db/` | SQLite (`aiosqlite`, WAL, FK cascade, `busy_timeout`, `synchronous=FULL`). `db/schema.py` defines current format 5; `PRAGMA user_version` is its sole format marker. Startup matches it before keys or writers; genuinely empty storage creates the complete current DDL directly. Ordinary reopening does not interpret or convert historical data. Publication verifies the full retained structure and current facts after old writers retire, before the candidate starts. Credentials and recovery relationships have one authority in `credential_secrets` and the successor's `recovery_of`. Short transactions confirm the original driver's COMMIT; uncertain storage enters fail-stop. Current input and unfinished-fork recovery remain owned by `SessionManager`. See [current storage and publication](plans/current-storage-format.md). |
+| `database.py` / `db/` | SQLite (`aiosqlite`, WAL, FK cascade, `busy_timeout`, `synchronous=FULL`). `db/schema.py` defines current format 5; `PRAGMA user_version` is its sole format marker. Startup matches it before keys or writers; genuinely empty storage creates the complete current DDL directly. Ordinary reopening does not interpret or convert historical data. Publication verifies the full retained structure and current facts after old writers retire, before the candidate starts. Credentials and recovery relationships have one authority in `credential_secrets` and the successor's `recovery_of`. Short transactions confirm the original driver's COMMIT; uncertain storage enters fail-stop. Current input and unfinished-fork recovery remain owned by `SessionManager`. See [current storage and publication](implemented/current-storage-format.md). |
 | `jsonl_parser.py` / `jsonl_writer.py` | Read/write Claude Code JSONL session files for `octopus handoff` (import) and `octopus pull` (export → local `claude --resume`). |
-| `applications.py` | Agent-built applications ([design](plans/applications.md)): account-owned directories, build sessions (`origin='application'`) and status projection. Progress can mark a build running; the original request's committed completion and entrypoint determine its final status. Direct build-session requests use the same completion observer. Archive keeps rows and files; the name index is live-only. |
-| `app_backends.py` | **Application backends** ([`plans/application-backends.md`](plans/application-backends.md)) — an executable `start.sh` at the app root IS the declaration; no manifest. Allocates a port, runs install/start with a **minimal** environment (never the server's, so Octopus credentials cannot leak into app code), waits for the port to accept, proxies `/apps/{id}/api/*`, reaps when idle. Three directories, three owners: `<slug>/` code (a rebuild rewrites it), `<slug>.data/` the app's own state (never touched), `<slug>.runtime/` installed deps (delete to force a clean reinstall). |
-| `app_agent.py` | Application↔agent conversations ([design](plans/app-agent-access.md)): resumable app-owned sessions and scoped SSE (`delta`/`message`/`tool`/`question`/`done`/`error`). Original-request completion confirms recording, outcome and notification delivery before `done`; response completion alone does not release the execution slot. |
-| `mcp_http.py` | **The MCP namespaces, served in-process** ([`plans/polish-2026-09.md`](plans/polish-2026-09.md) §4 B1) — each tool namespace is mounted at `/mcp/<name>` over streamable-HTTP instead of spawned as a stdio subprocess per session. Both CLIs build the tool name from the config key, so keys are unchanged and `mcp__bg__run` stays `mcp__bg__run`; connectors mount once per *kind* while their key stays per-installation. Replaces 7 subprocesses per session (~39 MB PSS each). |
+| `applications.py` | Agent-built applications ([design](implemented/applications.md)): account-owned directories, build sessions (`origin='application'`) and status projection. Progress can mark a build running; the original request's committed completion and entrypoint determine its final status. Direct build-session requests use the same completion observer. Archive keeps rows and files; the name index is live-only. |
+| `app_backends.py` | **Application backends** ([`implemented/application-backends.md`](implemented/application-backends.md)) — an executable `start.sh` at the app root IS the declaration; no manifest. Allocates a port, runs install/start with a **minimal** environment (never the server's, so Octopus credentials cannot leak into app code), waits for the port to accept, proxies `/apps/{id}/api/*`, reaps when idle. Three directories, three owners: `<slug>/` code (a rebuild rewrites it), `<slug>.data/` the app's own state (never touched), `<slug>.runtime/` installed deps (delete to force a clean reinstall). |
+| `app_agent.py` | Application↔agent conversations ([design](implemented/app-agent-access.md)): resumable app-owned sessions and scoped SSE (`delta`/`message`/`tool`/`question`/`done`/`error`). Original-request completion confirms recording, outcome and notification delivery before `done`; response completion alone does not release the execution slot. |
+| `mcp_http.py` | **The MCP namespaces, served in-process** ([`plans/polish-2026-09.md`](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/polish-2026-09.md) §4 B1) — each tool namespace is mounted at `/mcp/<name>` over streamable-HTTP instead of spawned as a stdio subprocess per session. Both CLIs build the tool name from the config key, so keys are unchanged and `mcp__bg__run` stays `mcp__bg__run`; connectors mount once per *kind* while their key stays per-installation. Replaces 7 subprocesses per session (~39 MB PSS each). |
 | `mcp_identity.py` | Per-session scope for those namespaces. One HTTP endpoint serves every session, so identity travels with the request: master-key signatures identify the session/account/run and each call checks its current authority. Claude passes the bearer as a header, Codex as an env var it names; that asymmetry stops at the profile boundary. |
 | `bg_tasks.py` | Cross-turn background shell tasks: spawn, stream capture (bounded), idle watchdog, cancel, persistence in `bg_tasks`. |
 | `large_prompts.py` | Spills any synthesized prompt over ~100 KB to a file and hands the model a small `Read` pointer (avoids `E2BIG` on argv). |
@@ -208,7 +209,7 @@ One install serves several people, each fully isolated (design:
 The harness is the **only** place that talks to a model runtime. There is one
 `Harness` class and one `HarnessRun` subprocess engine, configured by a
 `RuntimeProfile` **value** per backend kind — *no per-framework subclasses*
-(design: [`plans/harness-layer.md`](plans/harness-layer.md)).
+(design: [`implemented/harness-layer.md`](implemented/harness-layer.md)).
 
 | File | Purpose |
 |---|---|
@@ -219,7 +220,7 @@ The harness is the **only** place that talks to a model runtime. There is one
 | `events.py` | Backend-neutral `HarnessEvent` DTOs (`text`, `thinking`, `tool_use`, `tool_result`, `question_request`, `result`, `error`, `session_started`). |
 | `claude_code.py` | Claude profile — `claude --print --output-format=stream-json` argv, event normalization, JSONL transcript codec, `run_oneshot`. |
 | `codex.py` | Codex profile — `codex exec --json` argv (per-turn `-c` TOML overrides for MCP), event normalization, `run_oneshot`. Runs exactly once per turn. |
-| `codex_text.py` | Codex one-shot model-only worker: native authentication/configuration, subscription text HTTP with no tool dispatcher, completed-text result. The common Harness owns admission and process-group retirement; [capability contract](plans/codex-backend.md#single-call-capability-verification-2026-10-27). |
+| `codex_text.py` | Codex one-shot model-only worker: native authentication/configuration, subscription text HTTP with no tool dispatcher, completed-text result. The common Harness owns admission and process-group retirement; [capability contract](implemented/codex-backend.md#source-and-verification). |
 | `registry.py` | `get_harness(backend)` / `available_backends()` (a kind appears only when its CLI resolves on PATH; `claude-code` is always listed). |
 | `login.py` | `LoginDriver` protocol for in-app credential login flows. |
 
@@ -237,7 +238,7 @@ contexts without a live session scope; it is not the normal per-turn transport.
 | `bg.py` | `mcp__bg__run` / `cancel` / `list` | Fire-and-forget shell commands that run **across turns**; the result arrives as a follow-up turn. |
 | `schedule.py` | `mcp__schedule__create` / `list` / `update` / `delete` | Manage durable schedules owned by the authenticated session's agent. |
 | `ask.py` | `mcp__ask__user(questions)` | Structured multiple-choice question rendered as a form in the UI; long-polls for the answer. Caller-aware: when invoked from a delegation-origin session the question is also injected as an `[agent-question:…]` turn into the parent agent's session — same pending queue, two answer producers. Replaces the old permission-prompt hack. |
-| `ask_agent.py` | `mcp__ask_agent__ask` / `cancel` / `answer` / `list` | Agent-to-agent delegation. `ask(request, name=…, delegation_id=…, files=…)` is bimodal: pass `name` to spawn a fresh child session under the named agent, or pass `delegation_id` to continue a prior delegation in the same child session so the target keeps her transcript across rounds; exactly one id is required. `answer` drains a child's pending question with the parent's chosen label; `cancel` stops a delegation (cascade-cancels descendants); `list` enumerates this session's delegations. Same env-injection + bg-task-style follow-up-turn pattern as `bg`. Design: [`plans/agent-collaboration.md`](plans/agent-collaboration.md). |
+| `ask_agent.py` | `mcp__ask_agent__ask` / `cancel` / `answer` / `list` | Agent-to-agent delegation. `ask(request, name=…, delegation_id=…, files=…)` is bimodal: pass `name` to spawn a fresh child session under the named agent, or pass `delegation_id` to continue a prior delegation in the same child session so the target keeps her transcript across rounds; exactly one id is required. `answer` drains a child's pending question with the parent's chosen label; `cancel` stops a delegation (cascade-cancels descendants); `list` enumerates this session's delegations. Same env-injection + bg-task-style follow-up-turn pattern as `bg`. Design: [`implemented/agent-collaboration.md`](implemented/agent-collaboration.md). |
 | `connectors/github.py`, `gmail.py` | typed API tools | Built-in connector tools (see Connectors). |
 | `connectors/custom.py` | generic `request(method, path, …)` | One tool for any user-defined OAuth2 API. |
 | `connectors/_shared.py` | — | Token fetch+cache, 401→reconnect, 32 KB truncation. |
@@ -252,7 +253,7 @@ URI is derived from the incoming request, so it's correct behind a tunnel.
 Built-ins: **GitHub**, **Gmail**. **Custom** kinds (authorize/token URLs, scopes,
 PKCE, API base) are defined entirely from the browser and backed by a generic
 OAuth provider + the generic `request` tool. See
-[`connectors-setup.md`](connectors-setup.md) and [`plans/connectors.md`](plans/connectors.md).
+[`connectors-setup.md`](connectors-setup.md) and [`implemented/connectors.md`](implemented/connectors.md).
 
 Per-kind OAuth client creds live in `connector_oauth_clients`; installations in
 `connector_installations` (+ split-secret `connector_installation_secrets`);
@@ -267,7 +268,7 @@ React 19 + TypeScript (strict) + Vite + zustand + Tailwind v4 + Radix.
 | Area | Files |
 |---|---|
 | Shell & accounts | `App.tsx`, `SignIn.tsx` (sign-in / create-first-account), `SidebarAccount.tsx` (account row + menu), `AccountPage.tsx` (workspace roots, password, invites, people), `OctopusLogo.tsx`, `SettingsDialog.tsx` |
-| Sidebar (two-level) | `SidebarAgents.tsx` (agents → their sessions), `SidebarApplications.tsx`, `SidebarManage.tsx` (Schedules / Connectors / Harness summary rows), `SidebarSectionHeader.tsx`, `SidebarEdgeToggle.tsx` (collapse), `SortablePins.tsx` (`@dnd-kit` pin reorder). Design: [`plans/console-redesign.md`](plans/console-redesign.md), [`plans/sidebar-pins.md`](plans/sidebar-pins.md) |
+| Sidebar (two-level) | `SidebarAgents.tsx` (agents → their sessions), `SidebarApplications.tsx`, `SidebarManage.tsx` (Schedules / Connectors / Harness summary rows), `SidebarSectionHeader.tsx`, `SidebarEdgeToggle.tsx` (collapse), `SortablePins.tsx` (`@dnd-kit` pin reorder). Design: [`implemented/console-redesign.md`](implemented/console-redesign.md), [`implemented/sidebar-pins.md`](implemented/sidebar-pins.md) |
 | Main-area pages (store `mainView`) | `AgentFormPage.tsx` (create/edit agent — prompt/model/backend/credential/tools/connectors/avatar via `EmojiPicker.tsx`), `ApplicationFormPage.tsx`, `SchedulesPage.tsx`, `ConnectorsPage.tsx`, `HarnessPage.tsx`, `MonitorPage.tsx`, `ItemLibrary.tsx` (the **All** tab — every agent/app: pin / open / archive / restore), `PageHeader.tsx` (shared breadcrumb) |
 | Chat | `ChatView.tsx` (virtualized via `react-virtuoso`; Enter-to-send, Esc-interrupt, queued-message badge, per-message "Fork from here"), `MessageBubble.tsx`, `MessageTime.tsx` (hover-for-time), `SlashCommandMenu.tsx` (`/schedule`, `/remember`, `/research`, `/showme`, `/rewind`, `/fork`, `/archive`, `/model`, `/reset`), `ModelPickerDialog.tsx` (`/model`), `ForkDialog.tsx` (message picker + side-effect confirm + optional git-revert), `ArchivedSessionsDialog.tsx` |
 | In-turn cards & tools | `FileViewerDialog.tsx` (`/showme`), `BgTaskChip.tsx` (bg task status), `QuestionPrompt.tsx` (ask form), `MessageBubble.tsx` (historical tool approval records), `AgentDelegationRequestCard.tsx` + `AgentDelegationEventCard.tsx` (delegation status + injected reply/question/error turns), `SubagentCard.tsx` (native sub-agents), `ResearchCard.tsx` (deep-research phase progress) |
@@ -347,7 +348,7 @@ go silent after producing output. Details: [`post-mortems/2026-05-18-bg-pipeline
 `/research <question>` (or the `mcp__research__deep_research` MCP tool) starts a
 multi-phase orchestrated research job managed entirely by Octopus — no dependence
 on the Claude Code `/deep-research` workflow skill (which hangs inside a headless
-turn). Design: [`plans/native-deep-research.md`](plans/native-deep-research.md).
+turn). Design: [`implemented/native-deep-research.md`](implemented/native-deep-research.md).
 
 **Pipeline phases (asyncio, all within Octopus):**
 
@@ -446,7 +447,7 @@ conversion. Do not duplicate the schema in docs.
   owned table below carries a `user_id` (`agents`, `sessions`, `applications`,
   `backend_credentials`, `connector_installations`, `notifiers`); routers scope
   queries by it via `server/deps.py`. `user_id IS NULL` is the install-era
-  (pre-account) owner. Design: [`plans/multi-tenancy.md`](plans/multi-tenancy.md).
+  (pre-account) owner. Design: [`implemented/multi-tenancy.md`](implemented/multi-tenancy.md).
 - **`agents`** — durable assistant definition (prompt, model, backend,
   credential, `mcp_servers`, tool allow/deny, `is_system`, `archived`). Owns the rest.
 - **`sessions`** — one thread: `working_dir`, `claude_session_id` (backend
@@ -455,15 +456,15 @@ conversion. Do not duplicate the schema in docs.
   `archived`. Delegation rows additionally carry `parent_session_id`
   (the caller session, `ON DELETE SET NULL` — orphaning beats
   mass-delete) and `delegation_request` (the verbatim original prompt
-  for UI display) — see [`plans/agent-collaboration.md`](plans/agent-collaboration.md) §4.
+  for UI display) — see [delegation identity](implemented/agent-collaboration.md#1-invocation-and-identity).
   Fork rows additionally carry `forked_from_session_id` (the session that was
   branched), `fork_after_seq` (last copied message seq; the rewound message
-  is at seq+1 on the parent), `fork_needs_replay` (Codex: wrap history into
-  first turn), `fork_metadata` (ephemeral: prefilled prompt + first-turn note,
+  is at seq+1 on the parent), `fork_needs_replay` (wrap retained history into
+  the first turn when replay is required), `fork_metadata` (ephemeral: prefilled prompt + first-turn note,
   cleared after first result), `fork_revert_record` (durable: git-stash outcome
   and stash ref), and `fork_status` (`initializing`|`reverting`|`ready`) for
-  crash recovery — see [`plans/session-rewind.md`](plans/session-rewind.md) §4 and
-  [`plans/session-fork.md`](plans/session-fork.md).
+  crash recovery — see [rewind recovery](implemented/session-rewind.md#567-crash-recovery) and
+  [`implemented/session-fork.md`](implemented/session-fork.md).
 - **`messages`** — ordered history per session (`role`, `type`, `content`, tool
   fields, `cost`, `attachments`). User-message rows additionally record
   `git_head` and `git_status_clean` (captured at turn-start) so the fork
@@ -485,7 +486,7 @@ conversion. Do not duplicate the schema in docs.
 
 Each owned agent gets one canonical markdown dir,
 `<users_root>/<user_id>/agents/<id>/memory/`, shared
-by both backends (design: [`plans/memory.md`](plans/memory.md)):
+by both backends (design: [`implemented/memory.md`](implemented/memory.md)):
 
 - **Claude Code** points its auto-memory there via the
   `CLAUDE_COWORK_MEMORY_PATH_OVERRIDE` env var — **not** `CLAUDE_CONFIG_DIR`, so
@@ -502,7 +503,7 @@ account's existing `agents/shared-memory/`, outside any individual agent's
 deletion lifecycle. Development, review and research memory stays with its
 responsible role. Persona, memory
 and project-document ownership and task-based reading are defined in the
-[memory contract](plans/memory.md#current-content-ownership).
+[memory contract](implemented/memory.md#current-content-ownership).
 
 ## Configuration (`OCTOPUS_*`)
 
@@ -516,7 +517,7 @@ the resources those settings select.
 first administrator on an empty installation; its default is empty. It is not
 business API/WebSocket authentication or a data-encryption key. Accounts use
 bearer tokens; the master key wraps account DEKs. Existing account data and
-configuration follow the [account contract](plans/architecture-contract.md#公开接口与账户配置).
+configuration follow the [account contract](implemented/architecture-contract.md#公开接口与账户配置).
 Connector OAuth clients resolve in-app configuration before environment fallback;
 their operating instructions are in [connector setup](connectors-setup.md).
 
@@ -560,8 +561,8 @@ reservation refuses deletion with 409 until that original operation finishes.
   transcripts and archive flags intact. The sidebar builds a disclosure tree
   from this DAG. File revert on `/rewind` uses `git stash` gated on a strict preflight (clean
   tree at branch point, matching HEAD, only agent-touched files dirty). Designs:
-  [`plans/session-rewind.md`](plans/session-rewind.md) and
-  [`plans/session-fork.md`](plans/session-fork.md).
+  [`implemented/session-rewind.md`](implemented/session-rewind.md) and
+  [`implemented/session-fork.md`](implemented/session-fork.md).
 - **Per-turn safety net.** Every harness turn runs with a configurable idle
   timeout (`turn_idle_timeout_seconds`, default 300 s) and an overall cap
   (`turn_max_seconds`, default 0 / disabled). Active tasks have no total duration
@@ -573,7 +574,7 @@ reservation refuses deletion with 409 until that original operation finishes.
   results so delegation/app callers keep waiting. The overall cap includes all
   attempts; exhausted recovery surfaces `turn_timeout`. Manual interruption
   cancels recovery. Design:
-  [`plans/turn-safety.md`](plans/turn-safety.md).
+  [`implemented/turn-safety.md`](implemented/turn-safety.md).
 - **Three-tier failed-turn disposition.** After a turn fails, the run loop
   classifies the error: (1) auth-credential rejection (401/revoked/expired) →
   flag the bound credential `needs_reconnect` and stop — re-auth won't fix
@@ -581,8 +582,8 @@ reservation refuses deletion with 409 until that original operation finishes.
   bounded exponential retry (max 2, resumes from captured session id when
   output was already streamed); (3) everything else (quota/credit/billing) →
   surface as-is. Classifiers are backend-declared pattern sets in
-  `RuntimeProfile`. Designs: [`plans/harness-credential-reauth.md`](plans/harness-credential-reauth.md)
-  and [`plans/harness-transient-retry.md`](plans/harness-transient-retry.md).
+  `RuntimeProfile`. Designs: [`implemented/harness-credential-reauth.md`](implemented/harness-credential-reauth.md)
+  and [`implemented/harness-transient-retry.md`](implemented/harness-transient-retry.md).
 - **Hardened bg pipeline.** Large prompts spill to a file (`E2BIG` guard),
   premature CLI exit after a tool use auto-respawns once, and an idle watchdog
   reaps silent bg tasks. See [`post-mortems/2026-05-18-bg-pipeline-hardening.md`](post-mortems/2026-05-18-bg-pipeline-hardening.md).

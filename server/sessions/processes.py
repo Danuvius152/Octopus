@@ -1,7 +1,7 @@
 """The pool of held CLI processes: reuse, the idle reaper, the LRU cap, shutdown.
 
 One slice of `SessionManager`, which was a single 4,017-line class with 84
-methods (docs/plans/polish-2026-09.md §3 A1). Split by responsibility; the
+methods (docs/2026-09-25-polish-pass.md). Split by responsibility; the
 methods are unchanged and still reached through one `session_manager` object,
 so no call site moved.
 """

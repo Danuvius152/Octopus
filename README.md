@@ -59,7 +59,7 @@ Phone / Browser
   installation creates its first administrator and owned default agent through
   **setup**. User business stays closed until an account bearer is available;
   setup refuses retained business data.
-  Design: [`docs/plans/multi-tenancy.md`](docs/plans/multi-tenancy.md).
+  Design: [`docs/implemented/multi-tenancy.md`](docs/implemented/multi-tenancy.md).
 - **Run from anywhere** — One command serves the API and web UI on a single
   port; reach it from any browser or phone. `octopus serve --tunnel` gives
   instant public HTTPS via Cloudflare Tunnel. Session-bearer auth that a browser
@@ -94,7 +94,7 @@ Phone / Browser
     Pete. Chat UI renders three card types — the in-flight delegation,
     the reply when it lands, and a question that travelled back to you
     — and the sidebar surfaces hidden delegation sessions on demand.
-  - Design: [`docs/plans/agent-collaboration.md`](docs/plans/agent-collaboration.md).
+  - Design: [`docs/implemented/agent-collaboration.md`](docs/implemented/agent-collaboration.md).
 - **In-app tools** — Every agent gets MCP tools Octopus injects: a
   **background runner**, a structured **ask-the-user** prompt rendered as
   a multiple-choice form in the UI, and the agent-to-agent **delegation**
@@ -118,12 +118,12 @@ Phone / Browser
     confirm popover discloses side effects (file edits, bg tasks, irreversible
     tool calls) and optionally reverts file edits via `git stash` when the
     working tree is clean. Design:
-    [`docs/plans/session-rewind.md`](docs/plans/session-rewind.md).
+    [`docs/implemented/session-rewind.md`](docs/implemented/session-rewind.md).
   - **`/fork [name]`** — duplicate the **current** session onto an independent
     full copy of its working directory, leaving the original untouched. The fork
     resumes the real conversation history (native transcript copy), so the model
     sees full context. Design:
-    [`docs/plans/session-fork.md`](docs/plans/session-fork.md).
+    [`docs/implemented/session-fork.md`](docs/implemented/session-fork.md).
 - **Native deep research** — `/research <question>` (or the
   `mcp__research__deep_research` MCP tool, which agents can call themselves)
   starts a multi-phase Octopus-orchestrated research job: scope decompose →
@@ -133,7 +133,7 @@ Phone / Browser
   harness's own native tools (`WebSearch`/`WebFetch` for Claude; `web_search` for
   Codex). A `ResearchCard` in the chat tracks phase progress and exposes a cancel
   button; the final report arrives as a follow-up turn the agent can act on.
-  Design: [`docs/plans/native-deep-research.md`](docs/plans/native-deep-research.md).
+  Design: [`docs/implemented/native-deep-research.md`](docs/implemented/native-deep-research.md).
 - **Applications** — Ask an agent to build you a web app and it lands in the
   sidebar. Describe what you want, pick the agent, and it writes a
   self-contained static site into a directory Octopus owns inside your account's
@@ -146,20 +146,20 @@ Phone / Browser
   it when idle — with the app's own state in a directory a rebuild never
   touches. A running app can also hold conversations with your agents through
   its own scoped token.
-  Design: [`docs/plans/applications.md`](docs/plans/applications.md),
-  [`application-backends.md`](docs/plans/application-backends.md),
-  [`app-agent-access.md`](docs/plans/app-agent-access.md).
+  Design: [`docs/implemented/applications.md`](docs/implemented/applications.md),
+  [`application-backends.md`](docs/implemented/application-backends.md),
+  [`app-agent-access.md`](docs/implemented/app-agent-access.md).
 - **Per-agent memory** — Each agent has its own memory directory that both
   harnesses write to and read back across sessions, so an agent accumulates what
   it learned about your setup instead of starting cold every time. Claude's
   native auto-memory is pointed at it; Codex is told where it is. Auth and
   `--resume` transcripts are untouched by this.
-  Design: [`docs/plans/memory.md`](docs/plans/memory.md).
+  Design: [`docs/implemented/memory.md`](docs/implemented/memory.md).
 - **Native sub-agents, surfaced** — When a model spawns its own helpers
   (Claude Code's `Task`, Codex's `spawn_agent`), the run shows up as a live card
   with status and token counts rather than a tool call that sits there. An
   Octopus agent can also bring its own named sub-agents.
-  Design: [`docs/plans/native-subagents.md`](docs/plans/native-subagents.md).
+  Design: [`docs/implemented/native-subagents.md`](docs/implemented/native-subagents.md).
 - **Monitor** — A page for what the system actually did: request and turn
   counts, error rates, per-process memory (PSS, so shared pages are not counted
   twice), database and WAL size. Sampled continuously, kept 30 days, and an
@@ -286,7 +286,7 @@ in-process over streamable-HTTP
 This WSL installation defaults to Codex. Claude is currently unavailable;
 Claude-only and mixed-provider live tests are not run and must not be reported
 as passed. Offline tests still cover both backends. See the
-[local validation scope](AGENTS.md#local-codex-validation) before running the
+[local validation scope](AGENTS.md#backend-validation-scope) before running the
 provider-specific CLI/browser checks below.
 
 ```bash
@@ -317,5 +317,5 @@ is staged, so a doc-only commit stays fast.
 
 See [docs/](docs/) for all documentation — start with
 [docs/architecture.md](docs/architecture.md) for system design, data flow, and
-the WebSocket protocol; [docs/plans/](docs/plans/) holds the per-initiative
-design records.
+the WebSocket protocol. [docs/implemented/](docs/implemented/) owns current
+contracts and their reasons; [docs/plans/](docs/plans/) holds unfinished changes.

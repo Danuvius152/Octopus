@@ -97,7 +97,7 @@ class TurnContext:
     tool_deny: list[str] | None
     mcp_servers: list[McpServerEntry]  # selected built-ins + connectors
     credential: HarnessCredential | None
-    # Per-agent native memory (docs/plans/memory.md): the canonical markdown
+    # Per-agent native memory (docs/implemented/memory.md): the canonical markdown
     # dir both harnesses point at. None when there's no owning agent.
     memory_dir: str | None = None
     # Native-deep-research web leaf (native-deep-research.md §4): when True, the
@@ -263,7 +263,7 @@ class RuntimeProfile:
     # `SessionManager._run_backend` does exactly once per turn.
     stale_session_patterns: tuple[str, ...] = ()
     # Whether the composed system prompt should carry the agent-memory blurb
-    # (docs/plans/memory.md §3). Codex: True (no native memory — it reads/
+    # (docs/implemented/memory.md §3). Codex: True (no native memory — it reads/
     # writes the canonical dir with file tools by instruction). Claude: False
     # (native memory, pointed at the canonical dir via an env override).
     injects_memory_prompt: bool = False

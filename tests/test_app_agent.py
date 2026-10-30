@@ -1,4 +1,4 @@
-"""Applications talking to agents (docs/plans/app-agent-access.md).
+"""Applications talking to agents (docs/implemented/app-agent-access.md).
 
 Covers the manager (conversations as sessions, the prompt the agent reads,
 every cap and every refusal) and the HTTP surface an app actually calls,

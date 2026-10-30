@@ -10,7 +10,7 @@ day before, which is the argument for the whole exercise.
 Branch `polish-2026-09`, 24 commits, 221 files, +14,971 / −10,213. All gates
 green, both test tiers clean, deployed and verified against the live install —
 the whole plan, §10 items 1 through 11, done.
-Plan and reasoning: [`plans/polish-2026-09.md`](plans/polish-2026-09.md).
+Plan and reasoning: [`plans/polish-2026-09.md`](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/polish-2026-09.md).
 
 ---
 

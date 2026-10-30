@@ -1,4 +1,4 @@
-"""Native sub-agents, normalized (docs/plans/native-subagents.md).
+"""Native sub-agents, normalized (docs/implemented/native-subagents.md).
 
 Both CLIs fan work out to short-lived helpers inside a turn and narrate it
 while it runs — Claude Code through `system/task_*` events around a `Task`

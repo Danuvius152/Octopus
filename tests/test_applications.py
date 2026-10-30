@@ -1,4 +1,4 @@
-"""Tests for agent-built applications (docs/plans/applications.md).
+"""Tests for agent-built applications (docs/implemented/applications.md).
 
 Covers:
   * Path helpers — slug allocation + de-duplication, entrypoint validation,

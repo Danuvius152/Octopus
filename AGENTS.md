@@ -74,17 +74,17 @@ web/src/                React UI, zustand state, WebSocket handling and unit tes
 web/e2e/                Playwright; test.ts is the shared offline entry
 tests/                  Backend correctness and explicitly selected integration tiers
 scripts/                Checks, generated contracts and documentation index
-docs/                   Current guides, architecture, plans and scoped review records
-.scratch/               Ignored, temporary specs, tickets and task evidence
+docs/                   Current guides, implemented contracts and unfinished plans
+.scratch/               Existing temporary tasks; new tasks use account workspace
 ```
 
 Read the relevant part of [architecture.md](docs/architecture.md) for component
 relationships. For completion consumers, failure handoff or retirement, read
-[the execution contract](docs/plans/architecture-contract.md#输入完成与资源退休):
+[the execution contract](docs/implemented/architecture-contract.md#输入完成与资源退休):
 business outcome, notification delivery
 and resource retirement have separate authorities.
 
-Persistence changes follow [current storage and publication handoff](docs/plans/current-storage-format.md).
+Persistence changes follow [current storage and publication handoff](docs/implemented/current-storage-format.md).
 New persistent types, relationships or roots must also update
 [account portability](docs/backup-and-migrate.md#account-export-and-import)
 collection, exclusions, restoration and verification in the same change.
@@ -107,10 +107,13 @@ The authoritative suite commands, fixture rules, evidence-reuse conditions and
 release matrix are in [testing.md](docs/testing.md). Read the relevant sections
 before running checks; do not maintain a second test-count inventory.
 
-### Local Codex validation
+### Backend validation scope
 
-This installation's live validation scope is Codex. Preserve Claude's shared and
-hermetic behavior; do not probe, install or authenticate Claude for local checks.
+Offline correctness covers both Claude Code and Codex, including backend-specific
+protocol and simulated-process tests. Shared harness or session changes require
+the affected coverage for both backends; Claude's live-test exclusion does not
+exclude its offline tests. This installation's live validation scope remains
+Codex only; do not probe, install or authenticate Claude for routine checks.
 Keep persistent test state isolated and use the selected credentials without
 copying secrets or changing agent defaults. `knowledge_eval` and `wiki_perf`
 remain independently opt-in and outside default commit/release gates.
@@ -160,14 +163,20 @@ the service does not publish the development tree.
 
 ## Agent skills and local tasks
 
-There is no external issue tracker for this project. Specs and tickets use
-`.scratch/<feature>/`; [local task conventions](docs/agents/issue-tracker.md)
-define paths, statuses and what “publish” means for skills. Routine work does
-not require tickets. Durable decisions and final evidence belong in existing
-`docs/` owners before temporary task material is removed.
+Use the account workspace for new temporary task materials, experiments and
+isolated source worktrees. Edit deliverable code in the selected repository
+checkout or worktree. Test runtime state follows its separate isolation rules;
+the test cache is not a general development directory.
 
-Use the repository's terminology and existing `docs/plans/` decisions. Create a
-glossary only when needed.
+There is no external issue tracker. [Local task conventions](docs/agents/issue-tracker.md)
+define workspace paths, statuses and what “publish” means for skills, including
+skills whose generic examples use `.scratch/`. Routine work does not require
+tickets. Durable decisions and final evidence belong in existing `docs/` owners
+before temporary task material is removed. Preserve active tasks at their current
+paths until their processes and references can be retired or updated safely.
+
+Use the repository's terminology and `docs/implemented/` contracts and rationale.
+Unfinished changes belong in `docs/plans/`. Create a glossary only when needed.
 Skills support the task's scope and existing authorization.
 
 ## Repository and Upstream Maintenance

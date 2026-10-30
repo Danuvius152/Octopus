@@ -6,7 +6,7 @@ them, failed on each of them, and nothing anywhere counted it. The mechanism to
 record a broken connector already existed (`mark_needs_reconnect`); what was
 missing was any durable record of repeated failure.
 
-Design (docs/plans/polish-2026-09.md §9):
+Design (docs/2026-09-25-polish-pass.md):
 
 - A bounded, non-blocking sink (`store.MetricsStore`) in front of a batched
   writer, so recording cannot stall or fail a turn.

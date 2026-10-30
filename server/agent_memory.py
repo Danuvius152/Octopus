@@ -1,4 +1,4 @@
-"""Per-agent native-memory provisioning (docs/plans/memory.md).
+"""Per-agent native-memory provisioning (docs/implemented/memory.md).
 
 Memory is each harness's NATIVE, agent-written markdown memory, persisted and
 scoped per agent under ``<agents_dir>/<agent_id>/memory/`` — one canonical

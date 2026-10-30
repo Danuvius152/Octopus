@@ -1,0 +1,85 @@
+# Accounts, authorization and owned data
+
+> **Status:** implemented — Account authentication, scoped business state, per-account keys and managed paths.
+
+## Authentication and its limits
+
+Current business execution requires an active account. An empty installation
+supports first-account creation; later registration uses invitation codes.
+The old pre-account business mode, installation adoption, global access-token
+rotation and its recovery route have been retired. Current account transfer is
+the explicit [offline operation](../backup-and-migrate.md#account-export-and-import).
+
+Passwords authenticate; opaque server-side tokens authorize API/WebSocket access.
+Session/PAT tokens are stored by digest with revocation and applicable expiry.
+Changing a password and disabling an account revoke bearers under their current
+rules. Login throttling bounds guessing. Opaque tokens were chosen because
+revocation can be checked against the already-open SQLite authority without
+adding a JWT refresh/revocation subsystem.
+
+HTTP ownership, MCP invocation authority and a running subprocess have distinct
+lifetimes. Revoking login is not proof that an already-running child has retired.
+The [current execution contract](architecture-contract.md) owns admission and
+retirement; the [remaining tenancy proposal](../plans/multi-tenancy-gaps.md) must
+be checked against code before treating any old audit finding as still present.
+
+## Keys and secrets
+
+The server-held master key wraps one random data-encryption key per account.
+Account DEKs encrypt credentials and connector tokens. Passwords do not encrypt
+those secrets: a scheduled request must be able to use its account's credentials
+while the person is offline, and a password change must not rewrite ciphertexts.
+The server/operator can decrypt secrets it must use; this is not a promise of
+cryptographic isolation from the host administrator.
+
+`credential_secrets` is the unique stored secret authority. App tokens and MCP
+signatures use their scoped master-key mechanisms; neither is the retired global
+API access token. User deletion/crypto-shred is not an implemented product route.
+Secret rotation, current storage and release preparation follow
+[storage handoff](current-storage-format.md), not old migration SQL.
+
+## 5. Business ownership
+
+Agents, sessions, schedules, installations and applications carry account identity.
+Routes resolve account scope, and operations check referenced objects' ownership
+and current authority at the boundary that uses them. A session owner is derived
+from its agent. Connector enablement belongs to the agent; cross-account
+delegation is refused. Broadcasts use the appropriate account/session audience.
+Unscoped internal access is not permission for account-facing routes to read all
+rows. Shared registries and provider definitions are installation-level by design;
+users' instances and secrets are not.
+
+Per-account turn limits and other admission limits are enforced by the owning
+execution paths. Host-default credential behavior must be read from the current
+resolver; this document does not promote the old audit's proposed host-login flag
+or global quota redesign to an implemented guarantee.
+
+## 6. Files and workspace
+
+`workspace.paths_for(user_id)` gives the account's workspace, agents, applications,
+attachments, large prompts and research roots. A new session without an explicit
+directory uses the account workspace. Relative paths resolve there; absolute
+paths are validated against the account root and granted extra roots after
+symlink resolution. Applications legitimately work in their account-owned sibling
+directory, not necessarily below `workspace/` itself.
+
+This validates session directory selection. The local deployment runs trusted
+agents and applications under the host user; it is not an OS sandbox against
+hostile tenants or root. Per-tenant execution isolation would require a separate
+design. Application code, durable data and rebuildable dependencies have distinct
+[directory ownership](application-backends.md#3-three-directories-three-owners).
+
+## Verification and remaining scope
+
+Code: [users](../../server/users.py), [keys](../../server/crypto.py),
+[request scopes](../../server/deps.py), [paths](../../server/workspace.py),
+[MCP identity](../../server/mcp_identity.py) and [database](../../server/db/).
+`tests/test_route_scoping.py`, `tests/test_tenant_isolation.py` and
+`tests/test_agent_credential_bindings.py` provide regression entry points.
+
+SSO, self-service password recovery, billing and hostile-tenant sandboxing are
+not implied by account support. The current storage model validates a complete
+baseline; it does not replay the old first-account adoption/backfill workflow.
+The [original design](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/multi-tenancy.md)
+and [retired token rotation](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/token-rotation.md)
+remain historical evidence of those choices.

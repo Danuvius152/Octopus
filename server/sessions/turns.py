@@ -1319,7 +1319,7 @@ class TurnsMixin(SessionManagerBase):
         reasoning_effort = effective["reasoning_effort"]
         service_tier = effective["service_tier"]
 
-        # Per-agent native memory (docs/plans/memory.md): derive the agent's
+        # Per-agent native memory (docs/implemented/memory.md): derive the agent's
         # canonical memory dir. Managed preparation provisions it outside the
         # owner before constructing this configuration. No agent means that
         # → memory wiring is inert. Both harnesses point at this one dir —

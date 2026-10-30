@@ -1,4 +1,4 @@
-"""Real-CLI memory + resume safety (docs/plans/memory.md §6).
+"""Real-CLI memory + resume safety (docs/implemented/memory.md, Verification).
 
 Against the actual `claude` / `codex` binaries:
 1. Each harness READS its per-agent memory through the real wiring (Claude via

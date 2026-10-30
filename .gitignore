@@ -9,6 +9,8 @@ web/dist/
 web/test-results/
 test-results/
 .claude/
+.agents/
+skills-lock.json
 AGENTS_pre.md
 .pytest_cache/
 /.scratch/

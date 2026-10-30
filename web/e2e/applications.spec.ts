@@ -1,6 +1,6 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 /**
- * End-to-end coverage of applications (docs/plans/applications.md).
+ * End-to-end coverage of applications (docs/implemented/applications.md).
  *
  * Two buckets:
  *

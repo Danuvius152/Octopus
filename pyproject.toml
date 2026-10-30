@@ -87,7 +87,7 @@ ignore = [
 "server/app_agent.py" = ["B008"]
 
 [tool.mypy]
-# Non-strict on purpose (docs/plans/polish-2026-09.md §8 F1). The annotations
+# Non-strict on purpose (docs/2026-09-25-polish-pass.md). The annotations
 # are thorough — 89% return coverage — but were never checked, so a strict
 # first run would be a tarpit that stalls the A1 refactor instead of enabling
 # it. Ratchet these on once the baseline is clean.

@@ -363,7 +363,7 @@ def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
     env = os.environ.copy()
     private_settings = _apply_env_credential(argv, env, ctx.credential)
     _apply_effort(argv, env, ctx.reasoning_effort)
-    # Per-agent memory (docs/plans/memory.md §3): point Claude's auto-memory
+    # Per-agent memory (docs/implemented/memory.md §3): point Claude's auto-memory
     # dir at the agent's canonical store via the dedicated override. We do NOT
     # touch CLAUDE_CONFIG_DIR — that's the root of Claude's *session transcript*
     # store, so moving it would orphan every session's `--resume` data. The

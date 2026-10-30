@@ -12,8 +12,8 @@ installation and referenced files; a source checkout or a guessed
 Account export/import is the provided migration interface. Complete-backup
 restoration is a broader operator procedure; the account importer does not
 restore excluded history or arbitrary historical formats. Architecture and
-storage decisions live in [the architecture contract](plans/architecture-contract.md)
-and [current storage and publication handoff](plans/current-storage-format.md).
+storage decisions live in [the architecture contract](implemented/architecture-contract.md)
+and [current storage and publication handoff](implemented/current-storage-format.md).
 
 <a id="7-selected-account-export-and-import"></a>
 
@@ -210,7 +210,7 @@ separate decision after verified recovery.
 Every feature adding persistent types, relationships, roots or formats must
 maintain account selection, exclusions and restoration in the same change. The
 owning modules and acceptance boundary are in
-[the architecture contract](plans/architecture-contract.md#账户搬迁的开发约定).
+[the architecture contract](implemented/architecture-contract.md#账户搬迁的开发约定).
 Verify new semantics with an isolated round trip, including growth between
 exports when collection changes. This supports matching-version archives,
 not arbitrary old-package upgrades, hot migration, multi-root mapping or

@@ -1,4 +1,4 @@
-"""Per-agent native memory → harness wiring (docs/plans/memory.md §3).
+"""Per-agent native memory → harness wiring (docs/implemented/memory.md §3).
 
 Asserts the *rendered* turn for each harness. Crucially, Claude points its
 auto-memory at the per-agent dir via CLAUDE_COWORK_MEMORY_PATH_OVERRIDE and

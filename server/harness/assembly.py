@@ -266,7 +266,7 @@ def _connector_namespace(connector: Any) -> str:
 
 def render_memory_blurb(memory_dir: str) -> str:
     """Instructions for an agent's durable, cross-session markdown memory
-    (docs/plans/memory.md §3). Injected only for harnesses without native
+    (docs/implemented/memory.md §3). Injected only for harnesses without native
     memory (Codex); Claude relies on its own auto-injected MEMORY.md. The
     format mirrors Claude's native memory (frontmatter facts + a MEMORY.md
     index) so the two are interchangeable on a backend switch."""

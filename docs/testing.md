@@ -10,6 +10,20 @@ code commit. **Both exclude `knowledge_eval` and `wiki_perf` by default.** These
 optional tiers require a separate evaluation or measurement task and explicit
 opt-in; they are outside commit and release gates.
 
+**Offline correctness covers both Claude Code and Codex.** Include each backend's
+affected argument/configuration, protocol, session lifecycle and simulated-process
+cases when changing shared behavior. Backend-specific changes run the relevant
+backend's regressions; the full hermetic gate retains both backends. These tests
+use controlled fixtures, fake CLI subprocesses or local HTTP mocks, without a
+real provider CLI, model request or login. Claude's exclusion from live testing
+must not become a filename filter or skip in the offline gate.
+
+**Routine live validation remains Codex only**, for both pytest and browser E2E.
+Report offline coverage and live-provider coverage separately. Offline success
+does not establish Claude's actual authentication, model output or provider-side
+effort behavior; a separately authorized live investigation does not change this
+default test selection.
+
 ### Fast checks during development
 
 Get feedback on each change promptly with the smallest relevant test set:
@@ -103,7 +117,7 @@ root; use the PATH setup in [local-wsl.md](local-wsl.md#本机测试).
 
 | Suite | Command | Scope and execution boundary |
 |-------|---------|------------------------------|
-| Backend hermetic | `.venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" -n 4 --dist=loadfile --max-worker-restart=0 -q` | Full correctness, including Wiki sources/jobs/maintenance, permissions, transactions and recovery. No live model or external network dependency; guards reject real model CLI execution and production callback port 8000. |
+| Backend hermetic | `.venv/bin/pytest tests/ -m "not real and not knowledge_eval and not wiki_perf" -n 4 --dist=loadfile --max-worker-restart=0 -q` | Full correctness for **Claude Code and Codex**, including simulated CLI processes, Wiki sources/jobs/maintenance, permissions, transactions and recovery. No live model or external network dependency; guards reject real model CLI execution and production callback port 8000. |
 | Wiki performance (opt-in) | `.venv/bin/pytest tests/ --run-wiki-perf -m wiki_perf -v -s` | Large-dataset projection and grant-lookup cost measurements. Outside default full checks and release gates; small correctness and query-boundary checks remain in the hermetic tier. |
 | Live Codex pytest | `.venv/bin/pytest tests/ --ignore=tests/test_codex_login_real.py -m "real and (real_codex or codex_bin) and not real_claude and not knowledge_eval" -v` | Actual Codex execution, streaming/tools, scheduling, memory, fork, research and Wiki through the selected existing login. New device authentication is excluded from routine release checks. Use the isolated credential setup in [本机测试](local-wsl.md#本机测试). |
 | Supervisor integration | `.venv/bin/pytest tests/ -m "real and supervisor" -v` | Isolated systemd user units: installation ownership, environment/token handling, process retirement and managed restart. No provider CLI or production-service mutation. |
@@ -117,11 +131,11 @@ root; use the PATH setup in [local-wsl.md](local-wsl.md#本机测试).
   and `real_codex` require a signed-in CLI; `claude_bin` and `codex_bin` require
   the binary. Availability probes run at setup in `tests/conftest.py`, so
   collection and hermetic checks do not invoke model CLIs.
-- **This installation validates Codex. Claude is unavailable; its live CLI and
-  browser tests are not run and are outside this installation's release gate.**
-  Report that scope explicitly. Hermetic protocol coverage of both backends
-  does not establish a passing two-provider live suite. Preserve supported
-  backends and agent settings; do not probe, install or authenticate Claude.
+- **This installation's live gate selects Codex only.** Claude's live CLI and
+  browser tests remain outside routine checks and the release gate, regardless
+  of whether its binary is installed. Keep both backends' offline coverage and
+  supported agent settings; do not probe, install or authenticate Claude for
+  routine checks. Report unexecuted live coverage explicitly.
 - **Persistent state stays in temporary test roots**, including databases,
   account/Wiki/workspace paths and provider output. Live tests reference the
   existing selected credentials without copying secrets or changing defaults.
@@ -154,3 +168,24 @@ root; use the PATH setup in [local-wsl.md](local-wsl.md#本机测试).
   enabled. Keep correctness cases at the smallest useful size and reuse setup
   across read-only variations; mark dedicated scale/cost measurements instead
   of excluding Wiki behavior tests as a group.
+
+## Wiki evaluation method
+
+以下用于明确委托的质量或效率评测；日常、提交和发布门禁仍由
+[Test Coverage](#test-coverage) 选择，不自动运行可选评测。
+优先测量用户关心的单库约100篇规模，长文、大批次和多库只作增长诊断。
+质量与原文保全合格后，统计完整任务端到端耗时和全部输入、输出 token，包含
+错误、纠错、绕路与重试。调用数、轮数和缓存明细用于解释结果，不单独设下降门槛；
+不要求每次严格新旧 A/B，也不从提示词字数推算实际 token 收益。
+
+优化先查无效候选与提交、失败后绕路、同版重复读取、导出和验收，再按真实收益
+调整 prompt、工具回包或读写流程；已有规则足够时修复工具与流程中的冗余。
+保留权限、版本、事务、正文新鲜度及材料复用合同，减少调用不构成放宽依据。
+质量样本绑定资料版本，开发题与保留题分开，不为已见题增加关键词或正则特例；
+调参后重跑保留题不再算未见初测。明确要求自然问答质量时，走实际聊天入口、
+自然问题和线上共享提示；额外引导的委托只证明相应条件下的链路。
+
+保留真实失败、待定结论及实际成本；未知消耗不补零，缓存输入与推理输出不重复
+相加。有效同版结果按验证政策复用，不为证明提速重复已验收的付费样本。
+一次样本不证明普遍提速或 persona 的因果效果；用量和失败原始记录留在本次
+任务产物，长期文档只保留可解释的结论与其条件。

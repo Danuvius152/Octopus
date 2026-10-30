@@ -69,10 +69,10 @@ pre-commit:
 
     docs-index:
       tags: docs
-      # Each plan's Status line is the source of the table in docs/README.md.
-      glob: "docs/{README.md,plans/**/*.md}"
+      # Current contracts and unfinished plans each own their index metadata.
+      glob: "{docs/README.md,docs/implemented/**/*.md,docs/plans/**/*.md,scripts/gen-docs-index.py}"
       run: .venv/bin/python scripts/gen-docs-index.py --check
-      fail_text: "docs/README.md's plans index is stale. Run '.venv/bin/python scripts/gen-docs-index.py'."
+      fail_text: "Documentation indexes are stale or invalid. Run '.venv/bin/python scripts/gen-docs-index.py'."
 
     contracts:
       tags: backend

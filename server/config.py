@@ -86,13 +86,13 @@ class Settings(BaseSettings):
         if self.wiki_selection_page_size > self.wiki_selection_max_page_size:
             raise ValueError("Wiki selection default page size exceeds its maximum")
         return self
-    # Per-agent durable state root (docs/plans/memory.md §2). Each agent gets
+    # Per-agent durable state root (docs/implemented/memory.md §2). Each agent gets
     # `<agents_dir>/<agent_id>/memory/` — the canonical native, agent-written
     # markdown memory both harnesses point at (Claude via
     # CLAUDE_COWORK_MEMORY_PATH_OVERRIDE, Codex via its instructions blurb).
     # `~` expanded at use time.
     agents_dir: str = "~/.octopus/agents"
-    # Agent-built web applications (docs/plans/applications.md §2). Each app
+    # Agent-built web applications (docs/implemented/applications.md §2). Each app
     # gets `<applications_dir>/<slug>/` — a plain directory of static files
     # that the server streams back under /apps/{id}/. `~` expanded at use
     # time so tests (and the e2e suite) can point it at a temp root.

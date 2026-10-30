@@ -2,7 +2,7 @@
 
 本文负责本机环境与操作步骤，不追加逐次发布日志或测试项数。代码交付与纯文档
 改动的动作边界统一遵循 [AGENTS.md](../AGENTS.md#repository-and-upstream-maintenance)；
-Wiki 交付历史、证据及未完成需求分别见[开发总结](plans/wiki-development-summary.md)
+Wiki 交付历史、证据及未完成需求分别见[开发总结](implemented/wiki-development-summary.md)
 和[未来计划](plans/wiki-future-plan.md)。
 
 这台机器运行 WSL2 / Ubuntu 26.04，已启用 systemd。项目使用 Ubuntu 自带的
@@ -14,8 +14,9 @@ AI 后端使用已经登录 ChatGPT 的 Linux 版 Codex。`.env` 设置
 界面和 API 都采用这个默认值，新建普通会话继承代理的后端；继续使用当前
 用户的 CLI 登录，无需复制或重新设置凭据。
 
-本机当前没有可用的 Claude 环境；开发与发布的真实模型验证只使用 Codex。
-这是本机配置与验证范围，项目仍支持两个后端，不修改其他使用者的后端选择。
+本机日常开发与发布的离线测试覆盖 Claude Code 和 Codex；真实模型验证只使用
+Codex。Claude 是否安装、是否做过专项实测，不改变这一默认范围。项目仍支持
+两个后端，不修改其他使用者的后端选择。
 
 ## 配置和数据
 
@@ -133,9 +134,23 @@ Codex agent、普通新会话都使用同一份用户技能。凭据仍使用
 自动发现不意味着所有技能都应自动触发。目录、软链接与调用策略见
 [官方 skills 说明](https://learn.chatgpt.com/docs/build-skills#where-codex-loads-local-skills)。
 
+## 临时任务目录
+
+新的一般临时任务使用当前账户的 `~/.octopus/users/<user_id>/workspace/<task>/`。
+分析材料、规格票据、调试脚本、临时实验、交接和任务产物放在同一任务目录；需要
+隔离开发时，Git worktree 可放其 `worktree/` 子目录。正式代码仍在选定仓库或
+工作树内修改。具体生命周期与票据格式见[本地任务约定](agents/issue-tracker.md)。
+
+`.scratch/` 和 `.cache/octopus-worktrees/` 不再作为新任务的默认目录；已有活动
+任务先保留路径与引用，完成后再清理。`docs/review/` 仍可放当次审阅报告。
+这里的目录选择不改变框架的账户路径、应用输出或受管发布目录。
+
+下面的测试目录约束针对运行数据，而非源码存放位置：即使源码工作树位于
+workspace，测试数据库、账户、服务安装资源和 CLI 输出仍须与正式安装隔离。
+
 ## 本机测试
 
-日常验证范围、全量测试条件、发布门禁与 Codex 选择以 [AGENTS.md](../AGENTS.md#verification)
+日常验证范围、全量测试条件和发布门禁以 [AGENTS.md](../AGENTS.md#verification)
 为准，不在这里复制一份测试清单或固定通过数。下面只补充 WSL 环境、凭据入口
 和可选知识评测的使用方法；文档整理只做受影响链接、索引和差异检查，不触发
 全套测试、构建或付费模型请求。
@@ -158,9 +173,10 @@ Wiki 规模、性能测量和检索评测脚本的完整查询跑批使用独立
 
 此开关与 `--run-knowledge-evals` 相互独立，不会启用自然问答评测或真实模型请求。
 
-每次交付报告和审阅任务都应明确写出：Codex 的实际检查结果；Claude 当前
-不可用、真实 CLI/浏览器测试未执行，不计为通过，也不作为本机待补发布门禁。
-离线单元、协议与契约测试仍覆盖两个后端；它们不能代替 Claude 实机验证。
+交付报告和审阅任务分别说明离线覆盖、Codex 实机结果和未执行的 Claude 实机
+范围。Claude 的离线单元、协议与模拟 CLI 进程测试属于正常门禁，不因实机排除
+而跳过；这些结果不能代替真实 Claude CLI／浏览器验证。未执行的 Claude 实机
+检查不计为通过，也不作为本机待补发布门禁，完整选择见 [testing.md](testing.md)。
 
 仓库锁定的 Playwright 1.58.2 尚未提供 Ubuntu 26.04 平台包，本机使用它的
 Ubuntu 24.04 Chromium 构建，并已安装官方浏览器依赖。运行浏览器测试前指定
@@ -290,7 +306,7 @@ schema 及持久协议的已验证代码，或在保留现有状态的基础上�
 制作旧版兼容构建，不维护第二份知识库。不能仅放宽版本检查或恢复旧数据库
 覆盖当前写入。停机期间的
 补偿扫描只能观察最终文件，不能恢复未被观察的瞬时身份历史。实现细节与
-证据边界见[开发总结 §4](plans/wiki-development-summary.md#4-当前运行合同)。
+证据边界见[开发总结 §4](implemented/wiki-development-summary.md#4-当前运行合同)。
 
 ## 服务管理
 
@@ -363,7 +379,7 @@ push、构建、重启或发布。用户明确要求文档提交时才提交，�
    启动候选。任一库未准备、提交结果未知或跨库部分完成时保持业务关闭，按同一
    发布计划和实际提交事实前向继续。候选启动只匹配主库5/Wiki17的当前标记，
    不补做旧格式转换；不变格式的发布也执行完整只读核验。首次受管安装还须完成
-   上面的 unit/profile 过渡。具体合同见[当前存储格式](plans/current-storage-format.md)。
+   上面的 unit/profile 过渡。具体合同见[当前存储格式](implemented/current-storage-format.md)。
    确认实际 MainPID、工作目录、cgroup 和配置绑定属于目标，`/health` 为 ok、
    `/ready` 为 ready。候选中已构建并验证的前端产物随同一次切换生效。
 4. 验证存活与就绪接口、登录页面、静态资源和真实浏览器，确认代码与构建产物属于

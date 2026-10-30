@@ -1,5 +1,5 @@
 """AppAgentManager — the conversations a running application holds with an
-Octopus agent (docs/plans/app-agent-access.md).
+Octopus agent (docs/implemented/app-agent-access.md).
 
 An application used to be downstream of its agent: the agent wrote it, then
 left. This is the other direction — the app, while running, asking one of the

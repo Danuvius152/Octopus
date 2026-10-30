@@ -3,7 +3,7 @@
 `session_manager = SessionManager()` is created at import and was imported
 directly by 18 modules, which meant test isolation depended on resetting a
 global by hand and the object could not be instantiated twice in one process
-(docs/plans/polish-2026-09.md §3 A2).
+(docs/2026-09-25-polish-pass.md).
 
 The singleton stays — every background path (the scheduler, the delegation
 manager, the bridges) genuinely wants the one live instance, and removing it

@@ -184,7 +184,7 @@ class RunConfig:
     tool_allow: list[str] | None = None
     tool_deny: list[str] | None = None
     connectors: list[tuple[Any, Any]] = field(default_factory=list)
-    # Per-agent native memory (docs/plans/memory.md). None when there's no
+    # Per-agent native memory (docs/implemented/memory.md). None when there's no
     # owning agent (legacy/tests) → memory wiring is fully inert.
     memory_dir: str | None = None
     # Fork first-turn context note (session-rewind.md §5.6.4): framing

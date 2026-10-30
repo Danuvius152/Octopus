@@ -1100,7 +1100,7 @@ CODEX = RuntimeProfile(
     parse_oneshot_stdout=parse_oneshot_stdout,
     # Codex has no usable native memory in exec, so it reads/writes the shared
     # per-agent markdown dir with file tools, driven by the injected blurb
-    # (docs/plans/memory.md §3). Memory is decoupled from CODEX_HOME; the
+    # (docs/implemented/memory.md §3). Memory is decoupled from CODEX_HOME; the
     # canonical dir is ensured by session_manager.
     injects_memory_prompt=True,
     can_fork=True,  # /rewind: HISTORY_REPLAY; /fork: native rollout copy

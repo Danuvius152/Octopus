@@ -1,12 +1,25 @@
 # Codex / DSH 兼容与 DeepSeek backend 可行性方案
 
-> **Status:** proposed — 保留 Claude 原生支持与 Codex，评估以 API key 增加 DeepSeek backend；DSH 接口按适配度选择，尚未实施。
->
-> **2026-10-23 选型修订：** 用户明确 headless CLI 不是必须。§1.3–1.5 重新比较
-> ACP、SDK 与 headless，不再以“先做 headless、失败才看 SDK”为前提。下文原有
-> headless 的详细设计保留为条件方案；其中 argv、stdin、八类投影、final/exit
-> 聚合与原生能力限制不约束另两条路线。共同的账户、授权、配置、结果和资源合同
-> 继续成立。T0 必须选定路线并修订所有受影响章节，才进入实现。
+> **Status:** proposed — 推荐 SDK runtime 与同宿主薄插件，调用公开 Agent steer 并复用原生等待/退出；具体设计已更新，尚未实施。
+
+## 当前接入方向（2026-10-30）
+
+[统一路线第四阶段](engineering-runtime-roadmap.md#deepseek-design)
+记录 rc.5 发行包核查与具体接入设计：公开 `Agent.steer()` 已支持 next-step 输入，
+现成 SDK wire 的 `session/prompt` 仍是 followup。推荐同宿主薄插件复用公开 SDK
+server，补原生控制；不另造工具循环、不读私有 sessions。完成使用低层 wait 与
+持久事件，不用高层 run 的首次根 idle；原有自动返回仍由 Octopus 逐条派发。
+
+该路线尚未通过 loader、真实 runtime 或模型验收。人工等待的 timeout 映射、
+原生后代及父汇总、配置/凭据/权限、全部调用方与资料交接属于必要验收。
+实施结果及固定版本差异继续回写本文；下面的 rc.2 材料只保留历史研究依据。
+
+## 历史条件方案（2026-10-23）
+
+下文的 ACP 优先级、headless 规格、无原生问答等版本限定判断，以及当时的代码
+缺口，不再作为当前设计或当前实现清单。它们不能覆盖上述 rc.5 核查；其中已经
+落实的 one-shot 身份/授权等也不能重新立项。共同责任与当前工程合同按所链接的
+现行 owner 核对，后续实施应删除被替代的条件规格。
 
 **评估结论（2026-10-23）：Codex 与 DSH 共用 Octopus 的产品流程可行，DSH 接入
 仍有必须验证的前提。** Codex 已有实现；DSH 应增加一个 `RuntimeProfile`，不需要
@@ -31,7 +44,7 @@ DSH 协议依据本机 npm 包 `@deepseek-ai/dsh@0.2.1-rc.2` 的 README、类型
 ## 内容状态与证据边界
 
 当前已实现的后端合同归 [Harness 层](../architecture.md#harness-layer-serverharness)
-和[架构约定](architecture-contract.md)，本方案不新增已交付能力。
+和[架构约定](../implemented/architecture-contract.md)，本方案不新增已交付能力。
 §1.3–1.5与§2.3给出选型及取舍理由，SDK、ACP、headless 均是待验证候选；
 §3–9是条件实现和验收设计，headless 专属内容只约束选定该路线后的实现。
 §9全部工作包尚未实施，§10另列显式延后范围，技术可行不等于实施授权。
@@ -94,7 +107,7 @@ DSH 协议依据本机 npm 包 `@deepseek-ai/dsh@0.2.1-rc.2` 的 README、类型
   或在实际 CLI 支持验证后接通；不能静默接受成“已限制”。不为统一工具名另造运行时。
 - **Oneshot：** 原 Codex `exec` 路径未兑现 tool-free，已由 R1 替换为无执行
   dispatcher 的纯文本 worker；当前边界及安装版本证据归
-  [Codex 合同](codex-backend.md#single-call-capability-verification-2026-10-27)。
+  [Codex 合同](../implemented/codex-backend.md#source-and-verification)。
   DSH 的 oneshot 仍须独立验收，不能只把沙箱改成 read-only 就称为 tool-free。
 - **Research leaf：** Codex 当前启用 `read-only` 和 `web_search`，这不证明只剩
   web 工具；[leaf](../../server/research/leaf.py) 的 `mcp_servers=[]` 只证明本次
@@ -181,8 +194,8 @@ T0 使用已锁定包、临时根和本地假 provider，先验证最可能推�
 | 问题和事件是否阻塞协议 | Octopus ask→answer 与 Stop、审批拒绝、慢 UI/满队列同时发生；持续处理 response/control，有界失败，无静默丢正文或自动授权 |
 | 运维成本是否可接受 | 锁定客户端/runtime 版本、正常退出/崩溃/升级、冷 resume；记录私有模块与兼容代码，而非仅估代码行数 |
 
-综合规划的[公共协议接缝](../review/future.md#harness-protocol-contract)与
-[Codex 接入设计](../review/future.md#codex-app-server-interfaces)
+综合规划的[公共协议接缝](engineering-runtime-roadmap.md#harness-protocol-contract)与
+[Codex 接入设计](engineering-runtime-roadmap.md#codex-app-server-interfaces)
 定义共享接缝：一个公共 Harness/Profile，一个资源 owner，各后端私有协议；start、
 stream、stop 及可选 steer/answer 的含义不随 provider 改变。DSH T2 与 Codex F1/F2
 协调 `RuntimeProfile`、LaunchPlan、owner 传参及退出接口；不在业务 manager 中
@@ -334,7 +347,7 @@ session。实际 OS spawn 前继续调用原 `RunConfig.authorize_spawn`；增�
 ### 3.4 路径、安装与账户架构计划的衔接
 
 原调查基线包含 legacy/首账户 bootstrap；当前已按
-[架构约定](architecture-contract.md#公开接口与账户配置)退出该历史业务。
+[架构约定](../implemented/architecture-contract.md#公开接口与账户配置)退出该历史业务。
 **DSH 的目标安装以现有账户为入口，不新建 ownerless DSH 支持。** 实施时使用
 当前账户合同，缺 owner 明确拒绝，不恢复首账户接管，也不让缺失的 user_id
 隐式落到宿主目录。原调查中的 legacy 描述不构成新的兼容义务。
@@ -827,8 +840,8 @@ service 行为有变化时补 supervisor integration，再按 [自动发布](../
   [请求配置测试](../../tests/test_request_configuration.py)。
 - [MCP 组装](../../server/harness/assembly.py)、[MCP identity](../../server/mcp_identity.py)、
   [凭据路由](../../server/routers/credentials.py)、[模型设置](../../server/routers/backends.py)。
-- [架构约定与暂停范围](architecture-contract.md)、
-  [Harness 设计](harness-layer.md)、[模型与 reasoning](model-reasoning.md)、
+- [架构约定与暂停范围](../implemented/architecture-contract.md)、
+  [Harness 设计](../implemented/harness-layer.md)、[模型与 reasoning](../implemented/model-reasoning.md)、
   [架构说明](../architecture.md)。历史计划帮助解释目的，具体签名以源码为准。
 
 **DSH 证据**

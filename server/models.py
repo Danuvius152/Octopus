@@ -857,7 +857,7 @@ class UpdateNotifierRequest(BaseModel):
     enabled: bool | None = None
 
 
-# Applications (docs/plans/applications.md §2/§5) — agent-built static web
+# Applications (docs/implemented/applications.md §2/§5) — agent-built static web
 # apps that Octopus serves under /apps/{id}/ and renders in the main pane.
 
 

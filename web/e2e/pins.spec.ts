@@ -1,6 +1,6 @@
 import { TEST_BEARER, enterAccountCredentials } from "./current-account";
 /**
- * Sidebar pins, end to end (docs/plans/sidebar-pins.md). Pure UI, no model.
+ * Sidebar pins, end to end (docs/implemented/sidebar-pins.md). Pure UI, no model.
  *
  * The sidebar lists pinned agents in the user's order; the Agents page's All
  * tab lists every agent. Covered here in a real browser because the parts

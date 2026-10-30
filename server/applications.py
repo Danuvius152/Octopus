@@ -1,4 +1,4 @@
-"""ApplicationManager — agent-built web apps (docs/plans/applications.md).
+"""ApplicationManager — agent-built web apps (docs/implemented/applications.md).
 
 An **application** is a directory of static files that one of the user's
 agents wrote, served back under ``/apps/{id}/`` and rendered in the main pane
