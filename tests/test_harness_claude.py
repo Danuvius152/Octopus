@@ -22,6 +22,46 @@ from server.harness.events import HarnessCredential, HarnessOneshotError
 from server.harness.profile import OneShotContext, TurnContext
 
 
+@pytest.mark.parametrize("oneshot", [False, True])
+@pytest.mark.parametrize("auth_type,selected", [
+    ("api_key", "ANTHROPIC_API_KEY"), ("oauth", "CLAUDE_CODE_OAUTH_TOKEN"),
+])
+def test_selected_credential_overrides_all_host_auth_sources(tmp_path, monkeypatch, oneshot, auth_type, selected):
+    names = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+             "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "ANTHROPIC_CUSTOM_HEADERS")
+    for name in names:
+        monkeypatch.setenv(name, "host-credential")
+    secret = 'selected-"secret'
+    credential = HarnessCredential(backend="claude-code", auth_type=auth_type, secret=secret)
+    if oneshot:
+        argv, kw = build_oneshot_argv(OneShotContext(prompt="hello", credential=credential))
+    else:
+        ctx = _assemble_ctx(prompt="hello", wd=tmp_path, resume=None, credential=credential)
+        argv, kw = build_turn_argv(ctx)
+    overlay = kw["private_settings"].values
+    assert overlay["apiKeyHelper"] == ""
+    expected = {name: secret if name == selected else "" for name in names}
+    assert overlay["env"] == expected
+    assert {name: kw["env"][name] for name in names} == expected
+    assert "selected" not in str(argv) + repr(kw["private_settings"])
+    assert argv[kw["private_settings"].argument_index] == "<private-settings>"
+    if oneshot:
+        assert argv.index("--settings") < argv.index("--")
+
+
+@pytest.mark.parametrize("oneshot", [False, True])
+def test_host_default_keeps_auth_configuration(tmp_path, monkeypatch, oneshot):
+    import os
+
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "host-credential")
+    if oneshot:
+        argv, kw = build_oneshot_argv(OneShotContext(prompt="hello"))
+    else:
+        argv, kw = build_turn_argv(_assemble_ctx(prompt="hello", wd=tmp_path, resume=None, credential=None))
+    assert "--settings" not in argv
+    assert kw["env"]["ANTHROPIC_AUTH_TOKEN"] == os.environ["ANTHROPIC_AUTH_TOKEN"]
+
+
 @pytest.mark.parametrize("effort", [None, "low", "medium", "high", "xhigh", "max"])
 @pytest.mark.parametrize("oneshot", [False, True])
 def test_effort_overrides_only_child_environment(tmp_path, monkeypatch, effort, oneshot):
@@ -133,7 +173,7 @@ def test_turn_argv_api_key_and_minimal(tmp_path):
     )
     argv, kw = build_turn_argv(ctx)
     assert argv[0] == "claude"
-    assert argv[-2:] == ["--input-format", "stream-json"]
+    assert argv[argv.index("--input-format") + 1] == "stream-json"
     assert "p" not in argv  # the prompt goes to stdin, not argv
     assert "--resume" not in argv  # no resume id
     assert "--allowedTools" not in argv  # no allow list
@@ -311,7 +351,10 @@ def test_oneshot_argv_and_parse(tmp_path):
             working_dir=str(tmp_path),
         )
     )
-    assert argv == ["claude", "--print", "--output-format=json", "--model", "claude-opus-4-7", "--", "parse this"]
+    settings_index = argv.index("--settings")
+    assert argv[:settings_index] + argv[settings_index + 2:] == [
+        "claude", "--print", "--output-format=json", "--model", "claude-opus-4-7", "--", "parse this",
+    ]
     assert kw["cwd"] == str(tmp_path)
     assert kw["env"]["ANTHROPIC_API_KEY"] == "sk-1"
 

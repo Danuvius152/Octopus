@@ -229,6 +229,7 @@ class Harness:
         diagnostic_secrets = (settings.auth_token, ctx.credential.secret if ctx.credential else "")
         try:
             argv, kwargs = self.profile.build_oneshot_argv(ctx)
+            private_settings = kwargs.pop("private_settings", None)
             argv, kwargs = prepare_spawn(argv, kwargs)
         except LaunchConfigurationError as error:
             raise HarnessOneshotError("configuration", str(error)) from error
@@ -247,14 +248,24 @@ class Harness:
                     return None  # authorization ended before OS submission
                 except ValueError as error:
                     raise HarnessOneshotError("unauthorized", str(error)) from error
-            return await asyncio.create_subprocess_exec(
-                *argv,
-                # DEVNULL gives a stdin-reading CLI EOF immediately.
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **kwargs,
-            )
+            launch_argv = private_settings.materialize(argv) if private_settings else argv
+            try:
+                try:
+                    validate_launch(launch_argv, kwargs.get("env"))
+                except LaunchConfigurationError as error:
+                    raise HarnessOneshotError("configuration", str(error)) from error
+                return await asyncio.create_subprocess_exec(
+                    *launch_argv,
+                    # DEVNULL gives a stdin-reading CLI EOF immediately.
+                    stdin=asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    **kwargs,
+                )
+            except BaseException:
+                if private_settings is not None:
+                    private_settings.close()
+                raise
 
         spawn = asyncio.create_task(spawn_process(), name="one-shot-process-startup")
         retirement: asyncio.Task[None] | None = None
@@ -265,10 +276,14 @@ class Harness:
             except (FileNotFoundError, HarnessOneshotError):
                 return  # launch failed before creating a process
             if captured is None:
+                if private_settings is not None:
+                    private_settings.close()
                 return
             _terminate_process_group(captured, signal.SIGKILL)
             await captured.wait()
             await wait_group_exit(captured.pid, timeout=2.0, after_kill=True)
+            if private_settings is not None:
+                private_settings.close()
 
         def retirement_finished(done: asyncio.Task[None]) -> None:
             if not done.cancelled() and (error := done.exception()) is not None:
@@ -314,6 +329,9 @@ class Harness:
         except asyncio.CancelledError:
             # Job cancelled (or the job-level wait_for expired) while we were in
             # communicate() — confirm group retirement before propagating.
+            await confirm_retirement()
+            raise
+        except Exception:
             await confirm_retirement()
             raise
         await confirm_retirement()

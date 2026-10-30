@@ -349,6 +349,9 @@ async def test_steer_pipe_failure_preserves_local_details_without_the_bound_cred
 
     def executable_argv(context):
         _argv, kwargs = render_argv(context)
+        # This Python fake keeps the credential environment but does not read
+        # Claude's argv or its private settings file.
+        kwargs.pop("private_settings", None)
         return [sys.executable, "-u", "-c", code], kwargs
 
     monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=executable_argv))

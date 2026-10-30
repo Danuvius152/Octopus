@@ -43,6 +43,7 @@ from server.mcp_identity import mint
 from server.session_manager import SessionManager
 from tests.accounts import create_account
 from tests.callback_api import start_callback_api
+from tests.completion_models import CompletionModels
 
 # Widen PATH so shutil.which finds binaries in nvm + ~/.local/bin in
 # non-interactive pytest invocations.
@@ -109,12 +110,20 @@ async def _bootstrap(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "port", api.port)
 
     async def teardown() -> None:
-        await api.stop()
-        dm.shutdown()
+        # Keep caller Owners and callbacks live until child completion writers
+        # have recorded their terminal disposition, including on test failure.
+        for session in list(mgr.sessions.values()):
+            if mgr.session_is_executing(session):
+                await mgr.interrupt(session.id)
+                await mgr.await_session_execution(session.id)
+        await dm.confirm_recording()
         # Release any CLI process a finished turn is holding. Without this each
         # test leaves ~255MB of live `claude` behind for the rest of the run,
         # which is enough to get the suite OOM-killed (inline-steering.md §7).
         await mgr.stop_all_held_processes()
+        await dm.confirm_recording()
+        await api.stop()
+        dm.shutdown()
         await db.close()
 
     return db, mgr, dm, am, wd, teardown
@@ -129,12 +138,15 @@ def _intercept_parent_injections(
     capture list."""
     captured: list[tuple[str, str]] = []
     real = mgr.start_message
+    parent = CompletionModels()
 
-    async def wrapped(sid, prompt, attachment_ids=None):
+    async def wrapped(sid, prompt, attachment_ids=None, **kwargs):
         if sid == parent_session_id:
+            receipt = await parent.start_message(mgr, sid, prompt, attachment_ids, **kwargs)
+            await parent.emit(mgr, {"type": "result", "session_id": sid, "work_id": kwargs.get("work_id")}, wait=False)
             captured.append((sid, prompt))
-            return None
-        return await real(sid, prompt, attachment_ids)
+            return receipt
+        return await real(sid, prompt, attachment_ids, **kwargs)
 
     mgr.start_message = wrapped  # type: ignore[assignment]
     return captured
@@ -272,9 +284,11 @@ async def test_real_question_loop_claude_to_claude(tmp_path, monkeypatch):
             assert child is not None
             assert mgr.get_pending_questions(child.id), "no pending question in queue"
             qid = mgr.get_pending_questions(child.id)[0].question_id
-            await mgr._deliver_question_answer(
-                child, qid, "red", auto=False
-            )
+            assert await mgr.answer_question(child.id, qid, [{"selected": ["red"]}])
+            await _wait_for(lambda: rec.state != "running", timeout=180.0)
+            await dm.confirm_recording()
+            assert rec.state == "completed", rec.error
+            assert rec._terminal_disposition is not None
             return
         pytest.fail(
             "the child's question never reached the parent as an "

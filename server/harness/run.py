@@ -33,6 +33,7 @@ from ..process_groups import group_exists, wait_group_exit
 from . import assembly
 from .events import HarnessCredential, HarnessEvent
 from .launch_limits import validate_launch
+from .private_settings import PrivateSettings
 from .profile import ActivityObserver, RuntimeProfile, StdinMode, TurnContext
 
 logger = logging.getLogger(__name__)
@@ -224,6 +225,7 @@ class HarnessRun:
         self._activity_observer: ActivityObserver | None = None
         self._parser = profile.new_event_parser()
         self._process: asyncio.subprocess.Process | None = None
+        self._private_settings: PrivateSettings | None = None
         self._spawn_identity: str | None = None
         self._started_at: float | None = None
         self._event_queue: deque[tuple[HarnessEvent, int]] = deque()
@@ -324,6 +326,7 @@ class HarnessRun:
         ctx = self._make_context(prompt, working_dir, resume_id, credential)
         spawn_identity = self._context_signature(ctx)
         argv, kwargs = self._profile.build_turn_argv(ctx)
+        self._private_settings = kwargs.pop("private_settings", None)
         argv, kwargs = prepare_spawn(argv, kwargs)
         if ctx.resume_id and self._profile.prepare_resume is not None:
             preparation = asyncio.create_task(self._profile.prepare_resume(ctx, argv, kwargs), name="harness-controller-update")
@@ -374,19 +377,26 @@ class HarnessRun:
             from ..mcp_identity import register_run
             if self._config.session_id:
                 register_run(self.run_lease_id, self._config.session_id, self._config.user_id, self.work_id)
+            launch_argv = self._private_settings.materialize(argv) if self._private_settings else argv
             logger.info("Harness spawn provider=%s run=%s request=%s attempt=%s argv=%s cwd=%s",
                         self._profile.backend, self.run_lease_id, request_id, attempt_id,
-                        diagnostic_text(str(argv), secrets=self._diagnostic_secrets),
+                        diagnostic_text(str(launch_argv), secrets=self._diagnostic_secrets),
                         diagnostic_text(str(kwargs.get("cwd")), secrets=self._diagnostic_secrets))
             # No await separates current authority from submitting the spawn.
-            return await asyncio.create_subprocess_exec(
-                *argv,
-                stdin=asyncio.subprocess.PIPE,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                limit=_STDOUT_LINE_LIMIT_BYTES,
-                **kwargs,
-            )
+            try:
+                validate_launch(launch_argv, kwargs.get("env"))
+                return await asyncio.create_subprocess_exec(
+                    *launch_argv,
+                    stdin=asyncio.subprocess.PIPE,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    limit=_STDOUT_LINE_LIMIT_BYTES,
+                    **kwargs,
+                )
+            except BaseException:
+                if self._private_settings is not None:
+                    self._private_settings.close()
+                raise
 
         spawn = asyncio.create_task(spawn_process())
         self._spawn_task = spawn
@@ -668,6 +678,8 @@ class HarnessRun:
                 await wait_group_exit(pending.pid, timeout=2.0, after_kill=True)
         proc = self._process
         if proc is None:
+            if self._private_settings is not None:
+                self._private_settings.close()
             self._close_stream()
             if self._activity_observer is not None:
                 await self._activity_observer.close()
@@ -703,6 +715,8 @@ class HarnessRun:
                                self._profile.backend, self.run_lease_id)
                 _terminate_process_group(proc, signal.SIGKILL)
                 await wait_group_exit(proc.pid, timeout=2.0, after_kill=True)
+        if self._private_settings is not None:
+            self._private_settings.close()
         for task, name in (
             (self._stdout_task, "stdout reader"),
             (self._stderr_task, "stderr reader"),

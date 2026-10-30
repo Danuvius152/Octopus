@@ -34,6 +34,31 @@ credential, surface it (chat error + sidebar badge), and let the user
 re-authorize **in place** (same credential id, so all agent/session
 bindings survive) which clears the flag.
 
+### Explicit Claude credentials
+
+For direct Claude/Anthropic-compatible CLI calls, an explicit credential fixes
+the chosen API key or OAuth token in both the child environment and a per-process
+settings overlay. Competing key/token variables, the API-key descriptor source,
+`apiKeyHelper` and `ANTHROPIC_CUSTOM_HEADERS` are disabled for that invocation;
+arbitrary custom headers can carry competing authentication. The endpoint,
+model mapping, transcript home and other host settings remain in use. A call
+without an explicit credential retains the complete host authentication setup.
+Managed policy and outer cloud-provider selection retain their native authority.
+
+Renderers return an in-memory private-settings specification without filesystem
+effects. After authorization, the engine creates a private directory and a mode
+0600 settings file; only its path enters argv. The streaming process owns it
+across completed turns and releases it after confirmed process-group retirement.
+One-shot retirement owns the same cleanup, including cancellation, late startup
+handles and I/O failures. Partial writes and definite spawn failures roll back
+their files. Host configuration and stored credential identity are never changed.
+
+Regression coverage checks both renderers and credential types, default host
+behavior, subprocess file lifetime and failure cleanup. Live invalid-key checks
+require authentication rejection; a timeout or generic transport failure is not
+passing evidence. See [Claude authentication precedence](https://code.claude.com/docs/en/authentication#authentication-precedence)
+and [settings environment precedence](https://code.claude.com/docs/en/env-vars#precedence).
+
 ### Proactive refresh ownership
 
 Secret-backed OAuth bundles share one in-flight resolution per account and

@@ -276,12 +276,13 @@ async def test_real_interrupt_terminates_in_flight_turn():
 
 
 @pytest.mark.asyncio
-async def test_real_credential_with_bad_key_yields_auth_error():
+async def test_real_credential_with_bad_key_yields_auth_error(monkeypatch):
     """A credential with an obviously-invalid API key must override the
     default OAuth and cause the CLI to surface an auth error in its result.
     Proves the env-var injection actually takes effect at the CLI."""
     from server.harness import HarnessCredential
 
+    monkeypatch.setenv("CLAUDE_CODE_MAX_RETRIES", "0")
     backend = _claude_run(model="haiku")
     bad_cred = HarnessCredential(
         backend="claude-code",
@@ -301,6 +302,11 @@ async def test_real_credential_with_bad_key_yields_auth_error():
     # The CLI should report an error result (it can manifest as either an
     # error result or as a stderr-only failure; in either case, no normal
     # successful text response is expected).
+    error_text = "\n".join([backend.stderr_text, *(str(e.content or e.raw or "") for e in events)])
+    assert get_harness("claude-code").is_auth_error(error_text), error_text
+    # Claude may render the API rejection itself as an assistant text block.
+    assert all(get_harness("claude-code").is_auth_error(str(e.content))
+               for e in events if e.type == "text"), "a rejected key must not yield normal model text"
     result = next((e for e in events if e.type == "result"), None)
     if result is not None:
         assert result.is_error is True, (

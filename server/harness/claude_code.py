@@ -31,6 +31,7 @@ from .events import (
 from .harness import Harness
 from .login import LoginMethod
 from .model_settings import ModelOption, ModelSettings
+from .private_settings import PrivateSettings
 from .profile import (
     EventParser,
     McpServerEntry,
@@ -200,16 +201,24 @@ Pass exactly one recurrence: `cron="0 9 * * 1-5"` (5-field crontab, the right ch
 Related: `mcp__schedule__list()` (ids, next fire times — call it before changing anything), `mcp__schedule__update(schedule_id, enabled=False | cron=… | prompt=…)` (pausing is usually what "stop doing X for now" means), `mcp__schedule__delete(schedule_id)`."""
 
 
-def _apply_env_credential(env: dict[str, str], credential: HarnessCredential | None) -> None:
-    """Materialize an env_secret credential. api_key → ANTHROPIC_API_KEY
-    (a long-lived sk-ant- key); oauth → CLAUDE_CODE_OAUTH_TOKEN (a refreshed
-    Pro/Max access token). Both override any on-disk `claude login`."""
+def _apply_env_credential(argv: list[str], env: dict[str, str], credential: HarnessCredential | None) -> PrivateSettings | None:
+    """Select one auth source for this invocation, including settings.env.
+
+    Claude reloads settings after spawn, so environment injection alone cannot
+    override host credentials. Keep the selected secret and clear competing
+    sources in both places; no credential keeps the host's default behavior.
+    The engine owns the private settings file; its secret never enters argv.
+    """
     if credential is None:
-        return
-    if credential.auth_type == "api_key":
-        env["ANTHROPIC_API_KEY"] = credential.secret
-    elif credential.auth_type == "oauth":
-        env["CLAUDE_CODE_OAUTH_TOKEN"] = credential.secret
+        return None
+    selected = {"api_key": "ANTHROPIC_API_KEY", "oauth": "CLAUDE_CODE_OAUTH_TOKEN"}[credential.auth_type]
+    auth = {name: credential.secret if name == selected else "" for name in (
+        "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+        "CLAUDE_CODE_API_KEY_FILE_DESCRIPTOR", "ANTHROPIC_CUSTOM_HEADERS",
+    )}
+    env.update(auth)
+    argv += ["--settings", "<private-settings>"]
+    return PrivateSettings(len(argv) - 1, {"env": auth, "apiKeyHelper": ""})
 
 
 # Where the prompt goes, and therefore what stdin is for. Referenced by both
@@ -352,7 +361,7 @@ def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
         argv += ["--", ctx.prompt]
 
     env = os.environ.copy()
-    _apply_env_credential(env, ctx.credential)
+    private_settings = _apply_env_credential(argv, env, ctx.credential)
     _apply_effort(argv, env, ctx.reasoning_effort)
     # Per-agent memory (docs/plans/memory.md §3): point Claude's auto-memory
     # dir at the agent's canonical store via the dedicated override. We do NOT
@@ -362,7 +371,10 @@ def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
     # host config dir untouched.
     if ctx.memory_dir:
         env["CLAUDE_COWORK_MEMORY_PATH_OVERRIDE"] = ctx.memory_dir
-    return argv, {"cwd": ctx.working_dir, "env": env}
+    kwargs: dict[str, Any] = {"cwd": ctx.working_dir, "env": env}
+    if private_settings is not None:
+        kwargs["private_settings"] = private_settings
+    return argv, kwargs
 
 
 # ------------------------------------------------------------------ event parsing
@@ -624,10 +636,13 @@ def build_oneshot_argv(ctx: OneShotContext) -> tuple[list[str], dict[str, Any]]:
     if ctx.model:
         argv += ["--model", ctx.model]
     env = os.environ.copy()
-    _apply_env_credential(env, ctx.credential)
+    private_settings = _apply_env_credential(argv, env, ctx.credential)
     _apply_effort(argv, env, ctx.reasoning_effort)
     argv += ["--", ctx.prompt]
-    return argv, {"cwd": ctx.working_dir or os.getcwd(), "env": env}
+    kwargs: dict[str, Any] = {"cwd": ctx.working_dir or os.getcwd(), "env": env}
+    if private_settings is not None:
+        kwargs["private_settings"] = private_settings
+    return argv, kwargs
 
 
 def parse_oneshot_stdout(stdout: str) -> str:
