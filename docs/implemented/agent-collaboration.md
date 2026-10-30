@@ -93,6 +93,46 @@ or interrupted classification produces the corresponding `[agent-error:…]`.
 Stable `agent-terminal:{work_id}` admission identity, persisted
 `_terminal_disposition` and the in-flight guard prevent duplicate delivery.
 
+Terminal return checks the original receipt before reading reply text or
+restoring an archived parent. Permanent integrity refusal records `stopped`;
+lost acknowledgment (including a connection failure), timeout or an unavailable
+admission channel records `unknown` on the captured round before awaiting its
+diagnostic write. `terminal_delivery_error` is independent of the child's
+business `error`. After that write, one immediate original-receipt lookup may
+confirm admission; missing/unreadable evidence ends this observation while
+retaining unknown. Only existing settlement reentry can look again. There is
+no new polling task, return resubmission or child rerun. Only proven pre-effect
+busy/capacity/quota refusals retry, under the original identity.
+
+An observed disposition remains in the original control object if recording
+fails, so reentry can finish that recording without submitting again. Conflicts
+and programming errors retain their original exceptions; cancellation propagates,
+and authoritative storage uncertainty uses the existing fail-stop boundary.
+Source business success, return admission and parent completion remain distinct.
+REST/MCP list results, `delegation_delivery` events and the exact-round card
+expose disposition/error separately; the card calls the business state
+`completed`, without claiming that the parent has processed the reply. A late
+list snapshot cannot overwrite a delivery event received after its fetch began.
+Restart retains diagnostics but never replays old replies; old empty dispositions
+still recover as `not_replayed`. A follow-up owns a new work identity and fresh
+question delivery controls.
+
+The existing command registry retains explicit checks for those diagnostic
+writes. Neither a domain-error type nor a finished coroutine proves that its
+write is complete. An already occurring relay/settlement reentry registers its
+new command before taking over the same original write; the old failed command
+can then retire, while the new owner still blocks drain until the write is
+confirmed. Round CAS and child question notices have separate recording
+targets: losing the parent relationship closes only the round CAS writer.
+Deleting the original child closes both writers through the verified deletion
+path. A follow-up closes the preceding
+writer only when its own command has not confirmed rollback; its staging CAS
+alone is reversible. A confirmed refusal that restores the preceding round
+preserves its unfinished diagnostic responsibility even if another command
+temporarily stages a new round during cleanup. No new return ledger,
+polling task or alternate writer is introduced. Full masked exception chains
+remain in the existing logs even if a later receipt clears the UI observation.
+
 Business outcome and notification delivery are independent. A failed child
 notification prefix cannot erase its acknowledged success or leave its
 delegation permanently running. A writer ending without an acknowledged
@@ -101,10 +141,19 @@ or replay the input. Public deletion between classification and reply reading
 retains the original successful result. The same stable relay delivers an
 explicit `reply_unavailable` error to the still-open caller, so a nested parent
 can finish without invented reply text or child replay. Normal deletion does
-not turn command/database drain into an invariant failure.
+not turn command/database drain into an invariant failure. The database's
+session-deletion entry notifies the round owner synchronously after confirmed
+commit. Parent deletion leaves the independent child writable: its pending
+notice failures still block drain until recorded or their own target retires,
+and new valid questions retain a stopped-return notice and remain answerable.
+A refused deletion or an unrelated session deletion closes neither writer.
+This retires only finished diagnostic commands; in-flight
+callbacks and processes retain their original retirement owners.
 
 The broadcast listener only forwards `question_request` for the captured
-work. `assistant_text`, `result` and `error` are no longer parallel delegation
+work and retires that question's relay observation on answer/close once its
+required diagnostic recording is settled.
+`assistant_text`, `result` and `error` are no longer parallel delegation
 completion writers. Progress and history remain visible through the normal
 session surfaces.
 
@@ -137,6 +186,21 @@ expressible in its normal language/tool loop:
   an exception in its `ask` call and finalises via the error path.
 - The user can open the child session and answer through the ordinary
   question UI; the same question identity and timeout rules apply.
+
+Each original work/question owns a live relay control, with an in-flight guard
+and independent stopped/unknown observation before any diagnostic await. A
+duplicate event cannot submit during that await or after an unconfirmed return.
+The original receipt takes priority; only a definite pre-effect capacity refusal
+permits another submission, with the question revalidated before it. Permanent
+refusal or unknown is explained in the original child's existing delivery notice,
+identified by work/question, so it does not depend on the refused parent
+transcript. The original question remains answerable while pending. A child
+notice failure remains a failure with its original owner/exception; it neither
+recreates the question nor reopens return submission. Ending a question discards
+its live relay control only after required diagnostic recording has settled;
+an unfinished original write keeps its owner reference. Restart does not resurrect callbacks or a question
+queue. Closing a question after a lost ACK cannot undo any already admitted
+parent input; delayed answers still name that original batch.
 
 ### 5.6 `mcp__ask_agent__cancel` and `mcp__ask_agent__list`
 

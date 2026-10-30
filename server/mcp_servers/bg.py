@@ -234,6 +234,10 @@ def bg_list() -> str:
         line += f"  ({describe_limits(item.get('idle_timeout_seconds'), item.get('timeout_seconds'))})"
         if item.get("stop_reason") is not None:
             line += f"  reason={item['stop_reason']}"
+        if item.get("delivery_disposition") is not None:
+            line += f"  return={item['delivery_disposition']}"
+            if item.get("delivery_error"):
+                line += f" ({item['delivery_error']})"
         lines.append(line)
     return "\n".join(lines)
 

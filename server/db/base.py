@@ -103,6 +103,7 @@ class DatabaseBase:
     _BG_TASK_COLS = RecordProjection(
         "id", "session_id", "command", "description", "working_dir", "status", "exit_code", "stdout", "stderr",
         "truncated", "started_at", "completed_at", "idle_timeout_seconds", "timeout_seconds", "stop_reason", "work_id", "knowledge_context",
+        "delivery_disposition", "delivery_error",
     )
     _RESEARCH_COLS = RecordProjection(
         "id", "session_id", "question", "status", "phase", "error", "report_path", "cost", "created_at", "completed_at",
@@ -131,6 +132,7 @@ class DatabaseBase:
         # Work that has to unwind before the connection goes away; see
         # `add_close_hook`.
         self._close_hooks: list[Callable[[], Awaitable[None]]] = []
+        self._session_delete_hooks: list[Callable[[str], None]] = []
 
     @asynccontextmanager
     async def transaction(self, *, write: bool = True, timeout: float = 5.0) -> AsyncIterator[Transaction]:

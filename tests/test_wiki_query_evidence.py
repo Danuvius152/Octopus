@@ -3,11 +3,15 @@
 import asyncio
 import hashlib
 import json
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 
-from tests.wiki_query_evidence import collect_evaluation
+from server.harness import get_harness
+from server.harness.events import HarnessCredential
+from server.harness.profile import TurnContext
+from tests.wiki_query_evidence import collect_evaluation, observe_invocations
 
 
 def probe_for(tmp_path, *, answer="A different wording.", failure=None, mutate=False):
@@ -85,3 +89,47 @@ async def test_existing_report_is_not_overwritten_or_paid_for_again(tmp_path):
     with pytest.raises(FileExistsError):
         await collect_evaluation(probe, "Explain this note.", **args)
     assert path.read_bytes() == original and probe.ask_count == 1
+
+
+@pytest.mark.parametrize('complete', [False, True])
+async def test_full_read_requirement_is_checked_inside_failure_evidence(tmp_path, complete):
+    probe, source = probe_for(tmp_path)
+    text = source.read_text()
+    end = len(text) if complete else 5
+    probe.call_trace = [{'operation': 'read', 'response': {
+        'path': 'Library/example.md', 'revision': hashlib.sha256(source.read_bytes()).hexdigest(),
+        'start': 0, 'end': end, 'content': text[:end],
+    }}]
+    output = tmp_path / 'full-reports'
+    operation = collect_evaluation(probe, 'Read all of it', case_id='full-read', output=output,
+                                   expected_sources=[{'path': 'Library/example.md', 'full': True}])
+    if complete:
+        await operation
+    else:
+        with pytest.raises(AssertionError, match='full reading'):
+            await operation
+    report = json.loads(next(output.glob('*/report.json')).read_text())
+    source_read, = report['source_coverage']
+    assert source_read['complete'] is complete
+    assert report['execution_status'] == ('success' if complete else 'failed')
+    assert report['semantic_acceptance'] == 'not_reviewed'
+
+
+def test_invocation_evidence_retains_native_controls_without_prompt_or_bearers(monkeypatch, tmp_path):
+    harness = get_harness('codex')
+    probe = SimpleNamespace(input_context={})
+    observe_invocations(monkeypatch, probe)
+    context = TurnContext(prompt='private question', working_dir=str(tmp_path), resume_id=None,
+                          system_prompt='token=private-model-instruction', model='gpt-6.1-sol',
+                          tool_allow=None, tool_deny=None, mcp_servers=[],
+                          credential=HarnessCredential(backend='codex', auth_type='oauth', home_dir=str(tmp_path)),
+                          reasoning_effort='max', service_tier='default')
+    harness.profile.build_turn_argv(context)
+    item, = probe.input_context['rendered_attempt_profiles']
+    assert item['model_argument'] == 'gpt-6.1-sol'
+    assert 'model_reasoning_effort="max"' in item['control_arguments']
+    assert 'service_tier="default"' in item['control_arguments']
+    assert 'private' not in json.dumps(item)
+    probe.input_context['rendered_attempt_profiles'].clear()
+    harness.profile.build_turn_argv(replace(context, reasoning_effort='high'))
+    assert 'model_reasoning_effort="high"' in probe.input_context['rendered_attempt_profiles'][0]['control_arguments']

@@ -135,8 +135,7 @@ async def _update_session_settings(
     if {"model", "reasoning_effort", "service_tier", "credential_id"} & updates.keys():
         from .backends import (
             model_settings_for,
-            validate_reasoning,
-            validate_service_tier,
+            validate_controls,
         )
 
         agent = (
@@ -151,11 +150,12 @@ async def _update_session_settings(
                 updates.get("credential_id", session.credential_id) or agent.get("credential_id"),
                 user_id,
             )
-            validate_reasoning(
-                catalog, updates.get("model", session.model) or agent.get("model"), effort,
-            )
-            validate_service_tier(
-                catalog, updates.get("model", session.model) or agent.get("model"), tier,
+            validate_controls(
+                catalog, updates.get("model", session.model) or agent.get("model"), effort, tier,
+                backend=session.backend, overrides={
+                    "reasoning_effort": updates.get("reasoning_effort", session.reasoning_effort),
+                    "service_tier": updates.get("service_tier", session.service_tier),
+                },
             )
 
     if "name" in fields and fields["name"] is not None:

@@ -33,6 +33,7 @@ from ..models import (
     TurnRecovery,
 )
 from ..monitor import Event as _MonEvent
+from ..service_health import ServiceUnavailable
 from .base import (
     _BACKEND_RETIRE_TIMEOUT,
     _DELTA_FLUSH_SECONDS,
@@ -61,6 +62,7 @@ from .runtime_types import QuotaExceeded, _Attempt, _Decision, _Settlement, _Tur
 from .submission import RequestCompletion, SubmissionReceipt, observed_input_receipt
 
 if TYPE_CHECKING:
+    from ..bg_tasks import BgTaskRecord
     from ..knowledge import KnowledgeContext
 
 
@@ -595,7 +597,7 @@ class TurnsMixin(SessionManagerBase):
             return False
         return await self._session_owner(session).call(RetainResultNotice(delivery_id, content))
 
-    async def deliver_bg_result(self, rec) -> bool:  # type: ignore[no-untyped-def]
+    async def deliver_bg_result(self, rec: BgTaskRecord) -> bool:
         """Inject a synthesized user message into a session when a bg
         task completes. Threaded through the same start_message path
         as a real user prompt, so it queues behind an in-flight turn
@@ -616,10 +618,18 @@ class TurnsMixin(SessionManagerBase):
         from ..bg_tasks import render_delivery_prompt
         from ..knowledge import decode_owned
 
+        if rec.delivery_disposition == "stopped":
+            return False
         existing = await self.source_receipt("bg", f"bg:{rec.id}", session_id=rec.session_id)
         if existing is not None:
+            rec.delivery_disposition = None
+            rec.delivery_error = None
             return existing[1].accepted
+        if rec.delivery_disposition is not None:
+            return False
         if self.session_owner_failed(rec.session_id):
+            rec.delivery_disposition = "stopped"
+            rec.delivery_error = "Destination owner is unavailable; output retained in the task record"
             logger.warning("Background task %s delivery stopped: destination owner is unavailable; output retained in the task record", rec.id)
             return False
         work_id = getattr(rec, "work_id", None)
@@ -628,12 +638,19 @@ class TurnsMixin(SessionManagerBase):
             session_id=rec.session_id, work_id=work_id,
         )
         if resolved is None:
+            rec.delivery_disposition = "stopped"
+            rec.delivery_error = "The original request contract is missing, closed or could not be verified"
             logger.info("bg task %s retained as material: no open original request contract", rec.id)
-            await self.retain_result_notice(
-                rec.session_id, f"bg:{rec.id}",
-                f"Background task {rec.id}: output retained in the task record. "
-                "The original request contract is missing, closed or could not be verified; no automatic continuation was started.",
-            )
+            try:
+                await self.retain_result_notice(
+                    rec.session_id, f"bg:{rec.id}",
+                    f"Background task {rec.id}: output retained in the task record. "
+                    "The original request contract is missing, closed or could not be verified; no automatic continuation was started.",
+                )
+            except ServiceUnavailable:
+                raise
+            except Exception:
+                logger.exception("Background task %s auxiliary delivery notice failed", rec.id)
             return False
         _, knowledge_context = resolved
         prompt = render_delivery_prompt(rec)
@@ -644,6 +661,9 @@ class TurnsMixin(SessionManagerBase):
         )
         if not receipt.accepted and self._admission_closed:
             raise SessionOwnerUnavailable("Background return admission is stopping; acknowledgment is pending")
+        if not receipt.accepted:
+            rec.delivery_disposition = "stopped"
+            rec.delivery_error = "The destination refused automatic continuation"
         return receipt.accepted
 
 

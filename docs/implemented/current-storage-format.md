@@ -2,7 +2,7 @@
 
 > **Status:** implemented — Validation and release handoff are tracked separately from production deployment.
 
-The main database uses format **5**, and Wiki uses format **17**. Each database
+The main database uses format **6**, and Wiki uses format **17**. Each database
 has one `PRAGMA user_version` marker. An existing database must match exactly
 before a writer opens; a genuinely empty database creates the complete current
 layout and marker in one transaction. Startup does not interpret older layouts,
@@ -38,8 +38,40 @@ there is no global row factory or storage format change.
 
 ## Publication boundary
 
-Main format 5 adds the nullable, checked `applications.deletion` JSON column
-after `pin_order`. It records only unfinished deletion (`retiring`/`files`,
+Main format 6 adds nullable `bg_tasks.delivery_disposition` (`stopped`/`unknown`)
+and `delivery_error` after `knowledge_context`. Delegation round JSON requires
+an independent nullable `terminal_delivery_error` and validates the finite
+terminal-disposition vocabulary, including `stopped` and `unknown`. These are
+source-side delivery observations; they do not change command/child business
+results, duplicate input receipts or prove parent processing. Empty diagnostics
+do not authorize replay. Live question delivery controls stay with the original
+round/question and are not a new persistent queue.
+
+A format-5 installation requires this release's finite publication conversion
+after its original writers retire: append the two BG columns as NULL, add only
+`terminal_delivery_error: null` to validated old round JSON, and commit marker 6
+in the same SQLite transaction. Old round dispositions and all other facts
+remain unchanged; malformed or unrecognized old state blocks conversion.
+Ordinary startup never performs it. Real read-only preflight checks complete
+declarations, integrity, foreign keys and exact `table_xinfo` against both the
+declared baseline and the four verified historical column orders. The writer
+transaction repeats those checks, preserves every original column's metadata
+and compares typed row multisets, including duplicate counts and NULL/TEXT/BLOB/
+numeric distinctions. Round JSON differs only by the explicitly added nullable
+field. The candidate's complete verifier runs before COMMIT. Current-format
+reentry verifies and retains already committed diagnostics; an uncertain COMMIT
+keeps the publisher closed for fresh inspection, without rollback to old data.
+
+The format boundary was checked against an isolated snapshot of the actual
+main-5 installation, including its retained BG rows and historical column orders;
+every original table's typed row multiset survived. Temporary private acceptance
+also covers populated round JSON, both layouts, process loss before COMMIT and
+lost COMMIT acknowledgment. Current verification tests cover fresh creation,
+unsupported-marker refusal, diagnostic JSON validation and reopen preservation.
+These are implementation/validation facts, not a production conversion claim.
+
+The nullable, checked `applications.deletion` JSON column records only
+unfinished deletion (`retiring`/`files`,
 `keep_files`, optional error); successful deletion removes the owning app row.
 Existing `sessions.app_id` records new development sessions and their archive
 successors; the current app-session reference remains valid for existing rows.
@@ -47,22 +79,10 @@ No historical relationship is inferred from working directories. Research
 additionally retains an `unknown` admission observation in its existing status
 field, without converting it into permission to replay an input.
 
-A format-4 installation requires a finite publication conversion after its
-original writers retire: append that exact checked column as NULL for existing
-apps, preserve all other rows/receipts, and commit marker 5 in the same SQLite
-transaction. Verify the candidate's complete declarations and retained facts
-before reopening admission. Ordinary startup never performs this conversion.
-The finite handoff checks integrity, foreign keys and exact `table_xinfo`
-column order inside that transaction, alongside the candidate's current
-verifier. Preservation compares typed row multisets over every original
-column, including duplicate rows and NULL/TEXT/BLOB/numeric distinctions.
-Fresh format-4 conversion requires the new column to be NULL; format-5 reentry
-verifies and retains any already committed unfinished deletion.
-Code implementation and fresh-format/account-snapshot tests do not establish
-that the running installation was converted or deployed.
-
 Account snapshots retain unfinished deletion and its original file choice/error
-while excluding sessions, BG and delegation execution history. Clearing the
+while excluding sessions, BG and delegation execution history, including the
+new return diagnostics. A complete installation backup retains those fields
+with the original results and input receipts. Clearing the
 exported `session_id` does not reopen the app or restore an in-flight grant.
 Cold opening keeps it closed and does not delete files; an explicit retry owns
 the remaining phase. Application HTTP, process, cold-open and account-snapshot
@@ -148,5 +168,15 @@ provider scope remain in [AGENTS](../../AGENTS.md#verification); deployment foll
 or startup tests does not establish that production was converted or released.
 
 ## Historical evidence
+
+The 2026-10-31 main 5→6 handoff check used a fresh read-only backup of the actual
+running installation, including nonempty BG records and a persisted delegation
+round. Conversion touched only the isolated copy. All twenty original tables
+retained their column metadata and typed row multisets under the declared round
+JSON projection; an independent comparison removed only the new null
+`terminal_delivery_error` and checked every original JSON field. The copy was
+deleted after validation. This supplies retained-data evidence alongside the
+finite interruption/commit-ack tests; actual production conversion and release
+remain facts of the publication receipt.
 
 The [original design and version-bound evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/current-storage-format.md) explain the original implementation. Current behavior is maintained above; historical checks do not establish current deployment.

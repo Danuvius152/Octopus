@@ -18,6 +18,12 @@ The complete precedence and validation rules belong to
 [model settings](model-reasoning.md). Working directory is a session property,
 not an Agent setting, and is captured as an absolute permitted path at creation.
 
+A valid Agent default change is saved even when an older session's inherited
+combination becomes incompatible. That session retains its backend and history;
+the user repairs its effective settings before continuing. Session updates and
+execution validate the whole effective combination, including current credential
+authorization. Saving defaults does not silently migrate old conversations.
+
 Defaults apply to new agents. Startup, upgrades and account transfer preserve
 saved persona, model and tool choices. Path rebinding does not authorize rewriting
 configuration. Existing settings are validated at their owning update and

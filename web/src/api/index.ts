@@ -18,6 +18,8 @@ export type ClientSubmissionSummary = components["schemas"]["ClientSubmissionSum
 export type SubmissionRecoveryPage = components["schemas"]["SubmissionRecoveryPage"];
 
 export type AgentRead = components["schemas"]["AgentRead"];
+export type BgTaskResponse = components["schemas"]["BgTaskResponse"];
+export type DelegationResponse = components["schemas"]["DelegationResponse"];
 export type ToolPolicySupport = components["schemas"]["ToolPolicySupport"];
 export type ApplicationRead = components["schemas"]["ApplicationRead"];
 export type ApplicationCreate = components["schemas"]["ApplicationCreate"];

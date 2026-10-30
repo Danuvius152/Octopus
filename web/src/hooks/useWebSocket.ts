@@ -18,6 +18,7 @@ import {
   useSessionStore,
   type Agent,
   type BgTask,
+  type Delegation,
   type Message,
   type PendingQuestion,
   type ResearchJob,
@@ -419,6 +420,24 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
       break;
     }
 
+    case "delegation_delivery": {
+      const incoming = data.delegation as Delegation | undefined;
+      if (!incoming?.delegation_id || !incoming.work_id || incoming.parent_session_id !== sessionId) break;
+      const { delegations, setDelegations } = getState();
+      const current = delegations[sessionId] || [];
+      const idx = current.findIndex((round) => round.delegation_id === incoming.delegation_id && round.work_id === incoming.work_id);
+      setDelegations(sessionId, idx < 0 ? [incoming, ...current] : current.map((round, i) => i === idx ? incoming : round));
+      break;
+    }
+
+    case "bg_delivery": {
+      getState().updateBgTaskDelivery(sessionId, data.task_id as string, {
+        delivery_disposition: (data.delivery_disposition as BgTask["delivery_disposition"]) ?? null,
+        delivery_error: (data.delivery_error as string | null) ?? null,
+      });
+      break;
+    }
+
     case "research_started": {
       getState().upsertResearch(sessionId, {
         id: data.research_id as string,
@@ -612,7 +631,7 @@ export function useWebSocket() {
               .then((r) => (r.ok ? r.json() : null))
               .then((delegations) => {
                 if (delegations && wsRef.current === ws) {
-                  getState().setDelegations(activeSessionId, delegations);
+                  getState().setDelegations(activeSessionId, delegations, snapshotStart.delegations[activeSessionId] || []);
                 }
               })
               .catch(() => {});

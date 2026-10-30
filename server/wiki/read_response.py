@@ -10,6 +10,7 @@ from .store import WikiError
 # Includes the actual FastMCP text result and wrapper, not just body text.
 # Transport framing and a client's later context/output limits are separate.
 COMPACT_READ_MAX_BYTES = 32768
+COMPACT_ERROR_LIMIT = 3
 DOCUMENT_FIELDS = ("id", "path", "revision", "title", "kind", "quality", "characters", "stale")
 INDEX_FIELDS = ("freshness", "index_epoch", "index_checked_at", "pending_changes", "index_status", "observer_mode")
 
@@ -49,9 +50,10 @@ def compact_document(document):
 def compact_index(value):
     result = {key: value[key] for key in INDEX_FIELDS if key in value}
     errors = value.get("index_errors", [])
-    result["index_errors"] = [{"path": item.get("path", ""), "error": item.get("error", "")[:160]} for item in errors[:3]]
-    result["index_error_count"] = len(errors)
-    if len(errors) > 3 or any(len(item.get("error", "")) > 160 for item in errors[:3]):
+    samples = errors[:COMPACT_ERROR_LIMIT]
+    result["index_errors"] = [{"path": item.get("path", ""), "error": item.get("error", "")[:160]} for item in samples]
+    result["index_error_count"] = value["index_error_count"]
+    if value.get("index_errors_truncated") or value["index_error_count"] > len(samples) or any(len(item.get("error", "")) > 160 for item in samples):
         result["index_errors_truncated"] = True
     return result
 

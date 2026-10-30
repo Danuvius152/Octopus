@@ -9,7 +9,7 @@ changed.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -146,9 +146,20 @@ class SessionsMixin(DatabaseBase):
                 delegation_request=delegation_request, app_id=app_id, user_id=user_id,
             ))
 
+    def add_session_delete_hook(self, hook: Callable[[str], None]) -> None:
+        """Notify a recording owner after this relationship is truly removed.
+
+        Hooks are synchronous and perform no I/O. They close only recording
+        responsibility; execution and resource retirement keep their owners.
+        """
+        if hook not in self._session_delete_hooks:
+            self._session_delete_hooks.append(hook)
+
     async def delete_session(self, session_id: str) -> None:
         async with self.transaction(write=True) as tx:
             await tx.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
+        for hook in tuple(self._session_delete_hooks):
+            hook(session_id)
 
     async def create_fork_session(
         self,

@@ -1,0 +1,6 @@
+# Reproduce the Wiki parsing baseline with pip -c constraints-wiki.txt.
+# Application dependency compatibility ranges remain in pyproject.toml.
+markdown-it-py==4.2.0
+mdurl==0.1.2
+PyYAML==6.0.3
+jieba==0.42.1

@@ -32,10 +32,22 @@ import { useSessionStore, type Delegation, type Message } from "../stores/sessio
 
 const STATUS_LABEL: Record<Delegation["state"], string> = {
   running: "running",
-  completed: "replied",
+  completed: "completed",
   failed: "failed",
   cancelled: "cancelled",
   interrupted: "interrupted",
+};
+
+const RETURN_LABEL: Record<NonNullable<Delegation["terminal_disposition"]>, string | null> = {
+  accepted: null,
+  duplicate: null,
+  steered: null,
+  unknown: "Return admission unconfirmed",
+  stopped: "Automatic return stopped",
+  closed: "Automatic return stopped",
+  unbound: "Automatic return stopped",
+  unavailable: "Automatic return stopped",
+  not_replayed: "Automatic return not replayed",
 };
 
 function StatusIcon({ state }: { state: Delegation["state"] }) {
@@ -92,12 +104,13 @@ export function AgentDelegationRequestCard({
     let timer: ReturnType<typeof setTimeout> | undefined;
     const fire = async () => {
       let again = false;
+      const baseline = useSessionStore.getState().delegations[sessionId] || [];
       try {
         const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: abort.signal });
         const data = response.ok ? await response.json() : null;
         if (cancelled) return;
         if (Array.isArray(data)) {
-          setDelegations(sessionId, data as Delegation[]);
+          setDelegations(sessionId, data as Delegation[], baseline);
           again = data.some((item: Delegation) => item.delegation_id === delegationId && item.work_id === workId && item.state === "running");
           failures = 0;
         } else again = ++failures < 3;
@@ -140,6 +153,7 @@ export function AgentDelegationRequestCard({
   };
 
   const label = state ? STATUS_LABEL[state] : projection.failed ? "failed to start" : receipt ? "status unavailable" : projection.result ? "receipt unavailable" : "awaiting receipt";
+  const returnLabel = match?.terminal_disposition ? RETURN_LABEL[match.terminal_disposition] : null;
 
   return (
     <div
@@ -168,6 +182,12 @@ export function AgentDelegationRequestCard({
         <div className="text-muted-foreground truncate" title={request}>
           “{request}”
         </div>
+        {returnLabel && (
+          <div className="text-muted-foreground">
+            <div>{returnLabel}</div>
+            {match?.terminal_delivery_error && <div>{match.terminal_delivery_error}</div>}
+          </div>
+        )}
         {files && files.length > 0 && (
           <div className="text-[10px] text-muted-foreground/80">
             files: {files.join(", ")}

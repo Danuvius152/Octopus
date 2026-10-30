@@ -2,7 +2,9 @@
 
 import asyncio
 import json
-from dataclasses import asdict
+import sys
+from dataclasses import asdict, replace
+from pathlib import Path
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -13,6 +15,7 @@ from server.database import Database
 from server.harness import RunConfig, get_harness
 from server.harness.codex import read_model_settings
 from server.harness.events import HarnessCredential
+from server.harness.model_settings import ModelSettings
 from server.harness.profile import OneShotContext
 from server.main import app
 from server.routers import agents
@@ -321,37 +324,77 @@ async def test_concurrent_model_and_speed_updates_validate_the_committed_state(c
     assert not (saved["model"] == "model-b" and saved["service_tier"] == "fast")
 
 
-@pytest.mark.asyncio
-async def test_agent_speed_update_validates_inherited_session_model(client):
-    response = await client.post("/api/agents", headers=client.headers, json={
-        "name": "Inherited", "backend": "codex", "model": "model-a",
-    })
-    path = f"/api/agents/{response.json()['id']}"
-    response = await client.post(f"{path}/sessions", headers=client.headers, json={})
-    session_path = f"/api/sessions/{response.json()['id']}"
-    assert (await client.patch(session_path, headers=client.headers, json={"model": "model-b"})).status_code == 200
-    rejected = await client.patch(path, headers=client.headers, json={"service_tier": "fast"})
-    assert rejected.status_code == 400
-    assert "Session" in rejected.json()["detail"]
-    assert (await client.get(path, headers=client.headers)).json()["service_tier"] is None
-    assert (await client.patch(session_path, headers=client.headers, json={"service_tier": "default"})).status_code == 200
-    assert (await client.patch(path, headers=client.headers, json={"service_tier": "fast"})).status_code == 200
+@pytest.mark.parametrize('field,new_default,correction', [
+    ('reasoning_effort', 'high', 'medium'), ('service_tier', 'fast', 'default'),
+])
+@pytest.mark.parametrize('archived', [False, True])
+async def test_legal_defaults_save_before_an_old_session_is_repaired_and_resumed(
+    client, monkeypatch, tmp_path, field, new_default, correction, archived,
+):
+    effects = tmp_path / 'continued-settings.jsonl'
+    script = tmp_path / 'resume-configuration.py'
+    script.write_text(
+        "import json,sys\nfrom pathlib import Path\nargs=sys.argv[2:]\n"
+        "record={'model':args[args.index('-m')+1],'resume':args[args.index('resume')+1],"
+        "'effort':next(a for a in args if a.startswith('model_reasoning_effort=')),"
+        "'tier':next(a for a in args if a.startswith('service_tier='))}\n"
+        "with Path(sys.argv[1]).open('a') as out: out.write(json.dumps(record)+'\\n')\n"
+        "print(json.dumps({'type':'thread.started','thread_id':'original-thread'}),flush=True)\n"
+        "print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'Continued'}}),flush=True)\n"
+        "print(json.dumps({'type':'turn.completed','usage':{}}),flush=True)\n"
+    )
+    harness = get_harness('codex')
+    render = harness.profile.build_turn_argv
 
+    def controlled_process(context):
+        argv, kwargs = render(context)
+        return [sys.executable, '-u', str(script), str(effects), *argv[1:]], kwargs
 
-async def test_agent_reasoning_update_validates_inherited_session_model(client):
-    response = await client.post("/api/agents", headers=client.headers, json={
-        "name": "Reasoning inheritance", "backend": "codex", "model": "model-a", "reasoning_effort": "low",
+    monkeypatch.setattr(harness, 'profile', replace(
+        harness.profile, binary=sys.executable, build_turn_argv=controlled_process,
+        activity_observer=None, prepare_resume=None,
+    ))
+    response = await client.post('/api/agents', json={
+        'name': 'Legal defaults', 'backend': 'codex', 'model': 'model-a', 'reasoning_effort': 'low',
     })
-    path = f"/api/agents/{response.json()['id']}"
-    response = await client.post(f"{path}/sessions", headers=client.headers, json={})
-    session_path = f"/api/sessions/{response.json()['id']}"
-    assert (await client.patch(session_path, headers=client.headers, json={"model": "model-b"})).status_code == 200
-    rejected = await client.patch(path, headers=client.headers, json={"reasoning_effort": "high"})
-    assert rejected.status_code == 400
-    assert "Session" in rejected.json()["detail"]
-    assert (await client.get(path, headers=client.headers)).json()["reasoning_effort"] == "low"
-    assert (await client.patch(session_path, headers=client.headers, json={"reasoning_effort": "medium"})).status_code == 200
-    assert (await client.patch(path, headers=client.headers, json={"reasoning_effort": "high"})).status_code == 200
+    assert response.status_code == 201, response.text
+    agent_path = f"/api/agents/{response.json()['id']}"
+    response = await client.post('/api/sessions/import', json={
+        'agent_id': response.json()['id'], 'backend': 'codex', 'name': 'Original history',
+        'claude_session_id': 'original-thread',
+        'messages': [{'role': 'user', 'type': 'text', 'content': 'Remember MARIGOLD'}],
+    })
+    assert response.status_code == 201, response.text
+    sid = response.json()['id']
+    session_path = f'/api/sessions/{sid}'
+    assert (await client.patch(session_path, json={'model': 'model-b'})).status_code == 200
+    before = (await client.get(session_path)).json()
+    if archived:
+        await session_manager.archive_session(sid, replace=False)
+    saved = await client.patch(agent_path, json={field: new_default})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()[field] == new_default
+    if archived:
+        await session_manager.unarchive_session(sid)
+    receipt = await session_manager.start_message(sid, 'Try the new inherited default')
+    failed = await asyncio.wait_for(receipt.wait(), 5)
+    assert failed.outcome.status == 'failed' and not effects.exists()
+    assert 'codex' in failed.outcome.message and f'{field} from Agent default' in failed.outcome.message
+    assert 'Agent settings' in failed.outcome.message
+    after = (await client.get(session_path)).json()
+    assert after['backend'] == 'codex' and after['claude_session_id'] == 'original-thread'
+    assert after['model'] == 'model-b' and after[field] is None
+    assert after['messages'][:len(before['messages'])] == before['messages']
+    repaired = await client.patch(session_path, json={field: correction})
+    assert repaired.status_code == 200, repaired.text
+    receipt = await session_manager.start_message(sid, 'Continue the original history after correction')
+    succeeded = await asyncio.wait_for(receipt.wait(), 5)
+    assert succeeded.outcome.status == 'success', succeeded.outcome.message
+    assert [json.loads(line) for line in effects.read_text().splitlines()] == [{
+        'model': 'model-b', 'resume': 'original-thread',
+        'effort': 'model_reasoning_effort="medium"' if field == 'reasoning_effort' else 'model_reasoning_effort="low"',
+        'tier': 'service_tier="default"',
+    }]
 
 
 @pytest.mark.asyncio
@@ -373,10 +416,115 @@ async def test_invocation_rejects_unavailable_inherited_speed_before_spawning(cl
     assert receipt.accepted
     completion = await asyncio.wait_for(receipt.wait(), 5)
     assert completion.outcome.status == "failed"
-    assert "Fast speed is unavailable" in completion.outcome.message
+    assert "service_tier from Agent default" in completion.outcome.message
+    assert "model-b" in completion.outcome.message
     messages = await session_manager.db.load_messages(session.id)
     assert [row["content"] for row in messages if row["role"] == "user"] == ["hello"]
     assert len([row for row in messages if row["type"] == "result"]) == 1
+
+
+@pytest.mark.parametrize('backend,field,value', [
+    ('codex', 'reasoning_effort', 'low'),
+    ('claude-code', 'reasoning_effort', 'low'),
+    ('codex', 'service_tier', 'fast'),
+])
+@pytest.mark.parametrize('source', ['Agent default', 'session override'])
+async def test_empty_capability_rejects_saved_controls_before_spawn(client, monkeypatch, backend, field, value, source):
+    created = await client.post('/api/agents', json={
+        'name': 'Original configuration', 'backend': backend, 'model': 'model-a',
+        **({field: value} if source == 'Agent default' else {}),
+    })
+    assert created.status_code == 201, created.text
+    agent_path = f"/api/agents/{created.json()['id']}"
+    created = await client.post(f'{agent_path}/sessions', json={})
+    assert created.status_code == 201, created.text
+    session_path = f"/api/sessions/{created.json()['id']}"
+    if source == 'session override':
+        assert (await client.patch(session_path, json={field: value})).status_code == 200
+    harness = get_harness(backend)
+    monkeypatch.setattr(harness, 'profile', replace(
+        harness.profile, binary=sys.executable, model_settings=lambda credential: ModelSettings(),
+    ))
+    edit_path = agent_path if source == 'Agent default' else session_path
+    before = (await client.get(edit_path)).json()
+    rejected = await client.patch(edit_path, json={field: value, 'name': 'Must not be saved'})
+    assert rejected.status_code == 400, rejected.text
+    assert (await client.get(edit_path)).json()['name'] == before['name']
+    spawned = []
+    spawn = asyncio.create_subprocess_exec
+
+    async def forbidden_spawn(*argv, **kwargs):
+        if Path(argv[0]).name == 'git':
+            return await spawn(*argv, **kwargs)
+        spawned.append(argv)
+        raise RuntimeError('Unsupported controls reached process spawn')
+
+    monkeypatch.setattr(asyncio, 'create_subprocess_exec', forbidden_spawn)
+    receipt = await session_manager.start_message(created.json()['id'], 'Validate the actual backend before spawning')
+    completion = await asyncio.wait_for(receipt.wait(), 5)
+    assert completion.outcome.status == 'failed'
+    assert spawned == []
+    assert backend in completion.outcome.message and field in completion.outcome.message
+    assert source in completion.outcome.message
+    assert ('Agent settings' if source == 'Agent default' else '/model') in completion.outcome.message
+    assert 'does not offer' in completion.outcome.message
+
+
+@pytest.mark.parametrize('backend', ['codex', 'claude-code'])
+async def test_saved_custom_model_controls_reach_native_argv_and_process(
+    client, monkeypatch, tmp_path, short_process_shutdown, backend,
+):
+    effects = tmp_path / 'applied-settings.jsonl'
+    script = tmp_path / 'model-controls.py'
+    script.write_text(
+        "import json,sys\nfrom pathlib import Path\n"
+        "backend=sys.argv[2]; args=sys.argv[3:]\n"
+        "flag='-m' if backend=='codex' else '--model'\n"
+        "observed={'model':args[args.index(flag)+1]}\n"
+        "if backend=='codex':\n"
+        " observed['effort']=next(a for a in args if a.startswith('model_reasoning_effort='))\n"
+        " observed['tier']=next(a for a in args if a.startswith('service_tier='))\n"
+        "else:\n"
+        " observed['effort']=args[args.index('--effort')+1]\n"
+        " observed['deny']=args[args.index('--disallowedTools')+1].split(',')\n"
+        "with Path(sys.argv[1]).open('a') as out: out.write(json.dumps(observed)+'\\n')\n"
+        "if backend=='codex':\n"
+        " print(json.dumps({'type':'thread.started','thread_id':'configuration-thread'}),flush=True)\n"
+        " print(json.dumps({'type':'turn.completed','usage':{}}),flush=True)\n"
+        "else:\n"
+        " for line in sys.stdin:\n"
+        "  print(json.dumps({'type':'result','subtype':'success','is_error':False,"
+        "'session_id':'configuration-thread','result':'OK'}),flush=True)\n"
+    )
+    harness = get_harness(backend)
+    render = harness.profile.build_turn_argv
+
+    def controlled_process(context):
+        argv, kwargs = render(context)
+        return [sys.executable, '-u', str(script), str(effects), backend, *argv[1:]], kwargs
+
+    monkeypatch.setattr(harness, 'profile', replace(
+        harness.profile, binary=sys.executable, build_turn_argv=controlled_process,
+        activity_observer=None, prepare_resume=None,
+    ))
+    selected = {'service_tier': 'fast'} if backend == 'codex' else {'tool_deny': 'Write'}
+    created = await client.post('/api/agents', json={
+        'name': 'Applied model controls', 'backend': backend, 'model': 'private-model-alias',
+        'reasoning_effort': 'low', **selected,
+    })
+    assert created.status_code == 201, created.text
+    created = await client.post(f"/api/agents/{created.json()['id']}/sessions", json={})
+    assert created.status_code == 201, created.text
+    try:
+        receipt = await session_manager.start_message(created.json()['id'], 'Apply the saved configuration')
+        completion = await asyncio.wait_for(receipt.wait(), 5)
+        assert completion.outcome.status == 'success', completion.outcome.message
+        expected = {'model': 'private-model-alias'}
+        expected.update({'effort': 'model_reasoning_effort="low"', 'tier': 'service_tier="fast"'}
+                        if backend == 'codex' else {'effort': 'low', 'deny': ['AskUserQuestion', 'Write']})
+        assert [json.loads(line) for line in effects.read_text().splitlines()] == [expected]
+    finally:
+        await session_manager.stop_all_held_processes()
 
 
 @pytest.mark.asyncio

@@ -189,3 +189,65 @@ root; use the PATH setup in [local-wsl.md](local-wsl.md#本机测试).
 相加。有效同版结果按验证政策复用，不为证明提速重复已验收的付费样本。
 一次样本不证明普遍提速或 persona 的因果效果；用量和失败原始记录留在本次
 任务产物，长期文档只保留可解释的结论与其条件。
+
+### Frozen Wiki reference
+
+`tests/wiki_baseline.py` and `tests/fixtures/wiki-baseline-questions.json` own the
+seeded 100-document corpus and sixteen questions, split into development and
+holdout sets. Bind each question to source revisions and expected documents;
+keep the gold material outside the model request. Use a stable vault identity
+as well as a stable seed: regenerated UUIDs can change UID spelling, rank ties,
+error samples and cursors even when the source text is identical.
+
+`tests/fixtures/wiki-baseline-reference.json` retains the reproducible old-code
+pages and the original timing limits. Its provenance separates observations,
+the first limit capture and the explicit full-response count addition. It
+contains synthetic data and relative source identities, without private runtime
+paths. Absolute timing limits describe the recorded machine. On another
+environment, establish its baseline before changing the implementation; keep
+the old failures and avoid increasing limits in response to a failed candidate.
+
+For a comparable environment, select this bounded measurement explicitly:
+
+```bash
+.venv/bin/pytest tests/test_wiki_phase1_baseline.py \
+  'tests/test_wiki_efficiency_matrix.py::test_incremental_changes[100]' \
+  --run-wiki-perf -m wiki_perf \
+  --wiki-baseline-reference=tests/fixtures/wiki-baseline-reference.json \
+  --wiki-perf-output=/path/to/fresh-candidate.json -q
+```
+
+Without a reference, the same entry produces a new baseline. Warm cases use
+fourteen samples, cold builds six, with nearest-rank p50/p95. The prospective
+noise rule is owned by `tests/wiki_cost_probe.py`; candidate comparison consumes
+the stored limits by test/case/dimensions. Count SQLite cells delivered to
+Python and actual UTF-8 response bytes. Instrumented query plans, file reads and
+Python allocation peaks run separately from uninstrumented timing; they do not
+measure physical SQLite IO or RSS. Frozen pages retain all output fields and
+ordering except the declared observation-time normalization.
+
+### Model evidence and retirement
+
+Register the actual model, effort, tier, source manifest and selected login
+before running paid cases. Ordinary-chat cases use the normal WebSocket entry
+and shared runtime instructions; dedicated-query cases retain their additional
+context as a separate condition. Check actual native developer messages and
+tool-return guide digests when claiming a runtime guide became effective.
+
+`tests/wiki_query_evidence.py` records actual returned ranges and raw usage.
+Full-text evidence requires gap-free `[0,end)` coverage of the same revision;
+preserve CRLF, CR, mixed newlines and codepoint coordinates when reading evidence
+snapshots. Execution success leaves the raw semantic status `not_reviewed`.
+Record manual answer/citation review separately, bound to the raw report hash.
+Reconcile unique native response usage with CLI totals; cached input and
+reasoning output are subsets, and missing totals, native tier or USD stay unknown.
+
+On failure, the query probe cancels its original request and waits for its
+resource retirement. Fixture drain additionally waits for that request's
+completion and original owned tasks, credential refresh and held processes
+before closing the callback API and database. A failed prerequisite keeps its
+dependencies available; retain the original error and cleanup diagnostics
+separately. These test-lifecycle seams do not establish a new public execution
+retirement API. Small parameter/coordinate/cleanup regressions remain hermetic;
+real answer questions use `knowledge_eval`, and real benchmark execution uses
+`wiki_perf`, including benchmark-harness regressions.

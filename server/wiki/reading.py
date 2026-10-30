@@ -20,7 +20,7 @@ def window(text, start, length, location=None):
 def read(store, doc, user_id, *, start=0, length=16000, expected_revision=None,
          page=None, view='full', location=None, source_cursor=None, source_limit=8, task=None):
     from .history import WikiHistory
-    from .read_response import compact_read, validate_view
+    from .read_response import COMPACT_ERROR_LIMIT, compact_read, validate_view
     from .source_details import page as sources
     from .tasks import tasks
 
@@ -30,7 +30,8 @@ def read(store, doc, user_id, *, start=0, length=16000, expected_revision=None,
     if location is not None and page is not None:
         raise WikiError('A source location cannot be combined with a page', 422)
     with WikiHistory(store).locked():
-        document = store.read(doc, start=start, length=length, expected_revision=expected_revision, page=page, location=location)
+        document = store.read(doc, start=start, length=length, expected_revision=expected_revision, page=page, location=location,
+                              index_error_limit=COMPACT_ERROR_LIMIT if view == 'compact' else None)
         details = sources(store, document, user_id, cursor=source_cursor, limit=source_limit)
         if source_cursor is not None:
             return {key: document[key] for key in ('id', 'path', 'revision')} | {'sources': details}

@@ -1,5 +1,6 @@
 """Publication checks current declarations and facts without changing storage."""
 
+import json
 import sqlite3
 from pathlib import Path
 
@@ -69,7 +70,7 @@ async def test_publication_rejects_incompatible_current_structure_or_facts_witho
 async def test_publication_verification_leaves_current_messages_and_input_facts_unchanged(installation):
     path = Path(installation.db_path)
     before = path.read_bytes()
-    assert verify_storage(installation)['main_format_version'] == 5
+    assert verify_storage(installation)['main_format_version'] == 6
     assert path.read_bytes() == before
     database = Database(str(path))
     await database.initialize()
@@ -88,5 +89,29 @@ async def test_publication_uses_the_same_main_database_alias_as_current_startup(
     alias.symlink_to(original)
     installation.db_path = str(alias)
     before = original.read_bytes()
-    assert verify_storage(installation)['main_format_version'] == 5
+    assert verify_storage(installation)['main_format_version'] == 6
     assert original.read_bytes() == before
+
+
+@pytest.mark.parametrize('damage', ['unknown-disposition', 'missing-error', 'invalid-error-type'])
+async def test_publication_rejects_invalid_current_return_diagnostics_without_repair(installation, damage):
+    snapshot = {
+        'work_id': 'original-work', 'parent_work_id': None, 'target_agent_name': 'Worker',
+        'request': 'Retained request', 'created_at': 'time', 'state': 'completed', 'finished_at': 'later',
+        'error': None, 'awaiting_sub_relay': False, 'deferred_request_id': None,
+        'terminal_disposition': 'unknown', 'terminal_delivery_error': 'Original ACK lost',
+        'knowledge_context': None,
+    }
+    if damage == 'unknown-disposition':
+        snapshot['terminal_disposition'] = 'replay_forever'
+    elif damage == 'missing-error':
+        del snapshot['terminal_delivery_error']
+    else:
+        snapshot['terminal_delivery_error'] = []
+    path = Path(installation.db_path)
+    with sqlite3.connect(path) as db:
+        db.execute('UPDATE sessions SET delegation_state=? WHERE id=?', (json.dumps(snapshot), 'original'))
+    before = path.read_bytes()
+    with pytest.raises(RuntimeError, match='invalid current delegation snapshot'):
+        verify_storage(installation)
+    assert path.read_bytes() == before

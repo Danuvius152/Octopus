@@ -188,6 +188,7 @@ async def test_completed_command_retries_recording_after_retiring_resources(
 
 async def test_delivery_retry_preserves_original_completed_command(db, tmp_path, monkeypatch):
     from server import bg_tasks
+    from server.sessions.runtime_types import SessionMailboxFull
 
     await _make_session_row(db, "delivery-retry", str(tmp_path))
     manager = BgTaskManager()
@@ -200,7 +201,7 @@ async def test_delivery_retry_preserves_original_completed_command(db, tmp_path,
         attempts.append(record.id)
         if not allow_delivery:
             failed.set()
-            raise RuntimeError("delivery unavailable")
+            raise SessionMailboxFull("delivery unavailable before acceptance")
         succeeded.set()
 
     async def broadcast(event):
@@ -1207,6 +1208,7 @@ async def test_rest_start_and_get_bg_task(api_client):
     task_id = body["id"]
     assert body["status"] == "running"
     assert "knowledge_context" not in body
+    assert body["delivery_disposition"] is None and body["delivery_error"] is None
 
     # Wait for the task to finish.
     for _ in range(100):
@@ -1221,6 +1223,13 @@ async def test_rest_start_and_get_bg_task(api_client):
     assert "knowledge_context" not in final
     assert final["status"] == "completed"
     assert "hello" in final["stdout"]
+
+    await session_manager.db.update_bg_task(task_id, delivery_disposition="unknown", delivery_error="Original ACK lost")
+    detail = (await client.get(f"/api/sessions/{sess.id}/bg-tasks/{task_id}")).json()
+    listed = (await client.get(f"/api/sessions/{sess.id}/bg-tasks")).json()
+    for projection in (detail, next(item for item in listed if item["id"] == task_id)):
+        assert projection["status"] == "completed" and projection["exit_code"] == 0
+        assert projection["delivery_disposition"] == "unknown" and projection["delivery_error"] == "Original ACK lost"
 
 
 async def test_rest_rejects_client_supplied_knowledge_context(api_client):
@@ -1662,6 +1671,8 @@ def test_mcp_bg_list_summary(monkeypatch):
                     "status": "completed",
                     "description": None,
                     "exit_code": 0,
+                    "delivery_disposition": "unknown",
+                    "delivery_error": "Original ACK lost",
                 },
             ]
 
@@ -1671,6 +1682,7 @@ def test_mcp_bg_list_summary(monkeypatch):
     out = _call("bg_list")
     assert "t1" in out and "t2" in out
     assert "running" in out and "completed" in out
+    assert "return=unknown (Original ACK lost)" in out
 
 
 # ---------------------------------------------------------------------------

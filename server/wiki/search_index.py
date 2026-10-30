@@ -440,8 +440,8 @@ def public_section(part):
     return {key: part[key] for key in ("title", "start", "end", "line_start", "line_end")}
 
 
-def preview(row, hit, terms=()):
-    content = row["text"][hit["start"]:hit["end"]]
+def preview(row, hit, terms=(), *, origin: int = 0):
+    content = row["text"][hit["start"] - origin:hit["end"] - origin]
     positions = [match.start() for term in terms for match in re.finditer(re.escape(term), content, re.I)]
     start = hit["start"] + max(0, min(positions, default=0) - 100)
-    return row["text"][start:min(start + 400, hit["end"])], start
+    return row["text"][start - origin:min(start + 400, hit["end"]) - origin], start

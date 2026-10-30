@@ -423,6 +423,10 @@ def list_agent_tasks() -> str:
         )
         if item.get("error"):
             line += f"  (error={item['error'][:60]})"
+        if item.get("terminal_disposition"):
+            line += f"  return={item['terminal_disposition']}"
+        if item.get("terminal_delivery_error"):
+            line += f"  ({item['terminal_delivery_error']})"
         lines.append(line)
     return "\n".join(lines)
 

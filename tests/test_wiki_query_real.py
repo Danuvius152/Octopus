@@ -5,7 +5,9 @@ separately; these cases do not grade wording or block ordinary releases.
 """
 
 import asyncio
+import logging
 import uuid
+from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,9 +15,11 @@ from pathlib import Path
 import pytest
 
 from server.agent_manager import AgentManager
+from server.aio import complete_cleanup
 from server.config import settings
 from server.database import Database
 from server.deps import get_session_manager
+from server.diagnostics import exception_diagnostic
 from server.main import _wiki_error
 from server.mcp_identity import mint
 from server.mcp_servers import wiki as wiki_tools
@@ -25,11 +29,17 @@ from server.wiki import WikiError, registry
 from server.wiki.workflow import guide
 from tests.accounts import create_account
 from tests.callback_api import start_callback_api
-from tests.wiki_query_evidence import collect_evaluation
+from tests.wiki_query_evidence import (
+    collect_evaluation,
+    guarded_credential,
+    observe_invocations,
+    observe_model_measurements,
+)
 
 pytestmark = [pytest.mark.real, pytest.mark.real_codex, pytest.mark.knowledge_eval]
 REPORT = "Library/Research/vidu_realtime_report/技术报告.md"
 PERSONAL = "Library/Me/information.md"
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -44,12 +54,28 @@ class QueryProbe:
     last_events: list[dict] = field(default_factory=list)
     call_trace: list[dict] = field(default_factory=list)
     usage_observations: list[dict] = field(default_factory=list)
+    cleanup_failures: list[dict] = field(default_factory=list)
+    credential_id: str = ''
+    input_context: dict = field(default_factory=dict)
+    model_observations: list[dict] = field(default_factory=list)
+
+    def record_cleanup_failure(self, phase: str, error: BaseException) -> None:
+        diagnostic = exception_diagnostic(error)
+        self.cleanup_failures.append({"phase": phase, "diagnostic": diagnostic})
+        logger.error("Wiki query %s cleanup failed:\n%s", phase, diagnostic)
 
     async def ask(self, question):
         self.requests.clear()
         self.responses.clear()
+        self.call_trace.clear()
+        self.usage_observations.clear()
+        self.model_observations.clear()
+        self.last_events.clear()
+        self.last_session_id = self.last_request_id = None
+        self.input_context['rendered_attempt_profiles'] = []
         session = await self.manager.create_session(
-            self.agent_id, "Wiki query acceptance", str(self.root.parent), backend="codex"
+            self.agent_id, "Wiki query acceptance", str(self.root.parent), backend="codex",
+            credential_id=self.credential_id or None,
         )
         self.last_session_id = session.id
         self.last_request_id = uuid.uuid4().hex
@@ -70,6 +96,23 @@ class QueryProbe:
                 completion = await receipt.wait()
                 assert completion.recording_state == "committed"
                 assert completion.outcome is not None and completion.outcome.status == "success"
+        except BaseException as failure:
+            async def retire_request(original_failure=failure):
+                try:
+                    # Cancelling the waiter does not cancel its accepted work.
+                    # This entry captures and joins the original request's retirement.
+                    await self.manager.cancel_request(session.id, self.last_request_id)
+                except Exception as cleanup_error:
+                    self.record_cleanup_failure("request", cleanup_error)
+                    original_failure.add_note("Original request cleanup failed; see cleanup_failures.")
+
+            try:
+                await complete_cleanup(retire_request())
+            except asyncio.CancelledError:
+                # A repeated cancellation cannot release the original writer;
+                # propagate the original failure after its cleanup has finished.
+                pass
+            raise
         finally:
             self.manager.remove_broadcast(subscription)
         events = self.last_events
@@ -96,10 +139,7 @@ class QueryProbe:
         return result
 
 
-@pytest.fixture
-async def query_probe(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "wiki_dir", str(tmp_path / "state"))
-    monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "agents"))
+def default_query_root(tmp_path):
     root = tmp_path / "vault"
     (root / "Library/Me").mkdir(parents=True)
     for number in range(30):
@@ -115,57 +155,109 @@ async def query_probe(tmp_path, monkeypatch):
     )
     (root / "Library/Research/投影矩阵.md").write_text("# 投影矩阵\n\n本笔记把投影矩阵解释为坐标映射，须保留所用坐标系的约定。\n")
     (root / "Library/Research/职业讨论.md").write_text("# 职业讨论\n\n文章中的人物是一位工程师；这不是本用户的资料。\n")
+    return root
+
+
+@asynccontextmanager
+async def query_probe_context(tmp_path, monkeypatch, registration=None):
+    monkeypatch.setattr(settings, "wiki_dir", str(tmp_path / "state"))
+    monkeypatch.setattr(settings, "agents_dir", str(tmp_path / "agents"))
+    root = Path(registration['source_root']) if registration else default_query_root(tmp_path)
     db = Database(":memory:")
     await db.initialize()
-    owner, _ = await create_account(db, extra_roots=[tmp_path])
+    owner, _ = await create_account(db, extra_roots=[tmp_path, root])
     manager = SessionManager()
     await manager.initialize(db)
-    agent = await AgentManager(db).create_agent(name="Weber", backend="codex", system_prompt=guide("curator"), mcp_servers=[], user_id=owner["id"])
-    registry.configure(owner["id"], root, agent["id"])
-    probe = QueryProbe(manager, agent["id"], root)
-    original_result = manager._handle_result_event
-
-    async def record_usage(session, attempt, event):
-        probe.usage_observations.append({
-            "session_id": session.id, "request_id": probe.last_request_id,
-            "attempt_id": attempt.attempt_id, "native_thread_id": event.session_id,
-            "reused": attempt.reused, "is_error": event.is_error,
-            "raw": deepcopy(event.raw),
-        })
-        await original_result(session, attempt, event)
-
-    monkeypatch.setattr(manager, "_handle_result_event", record_usage)
-    api = await start_callback_api(router, overrides={get_session_manager: lambda: manager}, exception_handlers={WikiError: _wiki_error},
-                                   readiness_token=mint("callback-api-readiness", user_id=owner["id"]))
-    monkeypatch.setattr(settings, "port", api.port)
-
-    # start_callback_api reloads the namespaces and verifies them over HTTP.
-    # Wrap the freshly loaded shim, retaining the real HTTP/auth/read gates.
-    original_call = wiki_tools.call
-
-    def record_call(method, path, *, params=None, body=None):
-        observation = {"method": method, "operation": path,
-                       "params": deepcopy(params), "body": deepcopy(body)}
-        probe.call_trace.append(observation)
-        try:
-            result = original_call(method, path, params=params, body=body)
-        except Exception as error:
-            observation["exception"] = {"type": type(error).__name__, "message": str(error)}
-            raise
-        observation["response"] = deepcopy(result)
-        if "error" not in result:
-            probe.requests.append((path, dict(params or body or {})))
-            probe.responses.append((path, result))
-        return result
-
-    monkeypatch.setattr(wiki_tools, "call", record_call)
+    api, probe, failure = None, None, None
+    async def close_resources():
+        await manager.drain_turns()
+        await manager.drain_credential_refreshes()
+        await manager.stop_all_held_processes()
+        if api is not None:
+            await api.stop()
+        await db.close()
 
     try:
+        credential_id = registration['credential_id'] if registration else None
+        if credential_id:
+            await db.save_credential(credential_id, 'codex', 'Registered evaluation home', 'oauth', '',
+                                     '2026-10-30T00:00:00+00:00', user_id=owner['id'])
+        profile = registration['profile'] if registration else {}
+        agent = await AgentManager(db).create_agent(name="Weber", backend="codex", system_prompt=guide("curator"),
+                                                    credential_id=credential_id, **profile,
+                                                    mcp_servers=[], user_id=owner["id"])
+        registry.configure(owner["id"], root, agent["id"])
+        probe = QueryProbe(manager, agent["id"], root, credential_id=credential_id or '')
+        probe.input_context = {'transport': 'SessionManager.start_message', 'forced_wiki_mode': 'read',
+                               'persona': 'curator guide; additional dedicated-query instructions',
+                               'profile': profile, 'source_manifest_sha256': registration.get('source_manifest_sha256') if registration else None,
+                               'blind': False, 'extra_cli_availability_model_probe': False}
+        if credential_id:
+            credential = await manager.resolve_credential_by_id(credential_id, backend='codex', user_id=owner['id'])
+            assert credential is not None, 'selected credential unavailable; default-login fallback forbidden'
+            monkeypatch.setattr(manager, '_resolve_credential', guarded_credential(manager, credential_id, credential.home_dir))
+            observe_invocations(monkeypatch, probe)
+        observe_model_measurements(monkeypatch, probe)
+        original_result = manager._handle_result_event
+
+        async def record_usage(session, attempt, event):
+            current = session._run.request
+            probe.usage_observations.append({
+                "session_id": session.id, "request_id": getattr(current, 'request_id', None),
+                "attempt_id": attempt.attempt_id, "native_thread_id": event.session_id,
+                "reused": attempt.reused, "is_error": event.is_error,
+                "raw": deepcopy(event.raw),
+            })
+            await original_result(session, attempt, event)
+
+        monkeypatch.setattr(manager, "_handle_result_event", record_usage)
+        api = await start_callback_api(router, overrides={get_session_manager: lambda: manager}, exception_handlers={WikiError: _wiki_error},
+                                       readiness_token=mint("callback-api-readiness", user_id=owner["id"]))
+        monkeypatch.setattr(settings, "port", api.port)
+
+        # Namespace reload precedes wrapping the real HTTP/auth/read shim.
+        original_call = wiki_tools.call
+
+        def record_call(method, path, *, params=None, body=None):
+            observation = {"method": method, "operation": path,
+                           "params": deepcopy(params), "body": deepcopy(body)}
+            probe.call_trace.append(observation)
+            try:
+                result = original_call(method, path, params=params, body=body)
+            except Exception as error:
+                observation["exception"] = {"type": type(error).__name__, "message": str(error)}
+                raise
+            observation["response"] = deepcopy(result)
+            if "error" not in result:
+                probe.requests.append((path, dict(params or body or {})))
+                probe.responses.append((path, result))
+            return result
+
+        monkeypatch.setattr(wiki_tools, "call", record_call)
         yield probe
+    except BaseException as error:
+        failure = error
+        raise
     finally:
-        await manager.stop_all_held_processes()
-        await api.stop()
-        await db.close()
+        try:
+            await complete_cleanup(close_resources())
+        except asyncio.CancelledError:
+            if failure is None:
+                raise
+        except Exception as cleanup_error:
+            if probe is not None:
+                probe.record_cleanup_failure("fixture", cleanup_error)
+            else:
+                logger.error('Wiki query setup cleanup failed:\n%s', exception_diagnostic(cleanup_error))
+            if failure is None:
+                raise
+            failure.add_note("Fixture cleanup failed; see cleanup_failures.")
+
+
+@pytest.fixture
+async def query_probe(tmp_path, monkeypatch):
+    async with query_probe_context(tmp_path, monkeypatch) as probe:
+        yield probe
 
 
 async def evaluate(query_probe, question, request):

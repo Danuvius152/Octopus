@@ -14,13 +14,13 @@ Auth: same bearer token as every other API surface.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
 from ..auth import verify_token
-from ..delegations import DelegationError, delegation_manager
+from ..delegations import DelegationError, TerminalDisposition, delegation_manager
 from ..deps import ScopeUser, SessionMgr
 from ..mcp_identity import verify
 from ..sessions import SessionManager
@@ -36,6 +36,23 @@ class StartDelegationRequest(BaseModel):
     # verbatim; we don't validate existence here (the child's tools
     # will report missing files naturally).
     files: list[str] | None = None
+
+
+class DelegationResponse(BaseModel):
+    delegation_id: str
+    sub_session_id: str
+    parent_session_id: str
+    target_agent_id: str
+    target_agent_name: str
+    request: str
+    work_id: str
+    state: Literal["running", "completed", "failed", "cancelled", "interrupted"]
+    created_at: str
+    finished_at: str | None
+    error: str | None
+    terminal_disposition: TerminalDisposition | None
+    terminal_delivery_error: str | None
+    recording_state: Literal["committed"]
 
 
 class CancelDelegationRequest(BaseModel):
@@ -79,6 +96,7 @@ def _require_session(
 @router.post(
     "/{session_id}/delegations",
     status_code=status.HTTP_201_CREATED,
+    response_model=DelegationResponse,
 )
 async def start_delegation(
     session_manager: SessionMgr,
@@ -111,7 +129,7 @@ async def start_delegation(
     return rec.to_public_dict()
 
 
-@router.get("/{session_id}/delegations")
+@router.get("/{session_id}/delegations", response_model=list[DelegationResponse])
 async def list_delegations(
     session_manager: SessionMgr,
     session_id: str,
@@ -131,7 +149,7 @@ async def list_delegations(
     return [r.to_public_dict() for r in rows]
 
 
-@router.post("/{session_id}/delegations/{delegation_id}/cancel")
+@router.post("/{session_id}/delegations/{delegation_id}/cancel", response_model=DelegationResponse)
 async def cancel_delegation(
     session_manager: SessionMgr,
     session_id: str,
@@ -165,7 +183,7 @@ async def cancel_delegation(
     return updated.to_public_dict()
 
 
-@router.post("/{session_id}/delegations/{delegation_id}/follow-up")
+@router.post("/{session_id}/delegations/{delegation_id}/follow-up", response_model=DelegationResponse)
 async def follow_up_delegation(
     session_manager: SessionMgr,
     session_id: str,

@@ -5,8 +5,8 @@ model request; answers remain subject to separate semantic review.
 """
 
 import asyncio
-import hashlib
 import json
+import logging
 import secrets
 import uuid
 from collections import OrderedDict
@@ -19,9 +19,11 @@ from websockets.asyncio.client import connect
 
 from server import deps
 from server.agent_manager import AgentManager
+from server.aio import complete_cleanup
 from server.config import settings
 from server.database import Database
 from server.deps import get_session_manager
+from server.diagnostics import exception_diagnostic
 from server.main import _wiki_error
 from server.mcp_identity import mint
 from server.mcp_servers import wiki as wiki_tools
@@ -32,23 +34,17 @@ from server.sessions import SessionManager
 from server.wiki import WikiError, registry
 from tests.accounts import create_account
 from tests.callback_api import start_callback_api
-from tests.wiki_query_evidence import collect_evaluation, source_manifest
+from tests.wiki_query_evidence import (
+    collect_evaluation,
+    copy_registered_sources,
+    guarded_credential,
+    load_registration,
+    observe_invocations,
+    observe_model_measurements,
+)
 
 pytestmark = [pytest.mark.real, pytest.mark.real_codex, pytest.mark.knowledge_eval]
-
-
-def guarded_chat_credential(manager, credential_id, home_dir):
-    """Reject credential loss at the real invocation boundary, on every turn."""
-    original = manager._resolve_credential
-    expected = Path(home_dir).resolve()
-
-    async def resolve(session, agent, harness):
-        assert session.credential_id == credential_id, "registered credential selection changed"
-        resolved = await original(session, agent, harness)
-        assert resolved and resolved.home_dir and Path(resolved.home_dir).resolve() == expected, "selected credential unavailable; default-login fallback forbidden"
-        return resolved
-
-    return resolve
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -67,12 +63,20 @@ class OrdinaryChatProbe:
     last_request_id: str | None = None
     input_context: dict = field(default_factory=dict)
     cleanup_failures: list[dict] = field(default_factory=list)
+    model_observations: list[dict] = field(default_factory=list)
+
+    def record_cleanup_failure(self, phase, error):
+        diagnostic = exception_diagnostic(error, secrets=(self.token,))
+        self.cleanup_failures.append({'phase': phase, 'diagnostic': diagnostic})
+        logger.error('Ordinary Wiki chat %s cleanup failed:\n%s', phase, diagnostic)
 
     async def ask(self, question):
         self.call_trace.clear()
         self.usage_observations.clear()
         self.last_events.clear()
         self.cleanup_failures.clear()
+        self.model_observations.clear()
+        self.input_context['rendered_attempt_profiles'] = []
         self.last_session_id = None
         self.last_request_id = None
         session = await self.manager.create_session(
@@ -101,13 +105,26 @@ class OrdinaryChatProbe:
                                         and item.get("terminal") is True and item.get("request_id") == self.last_request_id]
                             assert len(matching) <= 1, "duplicate terminal outcome"
                             outcome = matching[0] if matching else None
+                await self.manager.await_session_execution(session.id)
         except BaseException as error:
+            async def retire_request(original_failure=error):
+                try:
+                    if self.last_request_id is not None:
+                        await self.manager.cancel_request(session.id, self.last_request_id)
+                    else:
+                        # This isolated evaluation session has no other work;
+                        # its admission ACK may not have reached the WebSocket.
+                        await self.manager.interrupt(session.id)
+                        await self.manager.await_session_execution(session.id)
+                except Exception as cleanup_error:
+                    self.record_cleanup_failure('request', cleanup_error)
+                    original_failure.add_note('Original chat request cleanup failed; see cleanup_failures.')
+
             try:
-                await self.manager.interrupt(session.id)
-                await self.manager.await_session_execution(session.id, timeout=15)
-            except BaseException as cleanup_error:
-                self.cleanup_failures.append({"type": type(cleanup_error).__name__,
-                                              "message": str(cleanup_error).replace(self.token, "<redacted>")})
+                await complete_cleanup(retire_request())
+            except asyncio.CancelledError:
+                pass
+            self.input_context['execution_failure_diagnostic'] = exception_diagnostic(error, secrets=(self.token,))
             if isinstance(error, asyncio.CancelledError):
                 raise
             # A WebSocket URL contains the short-lived test-host token.
@@ -128,14 +145,8 @@ class OrdinaryChatProbe:
 async def ordinary_chat_probe(tmp_path, monkeypatch, request):
     configured = request.config.getoption("wiki_chat_registration")
     assert configured, "--wiki-chat-registration is required before running any ordinary-chat model request"
-    registration = json.loads(Path(configured).read_text())
-    questions = registration["questions"]
-    assert 1 <= len(questions) <= 4
-    assert len({item["id"] for item in questions}) == len(questions)
-    assert all(isinstance(item["question"], str) and item["question"].strip() for item in questions)
-    root = Path(registration["source_root"]).resolve(strict=True)
-    manifest_bytes = json.dumps(source_manifest(root), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
-    assert hashlib.sha256(manifest_bytes).hexdigest() == registration["source_manifest_sha256"], "registered source version changed"
+    registration = load_registration(configured)
+    root = copy_registered_sources(registration, tmp_path / 'registered-sources')
     credential_id = registration["credential_id"]
     assert isinstance(credential_id, str) and credential_id
     monkeypatch.setattr(settings, "wiki_dir", str(tmp_path / "wiki-state"))
@@ -157,16 +168,16 @@ async def ordinary_chat_probe(tmp_path, monkeypatch, request):
     )
     manager = SessionManager()
     await manager.initialize(db)
-    api = None
+    api, probe, failure = None, None, None
     try:
         # Directory-backed credential resolution reads no provider secrets here.
         # Refuse fallback to an unrelated default CLI login.
         credential = await manager.resolve_credential_by_id(credential_id, backend="codex", user_id=owner["id"])
         assert credential is not None, "selected credential home is unavailable; default-login fallback forbidden"
-        monkeypatch.setattr(manager, "_resolve_credential", guarded_chat_credential(manager, credential_id, credential.home_dir))
+        monkeypatch.setattr(manager, "_resolve_credential", guarded_credential(manager, credential_id, credential.home_dir))
         agent = await AgentManager(db).create_agent(
             name="Assistant", backend="codex", system_prompt="",
-            model="gpt-6.1-sol", reasoning_effort="high", service_tier="default", mcp_servers=[],
+            **registration['profile'], mcp_servers=[],
             user_id=owner["id"],
         )
         curator = await db.get_system_agent(owner["id"])
@@ -183,12 +194,15 @@ async def ordinary_chat_probe(tmp_path, monkeypatch, request):
             "forced_wiki_mode": False, "per_question_evaluator_prompt": False,
             "persona": "empty; normal framework/shared guides still supplied",
             "agent_name": "Assistant", "session_title": "Chat",
-            "configured_profile": "gpt-6.1-sol/high/default", "credential_id": credential_id,
+            "configured_profile": '/'.join(registration['profile'][key] for key in ('model', 'reasoning_effort', 'service_tier')),
+            "credential_id": credential_id,
             "source_manifest_sha256": registration["source_manifest_sha256"],
             "environment": "isolated owned account and bearer, registered fixed corpus; production data not used",
             "blind": False, "filesystem_isolation": "fresh cwd and memory; unrestricted process filesystem access is not a blind-test guarantee",
             "extra_cli_availability_model_probe": False,
         }
+        observe_invocations(monkeypatch, probe)
+        observe_model_measurements(monkeypatch, probe)
         original_call = wiki_tools.call
 
         def record_call(method, path, *, params=None, body=None):
@@ -216,18 +230,31 @@ async def ordinary_chat_probe(tmp_path, monkeypatch, request):
 
         monkeypatch.setattr(manager, "_handle_result_event", record_usage)
         yield probe, registration
+    except BaseException as error:
+        failure = error
+        raise
     finally:
-        try:
-            for session in list(manager.sessions.values()):
-                await manager.interrupt(session.id)
+        async def close_resources():
+            await manager.drain_turns()
+            await manager.drain_credential_refreshes()
             await manager.stop_all_held_processes()
-        finally:
-            try:
-                if api:
-                    await api.stop()
-            finally:
-                registry.close()
-                await db.close()
+            if api:
+                await api.stop()
+            registry.close()
+            await db.close()
+        try:
+            await complete_cleanup(close_resources())
+        except asyncio.CancelledError:
+            if failure is None:
+                raise
+        except Exception as cleanup_error:
+            if probe is not None:
+                probe.record_cleanup_failure('fixture', cleanup_error)
+            else:
+                logger.error('Ordinary chat setup cleanup failed:\n%s', exception_diagnostic(cleanup_error, secrets=(bearer,)))
+            if failure is None:
+                raise
+            failure.add_note('Chat fixture cleanup failed; see cleanup_failures.')
 
 
 async def test_registered_natural_questions_use_ordinary_chat(ordinary_chat_probe, request):

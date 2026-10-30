@@ -33,7 +33,7 @@
 | 业务结果 | 主库精确 terminal 及其输入关联 | 通知送达、HTTP 等待者和资源退休分别取证 |
 | Wiki 账本归属与准入 | Registry 的注册、Construction 与生命周期 | 普通 Store 借用已准入对象，不自行选择 owner 或触发全量恢复 |
 | Wiki 文件效果 | History 原像、prepared/applied、operation receipt、observer inbox | job item 引用效果证据，模型文字和取消确认不能替代实际效果 |
-| 账户秘密与配置 | UserManager、账户 DEK、保存的 agent 配置 | 默认值仅用于新资源；普通启动、更新和搬迁保留用户设置 |
+| 账户秘密与配置 | UserManager、账户 DEK、保存的 agent 配置 | 安装初始默认值只用于新资源；显式 Agent 设置按实时继承影响后续请求；启动、更新和搬迁保留用户设置 |
 
 主库使用一个写连接和明确的短事务。`Database.transaction()` 统一连接锁、驱动与
 游标结束、总期限及 COMMIT/ROLLBACK；SQL helper 接收事务，不重入公共事务或
@@ -99,6 +99,56 @@ mailbox、控制入口及顺序 publisher 按实际内容计预算，背压到�
 合法大命令可独占空控制通道；未接纳的容量等待者取消后不执行，Owner 失败释放
 等待者。超时只结束等待，不丢弃原命令、句柄或数据库责任。
 
+BG 原命令结果、委派原 work 的已提交结论和 Research 报告，与返回接纳、父模型
+处理、通知及资源退休分别取证。返回首先核对原 source/delivery/session 的
+receipt；已有 receipt 不依赖来源正文仍存在，也不重新唤醒归档会话。
+
+| 原接纳边界的证据 | 来源处置 |
+| --- | --- |
+| 已有原 receipt | 复用原接纳事实，沿原 completion 观察父处理，不再提交 |
+| 明确效果前 busy/mailbox full/quota，且没有 unknown 前史 | 只以原 identity 重试；问题在每次准备/提交前仍须有效 |
+| 永久完整性拒绝 | 记停止自动返回，保留来源业务结果和独立原因 |
+| ACK 丢失、Owner/通道不可用或超时，可能已经接纳 | 先在原控制对象记 unknown，再完成必要诊断；立即核对一次原 receipt，仍无结果就结束本次观察 |
+| unknown 后目标关闭、问题过期或 receipt 仍不可读/不存在 | 保留 unknown；后来的缺失和拒绝不证明以前未接纳 |
+| 确定的 identity 正文冲突、未分类错误、取消或存储失信 | 保留并传播原错误/取消；可能有接纳效果时同时保留 unknown；存储失信仍按统一 fail-stop，不猜测补查/补写 |
+
+unknown 只允许原有结算/恢复入口重入时再核对同一 receipt，不新增轮询、重试账本
+或重放触发器。用户可以持续看到“返回未确认”；接受这个终点是为了避免常驻
+观察责任。只有原 receipt 的证明才能归并接纳事实；会话 idle 不构成证明。
+诊断在任何后续 await 前记住，写入失败后的重入只完成诊断或原回执观察，不能
+重新进入接纳。原进程、在途 callback 和必要写入各自收束后才释放对应引用。
+
+委派的既有命令注册同时持有其原诊断提交条件。写入失败不能仅凭异常属于
+`DelegationError` 就退出责任；已有原 relay/结算重入在注册新命令后接手同一写入，
+旧失败命令才可退休。新命令仍阻塞排空直到写入确认或原关系已被实际关闭。
+follow-up 的暂存 CAS 仍可回滚；本命令未确认回滚才可在退出时关闭前代 writer。
+明确拒绝并恢复前代后，即使另一命令暂存新 round，前代未完成的诊断责任仍阻塞排空。
+数据库会话删除入口在提交确认后同步通知 round owner。round CAS 依赖原父子关系，
+child 问题说明只依赖原 child：删除 parent 只闭合 CAS writer，不免除仍可写 child
+的新旧问题说明。删除 child 才闭合该目标的说明 writer；确认新轮接管则闭合前代。
+删除拒绝、归档或 Owner 不可用不构成删除证明，在途执行另行退休。
+不新增执行任务、观察触发器或投递账本；完整异常链由现有日志保留并掩码。
+
+BG manager 在原任务行保存 disposition/error；委派 round writer 保存独立
+terminal delivery error，不能覆盖业务 error。问题交付观察只活在原 work/question，
+说明写原 child 的 delivery notice；父返回失败不关闭仍有效的问题，也不表示
+整个 round 已回复。REST、MCP、事件及卡片分别展示业务状态与返回原因，诊断按
+实际凭据字段掩码。重启不重放旧 BG/委派终态，也不恢复旧问题回调；新 follow-up
+是新的授权轮次。存储表示和有限转换见[当前存储格式](current-storage-format.md)。
+BG 详情响应补齐输出时，保留请求开始后实际收到的交付事件（包括清除诊断）；
+列表插入或其他实体替换本身不表示新的交付观察，也不能阻止较新详情补齐诊断。
+
+| 来源 | 业务材料权威 | 交付观察及恢复边界 |
+| --- | --- | --- |
+| BG | 原任务行的状态、退出原因及 stdout/stderr | disposition/error 独立保存；原 receipt 才证明接纳；重启不重放历史终态。 |
+| 委派终态 | 原 work 的 completion、最终 attempt 与 child transcript | 原 round CAS 保存 disposition/error；新 follow-up 是新 work，旧终态不重放。 |
+| 委派问题 | 原 child 的有效问题与回答队列 | 原 work/question 控制对象保责，说明持久写原 child；失败后仍可人工回答，不建立重启问题队列。 |
+| Research | 原 job 状态与完成报告 | 沿用 injection_status、delivery_receipt 和原错误；恢复观察原回执，不重跑已完成研究。 |
+
+这些来源保留不同的异常适配和写入责任。自动输入仍按成功接纳次序逐条派发；
+Stop 保留暂停积压，人工纠偏不自动恢复积压，显式恢复才继续原顺序。
+没有自动合批、转 steer、notification-only 或默认等待全部独立工作的政策变化。
+
 当前使用 Codex exec 与 Claude stream-JSON：Codex 新输入在运行中排队；Claude
 按实际活动通道能力处理 steer，已到达的 idle 消息保留原身份。普通委托完成或
 重启不自动归档；人工追问和 parent follow-up 是新 request/round，显式归档与
@@ -161,8 +211,11 @@ KILL 和活跃成员退出确认；普通完成广播及父会话返回都在退
   未开户/缺证明不开放无账户业务；非空安装时代数据拒绝启动并保留原件。
 - 旧安装接管、memory handoff、token rotation 及专属在线恢复已退役；账户登录、
   密码修改、bearer 撤销、master key、当前 connector 锁和 refresh 仍保留。
-- 已有 agent 的名称、persona、模型、强度、速度和工具选择由用户控制。新默认值
-  只用于创建，不在启动、版本更新或搬迁时回填。
+- 已有 agent 的名称、persona、模型、强度、速度和工具选择由用户控制。安装初始
+  默认值只用于创建，不在启动、版本更新或搬迁时回填。显式保存的合法 Agent 默认
+  配置可以使旧会话的继承暂不兼容；保存不扫描并否决所有旧会话，也不转换其 backend
+  或历史。旧会话通过当前设置入口修正完整有效组合，实际使用前校验控制项与当前
+  凭据授权。捕获、重试和生效时序归[模型设置](model-reasoning.md)。
 
 配置与授权在所属模块统一解析。后台查询中的空 owner 不等于可接受的用户业务
 身份；按调用边界校验，不全局替换空值。保存的 canonical 授权根固定比较，访问

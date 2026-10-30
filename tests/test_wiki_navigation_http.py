@@ -19,7 +19,7 @@ async def test_navigation_error_bounds_survive_http_and_mcp(client, tmp_path, mo
     state = store.index_state()
     for error_count in (0, 2, 9):
         errors = [{"path": "长" * 200 + str(index), "error": "错误" * 150} for index in range(error_count)]
-        monkeypatch.setattr(store, "_index_state", lambda db=None, errors=errors: state | {"index_status": "partial" if errors else "ready", "index_errors": errors})
+        monkeypatch.setattr(store, "_index_state", lambda db=None, error_limit=None, errors=errors: state | {"index_status": "partial" if errors else "ready", "index_error_count": len(errors), "index_errors": errors})
         compact_search = None
         for endpoint, base in (("search", {"query": "Needle"}), ("documents", {})):
             compact = await client.get("/api/wiki/" + endpoint, params=base | {"view": "compact"}, headers=client.headers)

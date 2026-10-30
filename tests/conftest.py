@@ -11,6 +11,8 @@ from pathlib import Path
 
 import pytest
 
+pytest_plugins = ["tests.wiki_cost_probe"]
+
 # Override env vars before any module imports Settings, so tests
 # don't pick up values from the user's .env file.
 os.environ["OCTOPUS_AUTH_TOKEN"] = "changeme"
@@ -137,6 +139,17 @@ def _surviving_cli_pids() -> list[int]:
     return found
 
 
+def _seed_cli_home(source, destination, files):
+    for name in files:
+        if (source / name).is_file():
+            if name == 'models_cache.json':
+                # Preserve the selected catalog before spawn-time validation;
+                # subsequent CLI refreshes belong only to this test home.
+                shutil.copy2(source / name, destination / name)
+            else:
+                (destination / name).symlink_to(source / name)
+
+
 @pytest.fixture(autouse=True)
 def _account_state_stays_in_tmp(request, tmp_path_factory, monkeypatch):
     """No test may write into a real install's state directory.
@@ -174,7 +187,7 @@ def _account_state_stays_in_tmp(request, tmp_path_factory, monkeypatch):
         monkeypatch.setenv("OCTOPUS_" + name.upper(), value)
     Path(settings.default_working_dir).mkdir()
     for variable, default, files in (
-        ("CODEX_HOME", ".codex", ("auth.json", "config.toml")),
+        ("CODEX_HOME", ".codex", ("auth.json", "config.toml", "models_cache.json")),
         ("CLAUDE_CONFIG_DIR", ".claude", (".credentials.json", "settings.json", ".claude.json")),
     ):
         source = Path(os.environ.get(variable) or Path.home() / default).expanduser()
@@ -183,9 +196,7 @@ def _account_state_stays_in_tmp(request, tmp_path_factory, monkeypatch):
         if real:
             # Keep live authentication at its existing owner; isolate all CLI
             # output and exclude the managed installation's ownership marker.
-            for name in files:
-                if (source / name).is_file():
-                    (destination / name).symlink_to(source / name)
+            _seed_cli_home(source, destination, files)
         monkeypatch.setenv(variable, str(destination))
     if real and (request.node.get_closest_marker("real_codex") or request.node.get_closest_marker("codex_bin")):
         # Codex installs its helper aliases under CODEX_HOME and rejects homes
@@ -201,9 +212,7 @@ def _account_state_stays_in_tmp(request, tmp_path_factory, monkeypatch):
             if source.is_dir() and (source / "auth.json").is_file():
                 destination = credentials / source.name
                 destination.mkdir()
-                for name in ("auth.json", "config.toml"):
-                    if (source / name).is_file():
-                        (destination / name).symlink_to(source / name)
+                _seed_cli_home(source, destination, ('auth.json', 'config.toml', 'models_cache.json'))
     # Each temporary installation starts with its own healthy storage boundary.
     # Keep resource-owner collections intact so teardown leaks remain visible.
     from server.service_health import ServiceHealth
@@ -279,6 +288,10 @@ def pytest_addoption(parser):
         "--wiki-perf-output", metavar="FILE",
         help="Retain the expanded Wiki efficiency matrix, raw samples and source fingerprint as JSON",
     )
+    performance.addoption(
+        "--wiki-baseline-reference", metavar="FILE",
+        help="Compare frozen phase-one pages with a previously retained performance report",
+    )
     group = parser.getgroup("knowledge evaluation")
     group.addoption(
         "--run-knowledge-evals", action="store_true", default=False,
@@ -291,6 +304,10 @@ def pytest_addoption(parser):
     group.addoption(
         "--wiki-chat-registration", metavar="FILE",
         help="Prospectively registered source root, credential id and at most four natural chat questions",
+    )
+    group.addoption(
+        "--wiki-query-registration", metavar="FILE",
+        help="Prospectively registered source root, explicit profile and dedicated query questions",
     )
 
 

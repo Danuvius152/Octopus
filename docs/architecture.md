@@ -84,7 +84,7 @@ In development, Vite serves the SPA on port 5173 with HMR and proxies `/api`,
 
 An **Agent** is the durable definition of an assistant: name/avatar, system
 prompt, model, default backend (`claude-code` | `codex`), an attached credential,
-an optional reasoning-effort default (Codex),
+an optional backend-supported reasoning-effort default,
 its MCP/tool set, tool allow/deny policy, and enabled connectors. Agents **own**
 their Sessions and Schedules. Each account starts with its own protected
 **Default Agent** (`is_system=1`).

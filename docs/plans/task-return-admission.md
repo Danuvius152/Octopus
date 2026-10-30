@@ -6,16 +6,18 @@
 
 ### 待处理返回接管设计（未实现）
 
-状态：设计已确认，未实施、未运行实现验收。源码依据为 `0df8b78ec470c0186c0ef6bd758a3695f1e686d1`，
+状态：统一接口设计已确认，尚未实施；第一阶段来源分类修复不等于本接口验收。
+最初设计的源码依据为 `0df8b78ec470c0186c0ef6bd758a3695f1e686d1`，
 对比基线为 `before-takeover` 的 `88d2284b2b2493001be2e945df375d7a228ccc1f`。
 本设计只覆盖 BG、Research、委派终态及委派问题的返回接管。
 
 #### 问题与选择
 
-基线中的三个来源主要直接调用 `start_message`：BG 记录投递失败，Research 保存
-`injection_status`，委派用内存中的 `_terminal_injected` 防重。当前版本新增持久
-接管回执、稳定返回身份和原工作归属校验；`b19f6f9` 又集中合法返回的归档唤醒。
-这些保障继续保留，改进对象是三个来源重复编排同一段会话接管协议。
+早期基线的三个来源主要直接调用 `start_message`。之后加入持久接管回执、稳定
+返回身份和原工作归属校验，`b19f6f9` 集中合法返回的归档唤醒。第一阶段又完成
+BG/委派停止与 unknown 有限观察、来源诊断和原 writer 保责，沿用 Research 的
+既有分类。当前表示及恢复差异以[执行合同](../implemented/architecture-contract.md#输入完成与资源退休)
+为准。下一阶段保留这些保障，收回三个来源仍重复编排的会话接管协议。
 
 当前入口见 [BG](../../server/sessions/turns.py) 的 `deliver_bg_result`、
 [Research](../../server/research/manager.py) 的 `_inject_report` 与

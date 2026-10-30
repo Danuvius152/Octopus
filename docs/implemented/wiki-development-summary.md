@@ -29,7 +29,13 @@
 
 所有有效账户内 agent 均可按任务需要查共享 Wiki，不要求先询问 Weber 或输入 `/wiki`。只读与旧 Off 只收窄维护权。已知身份/路径直接读；否则保留原问题命名对象，用 compact 导航定位：明确文章用 lookup，具体问题用 question，宽主题用 overview，多方比较用 compare。
 
-索引卡和 snippet 只作导航；实际读到的当前摘要、Key note 或知识页已覆盖问题及条件即可回答。缺少定义、理由、条件、出处或另一方观点才补相关正文。明确整篇总结/评价则从 0 沿 `next_start` 连续读到 null，同一 revision 覆盖全文；工具预算不构成全文上限。比较需各方依据，未读/失败范围不算已读。
+索引卡和 snippet 只作导航；实际读到的当前摘要、Key note 或知识页已覆盖问题及条件即可回答。缺少定义、理由、条件、出处或另一方观点才补相关正文。明确整篇总结/评价须以同一 revision 的实际正文覆盖 `[0,end)`，没有缺口；工具预算不构成全文上限。比较需各方依据，未读/失败范围不算已读。
+
+已知多个正文范围可用 `read_many` 批读；本调用方上下文仍保留的同版正文可以复用，
+只补缺口。上下文丢失后须重新取得所需正文，不能用“此前交付过”代替模型现在
+可见的材料。身份、revision、当前授权和维护终稿冷读仍各自核验，正文复用不转移
+其他任务的阅读证明。HTTP 与 MCP 的单读、批读条目均默认16000字符，接受1–24000；
+非法请求在阅读留证前拒绝，最终证明仅覆盖预算裁剪后真正返回的码点范围。
 
 回答保留主张、支持理由和必要条件，区分原文观点、转述与自己的推导，并附实际路径/位置、简短 confidence 和必要限制。检索分数不等于正确概率。个人背景只从当前 `Library/Me` 定位和读取，缺失字段如实说明，不能用收藏文章或在读身份补出职业。
 
@@ -154,6 +160,25 @@ compact 列表仅从 SQLite 投影 id、path、title、revision、metadata 和�
 
 原始块读取使用同次 Store snapshot 的正文、版本和索引状态。每个 Store 最多保留最近四份 revision 的不可变块坐标、hash 和章节标签，交替读取文章不反复解析；不保留全文、可变 tokens、权限或阅读覆盖，分页只装配选中的块。每次请求重新读取当前文件并核对身份、revision、来源和授权，只有实际返回的正文计入阅读覆盖。`no_change` 仍核对当前正文、维护资格及完整阅读，并记录原版本回执；不为无编辑操作解析或装配原始块。搜索、目录及图导航在同一读事务内取得分页代、结果、来源与索引状态，复用调用方连接，连接数不再随返回结果数增长；SQLite 的同步持久性和连接退出检查保持原合同。
 
+compact lexical 搜索在原读事务中一次批取当前页最佳章节和所需原生/managed metadata，
+不再逐命中读取完整文档。候选、排序和分页保持原算法；章节切片带绝对 origin，
+preview 使用原文坐标，body 的 `matched_fields` 仍检查完整最佳章节。SQLite 的 TEXT
+`substr` 在 U+0000 截断，因此含 NUL 的既有合法正文沿同一页查询搬运全文，作为明确
+兼容例外；不能声称这类输入也实现了窄正文投影。exact 先解析稳定身份，再以同一
+谓词 count、过滤、分页和投影；被过滤或退役的身份不借同名标题回退，空页依据 total
+保留 exact/ambiguous 语义。compact 只取所需列，full 仍保留当前页完整导航字段。
+
+健康 summary 继续拥有准确 count/status。Store 的 `error_limit` 只限制错误样本物化：
+文档 count 和样本使用相同谓词与同一数据库快照，文档按 id 确定顺序后加入既有
+系统诊断；顺序不表示严重度。compact 最多三条说明，每条最多160字符；
+`index_error_count` 是准确总数，`index_errors_truncated` 同时标记漏出样本和说明裁剪。
+系统诊断即使未入前三条，也只计数一次并继续影响 unavailable 和维护阻塞。
+search/list 复用原 BEGIN，独立健康读取自建读事务。read、批读、模型 graph 和 info
+在上游即限样；compact 批读逐文档及 graph 中心不加载随后会丢弃的错误列表。
+HTTP info 默认 full，MCP info 默认 compact，显式 full 可查询完整诊断；MCP 仍遵守
+既有响应字节上限。full 保留完整错误数组及准确 count，维护/恢复从完整事实判断
+准入，不从样本长度推断健康。不新增持久计数或样本缓存，COUNT 仍有实际扫描成本。
+
 主库正文唯一，保留正常按文档有限历史与必要任务/失败证据，不默认长期整库备份，也不自动 Git 提交知识库。Sapphire 继续负责文件、附件和 Git 体验；本机此前一次主库 Git 保存不授权以后每次保存都提交/推送。
 
 当前完整 Wiki 格式及发布交接合同统一见[存储合同](current-storage-format.md)，版本标记是 `PRAGMA user_version`，启动只匹配当前完整布局。订阅唯一身份包含原 request_id，保留旧订阅 ID、事件与 ACK；所需有限转换由发布在旧 writer 退休后执行，运行时不保留旧格式解释器。结构与协议只读准入先于 writer、观察器和注册发布，未知结构或缺失持久账本保留原资料并拒绝。实际运行提交和转换事实仍以发布验收为准。
@@ -202,5 +227,27 @@ body fields），不再另存一份请求模型/可空性映射。`verify` 缺�
 效果均未获普遍认证。历史成本测量不证明重新准入性能、整项性能或生产 SLA。后续产品条件见[未来计划](../plans/wiki-future-plan.md)。
 
 ## Historical evidence
+
+2026-10-31 的第一阶段验收使用固定100篇合成语料、seed 20261030、Python 3.14.4、
+SQLite 3.46.1 和[解析约束](../../constraints-wiki.txt)。[冻结参考](../../tests/fixtures/wiki-baseline-reference.json)
+保留50份旧版页面、55组旧观察及最初54套计时上限；稳定 vault 身份保证 UID、同分
+顺序和错误样本可重建，full 页面只按明确合同补入准确 count。最终候选55项测量
+齐全，50页严格等价，54套原阈值全部通过。早先版本的尾部失败仍是失败，不能
+用后一次成功追认；参考保留其出处及适用机器条件，不构成可移植 SLO。
+
+普通无 NUL 长文的 lexical 文字搬运由2803738降至188168字节，exact 由280702
+降至1817字节；这些数值是 SQLite 交给 Python 的文字单元，不是物理 IO。诊断
+错误从3增至300时，search 操作总返回行保持30行、诊断 Python peak为242181至
+242185字节；其中错误样本始终三行。list 在50至300错误时总行数保持51行、peak
+为199757至199759字节。peak不是RSS，也不以某项改善抵消其他场景的阈值失败。
+
+模型证据固定 `gpt-6.1-sol/max/default`，包含普通聊天和专用查询：改前八类题中
+七题完成并通过人工语义评阅，一题240秒超时，失败与部分用量保留。七题可核对的
+CLI input/output 合计1385351/16372；超时题另有部分原生用量16773/422，不能据此
+补造完整总量。调用指南更新后四个代表题（含保留题）完成并通过人工评阅，合计
+528610/5138；两批问题不同，不能当作整体 A/B 收益。实际原生 developer 注入和
+指南正文/digest均经核对，全文题同版覆盖无缺口；没有观察到 `read_many` 的实际
+调用，不能宣称批读收益。原报告 `not_reviewed` 与单列人工结论分别保留，native
+tier和完整USD未知。具体复现、留证和清理要求归[验证方法](../testing.md#wiki-evaluation-method)。
 
 The [original design and version-bound evidence](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/wiki-development-summary.md) explain the original implementation. Current behavior is maintained above; historical checks do not establish current deployment.

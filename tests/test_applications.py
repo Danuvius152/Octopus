@@ -1104,6 +1104,7 @@ async def test_account_snapshot_keeps_unfinished_deletion_without_execution_auth
 
     from server.crypto import master_key
     from server.db.portability import snapshot_account
+    from server.db.schema import CURRENT_VERSION
     from server.storage_verification import verify_main
 
     row = await _create_app(am, db)
@@ -1115,7 +1116,7 @@ async def test_account_snapshot_keeps_unfinished_deletion_without_execution_auth
         await db.conn.backup(source)
         snapshot_account(source, target, row["user_id"], key=master_key())
     with closing(sqlite3.connect(target)) as copy:
-        assert verify_main(copy) == 5
+        assert verify_main(copy) == CURRENT_VERSION
         assert copy.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
         saved = copy.execute("SELECT session_id,deletion FROM applications WHERE id=?", (row["id"],)).fetchone()
         assert saved[0] is None

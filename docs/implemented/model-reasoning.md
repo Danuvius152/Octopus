@@ -36,6 +36,36 @@ A held process's spawn signature includes effort so it is replaced when the
 next turn needs different settings. The backend resume id is retained.
 The spawn signature also includes speed.
 
+## Saving defaults and repairing an existing session
+
+Saving an Agent validates the complete candidate against its own backend,
+credential and model controls. A legal default change can make an existing
+session's inherited settings temporarily incompatible; that does not veto the
+save. The session keeps its original backend, history and native resume identity.
+Overrides are not automatically added or converted to preserve compatibility.
+
+The chat header and `/model` show the selected session's effective settings and
+each field's source. The dialog can change credential and model controls in one
+atomic PATCH, including when both an inherited credential and effort are
+incompatible. Clearing a credential restores inheritance. Its draft catalog
+describes the draft credential; it does not replace the current effective-value
+display. Rejections preserve existing bindings and explain what to correct.
+Responses remain associated with their original session, so switching sessions
+cannot move an error or close the new session's dialog.
+
+| Boundary | Validation and timing |
+| --- | --- |
+| Agent save | Serialize candidate read, complete validation and write; validate the new defaults themselves. |
+| Session save | Validate the complete proposed effective combination using the session's retained backend; reject atomically. |
+| Logical request capture | Capture the effective configuration under the configuration lock; retries keep that capture. |
+| Process launch | Recheck supported controls and current credential authorization before invoking the captured backend. |
+
+Changing defaults during a request affects the next request. Revoking a
+credential can still prevent a captured configuration from launching; a prior
+save or capture does not grant continuing authorization. Configuration
+orchestration remains in the existing routes and request lifecycle, rather than
+an implemented central configuration service.
+
 ## Runtime metadata and validation
 
 `GET /api/backends/{backend}/models` requires authentication and account scope.
@@ -61,9 +91,10 @@ free-form models, and the runtime remains the authority on actual access.
 Claude Code does not expose speed controls. Invalid tiers and unavailable
 model/tier combinations are rejected before changing any bindings.
 Hidden cached models also constrain validation without appearing in the picker.
-Agent/session configuration updates serialize their read, validation and write
-independently of running turns. An agent default change checks affected session
-overrides, and invocation preflight catches availability changes after a save.
+Agent saves, session saves and execution share the same pure model-control
+validation. Empty supported-control lists do not authorize explicit values.
+Free-form model names preserve backend capability checks; invocation preflight
+catches incompatible inherited settings and changes in availability after a save.
 
 Codex renders explicit effort as `-c model_reasoning_effort="<effort>"` before
 the `resume` subcommand. Model-only changes keep the effort binding; efforts
@@ -95,10 +126,10 @@ Backend coverage checks independent inheritance, validation, metadata redaction,
 credential ownership, persistence, archived restore and fork inheritance. A
 recovery test changes effort mid-turn and checks that retries retain the old
 setting. Frontend tests cover effort-only requests, model-specific choices,
-rejection messages and concurrent store updates. Browser coverage changes
-effort through the visible header and reloads an existing transcript. The live
-Codex resume test changes low → high and recalls the original word from the
-same backend thread.
+rejection messages, combined credential/effort repair and concurrent store
+updates. Browser coverage changes effort through the visible header and reloads
+an existing transcript. This installation's routine Codex live checks use low
+effort; backend-specific parameter and retry variations retain hermetic coverage.
 Speed coverage verifies Normal defaults, metadata compatibility, independent
 overrides, validation, persistence, archive replacement, forks and retry
 snapshots. Browser coverage toggles Normal → Fast → Normal and reloads the

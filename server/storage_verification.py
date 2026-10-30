@@ -37,7 +37,10 @@ def _reader(path: Path) -> Iterator[sqlite3.Connection]:
 
 def verify_main(db: sqlite3.Connection) -> int:
     """Require the complete current layout without the startup upgrade path."""
+    from pydantic import ValidationError
+
     from .db.schema import _SCHEMA, CURRENT_VERSION
+    from .delegations import _PersistedRound
 
     version = db.execute("PRAGMA user_version").fetchone()[0]
     if version != CURRENT_VERSION:
@@ -58,6 +61,11 @@ def verify_main(db: sqlite3.Connection) -> int:
         LIMIT 1""").fetchone()
     if invalid:
         raise RuntimeError("Primary database contains inputs outside the current contract")
+    try:
+        for row in db.execute("SELECT delegation_state FROM sessions WHERE delegation_state IS NOT NULL"):
+            _PersistedRound.model_validate_json(row[0])
+    except ValidationError:
+        raise RuntimeError("Primary database contains an invalid current delegation snapshot") from None
     return version
 
 

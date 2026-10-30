@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 
 import { AgentDelegationRequestCard } from "./AgentDelegationRequestCard";
 import { MessageBubble } from "./MessageBubble";
+import { handleWsMessage } from "../hooks/useWebSocket";
 import { useSessionStore, type Delegation, type Message, type SessionInfo } from "../stores/sessionStore";
 
 const metadata = (call = "call-current", work = "round-current", receipt = true) => ({
@@ -43,7 +44,7 @@ it("shows a running exact round and sends its captured work on cancellation", as
     expect.objectContaining({ method: "POST", body: JSON.stringify({ reason: "cancelled from UI", work_id: "round-current" }) }));
 });
 
-it.each([["completed", "replied"], ["failed", "failed"], ["cancelled", "cancelled"]] as const)(
+it.each([["completed", "completed"], ["failed", "failed"], ["cancelled", "cancelled"]] as const)(
   "shows the exact %s terminal without a cancel control", (state, label) => {
     useSessionStore.getState().setMessages("parent", [toolUse(), result()]);
     useSessionStore.getState().setDelegations("parent", [delegation({ state })]);
@@ -52,6 +53,39 @@ it.each([["completed", "replied"], ["failed", "failed"], ["cancelled", "cancelle
     expect(screen.queryByTitle("Cancel delegation")).toBeNull();
   },
 );
+
+it.each([
+  ["unknown", "Return admission unconfirmed"],
+  ["stopped", "Automatic return stopped"],
+] as const)("shows completed business independently of %s parent return", (disposition, label) => {
+  useSessionStore.getState().setMessages("parent", [toolUse(), result()]);
+  useSessionStore.getState().setDelegations("parent", [delegation()]);
+  handleWsMessage({ type: "delegation_delivery", session_id: "parent", delegation: delegation({
+    state: "completed", terminal_disposition: disposition, terminal_delivery_error: "Original return reason",
+  }) });
+  render(card());
+  expect(screen.getByText("completed")).toBeTruthy();
+  expect(screen.getByText(label)).toBeTruthy();
+  expect(screen.getByText("Original return reason")).toBeTruthy();
+  expect(screen.queryByTitle("Cancel delegation")).toBeNull();
+});
+
+it.each([
+  ["unknown", "Return admission unconfirmed"],
+  ["stopped", "Automatic return stopped"],
+  ["closed", "Automatic return stopped"],
+  ["unbound", "Automatic return stopped"],
+  ["unavailable", "Automatic return stopped"],
+  ["not_replayed", "Automatic return not replayed"],
+] as const)("shows retained %s disposition without requiring an error string", (disposition, label) => {
+  useSessionStore.getState().setMessages("parent", [toolUse(), result()]);
+  useSessionStore.getState().setDelegations("parent", [delegation({
+    state: "completed", terminal_disposition: disposition, terminal_delivery_error: null,
+  })]);
+  render(card());
+  expect(screen.getByText("completed")).toBeTruthy();
+  expect(screen.getByText(label)).toBeTruthy();
+});
 
 it("uses the receipt even when readable names, request text and result text differ", () => {
   const accepted = result();
@@ -63,7 +97,7 @@ it("uses the receipt even when readable names, request text and result text diff
   ]);
   render(card(toolUse(), "model-spelled-name"));
   expect(screen.getByText("Asked Vera")).toBeTruthy();
-  expect(screen.getByText("replied")).toBeTruthy();
+  expect(screen.getByText("completed")).toBeTruthy();
   expect(screen.queryByTitle("Cancel delegation")).toBeNull();
 });
 
@@ -110,7 +144,7 @@ it("renders the continuation without requiring a name argument", () => {
   render(<MessageBubble sessionId="parent" message={continued} />);
   expect(screen.getByText("Continued Vera")).toBeTruthy();
   expect(screen.getByText("“review again”")).toBeTruthy();
-  expect(screen.getByText("replied")).toBeTruthy();
+  expect(screen.getByText("completed")).toBeTruthy();
 });
 
 it("waits for a receipt without borrowing a name/request match or claiming running", () => {

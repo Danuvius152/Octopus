@@ -33,7 +33,7 @@ def _merge(intervals):
 
 def read_many(store, requests, budget_chars, task=None, view="full", *, reuse_delivered=False, user_id=None):
     from .history import WikiHistory
-    from .read_response import compact_batch, validate_view
+    from .read_response import COMPACT_ERROR_LIMIT, compact_batch, validate_view
     from .reading import window
     from .source_details import page as source_page
     from .tasks import tasks
@@ -50,7 +50,7 @@ def read_many(store, requests, budget_chars, task=None, view="full", *, reuse_de
                 identity = store.resolve_identity(request.doc)
                 cache_key = identity[0] if identity else request.doc
                 if cache_key not in cache:
-                    document = store.read(request.doc, length=1)
+                    document = store.read(request.doc, length=1, index_error_limit=0 if view == "compact" else None)
                     with store.connect() as db:
                         text = db.execute("SELECT text FROM documents WHERE id=?", (document["id"],)).fetchone()[0]
                     cache[cache_key] = (document, text)
@@ -103,7 +103,7 @@ def read_many(store, requests, budget_chars, task=None, view="full", *, reuse_de
                 for item in items:
                     if item.get("id") == identifier and item["status"] in {"ok", "partial"} and start <= item["start"] <= item["end"] <= end:
                         item["range_id"] = range_id
-        result = {"items": items, "documents": list(documents.values()), "ranges": ranges, "characters_returned": budget_chars - remaining, "budget_chars": budget_chars, "freshness": "live", **store.index_state()}
+        result = {"items": items, "documents": list(documents.values()), "ranges": ranges, "characters_returned": budget_chars - remaining, "budget_chars": budget_chars, "freshness": "live", **store.index_state(error_limit=COMPACT_ERROR_LIMIT if view == "compact" else None)}
         if view == "compact" or task is not None:
             result = compact_batch(result, view=view)
         for piece in result["ranges"]:

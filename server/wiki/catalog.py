@@ -113,6 +113,7 @@ def dependencies(db, doc_id):
 
 
 def graph(store, doc_id, offset=0, limit=100, cursor=None, *, model_response=False):
+    from .read_response import COMPACT_ERROR_LIMIT, compact_index
     from .retrieval import continuation, pagination
 
     with store.connect() as db:
@@ -123,9 +124,9 @@ def graph(store, doc_id, offset=0, limit=100, cursor=None, *, model_response=Fal
         ids = {doc_id, *(edge["source_doc"] for edge in selected), *(edge["target_doc"] for edge in selected if edge["target_doc"])}
         nodes = [store.navigation(row, db=db) for identifier in sorted(ids) if (row := db.execute("SELECT d.*,m.metadata AS managed_metadata FROM documents d LEFT JOIN managed_notes m ON m.path=d.path WHERE d.id=?", (identifier,)).fetchone()) is not None]
         edges = [{"from": edge["source_doc"], "to": edge["target_doc"], "resource": edge["resource"], "revision": edge["recorded_revision"] or edge["revision"], "location": edge["location"], "relation": edge["relation"], "status": edge["status"]} for edge in selected]
-        state = store._index_state(db)
+        state = store._index_state(db, error_limit=COMPACT_ERROR_LIMIT if model_response else None)
     next_offset = offset + limit if offset + limit < total else None
-    result = {"nodes": nodes, "edges": edges, "total": total, "next_offset": next_offset, "next_cursor": continuation(next_offset, epoch, fingerprint), **state}
+    result = {"nodes": nodes, "edges": edges, "total": total, "next_offset": next_offset, "next_cursor": continuation(next_offset, epoch, fingerprint), **(compact_index(state) if model_response else state)}
     if model_response:
         from .model_response import fit_prefix, presentation
 

@@ -181,7 +181,7 @@ Phone / Browser
 ```bash
 # Clone and set up
 git clone https://github.com/Danuvius152/Octopus.git && cd Octopus
-python3 -m venv .venv && .venv/bin/pip install -e "."
+python3 -m venv .venv && .venv/bin/pip install -c constraints-wiki.txt -e "."
 cp .env.example .env          # set your own OCTOPUS_AUTH_TOKEN setup proof
 
 # Build the frontend (the server serves web/dist/)
@@ -212,7 +212,9 @@ Auth for the agent's backend uses your existing CLI login (`claude login` /
 `codex login`) by default — or add an API key under **Credentials** and attach
 it to an agent.
 
-Install development dependencies with `pip install -e '.[test]'`.
+Install development dependencies with
+`pip install -c constraints-wiki.txt -e '.[test]'`. The constraints preserve the
+Wiki parsing baseline; application compatibility ranges remain in `pyproject.toml`.
 
 For a managed Linux/WSL installation, `scripts/setup-services.sh` previews a
 systemd user unit. After validation and natural drain, stop the existing

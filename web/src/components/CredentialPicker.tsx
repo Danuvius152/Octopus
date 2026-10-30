@@ -25,10 +25,16 @@ const API = window.location.origin;
  * refuses a mismatch anyway (a Codex sign-in can't run a Claude session).
  */
 export function CredentialPicker({ session }: { session: SessionInfo }) {
+  // Pending choices and errors belong to this conversation's mounted picker.
+  return <SessionCredentialPicker key={session.id} session={session} />;
+}
+
+function SessionCredentialPicker({ session }: { session: SessionInfo }) {
   const token = useSessionStore((s) => s.token);
   const credentials = useSessionStore((s) => s.credentials);
   const agents = useSessionStore((s) => s.agents);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   const agent = agents.find((a) => a.id === session.agent_id);
   const usable = credentials.filter((c) => c.backend === session.backend);
@@ -40,6 +46,7 @@ export function CredentialPicker({ session }: { session: SessionInfo }) {
     if (busy) return;
     const observation = sessionList.capture();
     setBusy(true);
+    setError(null);
     try {
       const res = await fetch(`${API}/api/sessions/${session.id}`, {
         method: "PATCH",
@@ -49,17 +56,23 @@ export function CredentialPicker({ session }: { session: SessionInfo }) {
         },
         body: JSON.stringify({ credential_id: credentialId }),
       });
-      if (!res.ok) return;
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(typeof detail.detail === "string" ? detail.detail : `Could not change credential (HTTP ${res.status}).`);
+      }
       const updated: SessionInfo = await res.json();
       sessionList.patch(updated.id, { credential_id: updated.credential_id }, observation);
+    } catch (e) {
+      if (sessionList.current(observation)) setError(e instanceof Error ? e.message : "Could not change credential.");
     } finally {
       setBusy(false);
     }
   };
 
-  const label = effective?.label ?? "host default";
+  const label = effective?.label ?? (effectiveId ? "selected credential" : "host default");
 
   return (
+    <>
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
@@ -68,7 +81,7 @@ export function CredentialPicker({ session }: { session: SessionInfo }) {
           title={
             effective
               ? `Credential: ${effective.label}${inherited ? " (from the agent)" : ""}`
-              : "No credential attached — using the CLI's own login"
+              : effectiveId ? "Selected credential details are unavailable" : "No credential attached — using the CLI's own login"
           }
           aria-label="Change this session's credential"
         >
@@ -118,5 +131,7 @@ export function CredentialPicker({ session }: { session: SessionInfo }) {
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
+    {error && <span role="alert" className="max-w-xs text-xs text-destructive">{error}</span>}
+    </>
   );
 }

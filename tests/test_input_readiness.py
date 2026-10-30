@@ -142,16 +142,20 @@ async def test_ready_sources_execute_only_after_the_saved_claim_commits(not_read
 
 
 async def test_unready_one_shot_and_background_return_create_no_new_session(not_ready):
-    from types import SimpleNamespace
-
+    from server.bg_tasks import BgTaskRecord
     from server.knowledge import for_entry
 
     manager, _, session = not_ready
     context = for_entry(session, "schedule", request_id="original")
     with pytest.raises(ValueError, match="uninitialized"):
         await manager.start_one_shot({"id": "one-shot", "run_at": "now"}, "schedule", context)
+    record = BgTaskRecord(
+        id="task", session_id=session.id, command="printf retained", description=None,
+        working_dir=session.working_dir, status="completed", exit_code=0,
+        stdout="retained", stderr="", truncated=False, started_at="now", completed_at="now",
+    )
     with pytest.raises(ValueError, match="uninitialized"):
-        await manager.deliver_bg_result(SimpleNamespace(id="task", session_id=session.id))
+        await manager.deliver_bg_result(record)
     assert list(manager.sessions) == [session.id]
 
 

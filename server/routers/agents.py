@@ -10,7 +10,6 @@ from ..agent_manager import AgentError, AgentManager
 from ..auth import verify_token
 from ..credential_bindings import CredentialBindingError, validate_credential_binding
 from ..deps import ScopeUser, SessionMgr
-from ..harness.model_settings import effective_settings
 from ..models import (
     AgentCreate,
     AgentRead,
@@ -23,7 +22,7 @@ from ..models import (
     SessionInfo,
 )
 from ..sessions.presentation import session_info
-from .backends import model_settings_for, validate_reasoning, validate_service_tier
+from .backends import model_settings_for, validate_controls
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -86,8 +85,7 @@ async def create_agent(
         catalog = await model_settings_for(
             session_manager, req.backend, credential_id, user_id,
         )
-        validate_reasoning(catalog, req.model, req.reasoning_effort)
-        validate_service_tier(catalog, req.model, req.service_tier)
+        validate_controls(catalog, req.model, req.reasoning_effort, req.service_tier, backend=req.backend)
     try:
         # The owner, which is the whole point of the `ScopeUser` above: it was
         # declared and never passed, so every agent created through this route
@@ -169,27 +167,8 @@ async def _update_agent_settings(session_manager, agent_id: str, fields: dict, u
             catalog = await model_settings_for(
                 session_manager, merged["backend"], merged.get("credential_id"), user_id,
             )
-            validate_reasoning(catalog, merged.get("model"), merged.get("reasoning_effort"))
-            validate_service_tier(catalog, merged.get("model"), merged.get("service_tier"))
-        # Existing sessions may override the model or credential while
-        # inheriting speed. Reject a default change that would strand them.
-        for session in await session_manager.db.load_sessions(include_archived=True, user_id=user_id):
-            if session["agent_id"] != agent_id:
-                continue
-            effective = effective_settings(session, merged)
-            if not effective["reasoning_effort"] and not effective["service_tier"]:
-                continue
-            catalog = await model_settings_for(
-                session_manager, session["backend"],
-                effective["credential_id"], user_id,
-            )
-            try:
-                if catalog.reasoning_efforts:
-                    validate_reasoning(catalog, effective["model"], effective["reasoning_effort"])
-                if catalog.service_tiers:
-                    validate_service_tier(catalog, effective["model"], effective["service_tier"])
-            except HTTPException as exc:
-                raise HTTPException(400, f"Session {session['name']!r}: {exc.detail}") from exc
+            validate_controls(catalog, merged.get("model"), merged.get("reasoning_effort"),
+                              merged.get("service_tier"), backend=merged["backend"])
     try:
         agent = await _get_manager().update_agent(agent_id, user_id, **fields)
     except AgentError as e:

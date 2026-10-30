@@ -1,9 +1,10 @@
 """Account and live-turn Wiki tools. Authorization is enforced by the host API."""
 
-from typing import Literal
+from typing import Annotated, Literal
 
 import httpx
 from mcp.server.fastmcp import FastMCP, Image
+from pydantic import Field
 
 from ..mcp_result import TEXT_RESULT_MAX_BYTES, bound_tool_handler, model_result_bytes
 from ..wiki.contracts import (
@@ -76,6 +77,8 @@ def search(
 ) -> dict:
     """Find Markdown navigation with lookup/question/overview/compare intent.
 
+    Discover unknown locations; read a known path/id/uid directly instead.
+    Read several known targets or ranges together with read_many().
     section/sections give revision-bound positions for read(); snippets are not
     reading evidence. compact is default; full adds metadata within the same
     byte limit. lexical_partial indicates absent query terms; inspect index
@@ -91,6 +94,8 @@ def search(
 def read_many(items: list[ReadRequest], budget_chars: int = 24000, view: ReadView = "compact", reuse_delivered: bool = False) -> dict:
     """Read requested current passages once, merging overlaps; no model is called.
 
+    Batch already known targets/ranges and provide expected_revision. Reuse
+    current text still in this caller's context and request the missing ranges.
     items report status and reference actual content in ranges by range_id and
     start/end. budget_chars counts unique Unicode characters; the complete MCP
     envelope is separately capped at 32768 UTF-8 bytes in both views. Follow
@@ -100,6 +105,8 @@ def read_many(items: list[ReadRequest], budget_chars: int = 24000, view: ReadVie
     only while this task's previous text is still in context; already_delivered
     items reference those ranges without returning them again. Omit it to recover
     context. No reading is inherited from another task or revision.
+    Reuse still checks live identity, revision and authorization; after a scope
+    or identity change, verify the current target rather than trusting old text.
     """
     return call("POST", "read-many", body={"items": [item.model_dump() for item in items], "budget_chars": budget_chars, "view": view, "reuse_delivered": reuse_delivered})
 
@@ -108,7 +115,7 @@ def read_many(items: list[ReadRequest], budget_chars: int = 24000, view: ReadVie
 def read(
     doc: str,
     start: int = 0,
-    length: int = 16000,
+    length: Annotated[int, Field(ge=1, le=24000)] = 16000,
     expected_revision: str | None = None,
     page: int | None = None,
     view: ReadView = "compact",
@@ -118,6 +125,7 @@ def read(
 ) -> dict:
     """Read one current document slice, not the vault; no model is called.
 
+    Use a known path/id/uid directly; batch multiple known ranges in read_many().
     start/length are Unicode character offsets. Keep revision and follow
     next_start; only returned content counts as read. Both views cap the full
     MCP envelope at 32768 UTF-8 bytes, independently of requested characters.
@@ -127,6 +135,8 @@ def read(
     continues only those facts and never grants a body read. Long display labels
     are clipped independently; omitted source facts include recovery pointers to
     the current original declaration, never a substitute reading proof.
+    Full reading requires actual same-revision coverage from 0 to the end;
+    reuse text retained in this task's context and fill gaps without rereading it.
     """
     return call(
         "GET", "read", params={k: v for k, v in locals().items() if v is not None}
@@ -134,9 +144,12 @@ def read(
 
 
 @mcp.tool()
-def info() -> dict:
-    """Get the selected vault identity, curator and current operation scope; no vault summary."""
-    return call("GET", "info")
+def info(view: ReadView = "compact") -> dict:
+    """Get vault identity, curator, current scope and compact health; no vault summary.
+
+    Explicit view=full returns complete diagnostics instead of error samples.
+    """
+    return call("GET", "info", params={"view": view})
 
 
 @mcp.tool()

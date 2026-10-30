@@ -9,7 +9,7 @@ from ..account_baseline import persistent_database_file
 from ..sqlite_schema import statements
 from .transaction import Transaction
 
-CURRENT_VERSION = 5
+CURRENT_VERSION = 6
 _DEFAULT_MCP_SERVERS = ["ask", "bg", "ask_agent", "research", "schedule"]
 
 
@@ -172,6 +172,8 @@ CREATE TABLE bg_tasks (
     stop_reason TEXT,
     work_id TEXT,
     knowledge_context TEXT,
+    delivery_disposition TEXT CHECK(delivery_disposition IN ('stopped','unknown')),
+    delivery_error TEXT,
     FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
 

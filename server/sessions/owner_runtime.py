@@ -19,10 +19,15 @@ from typing import TYPE_CHECKING, Any, Literal
 from .. import fork_helpers
 from ..attachments import AttachmentUnavailable, validate_message_attachments
 from ..config import settings
+from ..credential_bindings import CredentialBindingError
 from ..diagnostics import diagnostic_text, exception_diagnostic, safe_diagnostic
 from ..harness import HarnessCredential, HarnessEvent, HarnessRun, get_harness
 from ..harness.events import HarnessPreparationError
-from ..harness.model_settings import effective_settings
+from ..harness.model_settings import (
+    ModelControlError,
+    effective_settings,
+    validate_controls,
+)
 from ..large_prompts import spill_if_large
 from ..models import AttachmentMetadata, MessageContent, MessageRole, SessionStatus
 from .base import (
@@ -1196,15 +1201,24 @@ class OwnerRuntime:
                                  service_tier=defaults.service_tier)
             agent = await manager._load_agent(configured)
         harness = get_harness(configured.backend)
-        credential = await manager._resolve_credential(configured, agent, harness)
+        try:
+            credential = await manager._resolve_credential(configured, agent, harness)
+        except CredentialBindingError as error:
+            source = 'session override' if configured.credential_id else 'Agent default'
+            entry = 'the credential picker in this conversation header'
+            if not configured.credential_id:
+                entry = f'Agent settings or {entry}'
+            raise ValueError(f'{configured.backend}: credential_id from {source}. {error} Use {entry}.') from error
         diagnostic.credential = credential
         effective = effective_settings(configured, agent)
         catalog = harness.model_settings(credential)
         effort, tier, model = effective["reasoning_effort"], effective["service_tier"], effective["model"]
-        if catalog.reasoning_efforts and effort and effort not in catalog.efforts_for(model):
-            raise ValueError(f"Reasoning effort {effort!r} is unavailable for this model.")
-        if catalog.service_tiers and tier and tier not in catalog.tiers_for(model):
-            raise ValueError("Fast speed is unavailable for this model. Choose Normal speed." if tier == "fast" else f"Speed {tier!r} is unavailable for this model.")
+        try:
+            validate_controls(catalog, model, effort, tier)
+        except ModelControlError as error:
+            raise ValueError(error.describe(
+                configured.backend, inherited=not bool(getattr(configured, error.field)),
+            )) from error
         connectors = await manager._load_connectors(agent)
         if configured.fork_needs_replay:
             prompt = fork_helpers.wrap_for_fork_replay(prompt, copied)

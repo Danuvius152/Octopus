@@ -127,6 +127,45 @@ async def test_completed_delegation_can_follow_up_after_restart_without_replayin
     assert second_boot.delegations.list_delegations(second_boot.parent_id)
 
 
+async def test_unconfirmed_return_diagnostic_survives_restart_without_replaying_input(runtime, monkeypatch):
+    from server.sessions.runtime_types import SessionOwnerUnavailable
+
+    boot, starts = runtime
+    current = await boot()
+    submit, lookup = current.manager.start_message, current.manager.source_receipt
+    attempts = 0
+
+    async def lose_ack(session_id, prompt, **kwargs):
+        nonlocal attempts
+        if session_id != current.parent_id:
+            return await submit(session_id, prompt, **kwargs)
+        attempts += 1
+        assert attempts == 1
+        await submit(session_id, prompt, **kwargs)
+        raise ConnectionError('Original terminal ACK lost')
+
+    async def unavailable(*args, **kwargs):
+        if attempts:
+            raise SessionOwnerUnavailable('Original receipt temporarily unavailable')
+        return await lookup(*args, **kwargs)
+
+    monkeypatch.setattr(current.manager, 'start_message', lose_ack)
+    monkeypatch.setattr(current.manager, 'source_receipt', unavailable)
+    rec = await current.delegations.start_delegation(
+        parent_session_id=current.parent_id, agent_name='Worker', request='Original review',
+    )
+    await asyncio.wait_for(starts.get(), 5)
+    await wait_finished(current.manager, rec)
+    await current.delegations.confirm_recording()
+    assert rec._terminal_disposition == 'unknown'
+    await current.close()
+    restarted = await boot()
+    restored = restarted.delegations.get_delegation(rec.delegation_id).to_public_dict()
+    assert restored['work_id'] == rec.work_id and restored['state'] == 'completed' and restored['error'] is None
+    assert restored['terminal_disposition'] == 'unknown' and 'ACK lost' in restored['terminal_delivery_error']
+    assert starts.empty() and restarted.manager.dispatch_snapshot(restarted.parent_id)['items'] == []
+
+
 async def test_malformed_future_snapshot_is_rejected_without_starting_work(runtime):
     boot, starts = runtime
     current = await boot()

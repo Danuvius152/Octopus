@@ -54,6 +54,8 @@ class BgTasksMixin(DatabaseBase):
                 "completed_at",
                 "stop_reason",
                 "knowledge_context",
+                "delivery_disposition",
+                "delivery_error",
             }
             updates: dict[str, Any] = {}
             for k, v in fields.items():

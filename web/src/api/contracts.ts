@@ -3446,6 +3446,48 @@ export interface components {
          * @enum {string}
          */
         BackendKind: "claude-code" | "codex";
+        /** BgTaskResponse */
+        BgTaskResponse: {
+            /** Id */
+            id: string;
+            /** Session Id */
+            session_id: string;
+            /** Command */
+            command: string;
+            /** Description */
+            description: string | null;
+            /** Working Dir */
+            working_dir: string;
+            /**
+             * Status
+             * @enum {string}
+             */
+            status: "pending" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+            /** Exit Code */
+            exit_code: number | null;
+            /** Stdout */
+            stdout: string;
+            /** Stderr */
+            stderr: string;
+            /** Truncated */
+            truncated: boolean;
+            /** Started At */
+            started_at: string;
+            /** Completed At */
+            completed_at: string | null;
+            /** Idle Timeout Seconds */
+            idle_timeout_seconds: number | null;
+            /** Timeout Seconds */
+            timeout_seconds: number | null;
+            /** Stop Reason */
+            stop_reason: string | null;
+            /** Work Id */
+            work_id: string | null;
+            /** Delivery Disposition */
+            delivery_disposition: ("stopped" | "unknown") | null;
+            /** Delivery Error */
+            delivery_error: string | null;
+        };
         /** Body_upload_attachment_api_sessions__session_id__attachments_post */
         Body_upload_attachment_api_sessions__session_id__attachments_post: {
             /** File */
@@ -3915,6 +3957,43 @@ export interface components {
             client_id: string;
             /** Client Secret */
             client_secret: string;
+        };
+        /** DelegationResponse */
+        DelegationResponse: {
+            /** Delegation Id */
+            delegation_id: string;
+            /** Sub Session Id */
+            sub_session_id: string;
+            /** Parent Session Id */
+            parent_session_id: string;
+            /** Target Agent Id */
+            target_agent_id: string;
+            /** Target Agent Name */
+            target_agent_name: string;
+            /** Request */
+            request: string;
+            /** Work Id */
+            work_id: string;
+            /**
+             * State
+             * @enum {string}
+             */
+            state: "running" | "completed" | "failed" | "cancelled" | "interrupted";
+            /** Created At */
+            created_at: string;
+            /** Finished At */
+            finished_at: string | null;
+            /** Error */
+            error: string | null;
+            /** Terminal Disposition */
+            terminal_disposition: ("accepted" | "duplicate" | "steered" | "closed" | "unbound" | "unavailable" | "not_replayed" | "stopped" | "unknown") | null;
+            /** Terminal Delivery Error */
+            terminal_delivery_error: string | null;
+            /**
+             * Recording State
+             * @constant
+             */
+            recording_state: "committed";
         };
         /** DispatchQueueItem */
         DispatchQueueItem: {
@@ -5003,7 +5082,7 @@ export interface components {
                 [key: string]: string;
             }[];
             /** Index Error Count */
-            index_error_count?: number | null;
+            index_error_count: number;
             /**
              * Index Errors Truncated
              * @default false
@@ -7801,9 +7880,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["BgTaskResponse"][];
                 };
             };
             /** @description Validation Error */
@@ -7840,9 +7917,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["BgTaskResponse"];
                 };
             };
             /** @description Validation Error */
@@ -7876,9 +7951,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["BgTaskResponse"];
                 };
             };
             /** @description Validation Error */
@@ -7947,9 +8020,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    }[];
+                    "application/json": components["schemas"]["DelegationResponse"][];
                 };
             };
             /** @description Validation Error */
@@ -7986,9 +8057,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["DelegationResponse"];
                 };
             };
             /** @description Validation Error */
@@ -8026,9 +8095,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["DelegationResponse"];
                 };
             };
             /** @description Validation Error */
@@ -8066,9 +8133,7 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content: {
-                    "application/json": {
-                        [key: string]: unknown;
-                    };
+                    "application/json": components["schemas"]["DelegationResponse"];
                 };
             };
             /** @description Validation Error */
@@ -8793,6 +8858,7 @@ export interface operations {
     info_api_wiki_info_get: {
         parameters: {
             query?: {
+                view?: "full" | "compact";
                 token?: string | null;
             };
             header?: never;

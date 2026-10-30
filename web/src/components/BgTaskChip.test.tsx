@@ -41,6 +41,78 @@ afterEach(() => {
 });
 
 describe("BgTaskChip", () => {
+  it("accepts newer detail diagnostics after an old list inserted the task", async () => {
+    const old = makeTask({ status: "completed", exit_code: 0, delivery_disposition: null, delivery_error: null });
+    let respond!: (response: Response) => void;
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => { respond = resolve; })));
+    const baseline = useSessionStore.getState().bgTasks.s1 ?? [];
+    render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    act(() => {
+      handleWsMessage({ type: "bg_delivery", session_id: "s1", task_id: "t1",
+        delivery_disposition: "unknown", delivery_error: "New reason" });
+      useSessionStore.getState().setBgTasks("s1", [old], baseline);
+    });
+    await act(async () => respond(new Response(JSON.stringify({ ...old,
+      delivery_disposition: "unknown", delivery_error: "New reason", stdout: "Full fetched output" }), { status: 200 })));
+    await waitFor(() => expect(screen.getByText("Full fetched output")).toBeInTheDocument());
+    expect(screen.getByText("Return admission unconfirmed")).toBeInTheDocument();
+    expect(screen.getByText("New reason")).toBeInTheDocument();
+  });
+
+  it.each([
+    ["mount", null, "unknown"],
+    ["mount", "unknown", null],
+    ["expanded", null, "stopped"],
+    ["expanded", "unknown", null],
+  ] as const)("preserves delivery events across a late %s detail response (%s → %s)", async (entry, oldDisposition, disposition) => {
+    const old = makeTask({ status: "completed", exit_code: 0,
+      delivery_disposition: oldDisposition, delivery_error: oldDisposition ? "Old reason" : null });
+    let respond!: (response: Response) => void;
+    const fetchMock = vi.fn(() => new Promise<Response>((resolve) => { respond = resolve; }));
+    vi.stubGlobal("fetch", fetchMock);
+    if (entry === "expanded") useSessionStore.getState().upsertBgTask("s1", old);
+    render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    if (entry === "expanded") {
+      await act(async () => screen.getByRole("button", { expanded: false }).click());
+    }
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    act(() => {
+      if (entry === "mount") useSessionStore.getState().upsertBgTask("s1", old);
+      handleWsMessage({ type: "bg_delivery", session_id: "s1", task_id: "t1",
+        delivery_disposition: disposition, delivery_error: disposition ? "New reason" : null });
+    });
+    await act(async () => respond(new Response(JSON.stringify({ ...old, stdout: "Full fetched output" }), { status: 200 })));
+    await waitFor(() => expect(screen.getByText("Full fetched output")).toBeInTheDocument());
+    if (disposition) {
+      expect(screen.getByText(disposition === "unknown" ? "Return admission unconfirmed" : "Automatic return stopped")).toBeInTheDocument();
+      expect(screen.getByText("New reason")).toBeInTheDocument();
+    } else {
+      expect(screen.queryByText("Return admission unconfirmed")).toBeNull();
+    }
+    expect(screen.queryByText("Old reason")).toBeNull();
+  });
+
+  it.each([
+    ["unknown", "Return admission unconfirmed"],
+    ["stopped", "Automatic return stopped"],
+  ] as const)("keeps command success separate from %s return admission", (disposition, label) => {
+    useSessionStore.getState().upsertBgTask("s1", makeTask({ status: "completed", exit_code: 0 }));
+    handleWsMessage({
+      type: "bg_delivery", session_id: "s1", task_id: "t1",
+      delivery_disposition: disposition, delivery_error: "Original return reason",
+    });
+    render(<BgTaskChip sessionId="s1" taskId="t1" />);
+    expect(screen.getByText("bg · completed")).toBeInTheDocument();
+    expect(screen.getByText(label)).toBeInTheDocument();
+    expect(screen.getByText("Original return reason")).toBeInTheDocument();
+    act(() => handleWsMessage({
+      type: "bg_delivery", session_id: "s1", task_id: "t1",
+      delivery_disposition: null, delivery_error: null,
+    }));
+    expect(screen.queryByText(label)).toBeNull();
+    expect(screen.getByText("bg · completed")).toBeInTheDocument();
+  });
+
   it("shows the live task limits and the actual timeout reason", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 404 })));
     handleWsMessage({

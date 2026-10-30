@@ -39,18 +39,28 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .aio import complete_cleanup, drain_cancelled
 from .database import Database
+from .diagnostics import exception_diagnostic, safe_diagnostic
 from .knowledge import OwnedTaskContext, capture, derive, encode
 from .mcp_identity import McpScope, require_live_scope, work_is_open
 from .process_groups import group_exists as _group_exists
 from .process_groups import (
     group_has_live_members_after_kill as _group_has_live_members_after_kill,
 )
+from .service_health import ServiceUnavailable
+from .sessions.runtime_types import (
+    AdmissionIntegrityError,
+    QuotaExceeded,
+    SessionAdmissionBusy,
+    SessionMailboxFull,
+    SessionOwnerUnavailable,
+)
+from .submission_models import SubmissionConflict
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +134,8 @@ class BgTaskRecord:
     stop_reason: str | None = None
     work_id: str | None = None
     knowledge_context: str | None = None
+    delivery_disposition: Literal["stopped", "unknown"] | None = None
+    delivery_error: str | None = None
 
 
 def _now_iso() -> str:
@@ -194,6 +206,7 @@ class _RunningTask:
         self.retired = False
         self.recorded = False
         self.notified = False
+        self.delivery_saved = (record.delivery_disposition, record.delivery_error)
         self.stdout_buf = bytearray()
         self.stderr_buf = bytearray()
         self.stdout_truncated = False
@@ -591,6 +604,8 @@ class BgTaskManager:
                 stop_reason=r["stop_reason"],
                 work_id=r["work_id"],
                 knowledge_context=r["knowledge_context"],
+                delivery_disposition=r["delivery_disposition"],
+                delivery_error=r["delivery_error"],
             )
             for r in rows
         ]
@@ -618,6 +633,8 @@ class BgTaskManager:
             stop_reason=r["stop_reason"],
             work_id=r["work_id"],
             knowledge_context=r["knowledge_context"],
+            delivery_disposition=r["delivery_disposition"],
+            delivery_error=r["delivery_error"],
         )
 
     # ------------------------------------------------------------------ orchestration
@@ -812,13 +829,13 @@ class BgTaskManager:
             if not rt.task.cancelled():
                 error = rt.task.exception()
                 if error is not None:
-                    logger.error("Retrying bg settlement for %s", rt.record.id, exc_info=error)
+                    logger.error("Retrying bg settlement for %s\n%s", rt.record.id, exception_diagnostic(error))
             rt.task = asyncio.create_task(self._settle_task(rt), name=f"bg-settle-{rt.record.id}")
             rt.task.add_done_callback(self._orchestration_done)
 
     def _orchestration_done(self, task: asyncio.Task[None]) -> None:
         if not task.cancelled() and (error := task.exception()) is not None:
-            logger.error("Background task settlement incomplete", exc_info=error)
+            logger.error("Background task settlement incomplete\n%s", exception_diagnostic(error))
 
     async def _settle_task(self, rt: _RunningTask) -> None:
         # Retirement precedes storage and notification, so a failed DB write
@@ -877,18 +894,74 @@ class BgTaskManager:
                 logger.exception("bg_completed broadcast failed")
             rt.notified = True
 
-        # The original task still owns its completed result until the callback
-        # acknowledges durable admission or a definitive closed destination.
-        # Retry only delivery under the same task ID; never rerun the command.
+        # Remember disposition before writing: settlement reentry may finish
+        # that write or observe the original receipt, but cannot resubmit.
+        await self._publish_delivery(rt)
+        if rt.record.delivery_disposition == "stopped":
+            return
         while self._deliver_cb:
+            observing = rt.record.delivery_disposition == "unknown"
             try:
                 await self._deliver_cb(rt.record)
-                return
-            except Exception:
-                logger.exception("bg delivery acknowledgment pending for %s", rt.record.id)
+            except (SessionAdmissionBusy, SessionMailboxFull, QuotaExceeded):
+                # These refusals guarantee no input effects. Unknown history
+                # can never be reclassified by a later refusal.
+                if observing:
+                    raise
                 if self._shutting_down:
                     raise
-            await asyncio.sleep(1)
+                await asyncio.sleep(1)
+            except AdmissionIntegrityError as error:
+                self._remember_delivery(rt, "stopped", error)
+                await self._publish_delivery(rt)
+                return
+            except (SessionOwnerUnavailable, TimeoutError, ConnectionError) as error:
+                self._remember_delivery(rt, "unknown", error)
+                await self._publish_delivery(rt)
+                if observing or rt.record.delivery_disposition == "stopped":
+                    return
+                # One immediate observation only. The callback sees unknown
+                # and must read the receipt without preparing another input.
+            except ServiceUnavailable:
+                raise  # Authoritative storage failure forbids reconciliation.
+            except SubmissionConflict as error:
+                self._remember_delivery(rt, "stopped", error)
+                await self._publish_delivery(rt)
+                raise
+            except (Exception, asyncio.CancelledError) as error:
+                self._remember_delivery(rt, "unknown", error)
+                await complete_cleanup(self._publish_delivery(rt))
+                raise
+            else:
+                await self._publish_delivery(rt)
+                return
+
+    def _remember_delivery(
+        self, rt: _RunningTask, disposition: Literal["stopped", "unknown"], error: BaseException,
+    ) -> None:
+        if rt.record.delivery_disposition is None:
+            rt.record.delivery_disposition = disposition
+            rt.record.delivery_error = safe_diagnostic(f"{type(error).__name__}: {error}")
+        logger.warning("Background return diagnostic task=%s disposition=%s\n%s",
+                       rt.record.id, rt.record.delivery_disposition, exception_diagnostic(error))
+
+    async def _publish_delivery(self, rt: _RunningTask) -> None:
+        assert self._db is not None
+        diagnostic = (rt.record.delivery_disposition, rt.record.delivery_error)
+        if diagnostic == rt.delivery_saved:
+            return
+        await self._db.update_bg_task(
+            rt.record.id, delivery_disposition=diagnostic[0], delivery_error=diagnostic[1],
+        )
+        rt.delivery_saved = diagnostic
+        if self._broadcast_cb:
+            try:
+                await self._broadcast_cb({
+                    "type": "bg_delivery", "session_id": rt.record.session_id, "task_id": rt.record.id,
+                    "delivery_disposition": diagnostic[0], "delivery_error": diagnostic[1],
+                })
+            except Exception:
+                logger.exception("bg delivery diagnostic broadcast failed for %s", rt.record.id)
 
     async def _terminate_proc(self, rt: _RunningTask, *, reason: str | None) -> bool:
         """SIGTERM the whole process group; 5s grace; SIGKILL if needed.

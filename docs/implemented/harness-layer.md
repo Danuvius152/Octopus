@@ -43,6 +43,14 @@ changes invalidate the held-process signature when needed while preserving the
 native resume identity. See [steering](inline-steering.md),
 [model settings](model-reasoning.md) and [turn safety](turn-safety.md).
 
+Model-control validation is shared by configuration saves and execution.
+Explicit effort, speed and tool restrictions must be supported by the actual
+backend and model; an empty capability list is not an exemption. Execution uses
+the logical request's captured configuration and checks current credential
+authorization before spawn. A legal Agent default save does not certify every
+older session's inherited combination; repair and timing follow the model
+settings contract above.
+
 ## One-shot, login and transcripts
 
 `run_oneshot` is a bounded, tool-free text operation. Schedule parsing, file
@@ -71,7 +79,7 @@ The owning code is [Harness](../../server/harness/harness.py),
 `tests/test_harness_codex.py`, `tests/test_harness_flow_control.py` and
 `tests/test_harness_authorization_stop.py` exercise these boundaries.
 
-Codex app-server, complete native tails and DSH integration remain
+Interactive Codex app-server migration, complete native tails and DSH integration remain
 [planned changes](../plans/engineering-runtime-roadmap.md), not current capabilities.
 The [original implementation](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/harness-layer.md)
 contains old API sketches and rollout evidence; current verification follows

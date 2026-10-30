@@ -16,7 +16,11 @@ export function useModelSettings(backend: string, credentialId?: string | null, 
       signal: controller.signal,
     })
       .then(async (res) => {
-        if (!res.ok) throw new Error(`Could not load model settings (HTTP ${res.status}).`);
+        if (!res.ok) {
+          const detail = await res.json().catch(() => ({}));
+          throw new Error(typeof detail.detail === "string"
+            ? `${backend}: ${detail.detail}` : `Could not load model settings (HTTP ${res.status}).`);
+        }
         const data: ModelSettings = await res.json();
         if (!Array.isArray(data.models)) throw new Error("Could not load model settings.");
         if (!controller.signal.aborted) setResult({ key, catalog: data, error: null });

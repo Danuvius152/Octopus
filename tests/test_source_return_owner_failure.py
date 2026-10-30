@@ -118,7 +118,9 @@ async def test_completed_delegation_keeps_its_reply_and_finishes_delivery_after_
         await wait_state(delegations, rec.delegation_id, "completed")
         await asyncio.wait_for(asyncio.shield(delegations.confirm_recording()), 2)
         joined = True
-        assert rec.state == "completed" and rec.to_public_dict()["terminal_disposition"] == "unavailable"
+        public = rec.to_public_dict()
+        assert rec.state == "completed" and public["terminal_disposition"] == "stopped"
+        assert "owner is unavailable" in public["terminal_delivery_error"].casefold()
         assert await manager.db.get_source_submission("delegation", f"agent-terminal:{rec.work_id}", session_id=parent.id) is None
         messages = await manager.db.load_messages(rec.delegation_id)
         assert any(row["role"] == "assistant" and row["content"] == "reply" for row in messages)
@@ -131,7 +133,7 @@ async def test_completed_delegation_keeps_its_reply_and_finishes_delivery_after_
         await manager.archive_session(parent.id, replace=False)
 
 
-async def test_delegation_question_delivery_ends_when_parent_owner_has_permanently_failed(work_runtime, monkeypatch, caplog):
+async def test_delegation_question_delivery_ends_when_parent_owner_has_permanently_failed(work_runtime, monkeypatch):
     manager, delegations, parent, starts = work_runtime
     rec = await delegations.start_delegation(parent_session_id=parent.id, agent_name="Worker", request="held while asking")
     await asyncio.wait_for(starts.get(), 5)
@@ -146,10 +148,16 @@ async def test_delegation_question_delivery_ends_when_parent_owner_has_permanent
     question = await manager.create_pending_question(rec.delegation_id, [{"question": "Keep this original question"}])
     try:
         await asyncio.wait_for(published.wait(), 2)
+        await delegations.confirm_recording()
         assert manager.has_pending_question(rec.delegation_id, question)
         assert await manager.db.get_source_submission("delegation", f"agent-question:{rec.work_id}:{question}", session_id=parent.id) is None
-        assert "owner is unavailable" in caplog.text
+        notices = [row for row in await manager.db.load_messages(rec.delegation_id) if row["type"] == "delivery_notice"]
+        assert len(notices) == 1 and question in notices[0]["content"]
+        assert "Automatic return stopped" in notices[0]["content"]
+        assert "owner is unavailable" in notices[0]["content"].casefold()
         assert manager._session_owners[id(parent)] is owner and owner.failed
+        assert await manager.answer_question(rec.delegation_id, question, [{"text": "Manual answer"}])
+        assert await manager.wait_for_question_answer(rec.delegation_id, question) == "Q: Keep this original question\nA: Manual answer"
     finally:
         await manager.close_pending_question(rec.delegation_id, question)
         await manager.archive_session(parent.id, replace=False)

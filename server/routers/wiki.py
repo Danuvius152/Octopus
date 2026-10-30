@@ -390,16 +390,18 @@ def get_config(
 
 
 @router.get("/info")
-def info(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
+def info(request: Request, view: ReadView = "full", user_id: ScopeUser = None, _: str = Depends(verify_token)):
     from ..wiki.capabilities import CAPABILITIES
+    from ..wiki.read_response import COMPACT_ERROR_LIMIT, compact_index
     from ..wiki.retention import POLICY
-    from ..wiki.workflow import view
+    from ..wiki.workflow import view as policy_view
 
     task = access(request)
     config = registry.config(user_id)
     store = registry.store(user_id)
     store.synchronize()
-    current = view(task) if task else None
+    current = policy_view(task) if task else None
+    state = store.index_state(error_limit=COMPACT_ERROR_LIMIT if view == "compact" else None)
     return {
         "vault_id": config["vault_id"],
         "curator_agent_id": config["curator_agent_id"],
@@ -417,7 +419,7 @@ def info(request: Request, user_id: ScopeUser = None, _: str = Depends(verify_to
             "Codex Skills",
             "temporary/static assets in default results",
         ],
-        **store.index_state(),
+        **(compact_index(state) if view == "compact" else state),
     }
 
 
@@ -493,7 +495,7 @@ class SearchResult(BaseModel):
     next_offset: int | None
     index_status: str
     index_errors: list[dict[str, str]]
-    index_error_count: int | None = None
+    index_error_count: int
     index_errors_truncated: bool = False
     match_mode: str
     query_terms: list[str]

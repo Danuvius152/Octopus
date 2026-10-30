@@ -275,6 +275,81 @@ async def test_backend_default_update_keeps_current_session_backend_and_changes_
         release.set()
 
 
+@pytest.mark.parametrize('setting', ['credential', 'tool_policy'])
+async def test_backend_default_change_preserves_old_session_and_explains_its_inherited_failure(
+    configuration_host, setting,
+):
+    client, manager, session, credential_ids, effects = configuration_host
+    candidate = {'backend': 'claude-code', 'credential_id': None, 'model': 'new-default-model',
+                 'reasoning_effort': 'low', 'service_tier': None}
+    if setting == 'credential':
+        credential = await client.post('/api/credentials', json={
+            'backend': 'claude-code', 'label': 'New backend credential', 'secret': 'test-only',
+        })
+        assert credential.status_code == 201, credential.text
+        candidate['credential_id'] = credential.json()['id']
+    else:
+        candidate['tool_deny'] = 'Write'
+    agent_path = f'/api/agents/{session.agent_id}'
+    saved = await client.patch(agent_path, json=candidate)
+    assert saved.status_code == 200, saved.text
+    fresh = await client.post('/api/sessions', json={'agent_id': session.agent_id})
+    assert fresh.status_code == 201 and fresh.json()['backend'] == 'claude-code'
+    receipt = await manager.start_message(session.id, 'Keep the old backend and check its actual configuration')
+    failed = await asyncio.wait_for(receipt.wait(), 5)
+    assert failed.outcome.status == 'failed' and not effects.exists()
+    assert 'codex' in failed.outcome.message
+    assert ('credential_id' if setting == 'credential' else 'tool_deny') in failed.outcome.message
+    assert 'Agent settings' in failed.outcome.message
+    if setting == 'credential':
+        repaired = await client.patch(f'/api/sessions/{session.id}', json={'credential_id': credential_ids[0]})
+    else:
+        repaired = await client.patch(agent_path, json={'tool_deny': ''})
+    assert repaired.status_code == 200, repaired.text
+    receipt = await manager.start_message(session.id, 'Continue this same conversation after correction')
+    completion = await asyncio.wait_for(receipt.wait(), 5)
+    assert completion.outcome.status == 'success', completion.outcome.message
+    detail = (await client.get(f'/api/sessions/{session.id}')).json()
+    assert detail['backend'] == 'codex'
+    assert [m['content'] for m in detail['messages'] if m['role'] == 'user'] == [
+        'Keep the old backend and check its actual configuration', 'Continue this same conversation after correction',
+    ]
+    assert json.loads(effects.read_text())['credential'] == (credential_ids[0] if setting == 'credential' else None)
+
+
+async def test_old_session_repairs_inherited_credential_and_effort_as_one_atomic_candidate(configuration_host):
+    client, manager, session, credential_ids, effects = configuration_host
+    credential = await client.post('/api/credentials', json={
+        'backend': 'claude-code', 'label': 'New Claude default', 'secret': 'test-only',
+    })
+    assert credential.status_code == 201, credential.text
+    saved = await client.patch(f'/api/agents/{session.agent_id}', json={
+        'backend': 'claude-code', 'model': 'new-default-model', 'reasoning_effort': 'max',
+        'service_tier': None, 'credential_id': credential.json()['id'],
+    })
+    assert saved.status_code == 200, saved.text
+    path = f'/api/sessions/{session.id}'
+    before = (await client.get(path)).json()
+    rejected = await client.patch(path, json={'credential_id': credential_ids[0]})
+    assert rejected.status_code == 400 and 'reasoning_effort' in rejected.json()['detail']
+    rejected = await client.patch(path, json={'reasoning_effort': 'low'})
+    assert rejected.status_code == 400 and 'Credential backend' in rejected.json()['detail']
+    rejected = await client.patch(path, json={'credential_id': credential_ids[0], 'reasoning_effort': 'max'})
+    assert rejected.status_code == 400 and 'reasoning_effort' in rejected.json()['detail']
+    unchanged = (await client.get(path)).json()
+    for field in ('credential_id', 'reasoning_effort', 'model', 'backend', 'claude_session_id', 'messages'):
+        assert unchanged[field] == before[field]
+    corrected = await client.patch(path, json={'credential_id': credential_ids[0], 'reasoning_effort': 'low'})
+    assert corrected.status_code == 200, corrected.text
+    receipt = await manager.start_message(session.id, 'Continue the same history after the combined correction')
+    completion = await asyncio.wait_for(receipt.wait(), 5)
+    assert completion.outcome.status == 'success', completion.outcome.message
+    assert manager.get_session(session.id).backend == 'codex'
+    assert json.loads(effects.read_text()) == {
+        'model': 'new-default-model', 'effort': 'low', 'tier': None, 'credential': credential_ids[0],
+    }
+
+
 @pytest.mark.parametrize("delete_previous", [False, True])
 @pytest.mark.parametrize("credential_style", ["home_dir", "env_secret"])
 async def test_next_request_uses_the_new_credential_instead_of_a_held_process(configuration_host, tmp_path, monkeypatch, delete_previous, credential_style):

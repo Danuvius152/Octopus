@@ -140,8 +140,8 @@ def test_legacy_batch_reads_history_and_restore_remain_compatible(store):
 
 def test_compact_navigation_bounds_errors_but_full_keeps_complete_diagnostics(store, monkeypatch):
     write(store, "one.md", "# Realtime\nRealtime evidence.\n")
-    state = store.index_state() | {"index_errors": [{"path": "p" * 200 + str(index), "error": "e" * 200} for index in range(5)]}
-    monkeypatch.setattr(store, "_index_state", lambda db=None: state)
+    state = store.index_state() | {"index_error_count": 5, "index_errors": [{"path": "p" * 200 + str(index), "error": "e" * 200} for index in range(5)]}
+    monkeypatch.setattr(store, "_index_state", lambda db=None, error_limit=None: state)
     for operation in [store.documents, lambda **kw: store.search("Realtime", **kw)]:
         compact = operation(view="compact")
         assert len(compact["index_errors"]) == 3

@@ -1,8 +1,23 @@
 import { beforeEach, expect, it } from "vitest";
-import { useSessionStore, type BgTask, type SubagentRun, type ResearchJob } from "../stores/sessionStore";
+import { useSessionStore, type BgTask, type Delegation, type SubagentRun, type ResearchJob } from "../stores/sessionStore";
+import { handleWsMessage } from "../hooks/useWebSocket";
 import { applySessionSnapshot } from "./hydrateSession";
 
-beforeEach(() => useSessionStore.setState({ subagents: {}, bgTasks: {}, research: {} }));
+beforeEach(() => useSessionStore.setState({ subagents: {}, bgTasks: {}, research: {}, delegations: {} }));
+
+it("retains committed return diagnostics when an older delegation list arrives", () => {
+  const store = useSessionStore.getState();
+  const running = { delegation_id: "child", work_id: "work", parent_session_id: "s", state: "running" } as Delegation;
+  store.setDelegations("s", [running]);
+  const before = useSessionStore.getState().delegations.s;
+  handleWsMessage({ type: "delegation_delivery", session_id: "s", delegation: {
+    ...running, state: "completed", terminal_disposition: "unknown", terminal_delivery_error: "Original ACK lost",
+  } });
+  store.setDelegations("s", [running], before);
+  expect(useSessionStore.getState().delegations.s[0]).toMatchObject({
+    state: "completed", terminal_disposition: "unknown", terminal_delivery_error: "Original ACK lost",
+  });
+});
 
 it("retains a newer subagent result across an older detail response", () => {
   const store = useSessionStore.getState();
@@ -16,6 +31,29 @@ it("retains a newer subagent result across an older detail response", () => {
   const nextStart = useSessionStore.getState();
   applySessionSnapshot("s", { messages: [], subagents: [{ ...running, summary: "new round" }], dispatch_state: dispatch }, nextStart);
   expect(useSessionStore.getState().subagents.s.call.status).toBe("running");
+});
+
+it("retains a delivery observation through list and completion updates while a detail request is pending", () => {
+  const store = useSessionStore.getState();
+  const original = { id: "bg", status: "completed", delivery_disposition: null, delivery_error: null } as BgTask;
+  store.setBgTasks("s", [original]);
+  handleWsMessage({ type: "bg_delivery", session_id: "s", task_id: "bg",
+    delivery_disposition: "unknown", delivery_error: "ACK lost" });
+  const listStart = useSessionStore.getState().bgTasks.s;
+  store.setBgTasks("s", [{ ...original, delivery_disposition: "unknown", delivery_error: "ACK lost" }], listStart);
+  handleWsMessage({ type: "bg_completed", session_id: "s", task_id: "bg", status: "completed", exit_code: 0 });
+  store.upsertBgTask("s", { ...original, stdout: "Full fetched output" }, original);
+  expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({
+    delivery_disposition: "unknown", delivery_error: "ACK lost", stdout: "Full fetched output",
+  });
+  // A detail request begun after that observation may report its later
+  // reconciliation. The old event alone must not freeze unknown forever.
+  const detailStart = useSessionStore.getState().bgTasks.s[0];
+  handleWsMessage({ type: "bg_completed", session_id: "s", task_id: "bg", status: "completed", exit_code: 0 });
+  store.upsertBgTask("s", { ...original, stdout: "Later fetched output" }, detailStart);
+  expect(useSessionStore.getState().bgTasks.s[0]).toMatchObject({
+    delivery_disposition: null, delivery_error: null, stdout: "Later fetched output",
+  });
 });
 
 it("merges background and research snapshots using request-start entities", () => {

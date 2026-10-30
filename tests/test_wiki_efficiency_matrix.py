@@ -2,8 +2,10 @@
 
 import asyncio
 import itertools
+import json
 import uuid
 from contextlib import ExitStack, contextmanager
+from pathlib import Path
 from time import perf_counter
 
 import pytest
@@ -18,8 +20,6 @@ from server.wiki.registry import registry
 from server.wiki.store import WikiStore, revision
 from tests import test_wiki_api as wiki_api
 from tests.test_wiki_write_gates import active_worker
-from tests.wiki_cost_probe import cost_probe as cost_probe
-from tests.wiki_cost_probe import cost_report as cost_report
 
 pytestmark = pytest.mark.wiki_perf
 client = wiki_api.client
@@ -112,13 +112,16 @@ def test_corpus_size_and_query_shapes(tmp_path, cost_probe, count):
         store.close()
 
 
-@pytest.mark.parametrize("count", [25, 2500])
-def test_incremental_changes(tmp_path, cost_probe, count):
+@pytest.mark.parametrize("count", [25, 100, 2500])
+def test_incremental_changes(tmp_path, cost_probe, count, request):
     root = tmp_path / "vault"
     target = corpus(root, count)
     with opened(root, tmp_path / "state") as store:
         identity = store.read(target, length=1)["id"]
-        options = {"roots": [root], "dimensions": {"documents": count}, "repeat": 3}
+        options = {"roots": [root], "dimensions": {"documents": count}, "repeat": 14 if count == 100 else 3}
+        if count == 100:
+            configured = request.config.getoption('wiki_baseline_reference')
+            options.update(baseline=True, reference=json.loads(Path(configured).read_text()) if configured else None)
         expected = {}
 
         def verify(_):

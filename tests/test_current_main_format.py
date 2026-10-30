@@ -10,7 +10,7 @@ from server.db.schema import UnsupportedMainStorage
 from tests.accounts import create_account
 
 
-@pytest.mark.parametrize('version', [0, 3, -1, 999])
+@pytest.mark.parametrize('version', [0, 3, 5, -1, 999])
 async def test_nonempty_format_mismatch_is_refused_before_opening_a_writer(tmp_path, version):
     path = tmp_path / 'owned.db'
     database = Database(str(path))

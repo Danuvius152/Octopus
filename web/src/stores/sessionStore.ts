@@ -11,6 +11,8 @@ import type {
   ApplicationRead as ApiApplicationRead,
   AttachmentMetadata as ApiAttachmentMetadata,
   BackendKind as ApiBackendKind,
+  BgTaskResponse as ApiBgTaskResponse,
+  DelegationResponse as ApiDelegationResponse,
   ConnectorCatalogEntry as ApiConnectorCatalogEntry,
   ConnectorInstallationInfo as ApiConnectorInstallationInfo,
   CredentialInfo as ApiCredentialInfo,
@@ -27,6 +29,9 @@ import type {
 // Provenance for immutable per-job updates, including WS and API receipts.
 // Snapshot rows stay unmarked. Weak references retain no second task state.
 const researchUpdates = new WeakSet<ResearchJob>();
+// Only delivery events advance this observation. Entity/list replacement does
+// not prove a new delivery fact; immutable copies retain their event marker.
+const bgDeliveryUpdates = new WeakMap<BgTask, symbol>();
 
 // Re-export contract types under the names the rest of the frontend
 // already uses. Source of truth is `web/src/api/contracts.ts`, regenerated
@@ -364,7 +369,8 @@ interface SessionStore {
   // The BgTaskChip in chat looks each task up by id; it lives next
   // to the `mcp__bg__run` tool_use block that started it.
   bgTasks: Record<string, BgTask[]>;
-  upsertBgTask: (sessionId: string, task: BgTask) => void;
+  upsertBgTask: (sessionId: string, task: BgTask, baseline?: BgTask | null) => void;
+  updateBgTaskDelivery: (sessionId: string, taskId: string, delivery: Pick<BgTask, "delivery_disposition" | "delivery_error">) => void;
   setBgTasks: (sessionId: string, tasks: BgTask[], baseline?: BgTask[]) => void;
   sessionAuxiliaryErrors: Record<string, Partial<Record<SessionAuxiliaryKind, string>>>;
   setSessionAuxiliaryError: (sessionId: string, kind: SessionAuxiliaryKind, error: string | null) => void;
@@ -375,7 +381,7 @@ interface SessionStore {
   // looking up the delegation_id in this map.
   // (agent-collaboration.md §6)
   delegations: Record<string, Delegation[]>;
-  setDelegations: (parentSessionId: string, ds: Delegation[]) => void;
+  setDelegations: (parentSessionId: string, ds: Delegation[], baseline?: Delegation[]) => void;
 
   // Sidebar visibility toggle for `origin === "delegation"` sessions.
   // Hidden by default so heavy fan-out doesn't flood the agent list;
@@ -453,6 +459,8 @@ export interface BgTask {
   idle_timeout_seconds?: number | null;
   timeout_seconds?: number | null;
   stop_reason?: string | null;
+  delivery_disposition?: ApiBgTaskResponse["delivery_disposition"];
+  delivery_error?: string | null;
 }
 
 // Live record of an agent-to-agent delegation, mirrored from
@@ -471,6 +479,8 @@ export interface Delegation {
   created_at: string;
   finished_at: string | null;
   error: string | null;
+  terminal_disposition?: ApiDelegationResponse["terminal_disposition"];
+  terminal_delivery_error?: string | null;
 }
 
 export const useSessionStore = create<SessionStore>((set, get) => ({
@@ -952,17 +962,47 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     else delete errors[sessionId];
     return { sessionAuxiliaryErrors: errors };
   }),
-  upsertBgTask: (sessionId, task) =>
+  upsertBgTask: (sessionId, task, baseline) =>
     set((s) => {
       const current = s.bgTasks[sessionId] || [];
       const idx = current.findIndex((t) => t.id === task.id);
+      const previous = current[idx];
+      const deliveryUpdate = previous && bgDeliveryUpdates.get(previous);
+      // Detail responses supply output, but must preserve delivery events
+      // observed after their request began, including an explicit clearing.
+      const incoming = baseline !== undefined && deliveryUpdate !== undefined
+        && deliveryUpdate !== (baseline ? bgDeliveryUpdates.get(baseline) : undefined)
+        ? { ...task, delivery_disposition: previous.delivery_disposition, delivery_error: previous.delivery_error }
+        : task;
+      const updated = { ...previous, ...incoming };
+      if (deliveryUpdate) bgDeliveryUpdates.set(updated, deliveryUpdate);
       const next = idx >= 0
-        ? [...current.slice(0, idx), { ...current[idx], ...task }, ...current.slice(idx + 1)]
-        : [...current, task];
+        ? [...current.slice(0, idx), updated, ...current.slice(idx + 1)]
+        : [...current, updated];
       return { bgTasks: { ...s.bgTasks, [sessionId]: next } };
     }),
+  updateBgTaskDelivery: (sessionId, taskId, delivery) =>
+    set((s) => {
+      const current = s.bgTasks[sessionId] || [];
+      const idx = current.findIndex((t) => t.id === taskId);
+      if (idx < 0) return s;
+      const updated = { ...current[idx], ...delivery };
+      bgDeliveryUpdates.set(updated, Symbol());
+      return { bgTasks: { ...s.bgTasks, [sessionId]: [
+        ...current.slice(0, idx), updated, ...current.slice(idx + 1),
+      ] } };
+    }),
   setBgTasks: (sessionId, tasks, baseline) =>
-    set((s) => ({ bgTasks: { ...s.bgTasks, [sessionId]: mergeCardSnapshot(tasks, s.bgTasks[sessionId] || [], baseline, (t) => t.id) } })),
+    set((s) => {
+      const current = s.bgTasks[sessionId] || [];
+      const updates = new Map(current.map((task) => [task.id, bgDeliveryUpdates.get(task)]));
+      const merged = mergeCardSnapshot(tasks, current, baseline, (t) => t.id);
+      for (const task of merged) {
+        const update = updates.get(task.id);
+        if (update) bgDeliveryUpdates.set(task, update);
+      }
+      return { bgTasks: { ...s.bgTasks, [sessionId]: merged } };
+    }),
 
   research: {},
   upsertResearch: (sessionId, job) =>
@@ -995,9 +1035,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     ) } })),
 
   delegations: {},
-  setDelegations: (parentSessionId, ds) =>
+  setDelegations: (parentSessionId, ds, baseline) =>
     set((s) => ({
-      delegations: { ...s.delegations, [parentSessionId]: ds },
+      delegations: { ...s.delegations, [parentSessionId]: mergeCardSnapshot(
+        ds, s.delegations[parentSessionId] || [], baseline, (round) => `${round.delegation_id}:${round.work_id}`,
+      ) },
     })),
 
   showDelegations: localStorage.getItem("octopus_show_delegations") === "true",

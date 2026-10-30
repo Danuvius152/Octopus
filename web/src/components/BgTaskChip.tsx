@@ -99,10 +99,11 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
     const url = `${window.location.origin}/api/sessions/${encodeURIComponent(
       sessionId
     )}/bg-tasks/${encodeURIComponent(taskId)}`;
+    const baseline = useSessionStore.getState().bgTasks[sessionId]?.find((t) => t.id === taskId) ?? null;
     fetch(url, { headers: { Authorization: `Bearer ${token}` } })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        if (data) upsertBgTask(sessionId, data as BgTask);
+        if (data) upsertBgTask(sessionId, data as BgTask, baseline);
       })
       .catch(() => {});
   }, [sessionId, taskId, token, task, upsertBgTask]);
@@ -114,10 +115,11 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
     const url = `${window.location.origin}/api/sessions/${encodeURIComponent(
       sessionId
     )}/bg-tasks/${encodeURIComponent(taskId)}`;
+    const baseline = useSessionStore.getState().bgTasks[sessionId]?.find((t) => t.id === taskId) ?? null;
     fetch(url, { headers: { Authorization: `Bearer ${token}` } })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
-        if (data) upsertBgTask(sessionId, data as BgTask);
+        if (data) upsertBgTask(sessionId, data as BgTask, baseline);
       })
       .catch(() => {});
   }, [expanded, sessionId, taskId, token, upsertBgTask]);
@@ -220,6 +222,13 @@ export function BgTaskChip({ sessionId, taskId }: Props) {
       {stopReason && (
         <div className="border-t border-border/60 px-3 py-1 text-[11px] text-muted-foreground">
           {stopReason}
+        </div>
+      )}
+      {task.delivery_disposition && (
+        <div className="border-t border-border/60 px-3 py-1 text-[11px] text-muted-foreground">
+          <span>{task.delivery_disposition === "unknown"
+            ? "Return admission unconfirmed" : "Automatic return stopped"}</span>
+          {task.delivery_error && <div>{task.delivery_error}</div>}
         </div>
       )}
       {!expanded && lastOut && (

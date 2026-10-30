@@ -6,7 +6,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
 /** Radix opens its menu on pointerdown, which jsdom doesn't synthesize — the
  * keyboard path (Enter on the trigger) is equivalent and is the one a
@@ -92,6 +92,41 @@ describe("CredentialPicker", () => {
     expect(screen.getByLabelText(/Change this session/)).toHaveTextContent(
       "archer-cc"
     );
+  });
+
+  it("keeps an explicit credential with missing details distinct from the host login", () => {
+    mount(session({ credential_id: "missing-details" }), []);
+    expect(screen.getByLabelText(/Change this session/)).toHaveTextContent("selected credential");
+    expect(screen.getByLabelText(/Change this session/)).not.toHaveTextContent("host default");
+  });
+
+  it("shows a rejected inherited binding change and preserves the current override", async () => {
+    fetchMock.mockResolvedValue(new Response(JSON.stringify({ detail: "Credential backend does not match claude-code" }), { status: 400 }));
+    mount(session({ credential_id: "c1" }), [credential()], [agent({ credential_id: "wrong-backend" })]);
+    openMenu();
+    fireEvent.click(screen.getByText(/Agent's credential/));
+    expect(await screen.findByRole("alert")).toHaveTextContent("Credential backend does not match claude-code");
+    expect(useSessionStore.getState().sessions[0].credential_id).toBe("c1");
+  });
+
+  it.each([false, true])("keeps an earlier session's rejection out of the selected session (late=%s)", async (late) => {
+    let reject!: (response: Response) => void;
+    fetchMock.mockImplementation(() => new Promise<Response>((resolve) => { reject = resolve; }));
+    const a = session({ id: "a", credential_id: "c1" });
+    const b = session({ id: "b", credential_id: "c1" });
+    const { rerender } = mount(a, [credential()]);
+    openMenu();
+    fireEvent.click(screen.getByText(/Host default sign-in/));
+    await waitFor(() => expect(reject).toBeTypeOf("function"));
+    const refused = () => reject(new Response(JSON.stringify({ detail: "Original session A rejection" }), { status: 400 }));
+    if (!late) {
+      await act(async () => refused());
+      expect(await screen.findByRole("alert")).toHaveTextContent("Original session A rejection");
+    }
+    rerender(<CredentialPicker session={b} />);
+    if (late) await act(async () => refused());
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByLabelText(/Change this session/)).toBeEnabled();
   });
 
   it("offers only credentials for this session's engine", () => {

@@ -11,10 +11,10 @@ Auth: same bearer token as every other API surface.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import ConfigDict
+from pydantic import BaseModel, ConfigDict
 
 from ..auth import verify_token
 from ..bg_tasks import BgTaskError, BgTaskLimits, BgTaskRecord, bg_task_manager
@@ -30,6 +30,27 @@ class StartBgTaskRequest(BgTaskLimits):
     model_config = ConfigDict(extra="forbid")
     command: str
     description: str | None = None
+
+
+class BgTaskResponse(BaseModel):
+    id: str
+    session_id: str
+    command: str
+    description: str | None
+    working_dir: str
+    status: Literal["pending", "running", "completed", "failed", "cancelled", "interrupted"]
+    exit_code: int | None
+    stdout: str
+    stderr: str
+    truncated: bool
+    started_at: str
+    completed_at: str | None
+    idle_timeout_seconds: int | None
+    timeout_seconds: int | None
+    stop_reason: str | None
+    work_id: str | None
+    delivery_disposition: Literal["stopped", "unknown"] | None
+    delivery_error: str | None
 
 
 def _record_to_json(rec: BgTaskRecord) -> dict[str, Any]:
@@ -50,6 +71,8 @@ def _record_to_json(rec: BgTaskRecord) -> dict[str, Any]:
         "timeout_seconds": rec.timeout_seconds,
         "stop_reason": rec.stop_reason,
         "work_id": rec.work_id,
+        "delivery_disposition": rec.delivery_disposition,
+        "delivery_error": rec.delivery_error,
     }
 
 
@@ -70,6 +93,7 @@ def _require_session(
 @router.post(
     "/{session_id}/bg-tasks",
     status_code=status.HTTP_201_CREATED,
+    response_model=BgTaskResponse,
 )
 async def start_bg_task(
     session_manager: SessionMgr,
@@ -109,7 +133,7 @@ async def start_bg_task(
     return _record_to_json(rec)
 
 
-@router.get("/{session_id}/bg-tasks")
+@router.get("/{session_id}/bg-tasks", response_model=list[BgTaskResponse])
 async def list_bg_tasks(
     session_manager: SessionMgr,
     session_id: str,
@@ -128,7 +152,7 @@ async def list_bg_tasks(
     return [_record_to_json(r) for r in rows]
 
 
-@router.get("/{session_id}/bg-tasks/{task_id}")
+@router.get("/{session_id}/bg-tasks/{task_id}", response_model=BgTaskResponse)
 async def get_bg_task(
     session_manager: SessionMgr,
     session_id: str,

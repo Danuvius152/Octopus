@@ -1,9 +1,11 @@
 """The evaluation submits raw human questions through the real WS handler."""
 
 import asyncio
+import hashlib
 import json
 import sys
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,8 +19,16 @@ from server.sessions import SessionManager
 from tests import cli_gate, conftest
 from tests.accounts import create_account
 from tests.callback_api import start_callback_api
-from tests.test_wiki_chat_real import OrdinaryChatProbe, guarded_chat_credential
-from tests.wiki_query_evidence import collect_evaluation
+from tests.test_wiki_chat_real import OrdinaryChatProbe
+from tests.test_wiki_chat_real import ordinary_chat_probe as ordinary_chat_probe
+from tests.test_wiki_query_retirement import (
+    controlled_query_cli as controlled_query_cli,
+)
+from tests.wiki_query_evidence import (
+    collect_evaluation,
+    guarded_credential,
+    source_manifest,
+)
 
 
 async def test_losing_selected_credential_between_questions_forbids_default_fallback(tmp_path):
@@ -29,11 +39,74 @@ async def test_losing_selected_credential_between_questions_forbids_default_fall
         return next(available)
 
     manager = SimpleNamespace(_resolve_credential=actual_resolution)
-    resolve = guarded_chat_credential(manager, "registered", selected.home_dir)
+    resolve = guarded_credential(manager, "registered", selected.home_dir)
     session = SimpleNamespace(credential_id="registered")
     assert await resolve(session, None, None) is selected
     with pytest.raises(AssertionError, match="default-login fallback forbidden"):
         await resolve(session, None, None)
+
+
+class TestRegisteredChat:
+    @pytest.fixture(autouse=True)
+    def registration(self, controlled_query_cli, tmp_path, monkeypatch, request):
+        root = tmp_path / 'frozen-source'
+        root.mkdir()
+        (root / 'note.md').write_text('# Synthetic evidence\n')
+        homes = tmp_path / 'homes'
+        (homes / 'registered').mkdir(parents=True)
+        (homes / 'registered/auth.json').write_text('{}')
+        monkeypatch.setattr(settings, 'codex_home_dir', str(homes))
+        harness = get_harness('codex')
+        catalog = replace(harness.model_settings(None), models=[], reasoning_efforts=['max'], service_tiers=['default'])
+        monkeypatch.setattr(harness, 'model_settings', lambda credential: catalog)
+        manifest = json.dumps(source_manifest(root), ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode()
+        registration = {'source_root': str(root), 'credential_id': 'registered',
+                        'source_manifest_sha256': hashlib.sha256(manifest).hexdigest(),
+                        'questions': [{'id': 'chat-registered', 'question': 'Read the source'}],
+                        'profile': {'model': 'gpt-6.1-sol', 'reasoning_effort': 'max', 'service_tier': 'default'}}
+        path = tmp_path / 'registration.json'
+        path.write_text(json.dumps(registration))
+        monkeypatch.setattr(request.config.option, 'wiki_chat_registration', str(path))
+
+    async def test_profile_and_selected_login_reach_real_websocket_execution(self, ordinary_chat_probe):
+        probe, registration = ordinary_chat_probe
+        assert await probe.ask('Read the source') == 'Controlled source answer'
+        session = probe.manager.get_session(probe.last_session_id)
+        assert session.credential_id == 'registered'
+        rendered, = probe.input_context['rendered_attempt_profiles']
+        assert rendered['configured_effort'] == 'max'
+        assert probe.input_context['configured_profile'] == 'gpt-6.1-sol/max/default'
+        assert probe.root != Path(registration['source_root'])
+        (probe.root / 'note.md').write_text('# Changed in this case only\n')
+        assert (Path(registration['source_root']) / 'note.md').read_text() == '# Synthetic evidence\n'
+
+    async def test_repeated_cancellation_cannot_release_original_chat_writer(self, ordinary_chat_probe, monkeypatch):
+        probe, _ = ordinary_chat_probe
+        writing, release, recorded = asyncio.Event(), asyncio.Event(), asyncio.Event()
+        original = probe.manager._handle_result_event
+
+        async def late_result(session, attempt, event):
+            writing.set()
+            await release.wait()
+            await original(session, attempt, event)
+            recorded.set()
+
+        monkeypatch.setattr(probe.manager, '_handle_result_event', late_result)
+        call = asyncio.create_task(probe.ask('Read the source'))
+        try:
+            await asyncio.wait_for(writing.wait(), 3)
+            call.cancel()
+            await asyncio.sleep(.05)
+            call.cancel()
+            await asyncio.sleep(.1)
+            assert not call.done(), 'Chat released its failed waiter before the original writer retired'
+            release.set()
+            with pytest.raises(asyncio.CancelledError):
+                await call
+            assert recorded.is_set()
+        finally:
+            release.set()
+            await asyncio.gather(call, return_exceptions=True)
 
 
 @pytest.mark.parametrize("knowledge_eval", [False, True])

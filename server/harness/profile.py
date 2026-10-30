@@ -210,7 +210,8 @@ class ToolPolicySupport:
             entries = value.splitlines() if isinstance(value, str) else value or []
             if not supported and any(entry.strip() for entry in entries):
                 raise ValueError(
-                    f"{backend} cannot enforce {field_name}. Clear this policy or select a backend that supports it."
+                    f"{backend} cannot enforce {field_name}. Clear this Agent policy in Agent settings "
+                    "or select a backend that supports it."
                 )
 
 

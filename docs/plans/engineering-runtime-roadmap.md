@@ -1,11 +1,12 @@
 # Octopus 工程收敛与运行时路线
 
-> **Status:** proposed — 已选择的四阶段方向与范围；各项修复、接口收敛及后端迁移仍须分别实施和验收。
+> **Status:** in-progress — 第一阶段行为已实现并归入当前合同；统一接口及 Codex/DeepSeek 迁移仍待实施，发布按实际回执验收。
 
 > 日期：2026-10-30（Asia/Shanghai）。源码核查基线：`1126d106d95af582ecf989b7c9206ec48c0a09c2`。
 > 历史架构候选补充核查：`0ca897e97189c5f213a658d986cbd67f4d69c5e3` 及当前文档工作树，范围见§7.3。
 >
-> 状态：设计与评审合并；本轮只交付文档。待办修复、重构及迁移不代表已实施、验收或部署；已有实现与新增推荐在对应条目中分别标注。
+> 第一阶段合同更新：2026-10-31，实施起点 `5867e6c5a92e47869859119b56d00995ec995dd4`。
+> 初始设计基线不代表当前运行版本。实现、验证与发布分别取证；第二至四阶段的提案仍未实施。
 >
 > 本文替代原 `future.md`、2026-10-29 架构路线、2026-10-29 回复调度指南及 2026-10-28 行动指南。按最新源码和本次访谈重新裁决，不按旧票号拼接待办。长期当前合同由 `implemented/` 各主题维护；本文只拥有未来变更的路线、取舍与范围。
 
@@ -102,61 +103,58 @@ Sapphire/SmartReader 与受限 App 客户端、更丰富的任务展示，以及
 <a id="phase-1"></a>
 ## 2. 第一阶段：当前可处理的问题、Wiki 效率与工程约定
 
-### 2.1 当前问题重新分类
+### 2.1 已实现的行为与当前 owner
 
-| 项目 | 最新代码事实与裁决 | 本阶段行动与完成条件 |
-| --- | --- | --- |
-| BG／委派永久拒绝后仍重试 | `AdmissionIntegrityError` 是效果前的永久拒绝；BG、委派终态及问题的部分路径仍泛异常循环，Research 已分类 | 修投递分类；业务结果与材料保留，自动投递结束并给出原因，不重跑原命令或子任务 |
-| 原 N3：默认配置与旧会话不兼容 | 保存入口部分检查旧会话，空 effort/tier 跳过，工具策略不触发同一检查；这证明校验范围不一致，不证明必须禁止默认变更 | 按§1.3统一规则：校验候选 Agent 自身；说明旧会话继承影响；实际使用时校验有效配置。旧会话不兼容不自动阻止改默认 |
-| 不支持的控制项 | backend 不提供 effort/tier 时，部分旧会话检查被跳过；Claude renderer 未因此获得相应能力 | 核对实际执行路径；明确拒绝或如实呈现不支持，不能把未执行的参数显示成已生效。只对有证据的约束校验，不全面禁用自定义模型名 |
-| Codex 原生尾部 | 父 success 可以伴随未完成 helper 被退休为 `interrupted/parent_done`，现有测试固定了这一范围 | 作为本次产品目标下的完成范围缺口，第一阶段保留反例，第二阶段定义合同，第三阶段完成修复；不靠 exec 提示词或延长等待临时补齐 |
-| Wiki 文档格式号漂移 | summary 写16，`schema.VERSION` 与存储合同为17 | 本轮文档整理移除重复版本号，引用权威存储合同；不涉及数据库转换 |
-| 接口耦合 | Wiki 读取执行私有字段、能力从 stdin/reusable 推导、各来源重复接纳顺序 | 第二阶段收敛；没有死锁或错误放行证据的，不写成已复现生产 bug |
+第一阶段的代码、定向审查、默认提交门禁及本机离线/实机验证已完成；G1 的
+最终交接和部署仍以对应版本的审查及发布回执为准，源码状态不证明生产已升级。
 
-源码入口：[Agent 保存](../../server/routers/agents.py)、[有效设置](../../server/harness/model_settings.py)、[凭据](../../server/sessions/credentials.py)、[工具能力](../../server/harness/profile.py)、[BG](../../server/bg_tasks.py)、[委派](../../server/delegations.py)、[Research 分类](../../server/research/manager.py)。
+| 行为 | 当前合同与已实现边界 |
+| --- | --- |
+| BG、委派终态和问题返回 | [执行合同](../implemented/architecture-contract.md#输入完成与资源退休)拥有原身份、receipt 优先、永久停止、unknown 有限观察及来源 writer 保责；[委派](../implemented/agent-collaboration.md)拥有 round/问题生命周期；Research 原分类保留。 |
+| Agent 默认与旧会话 | [模型设置](../implemented/model-reasoning.md)允许合法默认保存，旧会话保留 backend/历史，按有效组合修正后继续；共享纯校验、实际参数、捕获和效果前授权均已覆盖。 |
+| Wiki 读取与查询说明 | [Wiki 合同](../implemented/wiki-development-summary.md)拥有四入口长度边界、实际指南注入、同版正文复用及完整覆盖；评测失败完整收束先于 API/DB 退出。 |
+| compact 投影与健康摘要 | lexical 页内章节批取、exact 先过滤/count/分页，准确 count 与有界样本已实现；排序、Unicode、分页、live revision 与维护准入保持。 |
+| 可复现成本与环境 | [验证方法](../testing.md#wiki-evaluation-method)、[解析约束](../../constraints-wiki.txt)和冻结合成参考保留原判据与适用条件，专项仍独立 opt-in。 |
 
-原 N1 删除前退休、N2 Wiki 参数合同、N4 排序事务、N5/N6 列表协调、N7 Research 分类已有实现；不重复列作开发任务。应用成功删除后旧开发聊天仍可重新创建目录，是已保留行为，不恢复“成功后永久禁写”提案。旧修复的证据不替代本次新代码验收。
+删除前退休、排序事务和列表协调的既有合同继续保留。应用成功删除后旧开发
+聊天仍可重新创建目录，不恢复“成功后永久禁写”提案。完整原生尾部、公共返回
+接管、配置编排中心及统一退休查询/Owner 排空接口仍属于后续阶段。
 
 ### 2.2 投递错误分类：先修完整行为，再收回共同编排
 
-| 观察结果 | 来源应如何处理 |
-| --- | --- |
-| 已有原 receipt | 观察同一回执，不读已丢失正文、不再次唤醒或创建输入 |
-| 明确未接纳且暂时 busy/capacity | 来源沿原 delivery 重试；不创建新的工作身份 |
-| 本次永久完整性拒绝 | 结束自动投递，保全来源结果、正文和可见错误 |
-| 提交可能发生但确认丢失 | 只核对原 receipt；无可靠证据保留 unknown，后一次拒绝不能推翻此前未知 |
-| `SubmissionConflict`／程序错误 | 保留原异常和诊断，不当作 duplicate、成功或普通重试 |
-| 存储权威失信 | 交给既有 fail-stop；不在同代不断查库猜测提交结果 |
+返回真值表、各来源的业务材料/诊断/恢复差异及真实消费者统一归
+[执行合同](../implemented/architecture-contract.md#输入完成与资源退休)。当前回归
+经过真实 SQLite/Owner，覆盖永久拒绝、ACK 丢失、冲突、问题过期、人工回答、
+删除/归档与写入失败；通过现有命令重入保责，没有新返回账本或常驻观察器。
 
-来源业务成功、投递成功、父模型处理完成分别取证。修复的是返回交付循环，不把投递错误倒写为后台命令失败。沿用 Research 的分类依据；共同类型和顺序由第二阶段纳管，不另建通用重试引擎。
-
-验收覆盖真实 SQLite/Owner 的永久拒绝、ACK 丢失、正文冲突、取消、问题过期、归档唤醒和存储失信。旧报告曾记录 BG/委派探针，但本轮未取得其可执行附件；当前依据为源码与已有 [Research 回归](../../tests/test_research_session_return.py)，不宣称已重新复现全部场景。
+第二阶段迁移[共同接管接口](task-return-admission.md)时必须保留这些事实：来源
+结果、接纳、父处理、通知和退休分别取证；未知不授权重放，正常返回仍按成功接纳
+次序逐条派发。接口收敛不把各来源不同的业务结算或恢复策略强行合并。
 
 ### 2.3 Wiki：优先减少数据搬运，保持检索与阅读合同
 
-当前已有章节 FTS5、中文分词/bigram、身份与路径匹配、文档去重、overview/compare、compact、read_many、增量同步及 live revision 校验。不是每次搜索都扫描全库文件。查询调用方式、数据库投影和真实文件读取是不同成本。
+当前投影、NUL 兼容例外、完整章节字段匹配、exact 身份语义及健康事实归
+[Wiki 合同](../implemented/wiki-development-summary.md)。冻结参考逐字段保留页序、
+total/cursor、revision、sections/role、matched fields 和原文坐标；准确性先于搬运。
+最终完整测量遵循最初阈值；早先失败及参考身份修正的来由保留，不能用新容差
+或删字段换取通过。固定100篇/长文/错误增长的结论及模型用量限制见该合同的
+[版本化证据](../implemented/wiki-development-summary.md#historical-evidence)。
 
-| 优先级 | 工作 | 不变量与验收 |
-| --- | --- | --- |
-| 先做 | 已知路径直接 read；发现用 compact，读取用 read_many；复用本调用方上下文中已取得的同版材料 | 比较工具轮数、重复输入、字节和证据完整性；授权继续校验，不能跨任务借阅读证明 |
-| 高 | compact 搜索只获取必要列、命中窗口及字段匹配证据 | 当前最终候选仍 `SELECT d.*`；分别减少全文搬运和查询次数。排序、total/cursor、revision、section role、`matched_fields` 与中文坐标等价 |
-| 高 | 健康诊断同快照计算准确 count 与有界样本 | `_index_state` 当前先物化全部错误再截样本；保留完整诊断入口，不维护第二份计数缓存 |
-| 测量后 | full 导航当前页依赖批读；宽查询/深分页的查询计划 | 用 SQL 数、EXPLAIN、内存及实际延迟定位；不能截断候选牺牲覆盖与去重 |
-| 条件性 | 长文 reader handle、多库公平性、语义/混合检索 | 先证明 live-read、实际积压或召回缺口；维护修改/删除/重绑/撤权失效语义 |
-
-实现入口：[retrieval.py](../../server/wiki/retrieval.py)、[search_index.py](../../server/wiki/search_index.py)、[store.py](../../server/wiki/store.py)、[read_response.py](../../server/wiki/read_response.py)。只批量读取全文并未解决全文搬运；只截 snippet 也可能丢掉命中章节窗口之外的 `matched_fields` 证据。Unicode code point、UTF-8 字节和浏览器 UTF-16 坐标分别核验。
-
-旧报告两篇约7.5万字符文档的探针记录：compact search 候选字符串151,266字节、最终JSON 2,057字节；compact list 为1,148/1,077字节。后者是另一种操作，不是优化后搜索。本轮源码仍可见这一路径；旧数字不作为当前生产延迟或提速倍数。
-
-建立固定问题/预期段落与规模语料，分别测冷索引、热搜索、live read、批量变更同步和维护队列。观察 SQL/文件读取次数及字节、峰值内存、p50/p95、Recall@k、目标章节与 revision；没有收益就不引入新状态或缓存。`knowledge_eval`、`wiki_perf` 继续独立 opt-in，不恢复已暂停的多账户压力测试。
+full 当前页依赖批读、宽查询/深分页计划、reader handle、多库公平性和语义检索
+保留测量后再选择的条件。已有章节 FTS5、中文分词/bigram、去重、overview/compare
+及增量同步不重写；不能通过减少候选牺牲召回。查询调用、SQLite 搬运和 live 文件
+读取分别衡量，不把 JSON 小或调用少直接解释为 token/整体延迟收益。
 
 ### 2.4 文档与工程约定
 
-一个解释有一个正文 owner：根 AGENTS 管高频工程规则；架构/主题 plans 管当前合同与决策；testing/local-wsl 管验证与本机操作；review 管固定版本证据和路线裁决；persona 管角色，memory 只存偏好与短入口。
+一个解释有一个正文 owner：根 AGENTS 管高频工程规则，implemented 管当前合同，
+plans 保留未完成范围，testing/local-wsl 管验证与本机操作。活动审阅和临时材料
+退出前将必要理由及证据归回 owner；persona 管角色，memory 只存偏好与短入口。
+代码、受影响验证和审查收敛后统一整理长期文档，不逐补丁复制过程记录。
 
-本次同时修复入链和直接误导实施的文档漂移：Harness 旧“差异只是序列化”“Codex 工具限制静默忽略”不能再作当前指导；DSH 旧 rc.2/headless 条件稿不能覆盖本轮原生 API 事实；原生子任务卡片 shipped 也不能冒充完整尾部 shipped。只改文档不改变已保存 persona、memory 配置或运行服务。
-
-每个实质改动简述事实、writer、提交点、消费者与失败范围；普通局部编辑不强制生成票据或状态机。类型边界优先覆盖新协议输入、结果、凭据和接纳，按实际改动收窄 mypy 豁免；WS 事件按真实类型逐步收敛。记录可重建的 Python 依赖和 CLI/schema 基线，前端沿用锁文件；不以此启动全仓 strict、通用 ORM 或新的包管理器迁移。
+当前解析链使用现有 venv/pip 和固定约束，前端沿用锁文件。新字段及校验边界已
+同步类型，没有全仓 strict、ORM 或包管理器迁移。Harness 的能力拒绝、当前
+Wiki 格式和完整原生尾部范围各有权威；原生卡片可见不证明完整尾部已完成。
 
 <a id="phase-2"></a>
 <a id="harness-protocol-contract"></a>

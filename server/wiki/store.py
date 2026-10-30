@@ -320,20 +320,33 @@ class WikiStore:
             self.release_events()
         self._notify_retired()
 
-    def index_state(self) -> dict[str, Any]:
+    def index_state(self, *, error_limit: int | None = None) -> dict[str, Any]:
         with self.operation():
-            return self._index_state()
+            return self._index_state(error_limit=error_limit)
 
-    def _index_state(self, db: sqlite3.Connection | None = None) -> dict[str, Any]:
+    def _index_state(self, db: sqlite3.Connection | None = None, *, error_limit: int | None = None) -> dict[str, Any]:
         from .index_state import DOCUMENT_ERROR, summary
 
+        if error_limit is not None and (type(error_limit) is not int or error_limit < 0):
+            raise ValueError("Diagnostic sample limit must be a nonnegative integer")
         with self.connect() if db is None else contextlib.nullcontext(db) as connection:
-            if db is None:
+            if not connection.in_transaction:
                 connection.execute("BEGIN")
             state = summary(connection, self.events.needs_reconciliation)
-            errors = [{"path": row["path"], "error": json.loads(row["metadata"]).get("frontmatter_error") or json.loads(row["metadata"]).get("error", "Extraction failed")} for row in connection.execute(f"SELECT path,metadata FROM documents WHERE {DOCUMENT_ERROR}")]
-        errors.extend({"path": "", "error": error} for error in state.pop("index_diagnostics"))
-        state.pop("index_error_count")
+            diagnostics = state.pop("index_diagnostics")
+            errors = []
+            if state["index_error_count"] > len(diagnostics) and error_limit != 0:
+                query = f"SELECT path,metadata FROM documents WHERE {DOCUMENT_ERROR} ORDER BY id"
+                parameters = () if error_limit is None else (error_limit,)
+                if error_limit is not None:
+                    query += " LIMIT ?"
+                for row in connection.execute(query, parameters):
+                    metadata = json.loads(row["metadata"])
+                    errors.append({"path": row["path"], "error": metadata.get("frontmatter_error") or metadata.get("error", "Extraction failed")})
+            remaining = diagnostics if error_limit is None else diagnostics[:max(0, error_limit - len(errors))]
+            errors.extend({"path": "", "error": error} for error in remaining)
+        if state["index_error_count"] > len(errors):
+            state["index_errors_truncated"] = True
         return {**state, "index_errors": errors, "observer_mode": self.events.mode}
 
     def synchronize(self, *, dirty=True, removed_paths=frozenset(), journal_moves=(), source_plans=None) -> None:
@@ -966,6 +979,7 @@ class WikiStore:
             raise WikiError("Unknown document view", 422)
         if directory:
             self.path(directory.rstrip("/"))
+        from .read_response import COMPACT_ERROR_LIMIT, compact_index
         from .retrieval import compact, continuation, pagination
 
         with self.connect() as db:
@@ -997,8 +1011,7 @@ class WikiStore:
                 [*arguments, limit, offset],
             ).fetchall()
             items = [compact(self, row) if view == "compact" else self.navigation(row, db=db) for row in rows]
-            state = self._index_state(db)
-        from .read_response import compact_index
+            state = self._index_state(db, error_limit=COMPACT_ERROR_LIMIT if view == "compact" else None)
 
         result = {
             "items": items,
@@ -1018,7 +1031,7 @@ class WikiStore:
     def graph(self, doc, offset=0, limit=100, cursor=None, *, model_response=False):
         if offset < 0 or not 1 <= limit <= 100:
             raise WikiError("Invalid graph pagination", 422)
-        center = self.read(doc, length=1)
+        center = self.read(doc, length=1, index_error_limit=0)
         return catalog.graph(self, center["id"], offset, limit, cursor, model_response=model_response)
 
     def read(
@@ -1030,9 +1043,11 @@ class WikiStore:
         expected_revision: str | None = None,
         page: int | None = None,
         location: str | None = None,
+        index_error_limit: int | None = None,
     ) -> dict[str, Any]:
         document, _ = self.read_snapshot(
             doc, start=start, length=length, expected_revision=expected_revision, page=page, location=location,
+            index_error_limit=index_error_limit,
         )
         return document
 
@@ -1046,6 +1061,7 @@ class WikiStore:
         expected_revision: str | None = None,
         page: int | None = None,
         location: str | None = None,
+        index_error_limit: int | None = None,
     ) -> tuple[dict[str, Any], bytes]:
         """Return the public read and the exact bytes from which it was indexed."""
         if start < 0 or not 1 <= length <= 24000 or (page is not None and page < 1):
@@ -1097,7 +1113,7 @@ class WikiStore:
                 "next_start": end - page_offset if end < page_end else None,
                 "line_start": lines.line(start),
                 "line_end": lines.line(end),
-                "freshness": "live", **self._index_state(db=db),
+                "freshness": "live", **self._index_state(db=db, error_limit=index_error_limit),
                 **({"source_location": location} if location is not None else {}),
             }, raw
 
