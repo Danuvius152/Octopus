@@ -256,7 +256,7 @@ Claude held process 的 idle handler 曾解决真实问题：首个 result 后�
 
 原 Harness 持有进程组、连接、I/O、lease、临时配置及未退出引用；adapter 管协议和原生因果；SessionOwner 管输入与唯一 terminal/receipt。捕获 account/session/request/attempt/work、credential、原 backend handle，再关联 connection/thread/turn/item；Stop、晚 ACK、问题答案都使用原绑定。
 
-本机核查为 **Codex CLI 0.165.0**，已无模型调用生成 schema。`TurnSteerParams` 必须包含 `threadId/input/expectedTurnId`，响应含 `turnId`；可选 `clientUserMessageId` 不是已证明的幂等执行键。官方接口提供握手、thread start/resume、turn start/steer/interrupt 与完成通知；`turn/completed` 仍须检查状态。依据：[官方协议](https://learn.chatgpt.com/docs/app-server)。schema 形状不证明尾部或账号配置已联调。
+2026-11-01 本机锁版核查为 **Codex CLI 0.166.0**，已由该 binary 导出含实验字段的 schema，并以本地可控 provider 执行真实 stdio RPC；版本、限制与结果见 [G0 证据](#codex-g0-evidence)。`TurnSteerParams` 必须包含 `threadId/input/expectedTurnId`，响应含 `turnId`；可选 `clientUserMessageId` 不是已证明的幂等执行键。官方接口提供握手、thread start/resume、turn start/steer/interrupt 与完成通知；`turn/completed` 仍须检查状态。依据：[官方协议](https://learn.chatgpt.com/docs/app-server)。schema 形状不证明尾部或账号配置已联调。
 
 将 controller 检查点比较/更新、thread 恢复与业务输入合并到同一受管宿主，避免普通对话先开控制 writer 再开 exec。稳定 controller 与当轮上下文分离，变化更新一次，compaction 后仍可核验；controller 注入未知不能继续业务输入。跨请求配置安装不延长旧 Wiki grant 或复用旧 bearer。
 
@@ -294,6 +294,15 @@ Stop 先关闭新发送与工具准入、撤原 lease，随后对原活动和受
 helper 失败必须可见并进入父处理；父明确处理该失败后仍可能成功，不能把“任何 child failed”简单传播为整个请求失败。仍必需但未处理的结果、未知发送或被提前截断的尾部不能伪报完整成功。
 
 **协议证据不足时，迁移保持未完成。** 先做最小锁版实验，明确缺失的原生事实；不以日志轮询、延长超时、提示词补保证或宿主自动 exec/resume 报告冒充修复。不在本方案中默许自维护 Codex fork、通用持久任务树或无限未来任务保证；如确需改变上游接口，再把该具体依赖及维护成本带回设计裁决。
+
+**当前 G0 为 needs-info，后续实现阻断。** 0.166.0 的根级晚回正例成立，但
+root→child→grandchild 中，普通 final 后空闲的中间父不能靠该版本的
+`wake_on_agent_messages` 自动处理孙结果。直接对 v2 child 的 `turn/start`
+也被协议拒绝。尚未证明 root-only 继续能同时满足合法递归推进、父处理证据与
+范围闭合，不能据此开始依赖 G0 的 driver 预重构或普通请求接入。所需解除条件是：
+锁版接口能提供或组合证明必需返回进入父后继模型输入并被处置、再派生使候选失效、
+唯一推进者与当前请求范围封口；随后补全输入竞争、失败回流与 Stop 等验收。
+这不宣称所有 root-only 方案均不可能，也不授权降低完成门槛或维护上游 fork。
 
 <a id="codex-app-server-compatibility"></a>
 ### 4.6 消费者、历史与观测
@@ -486,7 +495,44 @@ Octop/Okou等外部项目的有界缓冲、身份保留、源会话串行和完�
 
 ### 7.2 外部版本证据与可重复核查
 
-Codex：本机 `codex --version` 为0.165.0，`codex app-server generate-json-schema --out <临时目录>` 成功。已核对steer必填字段、响应、完成与thread通知；没有运行模型、认证、实际RPC交互或完整尾部测试。旧稿0.164.0/0.166.0-alpha.1仅是历史环境证据。
+<a id="codex-g0-evidence"></a>
+#### Codex G0：0.166.0
+
+2026-11-01 核对 standalone Linux musl binary，SHA256 为
+`b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8`；
+[发行版](https://github.com/openai/codex/releases/tag/rust-v0.166.0) 的 tag 解析到
+`6ff1e1ca3b30fc8b914720681fcf5fe62e95f856`。官方 sigstore Rekor body 声明的 binary
+digest 与本机相同；本次未执行签名信任验证。由该 binary 执行
+`app-server generate-json-schema --experimental --out <隔离目录>`，bundle SHA256 为
+`8aabf260bb66e9ca9ae5d20253f443971834644fe4659c85f8b1cc9e1d22dd5c`。
+
+真实 binary 配合 loopback Responses SSE 的确定性实验，使用独立 CODEX_HOME/cwd、
+read-only、low effort、无登录及无 MCP；显式开启 multi_agent_v2 与 wake_on_agent_messages。
+先由 exec 建立历史并退出，再由新 stdio 宿主精确 resume，确认旧内容后才发送业务输入：
+
+- 一层 child 晚回后，根自动续跑，实际后继模型请求包含 child 结果。
+- 递归轨迹使用当前模型目录中明确标注 v2 的 `gpt-6.1-sol` 元数据：根首完成、child
+  完成、根后继完成后才释放 grandchild 结果；孙完成后观察到 child 仍只有原先的两次
+  模型请求，没有包含孙结果的后继输入。直接向该 child 输入返回 -32600。
+- 初次递归试验采用没有 v2 子协作能力元数据的模型，spawn 返回 unsupported call；
+  该失败是试验前提错误，未计作递归反例。只启用 feature 不证明子工具实际可用。
+
+反例的依据是实测与锁版
+[wake 准入](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/core/src/session/turn_input.rs#L714)
+一致：无显式 trigger/durable sleep 时，自动消息 wake 排除 non-root agent；不是用
+一秒观察窗口证明永久静默。[直接子输入限制](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/app-server/src/request_processors/thread_input.rs#L8)
+阻止客户端用 child turn/start 补齐。
+[回流实现](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/core/src/agent/control/completion.rs#L48)
+先发 completed activity，再尽力向父入队；
+[turn 收尾](https://github.com/openai/codex/blob/6ff1e1ca3b30fc8b914720681fcf5fe62e95f856/codex-rs/core/src/tasks/mod.rs#L703)
+还会记录 pending input，并在发完成事件后检查下一轮工作。因此 completed、历史存在
+与父模型已处理不能混用，尚无本期可依赖的完整范围结束证明。
+
+以上是安装 binary 的局部协议证据，不是真实远端模型或 Octopus 装配验收。
+未完成根再派 child、同 child 第二轮、快 child、回流失败/仅记历史、ACK 丢失/steer
+竞争、Stop 三阶段、fork/rewind/controller/授权兼容矩阵；没有据实验进程退出冒充
+产品退休验收。G0 未通过，产品代码与默认 exec 路径未改变，未触发产品全套回归或发布。
+旧 0.165.0 等版本的 schema 检查仅保留历史适用性。
 
 DSH：本轮下载rc.5发行包及所需类型/编译源码，未安装。以下npm SRI固定主要候选产物；实施须锁定完整解析依赖、profile、插件和runtime，不以三个摘要冒充完整环境锁：
 
