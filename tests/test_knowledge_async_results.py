@@ -25,6 +25,7 @@ from server.mcp_identity import (
 )
 from server.research.manager import ResearchManager
 from server.session_manager import SessionManager
+from server.sessions.submission import ReturnRefused
 from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
 
@@ -99,7 +100,11 @@ async def test_background_contract_is_committed_before_process_launch(owned_data
     async def broadcast(event):
         pass
 
-    manager.bind(database, delivered.put, broadcast)
+    async def deliver(record):
+        await delivered.put(record)
+        return ReturnRefused("source_withdrawn")
+
+    manager.bind(database, deliver, broadcast)
     await manager.start()
     reader = Database(str(tmp_path / "async-jobs.db"))
     await reader.initialize()
@@ -145,6 +150,7 @@ from pathlib import Path
 from server.bg_tasks import BgTaskManager
 from server.database import Database
 from server.knowledge import decode_owned
+from server.sessions.submission import ReturnRefused
 
 async def main():
     path, working_dir, encoded, committed = sys.argv[1:5]
@@ -170,6 +176,7 @@ async def main():
 
     async def deliver(record):
         (root / "delivery-notice").write_text(record.id)
+        return ReturnRefused("source_withdrawn")
     async def broadcast(event):
         (root / "broadcast-notice").write_text(event["type"])
     manager = BgTaskManager()
@@ -226,6 +233,7 @@ asyncio.run(main())
     notices = []
     async def notice(value):
         notices.append(value)
+        return ReturnRefused("source_withdrawn")
     spawn = asyncio.create_subprocess_exec
     async def observed_spawn(*args, **kwargs):
         (tmp_path / "spawn-attempted").touch()
@@ -462,7 +470,9 @@ async def test_background_material_retention_is_visible_once_without_starting_a_
     reader = Database(str(tmp_path / "async-jobs.db"))
     await reader.initialize()
     try:
-        assert await asyncio.gather(sessions.deliver_bg_result(rec), sessions.deliver_bg_result(rec)) == [False, False]
+        results = await asyncio.gather(sessions.deliver_bg_result(rec), sessions.deliver_bg_result(rec))
+        expected = "admission_closed" if contract == "closed" else "binding_unavailable"
+        assert results == [ReturnRefused(expected), ReturnRefused(expected)]
         messages = await reader.load_messages("parent")
         assert [message["type"] for message in messages] == ["delivery_notice"]
         assert messages[0]["role"] == "system"
@@ -471,7 +481,7 @@ async def test_background_material_retention_is_visible_once_without_starting_a_
         assert sessions.dispatch_snapshot("parent")["items"] == []
         restored = SessionManager()
         await restored.initialize(database)
-        assert await restored.deliver_bg_result(rec) is False
+        assert await restored.deliver_bg_result(rec) == ReturnRefused(expected)
         assert await reader.load_messages("parent") == messages
         assert await database.get_bg_task(rec.id) == task_before
     finally:

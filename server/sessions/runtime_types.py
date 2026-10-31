@@ -192,3 +192,7 @@ class AdmissionIntegrityError(ValueError):
 
 class SessionAdmissionBusy(ValueError):
     """A lifecycle reservation refused input before it could take effect."""
+
+
+class SessionAdmissionClosed(ValueError):
+    """The original account, agent or session cannot admit new work."""

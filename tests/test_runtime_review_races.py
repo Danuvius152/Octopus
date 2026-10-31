@@ -29,6 +29,7 @@ from server.routers.sessions import router as sessions_router
 from server.routers.ws import router as ws_router
 from server.sessions import SessionManager
 from server.sessions import turns as turn_module
+from server.sessions.submission import ReturnRefused
 from server.users import UserManager
 from tests.accounts import create_account
 
@@ -96,6 +97,7 @@ async def background(runtime):
 
     async def deliver(record):
         delivered.append(record)
+        return ReturnRefused("source_withdrawn")
 
     async def broadcast(event):
         broadcasts.append(event)
@@ -526,6 +528,7 @@ async def test_archived_background_result_keeps_its_original_account(background,
     gate = tmp_path / "complete-bg"
     code = f"import pathlib,time; gate=pathlib.Path({str(gate)!r});\nwhile not gate.exists(): time.sleep(.01)\nprint('synthetic private output')"
     record = await bg.start_task(session_id=session.id, command=shlex.join([sys.executable, "-c", code]), working_dir=str(tmp_path), idle_timeout_seconds=0)
+    settlement = bg._running[record.id].task
     foreign = await users.create_user(username="second", password="password2")
     owner_events, foreign_events = [], []
 
@@ -539,10 +542,14 @@ async def test_archived_background_result_keeps_its_original_account(background,
     manager.on_broadcast("bg-foreign", foreign_receive, foreign["id"])
     await manager.archive_session(session.id, replace=False)
     gate.touch()
-    await wait_until(lambda: bool(delivered))
+    await asyncio.wait_for(asyncio.shield(settlement), 5)
+    assert [item.id for item in delivered] == [record.id]
     assert foreign_events == []
-    assert [event["type"] for event in owner_events if event["type"] != "dispatch_state"] == ["session_archived", "bg_completed"]
+    assert [event["type"] for event in owner_events if event["type"] != "dispatch_state"] == [
+        "session_archived", "bg_completed", "bg_delivery",
+    ]
     assert owner_events[-1]["task_id"] == record.id
+    assert owner_events[-1]["session_id"] == session.id and owner_events[-1]["delivery_disposition"] == "stopped"
 
 
 @pytest.mark.parametrize("boundary", ["incoming", "broadcast", "unscoped_notice"])

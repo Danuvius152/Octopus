@@ -6,8 +6,8 @@
 当前约定直接在所属章节修订；实施顺序、逐轮访谈和已被替代的状态保留在 Git
 历史，不再追加到正文。文档中的支持范围不授予代码实施、发布或生产数据清理权限。
 
-[待处理返回接管设计](../plans/task-return-admission.md)已确认职责与接口方向，尚未实现；
-该计划不改变本文记录的当前能力。
+公共返回接管与 BG 接入已实现；Research、委派的剩余接入见
+[返回接管计划](../plans/task-return-admission.md)，不代表三来源已全部迁移。
 
 ## 文档职责
 
@@ -187,10 +187,37 @@ KILL 和活跃成员退出确认；普通完成广播及父会话返回都在退
 [Research 合同](native-deep-research.md#6-researchmanager-async-job-like-bgdelegationsscheduler)。
 这些局部错误分类不表示三来源统一返回接管设计已经实施。
 
-### 待处理返回接管设计（未实现）
+### 公共返回接管
 
-完整拟议接口、失败语义和验收见[返回接管计划](../plans/task-return-admission.md)。
-当前三来源尚未统一到该接口。
+`SessionManager.admit_return` 在会话模块拥有一次完整接管：先查原
+session/source/delivery 的回执，再验证捕获的 binding/work 与当前资格，按需调用
+来源的纯 `prepare`，准备后重新查回执及资格，沿原生命周期恢复会话，最后交给原
+Owner 和输入事务提交。已有回执优先于材料删除、Owner 失败及当前关闭，不准备
+正文、不唤醒、不重开输入；同身份实际提交的正文冲突仍原样传播。
+
+准备每次调用至多一次；并发未接纳调用允许重复纯读取。准备期间不持 mailbox、
+生命周期锁或事务，不预留执行资源。身份、work、账户/Agent、全局关闭及 Owner
+失败共用资格读取；session 的瞬态 reservation、fork 和 closed 由原生命周期锁
+内及实际 Owner 判定。归档期间的合法返回等待原归档结束后恢复，不能提前把临时
+closed 当成永久失去返回资格。唤醒与输入提交仍是两个提交点，接纳拒绝不自动
+撤销合法唤醒。
+
+结果区分已确认 `SubmissionReceipt`、本次明确未接纳 `ReturnRefused` 与
+`ReturnUnconfirmed`。回执读取暂不可用不能归为可重试容量拒绝；提交处的容量或
+busy 拒绝仍可由来源决定重试。丢确认后公共入口核实一次原回执，来源收到未确认
+只保存原诊断并结束本次观察；仅既有结算重入可再查原身份，不能重送或用后来的
+拒绝覆盖 unknown。准备错误、实际正文冲突、取消及存储失信保留原错误边界。
+
+BG 的 `deliver_bg_result` 只转换原身份、按需材料及辅助保留说明，callback 返回
+上述三类结果；BG manager 继续拥有命令结果、诊断、有限观察及业务重试。公共
+操作不创建来源执行、第二份完成 Future、表或恢复账本；现有输入、导出与恢复
+表示不变。自动返回按成功接纳顺序逐条派发，Stop 保留暂停 backlog，人工纠偏
+不隐式 Resume。
+
+`test_return_admission.py`、`test_bg_session_return.py` 覆盖原回执、纯准备、冲突及
+暂停；`test_return_admission_lifecycle.py` 覆盖归档竞争与委派单次接纳。Research
+和委派当前保留旧调用入口，共用原资格及归档恢复规则；后续迁移的范围与验收见
+[返回接管计划](../plans/task-return-admission.md)。
 
 ## 公开接口与账户配置
 

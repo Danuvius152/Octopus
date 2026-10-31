@@ -36,6 +36,7 @@ from server.bg_tasks import (
 from server.database import Database
 from server.main import app
 from server.session_manager import SessionManager, session_manager
+from server.sessions.submission import ReturnRefused, SubmissionReceipt
 from tests.accounts import create_account
 
 # ---------------------------------------------------------------------------
@@ -59,8 +60,9 @@ async def manager(db):
     delivered: list[BgTaskRecord] = []
     broadcasts: list[dict] = []
 
-    async def deliver(rec: BgTaskRecord) -> None:
+    async def deliver(rec: BgTaskRecord) -> ReturnRefused:
         delivered.append(rec)
+        return ReturnRefused("source_withdrawn")
 
     async def broadcast(msg: dict) -> None:
         broadcasts.append(msg)
@@ -201,8 +203,9 @@ async def test_delivery_retry_preserves_original_completed_command(db, tmp_path,
         attempts.append(record.id)
         if not allow_delivery:
             failed.set()
-            raise SessionMailboxFull("delivery unavailable before acceptance")
+            return ReturnRefused("capacity", SessionMailboxFull("delivery unavailable before acceptance"))
         succeeded.set()
+        return ReturnRefused("source_withdrawn")
 
     async def broadcast(event):
         broadcasts.append(event)
@@ -480,6 +483,7 @@ async def test_closed_work_drains_running_process_after_startup_cleanup_fails(db
     async def deliver(record):
         delivering.set()
         await release_delivery.wait()
+        return ReturnRefused("source_withdrawn")
 
     async def broadcast(message):
         pass
@@ -615,6 +619,7 @@ async def test_shutdown_retains_completed_task_until_its_callback_finishes(db, t
     async def deliver(record):
         if blocked_callback == "delivery":
             await complete_callback(record.id)
+        return ReturnRefused("source_withdrawn")
 
     mgr.bind(db, deliver, broadcast)
     await mgr.start()
@@ -720,6 +725,7 @@ async def test_slow_started_notification_does_not_extend_total_runtime(
 
     async def capture(record):
         delivered.append(record)
+        return ReturnRefused("source_withdrawn")
 
     async def slow_notification(event):
         if event["type"] == "bg_started":
@@ -1091,7 +1097,7 @@ async def test_restart_marks_only_orphans_and_keeps_old_limits_unknown(db):
 
 
 async def _noop_deliver(_rec):
-    pass
+    return ReturnRefused("source_withdrawn")
 
 
 async def _noop_broadcast(_msg):
@@ -1253,6 +1259,7 @@ async def test_rest_task_keeps_its_explicit_limits_in_details_and_results(api_cl
 
     async def capture(record):
         delivered.append(record)
+        return ReturnRefused("source_withdrawn")
 
     async def capture_event(event):
         events.append(event)
@@ -1275,7 +1282,7 @@ async def test_rest_task_keeps_its_explicit_limits_in_details_and_results(api_cl
     assert response.status_code == 201
     started = response.json()
     assert (started["idle_timeout_seconds"], started["timeout_seconds"]) == (0, 2)
-    await _wait_for(lambda: bool(delivered))
+    await _wait_for(lambda: any(event["type"] == "bg_delivery" for event in events))
     details = await client.get(
         f"/api/sessions/{sess.id}/bg-tasks/{started['id']}", headers=client.headers,
     )
@@ -1286,8 +1293,10 @@ async def test_rest_task_keeps_its_explicit_limits_in_details_and_results(api_cl
     prompt = render_delivery_prompt(delivered[0])
     assert "idle timeout: disabled" in prompt
     assert "total timeout: 2s" in prompt
-    assert [e["type"] for e in events] == ["bg_started", "bg_completed"]
-    assert all((e["idle_timeout_seconds"], e["timeout_seconds"]) == (0, 2) for e in events)
+    assert [e["type"] for e in events] == ["bg_started", "bg_completed", "bg_delivery"]
+    assert all((e["idle_timeout_seconds"], e["timeout_seconds"]) == (0, 2) for e in events[:2])
+    assert events[2]["task_id"] == started["id"] and events[2]["delivery_disposition"] == "stopped"
+    assert body["delivery_disposition"] == "stopped" and "source_withdrawn" in body["delivery_error"]
     listing = await client.get(f"/api/sessions/{sess.id}/bg-tasks", headers=client.headers)
     assert listing.json()[0] == body
 
@@ -1466,10 +1475,10 @@ async def test_deliver_bg_result_starts_a_new_session_turn(api_client, context_p
         )
         delivered = await session_manager.deliver_bg_result(rec)
         if not context_present:
-            assert delivered is False
+            assert isinstance(delivered, ReturnRefused) and delivered.reason == "binding_unavailable"
             assert not any(message.get("type") == "user_message" for message in captured)
             return
-        assert delivered is True
+        assert isinstance(delivered, SubmissionReceipt) and delivered.accepted
 
         # The user_message broadcast happens synchronously inside
         # send_message — before the backend spawn. Wait a tick for the
@@ -1495,7 +1504,7 @@ async def test_deliver_bg_result_starts_a_new_session_turn(api_client, context_p
         session_manager.remove_broadcast("test")
 
 
-async def test_deliver_bg_result_returns_false_for_missing_session(db):
+async def test_deliver_bg_result_refuses_missing_binding_without_admitting_input(db):
     sessions = SessionManager()
     await sessions.initialize(db)
     rec = BgTaskRecord(
@@ -1512,7 +1521,8 @@ async def test_deliver_bg_result_returns_false_for_missing_session(db):
         started_at="2026-01-01T00:00:00Z",
         completed_at="2026-01-01T00:00:00Z",
     )
-    assert await sessions.deliver_bg_result(rec) is False
+    result = await sessions.deliver_bg_result(rec)
+    assert isinstance(result, ReturnRefused) and result.reason == "binding_unavailable"
 
 
 # ---------------------------------------------------------------------------

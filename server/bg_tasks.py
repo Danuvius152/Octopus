@@ -53,12 +53,12 @@ from .process_groups import (
     group_has_live_members_after_kill as _group_has_live_members_after_kill,
 )
 from .service_health import ServiceUnavailable
-from .sessions.runtime_types import (
-    AdmissionIntegrityError,
-    QuotaExceeded,
-    SessionAdmissionBusy,
-    SessionMailboxFull,
-    SessionOwnerUnavailable,
+from .sessions.runtime_types import AdmissionIntegrityError
+from .sessions.submission import (
+    ReturnAdmission,
+    ReturnRefused,
+    ReturnUnconfirmed,
+    SubmissionReceipt,
 )
 from .submission_models import SubmissionConflict
 
@@ -92,7 +92,7 @@ _ORCHESTRATION_DRAIN_SECONDS = 5.0
 # Callback type the manager invokes when a task reaches a terminal state.
 # Wired up by main.py lifespan; lets bg_tasks stay decoupled from
 # session_manager / WS layer for testability.
-DeliveryCallback = Callable[["BgTaskRecord"], Awaitable[bool | None]]
+DeliveryCallback = Callable[["BgTaskRecord"], Awaitable[ReturnAdmission]]
 BroadcastCallback = Callable[[dict[str, Any]], Awaitable[None]]
 
 
@@ -902,26 +902,11 @@ class BgTaskManager:
         while self._deliver_cb:
             observing = rt.record.delivery_disposition == "unknown"
             try:
-                await self._deliver_cb(rt.record)
-            except (SessionAdmissionBusy, SessionMailboxFull, QuotaExceeded):
-                # These refusals guarantee no input effects. Unknown history
-                # can never be reclassified by a later refusal.
-                if observing:
-                    raise
-                if self._shutting_down:
-                    raise
-                await asyncio.sleep(1)
+                result = await self._deliver_cb(rt.record)
             except AdmissionIntegrityError as error:
                 self._remember_delivery(rt, "stopped", error)
                 await self._publish_delivery(rt)
                 return
-            except (SessionOwnerUnavailable, TimeoutError, ConnectionError) as error:
-                self._remember_delivery(rt, "unknown", error)
-                await self._publish_delivery(rt)
-                if observing or rt.record.delivery_disposition == "stopped":
-                    return
-                # One immediate observation only. The callback sees unknown
-                # and must read the receipt without preparing another input.
             except ServiceUnavailable:
                 raise  # Authoritative storage failure forbids reconciliation.
             except SubmissionConflict as error:
@@ -933,6 +918,30 @@ class BgTaskManager:
                 await complete_cleanup(self._publish_delivery(rt))
                 raise
             else:
+                if isinstance(result, ReturnRefused):
+                    # A later refusal cannot disprove an earlier uncertain
+                    # acceptance. Only its original receipt can clear unknown.
+                    if observing:
+                        return
+                    if result.reason in {"capacity", "busy"}:
+                        if self._shutting_down:
+                            raise result.cause or BgTaskError("Background return is still busy during shutdown")
+                        await asyncio.sleep(1)
+                        continue
+                    self._remember_delivery(rt, "stopped", result.cause or BgTaskError(
+                        f"Automatic return refused: {result.reason}; output retained in the task record",
+                    ))
+                elif isinstance(result, ReturnUnconfirmed):
+                    self._remember_delivery(rt, "unknown", result.cause)
+                    await self._publish_delivery(rt)
+                    # Admission already reconciled the handoff once. Only an
+                    # existing settlement reentry may observe this identity again.
+                    return
+                elif isinstance(result, SubmissionReceipt) and result.accepted:
+                    rt.record.delivery_disposition = None
+                    rt.record.delivery_error = None
+                else:
+                    raise TypeError("Background delivery must return an admission receipt, refusal or uncertainty")
                 await self._publish_delivery(rt)
                 return
 

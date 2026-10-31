@@ -10,6 +10,7 @@ import asyncio
 import json
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from datetime import UTC, datetime
 from functools import partial
@@ -58,8 +59,27 @@ from .owner_runtime import (
     Submit,
     WorkRetirement,
 )
-from .runtime_types import QuotaExceeded, _Attempt, _Decision, _Settlement, _Turn
-from .submission import RequestCompletion, SubmissionReceipt, observed_input_receipt
+from .runtime_types import (
+    QuotaExceeded,
+    SessionAdmissionBusy,
+    SessionAdmissionClosed,
+    SessionMailboxFull,
+    _Attempt,
+    _Decision,
+    _Settlement,
+    _Turn,
+)
+from .submission import (
+    RequestCompletion,
+    ReturnAdmission,
+    ReturnBody,
+    ReturnRefused,
+    ReturnSkipped,
+    ReturnTarget,
+    ReturnUnconfirmed,
+    SubmissionReceipt,
+    observed_input_receipt,
+)
 
 if TYPE_CHECKING:
     from ..bg_tasks import BgTaskRecord
@@ -498,6 +518,91 @@ class TurnsMixin(SessionManagerBase):
         session = self.sessions.get(row["session_id"])
         return row["session_id"], observed_input_receipt(row, session)
 
+    async def admit_return(
+        self, target: ReturnTarget, *, prepare: Callable[[], Awaitable[ReturnBody | ReturnSkipped]],
+    ) -> ReturnAdmission:
+        """Own the complete receipt-first handoff; the source owns retry policy.
+
+        Preparation is pure, may repeat across callers, and holds no mailbox,
+        lifecycle lock or transaction. Wake-up and input COMMIT stay separate.
+        """
+        from ..db.applications import ApplicationDeleting
+
+        async def observe() -> SubmissionReceipt | ReturnUnconfirmed | None:
+            try:
+                existing = await self.source_receipt(target.source, target.delivery_id, session_id=target.session_id)
+                return existing[1] if existing is not None and existing[1].accepted else None
+            except (SessionOwnerUnavailable, SessionMailboxFull, TimeoutError, ConnectionError) as error:
+                return ReturnUnconfirmed(error)
+
+        async def reconcile(result: ReturnRefused | ReturnUnconfirmed) -> ReturnAdmission:
+            observation = await observe()
+            if isinstance(observation, ReturnUnconfirmed):
+                # Keep the original uncertain handoff's cause when observation
+                # fails too. No lookup failure permits a new submission.
+                return result if isinstance(result, ReturnUnconfirmed) else observation
+            return observation or result
+
+        async def eligibility() -> ReturnRefused | None:
+            try:
+                observation = await self._task_return_eligibility(
+                    target.owned, session_id=target.session_id, work_id=target.work_id,
+                )
+                return observation if isinstance(observation, ReturnRefused) else None
+            except (SessionAdmissionClosed, ApplicationDeleting) as error:
+                return ReturnRefused("admission_closed", error)
+            except SessionAdmissionBusy as error:
+                return ReturnRefused("busy", error)
+
+        try:
+            existing = await observe()
+            if existing is not None:
+                return existing
+            refusal = await eligibility()
+        except (SessionOwnerUnavailable, SessionMailboxFull, TimeoutError, ConnectionError) as error:
+            return ReturnUnconfirmed(error)
+        if refusal is not None:
+            return await reconcile(refusal)
+
+        body = await prepare()  # Preparation errors and cancellation retain their identity.
+        try:
+            existing = await observe()
+            if existing is not None:
+                return existing
+            if isinstance(body, ReturnSkipped):
+                return ReturnRefused("source_withdrawn")
+            refusal = await eligibility()
+            if refusal is not None:
+                return await reconcile(refusal)
+            resolved = await self.resolve_task_return(target.owned, session_id=target.session_id, work_id=target.work_id)
+            if resolved is None:
+                return await reconcile(ReturnRefused("destination_unavailable"))
+            # Restoration may wait for another lifecycle command. Revalidate
+            # the captured binding before handing off to the original Owner.
+            refusal = await eligibility()
+            if refusal is not None:
+                return await reconcile(refusal)
+            _, context = resolved
+            receipt = await self.start_message(
+                target.session_id, body.prompt, source=target.source, delivery_id=target.delivery_id,
+                work_id=target.work_id, knowledge_context=context,
+                question_session_id=body.question_session_id, question_id=body.question_id,
+            )
+            if receipt.accepted:
+                return receipt
+            result: ReturnRefused | ReturnUnconfirmed = ReturnRefused("admission_closed")
+        except (SessionMailboxFull, QuotaExceeded) as error:
+            result = ReturnRefused("capacity", error)
+        except SessionAdmissionBusy as error:
+            result = ReturnRefused("busy", error)
+        except (SessionAdmissionClosed, ApplicationDeleting) as error:
+            result = ReturnRefused("admission_closed", error)
+        except (SessionOwnerUnavailable, TimeoutError, ConnectionError) as error:
+            logger.warning("Return acknowledgment unavailable source=%s delivery=%s\n%s",
+                           target.source, target.delivery_id, exception_diagnostic(error))
+            result = ReturnUnconfirmed(error)
+        return await reconcile(result)
+
     async def start_one_shot(self, schedule: dict[str, Any], prompt: str, context: KnowledgeContext) -> tuple[str, SubmissionReceipt]:
         """Prepare the target; Owner commits target, input and consumption once."""
         from ..db.schedules import ScheduleChangedError
@@ -597,50 +702,22 @@ class TurnsMixin(SessionManagerBase):
             return False
         return await self._session_owner(session).call(RetainResultNotice(delivery_id, content))
 
-    async def deliver_bg_result(self, rec: BgTaskRecord) -> bool:
-        """Inject a synthesized user message into a session when a bg
-        task completes. Threaded through the same start_message path
-        as a real user prompt, so it queues behind an in-flight turn
-        instead of racing it.
-
-        `rec` is a server.bg_tasks.BgTaskRecord — passed by name
-        rather than imported at module top to avoid a circular import
-        (bg_tasks depends on Database; the manager wires the delivery
-        callback into us in main.py's lifespan).
-
-        Returns True if the session exists and the prompt was accepted,
-        False if the session was already gone (e.g. deleted while the
-        bg task was running). Marker `[bg-task-result]` in the prompt
-        body is what the frontend keys off of for the "auto" badge —
-        keeping it textual means the model also sees the marker in
-        chat history on resume, which is the right cue.
-        """
+    async def deliver_bg_result(self, rec: BgTaskRecord) -> ReturnAdmission:
+        """Adapt original BG material; admission and retry have separate owners."""
         from ..bg_tasks import render_delivery_prompt
         from ..knowledge import decode_owned
 
-        if rec.delivery_disposition == "stopped":
-            return False
-        existing = await self.source_receipt("bg", f"bg:{rec.id}", session_id=rec.session_id)
-        if existing is not None:
-            rec.delivery_disposition = None
-            rec.delivery_error = None
-            return existing[1].accepted
-        if rec.delivery_disposition is not None:
-            return False
-        if self.session_owner_failed(rec.session_id):
-            rec.delivery_disposition = "stopped"
-            rec.delivery_error = "Destination owner is unavailable; output retained in the task record"
-            logger.warning("Background task %s delivery stopped: destination owner is unavailable; output retained in the task record", rec.id)
-            return False
-        work_id = getattr(rec, "work_id", None)
-        resolved = await self.resolve_task_return(
-            decode_owned(getattr(rec, "knowledge_context", None)),
-            session_id=rec.session_id, work_id=work_id,
+        async def prepare() -> ReturnBody | ReturnSkipped:
+            if rec.delivery_disposition is not None:
+                return ReturnSkipped("The source has stopped new submission; observe its original receipt only")
+            return ReturnBody(render_delivery_prompt(rec))
+
+        result = await self.admit_return(
+            ReturnTarget(rec.session_id, "bg", f"bg:{rec.id}", rec.work_id, decode_owned(rec.knowledge_context)),
+            prepare=prepare,
         )
-        if resolved is None:
-            rec.delivery_disposition = "stopped"
-            rec.delivery_error = "The original request contract is missing, closed or could not be verified"
-            logger.info("bg task %s retained as material: no open original request contract", rec.id)
+        if (isinstance(result, ReturnRefused) and result.reason in {"binding_unavailable", "admission_closed"}
+                and rec.delivery_disposition is None):
             try:
                 await self.retain_result_notice(
                     rec.session_id, f"bg:{rec.id}",
@@ -651,20 +728,7 @@ class TurnsMixin(SessionManagerBase):
                 raise
             except Exception:
                 logger.exception("Background task %s auxiliary delivery notice failed", rec.id)
-            return False
-        _, knowledge_context = resolved
-        prompt = render_delivery_prompt(rec)
-        receipt = await self.start_message(
-            rec.session_id, prompt, attachment_ids=None,
-            source="bg", delivery_id=f"bg:{rec.id}",
-            work_id=work_id, knowledge_context=knowledge_context,
-        )
-        if not receipt.accepted and self._admission_closed:
-            raise SessionOwnerUnavailable("Background return admission is stopping; acknowledgment is pending")
-        if not receipt.accepted:
-            rec.delivery_disposition = "stopped"
-            rec.delivery_error = "The destination refused automatic continuation"
-        return receipt.accepted
+        return result
 
 
 

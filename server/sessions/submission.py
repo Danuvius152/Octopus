@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from ..models import TurnOutcome
 
 if TYPE_CHECKING:
+    from ..knowledge import OwnedTaskContext
     from .base import Session
 
 
@@ -42,6 +43,53 @@ class SubmissionReceipt:
 
     async def wait(self) -> RequestCompletion:
         return await asyncio.shield(self._completion)
+
+
+@dataclass(frozen=True)
+class ReturnTarget:
+    """An independent source's captured identity, never a new caller binding."""
+
+    session_id: str
+    source: Literal["bg", "research", "delegation"]
+    delivery_id: str
+    work_id: str | None
+    owned: OwnedTaskContext | None
+
+
+@dataclass(frozen=True)
+class ReturnBody:
+    prompt: str
+    question_session_id: str | None = None
+    question_id: str | None = None
+
+    def __post_init__(self) -> None:
+        if (self.question_session_id is None) != (self.question_id is None):
+            raise ValueError("Return question identity must include both session and question")
+
+
+@dataclass(frozen=True)
+class ReturnSkipped:
+    """The source no longer needs a new input; earlier admission still wins."""
+
+    reason: str
+
+
+@dataclass(frozen=True)
+class ReturnRefused:
+    """This call admitted no new input; it says nothing about an earlier call."""
+
+    reason: Literal["source_withdrawn", "binding_unavailable", "destination_unavailable", "admission_closed", "capacity", "busy"]
+    cause: Exception | None = None
+
+
+@dataclass(frozen=True)
+class ReturnUnconfirmed:
+    """Admission may have happened; only the original receipt can confirm it."""
+
+    cause: Exception
+
+
+ReturnAdmission = SubmissionReceipt | ReturnRefused | ReturnUnconfirmed
 
 
 def receipt_for_input(row: dict[str, Any], future: asyncio.Future[RequestCompletion] | None = None) -> SubmissionReceipt:

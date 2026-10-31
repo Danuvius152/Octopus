@@ -11,6 +11,7 @@ from server.knowledge import AdmittedRequest, decode_context, derive
 from server.research import manager as research_module
 from server.research.manager import ResearchManager
 from server.sessions.runtime_types import SessionMailboxFull, SessionOwnerUnavailable
+from server.sessions.submission import SubmissionReceipt
 from tests.test_research_manager import _fake_report
 from tests.test_submission_recovery import runtime as runtime
 
@@ -40,7 +41,7 @@ async def test_background_owner_retries_the_original_result_after_caller_complet
 
     async def deliver(record):
         accepted = await manager.deliver_bg_result(record)
-        if accepted:
+        if isinstance(accepted, SubmissionReceipt) and accepted.accepted:
             acknowledged.set()
         return accepted
 

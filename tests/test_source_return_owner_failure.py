@@ -12,6 +12,10 @@ from server.knowledge import AdmittedRequest, decode_context, derive
 from server.research import manager as research_module
 from server.research.manager import ResearchManager
 from server.sessions.runtime_types import SessionOwnerUnavailable
+from server.sessions.submission import (
+    ReturnRefused,
+    SubmissionReceipt,
+)
 from tests.test_delegation_work import wait_state
 from tests.test_delegation_work import work_runtime as work_runtime
 from tests.test_research_manager import _fake_report
@@ -73,15 +77,19 @@ async def test_background_result_is_retained_and_delivery_retires_when_destinati
              else await fail_destination_owner(manager, session, monkeypatch))
     acknowledged = asyncio.Event()
     results = []
-    attempted = False
+    submit = manager.start_message
+    submissions = []
+
+    async def lose_ack(*args, **kwargs):
+        receipt = await submit(*args, **kwargs)
+        submissions.append(receipt.request_id)
+        await fail_destination_owner(manager, session, monkeypatch)
+        raise SessionOwnerUnavailable("Destination owner is unavailable after accepting the result")
+
+    if accepted_before_failure:
+        monkeypatch.setattr(manager, "start_message", lose_ack)
 
     async def deliver(record):
-        nonlocal attempted
-        if accepted_before_failure and not attempted:
-            attempted = True
-            assert await manager.deliver_bg_result(record)
-            await fail_destination_owner(manager, session, monkeypatch)
-            raise SessionOwnerUnavailable("Destination owner is unavailable after accepting the result")
         result = await manager.deliver_bg_result(record)
         results.append(result)
         acknowledged.set()
@@ -98,9 +106,11 @@ async def test_background_result_is_retained_and_delivery_retires_when_destinati
             while task.id in background._running:
                 await asyncio.sleep(.01)
         row = await background.get_task(task.id)
-        assert row.status == "completed" and row.stdout == "Retained original output\n" and results == [accepted_before_failure]
+        assert row.status == "completed" and row.stdout == "Retained original output\n" and len(results) == 1
+        assert isinstance(results[0], SubmissionReceipt if accepted_before_failure else ReturnRefused)
         source = await db.get_source_submission("bg", f"bg:{task.id}", session_id=session.id)
         assert (source is not None) is accepted_before_failure
+        assert submissions == ([results[0].request_id] if accepted_before_failure else [])
         assert "owner is unavailable" in caplog.text
         assert manager._session_owners[id(session)] is owner and owner.failed
     finally:

@@ -26,7 +26,15 @@ from ..models import (
     SessionStatus,
 )
 from ..oauth_errors import RefreshErrorCode
-from .submission import RequestCompletion, SubmissionReceipt
+from .submission import (
+    RequestCompletion,
+    ReturnAdmission,
+    ReturnBody,
+    ReturnRefused,
+    ReturnSkipped,
+    ReturnTarget,
+    SubmissionReceipt,
+)
 
 if TYPE_CHECKING:
     from ..knowledge import KnowledgeContext, OwnedTaskContext
@@ -616,6 +624,16 @@ class SessionManagerBase:
         self, owned: OwnedTaskContext | None, *, session_id: str, work_id: str | None,
     ) -> tuple[Session, KnowledgeContext] | None:
         raise NotImplementedError  # provided by lifecycle
+
+    async def _task_return_eligibility(
+        self, owned: OwnedTaskContext | None, *, session_id: str, work_id: str | None,
+    ) -> tuple[str | None, KnowledgeContext] | ReturnRefused:
+        raise NotImplementedError  # provided by lifecycle
+
+    async def admit_return(
+        self, target: ReturnTarget, *, prepare: Callable[[], Awaitable[ReturnBody | ReturnSkipped]],
+    ) -> ReturnAdmission:
+        raise NotImplementedError  # provided by turns
 
     def _session_dispatch_snapshot(self, session: Session) -> dict[str, Any]:
         raise NotImplementedError  # provided by turns

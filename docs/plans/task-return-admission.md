@@ -1,12 +1,13 @@
 # 待处理返回接管设计
 
-> **Status:** proposed — 设计方向已确认；统一返回接管接口尚未实施。
+> **Status:** in-progress — 公共接管与 BG 接入已实现；Research 和委派接入待完成。
 
 当前行为见[执行合同](../implemented/architecture-contract.md#输入完成与资源退休)。
 
-### 待处理返回接管设计（未实现）
+### 返回接管设计与剩余接入
 
-状态：统一接口设计已确认，尚未实施；第一阶段来源分类修复不等于本接口验收。
+状态：公共 `admit_return` 与 BG 已实施；下列合同继续约束 Research、委派终态及
+问题接入，三来源整体统一尚未验收。当前公共操作归执行合同，本文保留剩余接入设计。
 最初设计的源码依据为 `0df8b78ec470c0186c0ef6bd758a3695f1e686d1`，
 对比基线为 `before-takeover` 的 `88d2284b2b2493001be2e945df375d7a228ccc1f`。
 本设计只覆盖 BG、Research、委派终态及委派问题的返回接管。
@@ -17,13 +18,16 @@
 返回身份和原工作归属校验，`b19f6f9` 集中合法返回的归档唤醒。第一阶段又完成
 BG/委派停止与 unknown 有限观察、来源诊断和原 writer 保责，沿用 Research 的
 既有分类。当前表示及恢复差异以[执行合同](../implemented/architecture-contract.md#输入完成与资源退休)
-为准。下一阶段保留这些保障，收回三个来源仍重复编排的会话接管协议。
+为准。公共操作已收回 BG 的接管协议；剩余工作在保留这些保障的同时，收回
+Research 和委派仍重复编排的接管顺序。
 
 当前入口见 [BG](../../server/sessions/turns.py) 的 `deliver_bg_result`、
 [Research](../../server/research/manager.py) 的 `_inject_report` 与
 [委派](../../server/delegations.py) 的 `_inject_terminal` / `_inject_question`。
-[resolve_task_return](../../server/sessions/lifecycle.py) 已封装归属与唤醒，但调用者
-仍需拼接原回执查询、Owner 判断、提交和确认丢失后的处理。
+[admit_return](../../server/sessions/turns.py) 已拥有公共接管，BG 只作材料转换。
+[resolve_task_return](../../server/sessions/lifecycle.py) 暂保留给 Research 和委派；
+这些调用者仍需迁移其回执查询、Owner 判断、提交和确认丢失处理，共用资格读取
+及原生命周期等待行为继续保留。
 
 采用一个接管入口与按需正文准备函数。两阶段入口会让调用者继续承担调用顺序；
 正文/正文引用联合类型则会让会话接管模块认识来源材料的不同读取方式。按需函数
@@ -156,7 +160,7 @@ flowchart TD
 
 | 来源 | 保留的职责 | 替换与删除 |
 | --- | --- | --- |
-| BG | 已完成输出、prompt 组织、交付循环及停机条件 | `deliver_bg_result` 仅作来源转换；回调改用三类结果，删除 bool 对拒绝/未确认的混合表达及共同接管编排 |
+| BG | 已完成输出、prompt 组织、交付循环及停机条件 | 已接入：`deliver_bg_result` 作来源转换，回调使用三类结果，bool 与外部共同接管编排已退出。 |
 | Research | 报告状态、是否仍投递、queued/processing/processed 投影、原 receipt 的完成观察 | `_inject_report` 改用单入口，删除自行查询回执、恢复会话和读取 `_admission_closed` 的接管分支 |
 | 委派终态/问题 | 精确正文读取、问题是否有效、原轮次结算、`_terminal_injecting` 的来源重入保护 | 两个入口共用 `admit_return`，删除 `_return_context` 及重复的 Owner/准入/确认编排 |
 
@@ -187,7 +191,8 @@ flowchart TD
 
 保留各来源的实际接入与结算断言；公共接管场景集中到一个测试面后，才删除被
 完整替代的 helper 形状测试。每项检查只安排一个执行者，受影响检查与提交门禁
-遵循 [testing.md](../testing.md)。本次仅写设计与核对文档，不创建上述入口、修改
-生产行为或声称回归已通过。
+遵循 [testing.md](../testing.md)。公共接管和 BG 的当前行为及已验证边界见
+[执行合同](../implemented/architecture-contract.md#公共返回接管)；Research 与委派
+接入仍须各自完成真实消费者、失败路径和旧编排退出，不能以公共入口通过代替验收。
 
 暂停的执行扩展另见[范围与恢复条件](runtime-execution-scope.md)。

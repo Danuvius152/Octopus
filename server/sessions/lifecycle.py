@@ -18,6 +18,7 @@ from typing import Any
 
 from ..config import settings
 from ..credential_bindings import validate_credential_binding
+from ..db.applications import ApplicationDeleting
 from ..harness import get_harness
 from ..knowledge import KnowledgeContext, OwnedTaskContext, receive_return
 from ..models import MessageContent, SessionDetail
@@ -38,7 +39,8 @@ from .owner_runtime import (
     ReleaseArchive,
 )
 from .presentation import session_info
-from .runtime_types import SessionAdmissionBusy
+from .runtime_types import SessionAdmissionBusy, SessionAdmissionClosed
+from .submission import ReturnRefused
 
 # The window an archived open returns, matching the live one in
 # `routers/sessions.MESSAGE_WINDOW`. Declared here rather than imported to keep
@@ -123,14 +125,14 @@ class LifecycleMixin(SessionManagerBase):
 
     async def require_active_agent(self, agent_id: str | None) -> dict[str, Any] | None:
         if agent_id in self._closed_agents:
-            raise ValueError("Agent admission is closed")
+            raise SessionAdmissionClosed("Agent admission is closed")
         agent = await self.db.get_agent(agent_id) if self.db and agent_id else None
         if self.db and (agent is None or agent["archived"]):
-            raise ValueError("Agent not found or archived")
+            raise SessionAdmissionClosed("Agent not found or archived")
         if self.db and agent is not None and not await owner_is_available(self.db, agent.get("user_id")):
-            raise ValueError("Account is unavailable")
+            raise SessionAdmissionClosed("Account is unavailable")
         if agent_id in self._closed_agents:
-            raise ValueError("Agent admission is closed")
+            raise SessionAdmissionClosed("Agent admission is closed")
         return agent
 
     @asynccontextmanager
@@ -767,7 +769,7 @@ class LifecycleMixin(SessionManagerBase):
                 if current._archive_reservation is not None or current._forking:
                     raise SessionAdmissionBusy("Original session is busy (forking or archiving)")
                 if current.user_id != user_id or current._admission_closed or self.session_owner_failed(session_id):
-                    raise ValueError("Original session admission is unavailable")
+                    raise SessionAdmissionClosed("Original session admission is unavailable")
                 return current
             session = await self._restore_archived_session(session_id, user_id, returning=returning)
         await self._broadcast({"type": "session_unarchived", "session_id": session.id, "name": session.name,
@@ -792,7 +794,7 @@ class LifecycleMixin(SessionManagerBase):
             (r for r in rows if r["id"] == session_id and r["archived"]), None
         )
         if match is None:
-            raise ValueError(f"Archived session {session_id} not found")
+            raise SessionAdmissionClosed(f"Archived session {session_id} not found")
         message_state = await self.db.message_sequence_state(session_id)
         if returning is not None:
             await self.require_active_agent(match["agent_id"])
@@ -815,32 +817,48 @@ class LifecycleMixin(SessionManagerBase):
         if (self._admission_closed or self.session_owner_failed(session_id)
                 or receive_return(owned, session_id=session_id, user_id=user_id,
                                   work_id=owned.return_binding.work_id) is None):
-            raise ValueError("Original task return admission is unavailable")
+            raise SessionAdmissionClosed("Original task return admission is unavailable")
+
+    async def _task_return_eligibility(
+        self, owned: OwnedTaskContext | None, *, session_id: str, work_id: str | None,
+    ) -> tuple[str | None, KnowledgeContext] | ReturnRefused:
+        """Check without restoring membership or reserving execution resources."""
+        if owned is None:
+            return ReturnRefused("binding_unavailable")
+        binding = owned.return_binding
+        reference = binding.reference
+        if reference.session_id != session_id or binding.work_id != work_id:
+            return ReturnRefused("binding_unavailable")
+        context = receive_return(owned, session_id=session_id, user_id=reference.user_id, work_id=work_id)
+        if self._admission_closed or context is None:
+            return ReturnRefused("admission_closed")
+        if self.session_owner_failed(session_id):
+            return ReturnRefused("destination_unavailable", SessionOwnerUnavailable("Destination owner is unavailable"))
+        row = await self.input_database().get_session_binding(session_id)
+        if row is None or row["user_id"] != reference.user_id:
+            return ReturnRefused("destination_unavailable")
+        await self.require_active_agent(row["agent_id"])
+        return row["agent_id"], context
 
     async def resolve_task_return(
         self, owned: OwnedTaskContext | None, *, session_id: str, work_id: str | None,
     ) -> tuple[Session, KnowledgeContext] | None:
         """Restore only the fixed, still-authorized caller of independent work."""
-        if owned is None or self.db is None or self._admission_closed:
+        if owned is None:
             return None
         binding = owned.return_binding
         reference = binding.reference
-        if reference.session_id != session_id or binding.work_id != work_id:
-            return None
-        context = receive_return(owned, session_id=reference.session_id,
-                                 user_id=reference.user_id, work_id=binding.work_id)
-        if context is None or self.session_owner_failed(reference.session_id):
-            return None
-        row = await self.db.get_session_binding(reference.session_id)
-        if row is None or row["user_id"] != reference.user_id:
-            return None
         try:
-            session = await self._run_agent_operation(row["agent_id"], lambda: self._unarchive_session(
+            eligibility = await self._task_return_eligibility(owned, session_id=session_id, work_id=work_id)
+            if isinstance(eligibility, ReturnRefused):
+                return None
+            agent_id, _ = eligibility
+            session = await self._run_agent_operation(agent_id, lambda: self._unarchive_session(
                 reference.session_id, reference.user_id, returning=owned,
             ))
         except SessionAdmissionBusy:
             raise
-        except ValueError:
+        except (SessionAdmissionClosed, ApplicationDeleting):
             return None
         context = receive_return(owned, session_id=session.id, user_id=session.user_id, work_id=binding.work_id)
         return (session, context) if context is not None else None

@@ -133,7 +133,9 @@ async def test_build_history_retires_its_background_writers_before_losing_link(
     background = bg_tasks.BgTaskManager()
 
     async def discard(_):
-        return False
+        from server.sessions.submission import ReturnRefused
+
+        return ReturnRefused("source_withdrawn")
 
     background.bind(db, discard, discard)
     monkeypatch.setattr(bg_tasks, "bg_task_manager", background)
@@ -176,7 +178,9 @@ async def test_delete_retires_replaced_legacy_builder_history(am, db, mgr, sent,
     background = bg_tasks.BgTaskManager()
 
     async def discard(_):
-        return False
+        from server.sessions.submission import ReturnRefused
+
+        return ReturnRefused("source_withdrawn")
 
     background.bind(db, discard, discard)
     monkeypatch.setattr(bg_tasks, "bg_task_manager", background)
@@ -1055,7 +1059,9 @@ async def test_delete_joins_background_process_handle_that_arrives_late(am, db, 
     background = bg_tasks.BgTaskManager()
 
     async def discard(_):
-        return False
+        from server.sessions.submission import ReturnRefused
+
+        return ReturnRefused("source_withdrawn")
 
     background.bind(db, discard, discard)
     monkeypatch.setattr(bg_tasks, "bg_task_manager", background)
