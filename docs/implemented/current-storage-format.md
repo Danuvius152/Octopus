@@ -38,6 +38,18 @@ there is no global row factory or storage format change.
 
 ## Publication boundary
 
+Question resolution uses the existing nullable message `tool_input` JSON:
+`question_resolution.version=1` carries original form/execution association,
+disposition, structured answers and trusted provenance. This additive message
+fact changes no DDL, format marker or storage root and needs no startup
+conversion. Legacy messages without it retain unknown structure/source; no text
+parsing or provenance backfill is performed. Text and `question_closed.reason`
+remain compatible projections. Older consumers can ignore the nested facts;
+retaining original message JSON retains them, while stripped/legacy text cannot
+reconstruct them. Live question callbacks and resource observations are not
+persisted or restored. Backup and transfer scope remains with
+[account portability](../backup-and-migrate.md#account-export-and-import).
+
 Main format 6 adds nullable `bg_tasks.delivery_disposition` (`stopped`/`unknown`)
 and `delivery_error` after `knowledge_context`. Delegation round JSON requires
 an independent nullable `terminal_delivery_error` and validates the finite

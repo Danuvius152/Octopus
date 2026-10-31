@@ -34,6 +34,7 @@ from typing import TYPE_CHECKING, Any
 
 from .aio import complete_cleanup
 from .applications import data_dir_for
+from .session_results import LiveReply
 
 if TYPE_CHECKING:
     from .applications import ApplicationManager
@@ -93,14 +94,20 @@ class _Turn:
     observer: asyncio.Task | None = field(default=None, repr=False)
     queue: asyncio.Queue[dict[str, Any]] = field(default_factory=asyncio.Queue)
     done: asyncio.Event = field(default_factory=asyncio.Event)
-    text: list[str] = field(default_factory=list)
-    attempt_id: str | None = None
+    body: LiveReply = field(init=False)
     error: str | None = None
     cost: float | None = None
     consumer_attached: bool = True
 
+    def __post_init__(self) -> None:
+        self.body = LiveReply(self.request_id)
+
+    @property
+    def attempt_id(self) -> str | None:
+        return self.body.attempt_id
+
     def reply(self) -> str:
-        return "\n\n".join(t for t in self.text if t).strip()
+        return self.body.text()
 
     def emit(self, event: dict[str, Any]) -> None:
         if self.consumer_attached:
@@ -164,7 +171,10 @@ class AppAgentManager:
             turn.done.set()
         # A failed Owner can publish unavailable before its captured cleanup
         # retires. Response completion alone must not release the app's slot.
-        await self._require_session_mgr().await_session_execution(turn.session_id)
+        if receipt.execution is not None:
+            await receipt.execution.wait_driver()
+        else:
+            await self._require_session_mgr().await_session_execution(turn.session_id)
         self._release_turn(turn)
 
     @staticmethod
@@ -284,18 +294,10 @@ class AppAgentManager:
         """Observe the original admitted request; never start a replacement."""
         session = self._require_conversation(app_id, conversation_id)
         result: dict[str, Any] = {"conversation_id": conversation_id, "request_id": request_id}
-        messages = await self._require_db().load_committed_request_messages(conversation_id, request_id)
-        terminal = next((row for row in reversed(messages) if row["type"] == "result"
-                         and isinstance(row["content"], dict) and row["content"].get("request_id") == request_id), None)
-        if terminal:
-            context = (terminal.get("tool_input") or {}).get("attempt_context") or {}
-            attempt_id = context.get("attempt_id")
-            text = [row["content"] for row in messages if row["role"] == "assistant" and row["type"] == "text"
-                    and isinstance(row["content"], str)
-                    and (row.get("tool_input") or {}).get("attempt_context", {}).get("request_id") == request_id
-                    and (not attempt_id or (row.get("tool_input") or {}).get("attempt_context", {}).get("attempt_id") == attempt_id)]
-            return {**result, "state": "completed" if terminal["content"]["status"] == "success" else "failed",
-                    "outcome": terminal["content"], "reply": "\n\n".join(text), "cost": terminal.get("cost")}
+        saved = await self._require_db().read_session_result(conversation_id, request_id)
+        if saved.outcome is not None:
+            return {**result, "state": "completed" if saved.outcome.status == "success" else "failed",
+                    "outcome": saved.outcome.model_dump(exclude_unset=True), "reply": "\n\n".join(saved.fragments), "cost": saved.cost}
         current = session._run.request
         if current is not None and current.request_id == request_id:
             return {**result, "state": "running"}
@@ -625,19 +627,13 @@ class AppAgentManager:
         if not sid:
             return
         turn = self._turns.get(sid)
-        if turn is None or turn.done.is_set() or msg.get("request_id") != turn.request_id:
+        if turn is None or turn.done.is_set():
             return
-
+        reset = turn.body.observe(msg)
+        if reset is None:
+            return
         kind = msg.get("type")
-        attempt_id = msg.get("attempt_id")
-        if attempt_id and attempt_id != turn.attempt_id:
-            previous = turn.attempt_id
-            turn.attempt_id = attempt_id
-            turn.text.clear()
-            if previous is not None:
-                turn.emit({"type": "reset"})
-        if kind == "recovery" and msg.get("retrying"):
-            turn.text.clear()
+        if reset:
             turn.emit({"type": "reset"})
         if kind == "recording_failed":
             reason = msg.get("message") or "The agent finished, but saving its result is unconfirmed."
@@ -646,7 +642,6 @@ class AppAgentManager:
             turn.done.set()
             return
         if kind in ("result", "error") and msg.get("retrying"):
-            turn.text.clear()
             return
         if kind == "assistant_delta":
             content = msg.get("content")
@@ -656,7 +651,6 @@ class AppAgentManager:
         if kind == "assistant_text":
             content = msg.get("content")
             if content:
-                turn.text.append(content)
                 turn.emit({"type": "message", "text": content})
             return
         if kind == "tool_use":

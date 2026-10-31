@@ -105,6 +105,11 @@ the parent Owner fails. Without a receipt, a deleted child produces the existing
 child missing its exact terminal remains an integrity error. A confirmed empty
 reply retains the existing empty-text placeholder.
 
+Request/carrier/terminal/attempt association and committed body selection belong
+to the shared [session result reader](architecture-contract.md#原请求结果读取).
+Delegation alone owns continuous concatenation/strip, its empty-answer text and
+agent-error delivery meaning; it does not maintain another association rule.
+
 Permanent integrity refusal records `stopped`. After a lost acknowledgment,
 timeout or unavailable channel, the common operation checks the original receipt
 once. If admission remains unconfirmed, the source records `unknown` on its
@@ -187,6 +192,14 @@ wins. If both happen, the second one 409s. An incomplete batch is rejected
 without closing the pending questions; other questions are never padded with
 empty answers. Passing the batch identity prevents a delayed answer from
 consuming a later question.
+
+The original Question Owner owns the shared
+[validation and resolution contract](architecture-contract.md#问题结算).
+This entry converts question IDs/positions and retains its historical text strip;
+it does not clear malformed selection types before validation. Authentication
+supplies account/agent provenance, and the actual delegation supplies the parent
+relationship. Saved answer structure and the live event agree; a parent agent's
+answer is not labelled as a human answer.
 
 If the parent's model decides it can't answer, it has three options
 expressible in its normal language/tool loop:

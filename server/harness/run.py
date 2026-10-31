@@ -218,10 +218,15 @@ class HarnessRun:
         self.run_lease_id = uuid_module.uuid4().hex
         self.work_id = self._config.work_id
         self._lease_closed = False
+        # Harness owns this local submission boundary. False proves that no
+        # business input was submitted by this attempt; True is uncertainty,
+        # not a provider acknowledgment. Reset only before a reused turn.
+        self.input_may_have_run = False
         self._spawn_task: asyncio.Task[asyncio.subprocess.Process | None] | None = None
         self._spawn_cleanup: asyncio.Task[None] | None = None
         self._preparation_task: asyncio.Task[None] | None = None
         self._stop_task: asyncio.Task[None] | None = None
+        self._retirement_started = asyncio.Event()
         self._activity_observer: ActivityObserver | None = None
         self._parser = profile.new_event_parser()
         self._process: asyncio.subprocess.Process | None = None
@@ -385,6 +390,8 @@ class HarnessRun:
             # No await separates current authority from submitting the spawn.
             try:
                 validate_launch(launch_argv, kwargs.get("env"))
+                if self._profile.stdin_mode is StdinMode.CLOSE_AFTER_SPAWN:
+                    self.input_may_have_run = True
                 return await asyncio.create_subprocess_exec(
                     *launch_argv,
                     stdin=asyncio.subprocess.PIPE,
@@ -507,6 +514,7 @@ class HarnessRun:
                 "message": {"role": "user", "content": text},
             }
         ) + "\n"
+        self.input_may_have_run = True
         proc.stdin.write(line.encode())
         await proc.stdin.drain()
         return frame_uuid
@@ -608,6 +616,7 @@ class HarnessRun:
         self.protocol_issues.clear()
         self.protocol_locations.clear()
         self._parser.begin_turn()
+        self.input_may_have_run = False
 
     async def write_turn_input(self, prompt: str) -> None:
         """Write the initial input after the owner has opened its reader."""
@@ -643,7 +652,22 @@ class HarnessRun:
         tasks.unbind_run(self.run_lease_id)
         if self._stop_task is None:
             self._stop_task = asyncio.create_task(self._stop(), name="harness-retirement")
+            self._retirement_started.set()
         return self._stop_task
+
+    @property
+    def retirement_state(self) -> str:
+        """Only the original cleanup task proves exit; observing never stops it."""
+        task = self._stop_task
+        if task is None or not task.done():
+            return "pending"
+        return "failed" if task.cancelled() or task.exception() is not None else "proven"
+
+    async def wait_retirement(self) -> None:
+        """Cancellation withdraws this observer, leaving retirement owned here."""
+        await self._retirement_started.wait()
+        assert self._stop_task is not None
+        await asyncio.shield(self._stop_task)
 
     async def stop(self) -> None:
         """Owned retirement includes a late spawn; caller cancellation cannot orphan it."""

@@ -111,6 +111,21 @@ async def test_live_run_question_has_captured_work_in_history_and_broadcast(ques
     assert await manager.create_pending_question(session.id, QUESTIONS, scope=scope)
 
 
+async def test_http_answer_from_runtime_retains_agent_source(question_runtime):
+    manager, session, client, _, _ = question_runtime
+    token, scope = await begin_run(question_runtime)
+    question_id = await manager.create_pending_question(session.id, QUESTIONS, scope=scope)
+    response = await client.post(f"/api/sessions/{session.id}/questions/{question_id}/answer",
+        headers={"Authorization": f"Bearer {token}"}, json={"answers": [{"selected": ["B"]}]})
+    assert response.status_code == 200
+    detail = (await client.get(f"/api/sessions/{session.id}")).json()
+    saved = next(row for row in detail["messages"] if row["type"] == "question_answer")
+    assert saved["tool_input"]["question_resolution"]["source"] == {
+        "kind": "agent", "user_id": session.user_id, "session_id": session.id,
+        "work_id": "question-work", "run_lease_id": scope.run_lease_id,
+    }
+
+
 async def test_stop_revokes_old_question_scope_without_poisoning_new_request(question_runtime):
     manager, session, client, events, _ = question_runtime
     old_token, old_scope = await begin_run(question_runtime)

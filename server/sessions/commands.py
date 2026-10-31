@@ -7,6 +7,7 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from ..question_resolution import UNKNOWN_SOURCE, AnswerSource, QuestionAnswerInvalid
 from .owner_questions import AnswerQuestion
 
 if TYPE_CHECKING:
@@ -17,19 +18,22 @@ if TYPE_CHECKING:
 class CorrelatedControl:
     data: dict[str, Any]
     user_id: str | None
+    source: AnswerSource = AnswerSource()
 
 
-async def process_command(manager: SessionManager, data: dict[str, Any], user_id: str | None) -> dict[str, Any]:
+async def process_command(manager: SessionManager, data: dict[str, Any], user_id: str | None, *,
+                          source: AnswerSource = UNKNOWN_SOURCE) -> dict[str, Any]:
     sid = data.get("session_id")
     session = manager.get_session(sid) if isinstance(sid, str) else None
     if session is None or session.user_id != user_id:
         return {"type": "command_receipt", "client_command_id": data.get("client_command_id"),
                 "session_id": sid, "operation": data.get("type"), "accepted": False,
                 "code": "not_found", "message": "Session not found"}
-    return await manager._session_owner(session).call_runtime(CorrelatedControl(dict(data), user_id))
+    return await manager._session_owner(session).call_runtime(CorrelatedControl(dict(data), user_id, source))
 
 
-async def _process_owned_command(manager: SessionManager, session: Any, data: dict[str, Any], user_id: str | None) -> dict[str, Any]:
+async def _process_owned_command(manager: SessionManager, session: Any, data: dict[str, Any], user_id: str | None,
+                                 source: AnswerSource = UNKNOWN_SOURCE) -> dict[str, Any]:
     command_id, sid, operation = data.get("client_command_id"), data.get("session_id"), data.get("type")
     response = {"type": "command_receipt", "client_command_id": command_id, "session_id": sid, "operation": operation, "accepted": False}
     if not isinstance(command_id, str) or not command_id or len(command_id) > 128 or not isinstance(sid, str):
@@ -63,19 +67,14 @@ async def _process_owned_command(manager: SessionManager, session: Any, data: di
         if pending is not None and pending.state != "pending":
             pending = None
         answers = data.get("answers")
-        if (pending is None or data["request_id"] != pending.request_id or data["attempt_id"] != pending.attempt_id
-                or not isinstance(answers, list) or len(answers) != len(pending.questions)
-                or any(not isinstance(answer, dict) for answer in answers)):
+        if pending is None or data["request_id"] != pending.request_id or data["attempt_id"] != pending.attempt_id:
             result = stale
         else:
-            valid = all(isinstance(answer.get("selected", []), list)
-                        and all(isinstance(label, str) for label in answer.get("selected", []))
-                        and (answer.get("text") is None or isinstance(answer["text"], str))
-                        and (bool(answer.get("selected")) or bool((answer.get("text") or "").strip())) for answer in answers)
-            if not valid:
-                result = {**response, "code": "invalid_command", "message": "Provide a complete selection or text answer for every question"}
+            try:
+                ok = await manager._session_owners[id(session)].questions.handle(AnswerQuestion(pending.question_id, answers, source))
+            except QuestionAnswerInvalid as error:
+                result = {**response, "code": "invalid_command", "message": str(error)}
             else:
-                ok = await manager._session_owners[id(session)].questions.handle(AnswerQuestion(pending.question_id, answers))
                 result = {**response, "accepted": True} if ok else stale
     session._command_receipts[command_id] = (digest, result)
     while len(session._command_receipts) > 256:

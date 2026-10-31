@@ -36,7 +36,7 @@ async def test_deleting_child_after_completion_does_not_poison_delegation_drain(
     runtime.controls.enabled = False
     deliveries = observe_terminal_deliveries(runtime, monkeypatch)
     database = runtime.manager.db
-    read = database.load_committed_request_messages
+    read = database.read_session_result
     close = database.close
     reading, release = asyncio.Event(), asyncio.Event()
     observed_rows = []
@@ -62,7 +62,7 @@ async def test_deleting_child_after_completion_does_not_poison_delegation_drain(
         observed_rows.append((session_id, request_id, rows))
         return rows
 
-    monkeypatch.setattr(database, "load_committed_request_messages", hold_original_reply)
+    monkeypatch.setattr(database, "read_session_result", hold_original_reply)
     monkeypatch.setattr(database, "close", close_original_test_database)
     rec = await runtime.delegations.start_delegation(
         parent_session_id=runtime.parent.id, agent_name="Notification worker",
@@ -85,7 +85,9 @@ async def test_deleting_child_after_completion_does_not_poison_delegation_drain(
         release.set()
         await asyncio.wait_for(runtime.delegations.confirm_recording(), 3)
 
-        assert observed_rows == [(rec.delegation_id, original.request_id, [])]
+        assert len(observed_rows) == 1
+        assert observed_rows[0][:2] == (rec.delegation_id, original.request_id)
+        assert observed_rows[0][2].missing == "session_missing"
         assert rec.state == "completed"
         assert await original.wait() is completion
         assert completion.outcome.status == "success"
@@ -135,7 +137,7 @@ async def test_deleted_leaf_reply_still_finishes_the_original_nested_parent(
                  if sid == outer.delegation_id and work == outer.work_id)
     original = next(receipt for sid, work, receipt in runtime.receipts
                     if sid == leaf.delegation_id and work == leaf.work_id)
-    read = database.load_committed_request_messages
+    read = database.read_session_result
     reading, release = asyncio.Event(), asyncio.Event()
     observed_rows = []
 
@@ -148,7 +150,7 @@ async def test_deleted_leaf_reply_still_finishes_the_original_nested_parent(
             observed_rows.append(rows)
         return rows
 
-    monkeypatch.setattr(database, "load_committed_request_messages", hold_leaf_reply)
+    monkeypatch.setattr(database, "read_session_result", hold_leaf_reply)
     try:
         await release_model(runtime, outer)
         first_completion = await asyncio.wait_for(first.wait(), 2)
@@ -171,7 +173,7 @@ async def test_deleted_leaf_reply_still_finishes_the_original_nested_parent(
         assert await runtime.manager.delete_session(leaf.delegation_id)
         release.set()
         await asyncio.wait_for(runtime.delegations.confirm_recording(), 2)
-        assert observed_rows == [[]]
+        assert len(observed_rows) == 1 and observed_rows[0].missing == "session_missing"
         leaf_deliveries = [item for item in deliveries if item[2]["delivery_id"] == f"agent-terminal:{leaf.work_id}"]
         print("nested-deleted-leaf-handoff", {
             "leaf_outcome": completion.outcome.status, "leaf_state": leaf.state,

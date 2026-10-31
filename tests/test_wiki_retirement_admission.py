@@ -91,7 +91,8 @@ async def test_retirement_check_preserves_exact_request_scope(client, tmp_path, 
     manager = SessionManager()
     session = Session(id="original-session", name="worker", working_dir=str(tmp_path), user_id=owner)
     manager.sessions[session.id] = session
-    job["items"][0]["worker_request"] = {"session_id": session.id, "request_id": "original-worker", "phase": "unknown"}
+    job["items"][0]["worker_request"] = {"session_id": session.id, "request_id": "original-worker",
+                                        "phase": "settled", "retired": True}
     job = jobs.update(job["id"], session_id=session.id, items=job["items"])
     request = QueuedPrompt(prompt="Retain this instruction", attachment_ids=[], request_id=request_id)
     if location == "current":
@@ -107,3 +108,21 @@ async def test_retirement_check_preserves_exact_request_scope(client, tmp_path, 
         assert session._run.request is request
     else:
         assert session._pending_queue == [request]
+
+
+async def test_idle_original_session_does_not_replace_missing_retirement_proof(client, tmp_path):
+    root = tmp_path / "vault"
+    root.mkdir()
+    job, _ = await proposed(client, root, paths=["Library/new.md"])
+    owner = (await wiki_api.session_manager.db.get_system_agent())["user_id"]
+    jobs = WikiJobs(owner)
+    manager = SessionManager()
+    session = Session(id="original-session", name="worker", working_dir=str(tmp_path), user_id=owner)
+    manager.sessions[session.id] = session
+    job["items"][0]["worker_request"] = {"session_id": session.id, "request_id": "original-worker",
+                                        "work_id": "wiki-original-worker", "phase": "settled"}
+    for available in (True, False):
+        if not available:
+            manager.sessions.pop(session.id)
+        with pytest.raises(WikiError, match="retirement is not proven"):
+            jobs.require_retired(job, manager=manager)

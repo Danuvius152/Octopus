@@ -221,10 +221,12 @@ async def test_long_execution_diagnostics_classify_tail_without_exposing_stderr(
     def argv(context):
         starts.put_nowait(context)
         stderr = "access_token=" + secret + "\n" + "diagnostic " * 1000 + diagnostic
-        code = f"import sys;sys.stderr.write({stderr!r});print('{{\"type\":\"turn.failed\",\"error\":{{\"message\":\"execution failed\"}}}}')"
+        code = (f"import sys;sys.stderr.write({stderr!r});"
+                "print('{\"type\":\"thread.started\",\"thread_id\":\"diagnostic-thread\"}');"
+                "print('{\"type\":\"turn.failed\",\"error\":{\"message\":\"execution failed\"}}')")
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
     monkeypatch.setattr(manager, "_TRANSIENT_RETRY_BASE_DELAY", 0)
     receipt = await manager.start_message(session.id, "classify full evidence")
     completion = await asyncio.wait_for(receipt.wait(), 5)
@@ -976,7 +978,9 @@ async def test_overall_cap_expires_in_retry_backoff_before_another_cli_can_start
             payload = {"type": "turn.failed", "error": {"message": "Model overloaded", "codex_error_info": "server_overloaded"}}
         else:
             payload = {"type": "turn.completed", "usage": {}}
-        return [sys.executable, "-u", "-c", f"import json; print(json.dumps({payload!r}), flush=True)"], {"cwd": context.working_dir}
+        code = ("import json;print('{\"type\":\"thread.started\",\"thread_id\":\"backoff-thread\"}',flush=True);"
+                f"print(json.dumps({payload!r}), flush=True)")
+        return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))

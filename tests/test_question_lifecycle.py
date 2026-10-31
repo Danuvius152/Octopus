@@ -415,6 +415,8 @@ async def test_authoritative_deadline_wins_over_delayed_timer_and_late_human_ans
     answer = await manager.wait_for_question_answer(session.id, qid, timeout=0.1)
     assert answer == manager.AUTO_ANSWER_TEXT
     assert len([event for event in events if event.get("auto")]) == 1
+    saved = next(row for row in await manager.db.load_messages(session.id) if row["type"] == "question_answer")
+    assert saved["tool_input"]["question_resolution"]["disposition"] == "expired"
 
 
 async def test_overall_deadline_still_stops_a_turn_waiting_for_human(question_host, monkeypatch):

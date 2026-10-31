@@ -96,6 +96,73 @@ claim，没有无数据库执行分支；待执行队列只持身份与展示/�
 构建状态、App ask/SSE、Research、Wiki 和 scheduler 消费原请求完成事实。
 App 的成功 `done` 还要求原正文通知前缀已送达；响应结束不直接释放执行槽位。
 
+### 原执行的观察
+
+原接纳回执的 `execution` 持有 `RequestObservation`：原 input request/work、
+驱动完成 Future，以及按尝试捕获的 request/attempt/work/run lease 和 backend。
+原 OwnerRuntime 在原 Execution 的完成或故障接管中绑定这些事实；Manager 不回读
+当前执行解释旧回执。重建回执没有进程内资源证明时保持 `execution=None`，不因
+会话 idle、删除或对象缺失推导成功。
+
+`driver_state` / `wait_driver()` 只观察原输入的驱动收束。Stop 将未启动输入保留
+队列时，该输入仍 pending；未知 steer 即使先返回 unavailable，其观察仍跟随原
+承载 driver。`attempts` 返回有原身份的资源引用；`wait_resources()` 先等原 driver
+不再添加 attempt，再等这些 backend 的实际退出。资源仍存活、退出失败和缺少证明
+分别保持 pending、failed、unavailable；等待失败也可传播原异常。
+
+请求驱动结束允许 Claude 宿主供 B 复用，不能据此把 A 捕获的宿主报为已退出。
+观察 A 或取消其等待不调用 stop，也不停止 B；资源引用由原消费者持有至观察责任
+结束。普通 App 槽只等待原 driver，保留复用政策。安装交接的领域事实集中另在
+[未完成路线](../plans/engineering-runtime-roadmap.md#phase-2)推进。
+
+Wiki 结束或重试原 work 时，先关闭准入/授权，再加入原 BG、Research、会话和
+backend 清理。`require_retired` 使用会话公开的 work/旧会话范围查询与自己的持久
+退休确认，不再读取会话私有队列或退休集合。缺少原证明，即使会话仍存在且空闲，
+也拒绝重试；旧记录缺少 work 身份时保留原会话范围的保守检查。失败 Owner 可
+保留诊断引用，但只有其原 `resource_cleanup` 明确成功后才不再算活动资源；
+缺失、pending、失败或取消均不能被当作成功。归档不删除这些诊断来制造退休证明。
+
+### 原请求结果读取
+
+`Database.read_session_result` 在同一已提交快照解释 input/carrier、terminal、
+attempt、有序正文、成本和可识别缺失。确认的 inline 输入沿真实承载关系读取；
+unknown 输入不借用主请求的成功。旧 terminal 无 attempt 时只回退同 request
+已关联文本，不按时间、文字含义或“最佳答案”猜关联，也不建答案引用表。
+
+| 消费者 | 保留的正文及完成语义 |
+| --- | --- |
+| 委派完成返回 | terminal attempt 正文连续拼接后 strip；成功空正文用既有占位；失败走 agent-error，保留原交付缺失/完整性错误。 |
+| App 历史状态 | 正文双换行拼接，不整体 strip；失败仍可带保存的正文；无 terminal 按原运行事实区分 running/queued/unknown。 |
+| App 实时 ask/SSE | `LiveReply` 依原 request/attempt 接收，新 attempt/retry 清旧正文，忽略空片段后双换行拼接并 strip；成功另需原通知前缀送达。 |
+
+实时消费保留事件流，不强制改为事后 DB 查询；重建 receipt 不虚构 delivered。
+合法空答和正文行后来丢失，现有记录不能普遍区分；可识别的 terminal、会话或输入
+关联缺失则显式保留。Claude idle 迟到文本可以保存展示，不提升为完整尾部交付保证。
+
+### 问题结算
+
+HTTP、WS 和父代理代答将输入及可信来源送到原 Question Owner。Owner 找原
+pending/attempt，先纯校验原表单，再不让出地检查 current/到期并 claim，保存后
+发布和唤醒。每题有且仅有合法、不重复的单/多选，或非空自定义文字；缺答、非法
+选项、单选多选、有效选择与非空文字并存均整份拒绝，不消费问题且不使 Owner 失败。
+未用字段的空列表/空文字合法；trim 只判断文字是否为空，保留原正文，委派入口
+延续已有的文字 strip 转换。父代理入口只做题目 ID/位置转换，不再持另一份校验规则。
+
+原消息 `tool_input.question_resolution` 保存 version 1、question/request/attempt/
+work、处置、来源及答案。答案沿原 `question_index`、标签与可辨明的 `option_index`
+关联表单，保留多选顺序与自定义文字，不生成 provider ID。处置区分 answered、
+expired、closed；显式关闭保留 `question_closed` 和 reason，系统到期指导不伪装
+成表单答案。旧结构和来源缺失保持未知，content 仍是旧 MCP/展示使用的文本投影。
+
+来源沿认证 principal 表达 account 或 agent；父代理路径另带真实委派/父会话关系。
+账户认证不证明自然人亲答，HTTP URL 与客户端自报 source 也不证明来源。内部缺少
+可信调用来源时保持 unknown，系统到期和内部关闭记录 system。历史和实时消息携带
+同一结构，正常 Question UI 不加步骤；这是对原先宽松 HTTP/WS 非法输入的明确收紧。
+
+回答、到期和关闭只处置一次，晚答不能消费新 attempt。claim 后保存失败走原 Owner/
+存储故障边界，不发布或返回未保存的成功答案，不用撤回 claim 处理普通校验错误。
+这些事实沿现有消息 JSON 保存，不新增活回调、持久问题队列或存储根。
+
 审计原执行结果时使用非空 `terminal_request_id` 及其唯一性，不按消息时间或
 `request.content_id` 计数；复制的历史可以保留这些值而不代表新执行。原生父轮的
 `turn.completed` 不证明 helper 已完成或父轮已消费其报告；有限已写记录观察不等于

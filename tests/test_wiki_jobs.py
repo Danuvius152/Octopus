@@ -66,6 +66,12 @@ class Curator:
     def get_session(self, session_id):
         return None
 
+    def work_has_resources(self, work_id):
+        return False
+
+    def session_has_resources(self, session_id, request_ids=None):
+        return False
+
     async def get_committed_terminal(self, session_id, request_id):
         return self.terminals.get((session_id, request_id))
 

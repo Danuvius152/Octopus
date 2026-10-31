@@ -21,7 +21,7 @@ from pydantic import BaseModel
 
 from ..auth import verify_token
 from ..delegations import DelegationError, TerminalDisposition, delegation_manager
-from ..deps import ScopeUser, SessionMgr
+from ..deps import ScopeUser, SessionMgr, resolve_principal
 from ..mcp_identity import verify
 from ..sessions import SessionManager
 
@@ -255,9 +255,13 @@ async def answer_delegation_question(
         raise HTTPException(
             status.HTTP_404_NOT_FOUND, "Delegation not found"
         )
+    principal = await resolve_principal(_)
+    if principal is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
     try:
         return await delegation_manager.answer_pending_question(
             delegation_id, req.choice, answers=req.answers, question_id=req.question_id,
+            source=principal.answer_source(),
         )
     except DelegationError as e:
         raise HTTPException(e.status_code, str(e))

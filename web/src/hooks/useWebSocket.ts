@@ -248,6 +248,7 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
         type: "question_answer",
         content: data.content as string,
         tool_use_id: questionId,
+        tool_input: data.tool_input as Record<string, unknown> | undefined,
       });
       removePendingQuestion(sessionId, questionId);
       break;
@@ -260,7 +261,7 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
         type: "question_closed",
         content: data.message as string,
         tool_use_id: questionId,
-        tool_input: { reason: data.reason },
+        tool_input: (data.tool_input as Record<string, unknown> | undefined) ?? { reason: data.reason },
       });
       removePendingQuestion(sessionId, questionId);
       break;

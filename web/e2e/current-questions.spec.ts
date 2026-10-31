@@ -103,6 +103,22 @@ test("current questions submit complete answers and keep answered and cancelled 
     expect(detail.messages.map((message: { type: string }) => message.type)).toEqual([
       "question_request", "question_answer", "question_request", "question_closed",
     ]);
+    const savedAnswer = detail.messages.find((message: { type: string }) => message.type === "question_answer");
+    expect(savedAnswer.tool_input.question_resolution).toMatchObject({
+      version: 1, question_id: question.question_id, disposition: "answered", source: { kind: "account" },
+      answers: [
+        { question_index: 0, selected: [{ option_index: 0, label: "Harbor" }], text: null },
+        { question_index: 1, selected: [{ option_index: 0, label: "Train" }], text: null },
+      ],
+    });
+    expect(received.find((frame) => frame.type === "question_answer" && frame.question_id === question.question_id)?.tool_input)
+      .toEqual(savedAnswer.tool_input);
+    const savedClose = detail.messages.find((message: { type: string }) => message.type === "question_closed");
+    expect(savedClose.tool_input.question_resolution).toMatchObject({
+      version: 1, question_id: cancelled.question_id, disposition: "closed", source: { kind: "account" },
+    });
+    expect(received.find((frame) => frame.type === "question_closed" && frame.question_id === cancelled.question_id)?.tool_input)
+      .toEqual(savedClose.tool_input);
   } finally {
     const deleted = await request.delete(`${api}/sessions/${session.id}`, { headers });
     expect(deleted.ok()).toBeTruthy();

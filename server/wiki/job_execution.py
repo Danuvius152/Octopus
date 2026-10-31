@@ -189,23 +189,24 @@ def require_retired(store, job, *, manager=None):
         raise WikiError("The previous maintenance assignment has not retired", 409)
     manager = manager or worker.manager
     references = job_items.references(job.get("items", []))
-    sessions = {ref["session_id"] for ref in references if ref.get("session_id")}
-    if job["session_id"]:
-        sessions.add(job["session_id"])
-    for session_id in sessions:
-        session = manager.get_session(session_id) if manager else None
-        exact = {ref["request_id"] for ref in references if ref.get("session_id") == session_id and ref.get("request_id")}
-        active = ([*session._pending_queue, *([session._run.request] if session._run.request else [])]
-                  if session is not None else [])
-        if session is not None and (any(not exact or request.request_id in exact for request in active)
-                                    or session._run.retirements):
+    legacy_session = job.get("session_id")
+    if manager and legacy_session and not any(ref.get("work_id") and ref.get("session_id") == legacy_session
+                                              for ref in references):
+        exact = {ref["request_id"] for ref in references
+                 if ref.get("session_id") == legacy_session and ref.get("request_id")}
+        if manager.session_has_resources(legacy_session, exact or None):
             raise WikiError("The previous maintenance execution has not retired", 409)
     for reference in references:
+        active = manager and (
+            manager.work_has_resources(reference["work_id"]) if reference.get("work_id") else
+            manager.session_has_resources(reference["session_id"], {reference["request_id"]})
+            if reference.get("session_id") and reference.get("request_id") else False
+        )
+        if active:
+            raise WikiError("The previous maintenance execution has not retired", 409)
         if reference.get("retired") or reference.get("phase") == "rejected":
             continue
-        session = manager.get_session(reference.get("session_id")) if manager and reference.get("session_id") else None
-        if session is None:
-            raise WikiError("Original execution retirement is not proven; inspect the retained evidence", 409)
+        raise WikiError("Original execution retirement is not proven; inspect the retained evidence", 409)
 
 
 def reconcile_cancelled_effects(jobs, captured, *, manager):

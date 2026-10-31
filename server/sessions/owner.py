@@ -167,7 +167,7 @@ class SessionOwner:
         self.require_available()
         size = (len(command.request.prompt.encode("utf-8")) + len(command.request.attachment_ids) * 64
                 if isinstance(command, Submit) else
-                len(json.dumps(command.data, ensure_ascii=True).encode("ascii")) + 128
+                len(json.dumps((command.data, command.source.details()), ensure_ascii=True).encode("ascii")) + 128
                 if isinstance(command, CorrelatedControl) else 128)
         ordinary = isinstance(command, Submit)
         if ordinary:

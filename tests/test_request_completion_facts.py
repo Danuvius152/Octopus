@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -12,6 +13,8 @@ from server.applications import ApplicationManager
 from server.config import settings
 from server.harness.run import HarnessRun
 from server.sessions.owner import SessionOwnerUnavailable
+from server.wiki import job_execution
+from server.wiki.store import WikiError
 from tests.test_delegation_notification_failure import (
     notification_runtime as notification_runtime,
 )
@@ -80,6 +83,64 @@ async def test_owner_failure_after_terminal_commit_does_not_lose_the_acknowledge
     assert len(runtime.starts) == 1
 
 
+async def test_wiki_work_guard_releases_failed_owner_only_after_confirmed_resource_cleanup(
+    notification_runtime, monkeypatch,
+):
+    runtime = notification_runtime
+    runtime.controls.enabled = False
+    database = runtime.manager.db
+    sequence, stop = database.message_sequence_state, HarnessRun.stop
+    model = runtime.root / "notification_model.py"
+    model.write_text(model.read_text() + "sys.stdin.read()\n")
+    retiring, release = asyncio.Event(), asyncio.Event()
+    target = {}
+
+    async def fail_projection(session_id):
+        projection = await sequence(session_id)
+        if target.get("session_id") == session_id and target.get("fail"):
+            if await database.get_committed_terminal(session_id, target["receipt"].request_id):
+                raise RuntimeError("Projection failed after terminal commit")
+        return projection
+
+    async def retire_original(run):
+        if run.work_id == target.get("work_id"):
+            retiring.set()
+            await release.wait()
+        await stop(run)
+
+    monkeypatch.setattr(database, "message_sequence_state", fail_projection)
+    monkeypatch.setattr(HarnessRun, "stop", retire_original)
+    rec = await runtime.delegations.start_delegation(parent_session_id=runtime.parent.id,
+        agent_name="Notification worker", request="Retain resource proof after Owner failure")
+    receipt = next(receipt for sid, work, receipt in runtime.receipts
+                   if sid == rec.delegation_id and work == rec.work_id)
+    target.update(session_id=rec.delegation_id, work_id=rec.work_id, receipt=receipt, fail=True)
+    reference = {"request_id": receipt.request_id, "session_id": rec.delegation_id,
+                 "work_id": rec.work_id, "phase": "settled", "retired": True}
+    job = {"id": receipt.request_id, "session_id": rec.delegation_id, "items": [{"worker_request": reference}]}
+    store = SimpleNamespace(state=runtime.root)
+    try:
+        await release_model(runtime, rec)
+        assert (await asyncio.wait_for(receipt.wait(), 2)).outcome.status == "success"
+        await asyncio.wait_for(retiring.wait(), 2)
+        assert runtime.manager.session_owner_failed(rec.delegation_id)
+        assert runtime.manager.work_has_resources(rec.work_id)
+        with pytest.raises(WikiError, match="previous maintenance execution has not retired"):
+            job_execution.require_retired(store, job, manager=runtime.manager)
+        target["fail"] = False
+        release.set()
+        await asyncio.wait_for(job_execution.retire(runtime.manager, reference), 3)
+        assert not runtime.manager.work_has_resources(rec.work_id)
+        job_execution.require_retired(store, job, manager=runtime.manager)
+        await runtime.manager.archive_session(rec.delegation_id, replace=False)
+        assert runtime.manager.get_session(rec.delegation_id) is None
+        assert runtime.manager.session_owner_failed(rec.delegation_id)
+        job_execution.require_retired(store, job, manager=runtime.manager)
+    finally:
+        target["fail"] = False
+        release.set()
+
+
 async def test_slow_initial_text_cannot_overtake_the_nested_relay(notification_runtime, monkeypatch):
     runtime = notification_runtime
     model = runtime.root / "notification_model.py"
@@ -98,7 +159,7 @@ async def test_slow_initial_text_cannot_overtake_the_nested_relay(notification_r
     )
     first = next(receipt for sid, work, receipt in runtime.receipts
                  if sid == outer.delegation_id and work == outer.work_id)
-    load = runtime.manager.db.load_committed_request_messages
+    load = runtime.manager.db.read_session_result
     release_text = asyncio.Event()
 
     async def delayed_initial_text(session_id, request_id):
@@ -106,7 +167,7 @@ async def test_slow_initial_text_cannot_overtake_the_nested_relay(notification_r
             await release_text.wait()
         return await load(session_id, request_id)
 
-    monkeypatch.setattr(runtime.manager.db, "load_committed_request_messages", delayed_initial_text)
+    monkeypatch.setattr(runtime.manager.db, "read_session_result", delayed_initial_text)
     try:
         await release_model(runtime, outer)
         runtime.release.set()

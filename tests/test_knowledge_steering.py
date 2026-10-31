@@ -269,10 +269,13 @@ async def test_failed_frame_reuses_committed_input_and_its_original_identity(ste
     assert completed.reason == "steer_delivery_unknown" and completed.outcome is None
     assert completed.state == "unavailable" and completed.notification_state == "unavailable"
     assert completed.recording_state == "none"
+    assert receipt.execution.driver_state == "pending"
     assert env.manager.dispatch_snapshot(env.session.id)["items"] == []
     assert env.started.empty() and env.frames.empty()
     env.first_done.set()
     assert (await original.wait()).outcome.status == "success"
+    await asyncio.wait_for(receipt.execution.wait_driver(), 1)
+    assert receipt.execution.driver_state == "proven"
     assert env.started.empty() and env.frames.empty()
     rows = [row for row in await env.reader.load_messages(env.session.id) if row["content"] == correction]
     assert rows == [first]

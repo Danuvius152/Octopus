@@ -71,11 +71,11 @@ async def test_ws_large_answers_wait_for_bytes_and_release_after_cancel_and_owne
         waiting.put_nowait(asyncio.current_task())
         return await capacity_wait()
 
-    async def observe_command(*args):
+    async def observe_command(*args, **kwargs):
         command_id = args[1]["client_command_id"]
         entered.put_nowait((command_id, asyncio.current_task()))
         try:
-            result = await process_command(*args)
+            result = await process_command(*args, **kwargs)
         except BaseException as error:
             outcomes[command_id] = error
             raise

@@ -198,7 +198,7 @@ One install serves several people, each fully isolated (design:
 | `delegations.py` | Named-agent delegation and continuation by `delegation_id` ([design](implemented/agent-collaboration.md)). The original request's completion determines each round's reply or error; question events relay pending questions separately. Owns cycle/depth guards, delivery identity, continuation and descendant cancellation. Completion does not by itself archive an ordinary delegation session or prove its execution has retired. |
 | `scheduler.py` | `ScheduleRunner` — APScheduler runner for recurring prompts, **interval and cron**, fired per agent into fresh auto-archiving sessions. |
 | `schedule_ai.py` | Natural-language `/schedule` parsing — turns "every weekday at 9am" into a cron/interval spec via the agent's own harness (backend-agnostic). |
-| `database.py` / `db/` | SQLite (`aiosqlite`, WAL, FK cascade, `busy_timeout`, `synchronous=FULL`). `db/schema.py` defines current format 5; `PRAGMA user_version` is its sole format marker. Startup matches it before keys or writers; genuinely empty storage creates the complete current DDL directly. Ordinary reopening does not interpret or convert historical data. Publication verifies the full retained structure and current facts after old writers retire, before the candidate starts. Credentials and recovery relationships have one authority in `credential_secrets` and the successor's `recovery_of`. Short transactions confirm the original driver's COMMIT; uncertain storage enters fail-stop. Current input and unfinished-fork recovery remain owned by `SessionManager`. See [current storage and publication](implemented/current-storage-format.md). |
+| `database.py` / `db/` | SQLite (`aiosqlite`, WAL, FK cascade, `busy_timeout`, `synchronous=FULL`). `db/schema.py` defines current format 6; `PRAGMA user_version` is its sole format marker. Startup matches it before keys or writers; genuinely empty storage creates the complete current DDL directly. Ordinary reopening does not interpret or convert historical data. Publication verifies the full retained structure and current facts after old writers retire, before the candidate starts. Credentials and recovery relationships have one authority in `credential_secrets` and the successor's `recovery_of`. Short transactions confirm the original driver's COMMIT; uncertain storage enters fail-stop. Current input and unfinished-fork recovery remain owned by `SessionManager`. See [current storage and publication](implemented/current-storage-format.md). |
 | `jsonl_parser.py` / `jsonl_writer.py` | Read/write Claude Code JSONL session files for `octopus handoff` (import) and `octopus pull` (export → local `claude --resume`). |
 | `applications.py` | Agent-built applications ([design](implemented/applications.md)): account-owned directories, build sessions (`origin='application'`) and status projection. Progress can mark a build running; the original request's committed completion and entrypoint determine its final status. Direct build-session requests use the same completion observer. Archive keeps rows and files; the name index is live-only. |
 | `app_backends.py` | **Application backends** ([`implemented/application-backends.md`](implemented/application-backends.md)) — an executable `start.sh` at the app root IS the declaration; no manifest. Allocates a port, runs install/start with a **minimal** environment (never the server's, so Octopus credentials cannot leak into app code), waits for the port to accept, proxies `/apps/{id}/api/*`, reaps when idle. Three directories, three owners: `<slug>/` code (a rebuild rewrites it), `<slug>.data/` the app's own state (never touched), `<slug>.runtime/` installed deps (delete to force a clean reinstall). |
@@ -231,7 +231,7 @@ The harness is the **only** place that talks to a model runtime. There is one
 | `assembly.py` | Shared per-turn assembly: MCP server selection, system-prompt composition (in-app tools blurb, connectors blurb, memory blurb), working-dir absolutization. |
 | `events.py` | Backend-neutral `HarnessEvent` DTOs (`text`, `thinking`, `tool_use`, `tool_result`, `question_request`, `result`, `error`, `session_started`). |
 | `claude_code.py` | Claude profile — `claude --print --output-format=stream-json` argv, event normalization, JSONL transcript codec, `run_oneshot`. |
-| `codex.py` | Codex profile — `codex exec --json` argv (per-turn `-c` TOML overrides for MCP), event normalization, `run_oneshot`. Runs exactly once per turn. |
+| `codex.py` | Codex profile — `codex exec --json` argv (per-turn `-c` TOML overrides for MCP), event normalization, `run_oneshot`. Each attempt uses its own exec process; recovery follows the [evidence contract](implemented/harness-transient-retry.md#4-recovery-evidence-in-the-original-owner). |
 | `codex_text.py` | Codex one-shot model-only worker: native authentication/configuration, subscription text HTTP with no tool dispatcher, completed-text result. The common Harness owns admission and process-group retirement; [capability contract](implemented/codex-backend.md#source-and-verification). |
 | `registry.py` | `get_harness(backend)` / `available_backends()` (a kind appears only when its CLI resolves on PATH; `claude-code` is always listed). |
 | `login.py` | `LoginDriver` protocol for in-app credential login flows. |
@@ -347,6 +347,14 @@ WS actions receive the generic refusal; controls with command identities retain
 the usual authorization, replay and conflict rules. Historical tool approval
 requests remain readable from saved messages as static records, without actions
 or a live approval lifecycle.
+
+The original Question Owner validates complete answers against its saved form
+before claim, then saves text plus versioned `tool_input.question_resolution`
+before notifying waiters. HTTP/WS and delegated answers carry authenticated
+account/agent provenance; an account action does not prove a human personally
+answered. Expiry and closure remain distinct dispositions. Invalid answers leave
+the question open for correction; historical and live messages retain the same
+structure. See [question resolution](implemented/architecture-contract.md#问题结算).
 
 ### Cross-turn background work
 
@@ -481,6 +489,8 @@ conversion. Do not duplicate the schema in docs.
   fields, `cost`, `attachments`). User-message rows additionally record
   `git_head` and `git_status_clean` (captured at turn-start) so the fork
   safe-revert preflight can verify the working tree was clean at the branch point.
+  Question answers/closures keep optional versioned resolution facts in the
+  existing `tool_input`; older missing structure/provenance remains unknown.
 - **`schedules`** — recurring prompts owned by an agent: `interval_seconds` **or**
   `cron`+`timezone`, `recurrence_label`, `origin_session_id`, `enabled`.
 - **`backend_credentials`** + **`credential_secrets`** — credential metadata and
@@ -581,8 +591,9 @@ reservation refuses deletion with 409 until that original operation finishes.
   limit unless the administrator enables one. The child subprocess is spawned in its
   own process group (`start_new_session=True`) so `stop()` kills the whole
   group, not just the direct child. Idle stops recover automatically up to
-  `turn_idle_max_retries` times (default 2), continuing the captured conversation
-  after partial output. `retrying:true` marks nonterminal errors and failed
+  `turn_idle_max_retries` times (default 2), using pre-submission preparation
+  evidence or a supported captured-conversation continuation. Missing output
+  does not authorize prompt replay. `retrying:true` marks nonterminal errors and failed
   results so delegation/app callers keep waiting. The overall cap includes all
   attempts; exhausted recovery surfaces `turn_timeout`. Manual interruption
   cancels recovery. Design:
@@ -591,8 +602,8 @@ reservation refuses deletion with 409 until that original operation finishes.
   classifies the error: (1) auth-credential rejection (401/revoked/expired) →
   flag the bound credential `needs_reconnect` and stop — re-auth won't fix
   itself; (2) transient backend error (5xx/overloaded/dropped stream) →
-  bounded exponential retry (max 2, resumes from captured session id when
-  output was already streamed); (3) everything else (quota/credit/billing) →
+  bounded exponential recovery (max 2), only with preparation/continuation
+  evidence; (3) everything else (quota/credit/billing) →
   surface as-is. Classifiers are backend-declared pattern sets in
   `RuntimeProfile`. Designs: [`implemented/harness-credential-reauth.md`](implemented/harness-credential-reauth.md)
   and [`implemented/harness-transient-retry.md`](implemented/harness-transient-retry.md).

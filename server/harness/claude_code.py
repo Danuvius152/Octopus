@@ -947,6 +947,7 @@ CLAUDE_CODE = RuntimeProfile(
     stdin_mode=_STDIN_MODE,
     can_steer=True,
     reusable=True,
+    can_continue=True,
     build_turn_argv=build_turn_argv,
     new_event_parser=ClaudeEventParser,
     build_oneshot_argv=build_oneshot_argv,

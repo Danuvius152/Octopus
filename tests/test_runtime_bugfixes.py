@@ -691,6 +691,7 @@ async def test_codex_attempt_durations_reach_persisted_metrics_across_retry(mana
 
         async def start(self, *a, **k):
             self.parser = CodexEventParser()
+            self.initial_events = self.parser.parse({"type": "thread.started", "thread_id": "metrics-thread"}).events
             self.parser.parse({"type": "turn.started"})
             self.ordinal = len(starts)
             starts.append(clock.now)
@@ -698,6 +699,8 @@ async def test_codex_attempt_durations_reach_persisted_metrics_across_retry(mana
 
         async def stream(self):
             await self.started.wait()
+            for event in self.initial_events:
+                yield event
             clock.now += (self.ordinal + 1) / 4
             raw = {"type": "turn.failed", "error": {"message": "API Error: 529 Overloaded"}} if self.ordinal == 0 else {"type": "turn.completed"}
             for event in self.parser.parse(raw).events:

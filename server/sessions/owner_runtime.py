@@ -57,6 +57,7 @@ from .client_submissions import (
     saved_context,
 )
 from .commands import CorrelatedControl, _process_owned_command
+from .observation import AttemptResource
 from .owner_questions import (
     BeginQuestionAttempt,
     CloseSessionQuestions,
@@ -565,7 +566,7 @@ class OwnerRuntime:
         if isinstance(command, IdleEvent):
             return await self._idle_event(command)
         if isinstance(command, CorrelatedControl):
-            return await _process_owned_command(manager, session, command.data, command.user_id)
+            return await _process_owned_command(manager, session, command.data, command.user_id, command.source)
         raise AssertionError(f"Unknown Session command: {type(command).__name__}")
 
     def can_close_request(self, request_id: str | None) -> bool:
@@ -577,7 +578,15 @@ class OwnerRuntime:
         ))
 
     def owns_work(self, work_id: str) -> bool:
-        """Include original preparation and retirement after queue removal."""
+        """Retain ownership until original resource cleanup is proven.
+
+        A failed Owner keeps diagnostic references after cleanup; only its
+        successful cleanup task can stop those references counting as work.
+        """
+        cleanup = self.owner.resource_cleanup
+        if (self.owner.failed and cleanup is not None and cleanup.done()
+                and not cleanup.cancelled() and cleanup.exception() is None):
+            return False
         session = self.owner.session
         return (any(request.work_id == work_id for request in (*session._pending_queue, *session._steer_queue))
                 or self.current is not None and self.current.request.work_id == work_id
@@ -853,7 +862,7 @@ class OwnerRuntime:
                 message=message or original_message, code=code or original_code,
             )
         else:
-            await self.complete(execution.request, reason="shutdown" if cause == "shutdown" else "withdrawn")
+            await self.complete(execution.request, reason="shutdown" if cause == "shutdown" else "withdrawn", execution=execution)
         if (execution.phase in {"start", "stream", "retry"}
                 and execution.operation is not None and not execution.operation.done()):
             execution.operation.cancel()
@@ -963,6 +972,7 @@ class OwnerRuntime:
                           session._inline_requests.get(execution.request.request_id, ()))
         for request_id in tuple(session._request_completions):
             request = inputs.get(request_id)
+            carrying = None
             if request is None:
                 completion = RequestCompletion(request_id, request_id, "unavailable",
                     reason="Session owner failed; retained input requires review", notification_state="unavailable")
@@ -976,12 +986,27 @@ class OwnerRuntime:
                     actual_request_id=carrying.request.request_id if carrying is not None else None,
                     notification_state=self.notification_state(carrying) if carrying is not None else "unavailable",
                     reason="Session owner failed; retained input requires review", owner_ended=True)
+            self._finish_observation(request_id, carrying, unavailable=request is None)
             manager._finish_receipt(session, completion)
+
+    def _finish_observation(self, request_id: str, execution: Execution | None, *, unavailable: bool = False) -> None:
+        observation = self.owner.session._request_observations.pop(request_id, None)
+        if observation is None or observation._driver.done():
+            return
+        if execution is not None:
+            observation.follow_driver(execution.retired)
+        elif unavailable:
+            observation._driver.add_done_callback(lambda done: done.exception() if not done.cancelled() else None)
+            observation._driver.set_exception(SessionOwnerUnavailable("Original request driver evidence is unavailable"))
+        else:
+            # Withdrawing an unstarted input has no driver/resource to join.
+            observation._driver.set_result(None)
 
     async def complete(
         self, request: QueuedPrompt | PendingInput, *, settlement: _Settlement | None = None,
         reason: str | None = None, actual_request_id: str | None = None,
         published: bool = True,
+        execution: Execution | None = None,
     ) -> None:
 
         session, manager = self.owner.session, self.owner.manager
@@ -1002,6 +1027,7 @@ class OwnerRuntime:
                 reason=reason or completion.state,
             )
             self.changed()
+        self._finish_observation(request.request_id, execution)
         manager._finish_receipt(session, completion)
 
     def _offer_idle_publication(self) -> bool:
@@ -1354,7 +1380,7 @@ class OwnerRuntime:
             execution.turn = _Turn(
                 prepared.prompt, prepared.prompt, get_harness(prepared.configured.backend),
                 prepared.configured.credential_id or (prepared.agent or {}).get("credential_id"),
-                session.claude_session_id, execution.settlement,
+                execution.settlement,
             )
         backend, reused = prepared.backend, False
         held = session._run.backend
@@ -1372,6 +1398,10 @@ class OwnerRuntime:
         if session._run.retirements:
             return
         attempt = execution.attempt = _Attempt(backend, prepared.prompt, reused)
+        observation = session._request_observations.get(execution.request.request_id)
+        if observation is not None:
+            observation._attempts.append(AttemptResource(execution.request.request_id, attempt.attempt_id,
+                execution.request.work_id, getattr(backend, "run_lease_id", None), backend))
         execution.settlement.attempt_id = attempt.attempt_id
         session._run.backend, session._run.held_since = backend, None
         if hasattr(backend, "bind_tool_context"):
@@ -1544,7 +1574,8 @@ class OwnerRuntime:
         session, manager, turn, attempt = self.owner.session, self.owner.manager, execution.turn, execution.attempt
         assert turn is not None and attempt is not None
         settlement = execution.settlement
-        turn.produced_output |= attempt.produced_output
+        if attempt.conversation_id is not None:
+            turn.continuation_id = attempt.conversation_id
         for kind, count in getattr(attempt.backend, "protocol_issues", {}).items():
             settlement.protocol_issues[kind] = settlement.protocol_issues.get(kind, 0) + count
         settlement.protocol_locations.extend({**location, "attempt_id": attempt.attempt_id}
@@ -1698,10 +1729,10 @@ class OwnerRuntime:
         if execution.request.started or not any(item.request_id == execution.request.request_id for item in session._pending_queue):
             await self.complete(execution.request, settlement=execution.settlement,
                                 reason=execution.completion_reason or ("request_not_executed" if execution.settlement.outcome is None else None),
-                                published=published)
+                                published=published, execution=execution)
         for inline in session._inline_requests.pop(execution.request.request_id, []):
             await self.complete(inline, settlement=execution.settlement,
-                                actual_request_id=execution.request.request_id, published=published)
+                                actual_request_id=execution.request.request_id, published=published, execution=execution)
         session._run.request = None
         self.current = None
         self.notify_status(SessionStatus.idle)
@@ -1782,6 +1813,8 @@ class OwnerRuntime:
                 request.started = True
                 session._steer_queue[:] = [item for item in session._steer_queue if item.request_id != request.request_id]
                 session._inline_requests.setdefault(execution.request.request_id, []).append(request)
+                session._request_observations[request.request_id].follow(
+                    session._request_observations[execution.request.request_id])
                 steer.write = self.task(self._write_steer(
                     steer.backend, request.prompt, session.id, session.user_id, request.request_id,
                     execution.request.request_id,
@@ -1802,7 +1835,8 @@ class OwnerRuntime:
             delivered = False
             logger.error("Steer delivery unconfirmed session=%s request=%s error=%s\n%s",
                          session.id, request.request_id, type(error).__name__, steer.backend.format_exception(error))
-            await self.complete(request, reason="steer_delivery_unknown", actual_request_id=execution.request.request_id)
+            await self.complete(request, reason="steer_delivery_unknown", actual_request_id=execution.request.request_id,
+                                execution=execution)
         if delivered:
             request.started = True
             session._steer_queue[:] = [item for item in session._steer_queue if item.request_id != request.request_id]

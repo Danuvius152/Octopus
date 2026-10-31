@@ -4,6 +4,14 @@ import { act, renderHook } from "@testing-library/react";
 import { handleWsMessage, shouldApplyWsEvent, useWebSocket } from "./useWebSocket";
 import { useSessionStore, type SessionInfo } from "../stores/sessionStore";
 
+it.each(["question_answer", "question_closed"])("retains %s resolution facts from the original notification", (type) => {
+  useSessionStore.setState({ messages: {}, pendingQuestions: {}, sessionMembership: {}, sessions: [] });
+  const toolInput = { reason: "cancelled", question_resolution: { version: 1, question_id: "form", disposition: type === "question_answer" ? "answered" : "closed",
+    source: { kind: "account", user_id: "owner" }, answers: [{ question_index: 0, text: "choice", selected: [] }] } };
+  handleWsMessage({ type, session_id: "resolution-session", question_id: "form", content: "choice", message: "closed", tool_input: toolInput });
+  expect(useSessionStore.getState().messages["resolution-session"][0].tool_input).toEqual(toolInput);
+});
+
 it("restores the original session and rejects a delayed archive projection", () => {
   const original = { id: "woken-original", name: "Original", archived: false } as SessionInfo;
   useSessionStore.setState({ sessions: [], archivedSessions: [original], activeSessionId: "another-session", sessionMembership: {} });

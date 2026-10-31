@@ -14,6 +14,13 @@ from ..config import settings
 from ..harness import HarnessRun
 from ..mcp_identity import McpScope, require_live_scope
 from ..models import MessageContent, MessageRole
+from ..question_resolution import (
+    SYSTEM_SOURCE,
+    AnswerSource,
+    format_answers,
+    structured_answers,
+    validate_answers,
+)
 from .base import PendingQuestion
 from .publication import Publication
 from .runtime_types import SessionMailboxFull
@@ -44,12 +51,14 @@ class RegisterNativeQuestion:
 class AnswerQuestion:
     question_id: str
     answers: list[dict[str, Any]]
+    source: AnswerSource = AnswerSource()
 
 
 @dataclass(frozen=True)
 class CloseQuestion:
     question_id: str
     reason: str
+    source: AnswerSource = SYSTEM_SOURCE
 
 
 @dataclass(frozen=True)
@@ -86,9 +95,9 @@ def question_command_bytes(command: QuestionCommand) -> int:
     if isinstance(command, (CreateQuestion, RegisterNativeQuestion)):
         payload: object = command.questions
     elif isinstance(command, AnswerQuestion):
-        payload = (command.question_id, command.answers)
+        payload = (command.question_id, command.answers, command.source.details())
     elif isinstance(command, CloseQuestion):
-        payload = (command.question_id, command.reason)
+        payload = (command.question_id, command.reason, command.source.details())
     elif isinstance(command, CaptureQuestion):
         payload = command.question_id
     elif isinstance(command, BeginQuestionAttempt):
@@ -140,15 +149,17 @@ class OwnerQuestions:
             pending = self.owner.session._questions.get(command.question_id)
             if pending is None or pending.state != "pending":
                 return False
+            answers = validate_answers(pending.questions, command.answers)
             if not self._current(pending):
                 await self._close(pending, "attempt_ended")
                 return False
             if await self._expire(pending):
                 return False
-            return await self._answer(pending, format_answers(pending.questions, command.answers), auto=False)
+            return await self._answer(pending, format_answers(pending.questions, answers), auto=False,
+                source=command.source, answers=structured_answers(pending.questions, answers))
         if isinstance(command, CloseQuestion):
             pending = self.owner.session._questions.get(command.question_id)
-            return await self._close(pending, command.reason) if pending is not None else False
+            return await self._close(pending, command.reason, source=command.source) if pending is not None else False
         if isinstance(command, CaptureQuestion):
             pending = self.owner.session._questions.get(command.question_id)
             if pending is not None and pending.state == "pending":
@@ -242,7 +253,12 @@ class OwnerQuestions:
         self, pending: PendingQuestion, message: MessageContent, event: dict[str, Any], *, request: bool = False,
     ) -> None:
         manager, session = self.owner.manager, self.owner.session
-        seq = await manager._persist_message(session, message)
+        try:
+            seq = await manager._persist_message(session, message)
+        except ValueError as error:
+            # A recording failure after claim is not a rejected answer. Let
+            # the established Owner failure/cleanup boundary contain it.
+            raise RuntimeError("Question recording failed") from error
         manager._tag_persisted(event, seq, message)
         self._notice_order += 1
         notice = QuestionNotification(event, self._notice_order, session._run.backend)
@@ -283,31 +299,40 @@ class OwnerQuestions:
                 watchdog["last"] = time.monotonic()
         return True
 
-    async def _answer(self, pending: PendingQuestion, answer: str, *, auto: bool) -> bool:
+    def _resolution(self, pending: PendingQuestion, disposition: str, source: AnswerSource,
+                    *, answers: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        return {"version": 1, "question_id": pending.question_id, "request_id": pending.request_id,
+                "attempt_id": pending.attempt_id, "work_id": pending.work_id,
+                "disposition": disposition, "source": source.details(), "answers": answers}
+
+    async def _answer(self, pending: PendingQuestion, answer: str, *, auto: bool,
+                      source: AnswerSource = SYSTEM_SOURCE, answers: list[dict[str, Any]] | None = None) -> bool:
         if not self._claim(pending, "answered"):
             return False
-        pending.answer = answer
         message = MessageContent(role=MessageRole.user, type="question_answer",
-                                 tool_use_id=pending.question_id, content=answer)
+            tool_use_id=pending.question_id, content=answer,
+            tool_input={"question_resolution": self._resolution(pending, "expired" if auto else "answered", source, answers=answers)})
         event: dict[str, Any] = {
             "type": "question_answer", "session_id": self.owner.session.id,
-            "question_id": pending.question_id, "content": answer,
+            "question_id": pending.question_id, "content": answer, "tool_input": message.tool_input,
         }
         if auto:
             event["auto"] = True
         await self._persist(pending, message, event)
+        pending.answer = answer
         pending.ready.set()
         return True
 
-    async def _close(self, pending: PendingQuestion, reason: str) -> bool:
+    async def _close(self, pending: PendingQuestion, reason: str, *, source: AnswerSource = SYSTEM_SOURCE) -> bool:
         if not self._claim(pending, "closed"):
             return False
         human = f"Question closed: {reason.replace('_', ' ')}. No answer was received."
         message = MessageContent(role=MessageRole.system, type="question_closed", content=human,
-                                 tool_use_id=pending.question_id, tool_input={"reason": reason})
+            tool_use_id=pending.question_id, tool_input={"reason": reason,
+                "question_resolution": self._resolution(pending, "closed", source)})
         event = {
             "type": "question_closed", "session_id": self.owner.session.id,
-            "question_id": pending.question_id, "message": human, "reason": reason,
+            "question_id": pending.question_id, "message": human, "reason": reason, "tool_input": message.tool_input,
         }
         await self._persist(pending, message, event)
         pending.ready.set()
@@ -392,19 +417,3 @@ class OwnerQuestions:
                 and all(notice is None or notice.completed
                         for notice in (pending.request_publication, pending.publication))):
             self.owner.session._questions.pop(pending.question_id)
-
-
-def format_answers(questions: list[dict[str, Any]], answers: list[dict[str, Any]]) -> str:
-    """Render the original form and its aligned human answers."""
-    lines = []
-    for index, question in enumerate(questions):
-        answer = answers[index] if index < len(answers) else {}
-        if answer.get("text"):
-            text = answer["text"]
-        else:
-            selected = answer.get("selected") or []
-            if isinstance(selected, str):
-                selected = [selected]
-            text = ", ".join(selected) if selected else "(no answer)"
-        lines.append(f"Q: {question.get('question', '')}\nA: {text}")
-    return "\n\n".join(lines)

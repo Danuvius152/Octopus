@@ -41,6 +41,13 @@ Knowledge history and source/effect evidence are not executable work and must
 not be discarded as a cache. Exclusion from an archive does not delete or
 reconfigure source chats, tasks, logins or files.
 
+Structured Question resolutions live in existing chat-message JSON, with no
+additional collection root. They follow the same chat exclusion in account
+archives. A complete consistent backup retains that JSON and its original form
+associations; restoring it does not revive callbacks or infer missing legacy
+structure/provenance from text. Compatibility is described in the
+[current storage contract](implemented/current-storage-format.md#publication-boundary).
+
 ### Prepare and export
 
 Use the **same Octopus build** for both commands and retain it with the archive.

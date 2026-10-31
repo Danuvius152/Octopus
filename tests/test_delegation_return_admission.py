@@ -15,7 +15,7 @@ from tests.test_source_return_owner_failure import fail_destination_owner
 async def test_terminal_material_preparation_does_not_wake_archived_parent(work_runtime, monkeypatch, tmp_path):
     manager, delegations, parent, starts = work_runtime
     reading, release_material = asyncio.Event(), asyncio.Event()
-    read = manager.db.load_committed_request_messages
+    read = manager.db.read_session_result
     rec = await delegations.start_delegation(
         parent_session_id=parent.id, agent_name="Worker", request="controlled original return material",
     )
@@ -27,7 +27,7 @@ async def test_terminal_material_preparation_does_not_wake_archived_parent(work_
             await release_material.wait()
         return await read(session_id, request_id)
 
-    monkeypatch.setattr(manager.db, "load_committed_request_messages", prepare_original_material)
+    monkeypatch.setattr(manager.db, "read_session_result", prepare_original_material)
     await manager.archive_session(parent.id, replace=False)
     try:
         (tmp_path / "release").touch()
@@ -134,7 +134,7 @@ async def test_parent_work_closed_during_terminal_preparation_cannot_wake_or_cha
     )
     await asyncio.wait_for(starts.get(), 3)
     reading, release_material = asyncio.Event(), asyncio.Event()
-    read = manager.db.load_committed_request_messages
+    read = manager.db.read_session_result
 
     async def hold_original_material(session_id, request_id):
         if session_id == rec.delegation_id:
@@ -142,7 +142,7 @@ async def test_parent_work_closed_during_terminal_preparation_cannot_wake_or_cha
             await release_material.wait()
         return await read(session_id, request_id)
 
-    monkeypatch.setattr(manager.db, "load_committed_request_messages", hold_original_material)
+    monkeypatch.setattr(manager.db, "read_session_result", hold_original_material)
     try:
         (tmp_path / "release").touch()
         await asyncio.wait_for(reading.wait(), 3)
@@ -221,7 +221,7 @@ async def test_unconfirmed_return_recovers_original_input_after_source_loss_and_
         def closed_question_material(*args, **kwargs):
             pytest.fail("An admitted question must not prepare a closed question again")
 
-        monkeypatch.setattr(manager.db, "load_committed_request_messages", deleted_material)
+        monkeypatch.setattr(manager.db, "read_session_result", deleted_material)
         monkeypatch.setattr(delegations, "_render_question_body", closed_question_material)
         if source == "terminal":
             await delegations._command(delegations._inject_terminal(rec))

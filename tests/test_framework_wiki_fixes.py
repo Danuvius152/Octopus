@@ -72,7 +72,7 @@ async def test_app_waits_for_its_request_after_prioritized_human_correction(runt
         assert corrected.outcome.status == "success"
         assert seen == ["Human correction"]
         assert not turn.done.is_set()
-        assert not turn.text and turn.queue.empty()
+        assert turn.reply() == "" and turn.queue.empty()
         await manager.resume_dispatch(session.id)
         await asyncio.wait_for(turn.done.wait(), 2)
         assert "App question" in turn.reply()

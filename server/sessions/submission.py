@@ -7,6 +7,7 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 from ..models import TurnOutcome
+from .observation import RequestObservation
 
 if TYPE_CHECKING:
     from ..knowledge import OwnedTaskContext
@@ -29,6 +30,7 @@ class SubmissionReceipt:
     disposition: Literal["accepted", "duplicate", "closed", "steered"]
     request_id: str
     _completion: asyncio.Future[RequestCompletion] = field(repr=False, compare=False)
+    execution: RequestObservation | None = field(default=None, repr=False, compare=False)
 
     @classmethod
     def closed(cls, request_id: str, reason: Literal["shutdown", "withdrawn"]) -> SubmissionReceipt:
@@ -92,7 +94,8 @@ class ReturnUnconfirmed:
 ReturnAdmission = SubmissionReceipt | ReturnRefused | ReturnUnconfirmed
 
 
-def receipt_for_input(row: dict[str, Any], future: asyncio.Future[RequestCompletion] | None = None) -> SubmissionReceipt:
+def receipt_for_input(row: dict[str, Any], future: asyncio.Future[RequestCompletion] | None = None,
+                      execution: RequestObservation | None = None) -> SubmissionReceipt:
     """Observe durable admission without creating an Owner or dispatching work."""
     request_id = row["request_id"]
     if future is None:
@@ -105,7 +108,7 @@ def receipt_for_input(row: dict[str, Any], future: asyncio.Future[RequestComplet
             recording_state="committed" if terminal is not None else "none", reason=row["reason_code"],
             notification_state="unavailable",
         ))
-    return SubmissionReceipt("duplicate" if row["receipt"] and row["receipt"]["accepted"] else "closed", request_id, future)
+    return SubmissionReceipt("duplicate" if row["receipt"] and row["receipt"]["accepted"] else "closed", request_id, future, execution)
 
 
 def observed_input_receipt(row: dict[str, Any], session: Session | None) -> SubmissionReceipt:
@@ -120,4 +123,4 @@ def observed_input_receipt(row: dict[str, Any], session: Session | None) -> Subm
         if original is not None and original.request_id == row["request_id"]:
             return replace(original, disposition="duplicate")
     future = session._request_completions.get(row["request_id"]) if session is not None else None
-    return receipt_for_input(row, future)
+    return receipt_for_input(row, future, session._request_observations.get(row["request_id"]) if session else None)

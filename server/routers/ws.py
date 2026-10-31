@@ -70,7 +70,7 @@ async def websocket_endpoint(session_manager: SessionMgr, ws: WebSocket, token: 
                     continue
             if "client_command_id" in data:
                 from ..sessions.commands import process_command
-                delivery.offer(await process_command(session_manager, data, user_id), session_scoped=False)
+                delivery.offer(await process_command(session_manager, data, user_id, source=principal.answer_source()), session_scoped=False)
                 continue
 
             if msg_type == "send_message":

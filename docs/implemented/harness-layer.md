@@ -39,13 +39,22 @@ Input delivery, committed business outcome, notification and resource exit are
 separate facts under the [execution contract](architecture-contract.md#输入完成与资源退休).
 
 Claude declares `can_steer=True` and `reusable=True`; Codex exec declares both
-false. `stdin_mode` describes initial delivery only. Owner dispatch, API
+false. Both declare `can_continue=True` for a captured native conversation;
+this permits a new continuation input, not replay or exactly-once effects.
+`stdin_mode` describes initial delivery only. Owner dispatch, API
 capabilities and `HarnessRun.steer()` consume the explicit steering declaration;
 held-process policy consumes reuse. Tool allow/deny support remains independent.
 For a reusable host, Wiki scopes bind through its original live run lease so
 compatible later requests can install their own task. A non-reusable run uses
 its original task scope directly, including when its initial input uses stdin.
 Both paths preserve current Wiki authorization.
+
+The run also owns local input-submission evidence and its captured cleanup task.
+`retirement_state` and `wait_retirement()` observe that task without starting
+retirement or changing its original process. A live held host remains pending
+even after a request driver ends; cancellation of the waiter leaves resource
+ownership intact. The [execution observation contract](architecture-contract.md#原执行的观察)
+defines the receipt's request/attempt/work scope and consumer lifetime.
 
 Claude uses stream-JSON input and can retain a process between turns. Codex exec
 closes stdin after its initial prompt and queues subsequent user input. Settings

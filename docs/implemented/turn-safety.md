@@ -20,19 +20,19 @@
 
 ## 3. Per-turn watchdog (idle + overall)
 
-In `_run_backend`, around the `async for event in backend.stream()`:
+OwnerRuntime tracks validated activity and the logical turn's start. Each
+attempt's captured deadline wakes its original Owner; managed reader/start
+operations and retirement retain their original identities.
 
-- Track `last_event_at` (reset on every event) and the turn `start`.
-- A watchdog task (also the only timer we need) wakes periodically and, if
-  `now - last_event_at > turn_idle_timeout_seconds` OR
-  `now - start > turn_max_seconds`, records the reason and calls
-  `backend.stop()` — which emits `_STREAM_END`, so the `async for` exits
-  cleanly (no generator-cancellation hazard).
+- Idle expiry compares the last validated activity with
+  `turn_idle_timeout_seconds`; the overall deadline compares the logical turn
+  start with `turn_max_seconds`. The Owner records the cause, closes steering
+  and retires the original backend and in-flight I/O.
 - After an idle stop, recover automatically up to `turn_idle_max_retries`
-  times. With no output from any attempt, retry the original prompt from its
-  original resume state. Once text (including deltas) or tool use has appeared,
-  require a resume id and continue the unfinished work with instructions to
-  inspect existing tool outcomes and avoid duplicating jobs or delegations.
+  times only when the [recovery evidence](harness-transient-retry.md#4-recovery-evidence-in-the-original-owner)
+  permits preparation or native continuation. Missing output never authorizes
+  replay. Continuation tells the model to inspect existing effects and retain
+  existing jobs/delegations; it does not guarantee exactly-once effects.
 - Persist and broadcast `code:"turn_timeout_retry"` for each recovery. Failed
   attempt results are held until classification, then tagged `retrying:true`
   along with recovery markers. Delegations, app conversations, and application
@@ -55,8 +55,8 @@ These bounds apply to both backends and delegation children.
 ## 4. Interaction with existing paths
 
 - Auth-expiry / transient-retry classification and premature-exit recovery
-  retain their own budgets. Recovery remembers output across attempts so a
-  later no-output failure cannot replay the original request over earlier work.
+  retain their own budgets. Captured conversation evidence survives attempts;
+  a later silent failure cannot restore the original prompt over earlier work.
 - A manual interrupt cancels the logical turn, including recovery. It does not
   trigger another automatic attempt and still reaps the process group.
 - `start_new_session=True` matches what `codex_login` and bg-tasks already do;

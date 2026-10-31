@@ -1919,7 +1919,7 @@ async def test_answer_pending_question_happy(models, dm, mgr, db, monkeypatch):
     # Capture answer_question call shape.
     called: dict = {}
 
-    async def fake_answer(sid, qid, answers):
+    async def fake_answer(sid, qid, answers, **kwargs):
         called["sid"] = sid
         called["qid"] = qid
         called["answers"] = answers
@@ -1959,7 +1959,7 @@ async def test_answer_pending_question_requires_complete_multi_question_batch(
 
     seen: dict = {}
 
-    async def fake_answer(sid, qid, answers):
+    async def fake_answer(sid, qid, answers, **kwargs):
         seen["answers"] = answers
         return True
 
@@ -1983,14 +1983,17 @@ async def test_delegated_answers_preserve_multiple_choices_and_stable_question_i
     parent = await _make_session(mgr, octo["id"])
     rec = await dm.start_delegation(parent_session_id=parent.id, agent_name="vera", request="r")
     child = mgr.get_session(rec.delegation_id)
+    child.restore_message_state(*await db.message_sequence_state(child.id))
     _seed_pending_question(child, "batch", [
         {"id": "colors", "question": "Colors?", "multiSelect": True, "options": [{"label": "A"}, {"label": "B"}]},
         {"id": "note", "question": "Note?", "options": []},
     ])
     seen = []
-    async def answer(sid, qid, answers):
+    answer_question = mgr.answer_question
+    async def answer(sid, qid, answers, **kwargs):
+        result = await answer_question(sid, qid, answers, **kwargs)
         seen.append(answers)
-        return True
+        return result
     monkeypatch.setattr(mgr, "answer_question", answer)
     with pytest.raises(DelegationError):
         await dm.answer_pending_question(rec.delegation_id, answers=[{"text": "incomplete"}], question_id="batch")
@@ -2106,7 +2109,7 @@ async def test_route_answer_happy(models, client, monkeypatch):
         child, "q-route", [{"question": "?", "options": [{"label": "Yes"}]}]
     )
 
-    async def fake_answer(sid, qid, answers):
+    async def fake_answer(sid, qid, answers, **kwargs):
         assert sid == did and qid == "q-route"
         assert answers == [{"selected": ["Yes"], "text": None}]
         return True

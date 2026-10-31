@@ -69,6 +69,7 @@ from .knowledge import (
 from .mcp_identity import McpScope, close_work, require_live_scope, work_is_open
 from .monitor import Event as _MonEvent
 from .monitor import record as _mon_record
+from .question_resolution import UNKNOWN_SOURCE, AnswerSource, QuestionAnswerInvalid
 from .research.manager import research_manager
 from .service_health import ServiceUnavailable
 from .sessions.runtime_types import (
@@ -1429,6 +1430,7 @@ class DelegationManager:
         self, delegation_id: str, choice: str | None = None, *,
         answers: list[dict[str, Any]] | dict[str, dict[str, Any]] | None = None,
         question_id: str | None = None,
+        source: AnswerSource = UNKNOWN_SOURCE,
     ) -> dict[str, Any]:
         """Answer a complete batch; legacy choice is limited to one question."""
         if self.session_mgr is None:
@@ -1475,26 +1477,22 @@ class DelegationManager:
             if len(set(keys)) != len(questions) or set(answers) != set(keys):
                 raise DelegationError("Answers must identify every question by ID or zero-based index", status_code=400)
             answers = [answers[key] for key in keys]
-        if not isinstance(answers, list) or len(answers) != len(questions):
-            raise DelegationError("Provide exactly one answer for every question", status_code=400)
         normalized = []
-        for question, answer in zip(questions, answers, strict=True):
-            if not isinstance(answer, dict):
-                raise DelegationError("Each answer must be an object", status_code=400)
-            selected, text = answer.get("selected") or [], answer.get("text")
-            if (not isinstance(selected, list) or any(not isinstance(label, str) or not label for label in selected)
-                    or (text is not None and not isinstance(text, str))):
-                raise DelegationError("Use selected labels or free text", status_code=400)
-            text = text.strip() if text else None
-            labels = {option["label"] for option in question.get("options", []) if "label" in option}
-            if (not selected and not text) or (selected and text) or len(set(selected)) != len(selected):
-                raise DelegationError("Each question needs a nonempty selection or free-text answer", status_code=400)
-            if (labels and any(label not in labels for label in selected)) or (len(selected) > 1 and not question.get("multiSelect")):
-                raise DelegationError("The selected labels do not match this question", status_code=400)
-            normalized.append({"selected": selected, "text": text})
-        ok = await self.session_mgr.answer_question(
-            rec.delegation_id, question_id, normalized
-        )
+        # Keep this entry's historical whitespace conversion; acceptance is
+        # decided once by the original question Owner against its own form.
+        for answer in answers:
+            if isinstance(answer, dict):
+                text = answer.get("text")
+                normalized.append({"selected": [] if answer.get("selected") is None else answer["selected"],
+                                   "text": (text.strip() or None) if isinstance(text, str) else text})
+            else:
+                normalized.append(answer)
+        source = replace(source, delegation_id=rec.delegation_id, delegation_work_id=rec.work_id,
+                         parent_session_id=rec.parent_session_id)
+        try:
+            ok = await self.session_mgr.answer_question(rec.delegation_id, question_id, normalized, source=source)
+        except QuestionAnswerInvalid as error:
+            raise DelegationError(str(error), status_code=400) from error
         if not ok:
             # Race: the human UI answered between our get and our set.
             raise DelegationError(
@@ -1543,20 +1541,16 @@ class DelegationManager:
                 delivery_failure: tuple[str, str] | None = None
                 if rec.state == "completed":
                     assert self.db is not None and request_id is not None
-                    rows = await self.db.load_committed_request_messages(rec.delegation_id, request_id)
-                    terminal = next((row for row in rows if row["type"] == "result"), None)
-                    if terminal is None:
-                        if await self.db.get_session_binding(rec.delegation_id) is not None:
+                    result = await self.db.read_session_result(rec.delegation_id, request_id)
+                    if result.outcome is None:
+                        if result.missing != "session_missing":
                             raise RuntimeError("The committed delegation terminal is missing from its retained conversation")
                         delivery_failure = (
                             "reply_unavailable",
                             "The child completed, but its conversation was deleted before its reply text could be delivered.",
                         )
                     else:
-                        attempt_id = (terminal.get("tool_input") or {}).get("attempt_context", {}).get("attempt_id")
-                        body = "".join(row["content"] for row in rows
-                            if row["role"] == "assistant" and row["type"] == "text" and isinstance(row["content"], str)
-                            and (not attempt_id or (row.get("tool_input") or {}).get("attempt_context", {}).get("attempt_id") == attempt_id)).strip()
+                        body = "".join(result.fragments).strip()
                         if not body:
                             body = "(child session ended without producing any text)"
                         return ReturnBody(

@@ -38,8 +38,9 @@ Their messages direct the caller to inspect the original conversation; they do
 not offer a saving retry or establish that the operation had no effects.
 HTTP timeouts, caller cancellation and SSE disconnection detach only that
 response consumer. The application keeps the original execution in its active
-count and conversation list until its receipt and resource retirement finish,
-including cleanup after a failed SessionOwner. Admission is serialized per app
+count and conversation list until its receipt and original driver finish,
+including cleanup after a failed SessionOwner. A reusable host may remain alive;
+releasing the ordinary request slot does not require host exit. Admission is serialized per app
 through conversation creation and turn registration, so concurrent requests
 cannot exceed either the execution or conversation cap.
 This is distinct from `ApplicationManager`'s build-status consumer, which also
@@ -52,6 +53,13 @@ application-owned conversations are removed. See the
 [application lifecycle](applications.md#5-rest-surface) for failure, retry and restart.
 See the [architecture contract](architecture-contract.md#输入完成与资源退休)
 for the shared ownership and retirement rules. Deployment is verified separately.
+
+Historical request status uses the shared
+[session result association](architecture-contract.md#原请求结果读取): ordered fragments
+are joined with two newlines without trimming the whole saved reply, including
+failed outcomes. Live ask/SSE retains its attempt-reset/empty-fragment/strip
+behavior and requires delivered notifications. Neither path selects a better
+answer by text or claims to detect every lost body row.
 
 ## 3. A conversation is a session
 

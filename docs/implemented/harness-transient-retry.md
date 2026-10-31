@@ -1,6 +1,6 @@
 # Harness transient-error retry
 
-> **Status:** implemented — Bounded provider retry; partial work requires a resumable continuation and quota is not retried.
+> **Status:** implemented — Evidence-limited preparation and continuation; missing output never authorizes prompt replay.
 
 Transient provider failure, credential rejection and user quota have different recovery actions.
 Idle timeout classification precedes this dispatch; see [turn safety](turn-safety.md).
@@ -48,46 +48,54 @@ usage limit. So we match the throttle on its specific phrasing
 stays non-retryable). This was a real miss: the bare-"rate limit" exclusion
 swallowed the server throttle and stopped the turn instead of retrying.
 
-## 4. Retry in the run loop (`server/sessions/turns.py`)
+## 4. Recovery evidence in the original Owner
 
-The retry slots into the existing post-turn dispatch, BEFORE the
-result-presence early-return (a transient failure arrives as an `is_error`
-`result`, so `attempt.result is not None`) and the Claude premature-exit recovery:
+The original Owner classifies watchdog timeout first, authentication next,
+then preparation/stale-history/transient failure and premature exit. A failed
+result or missing result permits classification, not replay. Error notifications
+remain diagnostics until the final outcome is known. Transient recovery retains
+the two-attempt exponential budget (`_TRANSIENT_RETRY_BASE_DELAY * 2**(n-1)`),
+and the logical-turn deadline and manual interruption bound all recovery.
 
-- A turn is *failed* when it produced an `is_error` result/error event, or
-  no result at all.
-- On `is_transient_error(blob)`, retry after exponential backoff
-  (`_TRANSIENT_RETRY_BASE_DELAY * 2**(n-1)`), bounded by
-  `_MAX_TRANSIENT_RETRIES` (2), in one of **two modes**:
-  - **No output yet** (`not saw_tool_use and not saw_text`) → re-run the
-    ORIGINAL prompt, restoring the turn-start resume id (a failed no-output
-    attempt may have captured a `session_started` id we must discard).
-  - **Output already streamed** AND a resume id was captured → **RESUME with
-    "continue"** from that id, so we pick up where the turn left off WITHOUT
-    re-running tools or duplicating text.
-  A discreet marker is persisted + broadcast each retry; on exhaustion (or
-  output-without-a-resume-id) a clear error is surfaced.
+| Original evidence | Allowed action |
+| --- | --- |
+| Preparation failed before business input submission | Prepare that attempt's input again within its authorization and budget. |
+| Admission/terminal committed, acknowledgment lost | Read the original receipt; do not rerun the source or model. |
+| Adapter supports continuation and this logical turn captured a conversation | Send continuation instructions against that conversation, checking existing files/tool effects before repeating work. |
+| Only missing tool/text, an ambiguous diagnostic, or lost native history | Stop automatic replay; retain the original outcome and diagnostics. |
+| Protocol/local boundary proves input was not executed | Resubmit within the original identity and budget. Current adapters provide the pre-submission boundary, not a provider execution ACK. |
 
-**Why two modes (corrected).** The first cut gated retry on *no output yet* and
-let a mid-turn throttle simply stop the session — but a long agent turn almost
-always emits tool calls / text before being throttled, so that was the common
-failure, not the rare one. Re-running the prompt after partial work would
-duplicate it, so for that case we instead RESUME the conversation with
-"continue" (the same mechanism as the premature-exit recovery) — bounded and
-backed off — which recovers the turn safely. Re-running the original prompt is
-reserved for the clean no-output case.
+`HarnessRun.input_may_have_run` belongs to the run's local input boundary. It
+becomes true before submitting an argv-input spawn or writing a stream-JSON
+frame; a partial write, failed drain or cancelled spawn acknowledgment cannot
+turn it back into proof of non-execution. Reuse resets it before the next
+turn's input. A preparation refusal before this boundary can retry the same
+attempt prompt; it does not recover an earlier original prompt over already
+attempted continuation work.
 
-The backoff `sleep` is a normal `await` inside the turn, so a user interrupt
-cancels it like any in-flight turn.
+`RuntimeProfile.can_continue` is independent of steering and process reuse.
+Both current adapters support native conversation continuation. The logical
+turn retains conversation evidence observed during its own attempts, including
+a failed attempt with no display output. A resume ID inherited from a previous
+request alone does not authorize this recovery. Continuation is a new input;
+it cannot promise exactly-once tool or external effects.
 
-**Resume-id preservation (Vera review).** A failed no-output attempt can still
-emit `session_started` and mutate `session.claude_session_id`. Left alone, the
-retry would become `--resume <failed-id> -- <original prompt>` — not the
-original invocation, risking a duplicated prompt or a resumed dead partial
-conversation. So the logical turn snapshots `resume_at_turn_start =
-session.claude_session_id` before the loop and, on a transient retry, restores
-it (memory + DB) before re-running. The premature-exit recovery is unaffected —
-it deliberately resumes the captured id with "continue".
+Stale-history recovery can clear the stale ID and prepare a retained-history
+wrapper once only if the input was not submitted and this turn has no captured
+continuation work. A stale error after possible submission stops with
+`recovery_unproven`; missing history does not prove the request had no effects.
+The old no-output replay rule and turn-start resume-ID restoration are removed.
+
+Recovery markers remain persisted and published. Exhaustion or insufficient
+continuation evidence ends the request instead of replaying it. An explicit
+failed outcome stays failed; restart claims and unknown steer retain their
+separate [input reliability](../input-reliability.md) meanings.
+
+`tests/test_retry_evidence.py` exercises idle/transient recovery on both
+backends with real external file effects but no tool/text observations, stale
+history, unsupported continuation and pre-submission preparation refusal.
+The scripted-process and per-attempt metric regressions additionally check
+actual prompts, attempts, budgets and termination.
 
 ## 5. Limits
 

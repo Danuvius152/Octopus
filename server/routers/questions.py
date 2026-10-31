@@ -45,8 +45,9 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from pydantic import BaseModel
 
 from ..auth import verify_token
-from ..deps import ScopeUser, SessionMgr
+from ..deps import ScopeUser, SessionMgr, resolve_principal
 from ..mcp_identity import verify
+from ..question_resolution import QuestionAnswerInvalid
 from ..sessions.questions import QuestionClosedError
 
 router = APIRouter(prefix="/api/sessions", tags=["questions"])
@@ -153,11 +154,15 @@ async def submit_answer(
     Event that wakes the MCP server's long-poll."""
     if session_manager.get_session(session_id, user_id) is None:
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-    ok = await session_manager.answer_question(
-        session_id,
-        question_id,
-        [a.model_dump() for a in req.answers],
-    )
+    principal = await resolve_principal(_)
+    if principal is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
+    try:
+        ok = await session_manager.answer_question(
+            session_id, question_id, [a.model_dump() for a in req.answers], source=principal.answer_source(),
+        )
+    except QuestionAnswerInvalid as exc:
+        raise HTTPException(status.HTTP_400_BAD_REQUEST, str(exc)) from exc
     if not ok:
         raise HTTPException(
             status.HTTP_404_NOT_FOUND,
@@ -177,6 +182,9 @@ async def close_question(
 ) -> dict[str, bool]:
     if session_manager.get_session(session_id, user_id) is None:
         raise HTTPException(404, "Session not found")
-    if not await session_manager.close_pending_question(session_id, question_id, reason=reason):
+    principal = await resolve_principal(_)
+    if principal is None:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Invalid token")
+    if not await session_manager.close_pending_question(session_id, question_id, reason=reason, source=principal.answer_source()):
         raise HTTPException(404, "Question not found or closed")
     return {"ok": True}

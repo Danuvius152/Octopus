@@ -91,7 +91,9 @@ async def _drain(run) -> list[HarnessEvent]:
 async def test_engine_streams_events_and_ends(tmp_path):
     profile = _stream_profile('{"type":"hello"}', '{"type":"result"}')
     run = Harness(profile).create_run(RunConfig())
+    assert run.input_may_have_run is False
     await run.start("p", str(tmp_path))
+    assert run.input_may_have_run is True
     events = await asyncio.wait_for(_drain(run), timeout=3.0)
     await run.stop()
     assert [e.type for e in events] == ["hello", "result"]
@@ -155,10 +157,32 @@ async def test_engine_close_stdin_flag(tmp_path):
         '{"type":"result"}', stdin_mode=StdinMode.CLOSE_AFTER_SPAWN
     )
     run = Harness(profile).create_run()
+    assert run.input_may_have_run is False
     await run.start("p", str(tmp_path))
+    assert run.input_may_have_run is True
     events = await asyncio.wait_for(_drain(run), timeout=3.0)
     await run.stop()
     assert [e.type for e in events] == ["result"]
+
+
+@pytest.mark.parametrize("stdin_mode", list(StdinMode))
+async def test_resume_preparation_refusal_proves_no_input_submission(tmp_path, stdin_mode):
+    from dataclasses import replace
+
+    from server.harness.events import HarnessPreparationError
+
+    async def refuse(*args):
+        raise RuntimeError("unavailable before spawn")
+
+    profile = replace(_stream_profile(stdin_mode=stdin_mode), prepare_resume=refuse)
+    run = Harness(profile).create_run()
+    try:
+        with pytest.raises(HarnessPreparationError):
+            await run.start("original", str(tmp_path), resume_id="thread")
+        assert run.input_may_have_run is False
+        assert run.process_group_id is None
+    finally:
+        await run.stop()
 
 
 @pytest.mark.asyncio

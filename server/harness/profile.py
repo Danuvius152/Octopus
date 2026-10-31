@@ -238,6 +238,9 @@ class RuntimeProfile:
     # Independent adapter guarantees. An open stdin pipe proves neither.
     can_steer: bool = False
     reusable: bool = False
+    # Resume a captured conversation with a new continuation input. This
+    # neither replays the original input nor guarantees exactly-once effects.
+    can_continue: bool = False
     tool_policy: ToolPolicySupport = field(default_factory=ToolPolicySupport)
     # Request instructions have a native per-turn channel on some adapters;
     # otherwise they are fixed in the process's composed system prompt.
@@ -262,9 +265,9 @@ class RuntimeProfile:
     # Phrases meaning "the resume id this session is pinned to no longer
     # exists on this engine" — its local transcript was rotated, cleaned or
     # written by another machine. Distinct from auth (the credential is fine)
-    # and from transient (retrying the same id fails forever): the only way
-    # out is to drop the id and start a fresh engine-side conversation, which
-    # `SessionManager._run_backend` does exactly once per turn.
+    # and from transient (the same missing id cannot be resumed). Only
+    # pre-submission evidence permits fresh history preparation; losing
+    # native history after possible execution never permits prompt replay.
     stale_session_patterns: tuple[str, ...] = ()
     # Whether the composed system prompt should carry the agent-memory blurb
     # (docs/implemented/memory.md §3). Codex: True (no native memory — it reads/

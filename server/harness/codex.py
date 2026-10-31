@@ -1094,6 +1094,7 @@ CODEX = RuntimeProfile(
     stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
     can_steer=False,
     reusable=False,
+    can_continue=True,
     build_turn_argv=build_turn_argv,
     activity_observer=CodexActivityObserver,
     prepare_resume=refresh_instructions,

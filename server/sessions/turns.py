@@ -43,6 +43,7 @@ from .base import (
     _split_tool_list,
     logger,
 )
+from .observation import RequestObservation
 from .owner import RetainResultNotice, SessionOwner, SessionOwnerUnavailable
 from .owner_runtime import (
     CancelRequest,
@@ -247,7 +248,9 @@ class TurnsMixin(SessionManagerBase):
     def _new_receipt(session: Session, queued: QueuedPrompt, disposition: str = "accepted") -> SubmissionReceipt:
         future: asyncio.Future[RequestCompletion] = asyncio.get_running_loop().create_future()
         session._request_completions[queued.request_id] = future
-        return SubmissionReceipt(disposition, queued.request_id, future)  # type: ignore[arg-type]
+        observation = RequestObservation(queued.request_id, queued.work_id, asyncio.get_running_loop().create_future())
+        session._request_observations[queued.request_id] = observation
+        return SubmissionReceipt(disposition, queued.request_id, future, observation)  # type: ignore[arg-type]
 
     def _finish_receipt(self, session: Session, completion: RequestCompletion) -> None:
         future = session._request_completions.pop(completion.input_request_id, None)
@@ -573,6 +576,24 @@ class TurnsMixin(SessionManagerBase):
             request.work_id == work_id for request in (*session._pending_queue, *session._steer_queue)
         )
 
+    def work_has_resources(self, work_id: str) -> bool:
+        """Original work's queued, preparing, held or retiring resources.
+
+        Absence is not a retirement proof. Callers also need their successful
+        close_work receipt (or its durable domain-owned acknowledgment).
+        """
+        return any(owner.runtime.owns_work(work_id) for owner in tuple(self._session_owners.values()))
+
+    def session_has_resources(self, session_id: str, request_ids: set[str] | None = None) -> bool:
+        """Conservative legacy scope where no original work identity was saved."""
+        session = self.sessions.get(session_id)
+        if session is None:
+            return False
+        requests = (*session._pending_queue, *session._steer_queue,
+                    *((session._run.request,) if session._run.request else ()))
+        return (any(request_ids is None or request.request_id in request_ids for request in requests)
+                or bool(session._run.retirements))
+
     async def close_work(self, work_id: str) -> WorkRetirement:
         from ..mcp_identity import close_work
         close_work(work_id)
@@ -744,6 +765,7 @@ class TurnsMixin(SessionManagerBase):
         # Update the resume id in case the CLI reissued a different one
         # mid-stream.
         if event.session_id:
+            attempt.conversation_id = event.session_id
             await self._remember_resume_id(session, event.session_id)
         # First fork turn produced a result: drop the ephemeral fork state so
         # turn 2+ behaves like a normal resumed session (session-rewind.md
@@ -799,8 +821,6 @@ class TurnsMixin(SessionManagerBase):
         tracker.normalize(event, session._run.settlement.request_id if session._run.settlement else "untracked",
                           attempt.attempt_id)
         if event.type == "text_delta":
-            if event.content and event.content.strip():
-                attempt.saw_text = True
             flushed = self._coalesce_delta(session, attempt, event)
             return [flushed] if flushed is not None else []
 
@@ -818,6 +838,7 @@ class TurnsMixin(SessionManagerBase):
         # it even if the bug suppresses `result`. Internal event — never
         # persisted or broadcast.
         if event.type == "session_started" and event.session_id:
+            attempt.conversation_id = event.session_id
             await self._remember_resume_id(session, event.session_id)
             return frames
 
@@ -830,8 +851,6 @@ class TurnsMixin(SessionManagerBase):
 
         if event.type == "tool_use":
             attempt.saw_tool_use = True
-        if event.type == "text" and event.content and event.content.strip():
-            attempt.saw_text = True
 
         # Persist whichever message shape this event maps to. The returned seq
         # goes onto the WS event so reconnecting clients can dedupe against
@@ -907,9 +926,7 @@ class TurnsMixin(SessionManagerBase):
     async def _timeout_decision(
         self, session: Session, turn: _Turn, attempt: _Attempt
     ) -> _Decision | None:
-        """Resume an idle stop within its budget; the logical-turn cap stops
-        all recovery. Output requires a resume id so completed tools aren't
-        replayed from the original request."""
+        """The logical deadline bounds preparation and continuation alike."""
         if attempt.timeout is None:
             return None
         reason, limit = attempt.timeout
@@ -918,30 +935,13 @@ class TurnsMixin(SessionManagerBase):
             reason, limit = "overall", overall
         maximum = max(0, settings.turn_idle_max_retries)
         recovery = turn.settlement.recovery
+        next_prompt = self._recovery_prompt(turn, attempt, idle=True)
         if (
             reason == "idle"
             and recovery["idle"] < maximum
-            and (not turn.produced_output or session.claude_session_id)
+            and next_prompt is not None
         ):
             recovery["idle"] += 1
-            if turn.produced_output:
-                next_prompt = (
-                    "The previous attempt stopped after a period without backend "
-                    "activity. Continue the user's unfinished request from this "
-                    "conversation. Check existing files and tool outcomes before "
-                    "repeating operations: interrupted tools may already have "
-                    "changed things. Keep any existing delegations and background "
-                    "jobs; do not duplicate them. Work in smaller steps and use "
-                    "background execution for long commands when available."
-                )
-            else:
-                next_prompt = turn.prompt
-                if session.claude_session_id != turn.resume_at_turn_start:
-                    session.claude_session_id = turn.resume_at_turn_start
-                    if self.db:
-                        await self.db.update_session_field(
-                            session.id, claude_session_id=turn.resume_at_turn_start
-                        )
             return _Decision.again(
                 next_prompt,
                 await self._surface_idle_retry(
@@ -954,6 +954,26 @@ class TurnsMixin(SessionManagerBase):
                 session, reason=reason, limit=limit, backend=turn.harness.backend,
                 retries=recovery["idle"],
             )
+        )
+
+    @staticmethod
+    def _recovery_prompt(turn: _Turn, attempt: _Attempt, *, idle: bool = False) -> str | None:
+        """No output is never evidence of no effect.
+
+        A preparation refusal proves no input submission. Otherwise only a
+        captured conversation and the adapter's continuation contract permit
+        another input, with no exactly-once claim for external operations.
+        """
+        if attempt.preparation_failed or getattr(attempt.backend, "input_may_have_run", True) is False:
+            return attempt.prompt
+        if not (turn.harness.profile.can_continue and turn.continuation_id):
+            return None
+        prefix = "The previous attempt stopped after a period without backend activity. " if idle else ""
+        return prefix + (
+            "Continue the user's unfinished request from this conversation. "
+            "Check existing files and tool outcomes before repeating operations: "
+            "interrupted tools may already have changed things. Keep existing "
+            "delegations and background jobs; do not duplicate them."
         )
 
     async def _auth_decision(
@@ -974,18 +994,9 @@ class TurnsMixin(SessionManagerBase):
         )
 
     async def _stale_session_decision(
-        self, session: Session, turn: _Turn, blob: str
+        self, session: Session, turn: _Turn, attempt: _Attempt, blob: str
     ) -> _Decision | None:
-        """Dangling resume id: the engine no longer holds the conversation this
-        session is pinned to (its local transcript was rotated or cleaned; ours
-        lives in the DB and is intact).
-
-        This is NOT transient — retrying the same id fails identically forever,
-        which bricks the session silently: a result with zero turns, zero cost
-        and no text. Drop the dead id and re-run the same prompt once as a
-        fresh engine-side conversation, saying out loud that the engine lost
-        its own history so the model starts this turn without it.
-        """
+        """Lost history permits fresh preparation only before submission."""
         recovery = turn.settlement.recovery
         if not (
             session.claude_session_id
@@ -993,6 +1004,13 @@ class TurnsMixin(SessionManagerBase):
             and turn.harness.is_stale_session_error(blob)
         ):
             return None
+        if (not attempt.preparation_failed and getattr(attempt.backend, "input_may_have_run", True)
+                or turn.continuation_id is not None):
+            return _Decision.stop({
+                "code": "recovery_unproven",
+                "message": "Native conversation history is unavailable. The request may have changed external state; "
+                           "automatic replay was stopped. Inspect existing effects before continuing. " + blob.strip(),
+            })
         recovery["stale_session"] += 1
         logger.warning(
             "Session %s: resume id is gone from the engine; "
@@ -1000,7 +1018,6 @@ class TurnsMixin(SessionManagerBase):
             session.id,
         )
         session.claude_session_id = None
-        turn.resume_at_turn_start = None
         if self.db:
             await self.db.update_session_field(session.id, claude_session_id=None)
         # Don't restart cold: Octopus still has the whole conversation (the
@@ -1019,8 +1036,8 @@ class TurnsMixin(SessionManagerBase):
             replayed = len(kept)
             if kept:
                 recovery_prompt = fork_helpers.wrap_for_lost_history(turn.prompt, kept, omitted=omitted)
-        # A fresh retry must retain the history needed to replace the lost
-        # native transcript, including any later no-output transient retry.
+        # Keep the rebuilt context; any later preparation recovery must
+        # preserve it rather than restore the original unwrapped input.
         turn.prompt = recovery_prompt
         return _Decision.again(
             recovery_prompt,
@@ -1033,35 +1050,15 @@ class TurnsMixin(SessionManagerBase):
         )
 
     async def _transient_decision(
-        self, session: Session, turn: _Turn, blob: str, *, error_code: str | None = None
+        self, session: Session, turn: _Turn, attempt: _Attempt, blob: str, *, error_code: str | None = None
     ) -> _Decision | None:
-        """Transient provider-reliability failure (5xx / overloaded / dropped
-        connection / server-side throttle) → bounded retry.
-
-        TWO modes, by whether any attempt in this turn already produced output:
-
-        * **no output yet** → re-run the ORIGINAL prompt from the turn-start
-          resume state (side-effect-free; discard any resume id a failed
-          no-output attempt captured — Vera).
-        * **output already streamed** (tool_use/text) AND a resume id was
-          captured → RESUME with "continue" so we pick up where it left off
-          WITHOUT re-running tools or duplicating text. This is the common
-          case: a long agent turn throttled mid-flight — the earlier
-          no-output-only gate let it stop.
-
-        Quota/credit errors match no pattern here → they surface as-is
-        (harness-transient-retry.md §4).
-        """
+        """Transient classification supplies a budget, never replay permission."""
         if not turn.harness.is_transient_error(blob, code=error_code):
             return None
         recovery = turn.settlement.recovery
-        can_retry = recovery["transient"] < self._MAX_TRANSIENT_RETRIES and (
-            not turn.produced_output or bool(session.claude_session_id)
-        )
+        next_prompt = self._recovery_prompt(turn, attempt)
+        can_retry = recovery["transient"] < self._MAX_TRANSIENT_RETRIES and next_prompt is not None
         if not can_retry:
-            # Budget exhausted (or output with no resume id to continue from) —
-            # surface a clear error so the user knows it wasn't their request
-            # that failed.
             return _Decision.stop(
                 await self._surface_transient_exhausted(
                     session,
@@ -1079,25 +1076,9 @@ class TurnsMixin(SessionManagerBase):
             delay,
             recovery["transient"],
             self._MAX_TRANSIENT_RETRIES,
-            turn.produced_output,
+            bool(turn.continuation_id),
         )
-        if turn.produced_output:
-            # Continue the in-progress conversation from its captured resume
-            # id — no re-run, no duplication.
-            next_prompt = (
-                "Continue the user's unfinished request from this conversation. "
-                "Check existing files and tool outcomes before repeating operations: "
-                "interrupted tools may already have changed things. Keep existing "
-                "delegations and background jobs; do not duplicate them."
-            )
-        else:
-            next_prompt = turn.prompt  # original invocation
-            if session.claude_session_id != turn.resume_at_turn_start:
-                session.claude_session_id = turn.resume_at_turn_start
-                if self.db:
-                    await self.db.update_session_field(
-                        session.id, claude_session_id=turn.resume_at_turn_start
-                    )
+        assert next_prompt is not None
         return _Decision.again(
             next_prompt,
             await self._surface_transient_retry(
@@ -1122,8 +1103,8 @@ class TurnsMixin(SessionManagerBase):
         if attempt.result is not None:
             return _Decision.stop()
         if not turn.harness.premature_exit_recovery:
-            # Harness opts out of the Claude-CLI premature-exit recovery (Codex
-            # runs exactly once per turn) — codex-backend.md §5.6.
+            # Codex opts out of this Claude-specific premature-exit workaround;
+            # its other recovery still follows the common evidence contract.
             return _Decision.stop()
         recovery = turn.settlement.recovery
         if recovery["premature_exit"] >= self._MAX_RECOVERY_ATTEMPTS:
@@ -1134,7 +1115,7 @@ class TurnsMixin(SessionManagerBase):
             return _Decision.stop()
         if not attempt.saw_tool_use:
             return _Decision.stop()
-        if not session.claude_session_id:
+        if not (turn.harness.profile.can_continue and turn.continuation_id):
             # No resume id captured (init never arrived) — we can't respawn
             # into the same conversation.
             return _Decision.stop()
@@ -1177,17 +1158,20 @@ class TurnsMixin(SessionManagerBase):
             if decision is not None:
                 return decision
             if attempt.preparation_failed:
-                decision = await self._transient_decision(session, turn, blob, error_code=attempt.failure_code)
+                decision = await self._stale_session_decision(session, turn, attempt, blob)
+                if decision is not None:
+                    return decision
+                decision = await self._transient_decision(session, turn, attempt, blob, error_code=attempt.failure_code)
                 if decision is not None:
                     return decision
                 return _Decision.stop({"code": "preparation_failed"})
             if getattr(attempt.backend, "protocol_issues", None):
                 return _Decision.stop({"code": "protocol_incomplete"})
-            decision = await self._stale_session_decision(session, turn, blob)
+            decision = await self._stale_session_decision(session, turn, attempt, blob)
             if decision is not None:
                 return decision
             decision = await self._transient_decision(
-                session, turn, blob, error_code=attempt.failure_code,
+                session, turn, attempt, blob, error_code=attempt.failure_code,
             )
             if decision is not None:
                 return decision

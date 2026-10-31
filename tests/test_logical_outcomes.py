@@ -157,10 +157,14 @@ async def test_stop_delivers_one_interrupted_result_without_success(runtime, mon
 async def test_capacity_failure_exhausts_two_retries_and_preserves_reason(runtime, monkeypatch, error):
     # This checks the retry count and final reason, not the backoff duration.
     monkeypatch.setattr(runtime[0], "_TRANSIENT_RETRY_BASE_DELAY", .01)
-    prompts = scripted_cli(monkeypatch, [[{"type": "turn.failed", "error": error}]])
+    prompts = scripted_cli(monkeypatch, [[
+        {"type": "thread.started", "thread_id": "saved-thread"},
+        {"type": "turn.failed", "error": error},
+    ]])
     live, history = await drive(runtime)
     final = [e for e in live if e["type"] == "result"]
-    assert prompts == ["request", "request", "request"]
+    assert len(prompts) == 3 and prompts[0] == "request"
+    assert all(prompt.startswith("Continue the user's") for prompt in prompts[1:])
     assert len(final) == 1 and final[0]["is_error"] is True
     assert final[0]["content"]["status"] == "failed"
     assert final[0]["content"]["recovery"]["transient"] == 2
@@ -222,12 +226,13 @@ async def test_quota_notification_without_a_terminal_event_does_not_retry(runtim
 
 async def test_terminal_provider_code_takes_priority_over_earlier_diagnostics(runtime, monkeypatch):
     failed = [
+        {"type": "thread.started", "thread_id": "saved-thread"},
         {"type": "error", "message": "Earlier connection rejected: 401 unauthorized"},
         {"type": "turn.failed", "error": {"message": "provider overloaded", "codex_error_info": "server_overloaded"}},
     ]
     prompts = scripted_cli(monkeypatch, [failed, success()])
     live, history = await drive(runtime)
-    assert prompts == ["request", "request"]
+    assert len(prompts) == 2 and prompts[0] == "request" and prompts[1].startswith("Continue the user's")
     final = [e for e in live if e["type"] == "result"]
     assert len(final) == 1 and final[0]["content"]["status"] == "success"
     assert history[-1]["content"]["recovery"]["transient"] == 1
@@ -261,6 +266,7 @@ async def test_stream_processing_exception_has_one_failed_result(runtime, monkey
 async def test_stop_during_recovery_preserves_snapshot_and_allows_a_fresh_request(runtime, monkeypatch):
     manager, session, client = runtime
     prompts = scripted_cli(monkeypatch, [[
+        {"type": "thread.started", "thread_id": "saved-thread"},
         {"type": "turn.failed", "error": {"message": "provider overloaded", "codex_error_info": "server_overloaded"}},
     ], success()])
     retrying = asyncio.Event()

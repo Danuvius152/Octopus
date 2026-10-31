@@ -33,18 +33,22 @@ async def recovery_host(monkeypatch):
 
 
 class _ScriptedRun(FakeRunBase):
-    def __init__(self, *events, stall=False):
+    def __init__(self, *events, stall=False, preparation_error=None):
         self.events = events
         self.stall = stall
         self.stopped = asyncio.Event()
         self.prompt = None
         self.resume_id = None
         self.started = asyncio.Event()
+        self.preparation_error = preparation_error
 
     async def start(self, prompt, working_dir=None, resume_id=None, **kwargs):
         self.prompt = prompt
         self.resume_id = resume_id
         self.started.set()
+        if self.preparation_error:
+            from server.harness.events import HarnessPreparationError
+            raise HarnessPreparationError(self.preparation_error)
 
     async def stream(self):
         await self.started.wait()
@@ -64,14 +68,8 @@ async def test_mixed_recovery_keeps_independent_budgets_and_prompt_modes(recover
     manager, session = recovery_host
     session.claude_session_id = "missing-thread"
     runs = [
-        _ScriptedRun(HarnessEvent(
-            type="result", is_error=True,
-            content="No conversation found with session ID: missing-thread",
-        )),
-        _ScriptedRun(
-            HarnessEvent(type="session_started", session_id="failed-no-output-thread"),
-            HarnessEvent(type="result", is_error=True, content="API Error: 529 Overloaded"),
-        ),
+        _ScriptedRun(preparation_error="No conversation found with session ID: missing-thread"),
+        _ScriptedRun(preparation_error="API Error: 529 Overloaded"),
         _ScriptedRun(
             HarnessEvent(type="session_started", session_id="recovered-thread"),
             HarnessEvent(type="tool_use", tool_name="Read", tool_input={"file_path": "/file"}, tool_use_id="tool"),
@@ -130,9 +128,8 @@ async def test_terminal_recovery_is_captured_before_recording_await(recovery_hos
     expected = {"transient": 2, "idle": 1, "stale_session": 1, "premature_exit": 0}
     session.claude_session_id = "missing-thread"
     runs = iter([
-        _ScriptedRun(HarnessEvent(type="result", is_error=True,
-            content="No conversation found with session ID: missing-thread")),
-        _ScriptedRun(HarnessEvent(type="result", is_error=True, content="API Error: 529 Overloaded")),
+        _ScriptedRun(preparation_error="No conversation found with session ID: missing-thread"),
+        _ScriptedRun(preparation_error="API Error: 529 Overloaded"),
         _ScriptedRun(HarnessEvent(type="session_started", session_id="recovered-thread"), stall=True),
         _ScriptedRun(HarnessEvent(type="result", is_error=True, content="API Error: 529 Overloaded")),
         _ScriptedRun(HarnessEvent(type="result", session_id="recovered-thread")),

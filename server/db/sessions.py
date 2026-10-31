@@ -16,6 +16,7 @@ from typing import Any
 
 import aiosqlite
 
+from ..session_results import SessionResult, committed_result
 from .applications import ApplicationDeleting
 from .base import DatabaseBase
 from .transaction import Transaction
@@ -548,15 +549,36 @@ class SessionsMixin(DatabaseBase):
     async def load_committed_request_messages(self, session_id: str, request_id: str) -> list[dict[str, Any]]:
         """Read one request's outcome and text in one committed snapshot."""
         async with self.transaction(write=False) as tx:
-            cursor = await tx.execute(
-                "SELECT role,type,content,tool_input,cost FROM messages WHERE session_id=? AND "
-                "(terminal_request_id=? OR (role='assistant' AND type='text' "
-                "AND json_extract(tool_input,'$.attempt_context.request_id')=?)) ORDER BY seq",
-                (session_id, request_id, request_id),
+            return await self._request_messages(tx, session_id, request_id)
+
+    @staticmethod
+    async def _request_messages(tx: Transaction, session_id: str, request_id: str) -> list[dict[str, Any]]:
+        cursor = await tx.execute(
+            "SELECT role,type,content,tool_input,cost FROM messages WHERE session_id=? AND "
+            "(terminal_request_id=? OR (role='assistant' AND type='text' "
+            "AND json_extract(tool_input,'$.attempt_context.request_id')=?)) ORDER BY seq",
+            (session_id, request_id, request_id),
+        )
+        return [{"role": row[0], "type": row[1], "content": json.loads(row[2]) if row[2] else None,
+                 "tool_input": json.loads(row[3]) if row[3] else None, "cost": row[4]}
+                for row in await cursor.fetchall()]
+
+    async def read_session_result(self, session_id: str, input_request_id: str) -> SessionResult:
+        """Input/carrier, outcome, attempt and body share one committed snapshot."""
+        async with self.transaction(write=False) as tx:
+            if await tx.fetch_one("SELECT id FROM sessions WHERE id=?", (session_id,)) is None:
+                return SessionResult(input_request_id, input_request_id, missing="session_missing")
+            original = await tx.fetch_one(
+                "SELECT execution_owner,delivery_state FROM client_submissions WHERE session_id=? AND request_id=?",
+                (session_id, input_request_id),
             )
-            return [{"role": row[0], "type": row[1], "content": json.loads(row[2]) if row[2] else None,
-                     "tool_input": json.loads(row[3]) if row[3] else None, "cost": row[4]}
-                    for row in await cursor.fetchall()]
+            request_id = input_request_id
+            if original is not None:
+                if original[1] == "unknown" or original[0] not in (None, input_request_id) and original[1] != "confirmed":
+                    return SessionResult(input_request_id, request_id, missing="input_unconfirmed")
+                request_id = original[0] or input_request_id
+            rows = await self._request_messages(tx, session_id, request_id)
+            return committed_result(input_request_id, request_id, rows)
 
     async def load_messages(
         self,

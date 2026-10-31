@@ -8,6 +8,7 @@ from copy import deepcopy
 from typing import Any
 
 from ..mcp_identity import McpScope
+from ..question_resolution import SYSTEM_SOURCE, UNKNOWN_SOURCE, AnswerSource
 from .base import PendingQuestion, Session, SessionManagerBase
 from .owner import SessionOwner
 from .owner_questions import (
@@ -67,7 +68,9 @@ class QuestionsMixin(SessionManagerBase):
         if session is None or pending is None or pending.state == "closed":
             raise QuestionClosedError("Question not found or closed")
         # A confirmed answer remains a readable fact after emergency shutdown.
-        if pending.state == "answered":
+        if pending.state == "answered" and pending.ready.is_set():
+            if pending.answer is None:
+                raise QuestionClosedError("Question answer recording is unavailable")
             return pending.answer
         captured = await self._question_owner(session, internal=True).call_question(CaptureQuestion(question_id))
         if not isinstance(captured, PendingQuestion):
@@ -76,7 +79,7 @@ class QuestionsMixin(SessionManagerBase):
             await asyncio.wait_for(captured.ready.wait(), timeout=timeout)
         except TimeoutError:
             return None
-        if captured.state != "answered":
+        if captured.state != "answered" or captured.answer is None:
             raise QuestionClosedError("Question not found or closed")
         return captured.answer
 
@@ -96,18 +99,20 @@ class QuestionsMixin(SessionManagerBase):
             return False
         return pending.expires_at is None or time.monotonic() < pending.expires_at
 
-    async def answer_question(self, session_id: str, question_id: str, answers: list[dict[str, Any]]) -> bool:
+    async def answer_question(self, session_id: str, question_id: str, answers: list[dict[str, Any]], *,
+                              source: AnswerSource = UNKNOWN_SOURCE) -> bool:
         session = self.sessions.get(session_id)
         if session is None:
             return False
-        result = await self._question_owner(session).call_question(AnswerQuestion(question_id, deepcopy(answers)))
+        result = await self._question_owner(session).call_question(AnswerQuestion(question_id, deepcopy(answers), source))
         assert isinstance(result, bool)
         return result
 
-    async def close_pending_question(self, session_id: str, question_id: str, *, reason: str = "cancelled") -> bool:
+    async def close_pending_question(self, session_id: str, question_id: str, *, reason: str = "cancelled",
+                                     source: AnswerSource = SYSTEM_SOURCE) -> bool:
         session = self.sessions.get(session_id)
         if session is None:
             return False
-        result = await self._question_owner(session).call_question(CloseQuestion(question_id, reason))
+        result = await self._question_owner(session).call_question(CloseQuestion(question_id, reason, source))
         assert isinstance(result, bool)
         return result

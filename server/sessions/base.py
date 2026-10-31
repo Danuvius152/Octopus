@@ -26,6 +26,7 @@ from ..models import (
     SessionStatus,
 )
 from ..oauth_errors import RefreshErrorCode
+from .observation import RequestObservation
 from .submission import (
     RequestCompletion,
     ReturnAdmission,
@@ -397,6 +398,7 @@ class Session:
     _dispatch_order: int = field(default=0, repr=False)
     _delivery_receipts: dict[str, SubmissionReceipt] = field(default_factory=dict, repr=False)
     _request_completions: dict[str, asyncio.Future[RequestCompletion]] = field(default_factory=dict, repr=False)
+    _request_observations: dict[str, RequestObservation] = field(default_factory=dict, repr=False)
     _inline_requests: dict[str, list[QueuedPrompt]] = field(default_factory=dict, repr=False)
     _delivery_notice_ids: set[str] = field(default_factory=set, repr=False)
     # Steers: messages typed while THIS turn is running, to be handed to the

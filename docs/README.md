@@ -70,7 +70,7 @@ leave the README unchanged.
 | [Console redesign — the blue workspace UI](implemented/console-redesign.md) | implemented | The blue workspace UI — design tokens, the two-level sidebar, and every manage surface as a page rather than a dialog. |
 | [Current storage and publication handoff](implemented/current-storage-format.md) | implemented | Validation and release handoff are tracked separately from production deployment. |
 | [Harness credential refresh and re-authorization](implemented/harness-credential-reauth.md) | implemented | Owned proactive refresh and reactive rejection; reauthorization preserves credential identity. |
-| [Harness transient-error retry](implemented/harness-transient-retry.md) | implemented | Bounded provider retry; partial work requires a resumable continuation and quota is not retried. |
+| [Harness transient-error retry](implemented/harness-transient-retry.md) | implemented | Evidence-limited preparation and continuation; missing output never authorizes prompt replay. |
 | [Harness: current runtime boundary](implemented/harness-layer.md) | implemented | One public Harness with runtime profiles, shared execution ownership and explicit capabilities. |
 | [Input steering, streaming and held processes](implemented/inline-steering.md) | implemented | Claude stream-JSON steering and process reuse; Codex exec queues later input. |
 | [Message time, composer history and model selection](implemented/composer-and-time.md) | implemented | Original timestamps, human-only prompt history and session model controls. |
@@ -100,7 +100,7 @@ guarantee.
 
 | Plan | Status | What |
 |---|---|---|
-| [Octopus 工程收敛与运行时路线](plans/engineering-runtime-roadmap.md) | in-progress | 第一阶段、公共返回接管、配置捕获、Owner 结算及显式运行能力已实现；其余接口与 Codex/DeepSeek 迁移仍待实施。 |
+| [Octopus 工程收敛与运行时路线](plans/engineering-runtime-roadmap.md) | in-progress | 第一阶段及返回接管、配置、原执行/结果/问题与恢复证据已实现；Wiki 操作、前端投影、排空和 Codex/DeepSeek 迁移仍待实施。 |
 | [Codex / DSH 兼容与 DeepSeek backend 可行性方案](plans/deepseek-harness-backend.md) | proposed | 推荐 SDK runtime 与同宿主薄插件，调用公开 Agent steer 并复用原生等待/退出；具体设计已更新，尚未实施。 |
 | [Multi-tenancy: remaining policy and hardening proposals](plans/multi-tenancy-gaps.md) | proposed | Re-scope the remaining account-policy choices against current code before implementing them. |
 | [共享 Wiki：未来计划与应用协同](plans/wiki-future-plan.md) | proposed | Sapphire、SmartReader 与条件性扩展的统一计划；保留未完成合同，不把本文当作开发或生产写入授权。 |

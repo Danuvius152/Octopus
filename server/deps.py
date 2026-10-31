@@ -27,8 +27,9 @@ from typing import Annotated, Any, Literal
 from fastapi import Depends, HTTPException, Query, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
-from .mcp_identity import scope_is_authorized
+from .mcp_identity import McpScope, scope_is_authorized
 from .mcp_identity import verify as verify_mcp_scope
+from .question_resolution import AnswerSource
 from .sessions import SessionManager
 from .sessions import session_manager as _singleton
 from .users import UserManager
@@ -164,6 +165,15 @@ ScopeUser = Annotated[str | None, Depends(scope_user_id)]
 class Principal:
     user_id: str | None
     credential_kind: Literal["account", "mcp"]
+    scope: McpScope | None = None
+
+    def answer_source(self) -> AnswerSource:
+        if self.credential_kind == "account":
+            return AnswerSource("account", user_id=self.user_id)
+        scope = self.scope
+        return AnswerSource("agent", user_id=self.user_id,
+            session_id=scope.session_id if scope else None, work_id=scope.work_id if scope else None,
+            run_lease_id=scope.run_lease_id if scope else None)
 
 
 async def resolve_principal(token: str) -> Principal | None:
@@ -176,7 +186,7 @@ async def resolve_principal(token: str) -> Principal | None:
             return Principal(user["id"], "account")
     scope = verify_mcp_scope(token)
     if scope is not None and scope.user_id is not None:
-        return Principal(scope.user_id, "mcp") if await scope_is_authorized(scope) else None
+        return Principal(scope.user_id, "mcp", scope) if await scope_is_authorized(scope) else None
     return None
 
 

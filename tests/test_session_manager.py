@@ -428,7 +428,7 @@ async def test_interrupt_when_idle_returns_false(manager):
 @pytest.mark.asyncio
 async def test_format_answers_handles_select_and_text(manager):
     questions = [
-        {"question": "Favorite color?", "options": []},
+        {"question": "Favorite color?", "options": [{"label": "blue"}]},
         {"question": "Notes?", "options": []},
     ]
     answers = [
@@ -1600,7 +1600,7 @@ async def test_failed_codex_turn_with_tool_unauthorized_does_not_flag(manager, m
 
 
 # --------------------------------------------------------------- transient retry
-# Provider-reliability failures (5xx / overloaded) → bounded same-prompt retry
+# Provider-reliability failures require evidence before bounded recovery
 # (harness-transient-retry.md §4).
 
 
@@ -1608,15 +1608,19 @@ class _SeqBackend(FakeRunBase):
     """One scripted attempt: records the prompt it was started with, yields a
     fixed event list, exposes stderr_text."""
 
-    def __init__(self, events, stderr_text=""):
+    def __init__(self, events, stderr_text="", *, preparation_error=None):
         self._events = list(events)
         self.stderr_text = stderr_text
         self.started_with = None
         self.started_resume = None
+        self.preparation_error = preparation_error
 
     async def start(self, prompt, working_dir=None, resume_id=None, **kwargs):
         self.started_with = prompt
         self.started_resume = resume_id
+        if self.preparation_error:
+            from server.harness.events import HarnessPreparationError
+            raise HarnessPreparationError(self.preparation_error)
 
     def stream(self):
         async def _gen():
@@ -1638,7 +1642,7 @@ def _seq_factory(backends):
 
 
 @pytest.mark.asyncio
-async def test_transient_error_retries_same_prompt_then_succeeds(manager, monkeypatch):
+async def test_transient_error_without_submission_proof_stops(manager, monkeypatch):
     from server.harness import HarnessEvent
 
     monkeypatch.setattr(type(manager), "_TRANSIENT_RETRY_BASE_DELAY", 0.0)
@@ -1660,25 +1664,16 @@ async def test_transient_error_retries_same_prompt_then_succeeds(manager, monkey
 
     events = await _request_events(manager, session, "hi")
 
-    assert any(e.get("code") == "transient_retry" for e in events)
-    assert not any(e.get("code") == "transient_exhausted" for e in events)
-    assert any(e.get("type") == "assistant_text" for e in events)
-    # The retry re-ran the ORIGINAL prompt, not a "continue" resume.
-    assert attempt2.started_with == "hi"
+    assert not any(e.get("code") == "transient_retry" for e in events)
+    assert any(e.get("code") == "transient_exhausted" for e in events)
+    assert attempt2.started_with is None
 
 
 @pytest.mark.asyncio
-async def test_dangling_resume_id_is_dropped_and_the_turn_starts_fresh(
+async def test_dangling_resume_id_during_preparation_can_start_fresh(
     manager, monkeypatch
 ):
-    """The engine lost the conversation this session is pinned to.
-
-    Claude prints "No conversation found with session ID: <uuid>" on stderr and
-    exits with a zero-turn, zero-cost error result. Retrying the same id fails
-    identically forever, so the session is bricked — silently, with an empty
-    turn — until the id is cleared. We clear it, say so, and re-run the same
-    prompt once as a fresh engine-side conversation.
-    """
+    """Only a pre-submission refusal permits fresh history preparation."""
     from server.harness import HarnessEvent
 
     agent = await manager.db.get_system_agent()
@@ -1691,8 +1686,7 @@ async def test_dangling_resume_id_is_dropped_and_the_turn_starts_fresh(
     assert session.claude_session_id == "7d06c77e-dead-beef"
 
     attempt1 = _SeqBackend(
-        events=[HarnessEvent(type="result", is_error=True)],
-        stderr_text="No conversation found with session ID: 7d06c77e-dead-beef",
+        events=[], preparation_error="No conversation found with session ID: 7d06c77e-dead-beef",
     )
     attempt2 = _SeqBackend(
         events=[
@@ -1726,16 +1720,13 @@ async def test_dangling_resume_id_is_dropped_and_the_turn_starts_fresh(
 async def test_stale_resume_recovery_only_fires_once_per_turn(manager, monkeypatch):
     """If the fresh conversation fails the same way, something else is wrong —
     don't spin."""
-    from server.harness import HarnessEvent
-
     agent = await manager.db.get_system_agent()
     session = await manager.create_session(
         agent["id"], "Stale twice", None, backend="claude-code"
     )
     session.claude_session_id = "dead-1"
     stale = lambda: _SeqBackend(  # noqa: E731 - table of identical attempts
-        events=[HarnessEvent(type="result", is_error=True)],
-        stderr_text="No conversation found with session ID: dead-1",
+        events=[], preparation_error="No conversation found with session ID: dead-1",
     )
     attempts = [stale(), stale(), stale()]
     monkeypatch.setattr(manager, "_make_run", _seq_factory(attempts))
@@ -1772,10 +1763,8 @@ async def test_stale_pattern_does_not_fire_without_a_resume_id(manager, monkeypa
 
 
 @pytest.mark.asyncio
-async def test_transient_retry_ignores_failed_attempts_resume_id(manager, monkeypatch):
-    """Vera review: a failed no-output attempt can still emit `session_started`
-    and mutate session.claude_session_id. The retry must re-run the ORIGINAL
-    invocation (turn-start resume state), NOT `--resume <failed-id>`."""
+async def test_transient_retry_continues_captured_conversation_without_output(manager, monkeypatch):
+    """A captured conversation permits continuation, never original replay."""
     from server.harness import HarnessEvent
 
     monkeypatch.setattr(type(manager), "_TRANSIENT_RETRY_BASE_DELAY", 0.0)
@@ -1800,9 +1789,8 @@ async def test_transient_retry_ignores_failed_attempts_resume_id(manager, monkey
     events = await _request_events(manager, session, "hi")
 
     assert any(e.get("code") == "transient_retry" for e in events)
-    # The retry must NOT resume the failed attempt's session.
-    assert attempt2.started_resume is None
-    assert attempt2.started_with == "hi"
+    assert attempt2.started_resume == "failed-new-id"
+    assert attempt2.started_with.startswith("Continue the user's")
 
 
 @pytest.mark.asyncio
@@ -1816,7 +1804,8 @@ async def test_transient_error_bounded_then_surfaces(manager, monkeypatch):
     )
     # initial + 2 retries all fail transiently → exhausted on the 3rd.
     fails = [
-        _SeqBackend(events=[HarnessEvent(type="result", is_error=True,
+        _SeqBackend(events=[HarnessEvent(type="session_started", session_id="saved-thread"),
+                            HarnessEvent(type="result", is_error=True,
                                          content="API Error: 503 Service Unavailable")])
         for _ in range(3)
     ]
@@ -1992,7 +1981,7 @@ async def test_turn_timeout_does_not_trigger_premature_exit_respawn(manager, mon
 
 @pytest.mark.parametrize("backend_kind", ["claude-code", "codex"])
 @pytest.mark.parametrize("original_resume", [None, "original-thread"])
-async def test_idle_recovery_retries_original_without_duplicate_user_messages(
+async def test_idle_recovery_continues_without_duplicate_user_messages(
     manager, monkeypatch, backend_kind, original_resume
 ):
     from server.config import settings as cfg
@@ -2015,8 +2004,8 @@ async def test_idle_recovery_retries_original_without_duplicate_user_messages(
     retry = next(e for e in events if e.get("code") == "turn_timeout_retry")
     assert retry["retrying"] is True
     assert not any(e.get("code") == "turn_timeout" for e in events)
-    assert second.started_with == "original request"
-    assert second.started_resume == original_resume
+    assert "Continue the user's unfinished request" in second.started_with
+    assert second.started_resume == "failed-thread"
     assert first.stopped
     messages = await manager.db.load_messages(session.id)
     assert [m["content"] for m in messages if m["role"] == "user"] == ["original request"]
@@ -2059,7 +2048,7 @@ async def test_idle_recovery_has_a_per_turn_budget(manager, monkeypatch):
     monkeypatch.setattr(cfg, "turn_max_seconds", 0)
     monkeypatch.setattr(cfg, "turn_idle_max_retries", 2)
     session = await _new(manager, "Budget")
-    stalls = [_StallBackend() for _ in range(3)]
+    stalls = [_StallBackend([HarnessEvent(type="session_started", session_id="saved-thread")]) for _ in range(3)]
     success = _SeqBackend([HarnessEvent(type="result", session_id="done")])
     monkeypatch.setattr(manager, "_make_run", _seq_factory([*stalls, success]))
 
@@ -2120,12 +2109,14 @@ async def test_idle_recovery_does_not_replay_output_without_resume_id(manager, m
 
 async def test_overall_timeout_bounds_all_recovery_attempts(manager, monkeypatch):
     from server.config import settings as cfg
+    from server.harness import HarnessEvent
 
     monkeypatch.setattr(cfg, "turn_idle_timeout_seconds", 0.1)
     monkeypatch.setattr(cfg, "turn_max_seconds", 0.35)
     monkeypatch.setattr(cfg, "turn_idle_max_retries", 10)
     session = await _new(manager, "TotalBudget")
-    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: _StallBackend())
+    monkeypatch.setattr(manager, "_make_run", lambda *a, **k: _StallBackend([
+        HarnessEvent(type="session_started", session_id="saved-thread")]))
 
     events = await _request_events(manager, session, "request")
 
@@ -2143,7 +2134,7 @@ async def test_user_interrupt_stops_idle_recovery(manager, monkeypatch):
     monkeypatch.setattr(cfg, "turn_max_seconds", 0)
     session = await _new(manager, "CancelRecovery")
     started_second = asyncio.Event()
-    first = _StallBackend()
+    first = _StallBackend([HarnessEvent(type="session_started", session_id="saved-thread")])
     second = _StallBackend([HarnessEvent(type="text", content="second attempt")])
     monkeypatch.setattr(manager, "_make_run", _seq_factory([first, second]))
 
@@ -2236,6 +2227,7 @@ async def test_setting_saved_during_recovery_applies_on_the_next_turn(manager, m
                 if attempt_count == 1:
                     changed = await client.patch(f"/api/sessions/{session.id}", json={field: after})
                     assert changed.status_code == 200, changed.text
+                    yield HarnessEvent(type="session_started", session_id="saved-thread")
                     yield HarnessEvent(type="error", content="stream disconnected", is_error=True)
                     yield HarnessEvent(type="result", is_error=True)
                 else:

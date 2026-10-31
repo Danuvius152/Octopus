@@ -220,7 +220,7 @@ async def test_old_unavailable_completion_cannot_finish_the_followup_round(notif
     )
     original = next(receipt for sid, work, receipt in runtime.receipts
                     if sid == first.delegation_id and work == first.work_id)
-    read = runtime.manager.db.load_committed_request_messages
+    read = runtime.manager.db.read_session_result
     entered, release = asyncio.Event(), asyncio.Event()
 
     async def hold_original_snapshot(session_id, request_id):
@@ -229,7 +229,7 @@ async def test_old_unavailable_completion_cannot_finish_the_followup_round(notif
             await release.wait()
         return await read(session_id, request_id)
 
-    monkeypatch.setattr(runtime.manager.db, "load_committed_request_messages", hold_original_snapshot)
+    monkeypatch.setattr(runtime.manager.db, "read_session_result", hold_original_snapshot)
     try:
         await unavailable_after_commit(runtime, first)
         await asyncio.wait_for(entered.wait(), 2)

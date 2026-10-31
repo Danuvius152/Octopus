@@ -60,9 +60,8 @@ class _Attempt:
     attempt_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     result: HarnessEvent | None = None
     saw_tool_use: bool = False
-    # Whether any assistant text streamed, including unfinished delta blocks.
-    # Once output exists, recovery requires the captured conversation.
-    saw_text: bool = False
+    # Observed on this attempt, rather than inherited from an earlier request.
+    conversation_id: str | None = None
     # Error notifications are diagnostic until the final result is known.
     saw_error_event: bool = False
     error_code: str | None = None
@@ -102,21 +101,14 @@ class _Attempt:
     def failure_code(self) -> str | None:
         return (self.result.error_code if self.result else None) or self.error_code
 
-    @property
-    def produced_output(self) -> bool:
-        return self.saw_tool_use or self.saw_text
-
-
 @dataclass
 class _Turn:
     """What survives across the CLI invocations of one logical turn.
 
-    The retry budgets are per turn, not per attempt — that is the whole point
-    of them — and so is the resume id the turn started from.
+    The retry budgets and captured continuation survive individual attempts.
     """
 
-    # The prompt the user (or the injector) actually sent. A transient retry
-    # with no output yet re-runs THIS, not whatever a later attempt was given.
+    # Original prepared input; only unsubmitted attempts can replay it.
     prompt: str
     # The prompt the next attempt will run: `prompt`, "continue", or a
     # history-replay wrapper.
@@ -126,16 +118,11 @@ class _Turn:
     # to flag the right row needs_reconnect on a mid-turn 401
     # (harness-credential-reauth.md §4). None = host-default CLI auth.
     cred_id: str | None
-    # The resume id this logical turn STARTED from. A transient retry re-runs
-    # the original invocation, so it must restore this — a failed no-output
-    # attempt can still emit `session_started` and mutate
-    # session.claude_session_id, which would otherwise turn the retry into a
-    # `--resume <failed-id>` of the same prompt (Vera review,
-    # harness-transient-retry.md §4).
-    resume_at_turn_start: str | None
     settlement: _Settlement
     started_at: float = field(default_factory=time.monotonic)
-    produced_output: bool = False
+    # A conversation observed during this logical turn, usable only by a
+    # protocol that supports continuation. It is not proof of safe replay.
+    continuation_id: str | None = None
 
 
 @dataclass
