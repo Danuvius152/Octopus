@@ -7,7 +7,7 @@ import uuid
 from datetime import UTC, datetime
 
 from ..mcp_identity import McpScope
-from . import job_items
+from . import job_events, job_items
 from . import maintenance_selections as selections
 from .formats import is_markdown_maintenance
 from .history import WikiHistory
@@ -17,6 +17,43 @@ from .maintenance_view import MaintenanceSnapshot
 from .registry import registry
 from .store import WikiError
 from .tasks import tasks
+
+
+def submit(user_id, key, material, scope, paths, target, sources, created_changes=None, *,
+           mcp_scope=None, app_id=None, **options):
+    from .jobs import WikiJobs
+    from .maintenance_contract import actor_for
+
+    with registry.using(user_id) as (store, registration):
+        with registry.registered(user_id, store, registration):
+            task = tasks.caller(user_id, mcp_scope, registration, app_id=app_id, write=True)
+            tasks.require_submitter(task, registration)
+        return WikiJobs(user_id, store=store, registration=registration).maintain(
+            key, material, scope, paths, target, sources, actor_for(task, app_id), created_changes,
+            selection_task=task, mcp_scope=mcp_scope, requester=job_events.requester_for(user_id, task, app_id), **options)
+
+
+def submit_batch(user_id, selection_id, ordinals, *, mcp_scope=None, app_id=None):
+    from .jobs import WikiJobs
+    from .maintenance_contract import actor_for
+
+    with registry.using(user_id) as (store, registration):
+        with registry.registered(user_id, store, registration):
+            task = tasks.caller(user_id, mcp_scope, registration, app_id=app_id, write=True)
+            tasks.require_submitter(task, registration)
+        return admit_batch(WikiJobs(user_id, store=store, registration=registration), selection_id,
+                           ordinals, actor_for(task, app_id), task, mcp_scope=mcp_scope,
+                           requester=job_events.requester_for(user_id, task, app_id))
+
+
+def curate(user_id, key, scope, *, mcp_scope=None, app_id=None):
+    from .jobs import WikiJobs
+
+    with registry.using(user_id) as (store, registration):
+        with registry.registered(user_id, store, registration):
+            tasks.caller(user_id, mcp_scope, registration, app_id=app_id, human_only=True)
+        return WikiJobs(user_id, store=store, registration=registration).curate(
+            key, scope, requester=job_events.requester_for(user_id, app_id=app_id))
 
 
 def prepare(jobs, review):
@@ -141,17 +178,14 @@ def admit(jobs, key, material, paths, target, sources, actor, created_changes, r
     # shared-locked from its final generation check through commit.
     with jobs.store.borrow(), WikiHistory(jobs.store).locked():
         prepare(jobs, review)
-        with registry._account_lock(jobs.user_id), registry.registration_lock(jobs.user_id):
-            registration = registry.config(jobs.user_id)
-            if registration != jobs.registration or jobs.store.registration_generation != registration["registration_generation"]:
-                raise selections.error("registration_changed", "Wiki registration changed before admission", 409)
+        with registry.registered(jobs.user_id, jobs.store, jobs.registration):
             try:
                 result, created = commit(jobs, key, request, review, task,
                                          selection_id=selection_id, selection_ordinal=selection_ordinal,
                                          mcp_scope=mcp_scope, requester=requester)
             except sqlite3.DatabaseError as exc:
                 raise selections.unavailable() from exc
-    if created:
+    if created or result["status"] == "queued":
         worker.wake(jobs.user_id)
     return result
 
@@ -168,10 +202,7 @@ def admit_batch(jobs, selection_id, ordinals, actor, task, *, mcp_scope=None, re
             reviews = [selections.item(db, selection_id, ordinal)["review"] for ordinal in ordinals]
         for review in reviews:
             prepare(jobs, review)
-        with registry._account_lock(jobs.user_id), registry.registration_lock(jobs.user_id):
-            registration = registry.config(jobs.user_id)
-            if registration != jobs.registration or jobs.store.registration_generation != registration["registration_generation"]:
-                raise selections.error("registration_changed", "Wiki registration changed before admission", 409)
+        with registry.registered(jobs.user_id, jobs.store, jobs.registration) as registration:
             with jobs.store.connect() as db:
                 db.execute("BEGIN IMMEDIATE")
                 states = []
@@ -204,6 +235,6 @@ def admit_batch(jobs, selection_id, ordinals, actor, task, *, mcp_scope=None, re
                                      "job_id": target, "reused": previous is not None, **{key: item[key] for key in (
                         "doc", "path", "status", "revision", "output_revision", "receipt_id") if key in item}})
                 result = {"aggregation_scope": "associated_jobs", "jobs": [jobs.summary(job) for job in results.values()], "selected_items": selected}
-    if fresh:
+    if fresh or any(job["status"] == "queued" for job in result["jobs"]):
         worker.wake(jobs.user_id)
     return result

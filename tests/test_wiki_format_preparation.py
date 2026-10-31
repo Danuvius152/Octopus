@@ -7,6 +7,7 @@ from urllib.parse import unquote, urlsplit
 
 from server.wiki import grants, job_events, maintenance_inputs, protocols, schema
 from server.wiki.jobs import WikiJobs
+from server.wiki.registry import registry
 from server.wiki.store import WikiStore
 from tests.test_wiki_format_admission import registered_account as registered_account
 from tests.wiki_current_storage import facts
@@ -20,7 +21,6 @@ async def test_current_owned_format_shares_the_complete_current_contract(registe
     original_body = (root / "source.md").read_bytes()
     original_config = (state / "config.json").read_bytes()
     with closing(WikiStore(root, state, registration["vault_id"], defer_recovery=True)) as store:
-        jobs = WikiJobs(owner, store=store, registration=registration)
         with store.connect() as db:
             assert db.execute("PRAGMA user_version").fetchone()[0] == schema.VERSION
             assert db.execute("SELECT 1 FROM sqlite_schema WHERE name='wiki_schema'").fetchone() is None
@@ -29,6 +29,9 @@ async def test_current_owned_format_shares_the_complete_current_contract(registe
             grants.require(db)
             job_events.require(db)
         assert protocols.registration_preflight(state, complete=True)["vault_id"] == registration["vault_id"]
+    with registry.using(owner) as (store, current_registration):
+        assert current_registration == registration
+        jobs = WikiJobs(owner, store=store, registration=registration)
         current = store.read("source.md")
         requester = job_events.Requester(owner, "human", "format-browser", "format-request", "format-client")
         accepted = jobs.enqueue("format-contract", {"kind": "curation"}, [{"doc": current["id"], "path": current["path"],

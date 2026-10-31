@@ -164,9 +164,12 @@ registry.close()
 
 @pytest.fixture
 async def http_boundary(tmp_path, monkeypatch):
+    from server.wiki import maintenance_observation
+
     monkeypatch.setattr(settings, "wiki_dir", str(tmp_path / "legacy-wiki"))
     registry = WikiRegistry()
     monkeypatch.setattr(wiki_router, "registry", registry)
+    monkeypatch.setattr(maintenance_observation, "registry", registry)
     db = Database(":memory:")
     await db.initialize()
     users = UserManager(db)

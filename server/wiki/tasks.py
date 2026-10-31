@@ -168,6 +168,27 @@ class WikiTasks:
     def call(task, scope):
         return replace(task, call_scope=scope, active_task=task) if task.job_id else task
 
+    def caller(self, user_id, scope, registration, *, app_id=None, human_only=False, write=False, publish=False, original=None):
+        """Resolve current authority against the operation's protected binding."""
+        if app_id is not None and registration.get("app_id") != app_id:
+            raise WikiError("This application is not bound to this wiki", 403)
+        if scope is None:
+            return None
+        from ..mcp_identity import scope_is_live
+
+        if not scope_is_live(scope):
+            raise WikiError("The original Wiki caller is no longer active", 403)
+        if human_only:
+            raise WikiError("This operation requires the account owner", 403)
+        if scope.user_id != user_id:
+            raise WikiError("This Wiki call belongs to another account", 403)
+        task = self.call(self.require(scope, write=write, publish=publish), scope)
+        if original is not None and (task.active_task or task) is not (original.active_task or original):
+            raise WikiError("The original Wiki caller has been replaced", 403)
+        if publish and task.agent_id != registration["curator_agent_id"]:
+            raise WikiError("Only this account's configured curator may publish", 403)
+        return task
+
     def require(self, scope, *, write: bool = False, publish: bool = False) -> WikiTask:
         task = self.resolve(scope)
         if task is None or (task.session_id, task.user_id) != (

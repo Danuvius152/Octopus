@@ -78,12 +78,21 @@ export async function loadSessionSnapshot(sessionId: string, start = useSessionS
 }
 
 /** Background cards merge against the live records observed before fetch. */
-export async function loadBgTaskSnapshot(sessionId: string, start = useSessionStore.getState()): Promise<void> {
-  return loadAuxiliarySnapshot(sessionId, "background", start);
+export async function loadBgTaskSnapshot(sessionId: string): Promise<void> {
+  return observeSessionAuxiliary(sessionId, "background").done;
 }
 
-// Outstanding reads own only response ordering, never research status. A
-// response invalidates earlier reads after it applies; settled groups expire.
+/** Cancelling a view's observation never cancels the server's job. */
+export function observeSessionAuxiliary(sessionId: string, kind: SessionAuxiliaryKind) {
+  let active = true;
+  return {
+    done: loadAuxiliarySnapshot(sessionId, kind, useSessionStore.getState(), undefined, () => active),
+    cancel: () => { active = false; },
+  };
+}
+
+// Outstanding reads own error ordering, never job status. Valid older successes
+// may still advance a job; settled groups retain no domain state.
 const auxiliaryReads: Record<SessionAuxiliaryKind, Map<string, Set<symbol>>> = {
   background: new Map(), research: new Map(),
 };
@@ -91,6 +100,7 @@ const auxiliaryReads: Record<SessionAuxiliaryKind, Map<string, Set<symbol>>> = {
 async function loadAuxiliarySnapshot(
   sessionId: string, kind: SessionAuxiliaryKind, start: SnapshotStart,
   acceptedDetail?: Promise<Record<string, unknown> | null>,
+  current = () => true,
 ): Promise<void> {
   const observation = sessions.capture(start);
   if (!start.token || !sessions.current(observation)) return;
@@ -115,23 +125,27 @@ async function loadAuxiliarySnapshot(
     if (acceptedDetail && !detail) return;
     const generation = detail ? readDispatchState(detail.dispatch_state)?.generation : undefined;
     const result = await response;
-    if (!reads.has(read) || !sessions.current(observation, generation)) {
+    if (!current() || !sessions.current(observation, generation)) {
       if ("error" in result) throw result.error;
       return;
     }
-    // A newer completion retires older successes and failures alike.
-    for (const older of reads) {
-      reads.delete(older);
-      if (older === read) break;
+    // Response ordering governs errors. Valid successes still contribute
+    // terminal facts even if a newer-started read has already returned.
+    const ownsError = reads.has(read);
+    if (ownsError) {
+      for (const older of reads) {
+        reads.delete(older);
+        if (older === read) break;
+      }
     }
     const store = useSessionStore.getState();
     if ("error" in result) {
-      store.setSessionAuxiliaryError(sessionId, kind, `Could not refresh ${label}.`);
+      if (ownsError) store.setSessionAuxiliaryError(sessionId, kind, `Could not refresh ${label}.`);
       throw result.error;
     }
-    if (kind === "background") store.setBgTasks(sessionId, result.rows as BgTask[], start.bgTasks[sessionId] || []);
-    else store.setResearch(sessionId, result.rows as ResearchJob[], start.research[sessionId] || []);
-    store.setSessionAuxiliaryError(sessionId, kind, null);
+    if (kind === "background") store.setBgTasks(sessionId, result.rows as BgTask[], start.bgTasks[sessionId] || [], !ownsError);
+    else store.setResearch(sessionId, result.rows as ResearchJob[], start.research[sessionId] || [], !ownsError);
+    if (ownsError) store.setSessionAuxiliaryError(sessionId, kind, null);
   } finally {
     reads.delete(read);
     if (!reads.size && group.get(sessionId) === reads) group.delete(sessionId);
@@ -140,17 +154,17 @@ async function loadAuxiliarySnapshot(
 
 /** Selection, archived viewing and reconnect retain their original event
  * baseline. The store distinguishes per-job updates from snapshot writes. */
-export async function loadResearchSnapshot(sessionId: string, start = useSessionStore.getState()): Promise<void> {
-  return loadAuxiliarySnapshot(sessionId, "research", start);
+export async function loadResearchSnapshot(sessionId: string): Promise<void> {
+  return observeSessionAuxiliary(sessionId, "research").done;
 }
 
 /** The accepted detail establishes the service identity without replacing the
  * original account or event baseline captured by its caller. */
-export function loadResearchAfterDetail(sessionId: string, detail: Record<string, unknown>, start: SnapshotStart): Promise<void> {
+function loadResearchAfterDetail(sessionId: string, detail: Record<string, unknown>, start: SnapshotStart): Promise<void> {
   const generation = readDispatchState(detail.dispatch_state)?.generation ?? start.dispatchGeneration;
   const current = useSessionStore.getState();
   if (start.accountGeneration !== current.accountGeneration || generation !== current.dispatchGeneration) return Promise.resolve();
-  return loadResearchSnapshot(sessionId, { ...start, dispatchGeneration: generation });
+  return loadAuxiliarySnapshot(sessionId, "research", { ...start, dispatchGeneration: generation });
 }
 
 /** Selection and archived viewing accept detail before loading its research

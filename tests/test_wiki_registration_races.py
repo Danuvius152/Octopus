@@ -98,6 +98,21 @@ def test_cross_thread_operation_keeps_observer_until_both_lease_and_operation_en
         store.search("originalword")
 
 
+def test_captured_binding_keeps_old_observer_until_exit_and_rejects_rebinding(registries):
+    instances, roots = registries
+    registry = instances[0]
+    registry.configure(None, roots[0], "curator")
+    with registry.using(None) as (store, registration):
+        rebound = registry.configure(None, roots[0], "replacement")
+        assert rebound["registration_generation"] != registration["registration_generation"]
+        assert not store._events_released
+        with pytest.raises(WikiError, match="registration changed"):
+            with registry.registered(None, store, registration):
+                pytest.fail("An old binding must not authorize new work")
+        assert registry.store(None) is not store
+    assert store._events_released
+
+
 async def test_registry_cancelled_stop_finishes_thread_then_closes_observer(registries, monkeypatch):
     instances, roots = registries
     registry = instances[0]

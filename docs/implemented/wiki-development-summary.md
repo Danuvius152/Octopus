@@ -111,6 +111,42 @@ Codex 控制指令的当前交付生命周期见[Codex 当前契约](codex-backe
 
 内部任务只捕获文档及创建预留身份，卡片中的路径从当前 grant 投影，不另存旧路径或新页布尔授权镜像。原位整理保留单一目标；App 的准备和跟随任务分别由 task→owner 字典登记，失败任务与真实 writer 退休语义保留。后继选定修复沿用这些简化，并补齐持久通知、原执行交接与 owner 恢复，不扩展其他条件项。
 
+### 受保护操作与入口
+
+维护状态和 selection 创建/读取由 `maintenance_observation` 拥有完整观察。
+Registry 的 `using` 在业务锁外准备 Store，保留原代次使用权；`registered` 只保护并
+重验已捕获的账户、root、vault、registration generation 和完整注册，不重新构造
+或换库。History 决定观察及文件操作的锁范围，业务按 History → 账户/注册进入最终
+检查。重绑后的旧 Store 保留到原使用者退出，旧操作不得改取新 Store 继续提交。
+普通使用不触发全库恢复；当前调用 scope、App 绑定和原 turn 在领域内重验，selection
+准备期间撤权会使最终事务回滚，读取期间撤权不发布原观察。
+
+`maintenance_admission` 接管 maintain、maintain-batch、curate 的资源取得和提交
+策略；短事务仍由原 jobs/grants/selection 实现提交 job、grant、别名、订阅和选择
+证据。批量共同核对当前 revision、观察与范围，一项失效整批不接纳。commit 失败
+不 wake；commit 成功后 wake 失败保留原 job。重复提交沿原 key 与规范化请求校验，
+queued 原任务可再次 wake，不新建工作或绕过当前权限。requester 身份统一由
+`job_events` 从原 turn 或已认证客户端构造，不改变汇报订阅的归属。
+
+`job_controls.control` 拥有 cancel/retry/verify/readmit 的原 job 归属、授权和
+dispatch gate；执行退休及文件核验继续归原 owner。worker 仅控制其原 job 和已绑定
+attempt/request；取消及核验不要求新提交权，retry 仍重验提交许可和原 work 退休。
+cancel 的 `operation_id` 与取消意图同事务保存，丢确认后重放只读取原控制，不再次
+取消重试后的执行。curate/readmit 保持原 owner-only 策略；App 仅保留原白名单，
+readmit 不向 App/MCP 新开放。
+
+`content_mutations` 为 publish/revise/restructure/organize 保留同代 Store、History
+和注册保护，并把当前 curator、path、source-read、revision 检查交给原 Curation/
+History/grant 规则。效果前仍核验真实授权，原像、prepared/applied、文件效果和
+SQLite 收据各自保留，取消或记录失败不伪造跨资源回滚。普通编辑、history/restore、
+旧 snapshot 恢复、显式 recovery 和 App bridge 继续各自完整操作；snapshot 创建
+仍为 410。SmartReader 的 agent 通路和 Sapphire 的文件通路保持，同次保存不双写。
+
+隔离真实文件与 HTTP/App/MCP 路径回归覆盖准备后撤权、重绑、旧借用退出、最终
+事务失败、原 key 找回并唤醒、原控制重放及退休证明；入口参数、模型回包预算、
+读取证据、文件恢复与 App bridge 的既有回归继续保留。没有新增持久表、存储根或
+迁移表示，控制收据仍随既有 Wiki 账本保全。
+
 ### 恢复、存储与性能
 
 搜索、单读、批读、引用行定位与模型回包裁剪使用同一原始换行坐标：LF、CRLF、
@@ -195,10 +231,11 @@ HTTP info 默认 full，MCP info 默认 compact，显式 full 可查询完整诊
 | --- | --- |
 | 接管、执行、持久终态、通知 | [sessions](../../server/sessions/)、[harness](../../server/harness/)、[逻辑轮次计划](https://github.com/Danuvius152/Octopus/blob/b19f6f9deaa36245d80ed3c283d6e64dc257d978/docs/plans/runtime-log-repair-20261013.md)、[接口修补计划](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/runtime-interface-repair.md) |
 | HTTP / MCP 与真实参数 | [router](../../server/routers/wiki.py)、[MCP](../../server/mcp_servers/wiki.py)、[contracts](../../server/wiki/contracts.py) |
-| 权限、命令选择、维护观察 | [tasks](../../server/wiki/tasks.py)、[maintenance_state](../../server/wiki/maintenance_state.py)、[当前合同](#4-当前运行合同) |
+| 权限、命令选择、维护观察与接纳 | [tasks](../../server/wiki/tasks.py)、[maintenance_observation](../../server/wiki/maintenance_observation.py)、[maintenance_admission](../../server/wiki/maintenance_admission.py)、[maintenance_state](../../server/wiki/maintenance_state.py) |
 | 注册、索引与文件事件 | [registry](../../server/wiki/registry.py)、[store](../../server/wiki/store.py)、[events](../../server/wiki/events.py) |
 | 格式准入、原子准备与当前 DDL | [schema](../../server/wiki/schema.py)、[schema_ddl](../../server/wiki/schema_ddl.py)、[storage](../../server/wiki/storage.py) |
 | 持久任务、历史、原始材料 | [jobs](../../server/wiki/jobs.py)、[history](../../server/wiki/history.py)、[materials](../../server/wiki/materials.py) |
+| 任务控制与受授权内容变更 | [job_controls](../../server/wiki/job_controls.py)、[content_mutations](../../server/wiki/content_mutations.py)、[受保护操作与入口](#受保护操作与入口) |
 | 规则装配与按需指南 | [workflow](../../server/wiki/workflow.py)、[prompts](../../server/wiki/prompts/)；实际 Weber persona 属于代理配置，curator 参考文件不表示已自动应用 |
 | 检查、文档入口及本机发布 | [AGENTS](../../AGENTS.md)、[check.sh](../../scripts/check.sh)、[文档索引](../../scripts/gen-docs-index.py)、[local-wsl](../local-wsl.md) |
 

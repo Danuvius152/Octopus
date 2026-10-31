@@ -4,6 +4,7 @@ import uuid
 
 import pytest
 
+from server.config import settings
 from server.wiki.curation import WikiCuration
 from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiJobs
@@ -115,12 +116,9 @@ def test_recovered_delete_detaches_before_a_same_hash_creation_receipt_can_be_re
     history.store.path("Library/note.md").write_bytes(raw)
     assert history.store.read("Library/note.md")["id"] != original["id"]
     # No model is called: the old creation receipt fails at the enqueue gate.
-    monkeypatch.setattr(registry, "store", lambda _user_id: history.store)
-    monkeypatch.setattr(registry, "state", lambda _user_id: history.state)
-    monkeypatch.setattr(registry, "config", lambda _user_id: {
-        "root": str(history.store.root), "vault_id": history.store.vault_id,
-        "curator_agent_id": "curator", "app_id": None,
-    })
+    history.store.close()
+    monkeypatch.setattr(settings, "wiki_dir", str(history.state))
+    registry.configure(None, history.store.root, "curator")
     jobs = WikiJobs(None)
     with pytest.raises(WikiError, match="different document identity"):
         jobs.maintain("old-receipt", "", "organize", ["Library/note.md"], None, [], "human", {"Library/note.md": created["change_id"]})

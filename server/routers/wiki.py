@@ -10,11 +10,10 @@ from fastapi.responses import JSONResponse, Response
 from fastapi.routing import APIRoute
 from pydantic import BaseModel, ConfigDict, Field, StrictInt
 
-from ..aio import complete_cleanup
 from ..auth import verify_token
 from ..deps import ScopeUser, SessionMgr
 from ..mcp_identity import McpScope, verify
-from ..wiki import WikiError, job_events, registry
+from ..wiki import WikiError, registry
 from ..wiki.contracts import (
     CreationRequest,
     GrantReadmissionRequest,
@@ -33,8 +32,7 @@ from ..wiki.contracts import (
 )
 from ..wiki.curation import WikiCuration
 from ..wiki.history import WikiHistory
-from ..wiki.jobs import WikiJobs, worker
-from ..wiki.maintenance_contract import actor_for
+from ..wiki.jobs import WikiJobs
 from ..wiki.tasks import tasks
 from ..workspace import confine
 
@@ -164,13 +162,6 @@ def access(
     return None
 
 
-def requester_for(request: Request, user_id, task):
-    if task is not None:
-        return job_events.from_task(task)
-    app_id = request.path_params.get("app_id")
-    return job_events.Requester(user_id, "app" if app_id else "human", client_id=app_id or "")
-
-
 class WikiConfig(BaseModel):
     root: str
     curator_agent_id: str
@@ -296,18 +287,10 @@ def maintenance_status(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    from ..wiki.maintenance_state import status
+    from ..wiki.maintenance_observation import status
 
-    task = access(request)
-    store = registry.store(user_id)
-    with store.borrow():
-        with registry._account_lock(user_id), registry.registration_lock(user_id):
-            registration = registry.config(user_id)
-            if store.registration_generation != registration["registration_generation"]:
-                raise WikiError("Wiki registration changed; retry with the current Store", 503)
-            return status(store, registration, user_id,
-                          doc=doc, directory=directory, view=view, limit=limit, cursor=cursor,
-                          actor=actor_for(task, request.path_params.get("app_id")), model_response=task is not None)
+    return status(user_id, scope=_mcp_scope(request), app_id=request.path_params.get("app_id"),
+                  doc=doc, directory=directory, view=view, limit=limit, cursor=cursor)
 
 
 @router.post("/maintenance-selections")
@@ -317,18 +300,10 @@ def create_maintenance_selection(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    from ..wiki import maintenance_selections
+    from ..wiki.maintenance_observation import create
 
-    task = access(request)
-    store = registry.store(user_id)
-    with store.borrow(), WikiHistory(store).locked():
-        with registry._account_lock(user_id), registry.registration_lock(user_id):
-            registration = registry.config(user_id)
-            if store.registration_generation != registration["registration_generation"]:
-                raise maintenance_selections.error("registration_changed", "Wiki registration changed; retry with the current Store", 409)
-            return maintenance_selections.create(store, registration, user_id,
-                                                  actor=actor_for(task, request.path_params.get("app_id")),
-                                                  directory=body.directory, limit=body.limit)
+    return create(user_id, scope=_mcp_scope(request), app_id=request.path_params.get("app_id"),
+                  directory=body.directory, limit=body.limit)
 
 
 @router.get("/maintenance-selections/{selection_id}")
@@ -340,16 +315,10 @@ def get_maintenance_selection(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    from ..wiki import maintenance_selections
+    from ..wiki.maintenance_observation import read
 
-    task = access(request)
-    store = registry.store(user_id)
-    with store.borrow(), registry._account_lock(user_id), registry.registration_lock(user_id):
-        registration = registry.config(user_id)
-        if store.registration_generation != registration["registration_generation"]:
-            raise maintenance_selections.error("registration_changed", "Wiki registration changed; retry with the current Store", 409)
-        return maintenance_selections.read(store, registration, user_id, selection_id,
-                                            actor=actor_for(task, request.path_params.get("app_id")), limit=limit, cursor=cursor)
+    return read(user_id, selection_id, scope=_mcp_scope(request), app_id=request.path_params.get("app_id"),
+                limit=limit, cursor=cursor)
 
 
 @router.put("/config")
@@ -685,20 +654,6 @@ def restore_snapshot(
     )
 
 
-def curator_task(request: Request, user_id):
-    task = access(request, publish=True)
-    config = registry.config(user_id)
-    if task and task.agent_id != config["curator_agent_id"]:
-        raise WikiError("Only this account's configured curator may publish", 403)
-    return task
-
-
-def curator(request: Request, user_id, path: str):
-    task = curator_task(request, user_id)
-    tasks.require_path(task, registry.store(user_id), path)
-    return task.agent_id if task else "human"
-
-
 class Publish(Edit):
     kind: str
     sources: list[Source] | None = None
@@ -716,26 +671,10 @@ def publish(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    actor = curator(request, user_id, body.path)
-    task = access(request)
-    if task:
-        for source in body.sources or []:
-            tasks.require_source_read(task, registry.store(user_id), source.model_dump())
-    return WikiCuration(registry.store(user_id)).publish(
-        body.path,
-        body.content,
-        body.kind,
-        [s.model_dump() for s in body.sources] if body.sources is not None else None,
-        body.expected_revision,
-        actor,
-        body.reason,
-        task=task,
-        frontmatter_patch=body.frontmatter_patch,
-        tags=body.tags,
-        aliases=body.aliases,
-        item_doc=body.item_doc,
-        reservation_id=body.reservation_id,
-    )
+    from ..wiki.content_mutations import publish
+
+    return publish(user_id, scope=_mcp_scope(request), app_id=request.path_params.get("app_id"),
+                   **body.model_dump())
 
 
 @router.get("/blocks")
@@ -759,12 +698,9 @@ def get_blocks(
 
 @router.post("/revise")
 def revise_document(body: Revision, request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
-    from ..wiki.revise import revise
+    from ..wiki.content_mutations import revise
 
-    store = registry.store(user_id)
-    path = store.read(body.doc, length=1)["path"]
-    actor = curator(request, user_id, path)
-    return revise(WikiCuration(store), body, actor, access(request))
+    return revise(user_id, body, scope=_mcp_scope(request), app_id=request.path_params.get("app_id"))
 
 
 class Addition(BaseModel):
@@ -798,24 +734,10 @@ def organize(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    task = curator_task(request, user_id)
-    actor = task.agent_id if task else "human"
-    return WikiCuration(registry.store(user_id)).organize(
-        body.path,
-        body.expected_revision,
-        body.key_note,
-        body.tags,
-        [r.model_dump() for r in body.relations] if body.relations is not None else None,
-        [s.model_dump() for s in body.sources] if body.sources is not None else None,
-        actor,
-        body.reason,
-        publication={"job_id": task.job_id, "session_id": task.session_id} if task and task.job_id else None,
-        aliases=body.aliases,
-        reuse_existing_summary=body.reuse_existing_summary,
-        task=task,
-        frontmatter_patch=body.frontmatter_patch,
-        item_doc=body.item_doc,
-    )
+    from ..wiki.content_mutations import organize
+
+    return organize(user_id, scope=_mcp_scope(request), app_id=request.path_params.get("app_id"),
+                    **body.model_dump())
 
 
 class Restructure(BaseModel):
@@ -837,26 +759,10 @@ def restructure(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    actor = curator(request, user_id, body.path)
-    task = access(request)
-    tasks.require_read(task, registry.store(user_id), body.path, body.expected_revision)
-    if task:
-        for addition in body.additions:
-            for source in addition.sources:
-                tasks.require_source_read(task, registry.store(user_id), source.model_dump())
-    return WikiCuration(registry.store(user_id)).restructure(
-        body.path,
-        body.expected_revision,
-        body.order,
-        [a.model_dump() for a in body.additions],
-        actor,
-        body.reason,
-        task=task,
-        frontmatter_patch=body.frontmatter_patch,
-        tags=body.tags,
-        aliases=body.aliases,
-        item_doc=body.item_doc,
-    )
+    from ..wiki.content_mutations import restructure
+
+    return restructure(user_id, scope=_mcp_scope(request), app_id=request.path_params.get("app_id"),
+                       **body.model_dump())
 
 
 class Maintenance(BaseModel):
@@ -881,40 +787,32 @@ def maintain(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    task = access(request, write=True)
-    if task and task.job_id:
-        raise WikiError(
-            "Finish the assigned job; workers cannot enqueue more maintenance", 403
-        )
-    tasks.require_selection(task, body.paths, registry.store(user_id), checked=body.review is not None)
-    return WikiJobs(user_id).maintain(
+    from ..wiki.maintenance_admission import submit
+
+    return submit(
+        user_id,
         body.idempotency_key,
         body.material,
         body.scope,
         body.paths,
         body.target,
         [s.model_dump() for s in body.sources],
-        actor_for(task, request.path_params.get("app_id")),
         body.created_changes,
         review=body.review.model_dump() if body.review is not None else None,
-        selection_task=task,
         mcp_scope=_mcp_scope(request),
+        app_id=request.path_params.get("app_id"),
         selection_id=body.selection_id,
         selection_ordinal=body.selection_ordinal,
         creation=body.creation.model_dump() if body.creation is not None else None,
-        requester=requester_for(request, user_id, task),
     )
 
 
 @router.post("/maintain-batch")
 def maintain_batch(body: MaintenanceBatchRequest, request: Request, user_id: ScopeUser = None, _: str = Depends(verify_token)):
-    from ..wiki.maintenance_admission import admit_batch
+    from ..wiki.maintenance_admission import submit_batch
 
-    task = access(request, write=True)
-    tasks.require_submitter(task)
-    return admit_batch(WikiJobs(user_id), body.selection_id, body.ordinals,
-                       actor_for(task, request.path_params.get("app_id")), task,
-                       mcp_scope=_mcp_scope(request), requester=requester_for(request, user_id, task))
+    return submit_batch(user_id, body.selection_id, body.ordinals,
+                        mcp_scope=_mcp_scope(request), app_id=request.path_params.get("app_id"))
 
 
 class Curate(BaseModel):
@@ -929,15 +827,14 @@ async def curate(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    access(request, human_only=True)
     import anyio
 
-    result = await anyio.to_thread.run_sync(
-        lambda: WikiJobs(user_id).curate(body.idempotency_key, body.scope,
-                                       requester=requester_for(request, user_id, None))
+    from ..wiki.maintenance_admission import curate
+
+    return await anyio.to_thread.run_sync(
+        lambda: curate(user_id, body.idempotency_key, body.scope, mcp_scope=_mcp_scope(request),
+                       app_id=request.path_params.get("app_id"))
     )
-    worker.wake(user_id)
-    return result
 
 
 @router.get("/jobs")
@@ -1009,14 +906,10 @@ async def cancel_job(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    task = access(request, write=True)
-    if task and task.job_id and task.job_id != job_id:
-        raise WikiError("A worker can control only its original assigned job", 403)
-    import anyio
+    from ..wiki.job_controls import control
 
-    jobs = await anyio.to_thread.run_sync(lambda: WikiJobs(user_id))
-    result = await jobs.cancel(job_id, worker.manager, **(body.model_dump() if body else {}))
-    return control_result(result) if task is not None else result
+    return await control(user_id, job_id, "cancel", body.model_dump() if body else {},
+                         mcp_scope=_mcp_scope(request), app_id=request.path_params.get("app_id"))
 
 
 @router.post("/jobs/{job_id}/retry")
@@ -1028,24 +921,10 @@ async def retry_job(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    task = access(request, write=True)
-    if task and task.job_id and task.job_id != job_id:
-        raise WikiError("A worker can control only its original assigned job", 403)
-    import anyio
+    from ..wiki.job_controls import control
 
-    from ..wiki.job_returns import dispatch_gate
-
-    async with dispatch_gate(session_mgr, user_id):
-        result = await complete_cleanup(anyio.to_thread.run_sync(lambda: WikiJobs(user_id).retry(
-            job_id, **(body.model_dump() if body else {}),
-            requester=None if task and task.job_id else requester_for(request, user_id, task),
-            task=task, mcp_scope=_mcp_scope(request),
-        )))
-    return control_result(result) if task is not None else result
-
-
-def control_result(result):
-    return {key: result[key] for key in ("id", "status", "state_version", "attempt", "settlement_phase", "progress")}
+    return await control(user_id, job_id, "retry", body.model_dump() if body else {}, manager=session_mgr,
+                         mcp_scope=_mcp_scope(request), app_id=request.path_params.get("app_id"))
 
 
 @router.post("/jobs/{job_id}/verify")
@@ -1053,14 +932,10 @@ async def verify_job(
     job_id: str, request: Request, body: JobControlRequest,
     user_id: ScopeUser = None, _: str = Depends(verify_token),
 ):
-    task = access(request, write=True)
-    if task and task.job_id and task.job_id != job_id:
-        raise WikiError("A worker can control only its original assigned job", 403)
-    import anyio
+    from ..wiki.job_controls import control
 
-    jobs = await anyio.to_thread.run_sync(lambda: WikiJobs(user_id))
-    result = await jobs.verify(job_id, worker.manager, **body.model_dump())
-    return control_result(result) if task is not None else result
+    return await control(user_id, job_id, "verify", body.model_dump(),
+                         mcp_scope=_mcp_scope(request), app_id=request.path_params.get("app_id"))
 
 
 @router.post("/jobs/{job_id}/readmit")
@@ -1072,14 +947,7 @@ async def readmit_job(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    access(request, human_only=True)
-    import anyio
+    from ..wiki.job_controls import control
 
-    from ..wiki.job_returns import dispatch_gate
-
-    async with dispatch_gate(session_mgr, user_id):
-        return await complete_cleanup(anyio.to_thread.run_sync(lambda: WikiJobs(user_id).readmit(
-            job_id, body.paths, body.creation.model_dump() if body.creation else None,
-            expected_attempt=body.expected_attempt, expected_vault_id=body.expected_vault_id,
-            operation_id=body.operation_id, requester=requester_for(request, user_id, None),
-        )))
+    return await control(user_id, job_id, "readmit", body.model_dump(), manager=session_mgr,
+                         mcp_scope=_mcp_scope(request), app_id=request.path_params.get("app_id"))

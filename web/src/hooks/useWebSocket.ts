@@ -95,7 +95,7 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
   if (["research_progress", "research_completed", "research_failed", "research_delivery"].includes(type) &&
       sessionId === store.activeSessionId &&
       !store.research[sessionId]?.some((job) => job.id === data.research_id)) {
-    void loadResearchSnapshot(sessionId, store).catch(() => {});
+    void loadResearchSnapshot(sessionId).catch(() => {});
   }
 
   const seq = typeof data.seq === "number" ? (data.seq as number) : null;

@@ -244,6 +244,12 @@ def from_task(task):
                      task.session_id, task.request_id, task.app_id or "")
 
 
+def requester_for(user_id, task=None, app_id=None):
+    """Keep the original turn or authenticated client as notification owner."""
+    return from_task(task) if task is not None else Requester(
+        user_id, "app" if app_id else "human", client_id=app_id or "")
+
+
 def subscribe(db, job_id, requester):
     """Caller has verified the principal and holds the admission writer TX."""
     if requester is None:

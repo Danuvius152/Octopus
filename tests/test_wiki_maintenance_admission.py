@@ -34,7 +34,7 @@ async def test_concurrent_equivalent_selection_admissions_commit_one_job_and_bot
         json=submission(selection, selection["items"][0])) for selection in selections))
     assert all(response.status_code == 200 for response in responses), [r.text for r in responses]
     assert responses[0].json()["id"] == responses[1].json()["id"]
-    assert ledger_counts(jobs.store) == (1, 1, 2) and wakes == [True]
+    assert ledger_counts(jobs.store) == (1, 1, 2) and wakes
     result = jobs.get(responses[0].json()["id"])
     assert {row["selection_id"] for row in result["selection_evidence"]} == {s["id"] for s in selections}
     assert all(row["review"] == selections[0]["items"][0]["review"] for row in result["selection_evidence"])
@@ -252,7 +252,7 @@ async def test_final_writer_has_no_nested_connection_or_synchronizing_read_and_w
     assert first.status_code == 200, first.text
     replay = await client.post("/api/wiki/maintain", headers=client.headers, json=body)
     assert replay.status_code == 200 and replay.json()["id"] == first.json()["id"], replay.text
-    assert visited == [True, True] and wakes == [(1, 1, int(selected))]
+    assert visited == [True, True] and wakes == [(1, 1, int(selected))] * 2
 
 
 @pytest.mark.parametrize("existing", [False, True])

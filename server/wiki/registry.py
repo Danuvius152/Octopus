@@ -316,6 +316,33 @@ class WikiRegistry:
     def store(self, user_id: str | None) -> WikiStore:
         return self._store(user_id)
 
+    @contextlib.contextmanager
+    def using(self, user_id):
+        """Prepare outside business locks, then retain exactly this generation."""
+        store = self.store(user_id)
+        with store.operation():
+            with self.registered(user_id, store) as registration:
+                captured = dict(registration)
+            yield store, captured
+
+    @contextlib.contextmanager
+    def registered(self, user_id, store, registration=None):
+        """Protect a captured binding; never construct or switch Stores here."""
+        with self._account_lock(user_id), self.registration_lock(user_id):
+            self.health.require_healthy()
+            if not self._allowed(user_id):
+                raise WikiError("Wiki Store unavailable during account transition", 503)
+            current = self.config(user_id)
+            if (store.state.resolve() != self.state(user_id).resolve()
+                    or str(store.root.resolve()) != current["root"]
+                    or store.vault_id != current["vault_id"]
+                    or store.registration_generation != current["registration_generation"]
+                    or registration is not None and registration != current):
+                from .maintenance_selections import error
+
+                raise error("registration_changed", "Wiki registration changed; retry with the current Store", 409)
+            yield current
+
     def recoveries(self):
         from .recovery import RecoveryManager
 

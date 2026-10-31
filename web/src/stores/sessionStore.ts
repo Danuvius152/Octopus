@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { mergeCardSnapshot } from "../lib/cardSnapshots";
+import { mergeAuxiliarySnapshot, mergeCardSnapshot } from "../lib/cardSnapshots";
 import { agentRequestIsCurrent, beginAgentRequest, canApplyAgent, endAgentRequest, recordAgentChanges, recordAgentSnapshot, type AgentRequest } from "../lib/agentUpdates";
 import { withPinOrder } from "../lib/sidebarPins";
 import { unreadList, type ListReadState } from "../lib/listState";
@@ -28,7 +28,8 @@ import type {
 
 // Provenance for immutable per-job updates, including WS and API receipts.
 // Snapshot rows stay unmarked. Weak references retain no second task state.
-const researchUpdates = new WeakSet<ResearchJob>();
+const researchUpdates = new WeakMap<ResearchJob, symbol>();
+const bgUpdates = new WeakMap<BgTask, symbol>();
 // Only delivery events advance this observation. Entity/list replacement does
 // not prove a new delivery fact; immutable copies retain their event marker.
 const bgDeliveryUpdates = new WeakMap<BgTask, symbol>();
@@ -371,7 +372,7 @@ interface SessionStore {
   bgTasks: Record<string, BgTask[]>;
   upsertBgTask: (sessionId: string, task: BgTask, baseline?: BgTask | null) => void;
   updateBgTaskDelivery: (sessionId: string, taskId: string, delivery: Pick<BgTask, "delivery_disposition" | "delivery_error">) => void;
-  setBgTasks: (sessionId: string, tasks: BgTask[], baseline?: BgTask[]) => void;
+  setBgTasks: (sessionId: string, tasks: BgTask[], baseline?: BgTask[], advanceOnly?: boolean) => void;
   sessionAuxiliaryErrors: Record<string, Partial<Record<SessionAuxiliaryKind, string>>>;
   setSessionAuxiliaryError: (sessionId: string, kind: SessionAuxiliaryKind, error: string | null) => void;
 
@@ -411,7 +412,7 @@ interface SessionStore {
   // as a normal injected turn.
   research: Record<string, ResearchJob[]>;
   upsertResearch: (sessionId: string, job: Partial<ResearchJob> & { id: string }) => void;
-  setResearch: (sessionId: string, jobs: ResearchJob[], baseline?: ResearchJob[]) => void;
+  setResearch: (sessionId: string, jobs: ResearchJob[], baseline?: ResearchJob[], advanceOnly?: boolean) => void;
 }
 
 export interface ResearchJob {
@@ -976,6 +977,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         : task;
       const updated = { ...previous, ...incoming };
       if (deliveryUpdate) bgDeliveryUpdates.set(updated, deliveryUpdate);
+      const marker = previous && bgUpdates.get(previous);
+      if (baseline === undefined) bgUpdates.set(updated, Symbol());
+      else if (marker) bgUpdates.set(updated, marker);
       const next = idx >= 0
         ? [...current.slice(0, idx), updated, ...current.slice(idx + 1)]
         : [...current, updated];
@@ -988,15 +992,16 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       if (idx < 0) return s;
       const updated = { ...current[idx], ...delivery };
       bgDeliveryUpdates.set(updated, Symbol());
+      bgUpdates.set(updated, Symbol());
       return { bgTasks: { ...s.bgTasks, [sessionId]: [
         ...current.slice(0, idx), updated, ...current.slice(idx + 1),
       ] } };
     }),
-  setBgTasks: (sessionId, tasks, baseline) =>
+  setBgTasks: (sessionId, tasks, baseline, advanceOnly) =>
     set((s) => {
       const current = s.bgTasks[sessionId] || [];
       const updates = new Map(current.map((task) => [task.id, bgDeliveryUpdates.get(task)]));
-      const merged = mergeCardSnapshot(tasks, current, baseline, (t) => t.id);
+      const merged = mergeAuxiliarySnapshot(tasks, current, baseline, bgUpdates, advanceOnly);
       for (const task of merged) {
         const update = updates.get(task.id);
         if (update) bgDeliveryUpdates.set(task, update);
@@ -1017,11 +1022,11 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
         // snapshot fetch on session load seeds those properly (Vera review).
         if (!job.question || !job.status) return {};
         const added = { ...job } as ResearchJob;
-        researchUpdates.add(added);
+        researchUpdates.set(added, Symbol());
         return { research: { ...s.research, [sessionId]: [...current, added] } };
       }
       const updated = { ...current[idx], ...job };
-      researchUpdates.add(updated);
+      researchUpdates.set(updated, Symbol());
       const next = [
         ...current.slice(0, idx),
         updated,
@@ -1029,9 +1034,9 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       ];
       return { research: { ...s.research, [sessionId]: next } };
     }),
-  setResearch: (sessionId, jobs, baseline) =>
-    set((s) => ({ research: { ...s.research, [sessionId]: mergeCardSnapshot(
-      jobs, (s.research[sessionId] || []).filter((job) => researchUpdates.has(job)), baseline, (t) => t.id,
+  setResearch: (sessionId, jobs, baseline, advanceOnly) =>
+    set((s) => ({ research: { ...s.research, [sessionId]: mergeAuxiliarySnapshot(
+      jobs, s.research[sessionId] || [], baseline, researchUpdates, advanceOnly,
     ) } })),
 
   delegations: {},

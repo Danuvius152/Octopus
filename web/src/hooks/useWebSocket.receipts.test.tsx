@@ -68,7 +68,7 @@ it("retains the exact submission identity when confirming after a lost ACK", asy
   expect(await retried).toMatchObject({ accepted: true, requestId: "already-admitted" });
 });
 
-it("keeps live card completions across delayed reconnect responses and accepts a later round", async () => {
+it("keeps live card completions across delayed reconnect responses and accepts new jobs", async () => {
   const waiting = new Map<string, (response: Response) => void>();
   vi.stubGlobal("fetch", vi.fn((url: string) => new Promise<Response>((resolve) => waiting.set(new URL(url).pathname, resolve))));
   useSessionStore.setState({ activeSessionId: "s", subagents: {}, bgTasks: {}, research: {} });
@@ -83,18 +83,22 @@ it("keeps live card completions across delayed reconnect responses and accepts a
     emit({ type: "research_started", research_id: "research", question: "q" });
     emit({ type: "research_completed", research_id: "research", verified: 2 });
   });
-  const finish = async (status: string) => {
+  const finish = async (status: string, newJobs = false) => {
     await act(async () => {
       waiting.get("/api/sessions/s")!(Response.json({ messages: [],
         dispatch_state: { generation: "g", revision: 1, active_request_id: "r", paused: false, items: [] }, subagents: [
         { task_id: "child", tool_call_id: "call", status, summary: "snapshot" },
       ] }));
-      waiting.get("/api/sessions/s/bg-tasks")!(Response.json([{ id: "bg", status }]));
+      waiting.get("/api/sessions/s/bg-tasks")!(Response.json(newJobs
+        ? [{ id: "bg", status: "completed" }, { id: "bg-next", status }]
+        : [{ id: "bg", status }]));
     });
     // Research starts after detail establishes the service identity, using
     // the original reconnect baseline so these intervening events survive.
     await act(async () => {
-      waiting.get("/api/sessions/s/research")!(Response.json([{ id: "research", question: "q", status, verified: 0 }]));
+      waiting.get("/api/sessions/s/research")!(Response.json(newJobs
+        ? [{ id: "research", question: "q", status: "completed", verified: 2 }, { id: "research-next", question: "Next question", status }]
+        : [{ id: "research", question: "q", status, verified: 0 }]));
     });
   };
   await finish("running");
@@ -102,10 +106,14 @@ it("keeps live card completions across delayed reconnect responses and accepts a
   expect(useSessionStore.getState().bgTasks.s[0].status).toBe("completed");
   expect(useSessionStore.getState().research.s[0].verified).toBe(2);
   act(() => socket.onopen?.());
-  await finish("running");
+  await finish("running", true);
   expect(useSessionStore.getState().subagents.s.call.status).toBe("running");
-  expect(useSessionStore.getState().bgTasks.s[0].status).toBe("running");
-  expect(useSessionStore.getState().research.s[0].status).toBe("running");
+  expect(useSessionStore.getState().bgTasks.s).toEqual([
+    expect.objectContaining({ id: "bg", status: "completed" }), expect.objectContaining({ id: "bg-next", status: "running" }),
+  ]);
+  expect(useSessionStore.getState().research.s).toEqual([
+    expect.objectContaining({ id: "research", status: "completed" }), expect.objectContaining({ id: "research-next", status: "running" }),
+  ]);
 });
 
 it("keeps recovery provenance on a new identity and on lost-ACK confirmation", async () => {

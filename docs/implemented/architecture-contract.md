@@ -363,6 +363,26 @@ CAS / child notice 诊断写入及原 completion 观察，只消费公共接管�
 失败重入和删除材料的边界由 `test_delegation_return_retry.py`、
 `test_delegation_text_deletion.py` 保持。
 
+## 辅助任务的读取与事件合并
+
+`hydrateSession` 拥有 BG/Research 一次读取的账户、服务/连接身份、基线、结果、
+错误及有效期；公开辅助加载不再接收外部 store 基线。detail 仍先确认本次服务
+身份，辅助失败仅更新所属提示，独立重试只读对应辅助接口，不重新下载 transcript。
+`observeSessionAuxiliary` 的 cancel 仅结束观察，不取消服务器任务。完整会话打开和
+委派列表读取仍保留各自生命周期，不能由辅助加载的完成推出它们已收敛。
+
+读取顺序裁定错误归属，领域状态裁定成功快照能否采用。较新成功不被旧失败改成
+错误；较旧成功仍可贡献合法完成状态，但不能覆盖较新的同状态阶段或交付诊断。
+BG/Research 每个 id 对应一次执行，终态不因另一份 running/pending 快照回退；新
+任务使用新 id。两个请求共享 running baseline 时，无论返回顺序，另一份快照的
+对象变化都不能遮住合法 completed。
+
+Zustand 仍持有唯一任务状态。不可变记录上的弱引用标记只证明 WS/本地权威更新，
+快照写入沿用已有标记而不推进它；在途快照保留期间的真实更新与新增任务。BG 的
+交付诊断继续独立保护，Research 的浏览器收讫、汇报输入接纳与父处理继续分别
+表达。`sessionAuxiliary`、原加载、真实 WS 和辅助重试组件回归覆盖双成功乱序、
+旧错误、身份切换、局部失败及取消观察，不能以纯 merge helper 的通过代替入口验证。
+
 ## 公开接口与账户配置
 
 - 全局新建会话或 schedule 显式指定所属 `agent_id`；agent-scoped URL 提供该

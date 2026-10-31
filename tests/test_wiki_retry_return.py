@@ -185,8 +185,6 @@ async def test_return_acceptance_and_retry_have_one_admission_order(jobs, return
 
 
 async def test_caller_ending_while_retry_waits_cannot_transfer_the_dispatch(jobs, returning, client, monkeypatch):
-    from server.routers import wiki as router
-
     job = submitted(jobs, returning, "ended-retry")
     jobs.update(job["id"], status="running")
     jobs.update(job["id"], status="completed_with_attention")
@@ -194,16 +192,15 @@ async def test_caller_ending_while_retry_waits_cannot_transfer_the_dispatch(jobs
     token = scope.wiki_task_id
     bearer = mint(returning.original.id, user_id=jobs.user_id, wiki_task_id=token)
     entered = asyncio.Event()
-    access = router.access
-
-    def observed_access(*args, **kwargs):
-        result = access(*args, **kwargs)
-        entered.set()
-        return result
-
-    monkeypatch.setattr(router, "access", observed_access)
     gate = job_returns.dispatch_gate(returning.manager, jobs.user_id)
     await gate.acquire()
+    acquire = gate.acquire
+
+    async def observed_acquire():
+        entered.set()
+        return await acquire()
+
+    monkeypatch.setattr(gate, "acquire", observed_acquire)
     request = asyncio.create_task(client.post(f"/api/wiki/jobs/{job['id']}/retry", json={}, headers={"Authorization": "Bearer " + bearer}))
     try:
         await asyncio.wait_for(entered.wait(), 3)

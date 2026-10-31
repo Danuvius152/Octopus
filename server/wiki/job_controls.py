@@ -9,6 +9,43 @@ import json
 
 from .store import WikiError
 
+
+async def control(user_id, job_id, action, options, *, manager=None, mcp_scope=None, app_id=None):
+    """Authorize and control the original job; dispatch and retirement stay owned."""
+    from . import job_events
+    from .job_returns import dispatch_gate
+    from .jobs import WikiJobs, _io, worker
+    from .registry import registry
+    from .tasks import tasks
+
+    jobs = await _io(WikiJobs, user_id)
+
+    def authorize():
+        with registry.registered(user_id, jobs.store, jobs.registration):
+            task = tasks.caller(user_id, mcp_scope, jobs.registration, app_id=app_id,
+                                write=True, human_only=action == "readmit")
+            jobs.require_job_caller(job_id, task, mcp_scope)
+            return task
+
+    with jobs.store.borrow():
+        task = await _io(authorize)
+        requester = job_events.requester_for(user_id, task, app_id)
+        if action == "cancel":
+            result = await jobs.cancel(job_id, worker.manager, task=task, mcp_scope=mcp_scope, **options)
+        elif action == "verify":
+            result = await jobs.verify(job_id, worker.manager, task=task, mcp_scope=mcp_scope, **options)
+        elif action in {"retry", "readmit"}:
+            async with dispatch_gate(manager, user_id):
+                if action == "retry":
+                    result = await _io(jobs.retry, job_id, requester=None if task and task.job_id else requester,
+                                       task=task, mcp_scope=mcp_scope, **options)
+                else:
+                    result = await _io(jobs.readmit, job_id, requester=requester, **options)
+        else:
+            raise ValueError("Unknown Wiki job control")
+    return ({key: result[key] for key in ("id", "status", "state_version", "attempt", "settlement_phase", "progress")}
+            if task is not None else result)
+
 TABLE = """CREATE TABLE wiki_job_controls(
     job_id TEXT NOT NULL,operation_id TEXT NOT NULL,request_hash TEXT NOT NULL,
     PRIMARY KEY(job_id,operation_id))"""

@@ -48,8 +48,11 @@ class JobOwner:
 class WikiJobs:
     def __init__(self, user_id, *, store=None, registration=None):
         self.user_id = user_id
-        self.registration = registration if registration is not None else registry.config(user_id)
         self.store = store if store is not None else registry.store(user_id)
+        if registration is None:
+            with registry.registered(user_id, self.store) as current:
+                registration = dict(current)
+        self.registration = registration
         with self.store.connect() as db:
             maintenance_inputs.require(db)
             job_events.require(db)
@@ -116,10 +119,8 @@ class WikiJobs:
 
     def replay(self, key, request, *, task=None, mcp_scope=None, requester=None, alias_job=None, alias_sources=None):
         """Even an idempotent return admits its subscriber in the final writer TX."""
-        with registry._account_lock(self.user_id), registry.registration_lock(self.user_id), self.store.connect() as db:
+        with registry.registered(self.user_id, self.store, self.registration), self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            if registry.config(self.user_id) != self.registration:
-                raise WikiError("Wiki registration changed before admission", 409)
             from .tasks import tasks
 
             tasks.require_submission(task, request, self.store, db, mcp_scope, self.registration)
@@ -142,7 +143,9 @@ class WikiJobs:
                 db.execute("INSERT INTO job_requests VALUES(?,?,?)", (key, self.request_hash(request), alias_job))
             if previous is not None:
                 self.subscribe(db, previous["id"], requester)
-            return previous
+        if previous is not None and previous["status"] == "queued":
+            worker.wake(self.user_id)
+        return previous
 
     @staticmethod
     def public(row):
@@ -239,10 +242,8 @@ class WikiJobs:
         outputs = grants.targets(self.store, creation.get("paths") or [f"Library/Inbox/{job_id}-knowledge.md"]) if creation else []
         material = (grants.targets(self.store, [payload.get("target") or f"Library/Inbox/{job_id}.md"])[0]
                     if payload.get("material") and not items else None)
-        with WikiHistory(self.store).locked(), registry._account_lock(self.user_id), registry.registration_lock(self.user_id), self.store.connect() as db:
+        with WikiHistory(self.store).locked(), registry.registered(self.user_id, self.store, self.registration), self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            if registry.config(self.user_id) != self.registration:
-                raise WikiError("Wiki registration changed before admission", 409)
             from .tasks import tasks
 
             effects = [item["path"] for item in items if item.get("path")]
@@ -469,6 +470,8 @@ class WikiJobs:
     def curate(self, key, scope, *, requester=None, task=None, mcp_scope=None):
         from .maintenance_contract import actor_for
 
+        if task is not None or mcp_scope is not None:
+            raise WikiError("This operation requires the account owner", 403)
         with self.store.connect() as db:
             existing = db.execute(
                 "SELECT id FROM jobs WHERE request_key=?", (key,)
@@ -481,16 +484,17 @@ class WikiJobs:
                 or job["payload"].get("paths")
             ):
                 raise WikiError("Idempotency key already names a different task", 409)
-            with registry._account_lock(self.user_id), registry.registration_lock(self.user_id), self.store.connect() as db:
+            with registry.registered(self.user_id, self.store, self.registration), self.store.connect() as db:
                 db.execute("BEGIN IMMEDIATE")
-                if registry.config(self.user_id) != self.registration:
-                    raise WikiError("Wiki registration changed before admission", 409)
                 from .tasks import tasks
 
                 tasks.require_submission(task, {"actor": actor_for(task)}, self.store, db, mcp_scope, self.registration,
                                          actual_paths=self.effect_paths(db, job))
                 self.subscribe(db, job["id"], requester)
-                return self.get(job["id"], db=db)
+                result = self.get(job["id"], db=db)
+            if result["status"] == "queued":
+                worker.wake(self.user_id)
+            return result
         self.store.refresh()
         with self.store.connect() as db:
             documents = db.execute(
@@ -526,26 +530,32 @@ class WikiJobs:
                 or expected_vault_id is not None and expected_vault_id != self.registration["vault_id"]):
             raise WikiError("The displayed maintenance attempt or vault changed; review current state before controlling it", 409)
 
-    def mark_cancelled(self, job_id, *, expected_attempt=None, expected_vault_id=None):
-        with registry._account_lock(self.user_id), registry.registration_lock(self.user_id), self.store.connect() as db:
+    def mark_cancelled(self, job_id, *, expected_attempt=None, expected_vault_id=None, operation_id=None, task=None, mcp_scope=None):
+        control = job_controls.identity(operation_id, "cancel", {
+            "expected_attempt": expected_attempt, "expected_vault_id": expected_vault_id,
+        })
+        with registry.registered(self.user_id, self.store, self.registration), self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            if registry.config(self.user_id) != self.registration:
-                raise WikiError("Wiki registration changed before cancellation", 409)
+            self.require_job_caller(job_id, task, mcp_scope, db=db)
+            if job_controls.replay(db, job_id, control):
+                return self.get(job_id, db=db)
             self.require_control(self.get(job_id, db=db), expected_attempt, expected_vault_id)
             db.execute(
                 "UPDATE jobs SET status='cancelled',updated_at=? WHERE id=? AND status NOT IN ('completed','completed_with_attention','cancelled')",
                 (datetime.now(UTC).isoformat(), job_id),
             )
             job = self.get(job_id, db=db)
+            job_controls.record(db, job_id, control)
             if job["status"] == "cancelled":
                 for item in job["items"]:
                     if work_id := item.get("worker_request", {}).get("work_id"):
                         close_work(work_id)
         return self.get(job_id)
 
-    async def cancel(self, job_id, manager, *, expected_attempt=None, expected_vault_id=None, operation_id=None):
+    async def cancel(self, job_id, manager, *, expected_attempt=None, expected_vault_id=None, operation_id=None, task=None, mcp_scope=None):
         async def begin():
-            job = await _io(self.mark_cancelled, job_id, expected_attempt=expected_attempt, expected_vault_id=expected_vault_id)
+            job = await _io(self.mark_cancelled, job_id, expected_attempt=expected_attempt, expected_vault_id=expected_vault_id,
+                            operation_id=operation_id, task=task, mcp_scope=mcp_scope)
             return (WikiWorker.cancel_attempt(self, job, manager)
                     if job["status"] == "cancelled" and job["settlement_phase"] != "confirmed" else None)
 
@@ -780,9 +790,7 @@ class WikiJobs:
         control = job_controls.identity(operation_id, "readmit", intent | {
             "expected_attempt": expected_attempt, "expected_vault_id": expected_vault_id,
         })
-        with WikiHistory(self.store).locked(), registry._account_lock(self.user_id), registry.registration_lock(self.user_id):
-            if registry.config(self.user_id) != self.registration:
-                raise WikiError("Wiki registration changed before scope re-admission", 409)
+        with WikiHistory(self.store).locked(), registry.registered(self.user_id, self.store, self.registration):
             job = self.get(job_id)
             with self.store.connect() as db:
                 if job_controls.replay(db, job_id, control):
@@ -933,9 +941,8 @@ class WikiJobs:
         control = job_controls.identity(operation_id, "retry", {
             "expected_attempt": expected_attempt, "expected_vault_id": expected_vault_id,
         })
-        with WikiHistory(self.store).locked(), registry._account_lock(self.user_id), registry.registration_lock(self.user_id):
-            if registry.config(self.user_id) != self.registration:
-                raise WikiError("Wiki registration changed before retry", 409)
+        with WikiHistory(self.store).locked(), registry.registered(self.user_id, self.store, self.registration):
+            self.require_job_caller(job_id, task, mcp_scope)
             job = self.get(job_id)
             with self.store.connect() as db:
                 if job_controls.replay(db, job_id, control):
@@ -943,16 +950,34 @@ class WikiJobs:
             self.require_control(job, expected_attempt, expected_vault_id)
             return self._retry(job_id, control, requester=requester, task=task, mcp_scope=mcp_scope)
 
-    def require_dispatch_caller(self, task, mcp_scope):
-        """Recheck the original live caller at the final control writer boundary."""
+    def require_control_caller(self, task, mcp_scope):
+        """Cancellation/verification need a live caller, not submission rights."""
+        from ..mcp_identity import scope_is_live
+
+        if mcp_scope is not None and (task is None or not scope_is_live(mcp_scope)):
+            raise WikiError("The original control caller is no longer active", 403)
         if task is not None:
             from .tasks import tasks
 
             original = task.active_task or task
             if tasks.require(mcp_scope, write=True) is not original:
-                raise WikiError("The original retry caller is no longer active", 403)
-            if not task.job_id:
-                tasks.require_submitter(task, self.registration)
+                raise WikiError("The original control caller is no longer active", 403)
+
+    def require_dispatch_caller(self, task, mcp_scope):
+        self.require_control_caller(task, mcp_scope)
+        if task is not None and not task.job_id:
+            from .tasks import tasks
+
+            tasks.require_submitter(task, self.registration)
+
+    def require_job_caller(self, job_id, task, mcp_scope, *, db=None):
+        self.require_control_caller(task, mcp_scope)
+        if task is not None and task.job_id:
+            if task.job_id != job_id:
+                raise WikiError("A worker can control only its original assigned job", 403)
+            if (task.assigned_attempt is not None and self.get(job_id, db=db)["attempt"] != task.assigned_attempt
+                    or task.assigned_request_id is not None and task.request_id != task.assigned_request_id):
+                raise WikiError("The original worker attempt is no longer current", 403)
 
     def _retry(self, job_id, control=None, *, requester=None, task=None, mcp_scope=None):
         job = self.get(job_id)
@@ -1062,11 +1087,12 @@ class WikiJobs:
             reference.setdefault("item_result", {key: value for key, value in item.items()
                                                   if key not in {"worker_request", "previous_worker_requests"}})
 
-    async def verify(self, job_id, manager, *, expected_attempt=None, expected_vault_id=None, operation_id=None):
+    async def verify(self, job_id, manager, *, expected_attempt=None, expected_vault_id=None, operation_id=None, task=None, mcp_scope=None):
         """Reconcile the captured effects and indexes without admitting model work."""
         control = job_controls.identity(operation_id, "verify", {
             "expected_attempt": expected_attempt, "expected_vault_id": expected_vault_id,
         })
+        await _io(self.require_job_caller, job_id, task, mcp_scope)
         job = await _io(self.get, job_id)
         original = self.verification_input(job)
         with self.store.connect() as db:
@@ -1091,7 +1117,7 @@ class WikiJobs:
                     await verifier._recover_recorded_item(self, job_id, item)
                 elif item["status"] not in {"pending", "done"} or await _io(self.publication, job_id, item.get("doc")):
                     await _io(self.settle_item, job_id, item)
-        return await _io(self._commit_verification, job, control, original)
+        return await _io(self._commit_verification, job, control, original, task=task, mcp_scope=mcp_scope)
 
     @staticmethod
     def verification_input(job):
@@ -1099,11 +1125,10 @@ class WikiJobs:
                            "items": [{key: value for key, value in item.items() if key != "worker_request"}
                                      for item in job["items"]]}, sort_keys=True)
 
-    def _commit_verification(self, job, control, original):
-        with WikiHistory(self.store).locked(), registry._account_lock(self.user_id), registry.registration_lock(self.user_id), self.store.connect() as db:
+    def _commit_verification(self, job, control, original, *, task=None, mcp_scope=None):
+        with WikiHistory(self.store).locked(), registry.registered(self.user_id, self.store, self.registration), self.store.connect() as db:
             db.execute("BEGIN IMMEDIATE")
-            if registry.config(self.user_id) != self.registration:
-                raise WikiError("Wiki registration changed before effect verification", 409)
+            self.require_job_caller(job["id"], task, mcp_scope, db=db)
             current = self.get(job["id"], db=db)
             if job_controls.replay(db, job["id"], control):
                 return current

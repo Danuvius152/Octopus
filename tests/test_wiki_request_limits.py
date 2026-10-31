@@ -212,7 +212,7 @@ async def test_missing_or_changed_registration_keeps_queries_but_rejects_submiss
 
 
 @pytest.mark.parametrize("existing", [False, True])
-async def test_full_curation_and_its_subscription_cannot_exceed_the_request_scope(client, tmp_path, existing):
+async def test_full_curation_and_its_subscription_require_the_account_owner(client, tmp_path, existing):
     token, task, scope, _ = await open_turn(
         client, tmp_path, limit=MaintenanceLimit(True, ("/wiki maintain Library/x.md",)),
     )
@@ -220,8 +220,9 @@ async def test_full_curation_and_its_subscription_cannot_exceed_the_request_scop
         jobs = WikiJobs(task.user_id)
         if existing:
             jobs.curate("full-curation", "Review all current originals")
-        with pytest.raises(WikiError, match="Select an unambiguous"):
+        with pytest.raises(WikiError, match="requires the account owner") as rejected:
             jobs.curate("full-curation", "Review all current originals", task=task, mcp_scope=scope)
+        assert rejected.value.status == 403
         assert len(jobs.list()["items"]) == int(existing)
     finally:
         tasks.close(token)

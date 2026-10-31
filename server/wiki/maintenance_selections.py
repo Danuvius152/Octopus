@@ -239,7 +239,7 @@ def _page(db, selection, *, limit=None, cursor=None, deferred=None):
     return model_page(items, base, offset, selection["candidate_count"], lambda following: _cursor(selection, following))
 
 
-def create(store, registration, user_id, *, actor="human", directory="Library", limit=None):
+def create(store, registration, user_id, *, actor="human", directory="Library", limit=None, authorize=None):
     """Caller holds history/account/registration locks, before any final write TX."""
     directory, limit = _directory(directory), _limit(limit)
     store.synchronize()
@@ -276,7 +276,10 @@ def create(store, registration, user_id, *, actor="human", directory="Library", 
                 db.execute("INSERT INTO maintenance_selection_items VALUES(?,?,?,?,?,?)",
                            (selection["id"], ordinal, review["doc"], review["path"], review["revision"],
                             json.dumps(review, ensure_ascii=False, sort_keys=True)))
-            return _page(db, selection, limit=limit, deferred=deferred)
+            result = _page(db, selection, limit=limit, deferred=deferred)
+            if authorize is not None:
+                authorize()
+            return result
     except (sqlite3.DatabaseError, KeyError, json.JSONDecodeError) as exc:
         raise unavailable() from exc
 

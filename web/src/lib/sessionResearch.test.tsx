@@ -138,14 +138,13 @@ it.each(["old-first", "new-first"])("keeps recovered completion across overlappi
   expect(screen.queryByLabelText("Cancel research")).toBeNull();
 });
 
-it("does not treat an earlier snapshot as a live event when reusing a selection baseline", async () => {
+it("does not treat an earlier snapshot as a live event across overlapping empty-baseline reads", async () => {
   useSessionStore.setState({ dispatchGeneration: "service" });
-  const selection = useSessionStore.getState();
-  const fetcher = vi.fn().mockResolvedValueOnce(Response.json([job]))
-    .mockResolvedValueOnce(Response.json([{ ...job, status: "completed", phase: "done" }]));
-  vi.stubGlobal("fetch", fetcher);
-  await loadResearchSnapshot("s1", selection);
-  await loadResearchSnapshot("s1", selection);
+  const a = deferred(), b = deferred();
+  vi.stubGlobal("fetch", vi.fn().mockImplementationOnce(() => a.promise).mockImplementationOnce(() => b.promise));
+  const first = loadResearchSnapshot("s1"), second = loadResearchSnapshot("s1");
+  a.resolve(Response.json([job])); await first;
+  b.resolve(Response.json([{ ...job, status: "completed", phase: "done" }])); await second;
   expect(useSessionStore.getState().research.s1[0].status).toBe("completed");
 });
 
@@ -187,7 +186,6 @@ it.each(["account", "service"])("rejects both overlapping responses after changi
 
 it.each(["account", "service"])("keeps the new %s read owned when old calls and responses finish", async (kind) => {
   useSessionStore.setState({ activeSessionId: "s1", dispatchGeneration: "service" });
-  const previous = useSessionStore.getState();
   const old = deferred();
   const latest = deferred();
   const fetcher = vi.fn().mockImplementationOnce(() => old.promise).mockImplementationOnce(() => latest.promise);
@@ -196,7 +194,6 @@ it.each(["account", "service"])("keeps the new %s read owned when old calls and 
   if (kind === "account") useSessionStore.getState().setToken("other-account");
   else useSessionStore.getState().applyDispatchState("s1", dispatch("new-service"));
   const second = loadResearchSnapshot("s1");
-  await loadResearchSnapshot("s1", previous);
   expect(fetcher).toHaveBeenCalledTimes(2);
   old.resolve(Response.json([job]));
   await first;
