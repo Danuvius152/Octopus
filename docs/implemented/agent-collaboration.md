@@ -93,16 +93,28 @@ or interrupted classification produces the corresponding `[agent-error:…]`.
 Stable `agent-terminal:{work_id}` admission identity, persisted
 `_terminal_disposition` and the in-flight guard prevent duplicate delivery.
 
-Terminal return checks the original receipt before reading reply text or
-restoring an archived parent. Permanent integrity refusal records `stopped`;
-lost acknowledgment (including a connection failure), timeout or an unavailable
-admission channel records `unknown` on the captured round before awaiting its
-diagnostic write. `terminal_delivery_error` is independent of the child's
-business `error`. After that write, one immediate original-receipt lookup may
-confirm admission; missing/unreadable evidence ends this observation while
-retaining unknown. Only existing settlement reentry can look again. There is
-no new polling task, return resubmission or child rerun. Only proven pre-effect
-busy/capacity/quota refusals retry, under the original identity.
+Terminal and question returns use the session's complete
+[`admit_return` operation](architecture-contract.md#公共返回接管). The source keeps
+its original work/delivery identity, reentry guard, round CAS or child notice
+writer, retry policy and completion observation. Pure preparation reads the
+exact request/final-attempt reply or revalidates the original round and pending
+question; it neither restores the parent nor writes diagnostics or starts work.
+An existing receipt bypasses material reads even after the child is deleted or
+the parent Owner fails. Without a receipt, a deleted child produces the existing
+`reply_unavailable` error while keeping the child's successful outcome; a retained
+child missing its exact terminal remains an integrity error. A confirmed empty
+reply retains the existing empty-text placeholder.
+
+Permanent integrity refusal records `stopped`. After a lost acknowledgment,
+timeout or unavailable channel, the common operation checks the original receipt
+once. If admission remains unconfirmed, the source records `unknown` on its
+captured control before awaiting the diagnostic write, then ends this observation.
+`terminal_delivery_error` stays independent of the child's business `error`.
+Only existing settlement reentry can observe again through the same operation,
+with preparation returning a skip; a later refusal cannot erase the original
+uncertainty. There is no extra source-side lookup, polling task, return
+resubmission or child rerun. Only proven pre-effect busy/capacity/quota refusals
+without an unknown history retry, under the original identity.
 
 An observed disposition remains in the original control object if recording
 fails, so reentry can finish that recording without submitting again. Conflicts
@@ -201,6 +213,11 @@ its live relay control only after required diagnostic recording has settled;
 an unfinished original write keeps its owner reference. Restart does not resurrect callbacks or a question
 queue. Closing a question after a lost ACK cannot undo any already admitted
 parent input; delayed answers still name that original batch.
+If the question closes during parent restoration or while queued, the admitted
+input retains that batch identity. The original Owner expires it before starting
+an answer model turn. Parent Stop remains paused through restoration and new
+returns; human correction does not resume the backlog, and explicit Resume
+continues the successful admission order.
 
 ### 5.6 `mcp__ask_agent__cancel` and `mcp__ask_agent__list`
 

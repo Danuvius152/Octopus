@@ -840,7 +840,7 @@ class LifecycleMixin(SessionManagerBase):
         await self.require_active_agent(row["agent_id"])
         return row["agent_id"], context
 
-    async def resolve_task_return(
+    async def _restore_task_return(
         self, owned: OwnedTaskContext | None, *, session_id: str, work_id: str | None,
     ) -> tuple[Session, KnowledgeContext] | None:
         """Restore only the fixed, still-authorized caller of independent work."""

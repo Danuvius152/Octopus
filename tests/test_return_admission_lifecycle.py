@@ -9,7 +9,7 @@ async def test_delegation_terminal_waits_for_real_parent_archive_and_admits_once
     manager, delegations, parent, starts = work_runtime
     retiring, release_archive, returning = asyncio.Event(), asyncio.Event(), asyncio.Event()
     retire = manager._retire_application_history
-    resolve = manager.resolve_task_return
+    admit = manager.admit_return
     archive = recording = None
 
     async def hold_retirement(session):
@@ -18,13 +18,13 @@ async def test_delegation_terminal_waits_for_real_parent_archive_and_admits_once
             await release_archive.wait()
         await retire(session)
 
-    async def observe_return(*args, **kwargs):
-        if kwargs.get("session_id") == parent.id:
+    async def observe_return(target, **kwargs):
+        if target.session_id == parent.id:
             returning.set()
-        return await resolve(*args, **kwargs)
+        return await admit(target, **kwargs)
 
     monkeypatch.setattr(manager, "_retire_application_history", hold_retirement)
-    monkeypatch.setattr(manager, "resolve_task_return", observe_return)
+    monkeypatch.setattr(manager, "admit_return", observe_return)
     rec = await delegations.start_delegation(
         parent_session_id=parent.id, agent_name="Worker", request="controlled archive race",
     )

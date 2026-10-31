@@ -574,7 +574,7 @@ class TurnsMixin(SessionManagerBase):
             refusal = await eligibility()
             if refusal is not None:
                 return await reconcile(refusal)
-            resolved = await self.resolve_task_return(target.owned, session_id=target.session_id, work_id=target.work_id)
+            resolved = await self._restore_task_return(target.owned, session_id=target.session_id, work_id=target.work_id)
             if resolved is None:
                 return await reconcile(ReturnRefused("destination_unavailable"))
             # Restoration may wait for another lifecycle command. Revalidate

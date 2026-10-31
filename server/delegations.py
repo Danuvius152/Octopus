@@ -3,7 +3,7 @@
 The shape mirrors `server/bg_tasks.py`: an asynchronous, fire-and-forget
 operation on the parent agent's behalf, whose terminal result is
 delivered back to the parent session as a *new* injected user message
-(routed through `SessionManager.start_message`, the same path bg-task
+(routed through `SessionManager.admit_return`, the same path bg-task
 results use). That parent-injection is what gives the parent agent a
 fresh turn to react to the child's reply.
 
@@ -24,7 +24,7 @@ What this module owns:
   - The agent-name lookup (case-insensitive, ambiguity-rejecting).
   - The injection formatter: ``[agent-reply|agent-error:<name>
     delegation=<id>]`` plus the body, fed through
-    ``SessionManager.start_message(parent_session_id, …)``.
+    ``SessionManager.admit_return`` under the original return identity.
 
 What this module does NOT own:
 
@@ -73,12 +73,17 @@ from .research.manager import research_manager
 from .service_health import ServiceUnavailable
 from .sessions.runtime_types import (
     AdmissionIntegrityError,
-    QuotaExceeded,
-    SessionAdmissionBusy,
-    SessionMailboxFull,
     SessionOwnerUnavailable,
 )
-from .sessions.submission import RequestCompletion, SubmissionReceipt
+from .sessions.submission import (
+    RequestCompletion,
+    ReturnBody,
+    ReturnRefused,
+    ReturnSkipped,
+    ReturnTarget,
+    ReturnUnconfirmed,
+    SubmissionReceipt,
+)
 from .submission_models import SubmissionConflict
 
 logger = logging.getLogger(__name__)
@@ -1277,62 +1282,38 @@ class DelegationManager:
             if delivery.receipt is not None:
                 self._watch_completion(rec.parent_session_id, rec.parent_work_id, delivery.receipt)
                 return
-            while True:
-                try:
-                    existing = await self.session_mgr.source_receipt(
-                        "delegation", f"agent-question:{rec.work_id}:{question_id}", session_id=rec.parent_session_id,
-                    )
-                except (SessionOwnerUnavailable, TimeoutError, ConnectionError) as error:
-                    self._remember_question_delivery(delivery, "unknown", error)
-                    await self._retain_question_delivery(rec, question_id, delivery)
-                    await self._reconcile_question_delivery(rec, question_id, delivery)
-                    return
-                if existing is not None:
-                    self._acknowledge_question(rec, delivery, existing[1])
-                    return
-                if delivery.disposition == "unknown":
-                    return  # Absence is not proof of refusal, even after close.
+
+            async def prepare() -> ReturnBody | ReturnSkipped:
+                if delivery.disposition is not None:
+                    return ReturnSkipped("Previously unconfirmed question admission is observation only")
                 if (rec.state != "running" or self._records.get(rec.delegation_id) is not rec
                         or not self.session_mgr.has_pending_question(rec.delegation_id, question_id)):
-                    return
-                if self.session_mgr.session_owner_failed(rec.parent_session_id):
-                    self._remember_question_delivery(delivery, "stopped", "Parent owner is unavailable")
-                    await self._retain_question_delivery(rec, question_id, delivery)
-                    return
+                    return ReturnSkipped("The original round or question no longer needs a return")
+                body = self._render_question_body(msg.get("questions") or [])
+                prompt = (
+                    f"[agent-question:{rec.target_agent_name} delegation={rec.delegation_id} "
+                    f"question_id={question_id}]\n{body}\n\n"
+                    f"Decide: answer them by calling `mcp__ask_agent__answer(delegation_id="
+                    f"\"{rec.delegation_id}\", question_id=\"{question_id}\", answers=…)` "
+                    "with one answer per question (selected labels or free text; keyed by question ID/zero-based index, "
+                    "or in order). `choice=…` is supported only for a single-question batch. If you don't "
+                    "know, use your own `mcp__ask__user` to ask the user and forward their answer; or cancel via "
+                    "`mcp__ask_agent__cancel`."
+                )
+                return ReturnBody(prompt, question_session_id=rec.delegation_id, question_id=question_id)
+
+            while True:
                 try:
-                    context = await self._return_context(rec)
-                    if context is None or self.session_mgr._admission_closed:
-                        self._remember_question_delivery(delivery, "stopped", "The original parent request is closed or unavailable")
-                        break
-                    if not self.session_mgr.has_pending_question(rec.delegation_id, question_id):
-                        return
-                    body = self._render_question_body(msg.get("questions") or [])
-                    prompt = (
-                        f"[agent-question:{rec.target_agent_name} delegation={rec.delegation_id} "
-                        f"question_id={question_id}]\n{body}\n\n"
-                        f"Decide: answer them by calling `mcp__ask_agent__answer(delegation_id="
-                        f"\"{rec.delegation_id}\", question_id=\"{question_id}\", answers=…)` "
-                        "with one answer per question (selected labels or free text; keyed by question ID/zero-based index, "
-                        "or in order). `choice=…` is supported only for a single-question batch. If you don't "
-                        "know, use your own `mcp__ask__user` to ask the user and forward their answer; or cancel via "
-                        "`mcp__ask_agent__cancel`."
+                    result = await self.session_mgr.admit_return(
+                        ReturnTarget(rec.parent_session_id, "delegation", delivery.delivery_id,
+                                     rec.parent_work_id, rec.owned_context),
+                        prepare=prepare,
                     )
-                    receipt = await self.session_mgr.start_message(
-                        rec.parent_session_id, prompt, source="delegation",
-                        delivery_id=f"agent-question:{rec.work_id}:{question_id}", work_id=rec.parent_work_id,
-                        question_session_id=rec.delegation_id, question_id=question_id, knowledge_context=context,
-                    )
-                except (SessionAdmissionBusy, SessionMailboxFull, QuotaExceeded):
-                    await asyncio.sleep(1)
-                    continue
                 except AdmissionIntegrityError as error:
+                    if delivery.disposition == "unknown":
+                        raise
                     self._remember_question_delivery(delivery, "stopped", error)
                     await self._retain_question_delivery(rec, question_id, delivery)
-                    return
-                except (SessionOwnerUnavailable, TimeoutError, ConnectionError) as error:
-                    self._remember_question_delivery(delivery, "unknown", error)
-                    await self._retain_question_delivery(rec, question_id, delivery)
-                    await self._reconcile_question_delivery(rec, question_id, delivery)
                     return
                 except ServiceUnavailable:
                     raise
@@ -1344,13 +1325,26 @@ class DelegationManager:
                     self._remember_question_delivery(delivery, "unknown", error)
                     await complete_cleanup(self._retain_question_delivery(rec, question_id, delivery))
                     raise
-                if receipt.accepted:
-                    self._acknowledge_question(rec, delivery, receipt)
-                else:
-                    self._remember_question_delivery(delivery, "stopped", "Parent session refused this question return")
+                if isinstance(result, SubmissionReceipt):
+                    self._acknowledge_question(rec, delivery, result)
+                    return
+                if delivery.disposition == "unknown":
+                    return  # Absence or a later refusal does not settle the original handoff.
+                if isinstance(result, ReturnUnconfirmed):
+                    self._remember_question_delivery(delivery, "unknown", result.cause)
                     await self._retain_question_delivery(rec, question_id, delivery)
+                    return
+                assert isinstance(result, ReturnRefused)
+                if result.reason in {"capacity", "busy"}:
+                    await asyncio.sleep(1)
+                    continue
+                if result.reason == "source_withdrawn":
+                    return
+                self._remember_question_delivery(
+                    delivery, "stopped", result.cause or "The original parent request is closed or unavailable",
+                )
+                await self._retain_question_delivery(rec, question_id, delivery)
                 return
-            await self._retain_question_delivery(rec, question_id, delivery)
         finally:
             delivery.injecting = False
             if (not self.session_mgr.has_pending_question(rec.delegation_id, question_id)
@@ -1401,19 +1395,6 @@ class DelegationManager:
         delivery.error = None
         if receipt.accepted:
             self._watch_completion(rec.parent_session_id, rec.parent_work_id, receipt)
-
-    async def _reconcile_question_delivery(
-        self, rec: DelegationRunState, question_id: str, delivery: _QuestionDelivery,
-    ) -> None:
-        assert self.session_mgr is not None
-        try:
-            existing = await self.session_mgr.source_receipt(
-                "delegation", f"agent-question:{rec.work_id}:{question_id}", session_id=rec.parent_session_id,
-            )
-        except (SessionOwnerUnavailable, TimeoutError, ConnectionError):
-            return
-        if existing is not None:
-            self._acknowledge_question(rec, delivery, existing[1])
 
     @staticmethod
     def _render_question_body(questions: list[dict[str, Any]]) -> str:
@@ -1553,125 +1534,101 @@ class DelegationManager:
         try:
             if rec._terminal_disposition is not None:
                 await self._persist_terminal_delivery(rec)
-                if rec._terminal_disposition == "unknown":
-                    existing = await self._observe_terminal_receipt(rec)
-                    if existing is not None:
-                        await self._acknowledge_terminal(rec, existing[1])
-                return
-            existing = await self._observe_terminal_receipt(rec)
-            if existing is not None:
-                await self._acknowledge_terminal(rec, existing[1])
-                return
-            if rec._terminal_disposition == "unknown":
-                return
-            if await self._end_unavailable_return(rec):
-                return
-            if not work_is_open(rec.parent_work_id):
-                await self._stop_terminal_delivery(rec, "closed", "The original parent work is closed")
-                logger.info("Delegation %s terminal return suppressed by closed parent work", rec.delegation_id)
-                return
-            context = await self._return_context(rec)
-            if context is None:
-                await self._stop_terminal_delivery(
-                    rec, "closed" if self.session_mgr._admission_closed else "unbound",
-                    "The original parent request contract is missing, closed or could not be verified",
-                )
-                logger.info("Delegation %s terminal retained without an admitted return contract", rec.delegation_id)
-                try:
-                    await self.session_mgr.retain_result_notice(
-                        rec.parent_session_id, f"agent-terminal:{rec.work_id}",
-                        f"Delegation {rec.delegation_id}: the result is retained in the child conversation. "
-                        "The original request is unavailable, so no automatic reply was started.",
-                    )
-                except ServiceUnavailable:
-                    raise
-                except Exception:
-                    logger.exception("Delegation %s auxiliary terminal notice failed", rec.delegation_id)
-                return
-            delivery_failure: tuple[str, str] | None = None
-            if rec.state == "completed":
-                assert self.db is not None and request_id is not None
-                rows = await self.db.load_committed_request_messages(rec.delegation_id, request_id)
-                terminal = next((row for row in rows if row["type"] == "result"), None)
-                if terminal is None:
-                    if await self.db.get_session_binding(rec.delegation_id) is not None:
-                        raise RuntimeError("The committed delegation terminal is missing from its retained conversation")
-                    delivery_failure = (
-                        "reply_unavailable",
-                        "The child completed, but its conversation was deleted before its reply text could be delivered.",
-                    )
+                if rec._terminal_disposition != "unknown":
+                    return
+
+            async def prepare() -> ReturnBody | ReturnSkipped:
+                if rec._terminal_disposition is not None:
+                    return ReturnSkipped("Previously unconfirmed terminal admission is observation only")
+                delivery_failure: tuple[str, str] | None = None
+                if rec.state == "completed":
+                    assert self.db is not None and request_id is not None
+                    rows = await self.db.load_committed_request_messages(rec.delegation_id, request_id)
+                    terminal = next((row for row in rows if row["type"] == "result"), None)
+                    if terminal is None:
+                        if await self.db.get_session_binding(rec.delegation_id) is not None:
+                            raise RuntimeError("The committed delegation terminal is missing from its retained conversation")
+                        delivery_failure = (
+                            "reply_unavailable",
+                            "The child completed, but its conversation was deleted before its reply text could be delivered.",
+                        )
+                    else:
+                        attempt_id = (terminal.get("tool_input") or {}).get("attempt_context", {}).get("attempt_id")
+                        body = "".join(row["content"] for row in rows
+                            if row["role"] == "assistant" and row["type"] == "text" and isinstance(row["content"], str)
+                            and (not attempt_id or (row.get("tool_input") or {}).get("attempt_context", {}).get("attempt_id") == attempt_id)).strip()
+                        if not body:
+                            body = "(child session ended without producing any text)"
+                        return ReturnBody(
+                            f"[agent-reply:{rec.target_agent_name} "
+                            f"delegation={rec.delegation_id}]\n{body}"
+                        )
                 else:
-                    attempt_id = (terminal.get("tool_input") or {}).get("attempt_context", {}).get("attempt_id")
-                    body = "".join(row["content"] for row in rows
-                        if row["role"] == "assistant" and row["type"] == "text" and isinstance(row["content"], str)
-                        and (not attempt_id or (row.get("tool_input") or {}).get("attempt_context", {}).get("attempt_id") == attempt_id)).strip()
-                    if not body:
-                        body = "(child session ended without producing any text)"
-                    prompt = (
-                        f"[agent-reply:{rec.target_agent_name} "
-                        f"delegation={rec.delegation_id}]\n{body}"
-                    )
-            else:
-                delivery_failure = (rec.error or rec.state, f"(child session ended in state {rec.state!r})")
-            if delivery_failure is not None:
+                    delivery_failure = (rec.error or rec.state, f"(child session ended in state {rec.state!r})")
+                assert delivery_failure is not None
                 reason, detail = delivery_failure
-                prompt = (
+                return ReturnBody(
                     f"[agent-error:{rec.target_agent_name} "
                     f"delegation={rec.delegation_id} reason={reason}]\n"
                     f"{detail}"
                 )
+
             while True:
-                existing = await self._observe_terminal_receipt(rec)
-                if existing is not None:
-                    await self._acknowledge_terminal(rec, existing[1])
-                    return
-                if rec._terminal_disposition == "unknown":
-                    return
-                if await self._end_unavailable_return(rec):
-                    return
-                if self.session_mgr._admission_closed:
-                    await self._stop_terminal_delivery(rec, "closed", "Session admission is closed")
-                    return
-                context = await self._return_context(rec)
-                if context is None:
-                    await self._stop_terminal_delivery(rec, "closed", "The original parent request is closed")
-                    return
                 try:
-                    receipt = await self.session_mgr.start_message(
-                        rec.parent_session_id, prompt, source="delegation",
-                        delivery_id=f"agent-terminal:{rec.work_id}", work_id=rec.parent_work_id,
-                        knowledge_context=context,
+                    result = await self.session_mgr.admit_return(
+                        ReturnTarget(rec.parent_session_id, "delegation", f"agent-terminal:{rec.work_id}",
+                                     rec.parent_work_id, rec.owned_context),
+                        prepare=prepare,
                     )
-                except (SessionAdmissionBusy, SessionMailboxFull, QuotaExceeded):
-                    await asyncio.sleep(1)
-                    continue
                 except AdmissionIntegrityError as error:
+                    if rec._terminal_disposition == "unknown":
+                        raise
                     await self._stop_terminal_delivery(rec, "stopped", error)
-                    return
-                except (SessionOwnerUnavailable, TimeoutError, ConnectionError) as error:
-                    rec._terminal_disposition = "unknown"
-                    rec.terminal_delivery_error = self._terminal_diagnostic(rec, error)
-                    await self._persist_terminal_delivery(rec)
-                    existing = await self._observe_terminal_receipt(rec)
-                    if existing is not None:
-                        await self._acknowledge_terminal(rec, existing[1])
                     return
                 except ServiceUnavailable:
                     raise
                 except SubmissionConflict as error:
-                    await self._stop_terminal_delivery(rec, "stopped", error)
+                    if rec._terminal_disposition != "unknown":
+                        await self._stop_terminal_delivery(rec, "stopped", error)
                     raise
                 except (Exception, asyncio.CancelledError) as error:
-                    rec._terminal_disposition = "unknown"
-                    rec.terminal_delivery_error = self._terminal_diagnostic(rec, error)
-                    await complete_cleanup(self._persist_terminal_delivery(rec))
+                    if rec._terminal_disposition is None:
+                        rec._terminal_disposition = "unknown"
+                        rec.terminal_delivery_error = self._terminal_diagnostic(rec, error)
+                        await complete_cleanup(self._persist_terminal_delivery(rec))
                     raise
-                if not receipt.accepted and self.session_mgr._admission_closed:
-                    # A closed receipt guarantees refusal. There was no unknown
-                    # attempt before it, so this is a definitive stopped return.
-                    await self._stop_terminal_delivery(rec, "closed", "Session admission is closed")
+                if isinstance(result, SubmissionReceipt):
+                    await self._acknowledge_terminal(rec, result)
                     return
-                await self._acknowledge_terminal(rec, receipt)
+                if rec._terminal_disposition == "unknown":
+                    return  # A later refusal cannot settle an earlier uncertain handoff.
+                if isinstance(result, ReturnUnconfirmed):
+                    rec._terminal_disposition = "unknown"
+                    rec.terminal_delivery_error = self._terminal_diagnostic(rec, result.cause)
+                    await self._persist_terminal_delivery(rec)
+                    return
+                assert isinstance(result, ReturnRefused)
+                if result.reason in {"capacity", "busy"}:
+                    await asyncio.sleep(1)
+                    continue
+                disposition: TerminalDisposition = (
+                    "unbound" if result.reason == "binding_unavailable" else
+                    "closed" if result.reason == "admission_closed" else "stopped"
+                )
+                await self._stop_terminal_delivery(
+                    rec, disposition, result.cause or "The original parent request contract is missing, closed or unavailable",
+                )
+                if result.reason == "binding_unavailable":
+                    try:
+                        await self.session_mgr.retain_result_notice(
+                            rec.parent_session_id, f"agent-terminal:{rec.work_id}",
+                            f"Delegation {rec.delegation_id}: the result is retained in the child conversation. "
+                            "The original request is unavailable, so no automatic reply was started.",
+                        )
+                    except ServiceUnavailable:
+                        raise
+                    except Exception:
+                        logger.exception("Delegation %s auxiliary terminal notice failed", rec.delegation_id)
                 return
         finally:
             rec._terminal_injecting = False
@@ -1713,36 +1670,6 @@ class DelegationManager:
                            rec.work_id, rec.parent_session_id, exception_diagnostic(error))
             return safe_diagnostic(f"{type(error).__name__}: {error}")
         return safe_diagnostic(error)
-
-    async def _observe_terminal_receipt(self, rec: DelegationRunState) -> tuple[str, SubmissionReceipt] | None:
-        assert self.session_mgr is not None
-        try:
-            return await self.session_mgr.source_receipt(
-                "delegation", f"agent-terminal:{rec.work_id}", session_id=rec.parent_session_id,
-            )
-        except (SessionOwnerUnavailable, TimeoutError, ConnectionError) as error:
-            diagnostic = self._terminal_diagnostic(rec, error)
-            if rec._terminal_disposition is None:
-                rec._terminal_disposition = "unknown"
-                rec.terminal_delivery_error = diagnostic
-                await self._persist_terminal_delivery(rec)
-            return None
-
-    async def _end_unavailable_return(self, rec: DelegationRunState) -> bool:
-        assert self.session_mgr is not None
-        if not self.session_mgr.session_owner_failed(rec.parent_session_id):
-            return False
-        await self._stop_terminal_delivery(rec, "stopped", "Parent owner is unavailable; result retained in the child conversation")
-        logger.warning("Delegation %s delivery stopped: parent owner is unavailable; result retained in the child conversation", rec.delegation_id)
-        return True
-
-    async def _return_context(self, rec: DelegationRunState):
-        """Resolve the fixed immediate caller, independently of its retired lease."""
-        assert self.session_mgr is not None
-        resolved = await self.session_mgr.resolve_task_return(
-            rec.owned_context, session_id=rec.parent_session_id, work_id=rec.parent_work_id,
-        )
-        return resolved[1] if resolved is not None else None
 
 # Module-level singleton (mirrors the session_manager / bg_tasks
 # pattern). Wired in main.py's lifespan with .bind(...).

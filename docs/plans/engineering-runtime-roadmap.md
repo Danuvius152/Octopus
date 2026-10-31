@@ -1,12 +1,12 @@
 # Octopus 工程收敛与运行时路线
 
-> **Status:** in-progress — 第一阶段行为已实现并归入当前合同；统一接口及 Codex/DeepSeek 迁移仍待实施，发布按实际回执验收。
+> **Status:** in-progress — 第一阶段和公共返回接管已实现并归入当前合同；其余接口及 Codex/DeepSeek 迁移仍待实施，发布按实际回执验收。
 
 > 日期：2026-10-30（Asia/Shanghai）。源码核查基线：`1126d106d95af582ecf989b7c9206ec48c0a09c2`。
 > 历史架构候选补充核查：`0ca897e97189c5f213a658d986cbd67f4d69c5e3` 及当前文档工作树，范围见§7.3。
 >
 > 第一阶段合同更新：2026-10-31，实施起点 `5867e6c5a92e47869859119b56d00995ec995dd4`。
-> 初始设计基线不代表当前运行版本。实现、验证与发布分别取证；第二至四阶段的提案仍未实施。
+> 初始设计基线不代表当前运行版本。实现、验证与发布分别取证；公共返回接管 S1 已实施，其余第二至四阶段提案仍待实施。
 >
 > 本文替代原 `future.md`、2026-10-29 架构路线、2026-10-29 回复调度指南及 2026-10-28 行动指南。按最新源码和本次访谈重新裁决，不按旧票号拼接待办。长期当前合同由 `implemented/` 各主题维护；本文只拥有未来变更的路线、取舍与范围。
 
@@ -73,7 +73,7 @@ BG、Research、命名 agent 的终态和问题返回，继续保留原 source�
 | 应用与计划列表统一更新 | [应用列表](../../web/src/lib/applicationList.ts)、[计划列表](../../web/src/lib/scheduleList.ts)已有业务入口；合同归[列表协调](../implemented/frontend-list-reconciliation.md) | 这不证明聊天详情、Research 卡片、问题与 transcript 的合并责任已经集中 |
 | Connector 首次绑定原子性 | [ConnectorManager](../../server/connector_manager.py)已有外部身份与 installation 串行化；[业务事务](../../server/db/connectors.py)以 upsert 一同保存身份和秘密 | 不再沿旧报告认定“先查后写导致首次绑定冲突”仍待修；锁与事务分别保护真实的不同责任 |
 | 普通/App Wiki 请求校验 | [App 入口](../../server/routers/wiki.py)已复用路由正文校验，旧 null 缺陷已有修正路径 | 操作白名单、路径映射与特殊依赖仍由入口编排；完整 adapter 深化是另一项候选 |
-| 待处理返回接管 | [BG](../../server/sessions/turns.py)、[Research](../../server/research/manager.py)、[委派](../../server/delegations.py)仍拼接接管步骤；已有确认设计，见 S1 | 集中接管协议，不集中来源重试、业务结算或独立返回消费政策 |
+| 返回接管 | [BG](../../server/sessions/turns.py)、[Research](../../server/research/manager.py)、[委派](../../server/delegations.py)已使用同一公共接管操作，见[当前合同](../implemented/architecture-contract.md#公共返回接管) | 保留来源重试、业务结算及独立返回消费政策，后续来源沿同一接口接入 |
 | 原执行退休与单轮结算 | [Wiki](../../server/wiki/job_execution.py)仍读取私有队列/退休集合；[结算 helper](../../server/sessions/turns.py)仍由 Manager 回取 Owner 当前执行与 frames | S2 已覆盖原执行查询；Owner 内部结算编排是否同时收回，尚需明确，不能把二者当同一改动 |
 | 配置变更与请求捕获 | Agent/Session/Credential 路由仍主动持配置锁并安排更新；对应 S3 | 沿用§1.3允许改默认的规则，不恢复“所有旧会话兼容才可保存” |
 | Wiki 注册与受保护借用 | [Registry](../../server/wiki/registry.py)、[维护准入](../../server/wiki/maintenance_admission.py)及路由间仍存在外部锁序/代次编排；§3.5 已保留方向 | 不是已复现死锁；按业务操作收回协议，History 与 Store 的真实权威继续保留 |
@@ -117,8 +117,8 @@ Sapphire/SmartReader 与受限 App 客户端、更丰富的任务展示，以及
 | 可复现成本与环境 | [验证方法](../testing.md#wiki-evaluation-method)、[解析约束](../../constraints-wiki.txt)和冻结合成参考保留原判据与适用条件，专项仍独立 opt-in。 |
 
 删除前退休、排序事务和列表协调的既有合同继续保留。应用成功删除后旧开发
-聊天仍可重新创建目录，不恢复“成功后永久禁写”提案。完整原生尾部、公共返回
-接管、配置编排中心及统一退休查询/Owner 排空接口仍属于后续阶段。
+聊天仍可重新创建目录，不恢复“成功后永久禁写”提案。公共返回接管已完成；完整
+原生尾部、配置编排中心及统一退休查询/Owner 排空接口仍属于后续阶段。
 
 ### 2.2 投递错误分类：先修完整行为，再收回共同编排
 
@@ -127,9 +127,9 @@ Sapphire/SmartReader 与受限 App 客户端、更丰富的任务展示，以及
 经过真实 SQLite/Owner，覆盖永久拒绝、ACK 丢失、冲突、问题过期、人工回答、
 删除/归档与写入失败；通过现有命令重入保责，没有新返回账本或常驻观察器。
 
-第二阶段迁移[共同接管接口](task-return-admission.md)时必须保留这些事实：来源
-结果、接纳、父处理、通知和退休分别取证；未知不授权重放，正常返回仍按成功接纳
-次序逐条派发。接口收敛不把各来源不同的业务结算或恢复策略强行合并。
+第二阶段已完成[公共返回接管](../implemented/architecture-contract.md#公共返回接管)，
+保留来源结果、接纳、父处理、通知和退休分别取证；未知不授权重放，正常返回仍按
+成功接纳次序逐条派发。各来源不同的业务结算与恢复策略继续由其原 owner 维护。
 
 ### 2.3 Wiki：优先减少数据搬运，保持检索与阅读合同
 
@@ -160,6 +160,8 @@ Wiki 格式和完整原生尾部范围各有权威；原生卡片可见不证明
 <a id="harness-protocol-contract"></a>
 ## 3. 第二阶段：让既有所有者提供完整的小接口
 
+本节是第二阶段范围与 G2 出口的长期 owner；S1 已实施，其余已确认设计待实施。
+
 ### 3.1 责任与收益
 
 | 所有者 | 保留的权威 | 收回的重复知识 | 对后续的帮助 |
@@ -172,13 +174,11 @@ Wiki 格式和完整原生尾部范围各有权威；原生卡片可见不证明
 
 SessionOwner 继续串行裁定状态、异步推进执行；长 RPC、模型、问题等待、prepare 和退出不占住命令处理。后台回报携原 request/attempt/work/backend/lease，不能读取会话最新绑定重新归属。
 
-### 3.2 S1：统一返回接管，不动消费政策
+### 3.2 S1：公共返回接管已实现
 
-复用已经确认的 [admit_return 设计](../implemented/architecture-contract.md#待处理返回接管设计未实现)：来源提供原 target 与可重复读取、无结算副作用的 `prepare`；会话模块依次处理原 receipt、资格、按需准备、准备后重验、合法唤醒、原 Owner 提交和结果分类。
+当前合同、选择理由、提交与失败边界归[公共返回接管](../implemented/architecture-contract.md#公共返回接管)。BG、Research、委派终态和问题均已使用 `admit_return`，来源共同的 receipt/唤醒/准入编排及旧公开恢复入口已退出。
 
-已有 receipt 的快路径不读正文、不唤醒、不重新入队；prepare 不持 mailbox、生命周期锁或 DB 事务等待。唤醒与输入提交仍是两个提交点，不假装跨操作原子事务。`SubmissionReceipt`、本次明确拒绝、接纳无法确认分别返回；第一阶段永久拒绝等异常分类进入同一合同。
-
-完成时 BG、Research、委派终态/问题不再各自拼装 `source_receipt → resolve_task_return → start_message`，也不读 `_admission_closed`。来源继续拥有重试和自己的结算。Wiki outbox、schedule 首次触发、App、人工输入保持原入口。
+来源保有材料、业务结果、诊断及重试，逐条派发、Stop/Resume 和独立 work 语义保持。既有回归及真实接纳事务已覆盖丢确认、材料删除、Owner 失败与准备/归档竞争；验证政策仍归[testing.md](../testing.md)。本项完成不代表 G2 整体完成，也不改变后续运行时与安装交接的出口。
 
 ### 3.3 S2：询问原执行是否退休
 

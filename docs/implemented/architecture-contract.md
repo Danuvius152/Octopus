@@ -6,8 +6,9 @@
 当前约定直接在所属章节修订；实施顺序、逐轮访谈和已被替代的状态保留在 Git
 历史，不再追加到正文。文档中的支持范围不授予代码实施、发布或生产数据清理权限。
 
-公共返回接管已供 BG 和 Research 使用；委派的剩余接入见
-[返回接管计划](../plans/task-return-admission.md)，不代表三来源已全部迁移。
+公共返回接管已供 BG、Research、委派终态及问题使用，当前合同见
+[公共返回接管](#公共返回接管)。其余架构范围与出口由
+[工程路线](../plans/engineering-runtime-roadmap.md#phase-2)维护。
 
 ## 文档职责
 
@@ -108,7 +109,7 @@ receipt；已有 receipt 不依赖来源正文仍存在，也不重新唤醒归�
 | 已有原 receipt | 复用原接纳事实，沿原 completion 观察父处理，不再提交 |
 | 明确效果前 busy/mailbox full/quota，且没有 unknown 前史 | 只以原 identity 重试；问题在每次准备/提交前仍须有效 |
 | 永久完整性拒绝 | 记停止自动返回，保留来源业务结果和独立原因 |
-| ACK 丢失、Owner/通道不可用或超时，可能已经接纳 | 先在原控制对象记 unknown，再完成必要诊断；立即核对一次原 receipt，仍无结果就结束本次观察 |
+| ACK 丢失、Owner/通道不可用或超时，可能已经接纳 | 公共入口核实一次原 receipt；仍不能确认时，来源先在原控制对象记 unknown，再完成必要诊断并结束本次观察 |
 | unknown 后目标关闭、问题过期或 receipt 仍不可读/不存在 | 保留 unknown；后来的缺失和拒绝不证明以前未接纳 |
 | 确定的 identity 正文冲突、未分类错误、取消或存储失信 | 保留并传播原错误/取消；可能有接纳效果时同时保留 unknown；存储失信仍按统一 fail-stop，不猜测补查/补写 |
 
@@ -189,37 +190,100 @@ KILL 和活跃成员退出确认；普通完成广播及父会话返回都在退
 
 ### 公共返回接管
 
-`SessionManager.admit_return` 在会话模块拥有一次完整接管：先查原
-session/source/delivery 的回执，再验证捕获的 binding/work 与当前资格，按需调用
-来源的纯 `prepare`，准备后重新查回执及资格，沿原生命周期恢复会话，最后交给原
-Owner 和输入事务提交。已有回执优先于材料删除、Owner 失败及当前关闭，不准备
-正文、不唤醒、不重开输入；同身份实际提交的正文冲突仍原样传播。
+[`SessionManager.admit_return`](../../server/sessions/turns.py) 拥有 BG、Research、
+委派终态和问题的一次完整返回接管。来源提供原身份和按需正文准备函数，不再自行
+组合回执查询、会话唤醒和输入提交。采用回调是为了让材料读取仍归来源，同时把
+调用顺序交给会话模块；拆成两个公开阶段会把顺序责任留给调用方，正文引用联合
+类型则会让会话模块认识各来源的存储方式。
 
-准备每次调用至多一次；并发未接纳调用允许重复纯读取。准备期间不持 mailbox、
-生命周期锁或事务，不预留执行资源。身份、work、账户/Agent、全局关闭及 Owner
-失败共用资格读取；session 的瞬态 reservation、fork 和 closed 由原生命周期锁
-内及实际 Owner 判定。归档期间的合法返回等待原归档结束后恢复，不能提前把临时
-closed 当成永久失去返回资格。唤醒与输入提交仍是两个提交点，接纳拒绝不自动
-撤销合法唤醒。
+#### 身份、材料与责任
 
-结果区分已确认 `SubmissionReceipt`、本次明确未接纳 `ReturnRefused` 与
-`ReturnUnconfirmed`。回执读取暂不可用不能归为可重试容量拒绝；提交处的容量或
-busy 拒绝仍可由来源决定重试。丢确认后公共入口核实一次原回执，来源收到未确认
-只保存原诊断并结束本次观察；仅既有结算重入可再查原身份，不能重送或用后来的
-拒绝覆盖 unknown。准备错误、实际正文冲突、取消及存储失信保留原错误边界。
+[`ReturnTarget`、`ReturnBody` 和结果类型](../../server/sessions/submission.py)
+只在本次调用内使用，不新增持久事实。`ReturnTarget` 由可信来源按原记录构造，
+不能直接承接外部请求字段；目标 session、work 和捕获的 owned binding 必须相符。
+缺失 binding 仍可确认已有 receipt，但不能创建新输入。delivery 身份保持
+`bg:{task_id}`、`research:{job_id}`、`agent-terminal:{work_id}` 和
+`agent-question:{work_id}:{question_id}`。
 
-BG 的 `deliver_bg_result` 只转换原身份、按需材料及辅助保留说明，callback 返回
-上述三类结果；BG manager 继续拥有命令结果、诊断、有限观察及业务重试。公共
-操作不创建来源执行、第二份完成 Future、表或恢复账本；现有输入、导出与恢复
-表示不变。自动返回按成功接纳顺序逐条派发，Stop 保留暂停 backlog，人工纠偏
-不隐式 Resume。
+`prepare` 每次调用至多一次；已有回执或确定不能新接管时可以不调用。它只读取、
+构造 `ReturnBody`，或用 `ReturnSkipped(reason)` 表达来源不再需要新投递。空正文
+不表示跳过。问题关联的 child session/question 字段必须成对提供，Owner 在实际
+执行前再检查问题有效性。准备不得结算来源、启动执行、发送通知或修改授权；
+并发调用和容量重试可以重复纯准备，不为准备绝对一次增加锁表或账本。
 
-`test_return_admission.py`、`test_bg_session_return.py` 覆盖原回执、纯准备、冲突及
-暂停；`test_return_admission_lifecycle.py` 覆盖归档竞争与委派单次接纳。Research 的
-正常注入和启动 unknown 观察均使用公共操作，保留原报告、进度及完成观察；
-`test_research_return_admission.py` 验证丢确认后 Owner 失败、材料删除仍恢复原输入。
-委派当前保留旧调用入口，共用原资格及归档恢复规则；后续迁移的范围与验收见
-[返回接管计划](../plans/task-return-admission.md)。
+| 责任 | 所有者与提交事实 |
+| --- | --- |
+| 原回执、资格、准备顺序、合法唤醒及交接 | 会话模块的公共返回操作 |
+| 正文、是否仍需返回、重试节奏与放弃、业务结果 | BG / Research / 委派各来源 |
+| 归档成员关系与暂停恢复 | 原 lifecycle；合法恢复保留 Stop，不重放已取消输入 |
+| 输入接管、digest 冲突与去重 | 原 SessionOwner 和输入事务；完整输入与接纳事实提交后确认 |
+| 父处理、结果、通知与资源退休 | 原 `SubmissionReceipt` 的 completion 及各自原 owner；不新增完成 Future |
+
+#### 顺序与失败边界
+
+先查原 session/source/delivery 的 receipt。已确认接管优先于材料删除、Owner
+失败、来源或当前准入关闭；快路径不准备、不唤醒、不重开输入。已经撤销的输入
+也只观察原回执，不能重新入队。
+
+没有回执才检查原归属与当前资格。准备前的检查不授予跨 `await` 的许可；准备
+期间不持 mailbox、生命周期锁或事务，也不预留执行资源。准备完成后先再查原
+receipt，覆盖另一调用已经接纳的情况，再处理来源跳过或重验资格、恢复原会话。
+恢复可能等待原生命周期操作；等待结束后再次校验资格，最后由原 Owner 和输入
+事务裁定。归档期间的合法返回等待归档结束，不能提前把瞬态 closed 当成永久拒绝。
+session 的 reservation、fork 和 closed 由原生命周期锁内及实际 Owner 判断。
+
+唤醒与输入提交仍是两个提交点；本次没有新输入不证明此前没有合法唤醒，接纳
+拒绝不自动回滚归档成员关系。并发唯一性与实际提交的 digest 冲突仍由原事务及
+Owner 保证，不新增每 delivery 的锁、队列或注册表。普通重复观察无需生成正文；
+实际提交的 `SubmissionConflict` 原样传播，不能补查回执后把冲突当成 duplicate。
+
+| 返回或异常 | 调用者合同 |
+| --- | --- |
+| `SubmissionReceipt` | 已确认接纳的原输入；不证明执行成功，继续观察原 completion |
+| `ReturnRefused(reason)` | 本次没有新接纳；原因限于 `source_withdrawn`、`binding_unavailable`、`destination_unavailable`、`admission_closed`、`capacity`、`busy` |
+| `ReturnUnconfirmed(cause)` | 原回执暂时无法可靠观察，或提交交接后未获确认；保留原身份与原因，不推断没有接纳 |
+| 准备错误、实际正文冲突、未分类错误或取消 | 保留并传播原错误；取消等待不撤销已经交给 Owner 的 Submit |
+| 存储失信 / `ServiceUnavailable` | 沿原 fail-stop，不在同代补查猜测，也不转为普通 unknown 重试 |
+
+分类取决于阶段：回执读取的临时容量或期限失败是无法确认，提交处已知的
+`SessionMailboxFull` / quota 拒绝才是容量拒绝。归档/fork busy 与生命周期关闭
+使用其明确业务分类，不匹配错误文案、不把任意 `ValueError` 当拒绝。拒绝、来源
+跳过及可确认的交接异常出口，在存储可信时核实原 receipt；当前没查到不证明另一个
+在途提交不会成功，也不构成新接管许可。其他未分类异常不被转换为成功或普通拒绝。
+
+丢确认后公共入口核实一次原回执。来源收到未确认时先记住原诊断，再完成自己的
+必要写入并结束本次观察，不在外部重复核实。仅既有结算/恢复重入可观察原身份；
+unknown 的准备函数只返回跳过，后来的拒绝不能覆盖原原因。只有无 unknown 前史
+的明确容量或 busy 拒绝可按来源策略重试。停止观察保留原材料与业务结果，不更换
+delivery、不重新执行来源；接管未确认也不等于 `RequestCompletion` 的执行结果未知。
+
+#### 来源接入与验证
+
+BG 的 `deliver_bg_result` 转换原身份、材料及辅助说明，manager 保有命令结果、
+诊断与业务重试。Research 正常注入和启动 unknown 观察都使用公共操作，报告、
+queued/processing/processed、浏览器收讫及父处理仍分别由其原 owner 维护。
+委派 `_inject_terminal` / `_inject_question` 保留原轮次和问题的重入保护、round
+CAS / child notice 诊断写入及原 completion 观察，只消费公共接管的三类结果。
+其精确正文、问题关闭及材料删除语义见[委派合同](agent-collaboration.md#53-reply-delivery-the-original-request-completion)。
+
+来源不再组合 `source_receipt`、恢复、`start_message` 或读取准入私有字段来解释
+一次接管；生命周期恢复只保留会话模块内部 `_restore_task_return`。Wiki/schedule
+仍可使用 `source_receipt` 和通用 `start_message`；Wiki outbox、schedule 首次
+触发、App、人工输入保持各自入口。本操作不引入通用任务框架、执行表、持久队列、
+恢复机制或 provider 迁移，现有输入、导出及恢复表示不变。独立返回按成功接纳
+顺序逐条派发；来源完成时间不决定队列位置。Stop 保留暂停 backlog，人工纠偏
+不隐式 Resume，显式 Resume 后继续，来源 work 不并入当前请求的原生尾部。
+
+回归通过真实隔离 SQLite/Owner 和可控本地后端观察原输入、receipt、启动与来源
+记录，不替换最终接纳事务：`test_return_admission.py` 覆盖原回执、并发纯准备、
+跳过、错误分类、冲突、取消与失信；`test_bg_session_return.py` 和
+`test_research_session_return.py` 保留各自实际返回、资格与暂停覆盖。
+`test_return_admission_lifecycle.py` 验证真实归档等待及单次委派接纳；
+`test_delegation_return_admission.py` 验证准备前不唤醒、准备/恢复期间 work 或问题
+关闭，以及 unknown 后材料丢失、Owner 失败仍得到原输入。
+`test_research_return_admission.py` 覆盖同样的报告材料丢失场景；委派重试、诊断
+失败重入和删除材料的边界由 `test_delegation_return_retry.py`、
+`test_delegation_text_deletion.py` 保持。
 
 ## 公开接口与账户配置
 

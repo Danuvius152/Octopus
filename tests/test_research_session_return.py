@@ -12,6 +12,12 @@ from server.research import manager as research_module
 from server.research.manager import ResearchManager
 from server.research.orchestrator import ResearchReport
 from server.session_manager import SessionManager
+from server.sessions.submission import (
+    ReturnBody,
+    ReturnRefused,
+    ReturnTarget,
+    SubmissionReceipt,
+)
 from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
 
@@ -188,13 +194,15 @@ async def test_simultaneous_reports_share_one_session_and_duplicate_keeps_receip
     restored = manager.get_session(session.id)
     assert restored is not None and restored is not session
     row = await db.get_research_job(jobs[0]["id"])
-    resolved = await manager.resolve_task_return(decode_owned(row["knowledge_context"]), session_id=session.id, work_id=None)
-    assert resolved[0] is restored
-    repeated = await manager.start_message(
-        session.id, f"[deep-research:{row['id']}] Research complete for: {row['question']}\n\n# Saved report",
-        source="research", delivery_id=f"research:{row['id']}",
-        knowledge_context=resolved[1],
+    async def deleted_material():
+        pytest.fail("An admitted report must not prepare material again")
+
+    repeated = await manager.admit_return(
+        ReturnTarget(session.id, "research", f"research:{row['id']}", None, decode_owned(row["knowledge_context"])),
+        prepare=deleted_material,
     )
+    assert isinstance(repeated, SubmissionReceipt)
+    assert manager.get_session(session.id) is restored
     assert repeated.disposition == "duplicate"
     assert repeated.request_id == row["delivery_receipt"]["request_id"]
     assert (await repeated.wait()).outcome.status == "success"
@@ -280,11 +288,15 @@ async def test_unavailable_return_cannot_reopen_original_session(returning_resea
         await db.delete_session(session.id)
     elif unavailable == "agent_archived":
         await manager.archive_agent(agent["id"])
-    result = await manager.resolve_task_return(
-        owned, session_id="another-session" if unavailable == "wrong_session" else session.id,
-        work_id="another-work" if unavailable == "wrong_work" else work_id,
+    async def unavailable_material():
+        pytest.fail("Unavailable returns must not prepare or wake the original session")
+
+    result = await manager.admit_return(
+        ReturnTarget("another-session" if unavailable == "wrong_session" else session.id,
+                     "research", "research:unavailable", "another-work" if unavailable == "wrong_work" else work_id, owned),
+        prepare=unavailable_material,
     )
-    assert result is None and manager.get_session(session.id) is None and processed.empty()
+    assert isinstance(result, ReturnRefused) and manager.get_session(session.id) is None and processed.empty()
 
 
 async def test_work_closed_while_return_waits_for_restore_keeps_session_archived(returning_research):
@@ -308,10 +320,15 @@ async def test_work_closed_while_return_waits_for_restore_keeps_session_archived
 
     manager.on_broadcast("restore-events", record, session.user_id)
     lock = manager._session_lifecycle_lock(session.id)
+    async def prepare():
+        return ReturnBody("An original report waiting for restoration")
+
     async with lock:
         async def resolve():
             waiting.set()
-            return await manager.resolve_task_return(owned, session_id=session.id, work_id=work_id)
+            return await manager.admit_return(
+                ReturnTarget(session.id, "research", "research:closing-work", work_id, owned), prepare=prepare,
+            )
 
         returning = asyncio.create_task(resolve())
         await waiting.wait()
@@ -321,7 +338,7 @@ async def test_work_closed_while_return_waits_for_restore_keeps_session_archived
             while not lock._waiters:
                 await asyncio.sleep(.001)
         close_work(work_id)
-    assert await asyncio.wait_for(returning, 2) is None
+    assert isinstance(await asyncio.wait_for(returning, 2), ReturnRefused)
     assert manager.get_session(session.id) is None and processed.empty()
     archived = await manager.list_archived_sessions(user_id=session.user_id)
     assert session.id in {row["id"] for row in archived}
@@ -444,7 +461,6 @@ async def test_unconfirmed_report_is_not_overwritten_by_later_refusal_or_restart
 
 async def test_real_fork_reservation_delays_report_using_its_original_delivery_identity(returning_research, monkeypatch):
     from server.sessions.owner_runtime import ReserveFork
-    from server.sessions.runtime_types import SessionAdmissionBusy
 
     db, manager, research, started, release, processed = returning_research
     agent = await db.get_system_agent()
@@ -455,16 +471,15 @@ async def test_real_fork_reservation_delays_report_using_its_original_delivery_i
     owner = manager._session_owner(session)
     await owner.call_runtime(ReserveFork(True))
     refused = asyncio.Event()
-    resolve = manager.resolve_task_return
+    admit = manager.admit_return
 
     async def observe(*args, **kwargs):
-        try:
-            return await resolve(*args, **kwargs)
-        except SessionAdmissionBusy:
+        result = await admit(*args, **kwargs)
+        if isinstance(result, ReturnRefused) and result.reason == "busy":
             refused.set()
-            raise
+        return result
 
-    monkeypatch.setattr(manager, "resolve_task_return", observe)
+    monkeypatch.setattr(manager, "admit_return", observe)
     release.set()
     await asyncio.wait_for(refused.wait(), 2)
     assert await db.get_source_submission("research", f"research:{job['id']}", session_id=session.id) is None

@@ -620,7 +620,7 @@ class SessionManagerBase:
     async def auto_archive_scheduled_session(self, session_id: str) -> bool:
         raise NotImplementedError  # provided by a mixin
 
-    async def resolve_task_return(
+    async def _restore_task_return(
         self, owned: OwnedTaskContext | None, *, session_id: str, work_id: str | None,
     ) -> tuple[Session, KnowledgeContext] | None:
         raise NotImplementedError  # provided by lifecycle
