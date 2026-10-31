@@ -53,29 +53,6 @@ class BgTaskResponse(BaseModel):
     delivery_error: str | None
 
 
-def _record_to_json(rec: BgTaskRecord) -> dict[str, Any]:
-    return {
-        "id": rec.id,
-        "session_id": rec.session_id,
-        "command": rec.command,
-        "description": rec.description,
-        "working_dir": rec.working_dir,
-        "status": rec.status,
-        "exit_code": rec.exit_code,
-        "stdout": rec.stdout,
-        "stderr": rec.stderr,
-        "truncated": rec.truncated,
-        "started_at": rec.started_at,
-        "completed_at": rec.completed_at,
-        "idle_timeout_seconds": rec.idle_timeout_seconds,
-        "timeout_seconds": rec.timeout_seconds,
-        "stop_reason": rec.stop_reason,
-        "work_id": rec.work_id,
-        "delivery_disposition": rec.delivery_disposition,
-        "delivery_error": rec.delivery_error,
-    }
-
-
 def _require_session(
     session_manager: SessionManager, session_id: str, user_id: str | None = None
 ) -> str:
@@ -101,7 +78,7 @@ async def start_bg_task(
     req: StartBgTaskRequest,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
-) -> dict[str, Any]:
+) -> BgTaskRecord:
     """Start a new background task. Called by the bg MCP server.
 
     Returns the freshly-created task row so the MCP tool can echo the
@@ -130,7 +107,7 @@ async def start_bg_task(
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
     except BgTaskError as e:
         raise HTTPException(status.HTTP_400_BAD_REQUEST, str(e))
-    return _record_to_json(rec)
+    return rec
 
 
 @router.get("/{session_id}/bg-tasks", response_model=list[BgTaskResponse])
@@ -139,7 +116,7 @@ async def list_bg_tasks(
     session_id: str,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
-) -> list[dict[str, Any]]:
+) -> list[BgTaskRecord]:
     """All bg tasks for a session, most-recent first. Used by the
     sidebar / chip popover. Includes finished tasks so users can scroll
     back through history."""
@@ -148,8 +125,7 @@ async def list_bg_tasks(
     # which `session_belongs_to` answers for both.
     if not await session_manager.session_belongs_to(session_id, user_id):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-    rows = await bg_task_manager.list_tasks(session_id)
-    return [_record_to_json(r) for r in rows]
+    return await bg_task_manager.list_tasks(session_id)
 
 
 @router.get("/{session_id}/bg-tasks/{task_id}", response_model=BgTaskResponse)
@@ -159,7 +135,7 @@ async def get_bg_task(
     task_id: str,
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
-) -> dict[str, Any]:
+) -> BgTaskRecord:
     rec = await bg_task_manager.get_task(task_id)
     if (
         rec is None
@@ -167,7 +143,7 @@ async def get_bg_task(
         or not await session_manager.session_belongs_to(session_id, user_id)
     ):
         raise HTTPException(status.HTTP_404_NOT_FOUND, "Background task not found")
-    return _record_to_json(rec)
+    return rec
 
 
 @router.post("/{session_id}/bg-tasks/{task_id}/cancel")

@@ -120,12 +120,16 @@ Registry 的 `using` 在业务锁外准备 Store，保留原代次使用权；`r
 检查。重绑后的旧 Store 保留到原使用者退出，旧操作不得改取新 Store 继续提交。
 普通使用不触发全库恢复；当前调用 scope、App 绑定和原 turn 在领域内重验，selection
 准备期间撤权会使最终事务回滚，读取期间撤权不发布原观察。
+路由的 `access` 只承担读取任务解析和 owner-only 入口检查；写入及发布权限由上述
+受保护领域操作核验，不保留第二套路由写权限开关。
 
 `maintenance_admission` 接管 maintain、maintain-batch、curate 的资源取得和提交
 策略；短事务仍由原 jobs/grants/selection 实现提交 job、grant、别名、订阅和选择
 证据。批量共同核对当前 revision、观察与范围，一项失效整批不接纳。commit 失败
 不 wake；commit 成功后 wake 失败保留原 job。重复提交沿原 key 与规范化请求校验，
-queued 原任务可再次 wake，不新建工作或绕过当前权限。requester 身份统一由
+checked 日常复核的单项与批量提交均以最终事务内读回的 queued 状态决定唤醒：新任务以 queued 插入，
+queued 原任务可再次 wake，running/终态重放不唤醒，不新建工作或绕过当前权限。
+requester 身份统一由
 `job_events` 从原 turn 或已认证客户端构造，不改变汇报订阅的归属。
 
 `job_controls.control` 拥有 cancel/retry/verify/readmit 的原 job 归属、授权和

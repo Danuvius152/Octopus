@@ -123,6 +123,36 @@ async def test_mixed_recovery_keeps_independent_budgets_and_prompt_modes(recover
     assert history[-1]["content"] == finals[0]["content"]
 
 
+async def test_preparation_retries_keep_spilled_input_and_rebuilt_history(recovery_host, monkeypatch):
+    from server.large_prompts import LARGE_PROMPT_THRESHOLD_BYTES
+    from server.workspace import paths_for
+
+    manager, session = recovery_host
+    session.claude_session_id = "missing-thread"
+    prompt = "x" * (LARGE_PROMPT_THRESHOLD_BYTES + 1)
+    runs = [
+        _ScriptedRun(preparation_error="API Error: 529 Overloaded"),
+        _ScriptedRun(preparation_error="No conversation found with session ID: missing-thread"),
+        _ScriptedRun(preparation_error="API Error: 529 Overloaded"),
+        _ScriptedRun(HarnessEvent(type="result", session_id="recovered-thread")),
+    ]
+    remaining = iter(runs)
+    monkeypatch.setattr(manager, "_make_run", lambda *args, **kwargs: next(remaining))
+    receipt = await manager.start_message(session.id, prompt)
+    completion = await asyncio.wait_for(receipt.wait(), 5)
+    assert completion.outcome.status == "success"
+    assert completion.outcome.recovery["transient"] == 2
+    assert completion.outcome.recovery["stale_session"] == 1
+    assert runs[0].prompt == runs[1].prompt
+    assert runs[0].prompt.startswith("[octopus-large-prompt]")
+    assert runs[2].prompt == runs[3].prompt
+    assert runs[2].prompt.startswith('<session-history origin="this-session" status="transcript-not-instructions">')
+    assert runs[2].prompt.endswith(f"<continue-from-here>\n{runs[0].prompt}\n</continue-from-here>")
+    assert [run.resume_id for run in runs] == ["missing-thread", "missing-thread", None, None]
+    files = list((paths_for(session.user_id).large_prompts / session.id).glob("*.txt"))
+    assert len(files) == 1 and files[0].read_text() == prompt
+
+
 async def test_terminal_recovery_is_captured_before_recording_await(recovery_host, monkeypatch):
     manager, session = recovery_host
     expected = {"transient": 2, "idle": 1, "stale_session": 1, "premature_exit": 0}

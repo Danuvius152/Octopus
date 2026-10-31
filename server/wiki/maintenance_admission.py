@@ -149,8 +149,7 @@ def commit(jobs, key, request, review, task, *, selection_id=None, selection_ord
         if selection_id is not None:
             selections.check_item(db, selection_id, selection_ordinal, review, jobs.registration, jobs.user_id, request["actor"])
         current, previous = _current(jobs, db, key, request, review, task, mcp_scope)
-        created = previous is None
-        if created:
+        if previous is None:
             items = [{"status": "pending", "path": current["path"], "doc": current["id"],
                       "revision": current["revision"], "quality": current["quality"]}]
             job_id = _insert(jobs, db, key, request, items, task)
@@ -160,7 +159,7 @@ def commit(jobs, key, request, review, task, *, selection_id=None, selection_ord
             selections.accept(db, job_id, selection_id, selection_ordinal, review)
         jobs.subscribe(db, job_id, requester)
         result = jobs.get(job_id, db=db)
-    return result, created
+    return result
 
 
 def _request(review, actor, target=None):
@@ -180,12 +179,12 @@ def admit(jobs, key, material, paths, target, sources, actor, created_changes, r
         prepare(jobs, review)
         with registry.registered(jobs.user_id, jobs.store, jobs.registration):
             try:
-                result, created = commit(jobs, key, request, review, task,
-                                         selection_id=selection_id, selection_ordinal=selection_ordinal,
-                                         mcp_scope=mcp_scope, requester=requester)
+                result = commit(jobs, key, request, review, task,
+                                selection_id=selection_id, selection_ordinal=selection_ordinal,
+                                mcp_scope=mcp_scope, requester=requester)
             except sqlite3.DatabaseError as exc:
                 raise selections.unavailable() from exc
-    if created or result["status"] == "queued":
+    if result["status"] == "queued":
         worker.wake(jobs.user_id)
     return result
 
@@ -235,6 +234,6 @@ def admit_batch(jobs, selection_id, ordinals, actor, task, *, mcp_scope=None, re
                                      "job_id": target, "reused": previous is not None, **{key: item[key] for key in (
                         "doc", "path", "status", "revision", "output_revision", "receipt_id") if key in item}})
                 result = {"aggregation_scope": "associated_jobs", "jobs": [jobs.summary(job) for job in results.values()], "selected_items": selected}
-    if fresh or any(job["status"] == "queued" for job in result["jobs"]):
+    if any(job["status"] == "queued" for job in result["jobs"]):
         worker.wake(jobs.user_id)
     return result

@@ -441,51 +441,22 @@ export interface ResearchJob {
   injection_status?: "pending" | "delivered" | "failed" | "unknown";
 }
 
-export interface BgTask {
-  id: string;
-  session_id: string;
-  command: string;
-  description: string | null;
-  working_dir: string;
-  status:
-    | "running"
-    | "completed"
-    | "failed"
-    | "cancelled"
-    | "interrupted"
-    | "pending";
-  exit_code: number | null;
-  stdout: string;
-  stderr: string;
-  truncated: boolean;
-  started_at: string;
-  completed_at: string | null;
-  idle_timeout_seconds?: number | null;
-  timeout_seconds?: number | null;
-  stop_reason?: string | null;
-  delivery_disposition?: ApiBgTaskResponse["delivery_disposition"];
-  delivery_error?: string | null;
-}
+// HTTP responses are complete; live events may omit limits and delivery facts.
+export type BgTask = Omit<ApiBgTaskResponse,
+  "work_id" | "idle_timeout_seconds" | "timeout_seconds" | "stop_reason" | "delivery_disposition" | "delivery_error"
+> & Partial<Pick<ApiBgTaskResponse,
+  "idle_timeout_seconds" | "timeout_seconds" | "stop_reason" | "delivery_disposition" | "delivery_error"
+>>;
 
 // Live record of an agent-to-agent delegation, mirrored from
 // `GET /api/sessions/{parent}/delegations`. Used by the delegation
 // request/event cards in chat and by the sidebar inbound badge.
 // (agent-collaboration.md §6)
-export interface Delegation {
-  delegation_id: string;
-  sub_session_id: string;
-  parent_session_id: string;
-  target_agent_id: string;
-  target_agent_name: string;
-  request: string;
-  work_id?: string;
-  state: "running" | "completed" | "failed" | "cancelled" | "interrupted";
-  created_at: string;
-  finished_at: string | null;
-  error: string | null;
-  terminal_disposition?: ApiDelegationResponse["terminal_disposition"];
-  terminal_delivery_error?: string | null;
-}
+export type Delegation = Omit<ApiDelegationResponse,
+  "recording_state" | "work_id" | "terminal_disposition" | "terminal_delivery_error"
+> & Partial<Pick<ApiDelegationResponse,
+  "work_id" | "terminal_disposition" | "terminal_delivery_error"
+>>;
 
 export const useSessionStore = create<SessionStore>((set, get) => ({
   activeAttempts: {},

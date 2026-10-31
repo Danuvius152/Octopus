@@ -28,28 +28,39 @@ async def test_observation_rechecks_turn_after_store_preparation(client, tmp_pat
         assert response.status_code == 403, response.text
 
 
-async def test_lost_wake_recovers_original_checked_job_on_replay(client, tmp_path, monkeypatch):
+@pytest.mark.parametrize("batch", [False, True])
+async def test_lost_wake_recovers_original_checked_job_on_replay(client, tmp_path, monkeypatch, batch):
     from tests.test_wiki_maintenance_selections import select, submission
 
     _, _, jobs = await prepare(client, tmp_path)
     selection = await select(client)
     body = submission(selection, selection["items"][0])
+    url = "/api/wiki/maintain"
+    if batch:
+        url += "-batch"
+        body = {"selection_id": selection["id"], "ordinals": [selection["items"][0]["ordinal"]]}
 
     def failed_wake(owner):
         raise RuntimeError("wake unavailable after commit")
 
     monkeypatch.setattr(worker, "wake", failed_wake)
     with pytest.raises(RuntimeError, match="wake unavailable"):
-        await client.post("/api/wiki/maintain", headers=client.headers, json=body)
+        await client.post(url, headers=client.headers, json=body)
     retained = jobs.list()["items"]
     assert len(retained) == 1
     wakes = []
     monkeypatch.setattr(worker, "wake", wakes.append)
-    replay = await client.post("/api/wiki/maintain", headers=client.headers, json=body)
+    replay = await client.post(url, headers=client.headers, json=body)
     assert replay.status_code == 200, replay.text
-    assert replay.json()["id"] == retained[0]["id"]
+    result = replay.json()["jobs"][0] if batch else replay.json()
+    assert result["id"] == retained[0]["id"]
     assert wakes == [jobs.user_id]
     assert len(jobs.list()["items"]) == 1
+    jobs.update(result["id"], status="running")
+    wakes.clear()
+    running = await client.post(url, headers=client.headers, json=body)
+    assert running.status_code == 200, running.text
+    assert not wakes
 
 
 @pytest.mark.parametrize("action", ["cancel", "retry", "verify"])

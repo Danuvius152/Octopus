@@ -1378,7 +1378,7 @@ class OwnerRuntime:
         if execution.turn is None:
             execution.settlement.started_at = time.monotonic()
             execution.turn = _Turn(
-                prepared.prompt, prepared.prompt, get_harness(prepared.configured.backend),
+                prepared.prompt, get_harness(prepared.configured.backend),
                 prepared.configured.credential_id or (prepared.agent or {}).get("credential_id"),
                 execution.settlement,
             )

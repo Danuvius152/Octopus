@@ -151,14 +151,12 @@ def access(
     request: Request,
     *,
     human_only: bool = False,
-    write: bool = False,
-    publish: bool = False,
 ):
     scope = _mcp_scope(request)
     if scope:
         if human_only:
             raise WikiError("This operation requires the account owner", 403)
-        return tasks.call(tasks.require(scope, write=write, publish=publish), scope)
+        return tasks.call(tasks.require(scope), scope)
     return None
 
 

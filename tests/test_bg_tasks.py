@@ -1238,6 +1238,8 @@ async def test_rest_start_and_get_bg_task(api_client):
     detail = (await client.get(f"/api/sessions/{sess.id}/bg-tasks/{task_id}")).json()
     listed = (await client.get(f"/api/sessions/{sess.id}/bg-tasks")).json()
     for projection in (detail, next(item for item in listed if item["id"] == task_id)):
+        assert "knowledge_context" not in projection
+        assert projection.keys() == body.keys()
         assert projection["status"] == "completed" and projection["exit_code"] == 0
         assert projection["delivery_disposition"] == "unknown" and projection["delivery_error"] == "Original ACK lost"
 

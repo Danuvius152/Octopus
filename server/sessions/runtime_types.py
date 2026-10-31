@@ -108,10 +108,8 @@ class _Turn:
     The retry budgets and captured continuation survive individual attempts.
     """
 
-    # Original prepared input; only unsubmitted attempts can replay it.
-    prompt: str
-    # The prompt the next attempt will run: `prompt`, "continue", or a
-    # history-replay wrapper.
+    # The input selected for the next attempt: replay an unsubmitted
+    # attempt, continue the conversation, or rebuild lost history.
     current_prompt: str
     harness: Harness
     # The effective credential id (session override, else the agent's). Used

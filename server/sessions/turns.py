@@ -1027,7 +1027,7 @@ class TurnsMixin(SessionManagerBase):
         # instead of appearing to forget it.
         replayed = 0
         omitted = 0
-        recovery_prompt = turn.prompt
+        recovery_prompt = attempt.prompt
         if self.db:
             history = [
                 MessageContent(**m) for m in await self.db.load_messages(session.id)
@@ -1035,10 +1035,7 @@ class TurnsMixin(SessionManagerBase):
             kept, omitted = fork_helpers.select_lost_history(history)
             replayed = len(kept)
             if kept:
-                recovery_prompt = fork_helpers.wrap_for_lost_history(turn.prompt, kept, omitted=omitted)
-        # Keep the rebuilt context; any later preparation recovery must
-        # preserve it rather than restore the original unwrapped input.
-        turn.prompt = recovery_prompt
+                recovery_prompt = fork_helpers.wrap_for_lost_history(attempt.prompt, kept, omitted=omitted)
         return _Decision.again(
             recovery_prompt,
             await self._surface_stale_session(

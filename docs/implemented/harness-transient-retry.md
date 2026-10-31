@@ -85,6 +85,9 @@ wrapper once only if the input was not submitted and this turn has no captured
 continuation work. A stale error after possible submission stops with
 `recovery_unproven`; missing history does not prove the request had no effects.
 The old no-output replay rule and turn-start resume-ID restoration are removed.
+The current attempt owns its prepared input, including any large-prompt file
+pointer. Recovery selects the next attempt's input from that value; there is
+no separate original-prompt copy to synchronize after rebuilding history.
 
 Recovery markers remain persisted and published. Exhaustion or insufficient
 continuation evidence ends the request instead of replaying it. An explicit
@@ -96,6 +99,9 @@ backends with real external file effects but no tool/text observations, stale
 history, unsupported continuation and pre-submission preparation refusal.
 The scripted-process and per-attempt metric regressions additionally check
 actual prompts, attempts, budgets and termination.
+`tests/test_turn_recovery_state.py` also checks large input through preparation
+failures on both sides of stale-history recovery: the original spill file stays
+intact and subsequent attempts retain the rebuilt history and its pointer.
 
 ## 5. Limits
 
