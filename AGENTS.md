@@ -157,9 +157,10 @@ the service does not publish the development tree.
 - Resolve the nvm JS toolchain and `~/.local/bin` Codex on PATH for noninteractive
   checks. Current versions, proxies, credential isolation and service procedures
   live in [local-wsl.md](docs/local-wsl.md).
-- Read only task-relevant references. For documentation, persona or memory
-  changes, read [documentation rules](docs/AGENTS.md) and use the existing
-  [documentation index](docs/README.md) to find the owner.
+- Read only task-relevant references. For implementation tasks, follow
+  [documentation update timing](docs/AGENTS.md#writing-and-maintenance).
+  For documentation, persona or memory changes, read those documentation rules
+  and use the existing [documentation index](docs/README.md) to find the owner.
 
 ## Agent skills and local tasks
 

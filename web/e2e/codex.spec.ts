@@ -29,11 +29,14 @@ test.afterAll(async ({ request }) => {
   if (res.ok()) {
     for (const s of (await res.json()) as { id: string; name: string }[]) {
       if (OWNED.has(s.name)) {
-        await request
-          .delete(`${API}/sessions/${s.id}`, {
-            headers: { Authorization: `Bearer ${TOKEN}` },
-          })
-          .catch(() => {});
+        const deleted = await request.delete(`${API}/sessions/${s.id}`, {
+          headers: { Authorization: `Bearer ${TOKEN}` },
+        });
+        expect(deleted.status()).toBe(204);
+        const remaining = await request.get(`${API}/sessions/${s.id}`, {
+          headers: { Authorization: `Bearer ${TOKEN}` },
+        });
+        expect(remaining.status()).toBe(404);
       }
     }
   }

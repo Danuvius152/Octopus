@@ -72,10 +72,18 @@ In production `octopus serve` serves everything from one port (default 8000):
 - The frontend uses `window.location.origin` for REST and derives `ws://`/`wss://`
   from `window.location.protocol`, so it works behind any proxy, tunnel, or
   HTTPS terminator with no config.
-- HTTP responses negotiate GZip above 1 KiB (compression level 5), reducing
-  long conversation transfers without changing the JSON contract. SSE and
-  already encoded responses pass through; WebSockets keep their existing
-  transport. The declared Starlette floor includes SSE exclusion support.
+- Ordinary HTTP responses negotiate GZip above 1 KiB (compression level 5),
+  reducing long conversation transfers without changing the JSON contract.
+  MCP HTTP namespaces bypass compression using the same root-relative path
+  matching as their mounts: even an SSE-excluding compressor can retain headers
+  until the first body, while an idle MCP stream must send them immediately.
+  Already encoded responses and WebSockets keep their existing transport.
+- HTTP metrics and the 404 cache policy handle ASGI messages directly, without
+  task queues that can lose an SSE header during cancellation. Metrics record
+  first-header latency by route template and method, retaining the long-poll
+  408 classification. Every 404 overrides `Cache-Control` to `no-store` so a
+  missing asset cannot remain cached after publication. Other messages and
+  application errors propagate unchanged.
 
 In development, Vite serves the SPA on port 5173 with HMR and proxies `/api`,
 `/ws`, `/health` to the backend on 8000.

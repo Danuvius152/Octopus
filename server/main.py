@@ -14,7 +14,10 @@ from fastapi import Depends, FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette._utils import get_route_path
+from starlette.datastructures import MutableHeaders
 from starlette.middleware.gzip import GZipMiddleware
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from . import deps
 from . import monitor as monitor_pkg
@@ -32,6 +35,7 @@ from .crypto import master_key
 from .database import Database
 from .delegations import delegation_manager
 from .installation_admission import InstallationAdmission
+from .mcp_http import MOUNT_PREFIX
 from .mcp_http import lifespan as mcp_lifespan
 from .mcp_http import mount_all as mount_mcp
 from .monitor import Event as _MonEvent
@@ -357,8 +361,23 @@ async def _shutdown_service(db, started, schedule_runner, metrics, sampler_task,
         raise RuntimeError(f"Independent service resource cleanup failed: {names}") from failures[0][1]
 
 
+class _HTTPCompression(GZipMiddleware):
+    """MCP streams must send headers before their first event.
+
+    GZip buffers response.start even for excluded SSE content. An idle MCP
+    GET can therefore disconnect before the outer middleware sees a response.
+    Match the same root-relative path as Starlette's mounted namespaces.
+    """
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] == "http" and get_route_path(scope).startswith(MOUNT_PREFIX + "/"):
+            await self.app(scope, receive, send)
+        else:
+            await super().__call__(scope, receive, send)
+
+
 app = FastAPI(title="Octopus", version="0.1.0", lifespan=lifespan)
-app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
+app.add_middleware(_HTTPCompression, minimum_size=1024, compresslevel=5)
 
 
 @app.exception_handler(SessionOwnerUnavailable)
@@ -398,52 +417,47 @@ async def _workspace_error(_request: Request, exc: WorkspaceError) -> JSONRespon
 _mcp_mounts = mount_mcp(app)
 
 
-@app.middleware("http")
-async def _record_request(request, call_next):
-    """Time every request, labelled by route template.
+class _HTTPResponses:
+    """Apply metrics and cache policy without buffering streaming headers.
 
-    The template matters: labelling by raw path would mint a new dimension per
-    session id and make the table useless within a day (§9 G1).
-
-    A long-poll (a handler that sets `request.state.long_poll`) is tagged so
-    latency questions can leave it out: it lasts as long as the user takes to
-    answer, and its 408 is the designed "nothing yet", not an error.
+    BaseHTTPMiddleware queues can lose an SSE response.start when its task is
+    cancelled during shutdown. Forward ASGI messages in the original task.
+    Route templates keep per-session paths out of metric dimensions; human
+    long-poll 408s are tagged and are not failures. A 404 must override cache
+    policy so a CDN cannot retain a missing asset after it is published.
     """
-    started = time.perf_counter()
-    response = await call_next(request)
-    route = request.scope.get("route")
-    template = getattr(route, "path", None) or request.url.path
-    long_poll = getattr(request.state, "long_poll", False)
-    detail = {"route": template, "method": request.method}
-    if long_poll:
-        detail["long_poll"] = True
-    failed = response.status_code >= 400 and not (long_poll and response.status_code == 408)
-    _mon_record(_MonEvent(
-        kind="http",
-        duration_ms=(time.perf_counter() - started) * 1000,
-        ok=response.status_code < 500,
-        error_code=str(response.status_code) if failed else None,
-        detail=detail,
-    ))
-    return response
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        started = time.perf_counter()
+
+        async def response_send(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                status_code = message["status"]
+                if status_code == 404:
+                    MutableHeaders(scope=message)["Cache-Control"] = "no-store"
+                template = getattr(scope.get("route"), "path", None) or scope["path"]
+                long_poll = scope.get("state", {}).get("long_poll", False)
+                detail = {"route": template, "method": scope["method"]}
+                if long_poll:
+                    detail["long_poll"] = True
+                failed = status_code >= 400 and not (long_poll and status_code == 408)
+                _mon_record(_MonEvent(
+                    kind="http", duration_ms=(time.perf_counter() - started) * 1000,
+                    ok=status_code < 500, error_code=str(status_code) if failed else None,
+                    detail=detail,
+                ))
+            await send(message)
+
+        await self.app(scope, receive, response_send)
 
 
-@app.middleware("http")
-async def _no_store_on_missing(request, call_next):
-    """Never let a 404 be cached.
-
-    We send no `Cache-Control` on a 404, so a CDN in front of us is free to
-    invent one — Cloudflare caches error responses for static-looking paths for
-    four hours. The consequence is nasty and non-obvious: the FIRST request for
-    an asset that doesn't exist yet poisons that URL long after the file lands,
-    so a newly added icon or script is invisible to everyone behind the edge
-    while the origin serves it perfectly. Cost real debugging time once; this
-    makes it structurally impossible.
-    """
-    response = await call_next(request)
-    if response.status_code == 404:
-        response.headers["Cache-Control"] = "no-store"
-    return response
+app.add_middleware(_HTTPResponses)
 
 
 app.add_middleware(

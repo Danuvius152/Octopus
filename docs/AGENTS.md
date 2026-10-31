@@ -38,6 +38,14 @@ verification and repository actions.
 
 ## Writing and maintenance
 
+- For implementation tasks, consolidate durable documentation at the close of
+  the agreed delivery scope, after implementation is settled, required checks
+  pass and required code-review fixes are resolved. Keep intermediate findings
+  in existing temporary task materials when needed. Then update the owning
+  guides and `implemented/` contracts with verified behavior and necessary
+  rationale, and check documentation and code consistency before delivery.
+  Work-package documentation requirements assign responsibility at that delivery
+  boundary; they do not require a rewrite after each patch or review round.
 - Give each explanation one owner. Keep the complete local contract together:
   behavior, timing, ownership, failure and consequences for its consumers.
 - Preserve conditions, exceptions, negative guarantees and useful rationale
