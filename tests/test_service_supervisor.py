@@ -273,7 +273,7 @@ model.write_text("import json,os,sys\\nfrom pathlib import Path\\n"
                  "sys.stdin.read()\\n")
 harness=get_harness('codex')
 harness.profile=replace(harness.profile,binary=sys.executable,prepare_resume=None,activity_observer=None,
-    stdin_mode=StdinMode.STREAM_JSON,
+    stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
     build_turn_argv=lambda context: ([sys.executable,'-u',str(model)],{'cwd':str(root)}))
 spawn=asyncio.create_subprocess_exec
 async def interrupted_spawn(*args,**kwargs):

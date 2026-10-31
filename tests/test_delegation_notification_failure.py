@@ -59,7 +59,7 @@ async def notification_runtime(tmp_path, monkeypatch):
 
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, prepare_resume=None, activity_observer=None,
-        stdin_mode=StdinMode.STREAM_JSON, build_turn_argv=session_turn_argv(harness.profile, argv),
+        stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True, build_turn_argv=session_turn_argv(harness.profile, argv),
     ))
     spawn, submit = asyncio.create_subprocess_exec, manager.start_message
 

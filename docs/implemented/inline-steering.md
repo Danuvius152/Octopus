@@ -4,10 +4,21 @@
 
 ## Current capability and delivery
 
-Steering capability follows the selected runtime profile. Claude uses
-`STREAM_JSON`; Codex exec uses `CLOSE_AFTER_SPAWN`. The UI's `can_steer` is derived
-from current execution and backend capability. A native stdin channel alone is
-not evidence that an input was accepted, consumed or completed.
+Steering follows `RuntimeProfile.can_steer`, independently of `reusable` and
+tool-policy support. Claude declares steering and reuse with `STREAM_JSON`;
+Codex exec declares neither with `CLOSE_AFTER_SPAWN`. Session API views expose
+the explicit steering capability; Owner dispatch also checks the active phase
+and input eligibility. A native stdin channel grants no capability by itself.
+
+| Evidence | Current guarantee |
+| --- | --- |
+| Committed input claim | The original input has an execution identity; delivery is not proven. |
+| Steer `confirmed` | The complete local frame write/drain returned; provider acceptance or processing is not proven. |
+| Codex exec `turn.completed` | The current parser's root ended; complete native descendants and parent continuation are not proven. |
+
+A failed or cancelled frame write may have sent part or all of its input.
+The original input keeps its unknown delivery fact; a successful root does not
+upgrade that fact. These fields remain compatible without a new provider ACK layer.
 
 All user input first follows the durable [input contract](../input-reliability.md).
 SessionOwner owns dispatch eligibility and ordering. A supported steer is sent by
@@ -52,7 +63,8 @@ Code: [Owner runtime](../../server/sessions/owner_runtime.py),
 [HarnessRun](../../server/harness/run.py),
 [Claude profile](../../server/harness/claude_code.py).
 Verification entry points include `tests/test_session_dispatch.py`,
-`tests/test_harness_claude.py` and `tests/test_harness_flow_control.py`.
+`tests/test_harness_claude.py`, `tests/test_harness_flow_control.py` and
+`tests/test_session_capability_projection.py`.
 
 The [original experiments and rationale](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/inline-steering.md)
 retain their tested CLI version and conditions. Current test policy is in

@@ -49,6 +49,7 @@ async def steering(tmp_path, monkeypatch):
     def create(config):
         class Run(FakeRunBase):
             reusable = True
+            can_steer = True
 
             def __init__(self):
                 self.run_lease_id = uuid.uuid4().hex

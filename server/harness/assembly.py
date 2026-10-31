@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from .events import HarnessCredential
-from .profile import McpServerEntry, RuntimeProfile, StdinMode, TurnContext
+from .profile import McpServerEntry, RuntimeProfile, TurnContext
 
 if TYPE_CHECKING:
     from .run import RunConfig
@@ -34,7 +34,7 @@ def assemble_turn(
     """
     profile.tool_policy.validate(profile.backend, config.tool_allow, config.tool_deny)
     wiki_scope_id = config.wiki_task_id
-    if profile.stdin_mode is StdinMode.STREAM_JSON and config.session_id and wiki_scope_id:
+    if profile.reusable and config.session_id and wiki_scope_id:
         from ..wiki.tasks import RUN_WIKI_SCOPE
         wiki_scope_id = RUN_WIKI_SCOPE
     mcp_servers = select_mcp_servers(

@@ -92,7 +92,7 @@ async def test_active_stdout_backpressure_refuses_submit_and_preserves_the_origi
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
-        stdin_mode=StdinMode.STREAM_JSON,
+        stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(script), str(progress), str(identity_path), str(input_path)],
             {"cwd": context.working_dir},

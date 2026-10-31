@@ -558,18 +558,39 @@ async def test_creation_reply_and_answer_do_not_wait_for_the_creation_subscriber
 async def test_host_auto_answer_resolves_form_and_poll_once(question_host, monkeypatch):
     manager, session, client, events = question_host
     monkeypatch.setattr(settings, "ask_user_question_timeout_seconds", 0.03)
-    created = await client.post(
-        f"/api/sessions/{session.id}/questions", headers=client.headers, json={"questions": QUESTIONS}
-    )
-    qid = created.json()["question_id"]
-    answer = await client.get(f"/api/sessions/{session.id}/questions/{qid}/answer", headers=client.headers)
-    assert answer.status_code == 200
-    assert answer.json()["answer"] == manager.AUTO_ANSWER_TEXT
-    snapshot = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
-    assert snapshot.json()["pending_questions"] == []
-    # The answer wakes its poll promptly; publication may complete afterwards.
-    await asyncio.sleep(0.01)
-    assert len([event for event in events if event.get("auto")]) == 1
+    published = asyncio.Event()
+
+    async def observe_auto_answer(event):
+        if event["type"] == "question_answer" and event.get("auto") is True:
+            published.set()
+
+    manager.on_broadcast("auto-answer-observer", observe_auto_answer)
+    try:
+        created = await client.post(
+            f"/api/sessions/{session.id}/questions", headers=client.headers, json={"questions": QUESTIONS}
+        )
+        assert created.status_code == 201
+        qid = created.json()["question_id"]
+        answer = await client.get(f"/api/sessions/{session.id}/questions/{qid}/answer", headers=client.headers)
+        assert answer.status_code == 200
+        text = answer.json()["answer"]
+        assert text == manager.AUTO_ANSWER_TEXT
+        assert "No human is available" in text
+        assert "risky or irreversible" in text
+        assert not manager.has_pending_question(session.id, qid)
+        snapshot = await client.get(f"/api/sessions/{session.id}", headers=client.headers)
+        assert snapshot.json()["pending_questions"] == []
+        # Resolution wakes the poll before publication necessarily finishes.
+        await asyncio.wait_for(published.wait(), 1)
+        late = await client.get(f"/api/sessions/{session.id}/questions/{qid}/answer", headers=client.headers)
+        assert late.status_code == 200
+        assert late.json() == {"answer": text}
+        auto_events = [event for event in events if event.get("auto")]
+        assert len(auto_events) == 1
+        assert auto_events[0]["question_id"] == qid
+        assert auto_events[0]["content"] == text
+    finally:
+        manager.remove_broadcast("auto-answer-observer")
 
 
 class EarlyFinishRun(SilentRun):

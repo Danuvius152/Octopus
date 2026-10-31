@@ -17,6 +17,7 @@ from server.config import settings
 from server.database import Database
 from server.main import app
 from server.routers import credentials as credentials_mod
+from server.session_manager import session_manager
 from tests.accounts import create_account
 
 _FAKE = os.path.join(os.path.dirname(__file__), "_fixtures", "fake_codex_login.py")
@@ -42,6 +43,7 @@ async def client():
     db = Database(":memory:")
     await db.initialize()
     _, bearer = await create_account(db)
+    await session_manager.initialize(db)
     credentials_mod.set_db(db)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test",

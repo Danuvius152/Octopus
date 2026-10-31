@@ -256,7 +256,7 @@ async def test_http_question_prefix_precedes_the_original_success_receipt(
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
-        stdin_mode=StdinMode.STREAM_JSON, build_turn_argv=build_argv,
+        stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True, build_turn_argv=build_argv,
     ))
     monkeypatch.setattr(settings, "ask_user_question_timeout_seconds", 0)
 
@@ -361,7 +361,7 @@ async def test_live_question_subscriber_can_archive_without_waiting_on_its_prefi
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
-        stdin_mode=StdinMode.STREAM_JSON,
+        stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
         build_turn_argv=lambda context: ([sys.executable, "-u", str(model)], {"cwd": context.working_dir}),
     ))
     ready, archived = asyncio.Event(), asyncio.Event()

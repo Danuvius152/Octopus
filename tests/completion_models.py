@@ -16,8 +16,8 @@ from functools import partial
 
 from server.knowledge import encode
 from server.models import SessionStatus, TurnOutcome
+from server.sessions.runtime_types import _Settlement
 from server.sessions.submission import RequestCompletion, SubmissionReceipt
-from server.sessions.turns import _Settlement
 
 
 @dataclass

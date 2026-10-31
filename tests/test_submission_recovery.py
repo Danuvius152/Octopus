@@ -673,7 +673,7 @@ async def test_uncertain_steer_write_is_owned_saved_and_never_requeued(runtime, 
 
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
-        harness.profile, build_turn_argv=argv, stdin_mode=StdinMode.STREAM_JSON,
+        harness.profile, build_turn_argv=argv, stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
         prepare_resume=None, activity_observer=None,
     ))
     attempted = []

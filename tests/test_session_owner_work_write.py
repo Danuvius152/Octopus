@@ -47,7 +47,7 @@ async def test_closing_inline_work_waits_for_its_original_write_and_preserves_th
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
-        stdin_mode=StdinMode.STREAM_JSON,
+        stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model), str(frames), str(finish)],
             {"cwd": context.working_dir},

@@ -65,6 +65,17 @@ Owner 串行修改活动状态；慢准备、spawn、stdin、reader 和退休在
 中执行，结果携带原 request/attempt/work/backend 身份回报，不能在出队时改绑
 到“当前请求”。Owner 不等待另一个 Owner；广播负责通知，不驱动第二套权威终结。
 
+单轮结算由原 Owner 的 `OwnerRuntime.settle(execution)` 使用原 Execution、
+settlement 和发布上下文完成。Manager 不再回取 `runtime.current/frames` 解释
+旧结果，只保留入口、注册、跨会话配额和故障接管。重复结算返回原选定事件；
+不把旧终态重新选择给后来的请求。Database 仍拥有输入和 terminal 的短事务，
+原 publisher 仍拥有有序交付；慢通知和资源退出不阻塞命令处理。
+
+terminal 确认提交后先保留原 outcome、seq 与 `committed`，再刷新投影并交给
+publisher。后两者失败不会清掉提交事实、补选另一结果或重跑模型；Owner 失败时
+Manager 接管原对象的完成与资源责任。`done` 表示已结算，可以是 `done + failed`；
+重启未结算 claim 及未确认 steer 仍为 unknown，主成功不能替它们确认送达。
+
 | 接口事实 | 保证与限制 |
 | --- | --- |
 | `SubmissionReceipt.disposition` | 表达是否接纳；取消等待者不撤销已接管工作，重复 delivery 返回原 receipt |
@@ -433,6 +444,11 @@ job item 使用 typed JSON 与精确 ExecutionRef，同一 attempt 的多批不�
 统一见[暂停范围](../plans/runtime-execution-scope.md)。
 
 ## Conventions 与验收
+
+配置边界回归由 `test_request_configuration.py` 和 `test_model_settings.py` 覆盖；
+`test_terminal_recording.py`、`test_session_owner_failure.py` 与
+`test_submission_recovery.py` 使用真实 SQLite 验证原结算和故障接管，包含提交后
+投影/通知失败及重复迟到 terminal。能力组合与工具可见性证据归[Harness 合同](harness-layer.md#source-and-verification)。这些离线证据不证明运行版本已发布。
 
 - 一个真实事实只有一个 owner；接口接管时同步全部消费者和删除项。保留承担
   不同职责的 quota、事务锁、文件锁、receipt/journal，不按名称或文件长度合并。

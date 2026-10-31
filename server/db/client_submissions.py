@@ -150,6 +150,7 @@ class ClientSubmissionsMixin(DatabaseBase):
             return created, row
 
     async def claim_client_submission(self, session_id: str, request_id: str, owner: str, generation: str) -> bool:
+        """Reserve the original input identity; this is not a runtime ACK."""
         async with self.transaction(write=True) as tx:
             from ..execution_identity import boot_identity
             cursor = await tx.execute(
@@ -169,6 +170,7 @@ class ClientSubmissionsMixin(DatabaseBase):
             return True
 
     async def set_steer_delivery(self, session_id: str, request_id: str, *, confirmed: bool) -> bool:
+        """Record local frame write/drain, independently of provider processing."""
         async with self.transaction(write=True) as tx:
             if not confirmed:
                 owner = await tx.fetch_one("SELECT user_id FROM sessions WHERE id=?", (session_id,))

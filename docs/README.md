@@ -100,7 +100,7 @@ guarantee.
 
 | Plan | Status | What |
 |---|---|---|
-| [Octopus 工程收敛与运行时路线](plans/engineering-runtime-roadmap.md) | in-progress | 第一阶段和公共返回接管已实现并归入当前合同；其余接口及 Codex/DeepSeek 迁移仍待实施，发布按实际回执验收。 |
+| [Octopus 工程收敛与运行时路线](plans/engineering-runtime-roadmap.md) | in-progress | 第一阶段、公共返回接管、配置捕获、Owner 结算及显式运行能力已实现；其余接口与 Codex/DeepSeek 迁移仍待实施。 |
 | [Codex / DSH 兼容与 DeepSeek backend 可行性方案](plans/deepseek-harness-backend.md) | proposed | 推荐 SDK runtime 与同宿主薄插件，调用公开 Agent steer 并复用原生等待/退出；具体设计已更新，尚未实施。 |
 | [Multi-tenancy: remaining policy and hardening proposals](plans/multi-tenancy-gaps.md) | proposed | Re-scope the remaining account-policy choices against current code before implementing them. |
 | [共享 Wiki：未来计划与应用协同](plans/wiki-future-plan.md) | proposed | Sapphire、SmartReader 与条件性扩展的统一计划；保留未完成合同，不把本文当作开发或生产写入授权。 |

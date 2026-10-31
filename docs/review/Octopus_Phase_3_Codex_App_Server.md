@@ -14,7 +14,7 @@
 
 | 阶段 | 文档 | 必须交给下一阶段的成果 |
 | --- | --- | --- |
-| 1 | [正确性、Wiki 与工程约定](Octopus_Phase_1_Correctness_Wiki_Engineering.md) | 已验证的投递分类、配置规则、Wiki 等价性与文档权威 |
+| 1 | [正确性、Wiki 与工程约定](../plans/engineering-runtime-roadmap.md#phase-1) | 已验证的投递分类、配置规则、Wiki 等价性与文档权威 |
 | 2 | [架构与公共合同](Octopus_Phase_2_Architecture_Contracts.md) | C1–C8 语义合同及已迁移的真实消费者；G2 通过 |
 | 3 | **本文** | 锁版 Codex 对完整 scope 的真实证据；全部消费者切换；G3 通过 |
 | 4 | [DeepSeek 正式接入](Octopus_Phase_4_DeepSeek_Integration.md) | 复用同一产品请求与资源责任，提供另一种真实协议实现 |

@@ -12,6 +12,7 @@ from server.crypto import decrypt
 from server.database import Database
 from server.main import app
 from server.routers import credentials as creds_router
+from server.session_manager import session_manager
 from tests.accounts import create_account
 
 
@@ -20,6 +21,7 @@ async def client():
     db = Database(":memory:")
     await db.initialize()
     _, bearer = await create_account(db)
+    await session_manager.initialize(db)
     creds_router.set_db(db)
     transport = ASGITransport(app=app)
     async with AsyncClient(transport=transport, base_url="http://test", headers={"Authorization": f"Bearer {bearer}"}) as c:

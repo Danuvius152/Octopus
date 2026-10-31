@@ -12,7 +12,9 @@ import asyncio
 import json
 import time
 from collections import deque
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
+from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -29,7 +31,13 @@ from ..harness.model_settings import (
     validate_controls,
 )
 from ..large_prompts import spill_if_large
-from ..models import AttachmentMetadata, MessageContent, MessageRole, SessionStatus
+from ..models import (
+    AttachmentMetadata,
+    MessageContent,
+    MessageRole,
+    SessionStatus,
+    TurnOutcome,
+)
 from .base import (
     _MAX_PENDING_STEERS,
     ActiveRun,
@@ -708,6 +716,106 @@ class OwnerRuntime:
 
         return observed_input_receipt(row, self.owner.session)
 
+    async def settle(
+        self, execution: Execution, *,
+        status: Literal["success", "failed", "interrupted"],
+        message: str | None = None, code: str | None = None,
+        result: HarnessEvent | None = None, metadata: dict[str, Any] | None = None,
+        provider_code: str | None = None,
+        rejected_input: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """The single writer selects once and retains its commit observation."""
+        if asyncio.current_task() is not self.owner.task:
+            raise RuntimeError("Only the original Session owner may settle an execution")
+        session, settlement = self.owner.session, execution.settlement
+        if settlement.outcome is not None:
+            assert settlement.event is not None
+            return settlement.event
+        if self.current is not execution:
+            raise SessionOwnerUnavailable("The original execution is no longer owned")
+        outcome = TurnOutcome(
+            request_id=settlement.request_id, status=status,
+            message=safe_diagnostic(message), code=code,
+            provider_code=getattr(result, "error_code", None) or provider_code,
+            recovery=dict(settlement.recovery),
+            recording_integrity="incomplete" if settlement.protocol_issues else "complete",
+            recording_issues=dict(settlement.protocol_issues),
+            recording_locations=list(settlement.protocol_locations),
+        )
+        if settlement.protocol_issues:
+            note = "Some backend protocol records could not be read. Execution was not repeated; the transcript may be incomplete."
+            outcome.message = f"{outcome.message}\n{note}" if outcome.message else note
+
+        settlement.outcome = outcome
+        settlement.stored = MessageContent(
+            role=MessageRole.system, type="result", content=outcome.model_dump(),
+            tool_input={"rejected_input": rejected_input} if rejected_input is not None else None,
+            is_error=status != "success",
+            session_id=result.session_id if result else session.claude_session_id,
+            cost=settlement.cost, created_at=datetime.now(UTC).isoformat(),
+        )
+        if settlement.attempt_id:
+            settlement.stored.tool_input = {
+                **(settlement.stored.tool_input or {}),
+                "attempt_context": {"request_id": settlement.request_id, "attempt_id": settlement.attempt_id},
+            }
+        settlement.seq = session._next_message_seq
+        session._next_message_seq += 1
+        event = {
+            "type": "result", "session_id": session.id,
+            "request_id": settlement.request_id, "work_id": settlement.work_id,
+            "attempt_id": settlement.attempt_id,
+            "claude_session_id": settlement.stored.session_id,
+            "content": outcome.model_dump(), "is_error": status != "success",
+            "cost": settlement.cost, "code": code, "message": outcome.message,
+            "terminal": True, "turns": result.num_turns if result else None,
+            # Logical request latency includes retries and their waits.
+            "duration_ms": round((time.monotonic() - settlement.started_at) * 1000)
+            if settlement.started_at is not None else None,
+        }
+        if metadata:
+            for key in ("credential_id", "backend"):
+                if key in metadata:
+                    event[key] = metadata[key]
+        if rejected_input is not None:
+            event["tool_input"] = settlement.stored.tool_input
+        settlement.event = self.owner.manager._tag_persisted(event, settlement.seq, settlement.stored)
+        return await self._record_terminal(execution)
+
+    async def _record_terminal(self, execution: Execution) -> dict[str, Any]:
+        """The owner awaits the original bounded transaction, then offers I/O."""
+        session, settlement = self.owner.session, execution.settlement
+        assert settlement.stored is not None and settlement.event is not None
+        stored = settlement.stored
+        database = self.owner.manager.db
+        assert database is not None
+        try:
+            await database.record_terminal(
+                request_id=settlement.request_id, session_id=session.id,
+                seq=settlement.seq, role=stored.role.value, type=stored.type,
+                content=stored.content, is_error=stored.is_error,
+                session_id_ref=stored.session_id, cost=stored.cost,
+                created_at=stored.created_at,
+                **({"tool_input": stored.tool_input} if stored.tool_input is not None else {}),
+            )
+        except ValueError as error:
+            if str(error) != "terminal record conflict":
+                raise
+            settlement.recording_state = "failed"
+            event = {"type": "recording_failed", "session_id": session.id,
+                     "request_id": settlement.request_id, "recording_state": "failed",
+                     "terminal": False, "message": "This request conflicts with an already recorded outcome."}
+            settlement.event = event
+            execution.frames.append(event)
+            self.owner.wake()
+            return event
+        # Original commit acknowledgement precedes projection and publication.
+        settlement.recording_state = "committed"
+        session.restore_message_state(*await database.message_sequence_state(session.id))
+        execution.frames.append(deepcopy(settlement.event))
+        self.owner.wake()
+        return settlement.event
+
     async def _interrupt(
         self, cause: Literal["user", "shutdown"], *, retain_unstarted: bool = False,
         code: str | None = None, message: str | None = None,
@@ -740,8 +848,8 @@ class OwnerRuntime:
             session._pending_queue.sort(key=lambda request: request.order)
         elif execution.request.started:
             original_message, original_code = execution.settlement.interruption()
-            await self.owner.manager._settle_turn(
-                session, execution.settlement, status="interrupted",
+            await self.settle(
+                execution, status="interrupted",
                 message=message or original_message, code=code or original_code,
             )
         else:
@@ -1191,15 +1299,7 @@ class OwnerRuntime:
 
     async def _prepare_run(self, configured: Session, prompt: str, copied: list[MessageContent], diagnostic: PreparationDiagnostic) -> _PreparedRun:
         manager = self.owner.manager
-        async with manager.configuration_lock:
-            # The Owner's copy carries this request's runtime context. Read
-            # its defaults together with the agent, after pending updates
-            # commit, rather than mixing an earlier session copy with them.
-            defaults = manager.sessions[configured.id]
-            configured = replace(configured, backend=defaults.backend, credential_id=defaults.credential_id,
-                                 model=defaults.model, reasoning_effort=defaults.reasoning_effort,
-                                 service_tier=defaults.service_tier)
-            agent = await manager._load_agent(configured)
+        configured, agent = await manager.capture_request_configuration(configured)
         harness = get_harness(configured.backend)
         try:
             credential = await manager._resolve_credential(configured, agent, harness)
@@ -1388,7 +1488,7 @@ class OwnerRuntime:
                 await self._failed(execution, error, "backend_exception")
                 return
             else:
-                session._steer_open = bool(attempt.backend.reusable and attempt.result is None)
+                session._steer_open = bool(attempt.backend.can_steer and attempt.result is None)
                 execution.phase = "stream"
                 group = getattr(attempt.backend, "process_group_id", None)
                 if isinstance(group, int) and manager.db is not None:
@@ -1474,7 +1574,7 @@ class OwnerRuntime:
             reason = f"{reason}\n{raw}" if reason else raw
         if failed and not reason:
             reason = safe_diagnostic(getattr(attempt.backend, "stderr_text", "")) or "Backend ended without a terminal result"
-        await manager._settle_turn(session, settlement, status="failed" if failed else "success",
+        await self.settle(execution, status="failed" if failed else "success",
                                    message=reason, code=detail.get("code"), result=attempt.result,
                                    metadata=detail, provider_code=attempt.failure_code)
         execution.phase = "terminal"
@@ -1491,8 +1591,8 @@ class OwnerRuntime:
             self.owner.session, reason="overall", limit=settings.turn_max_seconds,
             backend=turn.harness.backend, retries=turn.settlement.recovery["idle"],
         )
-        await manager._settle_turn(
-            self.owner.session, execution.settlement, status="failed",
+        await self.settle(
+            execution, status="failed",
             message=event["message"], code=event["code"],
         )
         execution.phase = "terminal"
@@ -1520,8 +1620,8 @@ class OwnerRuntime:
         if backend is not None:
             execution.retirement = self.retire(backend, "parent_error")
         await self._end_questions(execution)
-        await self.owner.manager._settle_turn(
-            session, execution.settlement, status="failed",
+        await self.settle(
+            execution, status="failed",
             message=diagnostic_text(str(error), secrets=(settings.auth_token, credential.secret if credential else "")),
             code=error.code if isinstance(error, AttachmentUnavailable) else code,
             rejected_input={"content": execution.request.prompt, "attachment_ids": execution.request.attachment_ids}
@@ -1751,7 +1851,7 @@ class OwnerRuntime:
         if not available or not scope_is_live(McpScope(session_id, user_id=user_id,
                     run_lease_id=backend.run_lease_id, work_id=backend.work_id)):
             return False
-        await backend.send_user_frame(prompt)
+        await backend.steer(prompt)
         await database.set_steer_delivery(session_id, request_id, confirmed=True)
         return True
 

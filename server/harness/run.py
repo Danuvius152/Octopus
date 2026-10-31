@@ -484,9 +484,8 @@ class HarnessRun:
         the turn is running. Returns the frame's uuid so the caller can match
         the CLI's echo of it.
 
-        A failed write is terminal for the turn — if we can't reach the CLI's
-        stdin the prompt simply hasn't been delivered, and pretending otherwise
-        would hang the turn waiting for a reply to a question never asked.
+        Return proves local write/drain only, not provider acceptance. A
+        failed or cancelled write can have delivered part or all of the frame.
         """
         if self._profile.stdin_mode is not StdinMode.STREAM_JSON:
             raise RuntimeError(
@@ -511,6 +510,16 @@ class HarnessRun:
         proc.stdin.write(line.encode())
         await proc.stdin.drain()
         return frame_uuid
+
+    @property
+    def can_steer(self) -> bool:
+        return self._profile.can_steer
+
+    async def steer(self, text: str) -> str:
+        """Deliver a mid-request frame; confirmation is local write/drain."""
+        if not self.can_steer:
+            raise RuntimeError(f"{self._profile.backend} does not support steering")
+        return await self.send_user_frame(text)
 
     def spawn_signature(
         self, working_dir: str, credential: HarnessCredential | None
@@ -568,12 +577,8 @@ class HarnessRun:
 
     @property
     def reusable(self) -> bool:
-        """Whether this backend can serve more than one turn per process.
-
-        Only `STREAM_JSON` can: a backend whose prompt lives in argv is, by
-        construction, one process per turn.
-        """
-        return self._profile.stdin_mode is StdinMode.STREAM_JSON
+        """Whether the adapter supports another request on the same host."""
+        return self._profile.reusable
 
     async def send_turn(self, prompt: str) -> None:
         """Run another turn on the process already up.

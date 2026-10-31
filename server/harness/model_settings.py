@@ -1,8 +1,31 @@
 """Model metadata advertised by a runtime, without credentials or config contents."""
 
+from __future__ import annotations
+
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from ..database import Database
+
+
+async def model_settings_for(
+    database: Database, backend: str, credential_id: str | None, user_id: str | None,
+) -> ModelSettings:
+    """Read the selected runtime's local catalog without login or refresh."""
+    from ..credential_bindings import validate_credential_binding
+    from .events import HarnessCredential
+    from .registry import get_harness
+
+    await validate_credential_binding(database, credential_id, backend, user_id)
+    harness = get_harness(backend)
+    credential = None
+    if credential_id and harness.profile.credential_style == "home_dir":
+        from ..codex_login import codex_home_for
+
+        credential = HarnessCredential(backend=backend, auth_type="oauth", home_dir=codex_home_for(credential_id))
+    return harness.model_settings(credential)
 
 
 def effective_settings(session: Any, agent: Mapping[str, Any] | None) -> dict[str, Any]:

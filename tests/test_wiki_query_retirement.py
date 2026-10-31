@@ -379,7 +379,7 @@ async def test_registered_setup_failure_closes_database_without_starting_cli(
 
     monkeypatch.setattr(query_support, 'Database', database)
     registration = {'source_root': str(root), 'credential_id': 'absent',
-                    'profile': {'model': 'gpt-6.1-sol', 'reasoning_effort': 'max', 'service_tier': 'default'}}
+                    'profile': {'model': 'gpt-6.1-sol', 'reasoning_effort': 'low', 'service_tier': 'default'}}
     try:
         with pytest.raises(CredentialBindingError):
             async with query_probe_context(tmp_path, monkeypatch, registration=registration):

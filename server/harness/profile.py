@@ -193,8 +193,8 @@ class StdinMode(str, Enum):
     #: it is what lets the turn proceed.
     CLOSE_AFTER_SPAWN = "close_after_spawn"
 
-    #: Prompt — and any mid-turn follow-up — are written as JSON lines on
-    #: stdin, which therefore stays open for the life of the process.
+    #: The initial prompt is a JSON line on stdin. This transport alone
+    #: promises neither steering nor another request on the same process.
     STREAM_JSON = "stream_json"
 
 
@@ -235,6 +235,9 @@ class RuntimeProfile:
     new_event_parser: Callable[[], EventParser]
     build_oneshot_argv: Callable[[OneShotContext], tuple[list[str], dict[str, Any]]]
     parse_oneshot_stdout: Callable[[str], str]
+    # Independent adapter guarantees. An open stdin pipe proves neither.
+    can_steer: bool = False
+    reusable: bool = False
     tool_policy: ToolPolicySupport = field(default_factory=ToolPolicySupport)
     # Request instructions have a native per-turn channel on some adapters;
     # otherwise they are fixed in the process's composed system prompt.

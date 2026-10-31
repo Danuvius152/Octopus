@@ -136,6 +136,7 @@ async def test_create_session(manager, tmp_path):
     assert session.status == SessionStatus.idle
     assert len(session.id) == 12
     assert session.id in manager.sessions
+    assert any(row["id"] == session.id for row in await manager.db.load_sessions())
 
 
 @pytest.mark.asyncio
@@ -194,6 +195,7 @@ async def test_delete_session(manager):
     sid = session.id
     assert await manager.delete_session(sid) is True
     assert manager.get_session(sid) is None
+    assert not any(row["id"] == sid for row in await manager.db.load_sessions())
     assert await manager.delete_session(sid) is False
 
 
@@ -215,22 +217,6 @@ async def test_broadcast_registration(manager):
 
     manager.remove_broadcast("test")
     assert "test" not in manager._broadcast_callbacks
-
-
-@pytest.mark.asyncio
-async def test_create_session_persists_to_db(manager):
-    session = await _new(manager,"Persisted")
-    rows = await manager.db.load_sessions()
-    assert any(r["id"] == session.id for r in rows)
-
-
-@pytest.mark.asyncio
-async def test_delete_session_removes_from_db(manager):
-    session = await _new(manager,"To Delete")
-    sid = session.id
-    await manager.delete_session(sid)
-    rows = await manager.db.load_sessions()
-    assert not any(r["id"] == sid for r in rows)
 
 
 @pytest.mark.asyncio
@@ -464,7 +450,7 @@ async def test_answer_question_unknown_returns_false(manager):
 
 
 @pytest.mark.asyncio
-async def test_answer_question_sets_event_and_broadcasts(manager):
+async def test_answer_question_wakes_waiter_removes_form_and_broadcasts_once(manager, monkeypatch):
     """Answering wakes the long-poll, removes the form and publishes once."""
     session = await _new(manager,"Q")
     events: list[dict] = []
@@ -477,36 +463,28 @@ async def test_answer_question_sets_event_and_broadcasts(manager):
     qid = await manager.create_pending_question(
         session.id, [{"question": "Pick one", "options": [{"label": "A"}]}],
     )
-    polling = asyncio.create_task(manager.wait_for_question_answer(session.id, qid, timeout=1))
-    ok = await manager.answer_question(session.id, qid, [{"selected": ["A"]}])
-    assert ok is True
+    pending = manager.get_pending_questions(session.id)[0]
+    waiting = asyncio.Event()
+    ready_wait = pending.ready.wait
 
-    assert await polling == "Q: Pick one\nA: A"
+    async def observe_wait():
+        waiting.set()
+        return await ready_wait()
+
+    monkeypatch.setattr(pending.ready, "wait", observe_wait)
+    polling = asyncio.create_task(manager.wait_for_question_answer(session.id, qid, timeout=1))
+    try:
+        await asyncio.wait_for(waiting.wait(), 1)
+        assert not polling.done()
+        assert await manager.answer_question(session.id, qid, [{"selected": ["A"]}]) is True
+        assert await asyncio.wait_for(polling, 1) == "Q: Pick one\nA: A"
+    finally:
+        polling.cancel()
+        await asyncio.gather(polling, return_exceptions=True)
     assert not manager.has_pending_question(session.id, qid)
     qa = [e for e in events if e["type"] == "question_answer"]
     assert len(qa) == 1
     assert qa[0]["content"] == "Q: Pick one\nA: A"
-
-
-@pytest.mark.asyncio
-async def test_wait_for_question_answer_unblocks_on_submit(manager):
-    """The ask MCP server's HTTP long-poll calls wait_for_question_answer
-    which awaits the Event. When the user submits, the wait returns
-    the formatted answer text."""
-    session = await _new(manager,"Wait")
-    qid = await manager.create_pending_question(
-        session.id, [{"question": "OK?", "options": [{"label": "Y"}]}],
-    )
-
-    async def submit_after_delay():
-        await asyncio.sleep(0.05)
-        await manager.answer_question(session.id, qid, [{"selected": ["Y"]}])
-
-    asyncio.create_task(submit_after_delay())
-    answer = await manager.wait_for_question_answer(
-        session.id, qid, timeout=2.0
-    )
-    assert answer == "Q: OK?\nA: Y"
 
 
 @pytest.mark.asyncio
@@ -520,44 +498,6 @@ async def test_wait_for_question_answer_returns_none_on_timeout(manager):
         session.id, qid, timeout=0.1
     )
     assert answer is None
-
-
-@pytest.mark.asyncio
-async def test_unanswered_question_auto_answers_after_timeout(
-    manager, monkeypatch
-):
-    """Session-level auto-answer still works in VM0 shape: after the
-    configured timeout, deliver the autonomy-mode text via the same
-    Event mechanism, broadcast with auto=True."""
-    from server.config import settings
-
-    monkeypatch.setattr(settings, "ask_user_question_timeout_seconds", 0.05)
-
-    session = await _new(manager,"AutoQ")
-    events: list[dict] = []
-
-    async def cb(msg: dict) -> None:
-        events.append(msg)
-
-    manager.on_broadcast("auto", cb)
-
-    qid = await manager.create_pending_question(
-        session.id, [{"question": "What now?", "options": []}],
-    )
-
-    await asyncio.sleep(0.2)
-
-    # Auto-answer text is what the long-poll will read.
-    answer = await manager.wait_for_question_answer(session.id, qid, timeout=0.1)
-    assert answer is not None
-    assert "No human is available" in answer
-    assert "risky or irreversible" in answer
-    assert not manager.has_pending_question(session.id, qid)
-    auto_events = [
-        e for e in events
-        if e.get("type") == "question_answer" and e.get("auto") is True
-    ]
-    assert len(auto_events) == 1
 
 
 @pytest.mark.asyncio
@@ -2613,6 +2553,7 @@ async def test_interrupt_releases_the_session_handle_immediately(manager, monkey
 
 class _SteerRun(_QueuedRun):
     reusable = True
+    can_steer = True
 
     def __init__(self, session):
         super().__init__([])

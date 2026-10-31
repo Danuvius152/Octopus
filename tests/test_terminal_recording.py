@@ -13,7 +13,7 @@ import pytest
 
 from server import deps
 from server.database import Database
-from server.harness import get_harness
+from server.harness import HarnessEvent, HarnessRun, get_harness
 from server.sessions import SessionManager
 from server.users import UserManager
 from tests.accounts import create_account
@@ -293,3 +293,132 @@ async def test_actual_dispatch_waits_for_storage_then_preserves_stop_pause(datab
     rows = await database.load_messages(session.id)
     results = [row for row in rows if row["type"] == "result"]
     assert len(results) == 2 and results[0]["content"]["request_id"] == first.request_id
+
+
+@pytest.mark.parametrize("failure", ["projection", "publication"])
+async def test_committed_outcome_survives_failure_and_duplicate_input_observation(tmp_path, monkeypatch, failure):
+    from server.sessions.client_submissions import (
+        submission_status,
+        submit_client_message,
+    )
+
+    database = Database(str(tmp_path / "original-outcome.sqlite3"))
+    await database.initialize()
+    await create_account(database, extra_roots=[tmp_path])
+    manager = SessionManager()
+    await manager.initialize(database)
+    agent = await database.get_system_agent()
+    session = await manager.create_session(agent["id"], "Original outcome", str(tmp_path), backend="codex")
+    starts = []
+
+    def argv(context):
+        starts.append(context.prompt)
+        code = "print('{\"type\":\"turn.completed\",\"usage\":{}}',flush=True)"
+        return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
+
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv,
+                                                   prepare_resume=None, activity_observer=None))
+    committed = asyncio.Event()
+    record, projection, broadcast = database.record_terminal, database.message_sequence_state, manager._broadcast
+
+    async def record_original(**kwargs):
+        await record(**kwargs)
+        committed.set()
+
+    async def fail_projection(session_id):
+        if committed.is_set():
+            raise RuntimeError("post-commit projection failed")
+        return await projection(session_id)
+
+    async def fail_publication(event, **kwargs):
+        if event.get("type") == "result":
+            raise RuntimeError("post-commit publication failed")
+        return await broadcast(event, **kwargs)
+
+    monkeypatch.setattr(database, "record_terminal", record_original)
+    if failure == "projection":
+        monkeypatch.setattr(database, "message_sequence_state", fail_projection)
+    else:
+        monkeypatch.setattr(manager, "_broadcast", fail_publication)
+    try:
+        accepted = await submit_client_message(manager, session.id, "Execute once", [], "original", wiki_mode=None)
+        # Observe the original receipt even if its Owner has failed after commit.
+        row = await database.get_client_submission(session.id, "original")
+        from server.sessions.submission import observed_input_receipt
+        receipt = observed_input_receipt(row, session)
+        completion = await asyncio.wait_for(receipt.wait(), 5)
+        assert completion.outcome.status == "success" and completion.recording_state == "committed"
+        assert completion.notification_state == ("unavailable" if failure == "projection" else "failed")
+        original = await submission_status(manager, session.id, "original")
+        assert original["execution"]["state"] == "done"
+        duplicate = await submit_client_message(manager, session.id, "Execute once", [], "original", wiki_mode=None)
+        assert duplicate == original
+        rows = await database.load_messages(session.id)
+        terminals = [row for row in rows if row["type"] == "result"]
+        assert len(terminals) == 1 and terminals[0]["content"]["request_id"] == accepted["request_id"]
+        assert terminals[0]["content"]["status"] == "success"
+        assert starts == ["Execute once"]
+    finally:
+        monkeypatch.setattr(database, "message_sequence_state", projection)
+        await manager.drain_turns()
+        await manager.stop_all_held_processes()
+        await database.close()
+
+
+async def test_duplicate_late_terminal_uses_original_callback_without_settling_next_request(tmp_path, monkeypatch):
+    database = Database(str(tmp_path / "late-terminal.sqlite3"))
+    await database.initialize()
+    await create_account(database, extra_roots=[tmp_path])
+    manager = SessionManager()
+    await manager.initialize(database)
+    agent = await database.get_system_agent()
+    session = await manager.create_session(agent["id"], "Late terminal", str(tmp_path), backend="codex")
+    release, started = tmp_path / "release", asyncio.Event()
+    handlers, starts = [], []
+    set_handler = HarnessRun.set_idle_handler
+
+    def capture_handler(run, handler):
+        handlers.append(handler)
+        set_handler(run, handler)
+
+    monkeypatch.setattr(HarnessRun, "set_idle_handler", capture_handler)
+
+    def argv(context):
+        starts.append(context.prompt)
+        code = (
+            "import time\nfrom pathlib import Path\n"
+            "print('{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"second active\"}}',flush=True)\n"
+            f"while not Path({str(release)!r}).exists(): time.sleep(.01)\n"
+            if context.prompt == "second" else ""
+        ) + "print('{\"type\":\"turn.completed\",\"usage\":{}}',flush=True)"
+        return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
+
+    async def observe(event):
+        if event.get("type") == "assistant_text" and event.get("content") == "second active":
+            started.set()
+
+    manager.on_broadcast("late-terminal", observe)
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv,
+                                                   prepare_resume=None, activity_observer=None))
+    try:
+        first = await manager.start_message(session.id, "first")
+        assert (await asyncio.wait_for(first.wait(), 5)).outcome.status == "success"
+        original_handler = handlers[-1]
+        second = await manager.start_message(session.id, "second")
+        await asyncio.wait_for(started.wait(), 5)
+        for _ in range(2):
+            await original_handler(HarnessEvent(type="result", is_error=True, content="late original failure"))
+        assert manager.dispatch_snapshot(session.id)["active_request_id"] == second.request_id
+        assert await database.get_committed_terminal(session.id, second.request_id) is None
+        release.touch()
+        assert (await asyncio.wait_for(second.wait(), 5)).outcome.status == "success"
+        terminals = [row for row in await database.load_messages(session.id) if row["type"] == "result"]
+        assert [row["content"]["request_id"] for row in terminals] == [first.request_id, second.request_id]
+        assert all(row["content"]["status"] == "success" for row in terminals)
+        assert starts == ["first", "second"]
+    finally:
+        release.touch()
+        await manager.drain_turns()
+        await database.close()

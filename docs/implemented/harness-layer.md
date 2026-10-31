@@ -14,9 +14,10 @@ credentials or every model capability have been verified.
 One public boundary keeps schedules, research and sessions from each choosing
 binaries, constructing credentials or interpreting native protocol events.
 Profiles compose the real differences without a hierarchy of backend-specific
-SessionManagers or public Harness subclasses. Capability predicates derive from
-the supplied collaborators; unsupported operations fail rather than silently
-changing backend or dropping a requested tool restriction.
+SessionManagers or public Harness subclasses. Fork/transcript capabilities derive
+from their collaborators; steering, process reuse and tool-policy support are
+independent adapter declarations. Unsupported operations fail rather than
+silently changing backend or dropping a requested tool restriction.
 
 The wire and database field remains `backend`, and the shared resume field is
 still named `claude_session_id`. The latter stores either backend's native
@@ -36,6 +37,15 @@ reader and retirement operations report their original results to it. HarnessRun
 retains the native resources and reader backpressure through confirmed retirement.
 Input delivery, committed business outcome, notification and resource exit are
 separate facts under the [execution contract](architecture-contract.md#输入完成与资源退休).
+
+Claude declares `can_steer=True` and `reusable=True`; Codex exec declares both
+false. `stdin_mode` describes initial delivery only. Owner dispatch, API
+capabilities and `HarnessRun.steer()` consume the explicit steering declaration;
+held-process policy consumes reuse. Tool allow/deny support remains independent.
+For a reusable host, Wiki scopes bind through its original live run lease so
+compatible later requests can install their own task. A non-reusable run uses
+its original task scope directly, including when its initial input uses stdin.
+Both paths preserve current Wiki authorization.
 
 Claude uses stream-JSON input and can retain a process between turns. Codex exec
 closes stdin after its initial prompt and queues subsequent user input. Settings
@@ -78,6 +88,8 @@ The owning code is [Harness](../../server/harness/harness.py),
 `tests/test_harness_core.py`, `tests/test_harness_claude.py`,
 `tests/test_harness_codex.py`, `tests/test_harness_flow_control.py` and
 `tests/test_harness_authorization_stop.py` exercise these boundaries.
+`tests/test_session_capability_projection.py` checks all four steering/reuse
+combinations through real subprocess input, API projection and Wiki tool visibility.
 
 Interactive Codex app-server migration, complete native tails and DSH integration remain
 [planned changes](../plans/engineering-runtime-roadmap.md), not current capabilities.

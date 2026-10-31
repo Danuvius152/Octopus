@@ -945,6 +945,8 @@ CLAUDE_CODE = RuntimeProfile(
     # (measured 2.39s vs a 2.04s bare spawn). Neither failure reproduced —
     # inline-steering.md §10, with the fork suites as the standing gate.
     stdin_mode=_STDIN_MODE,
+    can_steer=True,
+    reusable=True,
     build_turn_argv=build_turn_argv,
     new_event_parser=ClaudeEventParser,
     build_oneshot_argv=build_oneshot_argv,

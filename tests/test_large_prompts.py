@@ -63,14 +63,16 @@ def test_prompt_exactly_at_threshold_passes_through(spill_root, spill_owner):
     assert not (spill_root / "sess-edge").exists()
 
 
-def test_oversize_prompt_is_spilled(spill_root, spill_owner):
+def test_oversize_prompt_publishes_verbatim_file_and_complete_read_pointer(spill_root, spill_owner):
     """A prompt one byte over the threshold gets spilled to disk and
     the caller receives a pointer message — not the original text."""
     prompt = "x" * (LARGE_PROMPT_THRESHOLD_BYTES + 1)
     result = spill_if_large("sess-big", prompt, user_id=spill_owner)
 
     assert result != prompt
-    assert "[octopus-large-prompt]" in result
+    assert result.startswith("[octopus-large-prompt]")
+    assert not result.startswith("[bg-task-result]")
+    assert "Read that file in full" in result
     # The pointer must cite an absolute path the model's Read tool
     # can open without working_dir confusion.
     assert str(spill_root / "sess-big") in result
@@ -79,6 +81,7 @@ def test_oversize_prompt_is_spilled(spill_root, spill_owner):
     files = list((spill_root / "sess-big").glob("*.txt"))
     assert len(files) == 1
     assert files[0].read_text(encoding="utf-8") == prompt
+    assert list((spill_root / "sess-big").glob("*.tmp")) == []
 
 
 def test_pointer_reports_actual_byte_size(spill_root, spill_owner):
@@ -89,15 +92,6 @@ def test_pointer_reports_actual_byte_size(spill_root, spill_owner):
     result = spill_if_large("sess-omega", prompt, user_id=spill_owner)
     expected_bytes = len(prompt.encode("utf-8"))
     assert f"{expected_bytes:,} bytes" in result
-
-
-def test_pointer_instructs_model_to_read_in_full(spill_root, spill_owner):
-    """The pointer must be unambiguous — the model should not respond
-    based on the pointer text alone. Test asserts the explicit
-    instruction is present."""
-    prompt = "x" * (LARGE_PROMPT_THRESHOLD_BYTES + 1)
-    result = spill_if_large("sess-instruct", prompt, user_id=spill_owner)
-    assert "Read that file in full" in result
 
 
 # ---------------------------------------------------------------------------
@@ -115,35 +109,9 @@ def test_bg_task_result_marker_is_preserved_at_front(spill_root, spill_owner):
     assert result.startswith("[bg-task-result] ")
 
 
-def test_plain_user_prompt_has_no_artificial_marker(spill_root, spill_owner):
-    """If the original prompt had no recognized marker, the pointer
-    shouldn't invent one — only `[octopus-large-prompt]` should
-    appear, and the file content stays unmarked."""
-    prompt = "x" * (LARGE_PROMPT_THRESHOLD_BYTES + 1)
-    result = spill_if_large("sess-plain", prompt, user_id=spill_owner)
-    assert not result.startswith("[bg-task-result]")
-    assert result.startswith("[octopus-large-prompt]")
-    # The spilled file is verbatim — no marker prepended to disk.
-    files = list((spill_root / "sess-plain").glob("*.txt"))
-    assert files[0].read_text(encoding="utf-8") == prompt
-
-
 # ---------------------------------------------------------------------------
-# Atomicity + safety
+# Session ID safety
 # ---------------------------------------------------------------------------
-
-
-def test_spill_writes_atomically(spill_root, spill_owner, monkeypatch):
-    """Implementation writes to a `.tmp` sibling, then renames. Verify
-    the temp file is gone after the call — if rename failed, a
-    partially-written `.tmp` would be observable, which would mean
-    the model could Read truncated content on a crash mid-write."""
-    prompt = "x" * (LARGE_PROMPT_THRESHOLD_BYTES + 1)
-    spill_if_large("sess-atomic", prompt, user_id=spill_owner)
-    tmp_files = list((spill_root / "sess-atomic").glob("*.tmp"))
-    assert tmp_files == []
-    final_files = list((spill_root / "sess-atomic").glob("*.txt"))
-    assert len(final_files) == 1
 
 
 def test_invalid_session_id_is_rejected(spill_root, spill_owner):

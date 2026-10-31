@@ -87,7 +87,7 @@ async def test_owner_failure_ends_app_and_question_waits_without_replaying_input
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None,
-        prepare_resume=None, stdin_mode=StdinMode.STREAM_JSON,
+        prepare_resume=None, stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model), str(retired)], {"cwd": context.working_dir},
         ),
@@ -387,7 +387,7 @@ async def _owner_retirement_failure_child(tmp_path, tmp_path_factory, monkeypatc
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None,
-        prepare_resume=None, stdin_mode=StdinMode.STREAM_JSON,
+        prepare_resume=None, stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model_script), str(artifacts / "model-identity.json"),
              str(holder_script), str(artifacts / "holder-identity.json"), str(artifacts / "model-reached-eof")],
@@ -501,7 +501,7 @@ async def test_owner_failure_keeps_a_committed_result_while_its_notification_is_
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None,
-        prepare_resume=None, stdin_mode=StdinMode.STREAM_JSON,
+        prepare_resume=None, stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model), str(retired)], {"cwd": context.working_dir},
         ),

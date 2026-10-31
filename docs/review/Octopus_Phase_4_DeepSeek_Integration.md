@@ -1,6 +1,6 @@
 # Octopus 第四阶段实施方案：DeepSeek Harness 正式接入
 
-实施顺序：[第一阶段](Octopus_Phase_1_Correctness_Wiki_Engineering.md) → [第二阶段](Octopus_Phase_2_Architecture_Contracts.md) → [第三阶段](Octopus_Phase_3_Codex_App_Server.md) → **第四阶段（本文）**。每阶段先达到自己的出口，再开始下一阶段产品改造。
+实施顺序：[第一阶段](../plans/engineering-runtime-roadmap.md#phase-1) → [第二阶段](Octopus_Phase_2_Architecture_Contracts.md) → [第三阶段](Octopus_Phase_3_Codex_App_Server.md) → **第四阶段（本文）**。每阶段先达到自己的出口，再开始下一阶段产品改造。
 
 > 日期：2026-10-30，Asia/Hong_Kong。
 >

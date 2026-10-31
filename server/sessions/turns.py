@@ -11,7 +11,6 @@ import json
 import time
 import uuid
 from collections.abc import Awaitable, Callable
-from copy import deepcopy
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
@@ -30,7 +29,6 @@ from ..harness.model_settings import effective_settings
 from ..models import (
     MessageContent,
     MessageRole,
-    TurnOutcome,
     TurnRecovery,
 )
 from ..monitor import Event as _MonEvent
@@ -66,7 +64,6 @@ from .runtime_types import (
     SessionMailboxFull,
     _Attempt,
     _Decision,
-    _Settlement,
     _Turn,
 )
 from .submission import (
@@ -132,104 +129,6 @@ class TurnsMixin(SessionManagerBase):
             "dispatch_state": self._session_dispatch_snapshot(session),
         }
 
-    async def _settle_turn(
-        self, session: Session, settlement: _Settlement, *,
-        status: Literal["success", "failed", "interrupted"],
-        message: str | None = None, code: str | None = None,
-        result: HarnessEvent | None = None, metadata: dict[str, Any] | None = None,
-        provider_code: str | None = None,
-        rejected_input: dict[str, Any] | None = None,
-    ) -> dict[str, Any]:
-        """The single writer selects once and retains its commit observation."""
-        self._require_session_writer(session)
-        if settlement.outcome is None:
-            outcome = TurnOutcome(
-                request_id=settlement.request_id, status=status,
-                message=safe_diagnostic(message), code=code,
-                provider_code=getattr(result, "error_code", None) or provider_code,
-                recovery=dict(settlement.recovery),
-                recording_integrity="incomplete" if settlement.protocol_issues else "complete",
-                recording_issues=dict(settlement.protocol_issues),
-                recording_locations=list(settlement.protocol_locations),
-            )
-            if settlement.protocol_issues:
-                note = "Some backend protocol records could not be read. Execution was not repeated; the transcript may be incomplete."
-                outcome.message = f"{outcome.message}\n{note}" if outcome.message else note
-
-            settlement.outcome = outcome
-            settlement.stored = MessageContent(
-                role=MessageRole.system, type="result", content=outcome.model_dump(),
-                tool_input={"rejected_input": rejected_input} if rejected_input is not None else None,
-                is_error=status != "success",
-                session_id=result.session_id if result else session.claude_session_id,
-                cost=settlement.cost, created_at=datetime.now(UTC).isoformat(),
-            )
-            if settlement.attempt_id:
-                settlement.stored.tool_input = {
-                    **(settlement.stored.tool_input or {}),
-                    "attempt_context": {"request_id": settlement.request_id, "attempt_id": settlement.attempt_id},
-                }
-            settlement.seq = session._next_message_seq
-            session._next_message_seq += 1
-            event = {
-                "type": "result", "session_id": session.id,
-                "request_id": settlement.request_id, "work_id": settlement.work_id,
-                "attempt_id": settlement.attempt_id,
-                "claude_session_id": settlement.stored.session_id,
-                "content": outcome.model_dump(), "is_error": status != "success",
-                "cost": settlement.cost, "code": code, "message": outcome.message,
-                "terminal": True, "turns": result.num_turns if result else None,
-                # Logical request latency includes retries and their waits.
-                "duration_ms": round((time.monotonic() - settlement.started_at) * 1000)
-                if settlement.started_at is not None else None,
-            }
-            if metadata:
-                for key in ("credential_id", "backend"):
-                    if key in metadata:
-                        event[key] = metadata[key]
-            if rejected_input is not None:
-                event["tool_input"] = settlement.stored.tool_input
-            settlement.event = self._tag_persisted(event, settlement.seq, settlement.stored)
-            return await self._record_and_publish(session, settlement)
-        assert settlement.event is not None
-        return settlement.event
-
-    async def _record_and_publish(self, session: Session, settlement: _Settlement) -> dict[str, Any]:
-        """The owner awaits the original bounded transaction, then offers I/O."""
-        self._require_session_writer(session)
-        assert settlement.stored is not None and settlement.event is not None
-        owner = self._session_owners[id(session)]
-        execution = owner.runtime.current
-        if execution is None or execution.settlement is not settlement:
-            raise SessionOwnerUnavailable("The original execution is no longer owned")
-        stored = settlement.stored
-        assert self.db is not None
-        try:
-            await self.db.record_terminal(
-                request_id=settlement.request_id, session_id=session.id,
-                seq=settlement.seq, role=stored.role.value, type=stored.type,
-                content=stored.content, is_error=stored.is_error,
-                session_id_ref=stored.session_id, cost=stored.cost,
-                created_at=stored.created_at,
-                **({"tool_input": stored.tool_input} if stored.tool_input is not None else {}),
-            )
-        except ValueError as error:
-            if str(error) != "terminal record conflict":
-                raise
-            settlement.recording_state = "failed"
-            event = {"type": "recording_failed", "session_id": session.id,
-                     "request_id": settlement.request_id, "recording_state": "failed",
-                     "terminal": False, "message": "This request conflicts with an already recorded outcome."}
-            settlement.event = event
-            execution.frames.append(event)
-            owner.wake()
-            return event
-        # Original commit acknowledgement precedes projection and publication.
-        settlement.recording_state = "committed"
-        session.restore_message_state(*await self.db.message_sequence_state(session.id))
-        execution.frames.append(deepcopy(settlement.event))
-        owner.wake()
-        return settlement.event
 
     async def _recovery_frame(
         self, session: Session, *, code: str, message: str,
@@ -1300,14 +1199,6 @@ class TurnsMixin(SessionManagerBase):
         limit = settings.turn_max_seconds
         return max(0.0, limit - (time.monotonic() - turn.started_at)) if limit > 0 else None
 
-    async def _settle_overall_timeout(self, session: Session, turn: _Turn) -> dict[str, Any]:
-        detail = await self._surface_turn_timeout(
-            session, reason="overall", limit=settings.turn_max_seconds, backend=turn.harness.backend,
-        )
-        return await self._settle_turn(
-            session, turn.settlement, status="failed", message=detail["message"],
-            code="turn_timeout",
-        )
 
 
     async def _load_agent(self, session: Session) -> dict[str, Any] | None:

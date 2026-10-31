@@ -19,6 +19,12 @@ class FakeRunBase:
     """The parts of `HarnessRun` every stand-in must answer."""
 
     reusable = False
+    can_steer = False
+
+    async def steer(self, text: str):
+        if not self.can_steer:
+            raise RuntimeError("This test runtime does not support steering")
+        return await self.send_user_frame(text)
 
     def is_alive(self) -> bool:
         return True

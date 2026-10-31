@@ -135,7 +135,9 @@ it("shows effective TPS, coverage and a missing-timing state", async () => {
   await screen.findByText("gpt-test");
   const row = screen.getByText("gpt-test").closest("tr");
   expect(row?.textContent).toContain("25.00 tok/s");
+  expect(row?.textContent).toContain("20.00 tok/s");
   expect(row?.textContent).toContain("66.7%");
+  expect(row?.textContent).toContain("Partial timing");
   expect(screen.getByText("missing-model").closest("tr")?.textContent).toContain("Missing timing");
   expect(screen.getByText(/Includes reasoning/)).toBeTruthy();
 });

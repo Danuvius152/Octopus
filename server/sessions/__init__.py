@@ -31,6 +31,7 @@ from .base import (
     fork_info_fields,
     resolve_working_dir,
 )
+from .configuration import ConfigurationMixin
 from .credentials import CredentialsMixin
 from .events import EventsMixin
 from .forking import ForkingMixin
@@ -43,6 +44,7 @@ from .turns import TurnsMixin
 
 
 class SessionManager(
+    ConfigurationMixin,
     OwnershipMixin,
     TurnsMixin,
     ForkingMixin,

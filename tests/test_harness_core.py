@@ -61,6 +61,8 @@ def _stream_profile(
         credential_style="env_secret",
         premature_exit_recovery=False,
         stdin_mode=stdin_mode,
+        can_steer=True,
+        reusable=True,
         build_turn_argv=build_turn_argv,
         new_event_parser=_RawParser,
         build_oneshot_argv=lambda ctx: ([sys.executable], {}),
@@ -730,6 +732,22 @@ async def test_send_user_frame_refused_on_argv_backends(tmp_path):
     with pytest.raises(RuntimeError, match="does not take input on stdin"):
         await run.send_user_frame("late")
     await run.stop()
+
+
+@pytest.mark.asyncio
+async def test_open_stdin_does_not_grant_steering_support(tmp_path):
+    from dataclasses import replace
+
+    profile = replace(_mode_profile("echo-stdin"), can_steer=False, reusable=True)
+    run = Harness(profile).create_run()
+    try:
+        await run.start("original", str(tmp_path))
+        with pytest.raises(RuntimeError, match="does not support steering"):
+            await run.steer("must not be written")
+        events = await asyncio.wait_for(_drain(run), 3)
+        assert [event.raw["content"] for event in events if event.raw.get("type") == "frame_seen"] == ["original"]
+    finally:
+        await run.stop()
 
 
 # --------------------------------------------------------------------------- #

@@ -30,11 +30,13 @@ Fast preferences saved in the CLI. Existing rows therefore use Normal.
 Archived detail, restore, archive replacement, rewind and full-copy forks
 preserve the settings along with their existing ownership and resume state.
 
-One logical turn snapshots its configuration. A change saved during a turn
-applies to the next turn, including if the current turn automatically retries.
-A held process's spawn signature includes effort so it is replaced when the
-next turn needs different settings. The backend resume id is retained.
-The spawn signature also includes speed.
+One logical request captures its session overrides and Agent defaults together
+when preparation acquires the configuration lock. Queued input and preparation
+still waiting for that lock have not captured settings: changes saved before
+capture apply to that request. Later changes apply to a subsequent request;
+retries keep the original capture. A held process's spawn signature includes
+effort and speed, so incompatible settings replace the process while retaining
+the backend resume id.
 
 ## Saving defaults and repairing an existing session
 
@@ -60,11 +62,15 @@ cannot move an error or close the new session's dialog.
 | Logical request capture | Capture the effective configuration under the configuration lock; retries keep that capture. |
 | Process launch | Recheck supported controls and current credential authorization before invoking the captured backend. |
 
-Changing defaults during a request affects the next request. Revoking a
-credential can still prevent a captured configuration from launching; a prior
-save or capture does not grant continuing authorization. Configuration
-orchestration remains in the existing routes and request lifecycle, rather than
-an implemented central configuration service.
+`AgentManager` owns candidate validation and default saves. The existing session
+module owns override saves, committed credential-deletion propagation and
+request capture in [configuration.py](../../server/sessions/configuration.py).
+These operations share the database instance's short configuration lock;
+routes translate requests and errors without composing locks or live-field
+refreshes. Effective field precedence stays in `effective_settings`.
+Credential refresh, connector loading and other slow preparation happen after
+capture releases the lock. Revoking a credential can still prevent spawn or
+any later frame write; capture grants no continuing authorization.
 
 ## Runtime metadata and validation
 
@@ -124,8 +130,10 @@ is the client's last advertised list, not a new availability check.
 
 Backend coverage checks independent inheritance, validation, metadata redaction,
 credential ownership, persistence, archived restore and fork inheritance. A
-recovery test changes effort mid-turn and checks that retries retain the old
-setting. Frontend tests cover effort-only requests, model-specific choices,
+configuration regression orders saves at the actual lock-acquisition boundary;
+queued, captured and retried requests use the expected complete settings.
+Spawn and initial-frame regressions revoke the captured credential before its
+actual effect. Frontend tests cover effort-only requests, model-specific choices,
 rejection messages, combined credential/effort repair and concurrent store
 updates. Browser coverage changes effort through the visible header and reloads
 an existing transcript. This installation's routine Codex live checks use low

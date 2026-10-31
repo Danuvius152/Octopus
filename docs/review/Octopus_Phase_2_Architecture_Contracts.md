@@ -1,6 +1,11 @@
 # Octopus 第二阶段实施方案：架构与接口收敛
 
-实施顺序：[第一阶段](Octopus_Phase_1_Correctness_Wiki_Engineering.md) → **第二阶段（本文）** → [第三阶段](Octopus_Phase_3_Codex_App_Server.md) → [第四阶段](Octopus_Phase_4_DeepSeek_Integration.md)。每阶段先达到自己的出口，再开始下一阶段产品改造。
+> **历史设计输入，已被 2026-10-31 的确认设计修订。** 当前第二阶段执行范围及 G2
+> 出口以[工程路线第二阶段](../plans/engineering-runtime-roadmap.md#phase-2)为准。
+> 本文的 C4 首输入持久扩展、C5 最终原生 item 引用和完整 S6 网关反射替换已被
+> D3/D4/D6/D11 替代，不再作为并行实施要求；其余正文保留当时论证。
+
+实施顺序：[第一阶段](../plans/engineering-runtime-roadmap.md#phase-1) → **第二阶段（当前范围见上）** → [第三阶段](Octopus_Phase_3_Codex_App_Server.md) → [第四阶段](Octopus_Phase_4_DeepSeek_Integration.md)。每阶段先达到自己的出口，再开始下一阶段产品改造。
 
 > 编制日期：2026-10-30。状态：**实施设计，尚未实施或验收**。\
 > 输入：用户附件《Octopus 工程收敛与运行时路线》；本次只读核对仓库提交 `0ca897e97189c5f213a658d986cbd67f4d69c5e3`。该提交与附件 §7.3 的补充核查基线一致。本文没有运行产品测试、真实模型、发布或生产数据操作。\

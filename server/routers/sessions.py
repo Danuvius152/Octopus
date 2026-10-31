@@ -24,6 +24,7 @@ from ..models import (
 )
 from ..session_manager import ForkError
 from ..sessions import SessionManager
+from ..sessions.configuration import SessionConfigurationError
 from ..sessions.presentation import session_info
 from ..sessions.runtime_types import QuotaExceeded
 from ..submission_models import (
@@ -101,76 +102,14 @@ async def update_session(
     session), and an unknown credential id is refused rather than silently
     stored, because a dangling id is exactly the state this route exists to
     get out of."""
-    async with session_manager.configuration_lock:
-        return await _update_session_settings(session_manager, session_id, req, user_id)
-
-
-async def _update_session_settings(
-    session_manager, session_id: str, req: SessionUpdate, user_id: str | None,
-) -> SessionInfo:
-    session = session_manager.get_session(session_id, user_id)
-    if session is None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
-
-    fields = req.model_dump(exclude_unset=True)
-    updates: dict[str, object] = {}
-
-    if "credential_id" in fields:
-        cred_id = fields["credential_id"] or None
-        await _check_credential_binding(session_manager, cred_id, session.backend, user_id)
-        updates["credential_id"] = cred_id
-
-    # `/model`. Deliberately not validated against a list: both CLIs accept
-    # aliases, and new model names appear between Octopus releases — refusing an
-    # unknown string would make this route the thing that needs shipping. Empty
-    # means "back to the agent's model", same as null.
-    if "model" in fields:
-        raw = fields["model"]
-        updates["model"] = (str(raw).strip() or None) if raw is not None else None
-
-    if "reasoning_effort" in fields:
-        updates["reasoning_effort"] = fields["reasoning_effort"]
-    if "service_tier" in fields:
-        updates["service_tier"] = fields["service_tier"]
-    if {"model", "reasoning_effort", "service_tier", "credential_id"} & updates.keys():
-        from .backends import (
-            model_settings_for,
-            validate_controls,
+    try:
+        session = await session_manager.update_session_configuration(
+            session_id, req.model_dump(exclude_unset=True), user_id,
         )
-
-        agent = (
-            await session_manager.db.get_agent(session.agent_id, user_id)
-            if session.agent_id else None
-        ) or {}
-        effort = updates.get("reasoning_effort", session.reasoning_effort) or agent.get("reasoning_effort")
-        tier = updates.get("service_tier", session.service_tier) or agent.get("service_tier")
-        if effort is not None or tier is not None:
-            catalog = await model_settings_for(
-                session_manager, session.backend,
-                updates.get("credential_id", session.credential_id) or agent.get("credential_id"),
-                user_id,
-            )
-            validate_controls(
-                catalog, updates.get("model", session.model) or agent.get("model"), effort, tier,
-                backend=session.backend, overrides={
-                    "reasoning_effort": updates.get("reasoning_effort", session.reasoning_effort),
-                    "service_tier": updates.get("service_tier", session.service_tier),
-                },
-            )
-
-    if "name" in fields and fields["name"] is not None:
-        name = str(fields["name"]).strip()
-        if not name:
-            raise HTTPException(
-                status.HTTP_400_BAD_REQUEST, "Session name cannot be empty"
-            )
-        updates["name"] = name
-
-    if updates:
-        await session_manager.db.update_session_field(session_id, **updates)
-        for key, value in updates.items():
-            setattr(session, key, value)
-
+    except SessionConfigurationError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+    except CredentialBindingError as error:
+        raise HTTPException(404 if str(error) == "Credential not found" else 400, str(error)) from error
     return session_info(session)
 
 

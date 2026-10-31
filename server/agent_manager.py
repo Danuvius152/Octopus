@@ -26,7 +26,7 @@ from .credential_bindings import (
     validate_failed_credential_write,
 )
 from .database import Database
-from .harness import RunConfig, get_harness
+from .harness import RunConfig, get_harness, model_settings
 
 
 def _validate_runtime_configuration(backend: str, fields: dict[str, Any]) -> None:
@@ -72,6 +72,15 @@ def _memory_mutation(operation):
 class AgentManager:
     def __init__(self, db: Database) -> None:
         self.db = db
+
+    async def _validate_controls(self, backend: str, fields: dict[str, Any], user_id: str | None) -> None:
+        if fields.get("reasoning_effort") is None and fields.get("service_tier") is None:
+            return
+        catalog = await model_settings.model_settings_for(self.db, backend, fields.get("credential_id"), user_id)
+        try:
+            model_settings.validate_controls(catalog, fields.get("model"), fields.get("reasoning_effort"), fields.get("service_tier"))
+        except model_settings.ModelControlError as error:
+            raise AgentError(error.describe(backend, inherited=True)) from error
 
 
     async def list_agents(
@@ -127,6 +136,10 @@ class AgentManager:
                 "service_tier": service_tier, "subagents": subagents, "tool_allow": tool_allow, "tool_deny": tool_deny,
             })
             await validate_credential_binding(self.db, credential_id, backend, user_id)
+            await self._validate_controls(backend, {
+                "model": model, "reasoning_effort": reasoning_effort,
+                "service_tier": service_tier, "credential_id": credential_id,
+            }, user_id)
         except ValueError as exc:
             raise AgentError(str(exc)) from exc
         agent_id = uuid.uuid4().hex[:12]
@@ -171,6 +184,15 @@ class AgentManager:
     async def update_agent(
         self, agent_id: str, user_id: str | None = None, **fields: Any
     ) -> dict[str, Any]:
+        async def save() -> dict[str, Any]:
+            async with self.db.configuration_lock:
+                return await self._update_agent(agent_id, user_id, **fields)
+
+        return await complete_cleanup(save())
+
+    async def _update_agent(
+        self, agent_id: str, user_id: str | None, **fields: Any,
+    ) -> dict[str, Any]:
         agent = await self.db.get_agent(agent_id, user_id=user_id)
         if agent is None:
             raise AgentError("Agent not found")
@@ -187,6 +209,8 @@ class AgentManager:
             await validate_credential_binding(
                 self.db, credential_id, backend, owner_id
             )
+            if {"model", "reasoning_effort", "service_tier", "backend", "credential_id"} & fields.keys():
+                await self._validate_controls(backend, {**agent, **fields}, owner_id)
         except ValueError as exc:
             raise AgentError(str(exc)) from exc
         if "name" in fields and fields["name"] is not None:

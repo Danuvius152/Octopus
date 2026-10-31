@@ -538,6 +538,9 @@ class SessionManagerBase:
     async def _load_agent(self, session: Session) -> dict[str, Any] | None:
         raise NotImplementedError  # provided by a mixin
 
+    async def capture_request_configuration(self, context: Session) -> tuple[Session, dict[str, Any] | None]:
+        raise NotImplementedError  # provided by a mixin
+
     def _make_run(
         self,
         session: Session,
@@ -702,9 +705,6 @@ class SessionManagerBase:
         # Resolution owns refresh through provider completion and conditional writeback.
         self._credential_refreshes: dict[tuple[str | None, str], asyncio.Task[HarnessCredential | None]] = {}
         self._credential_refresh_closed = False
-        # Short configuration operations share a lock, independently of turn
-        # execution. Read/validate/write and turn snapshots must agree.
-        self.configuration_lock = asyncio.Lock()
         self._agent_lifecycle_lock = asyncio.Lock()
         self._wiki_dispatch_locks: dict[str | None, asyncio.Lock] = {}
         self._closed_agents: set[str] = set()
@@ -767,7 +767,6 @@ class SessionManagerBase:
             # Lifespan binds a new runner after initialization. Retirement
             # must never query a runner that still owns an earlier database.
             self._schedule_runner = None
-        self.configuration_lock = asyncio.Lock()
         self._agent_lifecycle_lock = asyncio.Lock()
         self._closed_agents.clear()
         self._wiki_dispatch_locks.clear()

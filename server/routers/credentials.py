@@ -162,18 +162,9 @@ async def delete_credential(
     user_id: ScopeUser = None,
     _: str = Depends(verify_token),
 ):
-    db = _require_db()
-    async with session_manager.configuration_lock:
-        row = await db.get_credential(credential_id, user_id)
-        if row is None:
-            raise HTTPException(status_code=404, detail="credential not found")
-        if not await db.delete_credential(credential_id):
-            raise HTTPException(status_code=404, detail="credential not found")
-        # Propagate committed defaults only. A prepared request retains its
-        # original binding and must pass the actual-effect authorization.
-        for live in session_manager.sessions.values():
-            if live.credential_id == credential_id:
-                live.credential_id = None
+    row = await session_manager.delete_credential_binding(credential_id, user_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="credential not found")
     # Revoke any on-disk login state for this credential's harness (Codex
     # rmtree's its CODEX_HOME; Claude has nothing on disk). The harness owns
     # the cleanup — no backend-kind branching here.

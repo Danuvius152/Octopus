@@ -39,7 +39,7 @@ async def test_runtime_text_subscriber_can_stop_its_original_request(question_ho
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
-        stdin_mode=StdinMode.STREAM_JSON,
+        stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
         build_turn_argv=lambda context: ([sys.executable, "-u", str(model)], {"cwd": context.working_dir}),
     ))
     stopped = asyncio.Event()
@@ -102,7 +102,7 @@ async def test_initial_stdout_is_delivered_before_a_blocked_initial_stdin_drains
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
-        stdin_mode=StdinMode.STREAM_JSON,
+        stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model), str(allow_input), str(saved_input)],
             {"cwd": context.working_dir},
@@ -276,7 +276,7 @@ async def test_runtime_publication_failure_uses_its_original_credential(question
     harness = get_harness("claude-code")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
-        stdin_mode=StdinMode.STREAM_JSON, build_turn_argv=offline_argv,
+        stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True, build_turn_argv=offline_argv,
     ))
 
     async def cancel_original_publication(event):

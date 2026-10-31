@@ -238,7 +238,7 @@ async def test_concurrent_delete_callers_share_one_retirement_owner(runtime, mon
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
-        stdin_mode=StdinMode.STREAM_JSON,
+        stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model), str(identity), str(entered), str(release), str(original_input)],
             {"cwd": context.working_dir},

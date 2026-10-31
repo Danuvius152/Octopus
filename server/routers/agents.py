@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 
 from ..agent_manager import AgentError, AgentManager
 from ..auth import verify_token
-from ..credential_bindings import CredentialBindingError, validate_credential_binding
+from ..credential_bindings import CredentialBindingError
 from ..deps import ScopeUser, SessionMgr
 from ..models import (
     AgentCreate,
@@ -22,7 +22,6 @@ from ..models import (
     SessionInfo,
 )
 from ..sessions.presentation import session_info
-from .backends import model_settings_for, validate_controls
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -74,18 +73,6 @@ async def list_agents(
 async def create_agent(
     session_manager: SessionMgr, req: AgentCreate, user_id: ScopeUser = None, _: str = Depends(verify_token)
 ):
-    credential_id = req.credential_id or None
-    try:
-        await validate_credential_binding(
-            session_manager.db, credential_id, req.backend, user_id
-        )
-    except CredentialBindingError as e:
-        raise _agent_http_error(e)
-    if req.reasoning_effort is not None or req.service_tier is not None:
-        catalog = await model_settings_for(
-            session_manager, req.backend, credential_id, user_id,
-        )
-        validate_controls(catalog, req.model, req.reasoning_effort, req.service_tier, backend=req.backend)
     try:
         # The owner, which is the whole point of the `ScopeUser` above: it was
         # declared and never passed, so every agent created through this route
@@ -139,41 +126,12 @@ async def update_agent(
     # exclude_unset so omitting a field leaves it untouched while explicitly
     # passing null clears a nullable field (model/credential_id/avatar).
     fields = req.model_dump(exclude_unset=True)
-    async with session_manager.configuration_lock:
-        agent = await _update_agent_settings(session_manager, agent_id, fields, user_id)
-    await _publish(session_manager, "agent_updated", agent)
-    return AgentRead(**agent)
-
-
-async def _update_agent_settings(session_manager, agent_id: str, fields: dict, user_id: str | None) -> dict:
-    if "credential_id" in fields:
-        fields["credential_id"] = fields["credential_id"] or None
-    if {"model", "reasoning_effort", "service_tier", "backend", "credential_id"} & fields.keys():
-        current = await session_manager.db.get_agent(agent_id, user_id)
-        if current is None:
-            raise HTTPException(404, "Agent not found")
-        merged = {**current, **fields}
-        # Explicit null for backend is ignored by Database.update_agent; check
-        # the backend that will actually be saved, including backend-only edits.
-        if merged["backend"] is None:
-            merged["backend"] = current["backend"]
-        try:
-            await validate_credential_binding(
-                session_manager.db, merged.get("credential_id"), merged["backend"], user_id
-            )
-        except CredentialBindingError as e:
-            raise _agent_http_error(e)
-        if merged.get("reasoning_effort") is not None or merged.get("service_tier") is not None:
-            catalog = await model_settings_for(
-                session_manager, merged["backend"], merged.get("credential_id"), user_id,
-            )
-            validate_controls(catalog, merged.get("model"), merged.get("reasoning_effort"),
-                              merged.get("service_tier"), backend=merged["backend"])
     try:
         agent = await _get_manager().update_agent(agent_id, user_id, **fields)
     except AgentError as e:
         raise _agent_http_error(e)
-    return agent
+    await _publish(session_manager, "agent_updated", agent)
+    return AgentRead(**agent)
 
 
 @router.post("/{agent_id}/archive", response_model=AgentRead)

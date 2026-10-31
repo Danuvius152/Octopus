@@ -186,12 +186,15 @@ Skills support the task's scope and existing authorization.
 `archeryue/Octopus` for requested updates. Released milestone tags are immutable.
 
 - Keep secrets, runtime data and unrelated or concurrent work out of commits.
-  Commit/push this task's authorized, verified code and documentation to `origin`
-  in focused commits, unless the user asks to leave the work uncommitted.
-  Include required documentation updates in the code delivery, including
-  corrections completed after the code commit.
-- Documentation-only changes follow the same commit/push policy after their
-  documentation checks. They do not trigger application builds, full product
+  For implementation tasks, commit/push the authorized, verified code and its
+  required documentation to `origin` in focused commits, unless the user asks
+  to leave the work uncommitted. Include documentation corrections completed
+  after the code commit in that delivery.
+- For documentation-only tasks, including designs, specs, reviews, local
+  tickets and agent guidance, complete the applicable documentation checks
+  and leave changes uncommitted by default. Commit or push only when the user
+  explicitly requests that action; reuse authorization already given for the
+  same task. These tasks do not trigger application builds, full product
   suites, model calls, restarts or deployment.
 - After pushing validated `main` code, follow [自动发布](docs/local-wsl.md#自动发布)
   without another confirmation: prepare the candidate, wait for natural drain,

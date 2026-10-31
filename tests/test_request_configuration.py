@@ -82,7 +82,7 @@ async def configuration_host(tmp_path, monkeypatch):
             await db.close()
 
 
-async def test_request_captures_session_and_agent_after_coordinated_updates(configuration_host):
+async def test_request_captures_session_and_agent_after_coordinated_updates(configuration_host, monkeypatch):
     client, manager, session, credential_ids, effects = configuration_host
     response = await client.patch(f"/api/sessions/{session.id}", json={"model": "session-old"})
     assert response.status_code == 200, response.text
@@ -93,14 +93,23 @@ async def test_request_captures_session_and_agent_after_coordinated_updates(conf
             input_recorded.set()
 
     manager.on_broadcast("configuration-input", observe_input)
+    waiting = asyncio.Queue()
+    acquire = manager.configuration_lock.acquire
+
+    async def observe_acquire():
+        waiting.put_nowait(None)
+        return await acquire()
+
     # Hold the existing configuration boundary to order real HTTP updates
     # before request assembly; assertions concern the process's actual input.
     async with manager.configuration_lock:
+        monkeypatch.setattr(manager.configuration_lock, "acquire", observe_acquire)
         session_update = asyncio.create_task(client.patch(f"/api/sessions/{session.id}", json={"model": "session-new"}))
+        await asyncio.wait_for(waiting.get(), 1)
         agent_update = asyncio.create_task(client.patch(f"/api/agents/{session.agent_id}", json={
             "reasoning_effort": "high", "service_tier": "fast", "credential_id": credential_ids[1],
         }))
-        await asyncio.sleep(.02)
+        await asyncio.wait_for(waiting.get(), 1)
         receipt = await manager.start_message(session.id, "Use a consistent configuration")
         await asyncio.wait_for(input_recorded.wait(), 3)
     try:
@@ -114,7 +123,71 @@ async def test_request_captures_session_and_agent_after_coordinated_updates(conf
         manager.remove_broadcast("configuration-input")
 
 
-async def test_default_updates_after_capture_apply_to_the_next_request(configuration_host, monkeypatch):
+async def test_default_save_operation_waits_for_the_configuration_capture_boundary(configuration_host, monkeypatch):
+    _client, manager, session, _credential_ids, _effects = configuration_host
+    saving = asyncio.Event()
+    lock = manager.configuration_lock
+    acquire = lock.acquire
+
+    async def observe_acquire():
+        saving.set()
+        return await acquire()
+
+    async with lock:
+        monkeypatch.setattr(lock, "acquire", observe_acquire)
+        operation = asyncio.create_task(AgentManager(manager.db).update_agent(session.agent_id, model="saved-together"))
+        await asyncio.wait_for(saving.wait(), 1)
+        # Observe the public saved definition while capture owns the boundary.
+        assert not operation.done()
+        assert (await manager.db.get_agent(session.agent_id))["model"] == "agent-old"
+    assert (await operation)["model"] == "saved-together"
+
+
+async def test_default_changes_after_capture_do_not_change_retry_configuration(configuration_host, tmp_path, monkeypatch):
+    from server.config import settings
+
+    client, manager, session, credential_ids, effects = configuration_host
+    monkeypatch.setattr(settings, "turn_idle_max_retries", 0)
+    monkeypatch.setattr(manager, "_TRANSIENT_RETRY_BASE_DELAY", 0)
+    script = tmp_path / "configuration_model.py"
+    defaults_saved = tmp_path / "defaults-saved"
+    script.write_text(
+        "import sys,time\nfrom pathlib import Path\n"
+        "path=Path(sys.argv[1])\n"
+        "with path.open('a') as out: out.write(sys.argv[2]+'\\n')\n"
+        "print('{\"type\":\"thread.started\",\"thread_id\":\"captured-thread\"}',flush=True)\n"
+        "if len(path.read_text().splitlines()) == 1:\n"
+        " print('{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Partial work\"}}',flush=True)\n"
+        f" while not Path({str(defaults_saved)!r}).exists(): time.sleep(.005)\n"
+        " print('{\"type\":\"turn.failed\",\"error\":{\"message\":\"server overloaded\",\"code\":\"server_overloaded\"}}',flush=True)\n"
+        "else: print('{\"type\":\"turn.completed\",\"usage\":{}}',flush=True)\n"
+    )
+    changed = asyncio.Event()
+
+    async def change_defaults(event):
+        if event.get("type") == "assistant_text" and not changed.is_set():
+            changed.set()
+            response = await client.patch(f"/api/agents/{session.agent_id}", json={
+                "model": "agent-new", "reasoning_effort": "high", "service_tier": "fast", "credential_id": credential_ids[1],
+            })
+            assert response.status_code == 200, response.text
+            defaults_saved.touch()
+
+    manager.on_broadcast("change-before-retry", change_defaults)
+    try:
+        receipt = await manager.start_message(session.id, "Keep this request's captured configuration")
+        result = await asyncio.wait_for(receipt.wait(), 5)
+        assert result.outcome.status == "success" and changed.is_set()
+        assert result.outcome.recovery["transient"] == 1
+        assert [json.loads(line) for line in effects.read_text().splitlines()] == [
+            {"model": "agent-old", "effort": "low", "tier": "default", "credential": credential_ids[0]},
+            {"model": "agent-old", "effort": "low", "tier": "default", "credential": credential_ids[0]},
+        ]
+    finally:
+        manager.remove_broadcast("change-before-retry")
+
+
+async def test_default_updates_after_capture_apply_to_the_queued_request(configuration_host, monkeypatch):
     client, manager, session, credential_ids, effects = configuration_host
     captured, release = asyncio.Event(), asyncio.Event()
     read = manager.db.get_enabled_connectors_for_agent
@@ -129,6 +202,7 @@ async def test_default_updates_after_capture_apply_to_the_next_request(configura
     first = await manager.start_message(session.id, "Keep the original request's defaults")
     try:
         await asyncio.wait_for(captured.wait(), 3)
+        second = await manager.start_message(session.id, "Use the new defaults")
         updated = await client.patch(f"/api/sessions/{session.id}", json={"model": "session-new"})
         assert updated.status_code == 200, updated.text
         updated = await client.patch(f"/api/agents/{session.agent_id}", json={
@@ -137,7 +211,6 @@ async def test_default_updates_after_capture_apply_to_the_next_request(configura
         assert updated.status_code == 200, updated.text
         release.set()
         assert (await asyncio.wait_for(first.wait(), 5)).outcome.status == "success"
-        second = await manager.start_message(session.id, "Use the new defaults")
         assert (await asyncio.wait_for(second.wait(), 5)).outcome.status == "success"
         assert [json.loads(line) for line in effects.read_text().splitlines()] == [
             {"model": "agent-old", "effort": "low", "tier": "default", "credential": credential_ids[0]},
@@ -197,7 +270,7 @@ async def test_credential_deleted_after_spawn_cannot_receive_initial_input(confi
     )
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
-        harness.profile, stdin_mode=StdinMode.STREAM_JSON,
+        harness.profile, stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
         build_turn_argv=lambda context: ([sys.executable, "-u", str(model), str(effects)], {"cwd": context.working_dir}),
     ))
     spawn = asyncio.create_subprocess_exec
@@ -364,7 +437,7 @@ async def test_next_request_uses_the_new_credential_instead_of_a_held_process(co
     )
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
-        harness.profile, stdin_mode=StdinMode.STREAM_JSON, credential_style=credential_style,
+        harness.profile, stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True, credential_style=credential_style,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model), str(effects),
              Path(context.credential.home_dir).name if context.credential.home_dir else context.credential.secret],

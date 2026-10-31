@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from ..harness import StdinMode, get_harness
+from ..harness import get_harness
 from ..models import SessionInfo, SessionStatus
 from .base import Session, fork_info_fields
 
@@ -19,7 +19,7 @@ def session_info(
     get = source.get if isinstance(source, dict) else lambda name, default=None: getattr(source, name, default)
     backend = get("backend") or "claude-code"
     try:
-        can_steer = get_harness(backend).profile.stdin_mode is StdinMode.STREAM_JSON
+        can_steer = get_harness(backend).profile.can_steer
     except ValueError:
         can_steer = False
     return SessionInfo(

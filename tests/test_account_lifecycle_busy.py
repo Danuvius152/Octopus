@@ -45,7 +45,7 @@ async def test_busy_fork_refuses_without_blocking_owned_stop(
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
         harness.profile, binary=sys.executable, activity_observer=None,
-        prepare_resume=None, stdin_mode=StdinMode.STREAM_JSON,
+        prepare_resume=None, stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model), str(retired)], {"cwd": context.working_dir},
         ),

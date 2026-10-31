@@ -35,6 +35,7 @@ async def dispatch(monkeypatch, request, tmp_path):
 
     class Run(FakeRunBase):
         reusable = bool(getattr(request, "param", False))
+        can_steer = bool(getattr(request, "param", False))
         run_lease_id = None
         work_id = None
 

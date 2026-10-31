@@ -211,7 +211,7 @@ def synthetic_cli(monkeypatch, starts, code=None):
 
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
-        harness.profile, build_turn_argv=session_turn_argv(harness.profile, argv), stdin_mode=StdinMode.STREAM_JSON,
+        harness.profile, build_turn_argv=session_turn_argv(harness.profile, argv), stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
         activity_observer=None,
     ))
 

@@ -10,9 +10,9 @@ subagent definitions. Sessions are conversations owned by that agent; schedules,
 connector enablement and the agent's Markdown memory also use that identity.
 This keeps configuration and continuity independent of any one conversation.
 
-Configuration is a live reference. A saved agent change affects subsequent
-logical turns of existing sessions. An admitted logical turn keeps its captured
-configuration through retries. Session model, effort, speed and credential
+Configuration is a live reference. A saved agent change affects requests that
+have not yet captured their settings during preparation. A captured request
+keeps that configuration through retries. Session model, effort, speed and credential
 overrides resolve independently; clearing one restores that field's inheritance.
 The complete precedence and validation rules belong to
 [model settings](model-reasoning.md). Working directory is a session property,

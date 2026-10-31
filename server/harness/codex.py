@@ -1092,6 +1092,8 @@ CODEX = RuntimeProfile(
     # web_research render path (-c tools.web_search=true). native-deep-research.md §4.
     web=WebCapability(tool_names=("web_search",), combined=True),
     stdin_mode=StdinMode.CLOSE_AFTER_SPAWN,
+    can_steer=False,
+    reusable=False,
     build_turn_argv=build_turn_argv,
     activity_observer=CodexActivityObserver,
     prepare_resume=refresh_instructions,

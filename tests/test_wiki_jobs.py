@@ -1030,7 +1030,7 @@ async def shutdown_worker(jobs, monkeypatch):
 
     harness = get_harness("codex")
     monkeypatch.setattr(harness, "profile", replace(
-        harness.profile, build_turn_argv=argv, stdin_mode=StdinMode.STREAM_JSON,
+        harness.profile, build_turn_argv=argv, stdin_mode=StdinMode.STREAM_JSON, can_steer=True, reusable=True,
     ))
 
     async def observe(event):

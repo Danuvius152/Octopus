@@ -127,6 +127,9 @@ class DatabaseBase:
         self._closed: bool = False
         self._close_task: asyncio.Task[None] | None = None
         self._write_lock = asyncio.Lock()
+        # Agent defaults, live session overrides and request capture share
+        # this short boundary across all managers using this database.
+        self.configuration_lock = asyncio.Lock()
         self._agent_memory_lock = asyncio.Lock()
         self._write_owner: asyncio.Task[Any] | None = None
         # Work that has to unwind before the connection goes away; see

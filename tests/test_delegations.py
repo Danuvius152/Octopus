@@ -47,7 +47,7 @@ from server.routers import agents as agents_mod
 from server.routers import schedules as schedules_mod
 from server.scheduler import ScheduleRunner
 from server.session_manager import session_manager
-from server.sessions.turns import _Settlement
+from server.sessions.runtime_types import _Settlement
 from server.users import UserManager
 from tests.accounts import create_account
 from tests.completion_models import CompletionModels

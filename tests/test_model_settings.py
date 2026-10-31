@@ -296,7 +296,7 @@ async def test_speed_validation_is_atomic_and_model_specific(client):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entity", ["agents", "sessions"])
 async def test_concurrent_model_and_speed_updates_validate_the_committed_state(client, monkeypatch, entity):
-    from server.routers import backends
+    from server.harness import model_settings
 
     response = await client.post("/api/agents", headers=client.headers, json={
         "name": "Concurrent", "backend": "codex", "model": "model-a",
@@ -306,15 +306,14 @@ async def test_concurrent_model_and_speed_updates_validate_the_committed_state(c
     if entity == "sessions":
         response = await client.post(f"{path}/sessions", headers=client.headers, json={})
         path = f"/api/sessions/{response.json()['id']}"
-    original = backends.model_settings_for
+    original = model_settings.model_settings_for
 
     async def delayed_catalog(*args, **kwargs):
         result = await original(*args, **kwargs)
         await asyncio.sleep(0.02)
         return result
 
-    monkeypatch.setattr(backends, "model_settings_for", delayed_catalog)
-    monkeypatch.setattr(agents, "model_settings_for", delayed_catalog)
+    monkeypatch.setattr(model_settings, "model_settings_for", delayed_catalog)
     results = await asyncio.gather(
         client.patch(path, headers=client.headers, json={"model": "model-b"}),
         client.patch(path, headers=client.headers, json={"service_tier": "fast"}),
