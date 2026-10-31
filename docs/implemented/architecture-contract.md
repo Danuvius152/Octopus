@@ -6,7 +6,7 @@
 当前约定直接在所属章节修订；实施顺序、逐轮访谈和已被替代的状态保留在 Git
 历史，不再追加到正文。文档中的支持范围不授予代码实施、发布或生产数据清理权限。
 
-公共返回接管与 BG 接入已实现；Research、委派的剩余接入见
+公共返回接管已供 BG 和 Research 使用；委派的剩余接入见
 [返回接管计划](../plans/task-return-admission.md)，不代表三来源已全部迁移。
 
 ## 文档职责
@@ -215,8 +215,10 @@ BG 的 `deliver_bg_result` 只转换原身份、按需材料及辅助保留说�
 不隐式 Resume。
 
 `test_return_admission.py`、`test_bg_session_return.py` 覆盖原回执、纯准备、冲突及
-暂停；`test_return_admission_lifecycle.py` 覆盖归档竞争与委派单次接纳。Research
-和委派当前保留旧调用入口，共用原资格及归档恢复规则；后续迁移的范围与验收见
+暂停；`test_return_admission_lifecycle.py` 覆盖归档竞争与委派单次接纳。Research 的
+正常注入和启动 unknown 观察均使用公共操作，保留原报告、进度及完成观察；
+`test_research_return_admission.py` 验证丢确认后 Owner 失败、材料删除仍恢复原输入。
+委派当前保留旧调用入口，共用原资格及归档恢复规则；后续迁移的范围与验收见
 [返回接管计划](../plans/task-return-admission.md)。
 
 ## 公开接口与账户配置

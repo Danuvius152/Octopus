@@ -58,7 +58,7 @@ A module singleton bound in `main.py`'s lifespan (mirrors `bg_task_manager`
 - Persists to a `research_jobs` table, with **completion and delivery tracked
   separately** (Vera): `status`/`phase`/`completed_at` AND `injection_status`/
   `injected_at`/`delivery_error`/`report_path`. Because the report is delivered
-  by queuing a `start_message` injection (§7), a job can be `completed` while
+  through the shared `admit_return` operation (§7), a job can be `completed` while
   its report still sits behind an active user turn — the card/DB must show
   completion separately from admission. `injection_status=delivered` is a
   legacy admission fact, not evidence the model processed the report.
@@ -87,11 +87,20 @@ delegations use this same return boundary, including delegated questions.
 Restoration carries dispatch ordering within the current service generation,
 so delayed lifecycle notifications cannot replace a newer list projection.
 
-Report delivery preserves its original `research:{job_id}` identity. A typed
+Report delivery and startup reconciliation use the session-owned
+[`admit_return` operation](architecture-contract.md#公共返回接管), preserving the
+original `research:{job_id}` identity. Normal preparation reads the source job
+and builds its report body only when a new input is still permitted; startup
+preparation always skips new input. An existing receipt therefore needs neither
+the report material nor a functioning destination Owner. Research owns its
+report, delayed retry and processing observer; it does not assemble receipt
+lookup, wake-up or session admission checks itself.
+
+A typed
 `AdmissionIntegrityError` permanently ends automatic delivery while retaining
 the completed report and reason; restart or repairing the target never resends
-it. Only explicit capacity refusals (`SessionMailboxFull`, `QuotaExceeded`) and
-`SessionAdmissionBusy` permit the existing delayed retry. Arbitrary `ValueError`
+it. Only the shared operation's explicit capacity or busy refusal permits
+Research's existing delayed retry. Arbitrary `ValueError`
 and programming errors are not retry classifications. They retain the original
 exception, task and diagnostic on the completed job; the card shows delivery
 stopped, without changing the research outcome or asserting non-acceptance.
@@ -106,7 +115,7 @@ that original receipt, without rerunning research, reopening a failed Owner or
 submitting another input. Source cancellation and shutdown remain separate from
 input acceptance and resource retirement. The regression seams are the real
 SessionManager admission, SQLite receipts and a controlled report generator in
-`test_research_session_return.py`, with source-failure coverage in
+`test_research_session_return.py` and `test_research_return_admission.py`, with source-failure coverage in
 `test_research_manager.py` and `test_source_return_owner_failure.py`.
 
 Pipeline owners and report-delivery observers share one task registry and one

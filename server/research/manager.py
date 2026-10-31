@@ -5,7 +5,7 @@
     id immediately, and runs the pipeline as a tracked `asyncio.Task`.
   - Progress is broadcast over the session bus + written to the row's `phase`.
   - On success the report is written to a file AND injected into the session as
-    a turn via `start_message` (the bg-delivery path); completion and delivery
+    a turn via `admit_return`; completion and delivery
     are tracked separately, injection is idempotent.
   - `cancel(job_id)` cancels the task — leaves re-raise CancelledError and reap
     their process groups, so nothing orphans.
@@ -41,10 +41,15 @@ from ..sessions.base import Session
 from ..sessions.owner_runtime import capture_configuration
 from ..sessions.runtime_types import (
     AdmissionIntegrityError,
-    QuotaExceeded,
-    SessionAdmissionBusy,
-    SessionMailboxFull,
     SessionOwnerUnavailable,
+)
+from ..sessions.submission import (
+    ReturnBody,
+    ReturnRefused,
+    ReturnSkipped,
+    ReturnTarget,
+    ReturnUnconfirmed,
+    SubmissionReceipt,
 )
 from ..workspace import paths_for
 from .orchestrator import (
@@ -140,10 +145,18 @@ class ResearchManager:
             return 0
         n = await self.db.mark_in_flight_research_jobs_interrupted(_now())
         if self.session_mgr is not None:
+            async def observe_only() -> ReturnSkipped:
+                return ReturnSkipped("Previously unconfirmed research admission is observation only")
+
             for row in await self.db.unconfirmed_research_admissions():
-                existing = await self.session_mgr.source_receipt("research", f"research:{row['id']}", session_id=row["session_id"])
-                if existing is not None:
-                    await self._advance_delivery(row["id"], row["session_id"], existing[1].request_id, "unknown")
+                owned = decode_owned(row.get("knowledge_context"))
+                result = await self.session_mgr.admit_return(
+                    ReturnTarget(row["session_id"], "research", f"research:{row['id']}",
+                                 owned.return_binding.work_id if owned else None, owned),
+                    prepare=observe_only,
+                )
+                if isinstance(result, SubmissionReceipt):
+                    await self._advance_delivery(row["id"], row["session_id"], result.request_id, "unknown")
                     await self._settle_delivery(row["id"], row["session_id"])
         for row in await self.db.pending_research_deliveries():
             request_id = row["delivery_receipt"]["request_id"]
@@ -379,71 +392,52 @@ class ResearchManager:
     async def _inject_report(
         self, job_id: str, session_id: str, question: str, report: Any
     ) -> None:
-        """Deliver the report into the session as a turn (the bg-delivery path).
-        Idempotent + tracked separately from completion (Vera review)."""
+        """Own report retries/progress; sessions own the complete return handoff."""
         assert self.db is not None and self.session_mgr is not None
-        prompt = (
-            f"[deep-research:{job_id}] Research complete for: {question}\n\n"
-            f"{report.report}"
-        )
+
+        async def prepare() -> ReturnBody | ReturnSkipped:
+            current = await self.db.get_research_job(job_id)
+            if (self._closing or current is None or current["session_id"] != session_id
+                    or current["status"] != "completed" or current["injection_status"] != "pending"):
+                return ReturnSkipped("The source no longer permits a new report input")
+            return ReturnBody(f"[deep-research:{job_id}] Research complete for: {question}\n\n{report.report}")
+
         while True:
             row = await self.db.get_research_job(job_id)
             if row and row.get("injection_status") in {"delivered", "failed"}:
                 return
-            existing = await self.session_mgr.source_receipt("research", f"research:{job_id}", session_id=session_id)
-            if existing is not None:
-                receipt = existing[1]
-                break
-            if row and row.get("injection_status") == "unknown":
-                return  # Observation may reconcile; absence never authorizes replay.
-            if self.session_mgr.session_owner_failed(session_id):
-                await self._settle_delivery(job_id, session_id, error="delivery suppressed: destination owner is unavailable")
-                return
-            if self._closing or self.session_mgr._admission_closed:
-                await self._settle_delivery(job_id, session_id, error="delivery suppressed: session admission is closed")
-                return
             owned = decode_owned(row.get("knowledge_context")) if row else None
             work_id = owned.return_binding.work_id if owned else None
             try:
-                resolved = await self.session_mgr.resolve_task_return(owned, session_id=session_id, work_id=work_id)
-                context = resolved[1] if resolved is not None else None
-                if (row is None or row["session_id"] != session_id or row["status"] != "completed"
-                        or resolved is None or resolved[0].id != session_id or context is None):
-                    await self._settle_delivery(job_id, session_id,
-                        error="delivery suppressed: original request contract is missing, closed or mismatched")
-                    return
-                receipt = await self.session_mgr.start_message(
-                    session_id, prompt, source="research", delivery_id=f"research:{job_id}",
-                    work_id=work_id, knowledge_context=context,
+                result = await self.session_mgr.admit_return(
+                    ReturnTarget(session_id, "research", f"research:{job_id}", work_id, owned), prepare=prepare,
                 )
-                if not receipt.accepted:
-                    if self.session_mgr._admission_closed:
-                        continue  # Confirm admission before recording a closed destination.
-                    await self._settle_delivery(job_id, session_id, error="delivery suppressed: session admission is closed")
-                    return
-                break
             except AdmissionIntegrityError as error:
+                if row and row["injection_status"] == "unknown":
+                    raise
                 await self._settle_delivery(job_id, session_id, error=str(error))
                 return
-            except (SessionAdmissionBusy, SessionMailboxFull, QuotaExceeded):
-                # These types guarantee refusal before effects; retry the same
-                # report identity after capacity/lifecycle admission changes.
-                pass
-            except (SessionOwnerUnavailable, TimeoutError) as error:
-                # A missing acknowledgment may follow COMMIT. Reconcile the
-                # exact original receipt before classifying destination loss.
-                await self._settle_delivery(job_id, session_id, error=f"Report admission is unconfirmed: {error}", unknown=True)
-                try:
-                    existing = await self.session_mgr.source_receipt("research", f"research:{job_id}", session_id=session_id)
-                except (SessionOwnerUnavailable, TimeoutError):
-                    logger.warning("research %s: original receipt observation unavailable; report admission remains unknown", job_id, exc_info=True)
-                    return
-                if existing is None:
-                    return
-                receipt = existing[1]
+            if isinstance(result, SubmissionReceipt):
+                receipt = result
                 break
-            if not self._closing:
+            if row and row["injection_status"] == "unknown":
+                return  # A later refusal/observation failure cannot erase the original uncertainty.
+            if isinstance(result, ReturnUnconfirmed):
+                await self._settle_delivery(job_id, session_id,
+                    error=f"Report admission is unconfirmed: {result.cause}", unknown=True)
+                return
+            assert isinstance(result, ReturnRefused)
+            if result.reason in {"capacity", "busy"} and not self._closing:
                 await asyncio.sleep(1)
+                continue
+            if result.cause is not None:
+                detail = str(result.cause)
+            elif self._closing or result.reason == "admission_closed":
+                detail = "session admission is closed"
+            else:
+                detail = "original request contract is missing, closed or mismatched"
+            await self._settle_delivery(job_id, session_id, error=f"delivery suppressed: {detail}")
+            return
         self._delivery_jobs[receipt.request_id] = (job_id, session_id)
         current = self.session_mgr.get_session(session_id)
         processing = current and current._run.request and current._run.request.request_id == receipt.request_id

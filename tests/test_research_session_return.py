@@ -375,7 +375,8 @@ async def test_report_lost_ack_reconciles_original_input_without_repeating_resea
     session = await manager.create_session(agent["id"], "Lost report ACK")
     await manager.interrupt(session.id)
     submit, lookup = manager.start_message, manager.source_receipt
-    attempts, lookups = [], []
+    attempts = []
+    observation_failed = False
 
     async def lost_ack(*args, **kwargs):
         attempts.append(kwargs["delivery_id"])
@@ -383,8 +384,9 @@ async def test_report_lost_ack_reconciles_original_input_without_repeating_resea
         raise TimeoutError("Original admission ACK was lost")
 
     async def original_receipt(*args, **kwargs):
-        lookups.append("lookup")
-        if receipt_temporarily_unavailable and len(lookups) == 2:
+        nonlocal observation_failed
+        if receipt_temporarily_unavailable and attempts and not observation_failed:
+            observation_failed = True
             raise TimeoutError("Original receipt temporarily unreadable")
         return await lookup(*args, **kwargs)
 
