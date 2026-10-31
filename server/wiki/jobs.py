@@ -1461,6 +1461,11 @@ class WikiWorker:
                 self.run(user_id), name=f"wiki-curator-{user_id}"
             )
 
+    def drain_blockers(self) -> tuple[str, ...]:
+        if self.pending or self.executing or self.cancellations or any(not task.done() or not task.cancelled() and task.exception() is not None for task in self.tasks.values()):
+            return ("curator, queued wake or cancellation cleanup",)
+        return ()
+
     def begin_shutdown(self) -> None:
         """Seal wakes and issue curator cancellation before execution is drained."""
         self._stopping = True

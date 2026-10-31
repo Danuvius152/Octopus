@@ -70,6 +70,10 @@ a private file. This bearer is distinct from installation setup proof. The
 command waits for natural idle, closes admission through the service owner,
 stops the unit, and copies stable data under the installation lock. It restores
 the source and confirms readiness before compressing the copy.
+Only an explicit successful receipt for the original request authorizes stopping
+the source; a missing status, another request's marker or partially closed gates
+does not. Lost responses are confirmed against that same receipt. See the
+[handoff contract](implemented/architecture-contract.md#安装自然排空与交接收据).
 
 ```bash
 octopus export-account ACCOUNT_ID /private/account.zip \

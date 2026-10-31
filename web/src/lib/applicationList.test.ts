@@ -145,7 +145,7 @@ describe("application list observations", () => {
     const source = { socket: {}, accountGeneration: useSessionStore.getState().accountGeneration };
     list.connect(source); await flush();
     list.receive({ type: "application_updated", application: row("a", { session_id: "build" }) }, source);
-    const detail = calls.find((call) => call.url.endsWith("/api/sessions/build"))!;
+    const detail = calls.find((call) => call.url.endsWith("/api/sessions/build/info"))!;
     const body = deferred<unknown>(); detail.reply.resolve({ ok: true, json: () => body.promise } as Response); await flush();
     list.disconnect(source);
     list.connect({ ...source, socket: {} });

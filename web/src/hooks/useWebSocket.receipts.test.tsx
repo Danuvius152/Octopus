@@ -93,8 +93,7 @@ it("keeps live card completions across delayed reconnect responses and accepts n
         ? [{ id: "bg", status: "completed" }, { id: "bg-next", status }]
         : [{ id: "bg", status }]));
     });
-    // Research starts after detail establishes the service identity, using
-    // the original reconnect baseline so these intervening events survive.
+    // Research publication waits for detail to establish its service identity.
     await act(async () => {
       waiting.get("/api/sessions/s/research")!(Response.json(newJobs
         ? [{ id: "research", question: "q", status: "completed", verified: 2 }, { id: "research-next", question: "Next question", status }]
@@ -107,7 +106,7 @@ it("keeps live card completions across delayed reconnect responses and accepts n
   expect(useSessionStore.getState().research.s[0].verified).toBe(2);
   act(() => socket.onopen?.());
   await finish("running", true);
-  expect(useSessionStore.getState().subagents.s.call.status).toBe("running");
+  expect(useSessionStore.getState().subagents.s.call.status).toBe("completed");
   expect(useSessionStore.getState().bgTasks.s).toEqual([
     expect.objectContaining({ id: "bg", status: "completed" }), expect.objectContaining({ id: "bg-next", status: "running" }),
   ]);

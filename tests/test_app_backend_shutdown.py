@@ -41,6 +41,7 @@ async def test_shutdown_drains_reaper_and_readers_before_stopping_backend(tmp_pa
         supervisor._reaper = task
         await asyncio.sleep(0)
     try:
+        assert not supervisor.drain_blockers(), "An idle server remains a shutdown resource, not unfinished work"
         await supervisor.shutdown()
         assert task.done()
         assert supervisor._reaper is None

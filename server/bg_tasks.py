@@ -278,6 +278,11 @@ class BgTaskManager:
             )
         self._started = True
 
+    def drain_blockers(self) -> tuple[str, ...]:
+        if self._starting or self._running or self._cleanup_tasks:
+            return ("startup, execution, terminal delivery or cleanup",)
+        return ()
+
     def begin_shutdown(self) -> None:
         """Seal admission and cancel startup waiters while retaining owners."""
         self._shutting_down = True

@@ -405,6 +405,12 @@ class ScheduleRunner:
             if row["agent_id"] == agent_id:
                 await self.reschedule(row)
 
+    def drain_blockers(self) -> tuple[str, ...]:
+        callbacks = (*getattr(self._executor, "_pending_futures", ()), *(self._shutdown_tasks or ()))
+        if self._registration_lock.locked() or any(not task.done() for task in callbacks):
+            return ("registration or dispatched callback",)
+        return ()
+
     def begin_shutdown(self) -> None:
         """Stop launches and capture APScheduler's existing callback owner.
 

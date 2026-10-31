@@ -25,6 +25,19 @@ _blocked_owners: set[str | None] = set()
 logger = logging.getLogger(__name__)
 
 
+def drain_blockers() -> tuple[str, ...]:
+    if _pending or _preparations or _active:
+        return ("preparation, file effect or unconfirmed journal cleanup",)
+    if any((state / "external-change.json").exists() for _owner, state in registry.states()):
+        return ("unconfirmed external-change journal",)
+    return ()
+
+
+def begin_shutdown() -> None:
+    global _stopping
+    _stopping = True
+
+
 async def shutdown(*, timeout: float = 5.0, user_id=_ALL) -> None:
     """Join mutation owners while retaining any unconfirmed cleanup."""
     # The application supervisor has stopped its processes before this call.

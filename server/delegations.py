@@ -246,6 +246,7 @@ class DelegationManager:
         self._completion_handoffs: dict[asyncio.Future[Any], Callable[[asyncio.Future[Any]], None]] = {}
         self.session_mgr: SessionManager | None = None
         self.db: Database | None = None
+        self._closing = False
 
     # ------------------------------------------------------------ wiring
 
@@ -254,6 +255,7 @@ class DelegationManager:
         on repeat calls (last writer wins on the key)."""
         self.session_mgr = session_mgr
         self.db = db
+        self._closing = False
         self._closed_parents.clear()
         session_mgr.on_broadcast(self.BROADCAST_KEY, self._on_broadcast)
         db.add_close_hook(self._before_database_close)
@@ -286,6 +288,9 @@ class DelegationManager:
         self, operation: Coroutine[Any, Any, _T], *, parent_session_id: str | None = None,
     ) -> asyncio.Task[_T]:
         """Register before scheduling so drain sees completion-created commands."""
+        if self._closing:
+            operation.close()
+            raise DelegationError("Delegation admission is closed", status_code=503)
         assert self.session_mgr is not None
         task = asyncio.create_task(operation, name="delegation-command")
         recording = _CommandRecording()
@@ -543,7 +548,18 @@ class DelegationManager:
             if data.state == "running":
                 await self._save_round(rec, **changes)
 
+    def drain_blockers(self) -> tuple[str, ...]:
+        if (self._commands or self._completion_handoffs
+                or any(rec.state in {"pending", "queued", "running"} or rec._terminal_injecting
+                       or rec._awaiting_sub_relay or rec._save_lock.locked() for rec in self._rounds.values())):
+            return ("command, original work, question relay or terminal recording",)
+        return ()
+
+    def begin_shutdown(self) -> None:
+        self._closing = True
+
     def shutdown(self) -> None:
+        self.begin_shutdown()
         if self.session_mgr is not None:
             self.session_mgr.remove_broadcast(self.BROADCAST_KEY)
 

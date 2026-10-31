@@ -1,9 +1,28 @@
-/** Preserve only entities changed by live events after this fetch began. */
-export function mergeCardSnapshot<T>(snapshot: T[], current: T[], baseline: T[] | undefined, key: (item: T) => string): T[] {
+/** Event provenance belongs to the domain writer; snapshots never advance it.
+ * Terminal facts are monotonic within the exact task/round identity. */
+export function mergeCardSnapshot<T extends object>(
+  snapshot: T[], current: T[], baseline: T[] | undefined, key: (item: T) => string,
+  updates: WeakMap<T, symbol>, active: (item: T) => boolean, advanceOnly = false,
+): T[] {
   if (baseline === undefined) return snapshot;
   const start = new Map(baseline.map((item) => [key(item), item]));
-  const changed = current.filter((item) => start.get(key(item)) !== item);
-  return [...new Map([...snapshot, ...changed].map((item) => [key(item), item])).values()];
+  const live = new Map(current.map((item) => [key(item), item]));
+  const changed = (item: T) => {
+    const before = start.get(key(item));
+    return updates.get(item) !== (before ? updates.get(before) : undefined);
+  };
+  const result = new Map(snapshot.map((item) => {
+    const previous = live.get(key(item));
+    if (previous && (changed(previous) || !active(previous) && active(item) || advanceOnly && active(previous) === active(item))) return [key(item), previous];
+    const adopted = { ...item };
+    const marker = previous && updates.get(previous);
+    if (marker) updates.set(adopted, marker);
+    return [key(item), adopted];
+  }));
+  for (const item of current) {
+    if (!result.has(key(item)) && (!start.has(key(item)) || changed(item) || advanceOnly)) result.set(key(item), item);
+  }
+  return [...result.values()];
 }
 
 /** Auxiliary jobs have one execution per id. Only an event/receipt advances

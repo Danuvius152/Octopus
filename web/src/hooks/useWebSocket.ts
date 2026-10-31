@@ -2,8 +2,8 @@ import { accountFetch as fetch } from "../lib/accountFetch";
 import { useCallback, useEffect, useRef } from "react";
 import { newSubmissionId, type SubmissionReply } from "../lib/submission";
 import {
-  loadSessionSnapshot,
   loadSessionSnapshots,
+  hydrateSession,
   loadResearchSnapshot,
 } from "../lib/hydrateSession";
 import { readRuntimeMetadata } from "../lib/toolIdentity";
@@ -424,10 +424,7 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
     case "delegation_delivery": {
       const incoming = data.delegation as Delegation | undefined;
       if (!incoming?.delegation_id || !incoming.work_id || incoming.parent_session_id !== sessionId) break;
-      const { delegations, setDelegations } = getState();
-      const current = delegations[sessionId] || [];
-      const idx = current.findIndex((round) => round.delegation_id === incoming.delegation_id && round.work_id === incoming.work_id);
-      setDelegations(sessionId, idx < 0 ? [incoming, ...current] : current.map((round, i) => i === idx ? incoming : round));
+      getState().upsertDelegation(sessionId, incoming);
       break;
     }
 
@@ -554,7 +551,7 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
         if (newId) {
           store.setMessages(newId, []);
           store.setPendingQuestions(newId, []);
-          void loadSessionSnapshot(newId, store).catch(() => {});
+          void loadSessionSnapshots(newId).catch(() => {});
         }
       }
       break;
@@ -573,7 +570,7 @@ export function handleWsMessage(data: Record<string, unknown>, source?: ListEven
       // fork flags, etc. Re-dedupe inside the callback in case the initiating
       // tab's own add raced in first.
       if (!store.token) break;
-      void loadSessionSnapshot(forkId, store).catch(() => {});
+      void hydrateSession(forkId);
       break;
     }
     case "session_deleted":
@@ -624,18 +621,7 @@ export function useWebSocket() {
           void refreshAgents().catch(() => {});
 
           if (activeSessionId) {
-            void loadSessionSnapshots(activeSessionId, snapshotStart).catch(() => {});
-            fetch(
-              `${window.location.origin}/api/sessions/${activeSessionId}/delegations`,
-              { headers: { Authorization: `Bearer ${t}` } }
-            )
-              .then((r) => (r.ok ? r.json() : null))
-              .then((delegations) => {
-                if (delegations && wsRef.current === ws) {
-                  getState().setDelegations(activeSessionId, delegations, snapshotStart.delegations[activeSessionId] || []);
-                }
-              })
-              .catch(() => {});
+            void loadSessionSnapshots(activeSessionId).catch(() => {});
           }
         }
       };

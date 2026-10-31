@@ -30,6 +30,8 @@ import type {
 // Snapshot rows stay unmarked. Weak references retain no second task state.
 const researchUpdates = new WeakMap<ResearchJob, symbol>();
 const bgUpdates = new WeakMap<BgTask, symbol>();
+const subagentUpdates = new WeakMap<SubagentRun, symbol>();
+const delegationUpdates = new WeakMap<Delegation, symbol>();
 // Only delivery events advance this observation. Entity/list replacement does
 // not prove a new delivery fact; immutable copies retain their event marker.
 const bgDeliveryUpdates = new WeakMap<BgTask, symbol>();
@@ -324,7 +326,7 @@ interface SessionStore {
   // re-seeded from the session snapshot on reconnect.
   subagents: Record<string, Record<string, SubagentRun>>;
   upsertSubagent: (sessionId: string, run: SubagentRun) => void;
-  setSubagents: (sessionId: string, runs: SubagentRun[], baseline?: Record<string, SubagentRun>) => void;
+  setSubagents: (sessionId: string, runs: SubagentRun[], baseline?: Record<string, SubagentRun>, advanceOnly?: boolean) => void;
 
   dispatchStates: Record<string, DispatchState>;
   dispatchUnavailable: Record<string, boolean>;
@@ -382,7 +384,8 @@ interface SessionStore {
   // looking up the delegation_id in this map.
   // (agent-collaboration.md §6)
   delegations: Record<string, Delegation[]>;
-  setDelegations: (parentSessionId: string, ds: Delegation[], baseline?: Delegation[]) => void;
+  setDelegations: (parentSessionId: string, ds: Delegation[], baseline?: Delegation[], advanceOnly?: boolean) => void;
+  upsertDelegation: (parentSessionId: string, round: Delegation) => void;
 
   // Sidebar visibility toggle for `origin === "delegation"` sessions.
   // Hidden by default so heavy fan-out doesn't flood the agent list;
@@ -762,20 +765,23 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const steps = run.steps?.length
         ? run.steps
         : appendStep(prev?.steps, run.description);
+      const updated = { ...prev, ...prune(run), steps };
+      subagentUpdates.set(updated, Symbol());
       return {
         subagents: {
           ...s.subagents,
-          [sessionId]: { ...forSession, [key]: { ...prev, ...prune(run), steps } },
+          [sessionId]: { ...forSession, [key]: updated },
         },
       };
     }),
-  setSubagents: (sessionId, runs, baseline) =>
+  setSubagents: (sessionId, runs, baseline, advanceOnly) =>
     set((s) => ({
       subagents: {
         ...s.subagents,
         [sessionId]: Object.fromEntries(
           mergeCardSnapshot(runs.filter((r) => r.tool_call_id), Object.values(s.subagents[sessionId] || {}),
-            baseline === undefined ? undefined : Object.values(baseline), (r) => r.tool_call_id!)
+            baseline === undefined ? undefined : Object.values(baseline), (r) => r.tool_call_id!,
+            subagentUpdates, (r) => r.status === "running", advanceOnly)
             .map((r) => [r.tool_call_id!, r])
         ),
       },
@@ -1040,12 +1046,21 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
     ) } })),
 
   delegations: {},
-  setDelegations: (parentSessionId, ds, baseline) =>
+  setDelegations: (parentSessionId, ds, baseline, advanceOnly) =>
     set((s) => ({
       delegations: { ...s.delegations, [parentSessionId]: mergeCardSnapshot(
         ds, s.delegations[parentSessionId] || [], baseline, (round) => `${round.delegation_id}:${round.work_id}`,
+        delegationUpdates, (round) => round.state === "running", advanceOnly,
       ) },
     })),
+  upsertDelegation: (parentSessionId, round) => set((s) => {
+    const updated = { ...round };
+    delegationUpdates.set(updated, Symbol());
+    const current = s.delegations[parentSessionId] || [];
+    const found = current.some((item) => item.delegation_id === round.delegation_id && item.work_id === round.work_id);
+    return { delegations: { ...s.delegations, [parentSessionId]: found ? current.map((item) =>
+      item.delegation_id === round.delegation_id && item.work_id === round.work_id ? updated : item) : [updated, ...current] } };
+  }),
 
   showDelegations: localStorage.getItem("octopus_show_delegations") === "true",
   setShowDelegations: (v) => {

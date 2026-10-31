@@ -80,10 +80,12 @@ async def test_real_codex_deep_research_end_to_end(tmp_path, monkeypatch):
 
         injected: list[str] = []
 
-        async def fake_start_message(session_id, prompt, *, source, delivery_id, work_id, knowledge_context):
+        async def fake_start_message(session_id, prompt, *, source, delivery_id, work_id, knowledge_context,
+                                     question_session_id, question_id):
             assert source == "research"
             assert delivery_id.startswith("research:")
             assert work_id is None
+            assert question_session_id is question_id is None
             assert knowledge_context.trusted_request == "What is the latest stable version of Python 3? Cite python.org."
             injected.append(prompt)
             return accepted_receipt()

@@ -333,6 +333,24 @@ async def recover_submission_attachment(session_manager: SessionMgr, session_id:
     })
 
 
+@router.get("/{session_id}/info", response_model=SessionInfo)
+async def get_session_info(
+    session_manager: SessionMgr,
+    session_id: str,
+    user_id: ScopeUser = None,
+    _: str = Depends(verify_token),
+):
+    """Resolve navigation metadata without loading the conversation."""
+    live = session_manager.get_session(session_id, user_id)
+    if live is not None:
+        return session_info(live)
+    archived = await session_manager.list_archived_sessions(user_id)
+    match = next((row for row in archived if row["id"] == session_id), None)
+    if match is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "Session not found")
+    return match
+
+
 @router.get("/{session_id}", response_model=SessionDetail)
 async def get_session(
     session_manager: SessionMgr,

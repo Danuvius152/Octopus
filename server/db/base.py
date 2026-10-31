@@ -137,6 +137,11 @@ class DatabaseBase:
         self._close_hooks: list[Callable[[], Awaitable[None]]] = []
         self._session_delete_hooks: list[Callable[[str], None]] = []
 
+    def drain_blockers(self) -> tuple[str, ...]:
+        if self._conn is None or self._write_owner or self._write_lock.locked() or self._agent_memory_lock.locked() or self.configuration_lock.locked():
+            return ("writer or exclusive operation",)
+        return ()
+
     @asynccontextmanager
     async def transaction(self, *, write: bool = True, timeout: float = 5.0) -> AsyncIterator[Transaction]:
         """Own BEGIN, SQL, cursors and commit/rollback under one total deadline.

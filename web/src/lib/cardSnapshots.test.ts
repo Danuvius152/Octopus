@@ -30,7 +30,7 @@ it("retains a newer subagent result across an older detail response", () => {
   expect(useSessionStore.getState().subagents.s.call.summary).toBe("new answer");
   const nextStart = useSessionStore.getState();
   applySessionSnapshot("s", { messages: [], subagents: [{ ...running, summary: "new round" }], dispatch_state: dispatch }, nextStart);
-  expect(useSessionStore.getState().subagents.s.call.status).toBe("running");
+  expect(useSessionStore.getState().subagents.s.call.status).toBe("completed");
 });
 
 it("retains a delivery observation through list and completion updates while a detail request is pending", () => {

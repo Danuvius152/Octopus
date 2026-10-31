@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import { useSessionStore, type BgTask, type SubagentRun, type SessionInfo } from "../stores/sessionStore";
 import { handleWsMessage } from "../hooks/useWebSocket";
-import { hydrateSession, loadBgTaskSnapshot, loadResearchSnapshot, loadSessionSnapshots, loadSessionSnapshot } from "./hydrateSession";
+import { hydrateSession, loadBgTaskSnapshot, loadResearchSnapshot, loadSessionSnapshots, loadSessionSnapshot, observeSession } from "./hydrateSession";
 import { selectSession } from "./selectSession";
 
 function deferred() {
@@ -65,12 +65,14 @@ it("captures the background baseline before fetch", async () => {
   expect(useSessionStore.getState().bgTasks.s[0].stdout).toBe("live output");
 });
 
-it("retains an explicitly supplied earlier service identity", async () => {
-  const start = useSessionStore.getState();
+it("retains the service identity captured by its own read", async () => {
+  useSessionStore.getState().applyDispatchState("s", dispatch("old"));
+  const response = deferred();
+  vi.stubGlobal("fetch", vi.fn(() => response.promise));
+  const loaded = loadSessionSnapshot("s");
   useSessionStore.getState().applyDispatchState("s", dispatch("new"));
-  vi.stubGlobal("fetch", vi.fn(async () => json({ messages: [{ role: "user", type: "text", content: "retired", seq: 0 }],
-    dispatch_state: dispatch("old") })));
-  expect(await loadSessionSnapshot("s", start)).toBeNull();
+  response.resolve(json({ messages: [{ role: "user", type: "text", content: "retired", seq: 0 }], dispatch_state: dispatch("old") }));
+  expect(await loaded).toBeNull();
   expect(useSessionStore.getState().messages.s).toBeUndefined();
 });
 
@@ -115,7 +117,7 @@ it("rejects a late archived body after a different session changes service gener
   expect(useSessionStore.getState().pendingQuestions.archived).toBeUndefined();
 });
 
-it.each(["hydrate", "select"])("%s adopts detail in the same account as the transcript", async (entry) => {
+it("select adopts detail in the same account as the transcript", async () => {
   vi.stubGlobal("fetch", vi.fn(async (url: string) => json(url.endsWith("bg-tasks") ? [] : {
     id: "private", name: "Private old account", messages: [], dispatch_state: dispatch("service"),
   })));
@@ -125,8 +127,7 @@ it.each(["hydrate", "select"])("%s adopts detail in the same account as the tran
     }
   });
   try {
-    if (entry === "hydrate") await hydrateSession("private");
-    else await selectSession("private");
+    await selectSession("private");
     expect(useSessionStore.getState().token).toBe("other-account");
     expect(useSessionStore.getState().sessions).toEqual([]);
     expect(useSessionStore.getState().messages.private).toBeUndefined();
@@ -135,13 +136,23 @@ it.each(["hydrate", "select"])("%s adopts detail in the same account as the tran
   }
 });
 
+it("hydrates missing metadata without requesting or applying chat history", async () => {
+  const fetcher = vi.fn(async () => json({ id: "private", name: "Child", archived: true }));
+  vi.stubGlobal("fetch", fetcher);
+  await hydrateSession("private");
+  expect(fetcher).toHaveBeenCalledTimes(1);
+  expect(fetcher).toHaveBeenCalledWith(expect.stringContaining("/api/sessions/private/info"), expect.anything());
+  expect(useSessionStore.getState().messages.private).toBeUndefined();
+  expect(useSessionStore.getState().archivedSessions[0].id).toBe("private");
+});
+
 it("shows selected history and finishes navigation while background data is still pending", async () => {
   const detail = deferred();
   const background = deferred();
   const fetcher = vi.fn((url: string) => url.endsWith("bg-tasks") ? background.promise : detail.promise);
   vi.stubGlobal("fetch", fetcher);
   const loaded = selectSession("selected", "agent");
-  expect(fetcher).toHaveBeenCalledTimes(2);
+  expect(fetcher).toHaveBeenCalledTimes(4);
   expect(useSessionStore.getState().activeSessionId).toBe("selected");
   expect(useSessionStore.getState().activeAgentId).toBe("agent");
   detail.resolve(json({ id: "selected", name: "Child", messages: [{ role: "assistant", type: "text", content: "History", seq: 0 }], dispatch_state: dispatch("service") }));
@@ -262,4 +273,109 @@ it("rejects list fields from a detail whose dispatch revision is already known t
     dispatch_state: { ...dispatch("service"), revision: 4 } })));
   await loadSessionSnapshot("session");
   expect(useSessionStore.getState().sessions[0].status).toBe("idle");
+});
+
+it("does not replace a newer successful detail with an earlier failed read", async () => {
+  useSessionStore.setState({ dispatchGeneration: "service" });
+  const first = deferred(), second = deferred();
+  vi.stubGlobal("fetch", vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise));
+  const older = loadSessionSnapshot("s");
+  const failed = expect(older).rejects.toThrow("offline");
+  const newer = loadSessionSnapshot("s");
+  second.resolve(json({ id: "s", messages: [], dispatch_state: dispatch("service") }));
+  await newer;
+  first.reject(new Error("offline"));
+  await failed;
+  expect(useSessionStore.getState().dispatchUnavailable.s).toBeFalsy();
+});
+
+it("accepts a completed native task from overlapping successful details without a WS event", async () => {
+  const running = { tool_call_id: "native", status: "running" } as SubagentRun;
+  useSessionStore.getState().setSubagents("s", [running]);
+  const first = deferred(), second = deferred();
+  vi.stubGlobal("fetch", vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise));
+  const older = loadSessionSnapshot("s"), newer = loadSessionSnapshot("s");
+  first.resolve(json({ id: "s", messages: [], dispatch_state: dispatch("service"), subagents: [running] }));
+  await older;
+  second.resolve(json({ id: "s", messages: [], dispatch_state: dispatch("service"), subagents: [{ ...running, status: "completed", summary: "Finished" }] }));
+  await newer;
+  expect(useSessionStore.getState().subagents.s.native).toMatchObject({ status: "completed", summary: "Finished" });
+});
+
+it("does not resurrect a question absent from the newer successful detail", async () => {
+  const question = { question_id: "original", questions: [] };
+  useSessionStore.getState().setPendingQuestions("s", [question]);
+  const first = deferred(), second = deferred();
+  vi.stubGlobal("fetch", vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise));
+  const older = loadSessionSnapshot("s"), newer = loadSessionSnapshot("s");
+  second.resolve(json({ id: "s", messages: [], dispatch_state: dispatch("service"), pending_questions: [] })); await newer;
+  first.resolve(json({ id: "s", messages: [], dispatch_state: dispatch("service"), pending_questions: [question] })); await older;
+  expect(useSessionStore.getState().pendingQuestions.s || []).toEqual([]);
+});
+
+it("ends all parts of an observation without cancelling server work", async () => {
+  const response = deferred();
+  vi.stubGlobal("fetch", vi.fn(() => response.promise));
+  const read = observeSession("s");
+  read.cancel();
+  response.resolve(json({ id: "s", messages: [], dispatch_state: dispatch("service") }));
+  expect(await read.done).toBeNull();
+  expect(useSessionStore.getState().messages.s).toBeUndefined();
+  expect(fetch).not.toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ method: "POST" }));
+});
+
+it("keeps legal previous-session history without taking selection during A to B to A", async () => {
+  const a = deferred(), b = deferred(), again = deferred();
+  let aReads = 0;
+  vi.stubGlobal("fetch", vi.fn((url: string) => {
+    if (url.endsWith("/a")) return ++aReads === 1 ? a.promise : again.promise;
+    if (url.endsWith("/b")) return b.promise;
+    return Promise.resolve(json([]));
+  }));
+  const first = selectSession("a"), second = selectSession("b"), third = selectSession("a");
+  again.resolve(json({ id: "a", agent_id: "agent-a", messages: [], dispatch_state: dispatch("service") })); await third;
+  b.resolve(json({ id: "b", agent_id: "agent-b", messages: [{ type: "text", role: "user", seq: 0, content: "Cached B" }], dispatch_state: dispatch("service") })); await second;
+  a.resolve(json({ id: "a", agent_id: "agent-a", messages: [], dispatch_state: dispatch("service") })); await first;
+  expect(useSessionStore.getState().activeSessionId).toBe("a");
+  expect(useSessionStore.getState().activeAgentId).toBe("agent-a");
+  expect(useSessionStore.getState().messages.b[0].content).toBe("Cached B");
+});
+
+it.each(["session_deleted", "session_archived"])("does not rehydrate an old open after %s", async (type) => {
+  useSessionStore.setState({ sessions: [{ id: "s", archived: false } as SessionInfo], dispatchGeneration: "service" });
+  const response = deferred();
+  vi.stubGlobal("fetch", vi.fn(() => response.promise));
+  const read = observeSession("s", "detail");
+  handleWsMessage({ type, session_id: "s", old_session_id: "s", new_session_id: null });
+  response.resolve(json({ id: "s", archived: false, messages: [{ role: "user", type: "text", seq: 0, content: "stale" }], dispatch_state: dispatch("service") }));
+  expect(await read.done).toBeNull();
+  expect(useSessionStore.getState().messages.s).toBeUndefined();
+  expect(useSessionStore.getState().sessions.some((row) => row.id === "s")).toBe(false);
+});
+
+it.each(["complete", "detail"] as const)("invalidates a %s read when its unknown target is deleted", async (purpose) => {
+  useSessionStore.setState({ dispatchGeneration: "service" });
+  const response = deferred();
+  vi.stubGlobal("fetch", vi.fn((url: string) => url.endsWith("/unknown") ? response.promise : Promise.resolve(json([]))));
+  const read = observeSession("unknown", purpose);
+  handleWsMessage({ type: "session_deleted", session_id: "unknown" });
+  response.resolve(json({ id: "unknown", dispatch_state: dispatch("service"), messages: [{ role: "user", type: "text", seq: 0, content: "Deleted original" }] }));
+  expect(await read.done).toBeNull();
+  await Promise.resolve();
+  expect(useSessionStore.getState().messages.unknown).toBeUndefined();
+  expect(useSessionStore.getState().bgTasks.unknown).toBeUndefined();
+  expect(useSessionStore.getState().research.unknown).toBeUndefined();
+  expect(useSessionStore.getState().delegations.unknown).toBeUndefined();
+});
+
+it("does not publish a late failure for an unknown target deleted during its read", async () => {
+  useSessionStore.setState({ dispatchGeneration: "service" });
+  const response = deferred();
+  vi.stubGlobal("fetch", vi.fn(() => response.promise));
+  const read = observeSession("unknown", "detail");
+  const failure = expect(read.done).rejects.toThrow("offline");
+  handleWsMessage({ type: "session_deleted", session_id: "unknown" });
+  response.reject(new Error("offline"));
+  await failure;
+  expect(useSessionStore.getState().dispatchUnavailable.unknown).toBeUndefined();
 });

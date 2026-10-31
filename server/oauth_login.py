@@ -196,6 +196,9 @@ class OAuthLoginManager:
     def get(self, login_id: str) -> LoginSession | None:
         return self._sessions.get(login_id)
 
+    def drain_blockers(self) -> tuple[str, ...]:
+        return ("token exchange",) if any(session.state == LoginState.finalizing for session in self._sessions.values()) else ()
+
     async def shutdown(self) -> None:
         """Nothing to tear down (no subprocesses) — just drop state."""
         self._sessions.clear()

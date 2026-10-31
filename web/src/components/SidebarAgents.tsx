@@ -285,7 +285,7 @@ export function SidebarAgents() {
       // The POST may have succeeded before its response was lost. Confirm the
       // server's session state before changing the local list or selection.
       try {
-        const detail = await loadSessionSnapshot(id, start);
+        const detail = await loadSessionSnapshot(id);
         if (detail?.archived === true) {
           finishArchived();
           return;

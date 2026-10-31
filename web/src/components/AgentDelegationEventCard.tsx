@@ -1,5 +1,5 @@
 import { selectSession } from "../lib/selectSession";
-import { loadSessionSnapshot } from "../lib/hydrateSession";
+import { observeSession } from "../lib/hydrateSession";
 /**
  * Renders one of the three turn-injection artifacts a delegation can
  * produce, parsed from the user-message text the backend's
@@ -146,11 +146,9 @@ export function AgentDelegationEventCard({
   useEffect(() => {
     if (!event.delegationId) return;
     if (childSession) return;
-    let cancelled = false;
-    void loadSessionSnapshot(event.delegationId, useSessionStore.getState(), undefined, () => !cancelled).catch(() => {});
-    return () => {
-      cancelled = true;
-    };
+    const read = observeSession(event.delegationId, "metadata");
+    void read.done.catch(() => {});
+    return read.cancel;
   }, [
     event.delegationId,
     childSession,

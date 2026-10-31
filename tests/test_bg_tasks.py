@@ -399,6 +399,7 @@ async def test_shutdown_owns_cancelled_startup_until_its_process_handle_arrives(
     cleanup = None
     try:
         await spawned.wait()
+        assert manager.drain_blockers()
         manager.begin_shutdown()
         cleanup = asyncio.create_task(manager.shutdown())
         await asyncio.sleep(0)
@@ -412,6 +413,7 @@ async def test_shutdown_owns_cancelled_startup_until_its_process_handle_arrives(
         assert retained[0].status == "interrupted"
         assert retained[0].stop_reason == "server_shutdown"
         assert retained[0].knowledge_context is not None
+        assert not manager.drain_blockers()
     finally:
         release_handle.set()
         await asyncio.gather(startup, *(task for task in [cleanup] if task is not None), return_exceptions=True)
@@ -631,6 +633,7 @@ async def test_shutdown_retains_completed_task_until_its_callback_finishes(db, t
         await asyncio.wait_for(entered.wait(), 1.0)
         completed = await mgr.get_task(record.id)
         assert completed.status == "completed" and completed.exit_code == 0
+        assert mgr.drain_blockers()
         with pytest.raises(RuntimeError, match="shutdown incomplete"):
             await asyncio.wait_for(mgr.shutdown(), 0.3)
         assert not recorded.is_set()
@@ -640,6 +643,7 @@ async def test_shutdown_retains_completed_task_until_its_callback_finishes(db, t
         completed = await mgr.get_task(record.id)
         assert completed.status == "completed" and completed.stop_reason is None
         assert completed.stdout == "recorded after callback release"
+        assert not mgr.drain_blockers()
     finally:
         release.set()
         await asyncio.wait_for(mgr.shutdown(), 1.0)

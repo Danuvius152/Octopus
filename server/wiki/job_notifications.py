@@ -2,18 +2,37 @@
 
 import asyncio
 import logging
-from functools import partial
+import sqlite3
 
 from ..aio import complete_cleanup
-from . import job_events, job_returns
+from . import job_events, job_returns, storage
 from .registry import registry
 from .store import WikiError
 
 logger = logging.getLogger(__name__)
+_active = 0
+
+
+def drain_blockers() -> tuple[str, ...]:
+    """Read original ACK obligations, including polling and failure gaps."""
+    if _active:
+        return ("notification receive, return or ACK",)
+    for _user_id, state in registry.states():
+        if not (state / "config.json").is_file():
+            continue
+        try:
+            # A read-only, zero-wait inspection neither constructs a Store nor
+            # waits on a live writer. The outbox remains the sole authority.
+            with storage.connect(state / "index.sqlite3", registry.health, write=False, timeout=0) as db:
+                if db.execute("SELECT 1 FROM wiki_job_deliveries WHERE acknowledged=0 LIMIT 1").fetchone():
+                    return ("unacknowledged notification",)
+        except (OSError, sqlite3.Error):
+            return ("notification ledger inspection unavailable",)
+    return ()
 
 
 async def _io(function, *args):
-    return await complete_cleanup(asyncio.to_thread(partial(function, *args)))
+    return await registry.run_sync(function, *args)
 
 
 def _pending(jobs, cursor):
@@ -36,6 +55,15 @@ def _acknowledge(jobs, delivery, outcome):
 
 
 async def dispatch(jobs, manager):
+    global _active
+    _active += 1
+    try:
+        return await _dispatch(jobs, manager)
+    finally:
+        _active -= 1
+
+
+async def _dispatch(jobs, manager):
     """One fair bounded batch. Failed deliveries keep their original identity.
 
     A fixed high watermark bounds each pass even while new events arrive.

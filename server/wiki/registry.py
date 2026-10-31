@@ -58,6 +58,8 @@ class WikiRegistry:
         self._constructing: dict[Construction, None] = {}
         self._incarnation = 0
         self._closing = False
+        self._admission_closed = False
+        self._sync_operations: set[asyncio.Task] = set()
         self._stopped = False
         self._stop_operations = 0
         self._stop_drained = False
@@ -73,10 +75,53 @@ class WikiRegistry:
     @property
     def idle(self) -> bool:
         """Released retired stores are history, not outstanding writer owners."""
+        return not self.drain_blockers()
+
+    def drain_blockers(self) -> tuple[str, ...]:
+        try:
+            with self.handoff_guard():
+                return ()
+        except WikiError as error:
+            return (str(error),)
+
+    @contextlib.contextmanager
+    def handoff_guard(self):
+        """Freeze admission across threads through final observation and sealing."""
+        if not self._lock.acquire(blocking=False):
+            raise WikiError("Wiki registry admission is busy", 409)
+        try:
+            if self._constructing or self._sync_operations or self._starting is not None or self._stop_operations or self._closing:
+                raise WikiError("Wiki construction, scheduled synchronization or cleanup remains owned", 409)
+            with contextlib.ExitStack() as gates:
+                for store in dict.fromkeys((*self._stores.values(), *self._retired_stores)):
+                    gates.enter_context(store.handoff_guard())
+                yield
+        finally:
+            self._lock.release()
+
+    def begin_shutdown(self) -> None:
+        """Seal ordinary work while leaving final synchronization to stop()."""
+        with self.handoff_guard():
+            self._admission_closed = True
+            for store in dict.fromkeys((*self._stores.values(), *self._retired_stores)):
+                store.close_admission()
+            if self._stopping is not None:
+                self._stopping.set()
+
+    async def run_sync(self, function, *args):
+        """Own a dispatched thread before it can start or acquire a Store."""
         with self._lock:
-            return not (self._constructing
-                        or any(store._users for store in self._stores.values())
-                        or any(store._users or not store._events_released for store in self._retired_stores))
+            if self._admission_closed or self._closing or self._stopped:
+                raise WikiError("Wiki synchronization admission is closed", 503)
+            operation = asyncio.create_task(asyncio.to_thread(function, *args))
+            self._sync_operations.add(operation)
+        async def join():
+            return await asyncio.shield(operation)
+        try:
+            return await complete_cleanup(join())
+        finally:
+            with self._lock:
+                self._sync_operations.discard(operation)
 
     def bind_health(self, health: ServiceHealth) -> None:
         """A new service generation may bind only after every old owner exits."""
@@ -375,7 +420,7 @@ class WikiRegistry:
             self._blocked.discard(user_id)
 
     def _allowed(self, user_id):
-        return user_id not in self._blocked and not self._closing and not self._stopped
+        return user_id not in self._blocked and not self._closing and not self._stopped and not self._admission_closed
 
     def _collect_retired(self, store):
         """Only confirmed retired owners leave the retained-resource set."""
@@ -583,7 +628,7 @@ class WikiRegistry:
                 self._closing = False
 
     def _check_reopen(self):
-        if (self._closing or self._constructing or self._starting is not None
+        if (self._closing or self._constructing or self._sync_operations or self._starting is not None
                 or self._stop_operations or (self._stopped and not self._stop_drained)):
             raise WikiError("Wiki registry cleanup must finish before reopening", 503)
 
@@ -595,6 +640,7 @@ class WikiRegistry:
                 self._recoveries.resume()
             self._incarnation += 1
             self._stopped = False
+            self._admission_closed = False
 
     async def reconcile(self, *, initial=False) -> list[dict]:
         """Startup/periodic compensation; never called by an ordinary query."""
@@ -613,7 +659,7 @@ class WikiRegistry:
                     logger.exception("Wiki reconciliation failed for account=%s", user_id)
             return results
 
-        return await complete_cleanup(asyncio.to_thread(run))
+        return await self.run_sync(run)
 
     async def start(self, *, paused: bool = False, previous_writers_retired: bool = False) -> None:
         with self._lock:
@@ -638,7 +684,7 @@ class WikiRegistry:
 
     def start_reconciler(self) -> None:
         with self._lock:
-            if self._stopped or self._closing:
+            if self._stopped or self._closing or self._admission_closed:
                 raise WikiError("Wiki registry is stopping", 503)
             if self._task is None:
                 self._stopping = asyncio.Event()
@@ -657,10 +703,14 @@ class WikiRegistry:
             with self._lock:
                 stores = list(self._stores.values())
             for store in stores:
+                if self._stopping.is_set():
+                    return
                 try:
-                    await complete_cleanup(asyncio.to_thread(store.synchronize))
+                    await self.run_sync(store.synchronize)
                 except Exception:
                     logger.exception("Wiki event processing failed for vault=%s", store.vault_id)
+            if self._stopping.is_set():
+                return
             if loop.time() >= deadline:
                 await self.reconcile()
                 deadline = loop.time() + settings.wiki_reconcile_seconds
@@ -686,13 +736,18 @@ class WikiRegistry:
                 await self._task
             self._task = None
             self._stopping = None
+            # Includes dispatches not owned by the reconciler loop. A cancelled
+            # caller cannot release its thread's original retirement duty.
+            operations = tuple(self._sync_operations)
+            if operations:
+                await asyncio.gather(*(asyncio.shield(task) for task in operations), return_exceptions=True)
             # Writers have retired. Receive the final kernel events while the
             # original observers still exist; a same-bytes replacement must
             # end the old document identity before its watcher is closed.
             with self._lock:
                 stores = list(self._stores.values())
             for store in stores:
-                await complete_cleanup(asyncio.to_thread(store.synchronize))
+                await complete_cleanup(asyncio.to_thread(store.synchronize_shutdown))
             await asyncio.to_thread(self.close)
             drained = True
         finally:

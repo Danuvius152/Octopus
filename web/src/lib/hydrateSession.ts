@@ -4,6 +4,8 @@ import { useSessionStore } from "../stores/sessionStore";
 import { applyTranscript } from "./transcript";
 import { readDispatchState } from "./sessionDispatch";
 import { sessions, type SessionObservation } from "./sessionList";
+import { observeDelegations } from "./delegationReads";
+import { SnapshotReads } from "./snapshotReads";
 import type { BgTask, PendingQuestion, ResearchJob, SessionAuxiliaryKind, SubagentRun } from "../stores/sessionStore";
 
 const API = window.location.origin;
@@ -17,6 +19,8 @@ const DETAIL_ONLY_FIELDS = [
   "pending_questions",
   "subagents",
   "next_message_seq",
+  "oldest_loaded_seq",
+  "has_more_messages",
 ] as const;
 
 /** `GET /api/sessions/{id}` returns a SessionInfo superset — drop the
@@ -35,46 +39,75 @@ export function sessionInfoFromDetail(detail: Record<string, unknown>): SessionI
  * transcript the sidebar and chat header can't name. No-op when it's already
  * there.
  */
-export async function hydrateSession(sessionId: string, current = () => true): Promise<void> {
+export async function hydrateSession(sessionId: string): Promise<void> {
   const store = useSessionStore.getState();
   if (!sessionId || !store.token) return;
-  if (store.sessions.some((s) => s.id === sessionId)) return;
+  if ([...store.sessions, ...store.archivedSessions].some((s) => s.id === sessionId)) return;
   try {
-    await loadSessionSnapshot(sessionId, store, undefined, current);
+    await observeSession(sessionId, "metadata").done;
   } catch {
     // The mount fetch / reconnect refetch will pick it up.
   }
 }
 
 type SnapshotStart = ReturnType<typeof useSessionStore.getState>;
-type OnDetail = (detail: Record<string, unknown>) => void;
+const detailReads = new SnapshotReads();
 
-async function applyDetailResponse(sessionId: string, res: Response, start: SnapshotStart, observation: SessionObservation, onDetail?: OnDetail, current = () => true) {
+async function applyDetailResponse(sessionId: string, res: Response, start: SnapshotStart, observation: SessionObservation, current: () => boolean, read: ReturnType<SnapshotReads["begin"]>) {
   if (!res.ok) throw new Error(`Could not load session state (HTTP ${res.status}).`);
   const data: Record<string, unknown> = await res.json();
   const dispatch = readDispatchState(data.dispatch_state);
   if (!current() || !sessions.current(observation, dispatch?.generation)) return null;
-  if (!applySessionSnapshot(sessionId, data, start)) return null;
+  if (!applySessionSnapshot(sessionId, data, start, !read.claim())) return null;
   sessions.detail(sessionInfoFromDetail(data), observation, dispatch);
-  // Adopt detail in this same synchronous step, before an account change
-  // can clear the applied transcript and start a new sidebar list.
-  onDetail?.(data);
   return data;
 }
 
-/** Capture the merge baseline before starting this detail request. Callers
- * with an earlier operation identity can pass that original store snapshot. */
-export async function loadSessionSnapshot(sessionId: string, start = useSessionStore.getState(), onDetail?: OnDetail, current = () => true) {
-  const observation = sessions.capture(start);
-  try {
-    const res = await fetch(`${API}/api/sessions/${sessionId}`, {
-      headers: { Authorization: `Bearer ${start.token}` }, signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
-    });
-    return await applyDetailResponse(sessionId, res, start, observation, onDetail, current);
-  } catch (error) {
-    if (current() && sessions.current(observation)) useSessionStore.getState().setDispatchUnavailable(sessionId, true, start);
-    throw error;
+/** One read owns its original identity, baseline, publication and lifetime.
+ * Ending observation does not stop any server-side execution. */
+export function observeSession(sessionId: string, purpose: "complete" | "detail" | "metadata" = "complete") {
+  const start = useSessionStore.getState();
+  const lifetime = sessions.observe(sessionId);
+  const { observation } = lifetime;
+  const read = detailReads.begin(sessionId);
+  let active = true;
+  const current = () => active;
+  const done = (async () => {
+    try {
+      const res = await fetch(`${API}/api/sessions/${sessionId}${purpose === "metadata" ? "/info" : ""}`, {
+        headers: { Authorization: `Bearer ${start.token}` }, signal: AbortSignal.timeout(SNAPSHOT_TIMEOUT_MS),
+      });
+      if (purpose === "metadata") {
+        if (!res.ok) throw new Error(`Could not load session information (HTTP ${res.status}).`);
+        const info: SessionInfo = await res.json();
+        if (!current() || !sessions.current(observation)) return null;
+        return sessions.detail(info, observation, null) ? info as unknown as Record<string, unknown> : null;
+      }
+      const detail = await applyDetailResponse(sessionId, res, start, observation, current, read);
+      if (detail && start.activeSessionId === sessionId && useSessionStore.getState().activeSessionId === sessionId && typeof detail.agent_id === "string") {
+        useSessionStore.getState().setActiveAgentId(detail.agent_id);
+      }
+      return detail;
+    } catch (error) {
+      if (purpose !== "metadata" && current() && sessions.current(observation)) useSessionStore.getState().setDispatchUnavailable(sessionId, true, start);
+      throw error;
+    } finally {
+      read.finish();
+      lifetime.finish();
+    }
+  })();
+  let delegations: ReturnType<typeof observeDelegations> | undefined;
+  if (purpose === "complete") {
+    void loadAuxiliarySnapshot(sessionId, "background", start, done, current).catch(() => {});
+    void loadAuxiliarySnapshot(sessionId, "research", start, done, current).catch(() => {});
+    delegations = observeDelegations(sessionId, done);
+    void delegations.done.catch(() => {});
   }
+  return { done, cancel: () => { active = false; lifetime.finish(); delegations?.cancel(); } };
+}
+
+export async function loadSessionSnapshot(sessionId: string) {
+  return observeSession(sessionId, "detail").done;
 }
 
 /** Background cards merge against the live records observed before fetch. */
@@ -93,8 +126,8 @@ export function observeSessionAuxiliary(sessionId: string, kind: SessionAuxiliar
 
 // Outstanding reads own error ordering, never job status. Valid older successes
 // may still advance a job; settled groups retain no domain state.
-const auxiliaryReads: Record<SessionAuxiliaryKind, Map<string, Set<symbol>>> = {
-  background: new Map(), research: new Map(),
+const auxiliaryReads: Record<SessionAuxiliaryKind, SnapshotReads> = {
+  background: new SnapshotReads(), research: new SnapshotReads(),
 };
 
 async function loadAuxiliarySnapshot(
@@ -102,12 +135,10 @@ async function loadAuxiliarySnapshot(
   acceptedDetail?: Promise<Record<string, unknown> | null>,
   current = () => true,
 ): Promise<void> {
-  const observation = sessions.capture(start);
-  if (!start.token || !sessions.current(observation)) return;
-  const group = auxiliaryReads[kind];
-  const reads = group.get(sessionId) ?? new Set<symbol>();
-  const read = Symbol();
-  reads.add(read); group.set(sessionId, reads);
+  const lifetime = sessions.observe(sessionId, start);
+  const { observation } = lifetime;
+  if (!start.token || !sessions.current(observation)) { lifetime.finish(); return; }
+  const read = auxiliaryReads[kind].begin(sessionId);
   useSessionStore.getState().setSessionAuxiliaryError(sessionId, kind, null);
   const label = kind === "background" ? "background task details" : "research updates";
   // Start alongside detail, handling rejection immediately. Only its accepted
@@ -131,13 +162,7 @@ async function loadAuxiliarySnapshot(
     }
     // Response ordering governs errors. Valid successes still contribute
     // terminal facts even if a newer-started read has already returned.
-    const ownsError = reads.has(read);
-    if (ownsError) {
-      for (const older of reads) {
-        reads.delete(older);
-        if (older === read) break;
-      }
-    }
+    const ownsError = read.claim();
     const store = useSessionStore.getState();
     if ("error" in result) {
       if (ownsError) store.setSessionAuxiliaryError(sessionId, kind, `Could not refresh ${label}.`);
@@ -147,8 +172,8 @@ async function loadAuxiliarySnapshot(
     else store.setResearch(sessionId, result.rows as ResearchJob[], start.research[sessionId] || [], !ownsError);
     if (ownsError) store.setSessionAuxiliaryError(sessionId, kind, null);
   } finally {
-    reads.delete(read);
-    if (!reads.size && group.get(sessionId) === reads) group.delete(sessionId);
+    read.finish();
+    lifetime.finish();
   }
 }
 
@@ -158,27 +183,9 @@ export async function loadResearchSnapshot(sessionId: string): Promise<void> {
   return observeSessionAuxiliary(sessionId, "research").done;
 }
 
-/** The accepted detail establishes the service identity without replacing the
- * original account or event baseline captured by its caller. */
-function loadResearchAfterDetail(sessionId: string, detail: Record<string, unknown>, start: SnapshotStart): Promise<void> {
-  const generation = readDispatchState(detail.dispatch_state)?.generation ?? start.dispatchGeneration;
-  const current = useSessionStore.getState();
-  if (start.accountGeneration !== current.accountGeneration || generation !== current.dispatchGeneration) return Promise.resolve();
-  return loadAuxiliarySnapshot(sessionId, "research", { ...start, dispatchGeneration: generation });
-}
-
-/** Selection and archived viewing accept detail before loading its research
- * cards, so the first read also establishes the current service generation. */
-export async function loadSessionSnapshots(
-  sessionId: string, start = useSessionStore.getState(),
-  onDetail?: OnDetail,
-) {
-  const detail = loadSessionSnapshot(sessionId, start, onDetail);
-  // Auxiliary readers own their visible errors; they cannot block navigation
-  // or turn a successful authoritative detail into unavailable queue state.
-  void loadAuxiliarySnapshot(sessionId, "background", start, detail).catch(() => {});
-  void detail.then((accepted) => accepted && loadResearchAfterDetail(sessionId, accepted, start)).catch(() => {});
-  return detail;
+/** Navigation finishes with detail; auxiliary reads own independent errors. */
+export async function loadSessionSnapshots(sessionId: string) {
+  return observeSession(sessionId).done;
 }
 
 /** One queue-state path for selection, archived viewing and reconnect. */
@@ -210,12 +217,13 @@ function applyDispatchSnapshot(
 /** Reject a retired service before any part of its detail can be rehydrated. */
 export function applySessionSnapshot(
   sessionId: string, detail: Record<string, unknown>, start = useSessionStore.getState(),
+  advanceOnly = false,
 ): boolean {
   if (!applyDispatchSnapshot(sessionId, detail, start)) return false;
   applyTranscript(sessionId, detail);
   const store = useSessionStore.getState();
   const active = detail.active_attempt as { request_id?: unknown; attempt_id?: unknown } | undefined;
-  if (!store.activeAttempts[sessionId] && typeof active?.request_id === "string" && typeof active.attempt_id === "string" &&
+  if (!advanceOnly && !store.activeAttempts[sessionId] && typeof active?.request_id === "string" && typeof active.attempt_id === "string" &&
       store.dispatchStates[sessionId]?.active_request_id === active.request_id) {
     store.setActiveAttempt(sessionId, { request_id: active.request_id, attempt_id: active.attempt_id });
   }
@@ -232,7 +240,7 @@ export function applySessionSnapshot(
     newerRequests.has(question.question_id));
   const pending = new Map([...(detail.pending_questions as PendingQuestion[] || []), ...newerPending]
     .map((question) => [question.question_id, question]));
-  store.setPendingQuestions(sessionId, [...pending.values()]);
-  store.setSubagents(sessionId, (detail.subagents as SubagentRun[]) || [], start.subagents[sessionId] || {});
+  if (!advanceOnly) store.setPendingQuestions(sessionId, [...pending.values()]);
+  store.setSubagents(sessionId, (detail.subagents as SubagentRun[]) || [], start.subagents[sessionId] || {}, advanceOnly);
   return true;
 }

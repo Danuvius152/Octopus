@@ -542,6 +542,10 @@ class ResearchManager:
 
     # --------------------------------------------------------------- helpers
 
+    def drain_blockers(self) -> tuple[str, ...]:
+        # Failed teardown tasks remain owned until their original cleanup is confirmed.
+        return ("pipeline, return delivery or cleanup",) if self._tasks else ()
+
     def begin_shutdown(self) -> None:
         """Close admission and signal the jobs this manager already owns."""
         if self._closing:

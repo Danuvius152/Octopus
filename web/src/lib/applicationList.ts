@@ -1,6 +1,6 @@
 import * as api from "../api/applications";
 import { useSessionStore, type Application } from "../stores/sessionStore";
-import { hydrateSession } from "./hydrateSession";
+import { observeSession } from "./hydrateSession";
 import { pinnedInOrder } from "./sidebarPins";
 import { ListWriteError, unreadList, type ListReadState, type RefreshResult } from "./listState";
 
@@ -39,12 +39,14 @@ export class ApplicationList {
   private intent: symbol | null = null;
   private engaged = false;
   private closed = false;
+  private metadataReads = new Set<ReturnType<typeof observeSession>>();
   private unsubscribe: () => void;
 
   constructor() {
     this.unsubscribe = useSessionStore.subscribe((state, before) => {
       const accountChanged = state.accountGeneration !== before.accountGeneration || state.token !== before.token;
       if (!accountChanged && state.dispatchGeneration === before.dispatchGeneration) return;
+      this.cancelMetadata();
       this.retire({ state: "obsolete" });
       this.dirty.clear();
       this.change++;
@@ -67,6 +69,11 @@ export class ApplicationList {
   private scope(): Scope {
     const state = useSessionStore.getState();
     return { account: state.accountGeneration, generation: state.dispatchGeneration, token: state.token, socket: this.socket, connection: this.connection };
+  }
+
+  private cancelMetadata(): void {
+    for (const read of this.metadataReads) read.cancel();
+    this.metadataReads.clear();
   }
 
   private current(scope: Scope): boolean {
@@ -96,6 +103,7 @@ export class ApplicationList {
     if (source.accountGeneration !== useSessionStore.getState().accountGeneration) return;
     this.engaged = true;
     if (this.socket !== source.socket) {
+      this.cancelMetadata();
       this.connection++;
       this.retire({ state: "obsolete" });
       this.socket = source.socket;
@@ -107,6 +115,7 @@ export class ApplicationList {
 
   disconnect(source: ListEventSource): void {
     if (source.socket !== this.socket) return;
+    this.cancelMetadata();
     this.connection++;
     this.socket = null;
     this.change++;
@@ -264,7 +273,11 @@ export class ApplicationList {
           !(before.mainView === "application" && before.activeApplicationId === row.id)) {
           useSessionStore.getState().noteApplicationFailed(row.id);
         }
-        if (row.session_id) void hydrateSession(row.session_id, this.currentGuard());
+        if (row.session_id && before.token && ![...before.sessions, ...before.archivedSessions].some((session) => session.id === row.session_id)) {
+          const read = observeSession(row.session_id, "metadata");
+          this.metadataReads.add(read);
+          void read.done.catch(() => {}).finally(() => this.metadataReads.delete(read));
+        }
       }
     } else if (type === "application_archived" || type === "application_deleted") {
       const state = useSessionStore.getState();
@@ -341,7 +354,7 @@ export class ApplicationList {
     }, { ids });
   }
 
-  dispose(): void { this.closed = true; this.unsubscribe(); this.dirty.clear(); this.retire({ state: "obsolete" }); }
+  dispose(): void { this.cancelMetadata(); this.closed = true; this.unsubscribe(); this.dirty.clear(); this.retire({ state: "obsolete" }); }
 }
 
 export const applications = new ApplicationList();

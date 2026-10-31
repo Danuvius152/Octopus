@@ -125,6 +125,7 @@ class AppAgentManager:
         # Serializes each app's admission through asynchronous session creation.
         # A cancelled waiter owns no slot; admitted turns live in _turns.
         self._admission_locks: dict[str, asyncio.Lock] = {}
+        self._closing = False
 
     def bind(
         self,
@@ -135,9 +136,17 @@ class AppAgentManager:
         self.session_mgr = session_mgr
         self.db = db
         self.app_mgr = app_mgr
+        self._closing = False
         session_mgr.on_broadcast(_BUS_KEY, self._on_broadcast)
 
+    def drain_blockers(self) -> tuple[str, ...]:
+        return ("admission, response or original execution",) if self._turns or any(lock.locked() for lock in self._admission_locks.values()) else ()
+
+    def begin_shutdown(self) -> None:
+        self._closing = True
+
     def shutdown(self) -> None:
+        self.begin_shutdown()
         if self.session_mgr is not None:
             self.session_mgr.remove_broadcast(_BUS_KEY)
         for turn in list(self._turns.values()):
@@ -250,6 +259,8 @@ class AppAgentManager:
         if mgr is None:
             return 0
         async with self._admission_locks.setdefault(app_id, asyncio.Lock()):
+            if self._closing:
+                raise AppAgentError("Application agent admission is closed", status_code=503)
             rows = await mgr.db.load_sessions(include_archived=True)
             victims = [s["id"] for s in rows if s["origin"] == ORIGIN_APP and s["app_id"] == app_id]
             for sid in victims:

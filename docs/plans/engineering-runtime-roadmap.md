@@ -1,6 +1,6 @@
 # Octopus 工程收敛与运行时路线
 
-> **Status:** in-progress — 第一阶段及会话核心、Wiki 受保护操作和辅助任务快照已实现；完整会话/委派读取、安装排空与 G2 验收及 Codex/DeepSeek 迁移仍待实施。
+> **Status:** in-progress — 第一、二阶段代码与 G2 验证已完成；Codex app-server 与 DeepSeek 迁移仍待实施。
 
 > 日期：2026-10-30（Asia/Shanghai）。源码核查基线：`1126d106d95af582ecf989b7c9206ec48c0a09c2`。
 > 历史架构候选补充核查：`0ca897e97189c5f213a658d986cbd67f4d69c5e3` 及当前文档工作树，范围见§7.3。
@@ -8,7 +8,7 @@
 > 第一阶段合同更新：2026-10-31，实施起点 `5867e6c5a92e47869859119b56d00995ec995dd4`。
 > 第二阶段设计更新：2026-10-31，源码基线 `28c067a090414bdd0513f570320584b2d42d1ee3`。
 > 当次设计整合架构访谈 D1–D12 与 Stage 2 补充评审 R1–R8，设计与分票不作为实施证明。
-> 初始设计基线不代表当前运行版本。实现、验证与发布分别取证；S1、S2、S2b、S3、S4、现有问题结算、S5/S6 的 W1–W4 及 S7 的 BG/Research 辅助读取已实施；S7 的完整会话/委派读取、S8 与整体 G2 尚未完成。
+> 初始设计基线不代表当前运行版本。九项第二阶段范围已进入所属当前合同；G2 的真实入口、反例和旧路径退出已验收，回归入口见§3。实现、验证与生产发布分别取证。
 >
 > 本文替代原 `future.md`、2026-10-29 架构路线、2026-10-29 回复调度指南及 2026-10-28 行动指南。按最新源码和本次访谈重新裁决，不按旧票号拼接待办。长期当前合同由 `implemented/` 各主题维护；本文只拥有未来变更的路线、取舍与范围。
 
@@ -78,13 +78,13 @@ BG、Research、命名 agent 的终态和问题返回，继续保留原 source�
 | 返回接管 | [BG](../../server/sessions/turns.py)、[Research](../../server/research/manager.py)、[委派](../../server/delegations.py)已使用同一公共接管操作，见[当前合同](../implemented/architecture-contract.md#公共返回接管) | 保留来源重试、业务结算及独立返回消费政策，后续来源沿同一接口接入 |
 | 原执行退休与单轮结算 | 原 OwnerRuntime 绑定 driver/资源观察并唯一结算；[Wiki](../../server/wiki/job_execution.py)通过公开查询及原 work 清理证明守住重试；结果关联已集中 | 当前合同归[原执行观察](../implemented/architecture-contract.md#原执行的观察)与[结果读取](../implemented/architecture-contract.md#原请求结果读取)，新协议尾部仍另行实施 |
 | 配置变更与请求捕获 | 默认保存归 AgentManager，覆盖与捕获归[会话配置操作](../../server/sessions/configuration.py)；路由锁序已退出 | 保持§1.3允许改默认、准备锁内捕获及效果前撤权；不以保存或捕获延长授权 |
-| Wiki 注册与受保护借用 | [Registry](../../server/wiki/registry.py)、[维护准入](../../server/wiki/maintenance_admission.py)及路由间仍存在外部锁序/代次编排；§3.7 固定 S5/S6 范围 | 不是已复现死锁；按业务操作收回协议，History 与 Store 的真实权威继续保留 |
-| 聊天详情投影 | [hydrateSession](../../web/src/lib/hydrateSession.ts)仍显式协调 detail、Research、读取基线与服务代次 | 已选择 S7 集中读取生命周期，保留领域合并及视图观察责任，不整体重写前端 |
-| 安装交接与自然排空 | [main](../../server/main.py)仍集中读取各域私有任务、锁与退休集合；§3.7 选定各域事实与交接收据 | 已选择 S8；未来运行时新增责任继续进入所属 owner，不由安装层猜私有布局 |
+| Wiki 注册与受保护借用 | [W1–W4](../implemented/wiki-development-summary.md#受保护操作与入口)已收回同代、授权与锁序；History/Store 保留各自权威 | 新业务操作沿原 owner 接入，不为统一函数形状重写简单操作 |
+| 聊天详情投影 | [读取合同](../implemented/architecture-contract.md#辅助任务的读取与事件合并)已集中完整/辅助/委派读取与目标失效 | 新类型仍须说明身份、事件及快照规则，视图保留观察结束 |
+| 安装交接与自然排空 | [各域事实与成功收据](../implemented/architecture-contract.md#安装自然排空与交接收据)已贯通安装与导出消费者 | 新内部资源进入所属 owner，不由安装层猜私有布局；实际退出仍另取证 |
 
 三份报告支持的共同方向是减少调用方必须了解的内部规则，继续利用已有责任模块。
 它们没有证明统一 Job 总线、额外持久执行账本、通用 Repository 或全仓拆类能带来收益。
-全部候选及次级机会的扩展价值、推荐边界与验收见§3.6–§3.9；不能把候选数量、
+已实施接口的选择理由归[架构决策](../implemented/architecture-contract.md#既有领域接口的取舍)，后续候选见§3.3；不能把候选数量、
 文件长度或接口名称当作架构质量结论。
 
 ### 1.5 已确认的架构评价标准与本次评估范围
@@ -121,7 +121,9 @@ Sapphire/SmartReader 与受限 App 客户端、更丰富的任务展示，以及
 
 删除前退休、排序事务和列表协调的既有合同继续保留。应用成功删除后旧开发
 聊天仍可重新创建目录，不恢复“成功后永久禁写”提案。公共返回接管及[配置保存与请求捕获](../implemented/model-reasoning.md#saving-defaults-and-repairing-an-existing-session)已完成；
-完整原生尾部及统一退休查询/Owner 排空接口仍属于后续阶段。
+统一[退休查询](../implemented/architecture-contract.md#原执行的观察)与
+[领域排空](../implemented/architecture-contract.md#安装自然排空与交接收据)已完成；
+完整原生尾部仍属于后续阶段。
 
 ### 2.2 投递错误分类：先修完整行为，再收回共同编排
 
@@ -160,257 +162,73 @@ plans 保留未完成范围，testing/local-wsl 管验证与本机操作。活�
 Wiki 格式和完整原生尾部范围各有权威；原生卡片可见不证明完整尾部已完成。
 
 <a id="phase-2"></a>
+## 3. 第二阶段：既有领域操作与后续交接
+
+S1、S2、S2b、S3、S4、S5、按实际用法收窄的 S6、S7、S8 已实施；G2 的
+交付检查与独立审查已通过。已完成的操作、失败边界和必要理由归所属 implemented
+合同，本节不再保留第二份实施步骤。生产发布按实际发布回执单独判断。
+
+| 范围 | 当前合同与责任 | 后续变化在何处接入 |
+| --- | --- | --- |
+| S1 返回接管 | [原身份与公共接管](../implemented/architecture-contract.md#公共返回接管) | 新来源沿会话接纳操作返回，来源继续拥有正文、业务结论与重试 |
+| S2 原执行/资源、S2b 结算/结果 | [原执行观察](../implemented/architecture-contract.md#原执行的观察)、[结果读取](../implemented/architecture-contract.md#原请求结果读取)、[问题结算](../implemented/architecture-contract.md#问题结算) | 新宿主在原 owner 提供实际资源证据，消费者保持原 request/attempt/work |
+| S3 配置 | [保存、修正与准备时捕获](../implemented/model-reasoning.md#saving-defaults-and-repairing-an-existing-session) | 新配置进入原继承/捕获操作，不把当前授权固化为配置快照 |
+| S4 能力与恢复 | [运行时合同](../implemented/harness-layer.md)、[恢复证据](../implemented/harness-transient-retry.md#4-recovery-evidence-in-the-original-owner) | adapter 声明真实能力，Owner 按实际输入/效果证据裁定恢复 |
+| S5/S6 Wiki | [W1–W4 受保护操作](../implemented/wiki-development-summary.md#受保护操作与入口) | 新调用者消费现有领域操作，冷准备、同代借用、授权与提交仍由原 owner 负责 |
+| S7 读取 | [完整/辅助/委派读取](../implemented/architecture-contract.md#辅助任务的读取与事件合并) | 新任务类型说明自己的身份、事件与快照规则，页面不拼 baseline/服务代次 |
+| S8 排空 | [领域事实与交接收据](../implemented/architecture-contract.md#安装自然排空与交接收据) | 内部资源在所属 owner 纳入事实与退休；新业务域才扩展安装显式组合 |
+
 <a id="harness-protocol-contract"></a>
-## 3. 第二阶段：让既有所有者提供完整的小接口
+### 3.1 保留的协议范围与阶段出口
 
-本节是第二阶段范围与 G2 出口的长期 owner。S1、S2、S2b、S3、S4 与当前问题
-结算已实施；Wiki 的 S5/收窄 S6、前端 S7、排空 S8 及整体 G2 仍待完成。
-2026-10-31 访谈选择九项 S1/S2/S2b/S3/S4/S5/S6/S7/S8，并按 D3/D4/D6/D11
-修订旧串行计划：保留 Codex exec 与 Claude 有条件复用；不预建输入 ACK 状态层
-或最终答案引用表；S6 只迁移下列现实操作。旧评审的 C4 首输入持久扩展、C5
-最终原生 item 引用和完整 App 网关反射替换不再是 G2 条件。
+本阶段保持当前 Codex exec 与 Claude 有条件宿主复用；claim、本地写入/drain、
+root 结束、业务结算、通知和资源退休的证据不能互相提升。公共 prepare/events/
+steer/answer/completion/interrupt/reuse 操作沿现有 Harness 与原 Owner 演进，
+真实差异归 adapter；新 RPC 握手、双向关联与完整原生尾部在第三/四阶段验证。
 
-原 Stage 2 补充评审的 R1–R8 已落实到本节。设计审计与补充评审各有固定版本，
-不证明实现或产品测试通过。完整原生尾部、新宿主、RPC 接受语义留在第三/四阶段；
-本阶段也不保证未来协议永远无需在所属边界扩展。独立返回与问答的现有体验保留。
+未预建输入 ACK 状态层、最终原生答案引用表、新 RPC 引擎或跨请求宿主池。
+S6 保留简单查询、History 操作、既有 App 白名单与反射兼容，不扩展到完整网关
+替换或未经选择的直接 App 产品。snapshot 创建保持 410。原生尾部仍是下一阶段
+完整完成范围，不能以本阶段收敛或短对话通过宣称已经解决。
 
-### 3.1 责任与收益
+### 3.2 G2 反例与回归入口
 
-| 所有者 | 保留的权威 | 收回的重复知识 | 对后续的帮助 |
-| --- | --- | --- | --- |
-| SessionOwner／会话模块 | 接纳、逐条派发、原输入、问题和唯一业务结算 | 各来源拼接 receipt/唤醒/准入顺序 | Codex/DSH 不另建输入账本 |
-| HarnessRun／原资源 owner | 准备、spawn、连接、I/O、lease、停止和退出证据 | 消费者直接窥探内部任务集合 | 换协议不改变 Wiki/App 的退休判断 |
-| RuntimeProfile＋私有协议 adapter | 能力、装配、原生事件和发送/完成证据 | 在公共层拼 Claude 帧、由 stdin 猜能力 | 三种后端各自实现真实能力 |
-| 来源 BG／Research／委派 | 来源业务结果、材料、重试和放弃 | 接管流程内部细节 | 改善可靠性而不改变回复次序 |
-| Wiki Registry／Store／jobs | 注册代次、阅读/写入授权、身份、文件效果与恢复 | 调用者借 Store、拼锁序、重验代次 | 后端变化不外泄到知识发布合同 |
+下表保留验收映射和可复查入口，不缓存测试数量或部署状态。完整门禁、实际安装
+发布矩阵与有效证据复用规则归 [testing.md](../testing.md)。原失败及修复后结果
+分别记录，未执行的 Claude 实机不计为通过。
 
-SessionOwner 继续串行裁定状态、异步推进执行；长 RPC、模型、问题等待、prepare 和退出不占住命令处理。后台回报携原 request/attempt/work/backend/lease，不能读取会话最新绑定重新归属。
-
-### 3.2 S1：公共返回接管已实现
-
-当前合同、选择理由、提交与失败边界归[公共返回接管](../implemented/architecture-contract.md#公共返回接管)。BG、Research、委派终态和问题均已使用 `admit_return`，来源共同的 receipt/唤醒/准入编排及旧公开恢复入口已退出。
-
-来源保有材料、业务结果、诊断及重试，逐条派发、Stop/Resume 和独立 work 语义保持。既有回归及真实接纳事务已覆盖丢确认、材料删除、Owner 失败与准备/归档竞争；验证政策仍归[testing.md](../testing.md)。本项完成不代表 G2 整体完成，也不改变后续运行时与安装交接的出口。
-
-### 3.3 S2：原执行与资源观察已实现
-
-原回执、驱动和指定资源分别取证，当前合同归[原执行的观察](../implemented/architecture-contract.md#原执行的观察)。Wiki 已退出会话私有队列/退休集合；它继续拥有 work 关闭、BG/Research 等原资源清理及持久确认。查询 A 不停止 B，App 普通槽不增宿主退出门槛。
-
-模拟进程和原回执回归覆盖宿主复用、取消观察、unknown steer、缺少证明、退出失败与 Owner 故障后清理/归档。失败 Owner 的诊断引用不等于活动资源，也不能在清理尚未证明时放行。没有新增执行账本；新协议的完整原生尾部仍待后续阶段。
-
-### 3.4 S3：配置保存与请求捕获已实现
-
-当前操作、继承、锁内捕获时点和效果前授权归[模型设置](../implemented/model-reasoning.md#saving-defaults-and-repairing-an-existing-session)。AgentManager 与会话模块拥有各自完整保存操作，调用方已退出跨模块锁序及提交后字段刷新；没有新增持久配置副本。
-
-保留这项责任分工，是为了将候选默认是否合法、当前会话能否使用、本次捕获什么、
-效果前是否仍有授权分开判断。真实保存/启动/retry 回归覆盖排队与等锁改值、
-捕获后不混配及 spawn/frame 撤权；合法默认不会因旧会话不兼容而被否决。
-
-### 3.5 S4：当前能力与恢复证据已实现
-
-显式能力已实现：`can_steer`、`reusable`、`can_continue` 和工具策略分别由 adapter 声明，
-Owner、API 投影、Harness 发送、held 策略及 Wiki scope 使用相应能力；四种组合
-均已通过真实子进程和工具可见性回归。当前证据含义归[运行时合同](../implemented/harness-layer.md)及[输入送达](../implemented/inline-steering.md#current-capability-and-delivery)。Codex 仍为 exec，Claude held 策略保持。
-
-以下是操作语义，不是要求新增同名大类或存一张能力真相表：
-
-| 接口/能力 | 必须明确的内容 |
+| 验收与补充评审 | 保留的反例与回归入口 |
 | --- | --- |
-| prepare/start | 固定原身份和配置；准备失败及迟到句柄有 owner；首次可用工具前完成授权 |
-| events | 带原身份的文本、工具、原生任务、问题、usage、错误与完成证据；完整正文与流式投影分开 |
-| steer | 后端是否支持、允许的阶段、实际接受层级；明确未接受/接受/未知，不能把所有 pipe drain 当原生 ACK |
-| answer | 原问题与原通道、结构化答案、取消和晚答；不把答案当新 prompt |
-| completion | 当前 root 结束、请求驱动收束、业务结论分别说明；不以卡片状态或字段改名声称完整原生尾部 |
-| interrupt / retire | 请求取消与原资源确实退出分别回报；未退出责任继续可查 |
-| reuse | 跨请求复用独立于双向通信和 steer；新请求不得借旧 lease 安装新授权 |
-
-当前 claim 只证明取得执行身份；steer confirmed 只证明本地写入/drain；exec
-turn.completed 只证明当前 parser 的 root 结束。公共合同不把这些值提升为
-provider accepted/processed。steer、工具策略与跨请求复用独立声明，不从 stdin
-形态或 reusable 推导其他能力。当前能力变化须贯通 Owner 与两个现有后端。
-
-按效果证据限制 idle/transient/stale-session 恢复已实施；旧的无输出重播假设及
-turn-start resume-ID 恢复路径已退出。当前动作表、捕获依据、预算与边界统一归
-[恢复证据](../implemented/harness-transient-retry.md#4-recovery-evidence-in-the-original-owner)。
-接纳去重、原身份确认与 attempt 恢复仍是三个合同；不新增持久 ACK，也不声称
-continuation 可保证外部效果 exactly-once。两后端的外部文件效果/丢输出回归已
-检查实际启动、prompt、结果与退出；重启 claim 与 unknown steer 保持原事实。
-
-新 RPC reader/writer、握手、双向请求关联与完整尾部在§4/§5按实际协议交付；
-本阶段不预建通用 RPC 引擎或改变 Claude 首 result/idle 迟到文本的交付保证。
-
-Registry 的独立深化具体化为下文 S5，不再混在运行时协议责任中；S2 则是新运行时消费者隔离的直接前置。
+| A01–A03、A31；R8 | 返回已接纳但丢确认、慢准备撤权与 Stop backlog：[接管](../../tests/test_return_admission.py)、[生命周期](../../tests/test_return_admission_lifecycle.py)、[派发](../../tests/test_session_dispatch.py) |
+| A04、A07–A08；R4 | terminal 提交后通知失败、原 A 与复用宿主的 B、原 work/失败接管：[完成事实](../../tests/test_request_completion_facts.py)、[原执行](../../tests/test_execution_observation.py)、[Owner 接管](../../tests/test_session_owner_failure_handoff.py) |
+| A05–A06 | 多 attempt、承载身份、空/失败正文与同快照结果：[结果读取](../../tests/test_session_results.py)及 App/委派真实消费者 |
+| A09、A32；R6 | 排队/等锁/捕获后改值及效果前撤权：[配置捕获](../../tests/test_request_configuration.py) |
+| A10、A30；R3 | 能力独立与无输出但可能已有副作用：[能力投影](../../tests/test_session_capability_projection.py)、[恢复证据](../../tests/test_retry_evidence.py) |
+| A11–A13、A33；R5 | 正常结构化回答、可信来源、非法回答不消费、保存失败与到期竞争：[问题结算](../../tests/test_question_resolution.py)及真实问答入口 |
+| A14–A18；R7 | 同代/撤权、整批接纳、commit/wake 与效果后失败：[维护接纳](../../tests/test_wiki_maintenance_admission.py)、[原任务控制](../../tests/test_wiki_job_controls.py)、[效果结算](../../tests/test_wiki_effect_settlement.py) |
+| A19–A22、A28；R1 | 双成功乱序、真实 WS、未知目标删除、A→B→A、局部失败与新 work：[公开读取](../../web/src/lib/hydrateSession.test.ts)、[委派读取](../../web/src/lib/delegationReads.test.ts)、[真实重连卡片](../../web/src/components/AgentDelegationRequestCard.reconnect.test.tsx) |
+| A23–A26、A29、A34；R2 | 线程排出未 borrow、通知/桥接清理空隙、部分封口、丢响应、ASGI/WS：[安装](../../tests/test_installation_drain.py)、[ASGI](../../tests/test_installation_admission.py)、[导出消费](../../tests/test_portability_handoff.py)、[存储故障](../../tests/test_installation_storage_failure.py) |
+| A27；跨票 | 上述真实入口退出旧接管/裁定/锁序/基线/私有排空编排；全量离线覆盖 Claude/Codex，发布另覆盖浏览器、Codex 实机与适用 supervisor |
 
 <a id="architecture-candidate-value"></a>
-### 3.6 全部历史候选：哪些值得为后续扩展做
+### 3.3 后续候选的真实触发条件
 
-以下保留候选的取舍理由；九项范围已由 D1/D12 选定，S6 由 D11 收窄。
-选择设计不授权产品实现。优先级依据当前重复规则与现实消费者，不把展示顺序
-当成技术依赖，也不因某项不是后端迁移前置就漏掉已选择的完整行为。
+已实施九项范围的选择理由归[架构决策](../implemented/architecture-contract.md#既有领域接口的取舍)。
+三份历史报告中的次级建议仍按实际收益判断，不因旧优先级或文件长度自动进入下一阶段。
 
-| 候选 | 对应的已知扩展与收益 | 判断及主要代价 |
-| --- | --- | --- |
-| S1 返回接管 | BG、Research、委派已是三个真实调用方；以后修改准入/唤醒/确认规则只改会话模块 | **优先做。** 已有充分复用，不必等新功能；代价是须保留各来源的正文、重试及结算差异 |
-| S2 原执行退休接口 | Codex/DSH 改变进程和后代形态；Wiki、App 不必随之理解运行时私有集合 | **优先做。** 隐藏资源表示有直接收益；查询仍需保留原身份和未知证据，不能退化为一个 session idle 布尔值 |
-| S2b Owner 内部结算编排 | 完整原生尾部改变何时可结算；将结果分类到原 terminal 的编排收在单轮 owner 内，避免 Owner → Manager → Owner 往返 | **值得纳入。** 收益是完成语义变更集中；风险高于普通 helper 抽取，须保持结果、记录、通知和退休分别取证 |
-| S3 配置变更与捕获 | 后端、凭据、模型与工具能力会继续增加；保存与实际请求共用继承规则，路由不再各自拼锁和刷新 | **优先做。** 属于持续变化点；不能把慢准备或当前授权合并进配置快照 |
-| S5 Wiki 注册与受保护操作 | 新读取/维护入口和受限客户端会反复遇到重绑、代次、借用与撤权；这些规则只在原 owner 维护 | **优先做。** 已有多个调用方，未来扩展进一步放大收益；主要成本是保留不同操作真实锁范围和冷准备顺序 |
-| S6 Wiki 业务入口与 transport 分离 | 现有维护接纳、任务控制及受授权文件变更有跨 owner 规则；SmartReader 经 agent，Sapphire 经文件服务 | **按 D11 收窄纳入。** 迁完被选操作；保留简单操作和 App 网关兼容，不以未选择的直接 App 功能扩大范围 |
-| S7 聊天详情投影 | 原生尾部、新任务卡片与诊断会增加事件；选择、归档查看、重连共用快照接收及合并规则 | **值得纳入。** 是已有前端时序责任的深化；必须保留消息、问题、任务卡片的不同合并语义，不能做一个无差别通用 reducer |
-| S8 各 owner 提供排空事实 | 新宿主、RPC、问题等待、后台交付与应用资源持续增加；新增资源在所属模块纳入排空，不再同时改 main 的私有字段清单 | **值得纳入。** 运维扩展价值明确；仍须保留显式 owner 清单，以及检查至关闭准入之间的竞态保护 |
-
-S4 共同运行时接口来自本 Markdown 路线，也值得做：已有 Claude/Codex 和明确的 DSH
-接入目标，接口变化有真实驱动。应复用 Harness 的入口和资源责任，允许内部结构变化；
-不以所有 provider 都使用相似传输为由提前统一完成、steer 或 ACK 语义。
-
-<a id="37-新增推荐范围做到哪里才算有架构收益"></a>
-### 3.7 已选边界：做到哪里才算有架构收益
-
-本节保留已选范围与验收理由；当前已实现的 W1–W4 合同归
-[Wiki 受保护操作](../implemented/wiki-development-summary.md#受保护操作与入口)，
-BG/Research 合同归[辅助任务读取](../implemented/architecture-contract.md#辅助任务的读取与事件合并)。
-S7 的完整会话生命周期与委派列表、S8 安装交接仍是未完成工作。
-
-**S2b：原 Owner 结算与结果读取已实现。** [当前结算合同](../implemented/architecture-contract.md#输入完成与资源退休)固定原 Execution 与发布上下文，Manager 回取 current/frames 的旧编排已退出。真实 SQLite 与原 receipt 观察覆盖提交后投影/通知失败、重复迟到 A 不结算 B、失败与 unknown 的既有区别。结果关联已归同一快照读取，三个消费者保持格式和通知差异；S2 的证明范围与新尾部协议分别判断。
-
-**S5：Registry 与现有 Wiki 业务模块共同封装受保护操作。** Registry 拥有同代
-Store 的取得、借用和退休；维护准入拥有其业务提交。冷准备不持业务锁，准备后与
-效果前复核代次和当前权限。路由/普通调用方不再组合 account/registration/History
-锁或读取借用内部状态；锁的正确顺序留在拥有该操作的实现内。History 的文件效果、
-Store 的账本事务和恢复责任保留。验收覆盖取 Store 后重绑、准备后撤权、旧借用未退出、
-提交失败不唤醒；不能通过一把全局大锁实现“统一”。
-
-**S6：固定实际操作，收回业务规则。** 入口认证并传递可信账户/App/task/scope，
-不把客户端目标或 expected revision 当许可，不新增可变 authorized 镜像。原业务
-模块按当前权限重验；owner-only、submitter、原 worker/job 控制不能压成 read/write。
-MCP 保持主机 HTTP 通路，App 保留现有白名单及反射适配；合法默认值/包装差异保持。
-已收回规则不复制回网关，不强制所有路由套 wrapper，不新建统一 Context 类。
-
-| 固定迁移单元 | 操作与实际调用者 | 必须拥有的完整行为 |
-| --- | --- | --- |
-| W1 维护观察 | maintenance-status、selection 创建/读取；HTTP、现有 App 白名单及已暴露 MCP 工具 | 同代 Store 准备/借用、History 观察、账户/注册保护及 actor 重验；调用方不拼锁 |
-| W2 维护接纳 | maintain、maintain-batch、curate；原 HTTP/App/MCP，curate 保持 owner-only | 选择许可、原幂等键、批量共同验证、job/grant/别名/订阅短事务与提交后 wake |
-| W3 任务控制 | cancel/retry/verify/readmit；HTTP，App 仅前三者，MCP 仅既有工具；readmit 仍 owner-only | 原 job/attempt/work、当前授权、dispatch gate、原 work 退休；retry 消费 S2 证明 |
-| W4 受授权内容变更 | publish/revise/restructure/organize；原 HTTP/App/MCP | 同代捕获、curator/path/source-read/revision 检查、效果前重验、History 原像与 prepared/applied 恢复 |
-
-W2/W4 复用 W1 的同代资源操作，不强迫借用、维护事务和文件写入共享锁范围。
-冷构造/恢复在相应业务锁外，发布前重验；维护所需 History 保护保留。批量一项
-失效不部分提交；commit 失败不 wake，成功后 wake 失败保留原 job 与原幂等身份。
-文件与 SQLite 不构成跨资源原子事务，取消等待不抹去真实效果。
-
-保留 search/read/read-many/documents/graph/blocks/image/info/guide、job 查询及
-详情/output 的已有领域操作。保留 History 普通编辑/历史/restore、旧 snapshot
-读取/恢复、显式 recovery 和 App bridge 的 owner；snapshot **创建已退役为 410**，
-不因旧计划列举而恢复。W4 验证这些相邻操作仍按原许可运行；无新跨 owner 证据
-不整体重写。保留搜索/Unicode/cursor、模型字节预算及实际已读证据，不加全库扫描。
-SmartReader agent 通路与 Sapphire 文件保存保持，同一次保存不双写。
-
-**S7：会话投影拥有一次读取及其应用规则。** 由现有会话加载/投影模块捕获账户、
-会话、服务代次和读取基线，负责 detail 与任务快照的依赖、旧响应拒绝及事件合并；
-页面表达目标与用途并拥有观察结束，WS 沿原领域更新。Zustand 继续保存可见投影，transcript 继续
-拥有历史窗口与序号，问题关闭和任务更新保留各自规则。删除选择/归档/重连调用方
-传 baseline、排序快照的义务，不新增一份权威会话。以快照读取中关闭问题、切账户、
-旧服务响应晚到及原生子任务完成后旧快照到达为验收；不能只移动 switch 或拆 store。
-
-读取模块管请求间有效性，领域模块区分真实事件/本地权威更新与其他快照写入。
-两个请求共享 running baseline，A 的 running 快照先写 store 后，不能把它与
-baseline 引用不同当作实时证据遮住 B 的 completed。两种返回顺序和真实 WS 对照
-都须通过公开加载/hook 验证，不只测纯 merge。按原任务/原 work 合法状态处理终态，
-不设置全局 terminal 最大。委派重连和卡片轮询用 delegation_id + work_id。
-metadata、辅助重试与完整聊天按需读取；辅助失败不使成功 detail 不可用；取消
-读取不取消业务，旧成功/失败、删除/归档及切账户均受原观察身份约束。
-
-**S8：安装交接组合 owner 提供的真实排空事实。** 各域从自己持有的任务、准备、
-投递和退休引用推导能否交接；main 明确列出参与者并执行安装级检查与封口，不猜
-第三方 scheduler 或业务对象的私有布局。不引入通用任务注册中心、持久 idle 标记
-或第二份活动计数。当前无 await 的检查至封口保证须保留；线程/外部 producer 的
-竞争仍由对应 owner 的已有准入同步保护。原运行活动、迟到 spawn、交付观察者、停止失败
-或 DB writer 任一未收束都应拒绝交接，全部满足后才放行。业务结果完成不代替资源退休。
-
-Registry 必须覆盖已排出但未 borrow 的线程；health.stopping 不能代替线程准入
-封口。短 guard 不在事件循环等活线程，无法取得同步关系就拒绝交接；取消 await
-不证明 writer 退出，shutdown 最后同步仍由原 owner 等待。Wiki 通知 outbox/
-receive/返回/ACK 在 sleep 或暂时失败间隙仍有责任；App bridge 准备和未确认清理
-不能被 job 终态或 backend 空闲覆盖。HTTP 观察至原 ASGI 完成，WS 只计输入处理。
-
-全部必要 gate 成功封口后才发布 offline_request 与明确成功响应；marker 证明
-安全交接资格，不证明进程退出。封口前 busy 不关 producer；第 N 个封口失败不
-发布成功 marker，也不伪装普通 busy 重开服务，已关闭部分由原 owner 保责收尾。
-同 ID 丢响应后查询/重试读同一成功，异 ID 不得冒领；HTTP、ready 与导出消费者
-共同验收，缺 status 不默认成功。不把逐域 try-seal 叫全安装原子事务，不建通用
-两阶段提交。无活动责任的常驻循环/held 宿主可在成功交接后由正常 shutdown 退休。
-
-### 3.8 已落实、条件性及不建议的历史意见
-
-| 历史意见 | 当前结论与后续边界 |
+| 候选 | 保留的结论与触发条件 |
 | --- | --- |
-| 应用删除前确认退休 | **保留已有实现，不重做。** 已有持久删除阶段和原资源退休责任，未来新增 App writer 接入同一生命周期 |
-| 应用/计划列表协调 | **保留已有业务入口。** 参考其责任划分推进 S7，不把列表和聊天详情强制合成同一同步模型 |
-| Connector 首次绑定 | **保留已有身份串行化与原子 upsert。** 新 provider 沿既有安装/刷新接口接入，不另建 OAuth 事务框架 |
-| Wiki App 的 null/正文校验缺陷 | **局部修正已有实现；架构方向继续做 S6。** 参数一致与业务入口独立是两个完成条件 |
-| 数据库完整行列映射 | **原建议已有实现。** [RecordProjection](../../server/db/projection.py)及[完整行声明](../../server/db/base.py)集中 SQL 列与字段名，领域解码仍各自负责；不扩成 ORM/Repository，也不强制所有局部查询返回完整对象 |
-| Research 重复 Task 登记 | **原建议已有集中入口。** [ResearchManager](../../server/research/manager.py)的 `_register_task` 统一 pipeline/delivery 任务，保留失败清理和关停中迟到交接；多个集合不自动等于重复权威，不再抽成跨域 TaskManager |
-| 前端输入接管/恢复编排 | **有价值，暂不作为独立必做重构。** [ChatView](../../web/src/components/ChatView.tsx)与[WS](../../web/src/hooks/useWebSocket.ts)确有跨层协调，但现阶段对用户承诺的发送/恢复行为不变；当新增发送入口、复杂附件恢复或修改接纳 UX 时，将原身份、unknown 确认和草稿恢复纳入同一业务模块。S7 不顺带承担写入流程 |
-| 取消浏览器收讫账本 | **不建议作为架构优化。** [Research 回执](../../server/db/research.py)及[卡片](../../web/src/components/ResearchCard.tsx)仍区分浏览器收到状态与父模型处理；它有独立可观察含义。只有产品明确取消该保证时才讨论删除 |
-| 删除无数据库执行路径 | **相关执行路径已收敛，不重复列项。** [输入就绪入口](../../server/sessions/base.py)与[回归](../../tests/test_input_readiness.py)要求初始化完成；保留不启动执行的构造/查询不等于保留第二条执行路径 |
-| 因大文件或 mixin 多而拆类、统一所有 Job/前端 reducer、再造 Repository/任务总线 | **不建议。** 尚无独立业务责任或已知变化证明这些机制能减少调用知识，反而增加需要共同演进的接口与状态 |
+| 前端输入接管/恢复编排 | 新发送入口、复杂附件恢复或接纳 UX 改变时，集中原身份、unknown 确认与草稿责任；本阶段没有借读取重构改写发送政策 |
+| 全部 Wiki/App transport 深化 | 现有 W1–W4 已收回实际业务规则；新的现实客户端或跨 owner 用例再证明剩余适配边界，不为函数形状统一所有路由 |
+| Research 浏览器收讫账本 | 浏览器收到、汇报接纳和父模型处理有独立含义；只有产品明确取消保证时才讨论删除 |
+| 额外 ORM/Repository、TaskManager 或通用 Job/reducer | RecordProjection 已集中完整行映射，Research 已集中原任务登记；尚无独立责任或真实复用证明需要另一层权威 |
+| 按 mixin/文件大小拆类 | 不以文件数量判断深度；只有一次变化仍要求调用方掌握跨模块规则时才深化所属操作 |
 
-HTML 提到的 BG 退休、应用启动容量、列表竞态、OAuth 绑定及中文路径缺陷仍按其
-具体行为证据核对；不是额外五个架构重构项目。本表不以“值得保留”宣称已重新测试
-这些历史修复，当前 bug 与性能工作仍由第一阶段和各主题合同承担。
+应用删除保留原持久退休阶段，未来新 writer 接入同一生命周期；应用/计划列表沿
+原业务操作演进，不强迫它们与聊天详情共用一个同步模型。Connector 新 provider
+沿现有身份串行化与原子 upsert 接入，不重建 OAuth 事务框架。BG 退休、应用容量、
+列表竞态、OAuth 绑定和中文路径等历史缺陷仍按其行为合同维护，不变成额外重构项目。
 
-<a id="39-推荐组合真实依赖与退出条件"></a>
-### 3.9 已选组合、真实依赖与退出条件
-
-S1、S2、S2b、S3、S4、S5、收窄 S6、S7、S8 已组成第二阶段设计范围。
-按完整行为分票，推荐串行顺序不等于 blocking edge；同文件改动应串行安排，
-不因此把所有单元连成技术依赖链。没有证据需要一个全仓机械迁移或集成分支。
-
-| 组合 | 真实依赖与实施边界 |
-| --- | --- |
-| 输入与配置：S1、S3 | 各自已有多个真实入口，可先完整交付；第一阶段修正的错误分类/默认变更规则进入共同合同 |
-| 运行时与结算：S2、S2b、S4 | 先收回原 Execution 裁定，再按当前证据修复恢复；能力、结果读取、问题与原资源观察按各自完整行为验收，不等待新 RPC |
-| Wiki：S5、S6 | W2/W4 复用 W1 同代资源操作；W3 的 retry 需要 S2 原 work 证明，其余不等 Codex 切换或直接 App 产品 |
-| 前端：S7 | 先以现有 detail/Research/问题合同验证投影边界；新运行时事件语义明确后接入，不让投影解析 provider RPC |
-| 交接：S8 | 各域事实先通过真实安装判断消费，最终封口/收据贯通 HTTP/ready/导出；新运行时的额外资源在后续阶段加入所属域 |
-
-每个被选择的单元都要交付实际入口、全部受影响消费者、失败路径和旧路径删除，
-不把必需收尾留到后续阶段。完成证据至少包括：一项明确的未来变更场景、调用方删除
-的协议知识、唯一权威仍在哪、最容易推翻设计的行为测试，以及保留下来的真实差异。
-若重构后调用方仍须持同样的锁、传同样的基线或拼同样的完成步骤，就没有实现本次
-确认的架构收益，不能仅凭新接口或新目录验收。
-
-### 3.10 结果与问题消费已实现
-
-当前关联、三个消费者的合法差异、空正文和旧 terminal 边界归
-[原请求结果读取](../implemented/architecture-contract.md#原请求结果读取)。结构化答案、
-可信来源、纯校验/claim/保存/发布顺序和旧记录兼容归
-[问题结算](../implemented/architecture-contract.md#问题结算)。相关旧规则副本已退出。
-
-实际回归覆盖多 attempt、carrier、空答/失败正文、丢失 terminal、父代理代答、
-非法回答修正、到期/关闭竞争和保存失败；浏览器验证正常 UI、刷新历史与实时结构
-一致。没有新增最终答案表、问题状态机或活回调恢复；这些完成不代表整体 G2 已通过。
-
-### 3.11 G2 的反例与完成门槛
-
-| 反例 | 必须验证的响应 |
-| --- | --- |
-| 原返回已接纳但丢确认、材料随后删除；Stop 后新返回与人工纠偏 | 原身份唯一，已有 receipt 不 prepare；来源结果不被交付失败覆盖；成功接纳顺序、暂停 backlog 与显式 Resume 保持 |
-| 无本地输出但外部已有工具效果，随后 idle/transient/stale-session | 依据协议决定 continuation/停止，不能仅凭无输出重播；检查模型启动次数、实际 prompt、request/attempt、结果及退出 |
-| 原 terminal 已提交但通知失败；A 结束后 B 复用宿主 | outcome/提交/通知分别取证，无重跑或错结算；A driver 完成不代表宿主退出，查询/取消等待不停止 B |
-| 排队、等配置锁、捕获后分别改默认及撤权 | 捕获时点保持，retry 不混配；spawn/frame write 仍拒绝撤权效果 |
-| 三种结果消费者与问题竞争 | 内容/格式/失败/通知保持；结构和真实来源可读，无效答案不消费，持久失败不伪成功 |
-| Store 重绑、撤权、批量失效、commit/wake 失败及文件效果后取消 | W1–W4 同代、当前权限、整批事务和恢复责任完整；无双 job/双写，保留项不扩权 |
-| 两次成功快照共享 baseline，夹真实 WS、旧错误或新委派 work | 快照不冒充实时更新；合法新状态不被遮住，不串轮次；从公开加载和真实 hook 验证 |
-| 线程已排出未 borrow、通知 sleep 但待 ACK、bridge 清理失败 | 原域报告责任，安装拒绝；空闲循环/连接不永久阻塞 |
-| 第 N 个 gate 失败、成功响应丢失、同/异 ID 或缺 status | HTTP/ready/导出一致，失败无成功收据，原 ID 可确认真实成功；自然排空和资源退出保留 |
-
-G2 要求九项范围、W1–W4、真实消费者、上述失败路径与旧规则退出全部完成；每票
-包含自己的回归与当前合同更新，出口只收敛跨票证据，不代替未做的局部验收。
-持久结构变化同时覆盖存量兼容、资料导出/恢复及真实回退边界，不清用户资料。
-共享会话/Harness 保留 Claude/Codex 离线覆盖，真实模型沿当前 Codex 验证范围；
-提交/发布按 testing 的不同门禁，证据有效则复用。G2 不要求未来 RPC、完整尾部、
-新宿主、输入 ACK 层、最终答案引用或完整 App 网关替换；这些已替代旧更宽条款。
 
 <a id="codex-app-server-scope"></a>
 ## 4. 第三阶段：Codex app-server 迁移，完整解决原生尾部
@@ -613,7 +431,7 @@ DSH 的任务循环仍由 DSH 拥有，Octopus 只拥有产品请求和资源责
 
 旧22/23/24/28/31/42/43的编号不继续决定新阶段依赖。与本次完整请求、配置安装、真实发送、原输入结算、组合验收、能力说明和输入预算有关的责任，已进入第二/三阶段的目标合同；**不能用“旧票暂停”免除本次必须的尾部修复，也不能据此声称整个旧票包已恢复实施或验收。**
 
-本轮是文档交付，当前代码及部署范围仍按 [架构合同](../implemented/architecture-contract.md) 判断。实施时更新对应owner的当前正文和暂停边界；已完成的独立返回/会话保留不重新实现。跨请求池、远程宿主、公开恶意多租户隔离、通用任务树、自维护provider fork及全项目双语镜像不自动纳入。
+原路线整合阶段只交付文档，后续实施已更新所属 [架构合同](../implemented/architecture-contract.md)；当前部署另按实际发布回执判断。后续阶段继续更新对应 owner 的当前正文和暂停边界，已完成的独立返回/会话保留不重新实现。跨请求池、远程宿主、公开恶意多租户隔离、通用任务树、自维护 provider fork 及全项目双语镜像不自动纳入。
 
 ### 6.3 保留但不作为运行时前置的知识产品范围
 
@@ -694,7 +512,7 @@ Codex/DSH 路线与 `wiki-future-plan.md` 的受限客户端、引用阅读及�
 后端阅读证据，另读 Wiki/App 入口与准入、配置路由、结算调用、Research 登记、
 数据库投影及前端输入/收讫消费者，确认上述范围和现存实现。
 
-这轮历史核查时，§3.6–§3.9 尚是技术推荐；其范围后来由 2026-10-31 访谈确认并
+这轮历史核查时，领域接口候选尚是技术推荐；其范围后来由 2026-10-31 访谈确认并
 按 D3/D4/D6/D11 修订，当前以§3为准。历史阅读和文档检查不证明产品实现。
 
 ### 7.4 第二阶段设计补充的证据边界
@@ -705,5 +523,5 @@ quiesce 提前设置的 offline_request 被 ready/managed_source 当成功收据
 idle/transient 的无输出原 prompt 重放缺少无效果证明；配置在准备锁内捕获。
 Wiki 操作清单按路由和已有领域保护冻结，另核实 snapshot 创建已退役为 410。
 R1 的纯函数反例由补充评审执行；源码阅读不等于真实 WS、重复效果或安装故障复现。
-本次仅整合目标合同与分票，不改当前 implemented 状态、不运行产品/模型/发布；
-原审计只覆盖所记录的冻结版本，新验收需在相应实现时取得。
+该次设计整合没有改变产品或证明运行行为。后续实施已将当前合同归回 implemented，
+G2 的反例入口见§3.2；设计审计仍只覆盖原冻结版本，不替代实现、验证或生产发布证据。

@@ -52,7 +52,6 @@ import {
 import { Button } from "./ui/button";
 import { isSessionBusy } from "../lib/deferredFork";
 import { loadOlderMessages } from "../lib/transcript";
-import { loadSessionSnapshot } from "../lib/hydrateSession";
 import { selectSession } from "../lib/selectSession";
 import type { WikiMessageMode } from "../lib/wikiComposer";
 import { newSubmissionId, type SubmissionReply } from "../lib/submission";
@@ -702,10 +701,7 @@ export function ChatView({
         // The archived session is going away — drop any deferred /fork for it.
         store.clearPendingFork(activeSessionId);
         clearForkBackoff(activeSessionId);
-        store.setActiveSessionId(fresh.id);
-        store.setMessages(fresh.id, []);
-        store.setPendingQuestions(fresh.id, []);
-        await loadSessionSnapshot(fresh.id, store);
+        await selectSession(fresh.id, fresh.agent_id);
       } catch {
         // A selected replacement exposes any snapshot acquisition failure.
       }
@@ -1236,14 +1232,7 @@ export function ChatView({
   // copied history. The composer adopts fork_prefilled_prompt (§6.1).
   const handleForked = async (fork: SessionInfo, observation: SessionObservation) => {
     if (!sessionList.current(observation)) return;
-    const store = useSessionStore.getState();
-    if (fork.agent_id) store.setActiveAgentId(fork.agent_id);
-    store.setActiveSessionId(fork.id);
-    try {
-      await loadSessionSnapshot(fork.id, store);
-    } catch {
-      /* ignore — the session is selected regardless */
-    }
+    await selectSession(fork.id, fork.agent_id);
   };
 
   // A /fork duplicate was just created (session-fork.md): unlike a rewind,
@@ -1269,13 +1258,7 @@ export function ChatView({
         });
       return;
     }
-    if (fork.agent_id) store.setActiveAgentId(fork.agent_id);
-    store.setActiveSessionId(fork.id);
-    try {
-      await loadSessionSnapshot(fork.id, store);
-    } catch {
-      /* ignore — the session is selected regardless */
-    }
+    await selectSession(fork.id, fork.agent_id);
   };
 
   // POST the duplicate for `sid` and open it. Returns "ok" | "retry" | "fail".

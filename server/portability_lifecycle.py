@@ -61,14 +61,14 @@ restores that service. Export releases its offline lock before this exit.
                     _status, readiness = _request(base + "/ready")
                 except (OSError, ValueError) as inspection:
                     raise RuntimeError("Source handoff outcome is unknown; inspect the managed service before retrying") from inspection
-                acquired = readiness.get("offline_request") == request_id
+                acquired = _status == 503 and readiness.get("status") == "stopping" and readiness.get("offline_request") == request_id
                 if not acquired:
                     raise RuntimeError("Source handoff outcome is unknown; the original request may still seal admission; inspect the managed service") from error
             else:
                 if status in {400, 401, 403}:
                     uncertain = False
                     raise RuntimeError(f"Source handoff refused (HTTP {status}): {body.get('detail', 'invalid request')}")
-                acquired = body.get("request_id") == request_id and body.get("status", "stopping") == "stopping"
+                acquired = status == 200 and body.get("request_id") == request_id and body.get("status") == "stopping"
                 if not acquired:
                     if status != 409 or body.get("request_id") or "natural completion" not in body.get("detail", ""):
                         raise RuntimeError(f"Source handoff refused (HTTP {status}): {body.get('detail', 'invalid receipt')}")
@@ -86,7 +86,7 @@ restores that service. Export releases its offline lock before this exit.
                 _status, readiness = _request(base + "/ready")
             except (OSError, ValueError) as error:
                 raise RuntimeError("Source handoff outcome is unknown; inspect the managed service before retrying") from error
-            acquired = readiness.get("offline_request") == request_id
+            acquired = _status == 503 and readiness.get("status") == "stopping" and readiness.get("offline_request") == request_id
             if not acquired:
                 raise RuntimeError("Source handoff outcome is unknown; the original request may still seal admission; inspect the managed service")
         if acquired:

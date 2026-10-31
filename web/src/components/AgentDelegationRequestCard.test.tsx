@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen } from "@testing-library/react"
 import { AgentDelegationRequestCard } from "./AgentDelegationRequestCard";
 import { MessageBubble } from "./MessageBubble";
 import { handleWsMessage } from "../hooks/useWebSocket";
+import { observeDelegations } from "../lib/delegationReads";
 import { useSessionStore, type Delegation, type Message, type SessionInfo } from "../stores/sessionStore";
 
 const metadata = (call = "call-current", work = "round-current", receipt = true) => ({
@@ -187,4 +188,20 @@ it("opens the receipt's child and keeps the task brief and files readable", asyn
   await act(async () => fireEvent.click(screen.getByTitle("Open Vera's session")));
   expect(useSessionStore.getState().activeSessionId).toBe("child");
   expect(useSessionStore.getState().activeAgentId).toBe("vera-agent");
+});
+
+it("accepts a completed round after its polling success while another list read overlaps", async () => {
+  const replies: ((response: Response) => void)[] = [];
+  vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>((resolve) => replies.push(resolve))));
+  useSessionStore.getState().setMessages("parent", [toolUse(), result()]);
+  useSessionStore.getState().setDelegations("parent", [delegation()]);
+  render(card());
+  const reconnected = observeDelegations("parent");
+  await act(async () => replies[0](Response.json([delegation()])));
+  await act(async () => {
+    replies[1](Response.json([delegation({ state: "completed" })]));
+    await reconnected.done;
+  });
+  expect(screen.getByText("completed")).toBeTruthy();
+  expect(screen.queryByTitle("Cancel delegation")).toBeNull();
 });

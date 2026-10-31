@@ -13,7 +13,6 @@ import {
   DialogHeader,
   DialogTitle,
 } from "./ui/dialog";
-import { loadSessionSnapshots } from "../lib/hydrateSession";
 import { selectSession } from "../lib/selectSession";
 import { sessions as sessionList } from "../lib/sessionList";
 
@@ -32,8 +31,6 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
   const agents = useSessionStore((s) => s.agents);
   const archived = useSessionStore((s) => s.archivedSessions);
   const read = useSessionStore((s) => s.sessionRead);
-  const setActiveAgentId = useSessionStore((s) => s.setActiveAgentId);
-  const setActiveSessionId = useSessionStore((s) => s.setActiveSessionId);
 
   const headers = {
     "Content-Type": "application/json",
@@ -52,15 +49,8 @@ export function ArchivedSessionsDialog({ open, onOpenChange }: Props) {
   // active session is archived (it's in archivedSessions) and renders the
   // read-only banner + history. Mirrors SessionList's old selectSession.
   const view = async (s: SessionInfo) => {
-    const snapshotStart = useSessionStore.getState();
-    setActiveAgentId(s.agent_id ?? null);
-    setActiveSessionId(s.id);
     onOpenChange(false);
-    try {
-      await loadSessionSnapshots(s.id, snapshotStart);
-    } catch {
-      // ignore
-    }
+    await selectSession(s.id, s.agent_id);
   };
 
   const unarchive = async (s: SessionInfo) => {

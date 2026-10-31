@@ -314,6 +314,14 @@ class CodexLoginManager:
     def get(self, login_id: str) -> CodexLoginSession | None:
         return self._sessions.get(login_id)
 
+    def drain_blockers(self) -> tuple[str, ...]:
+        if any((item._task is not None and not item._task.done())
+               or (item._watchdog is not None and not item._watchdog.done())
+               or (item._proc is not None and item._proc.returncode is None)
+               for item in self._sessions.values()):
+            return ("login task or process",)
+        return ()
+
     def begin_shutdown(self) -> None:
         """Close admission and signal captured login owners without yielding."""
         self._shutting_down = True

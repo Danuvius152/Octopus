@@ -138,6 +138,7 @@ class WikiStore:
         self._local = threading.local()
         self._users = 0
         self._retired = False
+        self._admission_closed = False
         self._events_released = True
         self._on_retired: Callable[[WikiStore], None] | None = None
         self._recovery = recovery
@@ -244,6 +245,8 @@ class WikiStore:
     def borrow(self):
         """A captured operation owns its observer until it releases the lease."""
         with self._lifecycle:
+            if self._admission_closed and not getattr(self._local, "shutdown_access", False):
+                raise WikiError("Wiki ordinary admission is closed for installation handoff", 503)
             if self._retired:
                 raise WikiError("This Wiki Store has retired; acquire the current registration", 503)
             if self._recovery is None and getattr(getattr(getattr(self, "events", None), "journal", None), "recovery", None) is not None:
@@ -272,6 +275,30 @@ class WikiStore:
         # Never acquire Registry ownership while holding the lifecycle lock.
         if self._retired and not self._users and self._events_released and self._on_retired is not None:
             self._on_retired(self)
+
+    @contextlib.contextmanager
+    def handoff_guard(self):
+        """Hold only the short borrow boundary; never wait for a live thread."""
+        if not self._lifecycle.acquire(blocking=False):
+            raise WikiError("Wiki Store admission is busy", 409)
+        try:
+            if self._users or self._retired and not self._events_released:
+                raise WikiError("Wiki Store still owns operations or observer cleanup", 409)
+            yield
+        finally:
+            self._lifecycle.release()
+
+    def close_admission(self) -> None:
+        with self._lifecycle:
+            self._admission_closed = True
+
+    def synchronize_shutdown(self) -> None:
+        """The original shutdown owner may receive final events after sealing."""
+        self._local.shutdown_access = True
+        try:
+            self.synchronize()
+        finally:
+            self._local.shutdown_access = False
 
     @contextlib.contextmanager
     def operation(self, lease: StoreBorrow | None = None):

@@ -19,14 +19,7 @@ export async function selectSession(
   store.setActiveSessionId(sessionId);
 
   try {
-    await loadSessionSnapshots(sessionId, store, (data) => {
-      // A session created server-side (an application's build session, a
-      // delegation child) may not be in the sidebar list yet. We already have
-      // its detail in hand — adopt it rather than spending another request.
-      if (useSessionStore.getState().activeSessionId === sessionId && typeof data.agent_id === "string") {
-        useSessionStore.getState().setActiveAgentId(data.agent_id);
-      }
-    });
+    await loadSessionSnapshots(sessionId);
   } catch {
     // The queue exposes the failed read; reconnect can confirm it again.
   }

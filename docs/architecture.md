@@ -285,7 +285,7 @@ React 19 + TypeScript (strict) + Vite + zustand + Tailwind v4 + Radix.
 | Chat | `ChatView.tsx` (virtualized via `react-virtuoso`; Enter-to-send, Esc-interrupt, queued-message badge, per-message "Fork from here"), `MessageBubble.tsx`, `MessageTime.tsx` (hover-for-time), `SlashCommandMenu.tsx` (`/schedule`, `/remember`, `/research`, `/showme`, `/rewind`, `/fork`, `/archive`, `/model`, `/reset`), `ModelPickerDialog.tsx` (`/model`), `ForkDialog.tsx` (message picker + side-effect confirm + optional git-revert), `ArchivedSessionsDialog.tsx` |
 | In-turn cards & tools | `FileViewerDialog.tsx` (`/showme`), `BgTaskChip.tsx` (bg task status), `QuestionPrompt.tsx` (ask form), `MessageBubble.tsx` (historical tool approval records), `AgentDelegationRequestCard.tsx` + `AgentDelegationEventCard.tsx` (delegation status + injected reply/question/error turns), `SubagentCard.tsx` (native sub-agents), `ResearchCard.tsx` (deep-research phase progress) |
 | Backends / creds / apps | `BackendPanel.tsx` (backend pick), `CredentialPicker.tsx`, `AppIcon.tsx`, `ApplicationView.tsx` (app iframe pane) |
-| State | `stores/sessionStore.ts`, `hooks/useWebSocket.ts`, `hooks/useViewportHeight.ts`; `lib/hydrateSession.ts` owns detail/bg request baselines and snapshot application, while callers retain navigation, list adoption and error policy |
+| State | `stores/sessionStore.ts`, `hooks/useWebSocket.ts`, `hooks/useViewportHeight.ts`; `lib/hydrateSession.ts` owns complete/detail/metadata reads, identity, baselines and auxiliary publication; `sessionList` owns target observation invalidation, and views own navigation and ending observation |
 
 ## Data Flow
 

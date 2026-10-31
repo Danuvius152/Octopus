@@ -214,6 +214,22 @@ class SessionOwner:
                 and not self.questions.has_waiting_notifications and self.publisher.idle
                 and self.runtime.idle)
 
+    def drain_blockers(self) -> tuple[str, ...]:
+        """Observe this original writer; a held idle host retires at shutdown."""
+        session = self.session
+        if session._pending_queue or session._steer_queue:
+            return ("retained input",)
+        if session._forking or session._archive_reservation is not None:
+            return ("session lifecycle",)
+        if self.failed:
+            cleanup = self.cleanup
+            if cleanup is None or not cleanup.done() or cleanup.cancelled() or cleanup.exception() is not None:
+                return ("failed owner cleanup",)
+            return ()
+        if not self.idle or any(question.state == "pending" for question in session._questions.values()):
+            return ("command, execution, question or publication",)
+        return ()
+
     async def wait_idle(self) -> None:
         while not self.idle:
             if self.failed:

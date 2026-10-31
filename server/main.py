@@ -494,45 +494,35 @@ app.include_router(notifiers.router)
 app.include_router(ws.router)
 
 
-def _installation_is_idle(request: Request) -> bool:
-    """The lifecycle owner checks its actual producers before closing admission."""
+def _installation_blockers(request: Request) -> tuple[str, ...]:
+    """Each domain explains its own live execution and delivery obligations."""
     from .codex_login import codex_login_manager
+    from .oauth_login import oauth_login_manager
+    from .wiki import app_bridge, job_notifications
     from .wiki.jobs import worker
     from .wiki.registry import registry
 
     gate = getattr(request.app.state, "installation_admission", None)
-    if gate is None or not gate.idle:
-        return False
-    sm = session_manager
-    if (any(not owner.idle or owner.failed for owner in sm._session_owners.values())
-            or any(not task.done() for task in sm._owned_tasks)
-            or sm.configuration_lock.locked() or sm._agent_lifecycle_lock.locked()
-            or any(session._pending_queue or session._steer_queue or session._forking
-                   or session._archive_reservation or session._run.retirements for session in sm.sessions.values())):
-        return False
-    if (bg_task_manager._starting or bg_task_manager._running
-            or any(not task.done() for task in bg_task_manager._cleanup_tasks)
-            or any(not task.done() for task in research_manager._tasks.values())
-            or any(not task.done() for task in delegation_manager._commands)
-            or delegation_manager._completion_handoffs or app_agent_manager._turns
-            or any(rec.state in {"pending", "queued", "running"} or rec._terminal_injecting
-                   or rec._awaiting_sub_relay or rec._save_lock.locked() for rec in delegation_manager._rounds.values())
-            or worker.pending or worker.executing
-            or any(not task.done() for task in (*worker.tasks.values(), *worker.cancellations.values()))):
-        return False
-    if any(backend.lock.locked() or any(task is not None and not task.done() for task in (backend._operation, backend._spawn))
-           for backend in backend_supervisor._backends.values()):
-        return False
-    if any((item._task is not None and not item._task.done()) or (item._proc is not None and item._proc.returncode is None)
-           for item in codex_login_manager._sessions.values()):
-        return False
     runner = getattr(request.app.state, "schedule_runner", None)
-    if runner is not None and any(not task.done() for task in getattr(runner._executor, "_pending_futures", ())):
-        return False
-    db = sm.db
-    if db is None or db._write_owner or db._write_lock.locked() or db._agent_memory_lock.locked():
-        return False
-    return registry.idle
+    db = session_manager.db
+    facts = (
+        ("requests", () if gate is not None and gate.idle else ("HTTP response or WebSocket input",)),
+        ("sessions", session_manager.drain_blockers()),
+        ("background", bg_task_manager.drain_blockers()),
+        ("research", research_manager.drain_blockers()),
+        ("delegations", delegation_manager.drain_blockers()),
+        ("wiki worker", worker.drain_blockers()),
+        ("wiki notifications", job_notifications.drain_blockers()),
+        ("wiki registry", registry.drain_blockers()),
+        ("wiki app bridge", app_bridge.drain_blockers()),
+        ("app agent", app_agent_manager.drain_blockers()),
+        ("app backends", backend_supervisor.drain_blockers()),
+        ("login", codex_login_manager.drain_blockers()),
+        ("oauth login", oauth_login_manager.drain_blockers()),
+        ("scheduler", runner.drain_blockers() if runner is not None else ()),
+        ("database", db.drain_blockers() if db is not None else ("unavailable",)),
+    )
+    return tuple(f"{domain}: {reason}" for domain, reasons in facts for reason in reasons)
 
 
 @app.post("/api/installation/quiesce")
@@ -550,26 +540,44 @@ async def quiesce_installation(request: Request, user: deps.CurrentUser):
         request_id = str(UUID((await request.json())["request_id"]))
     except (ValueError, KeyError, TypeError, AttributeError):
         return JSONResponse({"detail": "A valid request_id is required"}, status_code=400)
+    if owner.offline_request is not None:
+        if owner.offline_request == request_id:
+            return {"status": "stopping", "request_id": request_id}
+        return JSONResponse({"detail": "Installation handoff belongs to another request"}, status_code=409)
     if health.state != "ready":
-        return JSONResponse({"detail": "Installation is unavailable", "request_id": owner.offline_request}, status_code=409)
-    if not _installation_is_idle(request):
-        return JSONResponse({"detail": "Installation still has work; wait for natural completion"}, status_code=409)
-    # No await between the proof above and sealing producers. Already admitted
-    # work is complete; ordinary shutdown will retire only idle resources.
-    owner.offline_request = request_id
-    health.begin_shutdown()
-    session_manager.close_admission()
+        return JSONResponse({"detail": "Installation is unavailable; handoff was not confirmed"}, status_code=503)
     from .codex_login import codex_login_manager
+    from .wiki import app_bridge
     from .wiki.jobs import worker
+    from .wiki.registry import registry
+    from .wiki.store import WikiError
 
-    worker.begin_shutdown()
-    runner = getattr(request.app.state, "schedule_runner", None)
-    if runner is not None:
-        runner.begin_shutdown()
-    research_manager.begin_shutdown()
-    bg_task_manager.begin_shutdown()
-    backend_supervisor.begin_shutdown()
-    codex_login_manager.begin_shutdown()
+    try:
+        # No await through observation, producer sealing and receipt publication.
+        # Registry/Store guards also serialize actual cross-thread admission.
+        with registry.handoff_guard():
+            if blockers := _installation_blockers(request):
+                return JSONResponse({"detail": "Installation still has work; wait for natural completion", "blockers": blockers}, status_code=409)
+            health.begin_shutdown()
+            session_manager.close_admission()
+            worker.begin_shutdown()
+            registry.begin_shutdown()
+            app_bridge.begin_shutdown()
+            app_agent_manager.begin_shutdown()
+            delegation_manager.begin_shutdown()
+            runner = getattr(request.app.state, "schedule_runner", None)
+            if runner is not None:
+                runner.begin_shutdown()
+            research_manager.begin_shutdown()
+            bg_task_manager.begin_shutdown()
+            backend_supervisor.begin_shutdown()
+            codex_login_manager.begin_shutdown()
+            # This is a successful handoff receipt, never a sealing intent.
+            owner.offline_request = request_id
+    except WikiError as error:
+        if health.state != "ready":
+            raise  # Partial sealing remains closed and has no success receipt.
+        return JSONResponse({"detail": "Installation still has work; wait for natural completion", "blockers": [str(error)]}, status_code=409)
     return {"status": "stopping", "request_id": request_id}
 
 

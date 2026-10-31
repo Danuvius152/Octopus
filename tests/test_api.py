@@ -153,6 +153,22 @@ async def test_get_session_not_found(client):
     assert resp.status_code == 404
 
 
+async def test_session_metadata_does_not_load_or_return_transcript(client, monkeypatch):
+    agent = await session_manager.db.get_system_agent()
+    created = await client.post("/api/sessions", json={"agent_id": agent["id"], "name": "Metadata"})
+    sid = created.json()["id"]
+
+    async def forbidden(*args, **kwargs):
+        raise AssertionError("Metadata must not load chat history")
+
+    monkeypatch.setattr(session_manager.db, "load_messages", forbidden)
+    response = await client.get(f"/api/sessions/{sid}/info")
+    assert response.status_code == 200
+    assert response.json()["name"] == "Metadata"
+    assert "messages" not in response.json()
+    assert (await client.get("/api/sessions/missing/info")).status_code == 404
+
+
 @pytest.mark.asyncio
 async def test_delete_session(client):
     agent = await session_manager.db.get_system_agent()

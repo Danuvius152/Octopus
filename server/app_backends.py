@@ -585,6 +585,13 @@ class BackendSupervisor:
                 self._reap_loop(), name="app-backend-reaper"
             )
 
+    def drain_blockers(self) -> tuple[str, ...]:
+        # Running idle servers remain resources for normal shutdown to retire.
+        if any(st.lock.locked() or st._admission.locked() or st._spawn is not None
+               or st._operation is not None for st in self._owned_states()):
+            return ("backend start, stop or spawn cleanup",)
+        return ()
+
     def begin_shutdown(self) -> None:
         self._shutting_down = True
         if self._reaper is not None and not self._reaper.done() and not self._reaper.cancelling():

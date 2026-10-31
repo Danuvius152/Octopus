@@ -1,5 +1,6 @@
 import { accountFetch as fetch } from "../lib/accountFetch";
 import { selectSession } from "../lib/selectSession";
+import { observeDelegations } from "../lib/delegationReads";
 /**
  * Inline card rendered next to a `mcp__ask_agent__ask` tool_use. The
  * tool_use itself shows the model's call shape (target agent name,
@@ -79,7 +80,8 @@ export function AgentDelegationRequestCard({
   continued?: boolean;
 }) {
   const token = useSessionStore((s) => s.token);
-  const setDelegations = useSessionStore((s) => s.setDelegations);
+  const connected = useSessionStore((s) => s.connected);
+  const generation = useSessionStore((s) => s.dispatchGeneration);
   const messages = useSessionStore((s) => s.messages[sessionId]);
   const projection = useMemo(() => projectToolCall(message, messages), [message, messages]);
   const receipt = projection.receipt?.kind === "delegation" ? projection.receipt : undefined;
@@ -97,23 +99,20 @@ export function AgentDelegationRequestCard({
   // newer round. Network failures have a bounded retry and one in-flight fetch.
   useEffect(() => {
     if (!delegationId || !workId || (state && state !== "running")) return;
-    const url = `${window.location.origin}/api/sessions/${encodeURIComponent(sessionId)}/delegations`;
-    const abort = new AbortController();
+    let observation: ReturnType<typeof observeDelegations> | undefined;
     let cancelled = false;
     let failures = 0;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const fire = async () => {
       let again = false;
-      const baseline = useSessionStore.getState().delegations[sessionId] || [];
       try {
-        const response = await fetch(url, { headers: { Authorization: `Bearer ${token}` }, signal: abort.signal });
-        const data = response.ok ? await response.json() : null;
+        observation = observeDelegations(sessionId);
+        const data = await observation.done;
         if (cancelled) return;
         if (Array.isArray(data)) {
-          setDelegations(sessionId, data as Delegation[], baseline);
           again = data.some((item: Delegation) => item.delegation_id === delegationId && item.work_id === workId && item.state === "running");
           failures = 0;
-        } else again = ++failures < 3;
+        } else again = true; // An obsolete observation is no missing-round fact.
       } catch {
         again = ++failures < 3;
       }
@@ -123,9 +122,9 @@ export function AgentDelegationRequestCard({
     return () => {
       cancelled = true;
       if (timer !== undefined) clearTimeout(timer);
-      abort.abort();
+      observation?.cancel();
     };
-  }, [delegationId, workId, state, sessionId, token, setDelegations]);
+  }, [delegationId, workId, state, sessionId, token, connected, generation]);
 
   const openChild = async () => {
     if (!delegationId) return;

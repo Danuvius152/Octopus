@@ -13,6 +13,27 @@ from .owner_runtime import ReleaseArchive, ReserveFork
 
 
 class OwnershipMixin(SessionManagerBase):
+    def drain_blockers(self) -> tuple[str, ...]:
+        """Derive current responsibilities without creating or waking owners."""
+        blockers = [f"session {owner.session.id}: {reason}"
+                    for owner in self._session_owners.values() for reason in owner.drain_blockers()]
+        if any(not task.done() for task in self._owned_tasks):
+            blockers.append("owned operation")
+        if (self._agent_lifecycle_lock.locked() or any(self._agent_operations.values())
+                or any(not task.done() for task in self._agent_archive_tasks.values())):
+            blockers.append("agent lifecycle")
+        if self.db is None or self.db.configuration_lock.locked():
+            blockers.append("configuration")
+        if any(not task.done() for task in self._credential_refreshes.values()):
+            blockers.append("credential refresh")
+        for session in self.sessions.values():
+            if id(session) not in self._session_owners and (
+                session._pending_queue or session._steer_queue or session._forking
+                or session._archive_reservation is not None or session._run.retirements
+            ):
+                blockers.append(f"session {session.id}: retained lifecycle")
+        return tuple(blockers)
+
     def session_owner_failed(self, session_id: str) -> bool:
         """Read the original owner's permanent failure without installing one."""
         session = self.sessions.get(session_id)

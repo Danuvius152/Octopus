@@ -5,7 +5,7 @@ import { unreadList, type ListReadState, type RefreshResult } from "./listState"
 import type { DispatchState } from "./sessionDispatch";
 
 interface Scope { account: number; token: string; generation: string | null; connection: number }
-export interface SessionObservation { scope: Scope; change: number }
+export interface SessionObservation { scope: Scope; change: number; invalidated?: boolean }
 interface Read extends SessionObservation {
   archived: boolean; controller: AbortController; timer: ReturnType<typeof setTimeout>;
   promise: Promise<RefreshResult>; finish: (result: RefreshResult) => void;
@@ -25,6 +25,8 @@ export class SessionList {
   private engaged = false;
   private archivedRequested = false;
   private closed = false;
+  // Only outstanding reads are retained, including targets not yet in a list.
+  private observations = new Map<SessionObservation, string>();
   private unsubscribe: () => void;
 
   constructor() {
@@ -48,8 +50,8 @@ export class SessionList {
   }
   current(observation: SessionObservation, establishedGeneration?: string | null): boolean {
     const now = this.scope(), scope = observation.scope;
-    return this.sameAccount(scope) && now.connection === scope.connection &&
-      (now.generation === scope.generation || scope.generation === null && establishedGeneration === now.generation);
+    return !observation.invalidated && this.sameAccount(scope) && now.connection === scope.connection &&
+      (now.generation === scope.generation || establishedGeneration != null && establishedGeneration === now.generation);
   }
   accountCurrent(observation: SessionObservation): boolean {
     return this.sameAccount(observation.scope);
@@ -57,6 +59,16 @@ export class SessionList {
   capture(start = useSessionStore.getState()): SessionObservation {
     const now = useSessionStore.getState();
     return { scope: this.scope(start), change: start.sessions === now.sessions && start.archivedSessions === now.archivedSessions ? this.change : -1 };
+  }
+  observe(id: string, start = useSessionStore.getState()) {
+    const observation = this.capture(start);
+    this.observations.set(observation, id);
+    return { observation, finish: () => { this.observations.delete(observation); } };
+  }
+  private invalidateTarget(id: string): void {
+    for (const [observation, target] of this.observations) {
+      if (target === id) { observation.invalidated = true; this.observations.delete(observation); }
+    }
   }
   accepts(source?: ListEventSource): boolean {
     return !this.closed && (!source || source.socket === this.socket && source.accountGeneration === this.scope().account);
@@ -139,6 +151,12 @@ export class SessionList {
     this.retire({ state: "failed", message }); this.dirty = false; this.state({ error: message });
   }
   private commit(sessions: SessionInfo[], archivedSessions: SessionInfo[]): void {
+    const before = useSessionStore.getState();
+    const nextRows = new Map([...sessions, ...archivedSessions].map((row) => [row.id, row]));
+    for (const row of [...before.sessions, ...before.archivedSessions]) {
+      const next = nextRows.get(row.id);
+      if (!next || Boolean(next.archived) !== Boolean(row.archived)) this.invalidateTarget(row.id);
+    }
     this.change++;
     useSessionStore.setState({ sessions, archivedSessions });
   }
@@ -224,6 +242,7 @@ export class SessionList {
   }
   archive(id: string, observation?: SessionObservation, info?: SessionInfo): boolean {
     if (!this.canConfirm(observation)) return false;
+    this.invalidateTarget(id);
     const store = useSessionStore.getState();
     const old = info ?? store.sessions.find((row) => row.id === id);
     this.commit(store.sessions.filter((row) => row.id !== id), old ?
@@ -232,11 +251,13 @@ export class SessionList {
   }
   remove(id: string, observation?: SessionObservation): boolean {
     if (!this.canConfirm(observation)) return false;
+    this.invalidateTarget(id);
     const store = useSessionStore.getState();
     this.commit(store.sessions.filter((row) => row.id !== id), store.archivedSessions.filter((row) => row.id !== id));
     return true;
   }
   dispose(): void {
+    this.observations.clear();
     this.closed = true; this.unsubscribe(); this.dirty = false; this.retire({ state: "obsolete" });
   }
 }
