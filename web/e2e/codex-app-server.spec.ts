@@ -16,7 +16,6 @@ test.afterAll(async ({ request }) => {
 });
 
 test("App Server preserves native history and original submissions across reload @llm", async ({ page, request }) => {
-  test.skip(process.env.OCTOPUS_CODEX_TRANSPORT !== "app-server", "Requires explicit App Server selection and the G0-pinned binary");
   test.setTimeout(180_000);
   const name = `Native E2E ${randomUUID()}`;
   const phrase = `amber-${randomUUID()}`;
@@ -83,7 +82,10 @@ test("App Server preserves native history and original submissions across reload
   expect(retry.ok()).toBeTruthy();
   const repeated = await retry.json() as Submission;
   expect(repeated.request_id).toBe(first.final.request_id);
-  expect(repeated.execution.native_inputs).toEqual(first.final.execution.native_inputs);
+  // POST omits nulls; the typed GET materializes the optional start target.
+  expect(repeated.execution.native_inputs.map((input) => ({
+    ...input, target_turn_id: input.target_turn_id ?? null,
+  }))).toEqual(first.final.execution.native_inputs);
 
   const second = await send("Reply only with the phrase I asked you to remember. Do not use any tools or helpers.");
   const secondNative = second.final.execution.native_inputs[0];

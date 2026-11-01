@@ -3,7 +3,6 @@
 import asyncio
 import os
 from contextlib import asynccontextmanager
-from dataclasses import replace
 from pathlib import Path
 
 from tests.e2e_boundary import OFFLINE_ARGV, install
@@ -18,6 +17,7 @@ from server import fork_helpers
 from server.harness import all_backends, get_harness
 from server.harness.claude_code import CLAUDE_CODE
 from server.harness.driver import ArgvDriver
+from tests.harness_profiles import process_profile
 
 
 def offline_argv(ctx):
@@ -36,7 +36,7 @@ fork_helpers._git = offline_git
 
 for backend in all_backends():
     harness = get_harness(backend)
-    harness.profile = replace(
+    harness.profile = process_profile(
         harness.profile,
         binary=OFFLINE_ARGV[0],
         build_turn_argv=offline_argv,

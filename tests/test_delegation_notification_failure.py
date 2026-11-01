@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -20,7 +19,7 @@ from server.mcp_identity import verify
 from server.sessions import SessionManager
 from server.sessions.owner import SessionOwnerUnavailable
 from tests.accounts import create_account
-from tests.harness_profiles import session_turn_argv
+from tests.harness_profiles import process_profile, session_turn_argv
 
 
 @pytest.fixture
@@ -57,7 +56,7 @@ async def notification_runtime(tmp_path, monkeypatch):
         starts.append((scope, context))
         return [sys.executable, "-u", str(model), scope.session_id, str(tmp_path / f"{scope.run_lease_id}.result")], {"cwd": context.working_dir}
 
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, prepare_resume=None, activity_observer=None,
         new_driver=ClaudeDriver, can_steer=True, reusable=True, build_turn_argv=session_turn_argv(harness.profile, argv),
     ))

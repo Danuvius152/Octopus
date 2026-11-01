@@ -50,7 +50,7 @@ reconstruct them. Live question callbacks and reply authority are not
 persisted or restored. Backup and transfer scope remains with
 [account portability](../backup-and-migrate.md#account-export-and-import).
 
-Opt-in App Server adds typed native source to the existing nullable
+Ordinary App Server adds typed native source to the existing nullable
 `messages.runtime_metadata` JSON: original request/attempt plus native
 thread/turn/item, root thread/turn, known parent and phase. `tool_call_id` is
 independent optional tool provenance; text does not fabricate it. Turn facts
@@ -94,6 +94,12 @@ Legacy rows remain `[]`: local write/drain or an old confirmed receipt does not
 become native acceptance or model consumption. Lifecycle and recovery semantics
 are in [the input contract](architecture-contract.md#codex-native-input-evidence).
 No additional storage root, execution queue or answer ledger is introduced.
+
+Passive Monitor records use the existing separate bounded metrics store and its
+JSON detail fields. Native phases, response scope, provider snapshots and Owner
+clock projections do not add a main-database column or change format 7. They do
+not restore input or execution authority. Their collection and deduplication
+contract belongs to [Monitor](codex-performance-monitor.md).
 
 New App Server outcomes add nullable `final_answer` and `native_status` within
 existing result-message JSON. `final_answer` contains the bound root thread/turn

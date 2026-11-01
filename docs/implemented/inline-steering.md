@@ -1,12 +1,13 @@
 # Input steering, streaming and held processes
 
-> **Status:** implemented — Claude stream-JSON steering and process reuse; opt-in Codex App Server steers its bound active root; Codex exec queues later input.
+> **Status:** implemented — Claude stream-JSON steering and process reuse; ordinary Codex App Server steers its bound active root.
 
 ## Current capability and delivery
 
 Steering follows the selected `RuntimeProfile.can_steer`, independently of
 `reusable` and tool-policy support. Claude declares steering and reuse; Codex
-App Server declares steering without process reuse; Codex exec declares neither.
+App Server declares steering without process reuse; the independent Research
+exec leaf declares neither.
 Session API views use the same transport selection as run creation. Owner
 dispatch also checks the active phase and input eligibility. A native stdin
 channel grants no capability by itself.
@@ -16,7 +17,7 @@ channel grants no capability by itself.
 | Committed input claim | The original input has an execution identity; delivery is not proven. |
 | Steer `confirmed` | The complete local frame write/drain returned; provider acceptance or processing is not proven. |
 | App Server `accepted` | The original steer response or complete user-message client ID proves native acceptance; model processing is unconfirmed. |
-| Codex exec `turn.completed` | The current parser's root ended; complete native descendants and parent continuation are not proven. |
+| App Server root terminal | The bound root ended and admission closed; child consumption and process exit are separate facts. |
 
 A failed or cancelled frame write may have sent part or all of its input.
 The original input keeps its unknown delivery fact; a successful root does not
@@ -95,8 +96,9 @@ Codex exec does not acquire held-process steering by sharing this public Harness
 
 Process reuse, within-turn steering, business completion and native descendant
 completion are separate capabilities. In particular, the first parent result does
-not prove its native tail is complete. Remaining native output, resource and
-default-cutover work follows the [R2 roadmap](../plans/engineering-runtime-roadmap.md#codex-app-server-scope).
+not prove its native tail is complete. Codex collects a finite original prefix
+through retirement; unfinished helpers can remain partial after root success.
+The [native output contract](native-subagents.md) owns that observation boundary.
 
 ## Rationale and verification
 

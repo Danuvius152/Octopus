@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from dataclasses import replace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -30,6 +29,7 @@ from server.main import app
 from server.session_manager import session_manager
 from server.users import UserManager
 from server.workspace import paths_for
+from tests.harness_profiles import process_profile
 
 
 @pytest.fixture
@@ -93,7 +93,7 @@ def runtime_input(tmp_path, monkeypatch):
         "sys.stdin.read()\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
         new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (

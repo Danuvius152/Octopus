@@ -1357,7 +1357,6 @@ class TurnsMixin(SessionManagerBase):
 
         return RunConfig(
             session_id=session.id,
-            transport=settings.codex_transport if session.backend == "codex" else None,
             credential_id=credential_id,
             user_id=session.user_id,
             wiki_task_id=session._run.wiki_task_id,

@@ -1,6 +1,6 @@
 # Octopus 工程收敛与运行时路线
 
-> **Status:** in-progress — 第一、二阶段与 Codex G0-Base 已验证；R2 产品集成与默认切换待验，DeepSeek 待实施。
+> **Status:** in-progress — 第一、二阶段及 Codex R2 已实现并通过运行门禁；当前合同归 implemented，DeepSeek 待实施。
 
 > 日期：2026-10-30（Asia/Shanghai）。源码核查基线：`1126d106d95af582ecf989b7c9206ec48c0a09c2`。
 > 历史架构候选补充核查：`0ca897e97189c5f213a658d986cbd67f4d69c5e3` 及当前文档工作树，范围见§7.3。
@@ -14,7 +14,7 @@
 
 2026-11-01 第三阶段文档更新：按用户要求完善 R2 工作稿，以活动原生协作、绑定根终态和有界退休替代本期任意 post-final 递归闭合承诺；旧反证保留。产品源码基线 `26aa78f`，本次已核查本地文档提交 `3a94312`；文档完善不代表 G0 通过、完整设计再次确认或实施授权。
 
-2026-11-01 当前实施前沿：[G0-Base 原生前提通过](#codex-g0-base-evidence)，旧 G0-Recursive 反例保留。02–07 已通过各自范围的 Vera 最终独立验收；合同归 [Codex](../implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume)、[输入证据](../implemented/architecture-contract.md#codex-native-input-evidence)、[steer](../implemented/inline-steering.md#bound-codex-root-and-queue-qualification)、[问题控制](../implemented/architecture-contract.md#native-question-control)与[原生输出](../implemented/native-subagents.md)。08–17 未启动，本轮停在 06–07 的交付边界；默认切换、生产发布及主库转换未执行。
+2026-11-02 当前实施前沿：Codex R2 的 01–17 产品范围已实施，普通路径默认 App Server；当前合同及验证入口见§4。G0-Base 锁版证据已核验复用，旧 G0-Recursive 反例保持失败且不属本期。代码、验证与生产发布分别取证；发布事实只按实际运维回执确认。DeepSeek 与新的 Codex 自定义角色映射仍未实施。
 
 阅读：[范围与顺序](#scope) · [三份架构意见的当前适用性](#prior-architecture-reviews) · [第一阶段](#phase-1) · [第二阶段](#phase-2) · [全部历史候选的扩展价值](#architecture-candidate-value) · [第三阶段：Codex](#codex-app-server-scope) · [第四阶段：DeepSeek](#deepseek-design) · [验收与证据](#verification)。
 
@@ -185,7 +185,7 @@ S1、S2、S2b、S3、S4、S5、按实际用法收窄的 S6、S7、S8 已实施�
 <a id="harness-protocol-contract"></a>
 ### 3.1 保留的协议范围与阶段出口
 
-本阶段保持当前 Codex exec 与 Claude 有条件宿主复用；claim、本地写入/drain、
+第二阶段验收时保留 Codex exec 与 Claude 有条件宿主复用；Codex 当前协议见§4。claim、本地写入/drain、
 root 结束、业务结算、通知和资源退休的证据不能互相提升。公共 prepare/events/
 steer/answer/completion/interrupt/reuse 操作沿现有 Harness 与原 Owner 演进，
 真实差异归 adapter；新 RPC 握手、双向关联和各后端所选完成范围在第三/四阶段分别验证。
@@ -235,177 +235,91 @@ S6 保留简单查询、History 操作、既有 App 白名单与反射兼容，�
 
 
 <a id="codex-app-server-scope"></a>
-## 4. 第三阶段：Codex App Server、活动原生协作与有界退休
+## 4. 第三阶段：Codex R2 的交付边界与独立剩余目标
 
 ### 4.1 当前行为与 R2 范围修订
 
-普通 Codex 当前仍使用 `exec --json`。根完成后原执行退休，未完 helper 可为
-`interrupted/parent_done`；[退休回归](../../tests/test_native_subagent_retirement.py)
-允许父 success，卡片可见不证明父已消费子结果。opt-in App Server 现已实现
-原问题控制与根子输出身份，仍不构成完整 R2 或默认切换验收。
+R2 已实现一个 attempt 对应一个实际接纳根 turn：活动轮次内的原生嵌套
+wait/followup、人工 steer 与双向问题由同一受管宿主承载；根正式 terminal 后
+立即冻结准入并启动有界退休。原 Owner 唯一结算，根 success 可与 helper
+interrupted/parent_done 及 partial 并存，不能称为全部子结果已消费。
+普通路径默认 App Server，旧普通 exec、重复 controller 宿主和环境选择器退出。
 
-旧方案要求父已结束后，任意层级晚回结果仍被逐层继续处理并可靠闭合。0.166.0
-的受控实验反证了普通自动 wake 对 idle 中间父的覆盖；v2 child 直输也被拒绝。
-[原 G0 证据](#codex-g0-evidence)保留，不能改标通过，也不证明所有未来路线均不可能。
-
-当前 R2 工作稿改为：一个 attempt 绑定一个已接纳根 native turn，保全该活动
-turn 内的原生等待、嵌套协作、followup、人工 steer 与结构化观察；根正式 terminal
-形成候选后立即冻结操作并启动有界退休。原生模型是否等待及如何使用结果不由
-Octopus 另建递归调度器保证。任意 post-final 递归闭合保留为独立上游能力目标，
-不再作为 R2 的默认切换门槛；这项范围变化不代表旧强目标已实现。
-
-本阶段须完整交付输入证据、配置与权限、结果选择、只读详情、资源生命周期及
-原功能保全。提示词、一次成功演示、静默窗口或常驻宿主均不能替代实际协议依据。
+旧方案要求父已结束后，任意层级晚回仍逐层自动推进并可靠闭合。0.166.0
+的受控实验反证自动 wake 对 idle 中间父的覆盖，v2 child 直输也被拒绝。
+[原 G0-Recursive 证据](#codex-g0-evidence)保留失败；本期 R2 没有解决这个强目标。
+重新启动它需要新的明确目标、目标版本与正反证据，不能作为自动 fallback。
 
 ### 4.2 Claude 与辅助调用保持原合同
 
-Claude 的 steer、held、signature、晚到完整输出、fork 与既有 receipt 语义保持
-等价；晚事件保留原 request/attempt/work，旧 receipt 不重开，不宣称新增递归闭合。
-不能把 Claude held 当成 Codex post-final 唤醒方案，也不能为 Codex 已撤权后的
-只读事件采集放宽 Claude 原 idle/live-lease 条件。
-
-共享层沿原 SessionOwner、HarnessRun、OwnerQuestions 分责，wire、输入证据和
-复用策略由真实后端表达。Research web leaf 保留独立受限 exec，one-shot/reason
-leaf 保留无工具文本 worker；它们不是普通请求失败的 fallback。已有 subagents
-定义及 Claude 装配保全，Codex 新角色映射后置，DeepSeek 不预建空实现。
+[Harness](../implemented/harness-layer.md)拥有当前能力声明和资源分责，
+[steering](../implemented/inline-steering.md)拥有活动根资格及 Claude held 合同。
+Research 独立 exec leaf 保持 read-only、无 Octopus MCP、无 resume；这不等于
+严格 web-only whitelist。one-shot/reason 使用无工具文本 worker。它们不承接
+普通请求的失败或 unknown。Claude 的受影响离线行为已验证，本机未新增 Claude
+登录或实机覆盖。已有 subagents 数据和 Claude 装配保全；Codex 自定义角色映射
+仍独立后置，DeepSeek 不预建占位实现。
 
 <a id="codex-app-server-interfaces"></a>
-### 4.3 attempt 宿主、根绑定与模式
+### 4.3 当前宿主、配置与根绑定合同
 
-一个普通 Codex request attempt 独占本地 stdio App Server，**只绑定一个实际
-接纳的根 native turn**。该 turn 可有多次模型采样、工具及原生后代的多个 turn；
-根正式终态后不由客户端自动追加总结或继续。下个逻辑请求等旧 writer 确认退休后，
-新建宿主并精确 resume 原 thread；不建跨请求池。
-
-HarnessRun 持有进程组、I/O、lease、临时材料和退出责任；driver 解释 RPC、原生
-身份和输入/终态事实；SessionOwner 唯一接管、调度和结算。RuntimeProfile 保持
-能力单一来源，共享层不构造 Claude frame 或解析 Codex wire，不新增通用任务树。
-
-在同一受管宿主完成 reader/握手、controller 检查与更新、精确 thread 准备及实际
-配置核验后才发送业务帧。controller 注入未知不能继续；compaction 后仍能核对
-有效指令，不复用旧请求 bearer/grant，也不向共享 credential home 写请求状态。
-
-G0-Base 必须证明按 attempt 关闭 `wake_on_agent_messages`，并隔离 goals 等额外
-自主根执行；新建、恢复及所用历史操作都纳入验证。无法保证时在业务输入前准确
-拒绝，不静默清除用户 goal。意外新根 turn 作为协议/配置异常保留真实效果并退休，
-不能默并入当前请求；事后杀进程不能代替正常模式可控的前提。
-
-版本锁定和已有局部字段依据见[原 0.166.0 证据](#codex-g0-evidence)。schema 只
-证明形状，源码、确定性轨迹和真实装配分别取证，不据旧版本号直接冻结新 parser。
+当前行为、锁版 binary、有效模式、controller、单根绑定、精确旧/新历史 resume
+及错误来源均归 [Codex 合同](../implemented/codex-backend.md)。Driver 解释协议，
+HarnessRun 管原资源，SessionOwner 管输入和产品结算；不建跨请求池或第二个 owner。
+保存的用户配置及原生历史保留，不因 transport 默认变化改写 backend 或凭据。
 
 <a id="codex-app-server-input"></a>
-### 4.4 输入、问题与停止
+### 4.4 当前输入、问题与停止合同
 
-首输入和 steer 使用原 submission，写业务帧前记录可能发送；只有明确未发送/
-未接受才可按原身份和预算回队。写后 ACK 丢失保留 unknown，不重放、不换 thread、
-backend 或 fallback exec。provider accepted、进入历史与模型已消费分别表述，
-根 success 不能抹去 unknown。App Server 无业务正文的 spawn/initialize 不跨业务
-发送边界；保留的 argv 和 Claude 路径仍遵守各自真实边界。
-
-人工 steer 只针对捕获的活动根 turn，保留原来源、附件、Wiki、明确配置意图、
-暂停例外、容量和顺序；准备、无目标、terminal 或资源收束时排队。根仍在原生 wait
-中时可按已验证协议 steer；wait 返回不是根完成，也不是 join-all。自动返回沿 §1.1。
-
-原生问题绑定 connection generation/server request/thread/turn/item 与产品
-question，原 OwnerQuestions 负责来源和关闭。审批、普通问题、动态工具分别按原
-政策处理，未知类型明确不支持；迟答不能回复新连接的问题。单 reader 分类、单
-writer 串行完整帧，控制不等 stdout 或展示队列，必要事件不得静默丢弃。
-
-根 terminal 或 Stop 立即冻结原输入/问题及受控工具准入，并启动有界取消、
-TERM/KILL/join/drain。DB 背压、缺失 item、宿主仍存活均不能阻止取消启动。
-保留不携带执行授权的原身份及唯一解析通路作有限采集，不保活 grant，不把 raw
-drain 当作完整记录，也不把事件送入 Claude idle 兜底。独立 BG/Research/命名
-委派保持自己的取消与返回合同。
+[原输入证据](../implemented/architecture-contract.md#codex-native-input-evidence)
+区分未发送、可能发送、原生接纳与模型消费；unknown 不自动重放，accepted 不能
+由根 success 升格成已消费。人工 steer 的资格、容量与顺序归
+[steering](../implemented/inline-steering.md#bound-codex-root-and-queue-qualification)，
+[问题控制](../implemented/architecture-contract.md#native-question-control)保留原身份
+与迟答拒绝；Stop 不等待展示或 DB 排空才启动取消。
 
 <a id="codex-native-tail"></a>
-### 4.5 结束候选、结果判定与失败出口
+### 4.5 当前结果与失败出口
 
-只有绑定根 turn 的正式终态提供 provider 结束候选；模型 response、final 文本、
-工具或 child completed 均不能单独完成产品请求。根活动/原生等待保持原配额与
-总预算，实质根/子进展可刷新活动，poll、ACK、重复通知与详情不能续命；native
-wait 不无限豁免 idle。根 terminal 触发原有界退休，清理宽限独立记录。
-
-必要记录是根最终正文或有依据的空正文、原输出通道已接纳的完整消息/工具审计、
-问题处置及输入发送事实。仅未采集的可选历史详情，或正常取消而从未产生的 child
-答案，不成为根成功前置；已经接纳的必要记录丢失不能借“详情缺失”豁免。
-
-| 情形 | 原 Owner 与消费者应遵守的判定 |
-| --- | --- |
-| 根 success、必要记录完整、资源确认退出 | 原 Owner 可选 success；helper 可同时 interrupted/parent_done 并保留 partial，不称全树已汇总 |
-| Stop 先于 Owner 唯一选定业务结论 | 选择 interrupted；根 provider 候选与 partial 保留，根 terminal 到达本身不抢占这个选定点 |
-| Stop 晚于已选定结论 | 不重选 outcome；仍关闭准入、暂停派发并收束资源，未确认提交不冒称已持久成功 |
-| 必要记录缺失 / 仅可选详情不可用 | 前者在尚未选定且存储可信时准确失败并保留完整性诊断；已有结论不重选。后者只影响详情，不重跑模型 |
-| 写入失败、确认缺失或通知失败 | recording_failed/unavailable 与通知状态沿原合同；确认提交的 outcome 不被后续通知失败改写，不伪造第二 terminal |
-| 有界退休失败、退出仍未确认 | 进入原 Owner/Manager 失败接管，按已提交证据结束 completion，保留资源引用并执行既有有界清理；仍失败走现有 health/fail-stop，不永久正常 pending，不放行同历史第二 writer |
-
-正常成功交付仍需必要记录、原通知和退休门；故障接管返回的 completion 不冒充
-资源退出证明。输入 unknown 独立保留，对应输入不能借用主请求成功。原执行结论、
-结果记录、通知交付和资源退休各自拥有证据，失败或 Stop 不撤销已发生效果。
-
-这里复用[既有执行与故障合同](../implemented/architecture-contract.md#输入完成与资源退休)，
-不新增完成 owner、持久状态机、后代义务图或无限退休重试。
+[执行合同](../implemented/architecture-contract.md#输入完成与资源退休)拥有唯一结算、
+必要记录、Stop 选定点、有限采集、资源退出和失败接管；
+[原请求结果](../implemented/architecture-contract.md#原请求结果读取)只选绑定根答案。
+[子任务合同](../implemented/native-subagents.md)区分正文、卡片、已采集详情、
+partial 与原生 helper 终态。已退出父的任意递归自动闭合仍是§4.1的独立剩余目标，
+不改变当前 R2 成功条件，也不由卡片或完成时间推断。
 
 <a id="codex-app-server-compatibility"></a>
-### 4.6 消费者、历史、数据与观察
+### 4.6 当前历史、保存与观察合同
 
-SessionResult/LiveReply、App ask、命名委派及正文查询共用绑定根 turn 的最终正文
-选择；支持多个有序最终 item，引用原持久消息，不复制答案账本。commentary、child
-与另一个根 turn 不混入结果；空答、坏引用、缺 terminal、unknown 分别解释。
-App build/scheduler/Wiki 沿原 completion/receipt/退休事实及各自产物、记录和效果
-验收，不增加正文查询依赖；App done 保留其原正文通知前缀条件。
+[fork](../implemented/session-fork.md)及[rewind](../implemented/session-rewind.md)
+保留真实历史、独立 cwd、产品 seq 和失败补偿；未知或坏 checkpoint 不授权删除。
+[四种保存边界](../backup-and-migrate.md)分别拥有升级、消息 transcript、账户排除
+聊天和完整备份范围；[当前格式](../implemented/current-storage-format.md)拥有有限
+6→7交接与前向恢复。真实运行库只读一致快照已在隔离副本完成转换及原表保全核验，
+该证据不表示生产库已转换，也不单独证明全部引用文件恢复。
 
-根/子/thread/turn/item 身份贯通工具 key、delta、完整 item、metadata、WS、
-前端与历史读取；child started 不覆盖根 resume ID，同名 item 不串流，保留真实
-seq/高水位及效果审计。卡片缓存不拥有资源责任。子详情只读已采集内容，退休后
-读保存 items，缺失明确，不续 lease、不建历史查询宿主、不开放 child 直输。
-
-旧 exec 历史精确恢复，fork/rewind 保全目录、归属、产品消息截断与失败清理；
-原生 fork 如需替代复制，在原 saga 同时处理真实 ID、创建未知和清理，不隐式执行。
-model/effort/Fast→normal、审批/sandbox、cwd、凭据、controller、memory/skills
-及 MCP/connector 在新建/恢复逐项验证；共享合法 home 不共享请求授权。
-
-原地升级保全新增关联及发送证据；会话 transcript 只导出原消息行范围；完整备份
-沿原安装数据与引用文件范围；账户导出/导入继续排除 sessions/messages/
-client_submissions，不改源聊天、不新增会话导入或扩大原生历史删除能力。
-
-Monitor 区分产品请求、native turn、采样与父子累计/增量用量，正常路径只选一个
-计量来源；没有真实 response timing 不造 TPS。Research web leaf 的 read-only、
-无 Octopus MCP 和严格 web-only 分别验证，无工具文本 worker 保持原资源责任。
+[Monitor](../implemented/codex-performance-monitor.md)使用一个安全 rollout 来源，
+按原实际 root/child turn 关联 response；历史累计快照单列，不推算采样数。
+缺 timing 不造 TPS，异常消耗独立诊断，被动采集不改变业务或时钟。
 
 <a id="codex-app-server-delivery"></a>
-### 4.7 基础门禁、实施依赖与旧路径退出
+### 4.7 运行门禁与发布边界
 
-**G0-Base 已通过[锁版原生前提验证](#codex-g0-base-evidence)；G0-Recursive 保留旧反例且移出本期。** 基础门禁用独立最小
-客户端、目标 binary、受控 provider 与进程监督，证明版本/有效模式、根绑定、
-活动嵌套 wait/followup、输入与问题证据、完整项及原生退出、历史/配置/只读前提。
-不要求尚未实现的 Owner/DB/UI/结果/详情/fork 先验收，从而避免循环前置。
-缺少原始材料时实际补取证据，旧票勾选或摘要不代替它。
+[G0-Base](#codex-g0-base-evidence)的目标 binary/schema/config 与原轨迹已再次核验，
+没有把旧 G0-Recursive 反例改成通过。产品验收另经过原提交、Owner/DB、结果、
+领域效果、UI、Monitor 与资源观察入口；独立协议探针不能代替这些产品证据。
 
-17 张本地票的编号和依赖保持：01 是基础探针；02 是现有 Codex/Claude/辅助用途
-行为等价的 driver 预重构，技术上无协议前置；03 同时等待 01 与 02。随后分票
-闭合配置、输入、问题、身份、根终态/退休、正文、详情、业务效果、历史、错误、
-观测和保存范围；12 不依赖 09。17 汇合全部验收再切默认。这个技术前沿不自动
-授予代码或模型执行权限。当前 01–14 的产品实现范围见
-[Codex 合同](../implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume)和
-[原生子任务合同](../implemented/native-subagents.md#saved-app-server-details)。
-12–14 已实现原完成/效果消费者、原生 fork 与产品 seq rewind、按来源隔离的错误与
-重试责任。完整提交门禁通过；文件效果、诊断预算和原生清理资格审查修正后的
-受影响模块复验及 Vera 最终独立验收通过。原生 fork 的旧 exec/native 来源均通过
-真实独立继续验证；真实原生创建
-后安装失败的补偿探针确认只清理新产物，没有发送 `turn/start`。这些验证复用既有
-登录并阻断认证域访问，未申请新登录。15–17 保留原依赖；阶段性交付不代表完整 R2
-或默认切换放行，也不把 G0-Recursive 反例改为通过。
+本次完整提交检查的首次后端失败已按失效的旧夹具边界修复并定向补验，共享消费者
+和双后端生命周期回归通过；其他七项检查已有有效通过结果。离线浏览器原登录页
+等待失败已单项补验，审计无真实模型派发。完整选定 Codex live 范围、两项真实
+浏览器检查及关联修正后的 nested/followup 计量补验均通过；保留首次失败及后续
+补验原件，不改写原整套日志。每项一个执行者，证据按 revision/配置/依赖/环境及
+实际受影响范围复用，策略与入口只由 [testing.md](../testing.md)维护。
 
-开发期发送前明确 transport，不双跑副作用请求、不在 unknown 后换协议。
-默认切换须在同一候选通过原仓库门禁及本机离线 E2E、Codex live pytest/浏览器
-验收；共享改动覆盖 Claude 离线行为，不新增 Claude 登录或 DeepSeek 实机。
-每项检查一个执行者，复用仍有效证据，不因票数增加重复套件。
-
-同次交付删除普通对话旧 exec、被替代的重复 controller writer、猜测 steer 能力
-及重复正常计量路径；保留有独立用途的 web leaf/text worker、登录控制和诊断。
-发布自然排空，不热搬连接、问题或 lease；回退核对数据/原生历史/配置及旧 writer
-退出，不覆新库、删历史或重放 unknown，不能安全回退时前向修复。仅依据实测成本
-再讨论跨请求复用，不预承诺性能倍数。完成 R2 不宣称 G0-Recursive 已实现。
+Vera 已独立核对产品代码及最后的计量关联修正；审查发现均修复并通过受影响验证。
+文档审查与发布回执独立记录。生产发布按[本机流程](../local-wsl.md#自动发布)
+准备候选、自然排空与有限格式交接，不热搬连接、问题或 lease，不覆盖新库、
+删历史或重放 unknown；不能安全回退时前向修复。实现和测试通过不证明已运行该版本。
 
 <a id="deepseek-design"></a>
 ## 5. 第四阶段：复用既有架构的 DeepSeek Harness 接入设计

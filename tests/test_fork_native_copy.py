@@ -1,19 +1,16 @@
-"""Unit tests for the full-copy fork strategy (session-fork.md): each
-harness copies its NATIVE transcript into a fresh resume id so a `/fork`
-duplicate continues with real context instead of replaying history.
+"""Claude copy mechanics and cleanup of saved pre-native Codex fork artifacts.
 
-These exercise the pure filesystem mechanics (no real CLI) — copy + id/cwd
-rewrite + fallback + cleanup — for both backends. Real CLI copy->resume->recall
-lives in test_fork_native_copy_real.py (gated)."""
+Current Codex creation and cleanup use the native history saga, covered by
+test_codex_app_server_fork.py and its real product-history counterpart.
+"""
 
 import json
-from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from server.harness import claude_code as cc
-from server.harness import codex as cx
+from server.harness import get_harness
 from server.harness.events import HarnessCredential
 
 # ----------------------------------------------------------------- Claude
@@ -134,97 +131,32 @@ def _write_codex_rollout(home_dir, rid):
 
 
 @pytest.mark.asyncio
-async def test_codex_fork_copy_rewrites_session_meta(tmp_path):
-    home = tmp_path / "codexhome"
-    home.mkdir()
-    _write_codex_rollout(home, "rid-1")
-    cred = HarnessCredential(backend="codex", auth_type="oauth", home_dir=str(home))
-
-    art = await cx._fork_copy(
-        parent_working_dir="/x", parent_resume_id="rid-1",
-        parent_credential=cred, dest_working_dir="/y", new_resume_id="rid-2",
-    )
-    assert art.resume_id == "rid-2"
-    assert art.needs_replay is False
-
-    copied = cx._find_rollout(home / "sessions", "rid-2")
-    assert copied is not None
-    timestamp = copied.name.removeprefix("rollout-").removesuffix("-rid-2.jsonl")
-    created = datetime.strptime(timestamp, "%Y-%m-%dT%H-%M-%S")
-    assert copied.parent.relative_to(home / "sessions").as_posix() == (
-        created.strftime("%Y/%m/%d")
-    )
-    meta = json.loads(copied.read_text().splitlines()[0])
-    assert meta["payload"]["id"] == "rid-2"
-
-
-@pytest.mark.asyncio
-async def test_codex_fork_copy_fallback_when_no_rollout(tmp_path):
-    home = tmp_path / "codexhome"
-    home.mkdir()
-    cred = HarnessCredential(backend="codex", auth_type="oauth", home_dir=str(home))
-    art = await cx._fork_copy(
-        parent_working_dir="/x", parent_resume_id="missing",
-        parent_credential=cred, dest_working_dir="/y", new_resume_id="n",
-    )
-    assert art.needs_replay is True
-    art2 = await cx._fork_copy(
-        parent_working_dir="/x", parent_resume_id=None,
-        parent_credential=cred, dest_working_dir="/y", new_resume_id="n",
-    )
-    assert art2.needs_replay is True
-
-
-@pytest.mark.asyncio
-async def test_codex_find_rollout_confirms_session_meta(tmp_path):
-    # A rollout whose FILENAME contains the id but whose session_meta.id differs
-    # must NOT match — _find_rollout confirms session_meta before returning (it
-    # drives deletion, so a filename-only hit could delete the wrong file).
-    home = tmp_path / "codexhome"
-    home.mkdir()
-    sess = home / "sessions" / "2026" / "06" / "15"
-    sess.mkdir(parents=True)
-    # filename says rid-2, content says rid-1
-    f = sess / "rollout-2026-06-15T00-00-00-rid-2.jsonl"
-    f.write_text(json.dumps({"type": "session_meta", "payload": {"id": "rid-1"}}) + "\n")
-    assert cx._find_rollout(home / "sessions", "rid-2") is None
-    assert cx._find_rollout(home / "sessions", "rid-1") == f
-
-
-@pytest.mark.asyncio
 async def test_codex_fork_cleanup_reraises_on_oserror(tmp_path, monkeypatch):
     home = tmp_path / "codexhome"
     home.mkdir()
     _write_codex_rollout(home, "rid-1")
     cred = HarnessCredential(backend="codex", auth_type="oauth", home_dir=str(home))
-    await cx._fork_copy(
-        parent_working_dir="/x", parent_resume_id="rid-1",
-        parent_credential=cred, dest_working_dir="/y", new_resume_id="rid-2",
-    )
+    _write_codex_rollout(home, "rid-2")  # Already saved by the retired strategy.
 
     def _boom(self, *a, **k):
         raise OSError("permission denied")
 
     monkeypatch.setattr(Path, "unlink", _boom)
     with pytest.raises(OSError):
-        await cx._fork_cleanup("/y", "rid-2", "fork1", credential=cred)
+        await get_harness("codex").cleanup_incomplete_fork_artifacts("/y", "rid-2", "fork1", credential=cred)
 
 
 @pytest.mark.asyncio
 async def test_codex_fork_cleanup_removes_copy(tmp_path):
     home = tmp_path / "codexhome"
     home.mkdir()
-    _write_codex_rollout(home, "rid-1")
+    original = _write_codex_rollout(home, "rid-1")
     cred = HarnessCredential(backend="codex", auth_type="oauth", home_dir=str(home))
-    await cx._fork_copy(
-        parent_working_dir="/x", parent_resume_id="rid-1",
-        parent_credential=cred, dest_working_dir="/y", new_resume_id="rid-2",
-    )
-    assert cx._find_rollout(home / "sessions", "rid-2") is not None
-    await cx._fork_cleanup("/y", "rid-2", "fork1", credential=cred)
-    assert cx._find_rollout(home / "sessions", "rid-2") is None
+    copied = _write_codex_rollout(home, "rid-2")
+    await get_harness("codex").cleanup_incomplete_fork_artifacts("/y", "rid-2", "fork1", credential=cred)
+    assert not copied.exists()
     # The ORIGINAL rollout is untouched.
-    assert cx._find_rollout(home / "sessions", "rid-1") is not None
+    assert original.exists()
 
 
 @pytest.mark.asyncio
@@ -234,12 +166,7 @@ async def test_codex_fork_cleanup_removes_unreadable_and_legacy_copies(
     home = tmp_path / "codexhome"
     original = _write_codex_rollout(home, "rid-1")
     cred = HarnessCredential(backend="codex", auth_type="oauth", home_dir=str(home))
-    await cx._fork_copy(
-        parent_working_dir="/x", parent_resume_id="rid-1",
-        parent_credential=cred, dest_working_dir="/y", new_resume_id="rid-2",
-    )
-    copied = cx._find_rollout(home / "sessions", "rid-2")
-    assert copied is not None
+    copied = _write_codex_rollout(home, "rid-2")
     legacy = original.parent / "rollout-fork-rid-2.jsonl"
     legacy.write_text('{"type":"session_meta","payload":{"id":"rid-2"}}\n')
 
@@ -247,7 +174,7 @@ async def test_codex_fork_cleanup_removes_unreadable_and_legacy_copies(
         raise PermissionError("cannot read transcript")
 
     monkeypatch.setattr(Path, "open", unreadable)
-    await cx._fork_cleanup("/y", "rid-2", "fork1", credential=cred)
+    await get_harness("codex").cleanup_incomplete_fork_artifacts("/y", "rid-2", "fork1", credential=cred)
     assert not copied.exists()
     assert not legacy.exists()
     assert original.exists()

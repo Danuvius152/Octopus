@@ -2,7 +2,6 @@
 
 import asyncio
 import sys
-from dataclasses import replace
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -15,6 +14,7 @@ from server.harness.claude_code import ClaudeDriver
 from server.main import app
 from server.session_manager import SessionManager
 from tests.accounts import create_account
+from tests.harness_profiles import process_profile
 
 
 @pytest.mark.parametrize("operation", ["fork", "duplicate"])
@@ -43,7 +43,7 @@ async def test_busy_fork_refuses_without_blocking_owned_stop(
         "Path(sys.argv[1]).write_text('The original process reached stdin EOF.')\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None,
         prepare_resume=None, new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (

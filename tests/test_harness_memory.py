@@ -9,8 +9,13 @@ never enables features.memories. Pure argv/env inspection — no subprocess.
 
 from __future__ import annotations
 
+import pytest
+
 from server.harness import RunConfig, get_harness
 from server.harness.assembly import compose_system_prompt, render_memory_blurb
+from tests.harness_profiles import native_submission
+from tests.test_codex_app_server_questions import wire_frames
+from tests.test_codex_app_server_submission import native_runtime as native_runtime
 
 
 def _arg_after(argv, flag):
@@ -82,18 +87,22 @@ def test_claude_omits_memory_blurb():
 # --- Codex -----------------------------------------------------------------
 
 
-def test_codex_injects_memory_blurb_and_no_native_feature():
+@pytest.mark.parametrize("memory_dir", [None, "/ag/a/memory"])
+async def test_codex_memory_blurb_is_installed_through_native_instructions(native_runtime, tmp_path, memory_dir):
     run = get_harness("codex").create_run(
-        RunConfig(session_id="s1", memory_dir="/ag/a/memory")
+        RunConfig(session_id="s1", memory_dir=memory_dir, mcp_servers=[])
     )
-    argv, _ = run.build_argv("hi", "/tmp", None)
-    joined = " ".join(argv)
-    assert "== Long-term memory ==" in joined
-    assert "/ag/a/memory" in joined
-    assert "features.memories" not in joined  # native pipeline NOT used
-
-
-def test_codex_no_blurb_without_memory_dir():
-    run = get_harness("codex").create_run(RunConfig(session_id="s1"))
-    argv, _ = run.build_argv("hi", "/tmp", None)
-    assert "== Long-term memory ==" not in " ".join(argv)
+    proofs = native_submission(run, "memory-request", "memory-attempt")
+    try:
+        await run.start("hi", str(tmp_path))
+        events = [event async for event in run.stream()]
+        assert any(event.type == "result" and not event.is_error for event in events)
+        start, = [frame for frame in wire_frames(tmp_path) if frame.get("method") == "thread/start"]
+        instructions = start["params"]["developerInstructions"]
+        assert ("== Long-term memory ==" in instructions) == (memory_dir is not None)
+        if memory_dir:
+            assert memory_dir in instructions
+        assert "features.memories" not in start["params"]["config"]
+        assert any(proof.state == "accepted" for proof in proofs)
+    finally:
+        await run.stop()

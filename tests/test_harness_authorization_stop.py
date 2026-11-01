@@ -27,6 +27,7 @@ from server.harness.driver import ArgvDriver
 from server.session_manager import session_manager
 from server.workspace import paths_for
 from tests import test_live_account_authorization as live_authorization
+from tests.harness_profiles import process_profile
 
 accounts = live_authorization.accounts
 client = live_authorization.client
@@ -180,7 +181,7 @@ async def test_spawn_authorization_reads_account_and_credential_as_one_view(acco
         "print('{\"type\":\"turn.completed\",\"usage\":{}}',flush=True)\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
         new_driver=ArgvDriver,
         build_turn_argv=lambda context: ([sys.executable, "-u", str(model), str(marker)], {"cwd": context.working_dir}),
@@ -280,7 +281,7 @@ async def test_session_stopped_during_spawn_authorization_can_run_again_without_
         }
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, build_turn_argv=argv,
         activity_observer=observer_factory, prepare_resume=None,
         new_driver=ArgvDriver,

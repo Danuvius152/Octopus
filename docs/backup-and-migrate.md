@@ -1,11 +1,13 @@
 # Backing up and moving a deployment
 
-Choose the operation by what must survive. Both use the actual configured
+Choose the operation by what must survive. Use the actual configured
 installation and referenced files; a source checkout or a guessed
 `~/.octopus/` subtree is not a complete inventory.
 
 | Operation | Retained scope | Supported workflow |
 | --- | --- | --- |
+| In-place upgrade/read | Existing sessions, messages, input evidence, native references and saved details | The finite publication handoff and current-format verifier; no implicit execution |
+| Session transcript export | Original message rows, metadata, terminal and answer references | The transcript HTTP export; no submission table, provider store, credentials or new session-import capability |
 | Account export/import | One account's durable configuration, files, Wiki and applications; new conversations on the target | The same Octopus build, an archive, and empty target data locations under the selected home layout |
 | Complete backup/restore | All required installation data, including chats, schedules, native transcripts and referenced work trees | A consistent backup plus explicit verification of configuration, keys, machine bindings and restored execution state |
 
@@ -14,6 +16,14 @@ restoration is a broader operator procedure; the account importer does not
 restore excluded history or arbitrary historical formats. Architecture and
 storage decisions live in [the architecture contract](implemented/architecture-contract.md)
 and [current storage and publication handoff](implemented/current-storage-format.md).
+
+`tests/test_codex_app_server_preservation.py` verifies these boundaries separately
+through transcript HTTP, real account archives and a reopened consistent SQLite
+backup with referenced native artifacts. It preserves root answers, helper
+partial details, Question resolutions, unknown input and accepted-but-processing-
+unconfirmed steer. A database-only snapshot proves database compatibility; full
+restoration also requires the referenced files and the target's closed execution
+state. Account transfer success cannot stand in for chat or full-backup evidence.
 
 <a id="7-selected-account-export-and-import"></a>
 

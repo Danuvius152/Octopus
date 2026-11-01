@@ -5,7 +5,6 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -25,7 +24,7 @@ def offline_harness(monkeypatch):
         raise AssertionError("A browser input retained before execution reached process preparation")
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, build_turn_argv=reject_unexpected_execution,
         prepare_resume=None, activity_observer=None,
     ))
@@ -297,6 +296,7 @@ async def test_recovery_listing_is_paginated_private_and_dismissible(tmp_path, m
             await db.close()
 
 
+from tests.harness_profiles import process_profile
 from tests.test_runtime_review_races import wait_dispatch_idle
 
 
@@ -332,7 +332,7 @@ async def runtime(monkeypatch, tmp_path):
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv, prepare_resume=None))
     try:
         yield manager, db, session, None, starts, events
     finally:
@@ -672,7 +672,7 @@ async def test_uncertain_steer_write_is_owned_saved_and_never_requeued(runtime, 
         return [sys.executable, "-u", "-c", code, str(frames), str(finish)], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, build_turn_argv=argv, new_driver=ClaudeDriver, can_steer=True, reusable=True,
         prepare_resume=None, activity_observer=None,
     ))

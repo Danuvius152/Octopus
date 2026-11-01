@@ -7,7 +7,6 @@ import json
 import os
 import signal
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -22,6 +21,7 @@ from server.harness.run import HarnessRun
 from server.routers.sessions import router
 from server.sessions import SessionManager
 from tests.accounts import create_account
+from tests.harness_profiles import process_profile
 
 
 @pytest.mark.parametrize("action", ["stop", "auto_archive"])
@@ -45,7 +45,7 @@ async def test_idle_native_parent_retires_original_process_and_delivers_its_endi
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("claude-code")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None,
     ))
     receipt = await manager.start_message(session.id, "Keep the original native transport")
@@ -148,7 +148,7 @@ def native_cli(monkeypatch, *, hold=False, child_status="running", parent_error=
         return [sys.executable, "-u", "-c", current_script], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None,
     ))
     return starts

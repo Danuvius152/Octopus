@@ -13,6 +13,7 @@ async def test_original_harness_path_would_dispatch_before_attachment_interrupt(
     """Old pure UI used this real run path; stop at a spy, never launch a CLI."""
     from server.harness import RunConfig, get_harness
     from server.harness import run as module
+    from tests.harness_profiles import native_submission
 
     attempted = []
 
@@ -24,6 +25,9 @@ async def test_original_harness_path_would_dispatch_before_attachment_interrupt(
     monkeypatch.setattr(module, "prepare_spawn", lambda argv, kwargs: (argv, kwargs))
     monkeypatch.setattr(module.asyncio, "create_subprocess_exec", refuse)
     run = get_harness(backend).create_run(RunConfig(mcp_servers=[]))
+    if backend == "codex":
+        monkeypatch.setattr("server.harness.codex_app_server.verify_binary", lambda path: None)
+        native_submission(run, "dispatch-probe", "dispatch-attempt")
     try:
         with pytest.raises(RuntimeError, match="safe dispatch spy"):
             await run.start("attachment receipt probe", str(tmp_path))

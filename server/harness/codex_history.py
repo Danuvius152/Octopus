@@ -14,7 +14,7 @@ from typing import Any
 
 from ..config import settings
 from ..diagnostics import diagnostic_text
-from .codex import _codex_sessions_dir
+from .codex import _cleanup_legacy_fork, _codex_sessions_dir
 from .codex_app_server import (
     _REQUIRED_FEATURES,
     AppServerDriver,
@@ -137,7 +137,14 @@ async def fork_copy(*, parent_working_dir: str, parent_resume_id: str | None, pa
 
 
 async def fork_cleanup(working_dir: str, resume_id_hint: str | None, fork_id: str, *, credential: HarnessCredential | None = None,
-                       artifact: dict[str, Any], hooks: ForkHooks) -> None:
+                       artifact: dict[str, Any] | None = None, hooks: ForkHooks | None = None) -> None:
+    if artifact is None:
+        # Existing format-6 forks predate the native saga checkpoint. Only
+        # retire their original, saved copy hint; no new fork uses file copy.
+        await _cleanup_legacy_fork(working_dir, resume_id_hint, fork_id, credential=credential)
+        return
+    if hooks is None:
+        raise NativeProtocolError("Native fork cleanup has no original resource owner")
     if artifact.get("phase") != "created":
         raise NativeProtocolError("Native fork creation is unknown; retain the original recovery material")
     if artifact.get("cleanup_allowed") is not True:

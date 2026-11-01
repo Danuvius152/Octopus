@@ -15,6 +15,7 @@ from server.harness.launch_limits import LaunchConfigurationError, validate_laun
 from server.harness.profile import McpServerEntry
 from server.harness.registry import _REGISTRY
 from server.session_manager import session_manager
+from tests.harness_profiles import native_submission
 from tests.test_agent_credential_bindings import bindings as bindings
 
 
@@ -111,7 +112,9 @@ async def test_changed_subagents_replace_held_process_and_deliver_new_configurat
 
 
 @pytest.mark.parametrize("backend", ["claude-code", "codex"])
-async def test_oversized_saved_system_prompt_is_refused_without_changing_original(bindings, backend):
+async def test_oversized_saved_system_prompt_is_refused_without_changing_original(bindings, backend, monkeypatch):
+    if backend == "codex":
+        monkeypatch.setattr("server.harness.codex_app_server._FRAME_LIMIT_BYTES", 128 * 1024)
     client, headers, _, _ = bindings
     created = await client.post("/api/agents", headers=headers, json={"name": "Unchanged", "backend": backend, "system_prompt": "Keep original"})
     assert created.status_code == 201
@@ -159,6 +162,8 @@ def test_combined_budget_counts_argument_and_environment_pointer_slots(delta):
 @pytest.mark.parametrize("backend", ["claude-code", "codex"])
 @pytest.mark.parametrize("surface", ["controller", "MCP", "environment"])
 async def test_dynamic_configuration_budget_refuses_before_any_spawn(tmp_path, monkeypatch, backend, surface):
+    if backend == "codex":
+        monkeypatch.setattr("server.harness.codex_app_server._FRAME_LIMIT_BYTES", 128 * 1024)
     profile = get_harness(backend).profile
     original = profile.build_turn_argv
     spawned = []
@@ -181,9 +186,12 @@ async def test_dynamic_configuration_budget_refuses_before_any_spawn(tmp_path, m
     monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden_spawn)
     harness = Harness(replace(profile, build_turn_argv=render, activity_observer=None))
     harness.validate_configuration(RunConfig(mcp_servers=[]))
-    run = harness.create_run(RunConfig(mcp_servers=[]))
+    run = harness.create_run(RunConfig(mcp_servers=[],
+        system_prompt="中" * 50000 if backend == "codex" and surface == "controller" else None))
+    if backend == "codex":
+        native_submission(run, "configuration-request", "configuration-attempt")
     try:
-        with pytest.raises(LaunchConfigurationError, match="bytes") as refused:
+        with pytest.raises((LaunchConfigurationError, ValueError), match="bytes") as refused:
             await run.start("Dynamic additions appear at execution", str(tmp_path))
         assert "never-quote-this-value" not in str(refused.value)
     finally:

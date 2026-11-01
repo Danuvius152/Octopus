@@ -60,6 +60,16 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_response_identity ON events(
 CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_turn_latency_identity ON events(
     kind, json_extract(detail, '$.native_thread_id'), json_extract(detail, '$.native_turn_id')
 ) WHERE kind = 'codex_turn_latency';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_run_identity ON events(
+    kind, json_extract(detail, '$.run_lease_id')
+) WHERE kind = 'codex_run';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_usage_snapshot_identity ON events(
+    kind, json_extract(detail, '$.run_lease_id'), json_extract(detail, '$.native_thread_id'),
+    json_extract(detail, '$.native_turn_id')
+) WHERE kind = 'codex_native_usage';
+CREATE UNIQUE INDEX IF NOT EXISTS idx_codex_steer_identity ON events(
+    kind, json_extract(detail, '$.run_lease_id'), json_extract(detail, '$.input_id')
+) WHERE kind = 'codex_steer';
 
 CREATE TABLE IF NOT EXISTS samples (
     ts     REAL NOT NULL,
@@ -181,8 +191,10 @@ class MetricsStore:
         try:
             if events:
                 await self._conn.executemany(
-                    "INSERT OR IGNORE INTO events (ts, kind, session_id, agent_id, backend, "
-                    "duration_ms, ok, error_code, detail) VALUES (?,?,?,?,?,?,?,?,?)",
+                    "INSERT INTO events (ts, kind, session_id, agent_id, backend, "
+                    "duration_ms, ok, error_code, detail) VALUES (?,?,?,?,?,?,?,?,?) "
+                    "ON CONFLICT DO UPDATE SET ts=excluded.ts, detail=excluded.detail "
+                    "WHERE excluded.kind='codex_native_usage'",
                     [
                         (e.ts, e.kind, e.session_id, e.agent_id, e.backend,
                          e.duration_ms,

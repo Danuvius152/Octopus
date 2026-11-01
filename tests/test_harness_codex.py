@@ -14,9 +14,12 @@ from server.harness.codex import (
     _OCTOPUS_SYSTEM_PROMPT_CODEX,
     CodexEventParser,
     build_oneshot_argv,
-    build_turn_argv,
     parse_oneshot_stdout,
 )
+from server.harness.codex import (
+    build_turn_argv as build_web_leaf_argv,
+)
+from server.harness.codex_app_server import build_argv as build_turn_argv
 from server.harness.events import HarnessCredential
 from server.harness.profile import OneShotContext, TurnContext
 
@@ -39,9 +42,9 @@ def test_turn_argv_web_research_uses_readonly_sandbox_and_web_search(tmp_path):
     ctx = _assemble_ctx(
         prompt="research", wd=str(tmp_path), resume=None,
         credential=HarnessCredential(backend="codex", auth_type="oauth", home_dir=None),
-        web_research=True,
+        web_research=True, mcp_servers=[],
     )
-    argv, _ = build_turn_argv(ctx)
+    argv, _ = build_web_leaf_argv(ctx)
     assert argv[argv.index("--sandbox") + 1] == "read-only"
     assert "tools.web_search=true" in argv
     assert "--dangerously-bypass-approvals-and-sandbox" not in argv
@@ -62,17 +65,14 @@ def test_turn_argv_full_config(tmp_path):
     argv, kw = build_turn_argv(ctx)
     joined = " ".join(argv)
 
-    assert argv[:3] == ["codex", "exec", "--json"]
-    assert "--dangerously-bypass-approvals-and-sandbox" in argv
-    assert argv[argv.index("-C") + 1] == str(tmp_path)
-    di = next(a for a in argv if a.startswith("developer_instructions="))
-    assert "PERSONA" in di and "Octopus in-app tools" in di
+    assert argv[:2] == ["codex", "app-server"]
+    assert "features.goals=false" in argv
     # Only the selected built-ins are rendered as -c overrides.
     assert "mcp_servers.ask.command=" in joined
     assert "mcp_servers.bg.command=" not in joined
-    assert argv[argv.index("-m") + 1] == "gpt-5.5"
-    assert argv[argv.index("resume") + 1] == "resume-1"
-    assert argv[-2:] == ["--", "hello"]
+    # Effective model, controller, permissions and exact history now travel in
+    # the native RPCs, verified by test_codex_app_server_configuration.py.
+    assert "hello" not in argv and "resume-1" not in argv
     assert kw["env"]["CODEX_HOME"] == home
 
 
@@ -82,9 +82,9 @@ def test_turn_argv_new_turn_and_no_home(tmp_path):
         credential=HarnessCredential(backend="codex", auth_type="oauth", home_dir=None),
     )
     argv, kw = build_turn_argv(ctx)
-    assert argv[:3] == ["codex", "exec", "--json"]
+    assert argv[:2] == ["codex", "app-server"]
     assert "resume" not in argv  # new turn
-    assert argv[-2:] == ["--", "p"]
+    assert "p" not in argv
     assert kw["env"].get("CODEX_HOME") == os.environ.get("CODEX_HOME")  # inherit ambient home
 
 

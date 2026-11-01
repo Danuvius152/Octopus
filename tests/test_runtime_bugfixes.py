@@ -21,7 +21,7 @@ from server import deps, main, mcp_http, mcp_identity
 from server.agent_manager import AgentManager
 from server.config import settings
 from server.database import Database
-from server.harness.codex import CODEX, CodexEventParser
+from server.harness.codex import CODEX, CODEX_WEB_LEAF, CodexEventParser
 from server.harness.run import HarnessRun
 from server.monitor import MetricsStore, query, set_store
 from server.users import UserManager
@@ -564,7 +564,7 @@ async def test_recording_reference_survives_a_cancellation_between_control_read_
 async def test_captured_web_lifecycle_prevents_idle_but_replays_and_silence_do_not(manager, monkeypatch, tmp_path):
     rows = [json.loads(line) for line in (Path(__file__).parent / "fixtures/codex-web-search-0.162.1.jsonl").read_text().splitlines()]
     clock = SimpleNamespace(now=299.0)
-    run = HarnessRun(CODEX)
+    run = HarnessRun(CODEX_WEB_LEAF)
     ticks = []
 
     def touch(_):
@@ -584,7 +584,7 @@ async def test_captured_web_lifecycle_prevents_idle_but_replays_and_silence_do_n
     await run._handle_line(json.dumps({"type": "item.completed", "item": {"type": "web_search", "id": "exec-11111111-1111-4111-8111-111111111111"}}))
     assert ticks == [299.0, 299.0]
 
-    observed = HarnessRun(CODEX)
+    observed = HarnessRun(CODEX_WEB_LEAF)
     validated = []
     active, replay, replayed, stopped = (asyncio.Event() for _ in range(4))
 

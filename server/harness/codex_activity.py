@@ -66,18 +66,25 @@ class CodexActivityObserver:
         resume_id: str | None = None,
         wall_clock: Callable[[], float] = time.time,
         monotonic: Callable[[], float] = time.monotonic,
+        native_thread_id: str | None = None,
+        rollout_path: str | None = None,
+        started_at: float | None = None,
     ) -> None:
         self._root = Path(env.get("CODEX_HOME") or Path.home() / ".codex").resolve() / "sessions"
         self._notify = notify
         self._wall = wall_clock
         self._monotonic = monotonic
-        self._started = wall_clock()
+        self._started = wall_clock() if started_at is None else started_at
         self._started_monotonic = monotonic()
-        self._thread = _uuid(resume_id)
-        self._stdout_thread: str | None = None
+        # App Server supplies an explicit thread identity and exact root path.
+        # This mode reads response metadata only: no exec stderr, native cards
+        # or liveness inference, and no second source of usage.
+        self._native_metrics: dict[str, CodexResponseMetrics] | None = {} if native_thread_id is not None else None
+        self._thread = native_thread_id if native_thread_id is not None else _uuid(resume_id)
+        self._stdout_thread: str | None = native_thread_id
         self._diagnostic_thread: str | None = None
         self._turn: str | None = None
-        self._path: Path | None = None
+        self._path: Path | None = Path(rollout_path) if rollout_path is not None else None
         self._discovery: Generator[None, None, Path | None] | None = None
         self._retry_discovery_at = 0.0
         self._inode: tuple[int, int] | None = None
@@ -106,7 +113,8 @@ class CodexActivityObserver:
 
     @property
     def identity_confirmed(self) -> bool:
-        return bool(self._file_verified and self._turn and self._stdout_thread == self._thread)
+        return bool(self._file_verified and (self._turn or self._native_metrics is not None)
+                    and self._stdout_thread == self._thread)
 
     def _disable(self, code: str) -> None:
         self._disabled = True
@@ -210,9 +218,12 @@ class CodexActivityObserver:
         # UUIDv7 carries the native thread's creation date. It is only a
         # bounded directory hint; the file/header/turn checks still establish
         # ownership. Adjacent UTC dates cover the CLI's local-date partition.
-        identifier = UUID(self._thread or "")
+        try:
+            identifier = UUID(self._thread or "")
+        except ValueError:
+            identifier = None
         scopes: list[tuple[list[Path], int]] = []
-        if identifier.version == 7:
+        if identifier is not None and identifier.version == 7:
             born = datetime.fromtimestamp((identifier.int >> 80) / 1000, UTC)
             candidates = [self._root / (born + timedelta(days=offset)).strftime("%Y/%m/%d")
                           for offset in (-1, 0, 1)]
@@ -344,7 +355,15 @@ class CodexActivityObserver:
 
     def _record_header(self, obj: dict[str, Any]) -> None:
         if obj.get("type") == "event_msg" and obj.get("payload", {}).get("type") == "task_started":
-            self._native_turn = _uuid(obj["payload"].get("turn_id"))
+            value = obj["payload"].get("turn_id")
+            if self._native_metrics is not None:
+                try:
+                    stamp = datetime.fromisoformat(obj["timestamp"].replace("Z", "+00:00"))
+                    if stamp.tzinfo is None or not self._started <= stamp.timestamp() <= self._wall() + 2:
+                        return
+                except (KeyError, TypeError, ValueError, AttributeError):
+                    return
+            self._native_turn = value if self._native_metrics is not None and isinstance(value, str) else _uuid(value)
             return
         if (obj.get("type") != "function_header" or not self.identity_confirmed
                 or self._native_turn != self._turn):
@@ -509,11 +528,21 @@ class CodexActivityObserver:
                     obj = self._decode_metadata(line)
                     if obj is not None:
                         self._record_header(obj)
-                    if self.identity_confirmed and self._native_turn == self._turn:
+                    if self.identity_confirmed and self._native_metrics is not None and self._native_turn:
+                        if self._native_turn not in self._native_metrics:
+                            if len(self._native_metrics) >= 16384:
+                                self._disable("metrics_turn_limit")
+                                break
+                            self._native_metrics[self._native_turn] = CodexResponseMetrics(
+                                self._thread, self._native_turn, self._started, modern_usage_only=True,
+                            )
+                        self._metrics = self._native_metrics[self._native_turn]
+                        events.extend(self._metrics.feed_line(line, self._wall()))
+                    elif self.identity_confirmed and self._native_turn == self._turn:
                         if self._metrics is None:
                             self._metrics = CodexResponseMetrics(self._thread, self._turn, self._started)
                         events.extend(self._metrics.feed_line(line, self._wall()))
-                    if obj is None:
+                    if obj is None or self._native_metrics is not None:
                         continue
                     tick = self._completion(obj)
                     if tick is not None:
@@ -524,6 +553,13 @@ class CodexActivityObserver:
                     self._partial = b""
                     self._skipping_line = True
             return ticks, events, boundary
+        except FileNotFoundError:
+            # A new thread advertises its path before the first input creates
+            # the rollout. No verified cursor exists yet: wait for that file,
+            # preserving the secure header/open checks on the next poll.
+            if self._inode is not None or drain:
+                self._disable("rollout_missing")
+            return [], [], boundary
         except (OSError, ValueError):
             self._disable("rollout_read")
             return [], [], boundary
@@ -549,12 +585,16 @@ class CodexActivityObserver:
             if task.done() and self._read_task is task:
                 self._read_task = None
 
-    async def start(self) -> None:
+    async def start(self, *, baseline: bool = True) -> None:
         # Existing threads start at a captured EOF before the child is spawned.
-        if self._thread is not None:
+        if self._thread is not None and baseline:
             async with self._cursor_lock:
                 await self._read_owned(baseline=True)
-        if not self._closed and not self._disabled:
+        self.start_live()
+
+    def start_live(self) -> None:
+        """A protocol-bound new child already has a finite fresh prefix."""
+        if not self._closed and not self._disabled and self._task is None:
             self._task = asyncio.create_task(self._watch(), name="codex-native-activity")
 
     async def poll_once(self) -> None:
@@ -597,26 +637,79 @@ class CodexActivityObserver:
     async def _watch(self) -> None:
         while not self._closed and not self._disabled:
             await self.poll_once()
-            if self._wall() - self._started > 30 and (not self._turn or not self._stdout_thread):
+            if (self._native_metrics is None and self._wall() - self._started > 30
+                    and (not self._turn or not self._stdout_thread)):
                 self._disable("identity_unconfirmed")
                 return
             await asyncio.sleep(0.25)
 
-    def invalidate(self) -> None:
+    def invalidate(self, reason: str | None = None) -> None:
         self._closed = True
+        if reason is not None:
+            self._disable(reason)
 
-    async def close(self) -> None:
-        self.invalidate()
-        if self._task is not None:
-            self._task.cancel()
-            await asyncio.gather(self._task, return_exceptions=True)
-            self._task = None
-        if self._read_task is not None:
-            await asyncio.shield(self._read_task)
-            self._read_task = None
+    def finish_metrics(self) -> list[HarnessEvent]:
+        return [event for metrics in (self._native_metrics or {}).values() for event in metrics.finish()]
+
+    @property
+    def metrics_status(self) -> str:
+        return self._warning or ("verified" if self._file_verified else "unavailable")
+
+    def _close_discovery(self) -> None:
         if self._discovery is not None:
             self._discovery.close()
             self._discovery = None
+
+    def _read_finished(self, task: asyncio.Task) -> None:
+        # A timed-out supplementary filesystem call cannot be cancelled by
+        # cancelling its waiter. The original observer retains this task until
+        # the worker's own finally closes its descriptor. Closed observers never
+        # publish that late result or touch another attempt.
+        if not task.cancelled():
+            task.exception()
+        if self._read_task is task:
+            self._read_task = None
+        self._close_discovery()
+
+    def _watch_finished(self, task: asyncio.Task) -> None:
+        if not task.cancelled():
+            task.exception()
+        if self._task is task:
+            self._task = None
+        if self._read_task is None:
+            self._close_discovery()
+
+    async def close(self, *, deadline: float | None = None) -> bool:
+        self.invalidate()
+        complete = True
+        if self._task is not None:
+            watcher = self._task
+            watcher.cancel()
+            if deadline is None:
+                await asyncio.gather(watcher, return_exceptions=True)
+            else:
+                await asyncio.wait({watcher}, timeout=max(0, deadline - asyncio.get_running_loop().time()))
+            if watcher.done():
+                self._watch_finished(watcher)
+            else:
+                complete = False
+                watcher.add_done_callback(self._watch_finished)
+        if self._read_task is not None:
+            reader = self._read_task
+            if deadline is None:
+                await asyncio.shield(reader)
+            else:
+                await asyncio.wait({reader}, timeout=max(0, deadline - asyncio.get_running_loop().time()))
+            if reader.done():
+                self._read_finished(reader)
+            else:
+                complete = False
+                reader.add_done_callback(self._read_finished)
+        if self._read_task is None and self._task is None:
+            self._close_discovery()
+        if not complete:
+            self.invalidate("supplementary_read_cutoff")
+        return complete
 
 
 def diagnostic_environment(env: dict[str, str]) -> None:

@@ -12,10 +12,13 @@ from server.harness.events import HarnessPreparationError
 from server.sessions import SessionManager
 from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
+from tests.harness_profiles import process_profile
 
 
 @pytest.fixture
 async def host(monkeypatch):
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile))
     monkeypatch.setattr(settings, "turn_idle_timeout_seconds", .08)
     monkeypatch.setattr(settings, "turn_max_seconds", 0)
     monkeypatch.setattr(SessionManager, "_TRANSIENT_RETRY_BASE_DELAY", 0)

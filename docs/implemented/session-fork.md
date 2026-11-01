@@ -26,13 +26,14 @@ throwaway copy of the project without disturbing the original.
     `<dest-slug>/<new-id>.jsonl`, rewriting each line's `cwd`→dest and
     `sessionId`→new id. (Empirically the CLI resumes a copied *real* transcript
     fine — the old "No conversation found" was specific to *synthesized* ones.)
-  - **Codex exec**: copy the rollout (`CODEX_HOME/sessions/.../rollout-*-<id>.jsonl`)
-    → a new rollout with `session_meta.id`→new id. Codex resume is by id
-    (cwd-independent), so the working-dir copy is irrelevant to it.
   - **Codex App Server**: use the pinned native `thread/fork` in the same home,
     save its actual returned identity and retire its short management host before
     installing the branch. This supports both old exec and native source histories;
     branch creation sends no model input. [Native protocol details](codex-backend.md#native-history-branching).
+    New Codex branches no longer copy rollout identities by hand. Saved legacy
+    initializing forks without a `native_fork` key retain their original file
+    cleanup strategy. A present but malformed native checkpoint preserves the
+    recovery row and files; it cannot select legacy deletion by omission.
   - **Fallback**: if the parent has no native transcript yet (never ran a turn),
     `prepare_fork_copy` returns `needs_replay=True` and we use the old replay
     path — history is tiny/empty then, so no transcript-dump problem.

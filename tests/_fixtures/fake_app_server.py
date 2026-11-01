@@ -5,10 +5,16 @@ import os
 import select
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 root, mode = Path(sys.argv[1]), sys.argv[2]
 history = root / "native-history.jsonl"
+metrics_enabled = (root / "native-metrics-enabled").exists()
+metrics_root = root / "codex-home" / "sessions"
+if metrics_enabled:
+    metrics_root.mkdir(parents=True, exist_ok=True)
+    history = metrics_root / "rollout-exact-native-thread.jsonl"
 business = root / "native-business.jsonl"
 thread_id = json.loads(history.read_text().splitlines()[0])["payload"]["id"] if history.exists() else "exact-native-thread"
 delayed = None
@@ -20,7 +26,28 @@ defaults = json.loads(defaults_path.read_text()) if defaults_path.exists() else 
 selected_path = root / "native-selected.json"
 
 
+def metric_record(thread, record_type, payload):
+    path = metrics_root / f"rollout-{thread}.jsonl"
+    if not path.exists():
+        path.write_text(json.dumps({"type": "session_meta", "payload": {"id": thread}}) + "\n")
+    with path.open("a") as handle:
+        handle.write(json.dumps({"timestamp": datetime.now(UTC).isoformat(),
+                                "type": record_type, "payload": payload}) + "\n")
+
+
 def send(frame):
+    if "__rollout" in frame:
+        record = frame["__rollout"]
+        metric_record(record["thread"], record["type"], record["payload"])
+        return
+    if metrics_enabled:
+        method, params = frame.get("method"), frame.get("params") or {}
+        if method in {"turn/started", "turn/completed"}:
+            metric_record(params["threadId"], "event_msg", {
+                "type": "task_started" if method == "turn/started" else "task_complete",
+                "turn_id": params["turn"]["id"], "thread_id": params["threadId"]})
+        elif method == "item/completed" and params["item"].get("type") == "agentMessage":
+            metric_record(params["threadId"], "response_item", {"type": "message", "role": "assistant"})
     if "__stderr" in frame:
         print(frame["__stderr"], file=sys.stderr, flush=True)
         return
@@ -97,6 +124,11 @@ for line in frames():
     if method == "config/read":
         if mode == "early_root":
             send({"method": "turn/started", "params": {"threadId": thread_id, "turn": {"id": "unsolicited"}}})
+            if metrics_enabled:
+                metric_record(thread_id, "token_usage_record", {"thread_id": thread_id, "turn_id": "unsolicited",
+                    "response_id": "unsolicited-response", "usage": {"output_tokens": 9}})
+                send({"method": "turn/completed", "params": {"threadId": thread_id,
+                    "turn": {"id": "unsolicited", "status": "completed"}}})
         result = {"config": {"model": defaults["model"], "model_reasoning_effort": defaults["effort"],
             "features": {"fast_mode": mode != "bad_fast_config", "wake_on_agent_messages": mode == "bad_config", "goals": False,
             "sleep_tool": False, "multi_agent": True, "multi_agent_v2": {"enabled": True, "wait_agent_enabled": True}}}}
@@ -172,6 +204,10 @@ for line in frames():
         with business.open("a") as handle:
             handle.write(json.dumps(params) + "\n")
         turn_id = "turn-" + str(len(business.read_text().splitlines()))
+        if metrics_enabled:
+            metric_record(thread_id, "event_msg", {"type": "task_started", "turn_id": turn_id})
+            metric_record(thread_id, "turn_context", {"turn_id": turn_id, "model": selected["model"],
+                                                      "effort": selected["effort"]})
         if mode in {"stop_late_accepted", "stop_late_rejected"}:
             delayed = frame["id"], turn_id
             continue
@@ -181,7 +217,7 @@ for line in frames():
         if mode == "start_internal_error":
             send({"id": frame["id"], "error": {"code": -32603, "message": "Internal error after possible creation"}})
             continue
-        if mode not in {"unknown", "unknown_disconnect", "late_tools", "late_bad_item", "control_question_resolved_before_ack"}:
+        if mode not in {"unknown", "unknown_disconnect", "late_tools", "late_bad_item", "control_question_resolved_before_ack", "control_delayed_ack"}:
             send({"id": frame["id"], "result": {"turn": {"id": turn_id}}})
         if mode == "wrong_root":
             turn_id = "another-root"

@@ -6,7 +6,6 @@ import os
 import select
 import signal
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -16,6 +15,7 @@ from server.harness import get_harness
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
 from tests.accounts import create_account
+from tests.harness_profiles import process_profile
 
 
 @pytest.fixture
@@ -64,7 +64,7 @@ def scripted_codex(monkeypatch, *, hold=False):
         return [sys.executable, "-u", "-c", script], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv, prepare_resume=None))
     return starts
 
 
@@ -352,7 +352,7 @@ async def _retirement_recording_child(tmp_path, tmp_path_factory, monkeypatch):
                 str(artifacts / "finish-model")], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None,
     ))
     ready = asyncio.Event()

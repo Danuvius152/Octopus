@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -17,6 +16,7 @@ from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiWorker
 from server.wiki.tasks import tasks
 from tests import test_wiki_api as wiki_api
+from tests.harness_profiles import process_profile
 from tests.test_wiki_jobs import client as client
 from tests.test_wiki_jobs import jobs as jobs
 
@@ -55,7 +55,7 @@ async def completion_worker(jobs, client, tmp_path, monkeypatch):
         runtime.starts.append((scope, context, gate))
         return [sys.executable, "-u", str(model), scope.session_id, str(gate)], {"cwd": context.working_dir}
 
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, prepare_resume=None, activity_observer=None,
         new_driver=ClaudeDriver, can_steer=True, reusable=True, build_turn_argv=argv,
     ))

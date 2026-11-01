@@ -1296,7 +1296,7 @@ class OwnerRuntime:
                 return
             configured = capture_configuration(session)
             request = replace(execution.request)
-            if configured.backend == "codex" and settings.codex_transport == "app-server":
+            if get_harness(configured.backend).runtime_profile(None).native_input_evidence:
                 native_input = NativeInputEvidence(input_id=request.request_id, attempt_id=uuid.uuid4().hex)
                 # Establish preparation evidence before Stop may settle this
                 # input. Later protocol observations refine the same attempt.
@@ -1548,6 +1548,16 @@ class OwnerRuntime:
         activity = execution.activity = _Activity()
         if hasattr(backend, "bind_activity"):
             execution.activity_token = backend.bind_activity(activity.observe)
+        if hasattr(backend, "bind_observation_clock"):
+            turn = execution.turn
+            assert turn is not None
+            backend.bind_observation_clock(lambda at: {
+                "overall_elapsed_ms": max(0, at - turn.started_at) * 1000,
+                "idle_elapsed_ms": max(0, at - attempt.watchdog["last"]) * 1000,
+                "overall_limit_ms": settings.turn_max_seconds * 1000 if settings.turn_max_seconds > 0 else None,
+                "idle_limit_ms": settings.turn_idle_timeout_seconds * 1000 if settings.turn_idle_timeout_seconds > 0 else None,
+                "idle_suspended": bool(attempt.watchdog.get("waiting_questions")),
+            })
         await self.owner.questions.handle(BeginQuestionAttempt(attempt.attempt_id, attempt.watchdog))
         execution.frames.append({"type": "attempt_started", "session_id": session.id,
                                  "request_id": execution.request.request_id, "attempt_id": attempt.attempt_id})

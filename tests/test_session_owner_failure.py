@@ -7,7 +7,6 @@ import select
 import signal
 import subprocess
 import sys
-from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -30,6 +29,7 @@ from server.sessions.client_submissions import submit_client_message
 from server.sessions.owner import SessionOwnerUnavailable
 from server.users import UserManager
 from tests.accounts import create_account
+from tests.harness_profiles import process_profile
 
 
 @pytest.mark.parametrize("delivery", ["ask", "chat"])
@@ -85,7 +85,7 @@ async def test_owner_failure_ends_app_and_question_waits_without_replaying_input
         "Path(sys.argv[1]).write_text('The original process reached stdin EOF.')\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None,
         prepare_resume=None, new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (
@@ -385,7 +385,7 @@ async def _owner_retirement_failure_child(tmp_path, tmp_path_factory, monkeypatc
         "Path(sys.argv[4]).write_text('Original model received stdin EOF.')\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None,
         prepare_resume=None, new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (
@@ -499,7 +499,7 @@ async def test_owner_failure_keeps_a_committed_result_while_its_notification_is_
         "Path(sys.argv[1]).write_text('Original completed model reached EOF.')\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None,
         prepare_resume=None, new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (

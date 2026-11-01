@@ -38,7 +38,11 @@ def evaluation_source_fingerprint():
 
 
 def observe_invocations(monkeypatch, probe):
-    """Record the real renderer's model flags, excluding prompts and MCP bearers."""
+    """Record configured controls and actual CLI flags, without prompts or bearers.
+
+    App Server transmits controls by RPC; its absent CLI model flags stay absent.
+    Verified response settings are collected independently from the runtime sink.
+    """
     harness = get_harness('codex')
     original = harness.profile.build_turn_argv
     probe.input_context['source_sha256'] = evaluation_source_fingerprint()
@@ -61,18 +65,19 @@ def observe_invocations(monkeypatch, probe):
 
 def observe_model_measurements(monkeypatch, probe):
     """Retain verified native response metadata already observed by the runtime."""
-    original = probe.manager._handle_stream_event
+    from server.harness.run import HarnessRun
 
-    async def stream(session, attempt, event):
-        if event.type == 'model_measurement':
-            current = session._run.request
+    original = HarnessRun.record_measurement
+
+    def record(run, event, *, request_id, attempt_id):
+        if event.type == 'model_measurement' and event.raw.get('kind') == 'codex_response':
             probe.model_observations.append({
-                'session_id': session.id, 'request_id': getattr(current, 'request_id', None),
-                'attempt_id': attempt.attempt_id, **deepcopy(event.raw),
+                'session_id': run._config.session_id, 'request_id': request_id,
+                'attempt_id': attempt_id, **deepcopy(event.raw),
             })
-        return await original(session, attempt, event)
+        return original(run, event, request_id=request_id, attempt_id=attempt_id)
 
-    monkeypatch.setattr(probe.manager, '_handle_stream_event', stream)
+    monkeypatch.setattr(HarnessRun, 'record_measurement', record)
 
 
 def load_registration(path):

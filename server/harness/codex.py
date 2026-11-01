@@ -22,12 +22,11 @@ import sys
 import time
 import tomllib
 import uuid
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from .codex_activity import CodexActivityObserver, diagnostic_environment
-from .codex_control import controller_message, refresh_instructions, turn_message
+from .codex_control import controller_message, turn_message
 from .driver import ArgvDriver
 from .events import HarnessCredential, HarnessEvent, SubagentUpdate
 from .harness import Harness
@@ -286,10 +285,9 @@ def _bearer_env_var(key: str) -> str:
 
 
 def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
-    """Render a `codex exec --json` command for one turn.
-
-    Exec-level flags MUST precede the `resume` subcommand (resume's parser
-    accepts neither -C nor the sandbox flag); `--` precedes the prompt."""
+    """Render the independent Research web leaf; ordinary input uses RPC."""
+    if not ctx.web_research or ctx.resume_id or ctx.mcp_servers:
+        raise ValueError("Codex exec is reserved for an independent web research leaf without MCP or resume")
     argv: list[str] = [
         "codex",
         "exec",
@@ -304,28 +302,18 @@ def build_turn_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
         "-c",
         "features.retain_client_developer_messages=true",
     ]
-    if ctx.web_research:
-        # A research leaf: native web_search and a read-only sandbox. Native
-        # functions/collaboration remain available; this does not enforce a
-        # strict web-only whitelist. native-deep-research.md §4.
-        argv += ["--sandbox", "read-only", "-c", "tools.web_search=true"]
-    else:
-        # Analog of Claude's --dangerously-skip-permissions for a full turn.
-        argv += ["--dangerously-bypass-approvals-and-sandbox"]
-    argv += _mcp_config_args(ctx)
+    # Native functions/collaboration remain available; read-only is not a
+    # strict web-only whitelist. This independent worker has no Octopus MCP.
+    argv += ["--sandbox", "read-only", "-c", "tools.web_search=true", "-c", "mcp_servers={}"]
     if ctx.model:
         argv += ["-m", ctx.model]
     if ctx.reasoning_effort:
         argv += ["-c", f"model_reasoning_effort={_toml_basic_string(ctx.reasoning_effort)}"]
     argv += _service_tier_args(ctx.service_tier)
-    if ctx.resume_id:
-        argv += ["resume", ctx.resume_id, "--", ctx.prompt]
-    else:
-        argv += ["--", ctx.prompt]
+    argv += ["--", ctx.prompt]
 
     env = os.environ.copy()
     _apply_home_dir(env, ctx.credential)
-    _apply_mcp_bearers(env, ctx)
     diagnostic_environment(env)
     return argv, {"cwd": ctx.working_dir, "env": env}
 
@@ -838,106 +826,7 @@ def _codex_sessions_dir(credential: Any) -> Path:
     return Path(home) / "sessions"
 
 
-def _rollout_meta_id(p: Path) -> str | None:
-    """The `session_meta.payload.id` of a rollout (its first line), or None."""
-    try:
-        with p.open() as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                d = json.loads(line)
-                if d.get("type") == "session_meta":
-                    return (d.get("payload") or {}).get("id")
-                return None  # session_meta is the first record
-    except (OSError, json.JSONDecodeError):
-        return None
-    return None
-
-
-def _find_rollout(sessions_dir: Path, resume_id: str) -> Path | None:
-    """Locate the rollout whose `session_meta.id` == resume_id. The filename
-    usually embeds the id, but since this also drives DELETION we CONFIRM against
-    session_meta before returning a match (Vera review) — never delete on a mere
-    filename-substring hit."""
-    if not sessions_dir.is_dir():
-        return None
-    # Fast path: filename contains the id — confirm before trusting it.
-    for p in sessions_dir.rglob(f"*{resume_id}*.jsonl"):
-        if _rollout_meta_id(p) == resume_id:
-            return p
-    # Fallback: scan every rollout's session_meta.
-    for p in sessions_dir.rglob("rollout-*.jsonl"):
-        if _rollout_meta_id(p) == resume_id:
-            return p
-    return None
-
-
-async def _fork_copy(
-    *,
-    parent_working_dir: str,
-    parent_resume_id: str | None,
-    parent_credential: Any = None,
-    dest_working_dir: str,
-    new_resume_id: str,
-    hooks: Any = None,
-) -> Any:
-    """Select native API fork for App Server, legacy rollout copy for exec.
-
-    The legacy copy stays in the SAME CODEX_HOME with `session_meta.id` rewritten to
-    `new_resume_id`, so the fork resumes the whole conversation natively — no
-    history replay. Codex resume is by id (cwd-independent), so the copied
-    working dir is irrelevant here. Falls back to replay when the parent has no
-    rollout yet (never ran a turn)."""
-    from ..config import settings
-    from .fork import ForkArtifact
-
-    if settings.codex_transport == "app-server":
-        from .codex_history import fork_copy
-
-        return await fork_copy(parent_working_dir=parent_working_dir, parent_resume_id=parent_resume_id,
-            parent_credential=parent_credential, dest_working_dir=dest_working_dir,
-            new_resume_id=new_resume_id, hooks=hooks)
-
-    if not parent_resume_id:
-        return ForkArtifact(resume_id=None, needs_replay=True)
-    sessions = _codex_sessions_dir(parent_credential)
-    src = _find_rollout(sessions, parent_resume_id)
-    if src is None:
-        return ForkArtifact(resume_id=None, needs_replay=True)
-
-    # Codex validates the timestamp and id in the native rollout filename when
-    # resuming. Give the copy its own creation time and matching date partition.
-    created = datetime.now(UTC)
-    dest_dir = sessions / created.strftime("%Y/%m/%d")
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"rollout-{created:%Y-%m-%dT%H-%M-%S}-{new_resume_id}.jsonl"
-    # Temp + atomic rename so a crash mid-copy can't leave a half-written
-    # rollout that later looks resumable (Vera review).
-    tmp = dest.with_suffix(".jsonl.tmp")
-    try:
-        with src.open() as fin, tmp.open("w") as fout:
-            for line in fin:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    d = json.loads(line)
-                except json.JSONDecodeError:
-                    fout.write(line + "\n")
-                    continue
-                if d.get("type") == "session_meta" and isinstance(d.get("payload"), dict):
-                    if d["payload"].get("id") == parent_resume_id:
-                        d["payload"]["id"] = new_resume_id
-                fout.write(json.dumps(d) + "\n")
-        os.replace(tmp, dest)
-    except Exception:
-        tmp.unlink(missing_ok=True)  # don't leave partial temp junk behind
-        raise
-    return ForkArtifact(resume_id=new_resume_id, needs_replay=False)
-
-
-async def _fork_cleanup(
+async def _cleanup_legacy_fork(
     working_dir: str,  # unused: rollouts live under CODEX_HOME, not the cwd
     resume_id_hint: str | None,
     fork_id: str,
@@ -1086,19 +975,19 @@ _CODEX_TRANSIENT_ERROR_PATTERNS = (
 
 def select_transport(base: RuntimeProfile, transport: str) -> RuntimeProfile:
     if transport == "exec":
-        return base
+        return CODEX_WEB_LEAF
     if transport == "app-server":
         from .codex_app_server import profile
         return profile(base)
     raise ValueError(f"Unknown Codex transport: {transport}")
 
 
-CODEX = RuntimeProfile(
+CODEX_WEB_LEAF = RuntimeProfile(
     separate_turn_instructions=True,
     model_settings=read_model_settings,
     backend="codex",
     binary="codex",
-    tools_prompt=_OCTOPUS_SYSTEM_PROMPT_CODEX,
+    tools_prompt="",
     credential_style="home_dir",
     premature_exit_recovery=False,
     auth_error_patterns=_CODEX_AUTH_ERROR_PATTERNS,
@@ -1111,10 +1000,9 @@ CODEX = RuntimeProfile(
     select_transport=select_transport,
     can_steer=False,
     reusable=False,
-    can_continue=True,
+    can_continue=False,
     build_turn_argv=build_turn_argv,
     activity_observer=CodexActivityObserver,
-    prepare_resume=refresh_instructions,
     new_event_parser=CodexEventParser,
     build_oneshot_argv=build_oneshot_argv,
     parse_oneshot_stdout=parse_oneshot_stdout,
@@ -1122,13 +1010,12 @@ CODEX = RuntimeProfile(
     # per-agent markdown dir with file tools, driven by the injected blurb
     # (docs/implemented/memory.md §3). Memory is decoupled from CODEX_HOME; the
     # canonical dir is ensured by session_manager.
-    injects_memory_prompt=True,
-    can_fork=True,  # /rewind: HISTORY_REPLAY; /fork: native rollout copy
-    fork_prepare=_fork_prepare_replay,
-    fork_copy=_fork_copy,
-    fork_cleanup=_fork_cleanup,
+    injects_memory_prompt=False,
     login=_DeviceLoginDriver(),
     transcript_codec=None,  # Codex has no handoff/pull transcript format
 )
 
+from .codex_app_server import profile as _app_server_profile  # noqa: E402
+
+CODEX = _app_server_profile(CODEX_WEB_LEAF)
 register(Harness(CODEX))

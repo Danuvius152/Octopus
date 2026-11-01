@@ -5,7 +5,6 @@ import json
 import re
 import sys
 import uuid
-from dataclasses import replace
 
 import pytest
 
@@ -13,7 +12,7 @@ from server.agent_manager import AgentManager
 from server.harness import get_harness
 from server.mcp_identity import scope_is_live, verify
 from server.wiki import registry
-from tests.harness_profiles import session_turn_argv
+from tests.harness_profiles import process_profile, session_turn_argv
 from tests.test_delegation_work import work_runtime as work_runtime
 
 
@@ -36,7 +35,7 @@ async def controlled_runtime(work_runtime, monkeypatch, tmp_path):
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=session_turn_argv(harness.profile, argv),
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=session_turn_argv(harness.profile, argv),
                                                   prepare_resume=None, activity_observer=None))
     yield work_runtime
 

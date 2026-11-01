@@ -7,7 +7,6 @@ import json
 import logging
 import os
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -21,6 +20,7 @@ from server.sessions.owner import SessionMailboxFull, SessionOwnerUnavailable
 from server.users import UserManager
 from tests import test_question_lifecycle as question_tests
 from tests.accounts import create_account
+from tests.harness_profiles import process_profile
 from tests.test_session_retirement import _retire_original_test_process
 from tests.test_submission_recovery import _submit_paused
 
@@ -43,7 +43,7 @@ async def held_python(manager, original, directory, monkeypatch, *, credential=N
         "sys.stdin.read()\n"
     )
     harness = get_harness("claude-code")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, prepare_resume=None, activity_observer=None,
         build_turn_argv=lambda context: ([sys.executable, "-u", str(model), str(gate), str(identity)],
                                           {"cwd": context.working_dir}),
@@ -333,7 +333,7 @@ async def _idle_retirement_failure_child(tmp_path, tmp_path_factory, monkeypatch
         (artifacts / "successor-started").write_text(context.prompt)
         return original_argv(context)
 
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=successor_argv))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=successor_argv))
     if operation == "stop":
         await manager.interrupt(session.id)
         sweep = None

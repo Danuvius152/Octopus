@@ -85,7 +85,7 @@ credentials", "invalid x-api-key", "401 unauthorized", "invalid_grant",
 failed** (see §4), so a tool that merely *returns* a 401 to the model
 (which then continues to a normal result) never trips it.
 
-The opt-in App Server profile disables text-pattern auth detection. Its driver
+The ordinary App Server profile disables text-pattern auth detection. Its driver
 accepts only typed provider-auth failure from the exact bound root terminal.
 RPC, child/tool 401 and arbitrary stderr retain diagnostics without invalidating
 the credential. Native retry/error notifications are diagnostic even if another

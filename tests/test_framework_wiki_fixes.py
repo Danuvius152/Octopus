@@ -3,7 +3,6 @@
 import asyncio
 import json
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -16,6 +15,7 @@ from server.harness.claude_code import ClaudeDriver
 from server.sessions import SessionManager
 from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
+from tests.harness_profiles import process_profile
 
 
 @pytest.fixture
@@ -236,7 +236,7 @@ async def test_concurrent_delete_callers_share_one_retirement_owner(runtime, mon
         "while not Path(sys.argv[3]).exists(): time.sleep(.005)\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
         new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (

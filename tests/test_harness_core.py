@@ -28,6 +28,7 @@ from server.harness import (
     register,
 )
 from server.harness.claude_code import ClaudeDriver
+from server.harness.codex import CODEX_WEB_LEAF
 from server.harness.driver import ArgvDriver, RunDriver
 from server.harness.registry import _REGISTRY
 
@@ -417,8 +418,8 @@ def test_is_auth_error_claude_matches_401_and_phrases():
     assert not h.is_auth_error("")
 
 
-def test_is_auth_error_codex_matches_and_is_case_insensitive():
-    h = get_harness("codex")
+def test_is_auth_error_codex_web_leaf_matches_and_is_case_insensitive():
+    h = Harness(CODEX_WEB_LEAF)
     assert h.is_auth_error("stream error: 401 Unauthorized")
     assert h.is_auth_error("Your authentication token has expired")
     assert not h.is_auth_error("turn completed successfully")
@@ -441,13 +442,13 @@ def test_is_stale_session_error_claude():
     )
 
 
-def test_is_auth_error_codex_matches_a_lapsed_chatgpt_login():
+def test_is_auth_error_codex_web_leaf_matches_a_lapsed_chatgpt_login():
     """The verbatim `turn.failed` message a dead ChatGPT login produces. It
     used to match nothing, so the credential was never flagged and the user got
     a generic error instead of a Re-authorize prompt — it only *looked* handled
     because the CLI's stderr happens to carry a websocket "401 Unauthorized"
     alongside it (harness-credential-reauth.md §3)."""
-    h = get_harness("codex")
+    h = Harness(CODEX_WEB_LEAF)
     assert h.is_auth_error(
         "Your access token could not be refreshed. Please log out and sign in again."
     )
@@ -460,7 +461,7 @@ def test_is_auth_error_codex_ignores_bare_unauthorized_from_tools():
     """A non-auth failure that merely contains "unauthorized" (an MCP/connector
     401, a tool error) must NOT be read as a harness-credential failure — the
     patterns are auth-specific, never a bare "unauthorized" (Vera review)."""
-    h = get_harness("codex")
+    h = Harness(CODEX_WEB_LEAF)
     assert not h.is_auth_error("MCP server returned Unauthorized")
     assert not h.is_auth_error("tool failed: GitHub Unauthorized")
     assert not h.is_auth_error("your session token has expired, refetch it")
@@ -469,7 +470,7 @@ def test_is_auth_error_codex_ignores_bare_unauthorized_from_tools():
 def test_is_transient_error_matches_server_reliability_failures():
     """5xx / overloaded / dropped-connection trip the retry classifier on both
     backends (harness-transient-retry.md §3)."""
-    c, x = get_harness("claude-code"), get_harness("codex")
+    c, x = get_harness("claude-code"), Harness(CODEX_WEB_LEAF)
     assert c.is_transient_error("API Error: 529 Overloaded")
     assert c.is_transient_error("API Error: 503 Service Unavailable")
     assert c.is_transient_error("connection reset by peer")
@@ -483,7 +484,7 @@ def test_is_transient_error_excludes_quota_and_auth():
     """Quota/credit and auth failures must NOT be retried — they match no
     transient pattern (harness-transient-retry.md §2), keeping the three
     dispositions mutually exclusive."""
-    c, x = get_harness("claude-code"), get_harness("codex")
+    c, x = get_harness("claude-code"), Harness(CODEX_WEB_LEAF)
     for blob in (
         "rate limit exceeded",
         "429 too many requests",

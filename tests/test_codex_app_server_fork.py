@@ -2,11 +2,13 @@
 
 import asyncio
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from server.config import settings
+from server.harness import get_harness
+from server.harness.codex import _cleanup_legacy_fork
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
 from server.sessions.forking import ForkingMixin
@@ -18,6 +20,11 @@ from tests.test_runtime_review_races import wait_dispatch_idle
 from tests.test_session_fork import _git
 
 native_runtime = native_tests.native_runtime
+
+
+def select_legacy_cleanup(monkeypatch):
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", replace(harness.profile, fork_cleanup=_cleanup_legacy_fork))
 
 
 @pytest.fixture
@@ -125,7 +132,7 @@ async def test_unknown_creation_keeps_saga_and_never_deletes_the_hint(fork_sourc
     assert manager.get_session(row["id"]) is None
     # Current selection must not turn an unknown native artifact into a
     # legacy hint-based file deletion at the next service entry.
-    monkeypatch.setattr(settings, "codex_transport", "exec")
+    select_legacy_cleanup(monkeypatch)
     await manager._recover_incomplete_forks()
     assert len(await database.load_incomplete_forks()) == 1
     assert not any(frame.get("method") == "thread/delete" for frame in wire_frames(tmp_path))
@@ -164,7 +171,7 @@ async def test_untrusted_fork_after_ack_keeps_its_effects_and_disables_cold_clea
     assert (tmp_path / "native-history.jsonl").exists()
     assert not manager.session_has_resources(parent.id)
     assert not any(frame.get("method") == "thread/delete" for frame in wire_frames(tmp_path))
-    monkeypatch.setattr(settings, "codex_transport", "exec")
+    select_legacy_cleanup(monkeypatch)
     mode[0] = "normal"
     await manager.close_session_owners()
     cold = SessionManager()
@@ -198,7 +205,7 @@ async def test_restart_cleans_only_acknowledged_artifact_using_saved_strategy(fo
     row, = await database.load_incomplete_forks()
     assert row["resume_id"] == "actual-native-fork"
     mode[0] = "fork_cleanup_failed"
-    monkeypatch.setattr(settings, "codex_transport", "exec")
+    select_legacy_cleanup(monkeypatch)
     await manager.close_session_owners()
     cold = SessionManager()
     try:
@@ -215,6 +222,32 @@ async def test_restart_cleans_only_acknowledged_artifact_using_saved_strategy(fo
     assert (tmp_path / "native-history.jsonl").exists()
     assert {frame["params"]["threadId"] for frame in wire_frames(tmp_path) if frame.get("method") == "thread/delete"} == {"actual-native-fork"}
     assert len((tmp_path / "native-business.jsonl").read_text().splitlines()) == 1
+
+
+@pytest.mark.parametrize("artifact", [None, {}, [], {"transport": "exec"}])
+async def test_corrupt_native_fork_checkpoint_never_uses_legacy_cleanup(
+    fork_source, tmp_path, monkeypatch, artifact,
+):
+    runtime, _ = fork_source
+    manager, database, parent, mode, _, _ = runtime
+    mode[0] = "fork_lost_ack"
+    with pytest.raises(RuntimeError):
+        await manager.duplicate_session(parent.id, user_id=parent.user_id)
+    row, = await database.load_incomplete_forks()
+    metadata = json.loads(row["fork_metadata"])
+    metadata["native_fork"] = artifact
+    # A retained hint still must not become permission for file cleanup.
+    hint = "retained-native-hint"
+    saved = tmp_path / "sessions" / f"rollout-fork-{hint}.jsonl"
+    saved.parent.mkdir(exist_ok=True)
+    saved.write_text("Retained uncertain provider effects\n")
+    await database.update_session_field(row["id"], resume_id=hint, fork_metadata=json.dumps(metadata))
+    select_legacy_cleanup(monkeypatch)
+    await manager._recover_incomplete_forks()
+    retained, = await database.load_incomplete_forks()
+    assert retained["id"] == row["id"]
+    assert saved.exists() and Path(row["working_dir"]).exists()
+    assert not any(frame.get("method") == "thread/delete" for frame in wire_frames(tmp_path))
 
 
 async def test_branch_waits_for_its_original_management_host_retirement(fork_source, tmp_path, monkeypatch):

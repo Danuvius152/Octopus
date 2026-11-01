@@ -15,10 +15,15 @@ from server.users import UserManager
 from server.workspace import paths_for
 from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
+from tests.harness_profiles import process_profile
 
 
 @pytest.fixture
-async def manager(tmp_path):
+async def manager(tmp_path, monkeypatch):
+    from server.harness import get_harness
+
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile))
     mgr = SessionManager()
     db = Database(":memory:")
     await db.initialize()

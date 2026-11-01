@@ -18,6 +18,7 @@ from server.routers.ws import router
 from server.sessions import SessionManager
 from tests.accounts import create_account
 from tests.fake_run import FakeRunBase
+from tests.harness_profiles import process_profile
 
 
 def hold_model_runs(manager, monkeypatch):
@@ -485,7 +486,6 @@ async def test_send_timeout_cancels_transport_and_reconnects_instead_of_signout(
 
 async def test_slow_browser_does_not_delay_stop_or_the_committed_result(runtime, monkeypatch, tmp_path, short_process_shutdown):
     import sys
-    from dataclasses import replace
 
     from server.harness import get_harness
 
@@ -503,7 +503,7 @@ async def test_slow_browser_does_not_delay_stop_or_the_committed_result(runtime,
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv, prepare_resume=None))
     release = asyncio.Event()
     async with connection(manager, bearer, release=release) as slow:
         async with connection(manager, bearer) as healthy:

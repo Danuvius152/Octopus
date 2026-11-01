@@ -3,7 +3,6 @@
 import asyncio
 import json
 import sys
-from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -14,6 +13,7 @@ from server.wiki import job_events, job_notifications
 from server.wiki.history import WikiHistory
 from server.wiki.jobs import WikiWorker
 from tests import test_wiki_api as wiki_api
+from tests.harness_profiles import process_profile
 from tests.test_wiki_jobs import client as client
 from tests.test_wiki_jobs import jobs as jobs
 
@@ -43,7 +43,7 @@ async def returning(jobs, client, tmp_path, monkeypatch):
         prompts.append(context.prompt)
         return [sys.executable, "-u", str(model), str(gate), "return" if automatic else "original"], {"cwd": context.working_dir}
 
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, prepare_resume=None, activity_observer=None,
         new_driver=ArgvDriver, build_turn_argv=argv,
     ))

@@ -102,13 +102,14 @@ validation. Empty supported-control lists do not authorize explicit values.
 Free-form model names preserve backend capability checks; invocation preflight
 catches incompatible inherited settings and changes in availability after a save.
 
-Codex renders explicit effort as `-c model_reasoning_effort="<effort>"` before
-the `resume` subcommand. Model-only changes keep the effort binding; efforts
-are not converted into another model. No global Codex config is rewritten.
-Speed renders as `-c service_tier="fast"` or `-c service_tier="default"`
-before `resume`, with the Fast feature enabled. Normal is always explicit so
-resuming a thread that previously used Fast does not retain that tier.
-One-shot schedule parsing and file-reference resolution use the same setting.
+Ordinary Codex applies model, reasoning effort and explicit service tier during
+native thread start/resume and verifies the returned effective settings before
+business input. Fast maps to native `priority`; Normal is explicit `default`,
+so a resumed thread cannot retain its previous Fast setting. Model-only changes
+keep the effort binding; effort is not converted into another model. The
+independent Research exec leaf renders `-m` and TOML effort/tier overrides;
+one-shot schedule parsing and file-reference resolution pass the same selected
+settings to the text worker. No global Codex config or saved agent row is rewritten.
 
 Claude Code renders explicit effort as `--effort` and sets
 `CLAUDE_CODE_EFFORT_LEVEL` in the child environment to the same value: that

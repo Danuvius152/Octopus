@@ -2,7 +2,6 @@
 
 import asyncio
 import sys
-from dataclasses import replace
 
 import pytest
 
@@ -10,6 +9,7 @@ from server.database import Database
 from server.harness import get_harness
 from server.sessions import SessionManager
 from tests.accounts import create_account
+from tests.harness_profiles import process_profile
 
 
 @pytest.fixture
@@ -26,7 +26,7 @@ async def held(tmp_path, monkeypatch, short_process_shutdown):
         " print(json.dumps({'type':'result','subtype':'success','session_id':'held-thread','is_error':False}),flush=True)\n"
     )
     harness = get_harness("claude-code")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile,
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile,
         build_turn_argv=lambda ctx: ([sys.executable, "-u", str(script)], {"cwd": ctx.working_dir})))
     db = Database(":memory:")
     await db.initialize()

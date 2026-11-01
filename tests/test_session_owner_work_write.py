@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -14,6 +13,7 @@ from server.harness import get_harness
 from server.harness.claude_code import ClaudeDriver
 from server.harness.run import HarnessRun
 from tests import test_question_lifecycle as question_tests
+from tests.harness_profiles import process_profile
 
 question_host = question_tests.question_host
 
@@ -45,7 +45,7 @@ async def test_closing_inline_work_waits_for_its_original_write_and_preserves_th
         "sys.stdin.read()\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
         new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (

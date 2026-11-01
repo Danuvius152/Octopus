@@ -74,7 +74,8 @@ attempt prompt; it does not recover an earlier original prompt over already
 attempted continuation work.
 
 `RuntimeProfile.can_continue` is independent of steering and process reuse.
-Claude stream-JSON and Codex exec support native conversation continuation. The logical
+Claude stream-JSON supports native conversation continuation; the independent
+Research exec leaf does not. The logical
 turn retains conversation evidence observed during its own attempts, including
 a failed attempt with no display output. A resume ID inherited from a previous
 request alone does not authorize this recovery. Continuation is a new input;

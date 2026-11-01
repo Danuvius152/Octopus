@@ -19,6 +19,7 @@ from server.sessions import SessionManager
 from tests import cli_gate, conftest
 from tests.accounts import create_account
 from tests.callback_api import start_callback_api
+from tests.harness_profiles import process_profile
 from tests.test_wiki_chat_real import OrdinaryChatProbe
 from tests.test_wiki_chat_real import ordinary_chat_probe as ordinary_chat_probe
 from tests.test_wiki_query_retirement import (
@@ -145,7 +146,7 @@ async def test_raw_question_real_websocket_identity_and_terminal_control(tmp_pat
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv,
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv,
                                                  prepare_resume=None, activity_observer=None))
 
     async def start_message(session_id, question, **kwargs):

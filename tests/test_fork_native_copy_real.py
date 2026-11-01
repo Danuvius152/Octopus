@@ -1,7 +1,6 @@
 """Claude real-CLI proof for full-copy forks (session-fork.md).
 
-Codex's full-copy proof shares the speed/resume transcript in
-test_backend_codex_real.py; it still resumes the copied file with the raw CLI.
+Codex's native fork proof uses the product saga in test_codex_app_server_real.py.
 
 Each asserts the END-TO-END truth the unit tests can't: that the real CLI
 actually RESUMES a transcript the harness copied to a new id/location and recalls

@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from server.harness import get_harness
-from server.harness.codex import CODEX
+from server.harness.codex import CODEX_WEB_LEAF as CODEX
 from server.harness.run import HarnessRun
 from tests.test_native_subagent_retirement import native_runtime as native_runtime
 

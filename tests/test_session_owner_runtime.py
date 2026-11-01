@@ -20,6 +20,7 @@ from server.sessions.owner import SessionOwnerUnavailable
 from server.users import UserManager
 from server.workspace import paths_for
 from tests import test_question_lifecycle as question_tests
+from tests.harness_profiles import process_profile
 
 question_host = question_tests.question_host
 
@@ -37,7 +38,7 @@ async def test_runtime_text_subscriber_can_stop_its_original_request(question_ho
         "sys.stdin.read()\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
         new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: ([sys.executable, "-u", str(model)], {"cwd": context.working_dir}),
@@ -100,7 +101,7 @@ async def test_initial_stdout_is_delivered_before_a_blocked_initial_stdin_drains
         "sys.stdin.read()\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
         new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: (
@@ -188,7 +189,7 @@ async def test_owner_failure_waits_for_the_original_prompt_spill_thread(question
     model = tmp_path / "must_not_start.py"
     model.write_text("from pathlib import Path\nPath(__file__).with_name('model-started').touch()\n")
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
         build_turn_argv=lambda context: ([sys.executable, str(model)], {"cwd": context.working_dir}),
     ))
@@ -274,7 +275,7 @@ async def test_runtime_publication_failure_uses_its_original_credential(question
         return [sys.executable, "-u", str(model)], {"cwd": context.working_dir}
 
     harness = get_harness("claude-code")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
         new_driver=ClaudeDriver, can_steer=True, reusable=True, build_turn_argv=offline_argv,
     ))

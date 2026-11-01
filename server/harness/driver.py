@@ -101,6 +101,10 @@ class RunDriver(ABC):
         """Join already observed evidence before closing this stream."""
         return None
 
+    async def close_observations(self, *, retired: bool) -> None:
+        """Retirement closes supplementary readers even when process cleanup fails."""
+        return None
+
     def retirement_events(self, reason: str, *, reconcile: bool = False) -> list[Any]:
         return []
 

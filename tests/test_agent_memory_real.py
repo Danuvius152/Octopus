@@ -18,9 +18,11 @@ import os
 
 import pytest
 
-from server import agent_memory
+from server import agent_memory, monitor
 from server.config import settings
 from server.harness import HarnessEvent, RunConfig, get_harness
+from server.monitor import MetricsStore, query
+from tests.harness_profiles import native_submission
 
 pytestmark = pytest.mark.real
 
@@ -112,7 +114,10 @@ async def test_codex_memory_read_emits_native_activity_and_metadata(tmp_path, mo
         session_id="native_activity_acceptance",
         memory_dir=str(agent_memory.agent_memory_dir(aid)), mcp_servers=[],
     ))
-    run.bind_tool_context("native-metrics-request", "native-metrics-attempt")
+    proofs = native_submission(run, "native-metrics-request", "native-metrics-attempt")
+    metrics = MetricsStore(str(tmp_path / "metrics.db"))
+    await metrics.initialize()
+    monkeypatch.setattr(monitor, "monitor", metrics)
     ticks: list[float | None] = []
     run.bind_activity(ticks.append)
     await run.start(
@@ -134,21 +139,28 @@ async def test_codex_memory_read_emits_native_activity_and_metadata(tmp_path, mo
         tr = next((e for e in events if e.type == "tool_result" and e.tool_use_id == tu.tool_use_id), None)
         assert tr is not None and tr.is_error is False
         assert "NATIVE_ACTIVITY_ACCEPTED" in (tr.content or "")
-        assert run._activity_observer.identity_confirmed, "Installed CLI native identity was not verified"
+        assert any(proof.state == "accepted" and proof.thread_id and proof.turn_id for proof in proofs)
+        assert tu.runtime_metadata["native"]["thread_id"] == run.observed_root.thread_id
         # Reasoning emission is optional; its acceptance has replay coverage.
         assert ticks
-        responses = [e for e in events if e.type == "model_measurement"
-                     and e.raw.get("kind") == "codex_response"]
-        assert len(responses) >= 2, "Shell and final-answer responses need separate usage windows"
-        assert all(e.duration_ms and e.duration_ms > 0 for e in responses)
-        assert all(e.raw["model"] != "unknown" and e.raw["output_tokens"] > 0 for e in responses)
-        assert all(e.raw["reasoning_tokens"] <= e.raw["output_tokens"] for e in responses)
-        assert sum(e.duration_ms for e in responses) < next(e.duration_ms for e in events if e.type == "result")
+        await run.stop()
+        await metrics.drain()
+        responses = await query.codex(metrics.conn)
+        assert sum(row["responses"] for row in responses) >= 2, responses
+        assert all(row["model"] != "unknown" and row["output_tokens"] > 0 for row in responses)
+        assert all(row["reasoning_tokens"] <= row["output_tokens"] for row in responses)
+        assert sum(row["timed_responses"] for row in responses) >= 2, responses
+        assert all(row["weighted_tps"] > 0 for row in responses)
+        run_row, = await query.codex_runs(metrics.conn)
+        assert run_row["root_turns"] == 1 and run_row["metrics_unavailable"] == 0
+        assert run_row["resource_state"] == "proven" and run_row["metrics_collection_complete"] == 1
+        assert not any(e.type == "model_measurement" for e in events)
         assert any(e.type == "result" and not e.is_error for e in events)
         assert "Sent prompt with event ID:" not in run.stderr_text
         assert "SessionConfiguredEvent" not in run.stderr_text
     finally:
         await run.stop()
+        await metrics.stop()
 
 
 @pytest.mark.real_claude

@@ -7,7 +7,6 @@ from pathlib import Path
 
 import pytest
 
-from server.harness import HarnessCredential, get_harness
 from server.large_prompts import LARGE_PROMPT_THRESHOLD_BYTES, spill_if_large
 from server.routers import attachments as attachment_routes
 from tests.test_account_file_layout import managed_files as managed_files
@@ -36,16 +35,15 @@ async def test_native_fork_original_file_pointers_survive_parent_deletion(manage
                {"type": "response_item", "payload": {"text": native_text}}]
     (native_directory / "rollout-2026-10-24T00-00-00-native-parent.jsonl").write_text(
         "\n".join(json.dumps(record) for record in records) + "\n")
-    artifact = await get_harness("codex").prepare_fork_copy(
-        parent_working_dir=parent.working_dir, parent_resume_id="native-parent",
-        parent_credential=HarnessCredential(backend="codex", auth_type="oauth", home_dir=str(home)),
-        dest_working_dir=parent.working_dir, new_resume_id="native-child",
-    )
-    assert artifact.resume_id == "native-child" and not artifact.needs_replay
+    # Retained provider history is the input to the file-lifetime contract.
+    # Actual current native creation is exercised by the owned fork saga tests.
+    records[0]["payload"]["id"] = "native-child"
+    (native_directory / "rollout-2026-10-24T00-00-00-native-child.jsonl").write_text(
+        "\n".join(json.dumps(record) for record in records) + "\n")
     await manager.db.create_fork_session(
         fork_id="nativechild001", name="Native fork", working_dir=parent.working_dir,
         created_at=parent.created_at, parent_id=parent.id, backend="codex", user_id=parent.user_id,
-        agent_id=parent.agent_id, credential_id=None, resume_id=artifact.resume_id, fork_after_seq=0,
+        agent_id=parent.agent_id, credential_id=None, resume_id="native-child", fork_after_seq=0,
     )
     await manager.db.update_session_field("nativechild001", fork_status="ready", archived=True)
     copied = list((home / "sessions").glob("**/*native-child.jsonl"))

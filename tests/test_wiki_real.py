@@ -201,17 +201,18 @@ async def test_codex_explicit_wiki_and_native_helper(
         assert len(runs) == 1
         backend, raw, contexts = runs[0]
         assert len(contexts) == 1
-        calls = [event for event in raw if event.type == "tool_use" and event.tool_name in {
-            "subagent:spawn_agent", "subagent:followup_task",
-        }]
-        assert [event.tool_name for event in calls] == ["subagent:spawn_agent", "subagent:followup_task"]
+        calls = [event for event in raw if event.type == "tool_use" and event.tool_name == "subAgentActivity"
+                 and event.raw["params"]["item"]["kind"] in {"started", "interacted"}]
+        assert [event.raw["params"]["item"]["kind"] for event in calls] == ["started", "interacted"]
         assert all(event.runtime_metadata["attempt_id"] == contexts[0][1] for event in calls)
-        finished = [event.subagent for event in raw if event.type == "subagent" and event.subagent.status == "completed"]
+        assert len({event.runtime_metadata["tool_call_id"] for event in calls}) == 2
+        finished = {event.subagent.card_id: event.subagent for event in raw
+                    if event.type == "subagent" and event.subagent.status == "completed"}.values()
         assert len(finished) == 2
         assert len({child.task_id for child in finished}) == 1
-        assert [child.tool_call_id for child in finished] == [call.runtime_metadata["tool_call_id"] for call in calls]
-        assert finished[0].tool_call_id != finished[1].tool_call_id
-        assert all(not child.summary and not child.prompt for child in finished)
+        assert len({child.native_turn_id for child in finished}) == 2
+        assert all(child.parent_thread_id == session.claude_session_id for child in finished)
+        assert all(child.runtime_metadata["attempt_id"] == contexts[0][1] for child in finished)
         assert "NATIVE_CARD_ACCEPTED" in "".join(event.content or "" for event in raw if event.type == "text")
         assert raw[-1].type == "result" and not raw[-1].is_error
         assert "Sent prompt with event ID:" not in backend.stderr_text

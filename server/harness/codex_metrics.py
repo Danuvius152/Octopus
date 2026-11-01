@@ -99,7 +99,7 @@ def _project(text: str, fields: dict, position: int = 0) -> tuple[dict[str, Any]
 class CodexResponseMetrics:
     """One verified native turn; callers own file and subprocess identity."""
 
-    def __init__(self, thread_id: str, turn_id: str, started: float) -> None:
+    def __init__(self, thread_id: str, turn_id: str, started: float, *, modern_usage_only: bool = False) -> None:
         self.thread_id, self.turn_id, self.started = thread_id, turn_id, started
         self.model: str | None = None
         self.effort: str | None = None
@@ -110,7 +110,7 @@ class CodexResponseMetrics:
         self._next_start: float | None = None
         self._pending: tuple[dict, str | None, float] | None = None
         self._seen: set[str] = set()
-        self._modern = False
+        self._modern = modern_usage_only
         self._last_signature: tuple | None = None
 
     def feed_line(self, line: bytes, now: float) -> list[HarnessEvent]:
@@ -178,6 +178,10 @@ class CodexResponseMetrics:
             return []
         usage, identifier, ts = self._pending
         return self._measurement(usage, identifier, ts)
+
+    def finish(self) -> list[HarnessEvent]:
+        """Retain a completed response even when its native turn was interrupted."""
+        return self._flush()
 
     def _feed(self, record_type: Any, payload: dict, ts: float) -> list[HarnessEvent]:
         kind = payload.get("type")

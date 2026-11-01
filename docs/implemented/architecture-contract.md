@@ -119,7 +119,7 @@ Manager 接管原对象的完成与资源责任。`done` 表示已结算，可�
 <a id="codex-native-input-evidence"></a>
 ### Codex 首输入证据与准备边界
 
-opt-in App Server 的首输入和人工 steer 继续使用原 `client_submissions`，不另建投递或结果账本。
+普通 Codex App Server 的首输入和人工 steer 继续使用原 `client_submissions`，不另建投递或结果账本。
 Owner 在标记请求 started、启动异步 claim/附件/凭据/配置准备之前，以短事务记录
 初始 `not_sent` 并保留首 attempt 身份；真正执行沿用该身份。pending 行只允许初始
 未发送证据，不能写发送事实；已证明未接纳的 steer 回队后，原输入可记录后续
@@ -262,7 +262,7 @@ expired、closed；显式关闭保留 `question_closed` 和 reason，系统到�
 <a id="native-question-control"></a>
 ### 原生问题与控制写入
 
-opt-in App Server 的原生用户问题沿同一 PendingQuestion/OwnerQuestions
+普通 Codex App Server 的原生用户问题沿同一 PendingQuestion/OwnerQuestions
 保存表单、结构化答案、可信来源和关闭事实，不再从展示文本反推原生答案。
 不可变 binding 同时保留原连接 generation、server request、thread/turn/item、
 request/attempt、产品 question 与原生 question IDs。客户端与服务端 RPC 编号
@@ -356,8 +356,8 @@ BG 详情响应补齐输出时，保留请求开始后实际收到的交付事�
 Stop 保留暂停积压，人工纠偏不自动恢复积压，显式恢复才继续原顺序。
 没有自动合批、转 steer、notification-only 或默认等待全部独立工作的政策变化。
 
-当前使用 Codex exec 与 Claude stream-JSON：Codex 新输入在运行中排队；Claude
-按实际活动通道能力处理 steer，已到达的 idle 消息保留原身份。普通委托完成或
+当前普通 Codex 使用 App Server，人工输入按绑定活动根和配置资格 steer，否则排队；
+Claude stream-JSON 按实际活动通道能力处理 steer，已到达的 idle 消息保留原身份。普通委托完成或
 重启不自动归档；人工追问和 parent follow-up 是新 request/round，显式归档与
 schedule 策略仍有效。可靠跨请求返回走现有独立工作机制；完整原生尾部及更强
 的送达、授权切换保证仍属下方暂停范围，不能从 stdin 能力或首个 result 推断。
@@ -659,12 +659,11 @@ Connector OAuth 在本地安装绑定前可取消，回调单次领取；普通�
 才能删旧位置；删会话本身不证明文件无人使用。正常新写入应符合安装资源声明，
 不能靠补 marker、删除有效 marker 或关闭检查绕过归属问题。
 
-Codex exec 对话和重试沿现有传输：拼装后的 prompt 按 UTF-8 字节计，`<=102400`
-使用 argv，`>102400` 完整写文件并让模型读取；用户原文完整持久化。这是明确
-保留的选择，账户路径修正不重新打开 stdin 改造，不恢复票43的完整 argv/env
-预算项目，也不扩大到 one-shot。运行参数与诊断保留可读信息，只掩码实际秘密。
-opt-in App Server 的大输入通过业务 RPC 保持 inline，不走该文件溢出路径；原输入
-及附件仍由同一 submission 与文件 owner 保全。
+普通 Codex App Server 的大输入通过业务 RPC 保持 inline，不走旧普通 exec 的
+argv/file 溢出路径；原输入及附件仍由同一 submission 与文件 owner 保全。
+独立 Research exec leaf 保留自身的 argv 字节预算与长输入文件路径，不接受普通
+对话或历史 resume；one-shot 使用无工具文本 worker。运行参数与诊断保留可读信息，
+只掩码实际秘密。各传输分别验证自己的真实输入边界，不按 backend 名猜测 argv 限制。
 
 凭据的 `CODEX_HOME` 同时保存认证和原生会话。重新授权借用已有目录；取消、
 provider 失败和 spawn 失败不授予删除该目录的权限。用预存 rollout 验证这些

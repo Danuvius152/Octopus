@@ -6,7 +6,6 @@ import json
 import logging
 import os
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -20,6 +19,7 @@ from server.session_manager import session_manager
 from server.users import UserManager
 from tests import test_auth_routes as auth_api
 from tests.accounts import create_account
+from tests.harness_profiles import process_profile
 from tests.test_service_shutdown import synthetic_cli
 
 auth_client = auth_api.client
@@ -101,7 +101,7 @@ async def test_bound_credential_spawn_failure_masks_all_local_logs_without_chang
         # Claude installation: this test stops at the OS spawn boundary.
         return [sys.executable, *argv[1:]], kwargs
 
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=executable_argv))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=executable_argv))
 
     async def refused(*argv, **kwargs):
         if "ANTHROPIC_API_KEY" not in kwargs.get("env", {}):
@@ -252,7 +252,7 @@ async def _retirement_diagnostic_child(tmp_path, tmp_path_factory, monkeypatch):
         argv, kwargs = render_argv(context)
         return [sys.executable, *argv[1:]], kwargs
 
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=executable_argv))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=executable_argv))
 
     async def late_refusal(*argv, **kwargs):
         if "ANTHROPIC_API_KEY" not in kwargs.get("env", {}):
@@ -354,7 +354,7 @@ async def test_steer_pipe_failure_preserves_local_details_without_the_bound_cred
         kwargs.pop("private_settings", None)
         return [sys.executable, "-u", "-c", code], kwargs
 
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=executable_argv))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=executable_argv))
     pipe_write = asyncio.StreamWriter.write
 
     def rejected_write(writer, data):

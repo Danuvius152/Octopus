@@ -132,7 +132,9 @@ class ForkingMixin(SessionManagerBase):
                     metadata = json.loads(row["fork_metadata"]) if row.get("fork_metadata") else {}
                     artifact = metadata.get("native_fork")
                     extra = {}
-                    if artifact:
+                    if "native_fork" in metadata:
+                        if not isinstance(artifact, dict) or artifact.get("transport") != "app-server":
+                            raise ValueError("Malformed native fork checkpoint; retain recovery material")
                         recovery = Session(id=fork_id, name="Incomplete fork cleanup", working_dir=row["working_dir"],
                             backend=row["backend"], user_id=row["user_id"], agent_id=row["agent_id"],
                             origin="fork", fork_status="initializing")

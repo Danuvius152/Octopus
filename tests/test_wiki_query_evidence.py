@@ -115,7 +115,7 @@ async def test_full_read_requirement_is_checked_inside_failure_evidence(tmp_path
     assert report['semantic_acceptance'] == 'not_reviewed'
 
 
-def test_invocation_evidence_retains_native_controls_without_prompt_or_bearers(monkeypatch, tmp_path):
+def test_invocation_evidence_retains_configured_controls_without_prompt_or_bearers(monkeypatch, tmp_path):
     harness = get_harness('codex')
     probe = SimpleNamespace(input_context={})
     observe_invocations(monkeypatch, probe)
@@ -126,10 +126,10 @@ def test_invocation_evidence_retains_native_controls_without_prompt_or_bearers(m
                           reasoning_effort='max', service_tier='default')
     harness.profile.build_turn_argv(context)
     item, = probe.input_context['rendered_attempt_profiles']
-    assert item['model_argument'] == 'gpt-6.1-sol'
-    assert 'model_reasoning_effort="max"' in item['control_arguments']
-    assert 'service_tier="default"' in item['control_arguments']
+    assert item['configured_model'] == 'gpt-6.1-sol'
+    assert item['configured_effort'] == 'max' and item['configured_tier'] == 'default'
+    assert item['model_argument'] is None and item['control_arguments'] == []
     assert 'private' not in json.dumps(item)
     probe.input_context['rendered_attempt_profiles'].clear()
     harness.profile.build_turn_argv(replace(context, reasoning_effort='high'))
-    assert 'model_reasoning_effort="high"' in probe.input_context['rendered_attempt_profiles'][0]['control_arguments']
+    assert probe.input_context['rendered_attempt_profiles'][0]['configured_effort'] == 'high'

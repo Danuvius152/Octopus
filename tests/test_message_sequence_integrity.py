@@ -3,7 +3,6 @@
 import asyncio
 import sqlite3
 import sys
-from dataclasses import replace
 
 import pytest
 
@@ -18,6 +17,7 @@ from server.routers.sessions import get_session
 from server.session_manager import SessionManager
 from server.users import UserManager
 from tests.accounts import create_account
+from tests.harness_profiles import process_profile
 
 
 @pytest.fixture
@@ -103,7 +103,7 @@ async def test_reserved_terminal_does_not_advance_snapshot_watermark(history, mo
         "print(json.dumps({'type':'turn.completed','usage':{}}),flush=True)\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, prepare_resume=None, activity_observer=None,
         new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: ([sys.executable, "-u", "-c", code], {"cwd": context.working_dir}),

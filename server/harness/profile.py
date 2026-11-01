@@ -219,6 +219,9 @@ class RuntimeProfile:
     build_oneshot_argv: Callable[[OneShotContext], tuple[list[str], dict[str, Any]]]
     parse_oneshot_stdout: Callable[[str], str]
     select_transport: Callable[[RuntimeProfile, str], RuntimeProfile] | None = None
+    # The Owner saves an original native-input preparation record before the
+    # driver's fallible startup. Synthetic and non-native profiles omit it.
+    native_input_evidence: bool = False
     # JSON-RPC accepts the original large input directly. Existing transports
     # retain their file-spill convention and its attachment lifecycle.
     inline_large_inputs: bool = False

@@ -12,7 +12,6 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
-from dataclasses import replace
 
 import pytest
 
@@ -21,6 +20,7 @@ from server.harness import get_harness
 from server.session_manager import SessionManager
 from server.sessions.questions import QuestionClosedError
 from tests.accounts import create_account
+from tests.harness_profiles import process_profile
 
 
 @pytest.mark.asyncio
@@ -125,7 +125,7 @@ async def test_the_session_manager_drains_its_turns_when_the_db_closes(tmp_path,
             started.set()
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None,
     ))
     mgr.on_broadcast("closing-original-process", observe)
@@ -159,7 +159,7 @@ async def test_shutdown_keeps_database_open_until_terminal_writer_finishes(tmp_p
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv))
     entered, release = asyncio.Event(), asyncio.Event()
     record = db.record_terminal
 

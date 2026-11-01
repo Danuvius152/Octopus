@@ -225,7 +225,7 @@ class Harness:
         Known artifacts use their saved strategy, independent of current transport.
         No-op when the backend has no on-disk fork artifacts. `credential` lets a
         directory-backed backend (Codex / CODEX_HOME) locate its rollout store."""
-        profile = self.runtime_profile(RunConfig(transport=artifact["transport"])) if artifact else self.profile
+        profile = self.runtime_profile(RunConfig(transport=artifact["transport"])) if artifact is not None else self.profile
         if profile.fork_cleanup is None:
             return
         kwargs = {"credential": credential}

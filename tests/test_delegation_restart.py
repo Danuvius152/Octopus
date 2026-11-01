@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 
 import pytest
@@ -17,7 +17,7 @@ from server.harness import get_harness
 from server.sessions import SessionManager
 from server.users import UserManager
 from tests.accounts import create_account
-from tests.harness_profiles import session_turn_argv
+from tests.harness_profiles import process_profile, session_turn_argv
 
 
 @dataclass
@@ -51,7 +51,7 @@ async def runtime(tmp_path, monkeypatch, short_process_shutdown):
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, build_turn_argv=session_turn_argv(harness.profile, argv), prepare_resume=None, activity_observer=None,
     ))
 

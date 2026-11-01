@@ -42,7 +42,7 @@ separate facts under the [execution contract](architecture-contract.md#输入完
 `RunDriver` owns protocol state, without owning a process, lease or product
 outcome. `ArgvDriver` supplies Codex exec's initial EOF; `ClaudeDriver` encodes
 stream-JSON inputs and gives every opening or steering frame a unique UUID.
-`AppServerDriver` owns opt-in Codex RPC preparation, exact history, single-root
+`AppServerDriver` owns ordinary Codex RPC preparation, exact history, single-root
 correlation and protocol evidence, without product settlement authority.
 The shared run checks authority immediately before spawn and business writes,
 and owns readers, backpressure, process groups and retirement. Moving wire
@@ -56,16 +56,20 @@ without losing late native input proof; closure alone is not an exit proof.
 The [execution contract](architecture-contract.md#输入完成与资源退休) owns settlement
 and cancellation timing.
 
-Claude declares `can_steer=True` and `reusable=True`; Codex exec declares both
-false. Claude and exec declare `can_continue=True` for a captured native conversation;
+Claude declares `can_steer=True`, `reusable=True` and `can_continue=True`;
 this permits a new continuation input, not replay or exactly-once effects.
 `new_driver` selects protocol operations instead of a shared stdin enum. Owner dispatch, API
 capabilities and `HarnessRun.steer()` consume the explicit steering declaration;
 held-process policy consumes reuse. Tool allow/deny support remains independent.
-The opt-in App Server profile declares steering true and reuse/continuation false:
+The ordinary Codex App Server profile declares steering true and reuse/continuation false:
 it only steers its captured active root, does not retain
 a host between requests or recover by automatically sending a continuation.
 Explicit subsequent requests can still resume the same native history.
+The independent Research exec leaf declares steering, reuse and continuation
+false. It has no ordinary conversation or resume entry. Runtime profiles also
+declare `native_input_evidence`: Owner uses that actual driver contract for
+pre-recording input facts. Synthetic process peers declare their own capabilities;
+backend spelling or a stdin pipe cannot grant native evidence.
 For a reusable host, Wiki scopes bind through its original live run lease so
 compatible later requests can install their own task. A non-reusable run uses
 its original task scope directly, including when its initial input uses stdin.
@@ -121,6 +125,15 @@ keeps a reliable error after the accepted prefix. Failed retirement closes
 collection without claiming exit and wakes the original Owner for existing
 failure takeover. Synthetic helper interruptions require proven retirement.
 
+Passive measurements bypass the necessary output queue and never refresh
+activity. The Driver interprets native response/turn facts; Owner attaches product
+identity and exposes its existing overall/idle clock read-only; Monitor uses its
+bounded disposable sink. HarnessRun records entered retirement phases with their
+actual grace and elapsed time, without adding a timer or changing those limits.
+Optional observation drain and close share one finite deadline, and their errors
+cannot replace process-exit proof with a retirement failure. See the
+[Monitor contract](codex-performance-monitor.md) for source and coverage limits.
+
 Drivers normalize structured provider failures as `HarnessEvent.error_details`.
 The existing recovery-message path retains that payload and original runtime
 source, including after business status selection. A late failure therefore
@@ -133,8 +146,8 @@ even after a request driver ends; cancellation of the waiter leaves resource
 ownership intact. The [execution observation contract](architecture-contract.md#原执行的观察)
 defines the receipt's request/attempt/work scope and consumer lifetime.
 
-Claude uses stream-JSON input and can retain a process between turns. Codex exec
-closes stdin after its initial prompt and queues subsequent user input. Settings
+Claude uses stream-JSON input and can retain a process between turns. Ordinary
+Codex steers only its bound active root and retires its host after that root. Settings
 changes invalidate the held-process signature when needed while preserving the
 native resume identity. See [steering](inline-steering.md),
 [model settings](model-reasoning.md) and [turn safety](turn-safety.md).
@@ -190,10 +203,10 @@ remain the behavior checks; the seam does not replace them.
 `tests/test_session_capability_projection.py` checks all four steering/reuse
 combinations through real subprocess input, API projection and Wiki tool visibility.
 
-Basic opt-in App Server start and precise resume are described in
+Ordinary App Server start and precise resume are described in
 [the Codex contract](codex-backend.md#opt-in-app-server-start-and-precise-resume).
-Remaining interactive/descendant integration, default cutover and DSH work remain
-[planned changes](../plans/engineering-runtime-roadmap.md).
+The [runtime roadmap](../plans/engineering-runtime-roadmap.md) retains the separate
+post-final recursive capability goal and unfinished DeepSeek scope.
 The [original implementation](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/harness-layer.md)
 contains old API sketches and rollout evidence; current verification follows
 [testing.md](../testing.md).

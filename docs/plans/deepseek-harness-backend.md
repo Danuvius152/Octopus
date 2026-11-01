@@ -141,9 +141,8 @@ DSH 协议依据本机 npm 包 `@deepseek-ai/dsh@0.2.1-rc.2` 的 README、类型
 
 Codex 官方支持 [`exec resume`](https://developers.openai.com/codex/noninteractive)
 及 [app-server 的 `turn/steer`](https://developers.openai.com/codex/app-server)。
-后者属于另一条接入协议，不能由此推断当前 Octopus exec 会话已经能 steer。
-忙时能力按实际接入判断：当前 Codex exec 排队，迁移后的 app-server 单独验收
-steer；DSH headless 排队，ACP 一次只允许一个 prompt，SDK 入队不等于 steer。
+当前普通 Codex 已使用 App Server，按实际活动根资格 steer；独立 Research exec
+leaf 不提供该能力。DSH headless 排队，ACP 一次只允许一个 prompt，SDK 入队不等于 steer。
 不把 kill + resume 冒充轮内追加。
 
 API、数据库保持 `codex`、`claude-code`，新增值固定为 `deepseek`；`dsh` 是 CLI
@@ -669,8 +668,8 @@ account/service generation 失效处理；账户切换后的旧提交响应不�
 表单，不回显 secret。键盘与手机布局覆盖第三选项。
 
 保留 Claude 条目及已有数据，以当前安装不可用状态展示；不自动切换已有 agent。
-聊天输入根据有实际实现的 `can_steer` 决定追加/排队；当前 Codex exec 与 headless
-候选排队，后续按实际 Codex/DSH 协议重新验收，不从“RPC”或 stdin 模式推导能力。
+聊天输入根据有实际实现的 `can_steer` 决定追加/排队；普通 Codex 按绑定活动根资格
+处理，DSH headless 候选排队，后续按实际 DSH 协议验收，不从“RPC”或 stdin 模式推导能力。
 handoff/pull、原生子代理定义等入口按实际能力限制，不能把“非 Claude”统一显示为
 Codex，或因为 DSH 没有某能力就隐藏 Codex 已有能力。
 

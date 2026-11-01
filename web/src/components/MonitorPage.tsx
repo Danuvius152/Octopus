@@ -18,6 +18,11 @@ type Overview = {
   resources: Row[];
   codex?: Row[];
   codex_turns?: Row[];
+  codex_runs?: Row[];
+  codex_retirement?: Row[];
+  codex_native_usage?: Row[];
+  codex_steers?: Row[];
+  codex_anomalies?: Row[];
 };
 
 /** Column labels the raw SQL aliases do not read well as. */
@@ -39,6 +44,12 @@ const HEADINGS: Record<string, string> = {
   avg_turn_ttft_ms: "avg turn TTFT",
   timed_responses: "timed responses",
   status: "measurement status",
+  preparation_ms: "preparation",
+  root_active_ms: "root activity",
+  retirement_ms: "retirement",
+  start_ack_ms: "start ACK",
+  first_output_ms: "first output",
+  ack_ms: "steer ACK",
 };
 
 function heading(key: string): string {
@@ -231,6 +242,40 @@ export function MonitorPage({ onToggleSidebar }: { onToggleSidebar?: () => void 
               <summary className="cursor-pointer text-sm text-gray-600">Recent Codex turns</summary>
               <Table title="Recent logical requests (up to 20, within window)" rows={data.codex_turns ?? []} />
             </details>
+            <Table title="Native execution phases" rows={(data.codex_runs ?? []).map((row) => ({
+              request_id: row.request_id, root_turns: row.root_turns, child_turns: row.child_turns,
+              input_state: row.input_state, resource_state: row.resource_state,
+              preparation_mode: row.preparation_mode, spawn_ms: row.spawn_ms,
+              preparation_ms: row.preparation_ms, start_ack_ms: row.start_ack_ms,
+              first_output_ms: row.first_output_ms, root_active_ms: row.root_active_ms,
+              retirement_ms: row.retirement_ms,
+              usage_coverage: Number(row.metrics_unavailable) > 0 || Number(row.metrics_capacity_drops) > 0
+                || row.metrics_collection_complete === 0
+                ? "Incomplete" : "Source verified",
+            }))} />
+            <p className="mb-4 text-xs text-gray-500">
+              A product request can have multiple attempts; each accepted attempt binds one root turn,
+              with separate child turns and model responses. Retirement measures resource cleanup,
+              including cancel, drain and exit; it is outside model generation time.
+            </p>
+            <details className="mb-6">
+              <summary className="cursor-pointer text-sm text-gray-600">Native counters and input timing</summary>
+              <Table title="Provider cumulative snapshots" rows={data.codex_native_usage ?? []} />
+              <p className="mb-4 text-xs text-gray-500">
+                Snapshots are not added to response usage. They may include restored history and
+                do not count model requests. Missing usage or timing remains unknown.
+              </p>
+              <Table title="Steer acceptance timing" rows={data.codex_steers ?? []} />
+              <p className="mb-4 text-xs text-gray-500">An acceptance ACK does not prove the model consumed the input.</p>
+              <Table title="Owner budget clocks" rows={(data.codex_runs ?? []).map((row) => ({
+                request_id: row.request_id, overall_elapsed_ms: row.overall_elapsed_ms,
+                overall_limit_ms: row.overall_limit_ms, idle_elapsed_ms: row.idle_elapsed_ms,
+                idle_limit_ms: row.idle_limit_ms, idle_suspended: row.idle_suspended,
+              }))} />
+              <Table title="Retirement grace phases" rows={data.codex_retirement ?? []} />
+              <p className="mb-4 text-xs text-gray-500">Only phases entered by the Harness appear, with their actual timeout and elapsed time.</p>
+            </details>
+            {!!data.codex_anomalies?.length && <Table title="Unaccepted native execution usage" rows={data.codex_anomalies} />}
             <Table title="activity" rows={data.counts} />
             <Table title="turns" rows={data.turns} />
             <Table title="top errors" rows={data.errors} />

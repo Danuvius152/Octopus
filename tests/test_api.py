@@ -333,7 +333,7 @@ async def test_session_info_reports_the_steering_capability(client):
         "/api/sessions", headers=client.headers, json={"agent_id": agent["id"], "name": "Cx", "backend": "codex"}
     )
     assert cx.status_code == 201
-    assert cx.json()["can_steer"] is False
+    assert cx.json()["can_steer"] is True
 
 
 @pytest.mark.asyncio

@@ -15,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -30,6 +29,7 @@ from server.harness.claude_code import (
 from server.harness.codex import CodexEventParser
 from server.harness.profile import TurnContext
 from tests import test_question_lifecycle as question_tests
+from tests.harness_profiles import process_profile
 
 question_host = question_tests.question_host
 owned_question_host = question_tests.owned_question_host
@@ -598,7 +598,7 @@ async def held_subagent_transport(owned_question_host, monkeypatch):
         {"type": "result", "subtype": "success", "session_id": "held-original-thread", "is_error": False},
     ]))
     harness = get_harness("claude-code")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, prepare_resume=None, activity_observer=None,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model), str(initial_path), str(identity_path),

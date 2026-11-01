@@ -3,11 +3,11 @@
 > **Status:** implemented — Native helper observations, scoped App Server work cards and read-only saved child details, including late events within the original resource lifetime.
 
 The implemented scope is observation and presentation, including Claude
-held-process late events and opt-in Codex App Server capture through bounded
+held-process late events and ordinary Codex App Server capture through bounded
 retirement. A card does not prove that the parent consumed a child result or
 that a delegation receives a later parent report. Codex root success may coexist
-with an unfinished helper retired as interrupted. Default Codex execution still
-uses exec; the remaining compatibility and cutover scope belongs to
+with an unfinished helper retired as interrupted. Arbitrary post-final recursive
+continuation remains a separate, unfulfilled capability goal in
 the [runtime roadmap](../plans/engineering-runtime-roadmap.md#codex-native-tail).
 
 ## 1. Observation sources
@@ -153,7 +153,7 @@ The saved agent `subagents` configuration is rendered by the Claude profile.
 An empty configuration leaves the CLI built-ins available; saved user definitions
 are not rewritten by startup.
 
-The current Octopus Codex exec profile does not render these saved custom
+The current Octopus Codex profile does not render these saved custom
 definitions. This describes the integration, not every available native feature.
 
 ## 7. Work that outlives its turn
@@ -197,7 +197,8 @@ keeps spinning after its process is gone is a lie.
 This is the same hole native cron ticks fall through, and the same fix covers
 them.
 
-### Opt-in App Server capture
+<a id="opt-in-app-server-capture"></a>
+### App Server capture
 
 App Server has no held-process idle execution path. Root terminal or Stop revokes
 execution and question admission immediately, while the original attempt keeps

@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from server.harness.codex import CODEX
+from server.harness.codex import CODEX_WEB_LEAF as CODEX
 from server.harness.events import HarnessEvent, SubagentUpdate
 from server.harness.run import HarnessRun
 from server.harness.tool_identity import ToolIdentityTracker

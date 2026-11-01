@@ -4,7 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from server.harness import get_harness
+from server.harness import Harness
+from server.harness.codex import CODEX_WEB_LEAF
 from server.sessions.turns import TurnsMixin
 
 
@@ -15,4 +16,4 @@ from server.sessions.turns import TurnsMixin
 def test_failure_classification_reads_tail(tail, classification):
     attempt = SimpleNamespace(error_text="prefix " * 1300, backend=SimpleNamespace(stderr_text=tail))
     blob = TurnsMixin._failure_blob(attempt)
-    assert getattr(get_harness("codex"), classification)(blob)
+    assert getattr(Harness(CODEX_WEB_LEAF), classification)(blob)

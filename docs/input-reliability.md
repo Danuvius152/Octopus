@@ -51,7 +51,7 @@ Delivery evidence has its own `delivery_state`. An uncertain steer remains
 unknown even when the carrying request has a successful result. For ordinary
 single-input execution, the exact terminal and input settlement commit in one
 transaction. Notification failure cannot reverse a committed outcome.
-For opt-in Codex App Server, `native_inputs` separates accepted native steer
+For ordinary Codex App Server, `native_inputs` separates accepted native steer
 from its carrier's business result. Accepted does not prove model processing,
 even when the carrier succeeds. Only a proven unaccepted steer may return to
 the ordinary queue under its original identity and order; unknown inputs stay

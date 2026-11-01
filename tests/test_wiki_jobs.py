@@ -5,7 +5,6 @@ import json
 import sys
 import threading
 import uuid
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -17,6 +16,7 @@ from server.wiki.history import WikiHistory, atomic
 from server.wiki.jobs import WikiJobs, WikiWorker
 from server.wiki.store import WikiError
 from tests import test_wiki_api as wiki_api
+from tests.harness_profiles import process_profile
 from tests.submission import receipt_from_events
 
 client = wiki_api.client
@@ -1035,7 +1035,7 @@ async def shutdown_worker(jobs, monkeypatch):
         return [sys.executable, "-u", "-c", script], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, build_turn_argv=argv, new_driver=ClaudeDriver, can_steer=True, reusable=True,
     ))
 

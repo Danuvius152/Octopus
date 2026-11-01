@@ -3,7 +3,6 @@
 import asyncio
 import json
 import sys
-from dataclasses import replace
 
 import pytest
 
@@ -14,6 +13,7 @@ from server.session_manager import session_manager
 from server.sessions.client_submissions import submission_status, submit_client_message
 from server.workspace import paths_for
 from tests import test_live_account_authorization as live_authorization
+from tests.harness_profiles import process_profile
 
 accounts = live_authorization.accounts
 client = live_authorization.client
@@ -55,7 +55,7 @@ async def test_disabling_owner_during_steer_git_anchor_prevents_frame_delivery(
         return [sys.executable, "-u", str(model), str(frames), str(finish_initial)], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, build_turn_argv=argv, prepare_resume=None,
         activity_observer=None, new_driver=ClaudeDriver, can_steer=True, reusable=True,
     ))

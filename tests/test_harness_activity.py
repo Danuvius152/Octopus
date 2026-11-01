@@ -6,7 +6,8 @@ import json
 
 import pytest
 
-from server.harness.codex import CODEX
+from server.harness import RunConfig
+from server.harness.codex import CODEX_WEB_LEAF as CODEX
 from server.harness.run import HarnessRun
 
 
@@ -559,7 +560,7 @@ async def test_cancel_during_activity_startup_drains_owned_observer(tmp_path, mo
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden_spawn)
     profile = replace(CODEX, activity_observer=lambda *args, **kwargs: WaitingObserver())
-    run = HarnessRun(profile)
+    run = HarnessRun(profile, RunConfig(web_research=True, mcp_servers=[]))
     run.bind_activity(lambda _: None)
     starting = asyncio.create_task(run.start("prompt", str(tmp_path)))
     await entered.wait()

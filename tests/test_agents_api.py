@@ -4,7 +4,6 @@ import asyncio
 import json
 import os
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -20,6 +19,7 @@ from server.scheduler import ScheduleRunner
 from server.session_manager import session_manager
 from server.users import UserManager
 from tests.fake_run import FakeRunBase
+from tests.harness_profiles import process_profile
 from tests.test_session_retirement import _retire_original_test_process
 
 
@@ -465,6 +465,8 @@ async def _agent_archive_fault_child(tmp_path, tmp_path_factory, monkeypatch):
     manager.on_broadcast("agent-archive-fault-proof", observe)
     if mode == "retirement":
         failure = RuntimeError("Backend retirement remains unconfirmed")
+        harness = get_harness("codex")
+        monkeypatch.setattr(harness, "profile", process_profile(harness.profile))
 
         class UnreapedRun(FakeRunBase):
             async def start(self, prompt, working_dir, resume_id=None, credential=None):
@@ -503,7 +505,7 @@ async def _agent_archive_fault_child(tmp_path, tmp_path_factory, monkeypatch):
             return [sys.executable, "-u", "-c", code, str(artifacts / "model.json"), str(artifacts / "starts.jsonl"), json.dumps(context.prompt)], {"cwd": context.working_dir}
 
         harness = get_harness("codex")
-        monkeypatch.setattr(harness, "profile", replace(
+        monkeypatch.setattr(harness, "profile", process_profile(
             harness.profile, build_turn_argv=argv, prepare_resume=None, activity_observer=None,
         ))
 

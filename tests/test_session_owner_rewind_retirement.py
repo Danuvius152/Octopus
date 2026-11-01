@@ -6,7 +6,6 @@ import asyncio
 import json
 import sys
 import time
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +22,7 @@ from server.routers.sessions import router
 from server.sessions import SessionManager
 from server.sessions.owner import SessionOwnerUnavailable
 from tests.accounts import create_account
+from tests.harness_profiles import process_profile
 
 
 @pytest.fixture
@@ -49,7 +49,7 @@ async def held_rewind(tmp_path, monkeypatch, request):
         "Path(sys.argv[3]).write_text(json.dumps({'eof_at':began,'exited_at':time.monotonic()}))\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, new_driver=ClaudeDriver, can_steer=True, reusable=True,
         activity_observer=None, prepare_resume=None,
         build_turn_argv=lambda context: (

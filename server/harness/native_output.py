@@ -79,6 +79,13 @@ class NativeOutput:
     def metadata(self, source: NativeSource) -> dict[str, Any]:
         return RuntimeMetadata(request_id=self.request_id, attempt_id=self.attempt_id, native=source).model_dump()
 
+    def contains_turn(self, thread: str, turn: str) -> bool:
+        return (thread, turn) == (self.thread_id, self.turn_id) or (thread, turn) in self._work
+
+    @property
+    def child_turn_count(self) -> int:
+        return len(self._work)
+
     def accepts(self, thread: Any, turn: dict[str, Any]) -> bool:
         if thread != self.thread_id and turn.get("rootTurnId") not in {None, self.turn_id}:
             return False

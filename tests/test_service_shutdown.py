@@ -30,7 +30,7 @@ from server.wiki import jobs as wiki_jobs
 from server.wiki.registry import registry
 from server.wiki.store import WikiError
 from tests.accounts import create_account
-from tests.harness_profiles import session_turn_argv
+from tests.harness_profiles import process_profile, session_turn_argv
 
 
 @pytest.fixture
@@ -210,7 +210,7 @@ def synthetic_cli(monkeypatch, starts, code=None):
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, build_turn_argv=session_turn_argv(harness.profile, argv), new_driver=ClaudeDriver, can_steer=True, reusable=True,
         activity_observer=None,
     ))

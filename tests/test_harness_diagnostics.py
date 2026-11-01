@@ -28,6 +28,7 @@ from server.harness import (
     get_harness,
 )
 from server.harness.driver import ArgvDriver
+from tests.harness_profiles import process_profile
 
 PRIVATE_PROMPT = "PRIVATE-PROMPT-46-原始输入\n第二行"
 PRIVATE_PERSONA = "PRIVATE-PERSONA-46-私有指令"
@@ -151,7 +152,7 @@ async def test_stream_diagnostics_keep_protocol_context_and_mask_credentials(
         }))
     lines.append(json.dumps(final))
     script = f"import sys; sys.stdout.write({chr(10).join(lines) + chr(10)!r})"
-    profile = replace(
+    profile = process_profile(
         get_harness(backend).profile,
         build_turn_argv=_profile(script).build_turn_argv,
         new_driver=ArgvDriver,

@@ -2,14 +2,15 @@
 
 import asyncio
 import json
+import os
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from server.config import settings
 from server.database import Database
-from server.harness import codex_app_server
+from server.harness import codex_app_server, get_harness
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
 from server.sessions.owner_runtime import RuntimeReader
@@ -21,16 +22,20 @@ PEER = Path(__file__).parent / "_fixtures" / "fake_app_server.py"
 
 @pytest.fixture
 async def native_runtime(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "codex_transport", "app-server")
     monkeypatch.setattr(codex_app_server, "verify_binary", lambda path: None)
     monkeypatch.setattr(codex_app_server, "_RPC_TIMEOUT", 0.5)
     mode, starts, events = ["normal"], [], []
 
     def argv(context):
         starts.append(context)
-        return [sys.executable, "-u", str(PEER), str(tmp_path), mode[0]], {"cwd": context.working_dir}
+        return [sys.executable, "-u", str(PEER), str(tmp_path), mode[0]], {
+            "cwd": context.working_dir, "env": {**os.environ, "CODEX_HOME": str(tmp_path / "codex-home")},
+        }
 
     monkeypatch.setattr(codex_app_server, "build_argv", argv)
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", replace(codex_app_server.profile(harness.profile),
+        build_turn_argv=lambda context: codex_app_server.build_argv(context)))
     database = Database(str(tmp_path / "product.db"))
     await database.initialize()
     await create_account(database, extra_roots=[tmp_path])

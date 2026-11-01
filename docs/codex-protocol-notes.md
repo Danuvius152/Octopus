@@ -7,9 +7,14 @@ The normalizer lives in `server/harness/codex.py` (formerly
 `server/backends/codex.py`, before the harness-layer refactor); the fake CLI
 that scripts these shapes is `tests/_fixtures/fake_codex_cli.py`.
 
+These are version-bound exec observations. Ordinary sessions now use the pinned
+[App Server contract](implemented/codex-backend.md); only the independent Research
+leaf retains exec. The historical spawn/resume example below is not a current
+ordinary-session entry point or a template for that restricted leaf.
+
 ## Spawn command
 
-`CodexBackend.build_args` produces (exec-level flags MUST precede the `resume`
+The then-current `CodexBackend.build_args` produced (exec-level flags MUST precede the `resume`
 subcommand; `--` precedes the prompt):
 
 ```

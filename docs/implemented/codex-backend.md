@@ -1,18 +1,15 @@
 # Codex: interactive execution and tool-free text calls
 
-> **Status:** implemented — Native exec turns, opt-in single-root App Server execution and a separate subscription text worker.
+> **Status:** implemented — Ordinary single-root App Server turns, an independent Research exec leaf and a separate subscription text worker.
 
 ## Interactive execution
 
-The default Codex profile runs native `codex exec --json` through the common
-Harness using `ArgvDriver`. The driver delegates existing argv rendering and
-parsing to the profile; HarnessRun retains process and retirement ownership.
-Native thread identity is retained for resume. Stdin closes after the
-initial input; additional user input queues for a subsequent turn. Basic opt-in
-App Server start, precise resume, steering, native questions and scoped
-root/child output, completion consumers and native fork are implemented below;
-native Monitor accounting, the remaining data acceptance and default cutover remain in
-[the runtime plan](../plans/engineering-runtime-roadmap.md).
+The ordinary Codex profile uses the pinned native App Server through the common
+Harness. Each request attempt owns one stdio host and one accepted root turn;
+HarnessRun owns its process group and retirement. Human steering targets that
+active root. Later ordinary requests resume the captured native thread after
+the preceding writer retires. Native questions, scoped root/child output,
+completion consumers, native fork and passive accounting use the contracts below.
 
 The profile renders selected MCP entries and a composed controller through
 developer instructions. Resumed threads receive controller updates and separate
@@ -26,8 +23,8 @@ Claude renders those definitions into its native configuration. Codex currently
 uses its built-in helpers; saving a definition does not map its custom role,
 model or tool restrictions into Codex. The agent form states this boundary.
 
-Native stdout events and bounded verified rollout observations are normalized
-into common events. Native helper cards describe observation, not proof that
+Native stdout events supply product output; bounded verified rollout observations
+supply passive measurements. Native helper cards describe observation, not proof that
 the parent consumed every child result. Usage timing has the narrower
 [Monitor contract](codex-performance-monitor.md).
 
@@ -37,15 +34,17 @@ host-default path. In-app device login is implemented. This differs from the
 original plan's unresolved login alternatives. Public transcript export/import
 is separate from [rewind](session-rewind.md) and [native-copy fork](session-fork.md).
 
-## Opt-in App Server start and precise resume
+<a id="opt-in-app-server-start-and-precise-resume"></a>
+## App Server start and precise resume
 
-`OCTOPUS_CODEX_TRANSPORT=app-server` selects the transport before preparation;
-`exec` remains the default. `OCTOPUS_CODEX_APP_SERVER_BINARY` selects its binary
+Ordinary requests select App Server before preparation. The former
+`OCTOPUS_CODEX_TRANSPORT` selector and ordinary exec path are removed.
+`OCTOPUS_CODEX_APP_SERVER_BINARY` selects the binary
 (default `codex`, resolved on PATH). The driver requires the G0-Base verified
 0.166.0 binary, SHA256
 `b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8`.
-A different binary fails preparation. Selection does not rewrite saved agents,
-convert backend identities or authorize a production/default transport switch.
+A different binary fails preparation. This default does not rewrite saved agents,
+credentials, model settings or backend identities.
 There is no second transport execution or automatic fallback after a failure.
 
 Each attempt has its own managed stdio host. Initialization, effective config,
@@ -84,10 +83,15 @@ owner; unsupported approval/dynamic requests receive explicit method-specific
 negative responses. Root and child output retain their original identities, and
 known helper state is reconciled through finite retirement. Bound-root completion
 and selected final replies, saved details, Stop/recovery, effect consumers and
-history branching use the contracts below. Native Monitor accounting and the
-remaining acceptance/cutover retain their tickets. These implemented behaviors
-do not certify full R2 cutover.
-Research web leaves remain explicitly on exec; one-shots keep the text worker.
+history branching use the contracts below. [Monitor](codex-performance-monitor.md)
+separates model responses, provider snapshots and resource cleanup.
+
+Research web leaves explicitly select the independent `CODEX_WEB_LEAF` exec
+profile: read-only, web search enabled, no Octopus MCP, history resume, steering
+or fork. Read-only does not imply a web-only tool whitelist; arbitrary tool
+allow/deny policies remain unsupported. Its argv builder rejects ordinary
+conversation use. One-shots keep the tool-free text worker. Neither is a
+fallback for a failed or unknown ordinary request.
 
 ### Root completion and selected answer
 
@@ -266,8 +270,11 @@ actual identity, initializing row and cwd; immediate and cold recovery both
 refuse automatic deletion without the qualification. Upstream reference refusals
 remain failures; cleanup
 does not expand to the source or related histories. Ordinary product archive,
-delete, reset and handoff keep their existing scope. Legacy exec and Claude
-file-copy strategies remain available. See [the fork saga](session-fork.md).
+delete, reset and handoff keep their existing scope. Claude retains its file-copy
+strategy. Saved pre-native Codex initializing forks without a `native_fork` key
+retain their old file-cleanup strategy; new Codex forks use the native API.
+A present but malformed checkpoint preserves the row and files for recovery,
+instead of falling back to legacy deletion. See [the fork saga](session-fork.md).
 
 `/rewind` retains product-message seq as its boundary: a steer may split one
 native turn. History replay preserves native root/child, phase, partial/cause

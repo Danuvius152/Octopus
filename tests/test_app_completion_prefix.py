@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from dataclasses import replace
 
 import pytest
 
@@ -15,6 +14,7 @@ from server.config import settings
 from server.harness import get_harness
 from server.harness.claude_code import ClaudeDriver
 from tests import test_session_owner_publication as publication_tests
+from tests.harness_profiles import process_profile
 
 notices = publication_tests.notices
 
@@ -49,7 +49,7 @@ async def test_app_answer_waits_for_the_original_terminal_notification_prefix(
         "sys.stdin.read()\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
         new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: ([sys.executable, "-u", str(model)], {"cwd": context.working_dir}),

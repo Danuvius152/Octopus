@@ -3,11 +3,11 @@
 import asyncio
 import json
 import sys
-from dataclasses import replace
 
 from server.agent_manager import AgentManager
 from server.harness import get_harness
 from tests import test_question_lifecycle as question_tests
+from tests.harness_profiles import process_profile
 
 question_host = question_tests.question_host
 
@@ -36,7 +36,7 @@ async def test_effort_changes_replace_process_and_resume_history(question_host, 
         return [sys.executable, '-u', str(model), str(effects), *args[1:]], kwargs
 
     monkeypatch.setenv("CLAUDE_CODE_EFFORT_LEVEL", "max")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, build_turn_argv=argv,
     ))
     agent = await AgentManager(manager.db).create_agent(

@@ -32,6 +32,7 @@ from server.sessions import turns as turn_module
 from server.sessions.submission import ReturnRefused
 from server.users import UserManager
 from tests.accounts import create_account
+from tests.harness_profiles import process_profile
 
 
 async def session_client(manager, session):
@@ -146,7 +147,7 @@ async def runtime(monkeypatch, tmp_path, short_process_shutdown):
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv, prepare_resume=None))
     try:
         yield manager, database, parent, delegations, starts, events
     finally:
@@ -198,7 +199,7 @@ async def test_corrupt_protocol_reports_incomplete_success_without_reexecution(r
         starts.put_nowait(context)
         return [sys.executable, "-u", "-c", "print('{broken');print('{\"type\":\"item.completed\",\"item\":{\"type\":\"agent_message\",\"text\":\"Executed once\"}}');print('{\"type\":\"turn.completed\",\"usage\":{}}')"], {"cwd": context.working_dir}
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv))
     await manager.start_message(session.id, "execute once")
     await wait_dispatch_idle(manager, session.id)
     outcomes = [event["content"] for event in events if event["type"] == "result"]
@@ -229,7 +230,7 @@ async def test_long_execution_diagnostics_classify_tail_without_exposing_stderr(
                 "print('{\"type\":\"turn.failed\",\"error\":{\"message\":\"execution failed\"}}')")
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv, prepare_resume=None))
     monkeypatch.setattr(manager, "_TRANSIENT_RETRY_BASE_DELAY", 0)
     receipt = await manager.start_message(session.id, "classify full evidence")
     completion = await asyncio.wait_for(receipt.wait(), 5)
@@ -272,7 +273,7 @@ async def test_first_app_timeout_recovers_late_completed_attempt_without_resubmi
             code += "print(json.dumps({'type':'turn.completed','usage':{}}),flush=True)\n"
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv))
     try:
         with pytest.raises(AppAgentError) as exc:
             await app_agent.ask(row, message="first request")
@@ -380,7 +381,7 @@ async def test_closing_old_work_retires_its_held_backend_while_new_input_is_clai
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("claude-code")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv, prepare_resume=None))
     session = await manager.create_session(parent.agent_id, "Held old work", str(tmp_path), backend="claude-code")
     old_work = f"held-work:{session.id}"
     await manager.start_message(session.id, "Finish the original work", work_id=old_work)
@@ -444,7 +445,7 @@ async def test_wiki_held_process_reuses_transport_with_fresh_turn_authority(runt
         code += " print(json.dumps({'type':'result','subtype':'success','session_id':'wiki-held-thread','is_error':False}),flush=True)\n"
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
     harness = get_harness("claude-code")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv, prepare_resume=None))
     session = await manager.create_session(parent.agent_id, "Wiki held", str(tmp_path), backend="claude-code")
     first = await manager.start_message(session.id, "first", wiki_mode="read")
     context = await asyncio.wait_for(starts.get(), 5)
@@ -986,7 +987,7 @@ async def test_overall_cap_expires_in_retry_backoff_before_another_cli_can_start
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv, prepare_resume=None))
     began = time.monotonic()
     await manager.start_message(session.id, "Capacity request")
     await wait_dispatch_idle(manager, session.id)
@@ -1190,7 +1191,7 @@ async def test_elapsed_cap_retires_a_reusable_run_before_its_success_can_be_held
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("claude-code")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv, prepare_resume=None))
     await manager.start_message(session.id, "Complete at the deadline")
     context = await asyncio.wait_for(starts.get(), 5)
     await wait_dispatch_idle(manager, session.id)

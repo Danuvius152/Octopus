@@ -96,11 +96,8 @@ test("create a Codex session via the UI and get a real response @llm", async ({
   await expect(page.locator(".msg-assistant .msg-content")).toBeVisible({
     timeout: 90_000,
   });
-  const text = await page
-    .locator(".msg-assistant .msg-content")
-    .first()
-    .textContent();
-  expect((text || "").toUpperCase()).toContain("PONG-CODEX");
+  await expect(page.locator(".msg-assistant .msg-content").first())
+    .toContainText(/PONG-CODEX/i, { timeout: 90_000 });
   await expect(page.locator(".result-badge")).toBeVisible({ timeout: 90_000 });
 
   // The same ordinary turn supplies Monitor; no benchmark request is sent.

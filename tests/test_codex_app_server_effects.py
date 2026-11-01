@@ -2,6 +2,7 @@
 
 import asyncio
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,7 +11,7 @@ import pytest
 from server.agent_manager import AgentManager
 from server.applications import ApplicationManager
 from server.config import settings
-from server.harness import codex_app_server
+from server.harness import codex_app_server, get_harness
 from server.harness import run as run_module
 from server.mcp_identity import scope_is_live, verify
 from server.scheduler import ScheduleRunner
@@ -174,7 +175,6 @@ async def test_schedule_records_original_result_and_archives_only_after_retireme
 async def native_wiki(jobs, client, tmp_path, monkeypatch):
     manager = wiki_api.session_manager
     await manager.db.update_agent(jobs.registration["curator_agent_id"], backend="codex")
-    monkeypatch.setattr(settings, "codex_transport", "app-server")
     monkeypatch.setattr(codex_app_server, "verify_binary", lambda path: None)
     runtime = SimpleNamespace(manager=manager, jobs=jobs, client=client, starts=[], completions=[])
 
@@ -186,6 +186,9 @@ async def native_wiki(jobs, client, tmp_path, monkeypatch):
         runtime.completions.append(completion)
 
     monkeypatch.setattr(codex_app_server, "build_argv", argv)
+    harness = get_harness("codex")
+    monkeypatch.setattr(harness, "profile", replace(codex_app_server.profile(harness.profile),
+        build_turn_argv=lambda context: codex_app_server.build_argv(context)))
     manager.on_request_complete("native-wiki-effect", completed)
     worker = WikiWorker()
     worker.manager = manager

@@ -139,6 +139,9 @@ _CODEX_RESPONSES = """
                    json_extract(detail, '$.service_tier') service_tier,
                    json_extract(detail, '$.input_tokens') input_tokens,
                    json_extract(detail, '$.cached_input_tokens') cached_input_tokens,
+                   json_extract(detail, '$.scope') scope,
+                   json_extract(detail, '$.native_thread_id') native_thread_id,
+                   json_extract(detail, '$.native_turn_id') native_turn_id,
                    COALESCE(json_extract(detail, '$.model'), 'unknown') model,
                    json_extract(detail, '$.output_tokens') output,
                    json_extract(detail, '$.reasoning_tokens') reasoning,
@@ -149,6 +152,7 @@ _CODEX_RESPONSES = """
                             OR json_extract(detail, '$.reasoning_tokens') BETWEEN 0
                                AND json_extract(detail, '$.output_tokens')) valid
             FROM events WHERE kind = 'codex_response' AND ts >= ?
+              AND COALESCE(json_extract(detail, '$.scope'), 'managed_session') NOT IN ('anomalous_root', 'unbound')
 """
 
 
@@ -175,6 +179,8 @@ async def codex(conn: aiosqlite.Connection, window: str = "24h") -> list[dict[st
                SUM(r.output) output_tokens, SUM(r.reasoning) reasoning_tokens,
                (SELECT ROUND(AVG(e.duration_ms), 1) FROM events e
                 WHERE e.kind = 'codex_turn_latency' AND e.ts >= ?
+                  AND COALESCE(json_extract(e.detail, '$.scope'), 'managed_session')
+                      NOT IN ('anomalous_root', 'unbound')
                   AND json_extract(e.detail, '$.model') = r.model) avg_turn_ttft_ms
         FROM responses r GROUP BY r.model ORDER BY r.model
     """, (_since(window), _since(window)))
@@ -189,10 +195,72 @@ async def codex_turns(conn: aiosqlite.Connection, window: str = "24h") -> list[d
                  COUNT(*) responses, SUM(CASE WHEN valid THEN 1 ELSE 0 END) timed_responses,
                  SUM(output) output_tokens, SUM(reasoning) reasoning_tokens,
                  SUM(input_tokens) input_tokens, SUM(cached_input_tokens) cached_input_tokens,
+                 SUM(CASE WHEN scope='root' THEN 1 ELSE 0 END) root_responses,
+                 SUM(CASE WHEN scope='child' THEN 1 ELSE 0 END) child_responses,
+                 COUNT(DISTINCT json_array(native_thread_id, native_turn_id)) native_turns,
                  GROUP_CONCAT(DISTINCT effort) effort, GROUP_CONCAT(DISTINCT service_tier) service_tier
           FROM responses GROUP BY session_id, request_id, model
           ORDER BY last_seen DESC LIMIT 20
     """, (_since(window),))
+
+
+async def _codex_details(conn: aiosqlite.Connection, window: str, kind: str, fields: tuple[str, ...]) -> list[dict[str, Any]]:
+    # Callers supply fixed field names. Provider counters are snapshots, never
+    # input to the response/TPS aggregates above.
+    columns = ", ".join(f"json_extract(detail, '$.{field}') {field}" for field in fields)
+    return await _rows(conn, f"SELECT session_id, ts last_seen, {columns} FROM events "
+                       "WHERE kind=? AND ts >= ? ORDER BY ts DESC LIMIT 20", (kind, _since(window)))
+
+
+async def codex_runs(conn: aiosqlite.Connection, window: str = "24h") -> list[dict[str, Any]]:
+    return await _codex_details(conn, window, "codex_run", (
+        "request_id", "attempt_id", "root_thread_id", "root_turn_id", "root_turns", "child_turns",
+        "input_state", "native_status", "resource_state", "end_reason", "host_ms", "preparation_ms",
+        "start_ack_ms", "first_output_ms", "root_active_ms", "retirement_ms", "overall_elapsed_ms",
+        "preparation_mode", "spawn_ms", "metrics_collection_complete",
+        "idle_elapsed_ms", "overall_limit_ms", "idle_limit_ms", "idle_suspended", "metrics_threads",
+        "metrics_unavailable", "metrics_capacity_drops",
+    ))
+
+
+async def codex_native_usage(conn: aiosqlite.Connection, window: str = "24h") -> list[dict[str, Any]]:
+    return await _codex_details(conn, window, "codex_native_usage", (
+        "request_id", "attempt_id", "native_thread_id", "native_turn_id", "historical",
+        "input_tokens", "cached_input_tokens", "output_tokens", "reasoning_tokens", "total_tokens",
+    ))
+
+
+async def codex_retirement(conn: aiosqlite.Connection, window: str = "24h") -> list[dict[str, Any]]:
+    """Only entered phases, with the original Harness timeout and elapsed time."""
+    return await _rows(conn, """
+        SELECT e.session_id, json_extract(e.detail, '$.request_id') request_id,
+               json_extract(e.detail, '$.attempt_id') attempt_id,
+               json_extract(p.value, '$.phase') phase,
+               json_extract(p.value, '$.grace_ms') grace_ms,
+               json_extract(p.value, '$.elapsed_ms') elapsed_ms
+        FROM events e, json_each(e.detail, '$.retirement_phases') p
+        WHERE e.kind='codex_run' AND e.ts >= ?
+        ORDER BY e.ts DESC, p.key LIMIT 100
+    """, (_since(window),))
+
+
+async def codex_steers(conn: aiosqlite.Connection, window: str = "24h") -> list[dict[str, Any]]:
+    return await _rows(conn, "SELECT session_id, ts last_seen, duration_ms ack_ms, "
+        "json_extract(detail, '$.request_id') request_id, json_extract(detail, '$.input_id') input_id, "
+        "json_extract(detail, '$.state') state FROM events WHERE kind='codex_steer' AND ts >= ? "
+        "ORDER BY ts DESC LIMIT 20", (_since(window),))
+
+
+async def codex_anomalies(conn: aiosqlite.Connection, window: str = "24h") -> list[dict[str, Any]]:
+    return await _rows(conn, "SELECT session_id, json_extract(detail, '$.request_id') request_id, "
+        "json_extract(detail, '$.attempt_id') attempt_id, json_extract(detail, '$.native_thread_id') native_thread_id, "
+        "json_extract(detail, '$.native_turn_id') native_turn_id, json_extract(detail, '$.scope') scope, "
+        "json_extract(detail, '$.model') model, COUNT(*) responses, "
+        "SUM(json_extract(detail, '$.output_tokens')) output_tokens, MAX(ts) last_seen "
+        "FROM events WHERE kind='codex_response' AND ts >= ? "
+        "AND json_extract(detail, '$.scope') IN ('anomalous_root', 'unbound') "
+        "GROUP BY session_id, request_id, attempt_id, native_thread_id, native_turn_id, scope, model "
+        "ORDER BY last_seen DESC LIMIT 20", (_since(window),))
 
 
 async def overview(conn: aiosqlite.Connection, window: str = "24h") -> dict[str, Any]:
@@ -211,12 +279,22 @@ async def overview(conn: aiosqlite.Connection, window: str = "24h") -> dict[str,
         "resources": await resources(conn, window),
         "codex": await codex(conn, window),
         "codex_turns": await codex_turns(conn, window),
+        "codex_runs": await codex_runs(conn, window),
+        "codex_retirement": await codex_retirement(conn, window),
+        "codex_native_usage": await codex_native_usage(conn, window),
+        "codex_steers": await codex_steers(conn, window),
+        "codex_anomalies": await codex_anomalies(conn, window),
     }
 
 
 REPORTS = {
     "codex": codex,
     "codex_turns": codex_turns,
+    "codex_runs": codex_runs,
+    "codex_retirement": codex_retirement,
+    "codex_native_usage": codex_native_usage,
+    "codex_steers": codex_steers,
+    "codex_anomalies": codex_anomalies,
     "turns": turns,
     "errors": errors,
     "connectors": connectors,

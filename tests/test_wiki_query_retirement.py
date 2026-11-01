@@ -19,7 +19,7 @@ from server.oauth_providers import OAuthTokenSet, get_provider
 from server.users import UserManager
 from tests import test_wiki_query_real as query_support
 from tests.callback_api import CallbackApi
-from tests.harness_profiles import session_turn_argv
+from tests.harness_profiles import process_profile, session_turn_argv
 from tests.test_wiki_query_real import query_probe_context
 from tests.wiki_query_evidence import (
     collect_evaluation,
@@ -52,7 +52,7 @@ def controlled_query_cli(monkeypatch, tmp_path, short_process_shutdown):
             spawned.set()
         return process
 
-    monkeypatch.setattr(harness, 'profile', replace(
+    monkeypatch.setattr(harness, 'profile', process_profile(
         harness.profile, binary=sys.executable,
         build_turn_argv=session_turn_argv(harness.profile, argv), prepare_resume=None, activity_observer=None,
     ))

@@ -6,7 +6,6 @@ import os
 import sqlite3
 import subprocess
 import sys
-from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -17,6 +16,7 @@ from server.harness import HarnessEvent, HarnessRun, get_harness
 from server.sessions import SessionManager
 from server.users import UserManager
 from tests.accounts import create_account
+from tests.harness_profiles import process_profile
 
 
 @pytest.fixture
@@ -164,7 +164,8 @@ async def main():
         code = "import json\nprint(json.dumps({'type':'thread.started','thread_id':'original-thread'}),flush=True)\nprint(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'Original answer'}}),flush=True)\nprint(json.dumps({'type':'turn.completed','usage':{}}),flush=True)"
         return [sys.executable,"-u","-c",code], {"cwd":context.working_dir}
     harness = get_harness("codex")
-    harness.profile = replace(harness.profile,build_turn_argv=argv,prepare_resume=None,activity_observer=None)
+    from tests.harness_profiles import process_profile
+    harness.profile = process_profile(harness.profile,build_turn_argv=argv,prepare_resume=None,activity_observer=None)
     receipts=[]
     start = manager.start_message
     async def capture(*args,**kwargs):
@@ -263,7 +264,7 @@ async def test_actual_dispatch_waits_for_storage_then_preserves_stop_pause(datab
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv, prepare_resume=None))
     original = database.record_terminal
 
     entered, release = asyncio.Event(), asyncio.Event()
@@ -317,7 +318,7 @@ async def test_committed_outcome_survives_failure_and_duplicate_input_observatio
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv,
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv,
                                                    prepare_resume=None, activity_observer=None))
     committed = asyncio.Event()
     record, projection, broadcast = database.record_terminal, database.message_sequence_state, manager._broadcast
@@ -400,7 +401,7 @@ async def test_duplicate_late_terminal_uses_original_callback_without_settling_n
 
     manager.on_broadcast("late-terminal", observe)
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv,
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv,
                                                    prepare_resume=None, activity_observer=None))
     try:
         first = await manager.start_message(session.id, "first")

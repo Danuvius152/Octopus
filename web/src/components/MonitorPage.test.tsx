@@ -42,6 +42,26 @@ function mockFetch(payload: unknown, ok = true, status = 200) {
   } as Response);
 }
 
+it("keeps native execution phases and provider snapshots distinct from response speed", async () => {
+  vi.stubGlobal("fetch", mockFetch(overview({
+    codex_runs: [{ request_id: "native-request", input_state: "accepted", resource_state: "proven",
+      preparation_ms: 120, root_active_ms: 2000, retirement_ms: 5000, metrics_unavailable: 1 }],
+    codex_native_usage: [{ native_thread_id: "native-thread", historical: 1, total_tokens: 987 }],
+    codex_steers: [{ input_id: "native-input", ack_ms: 15, state: "accepted" }],
+    codex_retirement: [{ request_id: "native-request", phase: "graceful_exit", grace_ms: 2000, elapsed_ms: 15 }],
+  })));
+  render(<MonitorPage />);
+  await waitFor(() => expect(screen.getAllByText("native-request").length).toBeGreaterThan(0));
+  expect(screen.getByText("Native execution phases")).toBeTruthy();
+  expect(screen.getByText("Provider cumulative snapshots")).toBeTruthy();
+  expect(screen.getByText("retirement")).toBeTruthy();
+  expect(screen.getByText("5.0s")).toBeTruthy();
+  expect(screen.getByText(/Snapshots are not added/)).toBeTruthy();
+  expect(screen.getByText(/Retirement measures resource cleanup/)).toBeTruthy();
+  expect(screen.getByText("Retirement grace phases")).toBeTruthy();
+  expect(screen.getByText("graceful_exit")).toBeTruthy();
+});
+
 beforeEach(() => {
   useSessionStore.setState({ token: "t" });
 });
@@ -89,7 +109,7 @@ describe("MonitorPage", () => {
     );
     render(<MonitorPage />);
     await waitFor(() =>
-      expect(screen.getAllByText(/Nothing recorded in this window/).length).toBe(6)
+      expect(screen.getAllByText(/Nothing recorded in this window/).length).toBe(11)
     );
   });
 

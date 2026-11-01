@@ -1,16 +1,7 @@
-"""End-to-end CodexBackend tests against the real `codex` binary.
+"""Real ordinary Codex resume applies each turn's effort and service tier.
 
-These need `codex` installed AND a logged-in ChatGPT subscription
-(`~/.codex/auth.json`). Auto-skipped otherwise so CI without a login still
-passes. They sit alongside test_backend_codex.py (fake CLI): the fake tests
-are fast regression checks for the normalizer; these prove the wire format is
-actually what codex emits (codex-backend.md §12, Phase C — keeps the fake
-fixture honest against version drift).
-
-Confirmed against codex 0.132.0 in this session:
-  thread.started{thread_id} / turn.started / item.completed{agent_message}
-  / item.{started,completed}{command_execution} / item.{started,completed}
-  {mcp_tool_call: server,tool,arguments,result} / turn.completed{usage}.
+Native fork/independent-history proof uses the original product saga in
+test_codex_app_server_real.py, including externally created exec history.
 """
 
 from __future__ import annotations
@@ -18,23 +9,18 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-import subprocess
-import uuid
 from pathlib import Path
 
 import pytest
 
 from server.harness import HarnessEvent, RunConfig, get_harness
-from server.harness import codex as cx
-from server.harness.events import HarnessCredential
-from server.harness.run import _which_with_fallback
-from tests.cli_gate import codex_home_with_auth
 from tests.codex_speed_evidence import (
     capture_rollout,
     record_phase,
     successful_thread,
     verify_resume,
 )
+from tests.harness_profiles import native_submission
 
 pytestmark = [pytest.mark.real, pytest.mark.real_codex]
 
@@ -43,7 +29,9 @@ def _codex_run(**cfg):
     """A codex HarnessRun for the given RunConfig. The engine resolves the
     `codex` binary via the same nvm-aware fallback, so this spawns even when
     codex lives only under ~/.nvm/.../bin (not on the service PATH)."""
-    return get_harness("codex").create_run(RunConfig(**cfg))
+    run = get_harness("codex").create_run(RunConfig(**cfg))
+    native_submission(run, cfg["session_id"], "direct-harness-attempt")
+    return run
 
 
 async def _drain(backend, timeout: float = 150.0) -> list[HarnessEvent]:
@@ -64,8 +52,8 @@ async def _drain(backend, timeout: float = 150.0) -> list[HarnessEvent]:
 
 
 @pytest.mark.asyncio
-async def test_real_resume_speed_changes_and_native_copy(tmp_path):
-    """The same real transcript proves speed changes and full-copy resume."""
+async def test_real_resume_speed_changes(tmp_path):
+    """Three verified rollout intervals prove settings without guessing TPS."""
     b1 = _codex_run(session_id="r1", mcp_servers=[], reasoning_effort="low", service_tier="default")
     await b1.start(
         "Remember this exact word for later: MARIGOLD. Reply only with OK. Do not use tools.",
@@ -86,7 +74,7 @@ async def test_real_resume_speed_changes_and_native_copy(tmp_path):
     assert result.session_id is not None
     assert result.cost is None
     assert result.is_error is False
-    assert result.duration_ms is not None and result.duration_ms > 0
+    assert b1.retirement_state == "proven"
     sid = successful_thread(e1)
     home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
     evidence = tmp_path / "speed-evidence"
@@ -132,38 +120,3 @@ async def test_real_resume_speed_changes_and_native_copy(tmp_path):
     (evidence / "verified-intervals.json").write_text(
         json.dumps([fast_interval, normal_interval], indent=2) + "\n"
     )
-    # A full-copy fork needs an actual completed rollout, which these three
-    # phases already supplied. Keep the raw CLI resume in a different cwd;
-    # creating another seed conversation adds no independent coverage.
-    codex_home = codex_home_with_auth()
-    assert codex_home is not None and Path(codex_home).resolve() == home.resolve()
-    credential = HarnessCredential(backend="codex", auth_type="oauth", home_dir=codex_home)
-    destination = tmp_path / "copied-workspace"
-    destination.mkdir()
-    copied_id = str(uuid.uuid4())
-    artifact = await cx._fork_copy(
-        parent_working_dir=str(tmp_path), parent_resume_id=sid,
-        parent_credential=credential, dest_working_dir=str(destination),
-        new_resume_id=copied_id,
-    )
-    try:
-        assert artifact.needs_replay is False and artifact.resume_id == copied_id
-        result = subprocess.run(
-            [_which_with_fallback("codex"), "exec", "--json", "--skip-git-repo-check",
-             "-C", str(destination), "--dangerously-bypass-approvals-and-sandbox",
-             "-c", 'model_reasoning_effort="low"', "resume", copied_id, "--",
-             "What exact word did I ask you to remember? Reply with only that word."],
-            capture_output=True, text=True, timeout=180,
-            env={**os.environ, "CODEX_HOME": codex_home},
-        )
-        assert result.returncode == 0, result.stderr
-        rows = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
-        assert any(row.get("type") == "thread.started" and row.get("thread_id") == copied_id for row in rows)
-        reply = "".join(row["item"].get("text", "") for row in rows
-                        if row.get("type") == "item.completed" and row.get("item", {}).get("type") == "agent_message")
-        assert "MARIGOLD" in reply.upper(), f"copied rollout lost context: {reply!r}"
-        assert normal.path.read_bytes() == normal.raw, "copy resume changed its parent rollout"
-    finally:
-        copied = cx._find_rollout(cx._codex_sessions_dir(credential), copied_id)
-        if copied is not None:
-            copied.unlink(missing_ok=True)

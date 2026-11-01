@@ -7,12 +7,12 @@ import json
 import os
 import signal
 import sys
-from dataclasses import replace
 
 import pytest
 
 from server.harness import Harness, get_harness
 from server.research.leaf import LeafRetirementError, run_web_leaf
+from tests.harness_profiles import process_profile
 
 
 @pytest.mark.parametrize("ending", ["zero_exit", "error_exit", "success"])
@@ -24,7 +24,7 @@ async def test_leaf_eof_keeps_partial_but_requires_success_terminal(tmp_path, en
     script = "import sys; " + "; ".join(f"print({json.dumps(json.dumps(record))}, flush=True)" for record in records)
     if ending == "error_exit":
         script += "; sys.exit(7)"
-    profile = replace(
+    profile = process_profile(
         get_harness("claude-code").profile, binary=sys.executable,
         build_turn_argv=lambda ctx: ([sys.executable, "-c", script], {"cwd": ctx.working_dir}),
         activity_observer=None,
@@ -55,7 +55,7 @@ async def test_successful_leaf_retains_original_run_when_retirement_fails(tmp_pa
     ]
     script = "import time; " + "; ".join(f"print({json.dumps(json.dumps(record))}, flush=True)" for record in records)
     script += "; time.sleep(60)"
-    profile = replace(
+    profile = process_profile(
         get_harness("claude-code").profile, binary=sys.executable, activity_observer=None,
         build_turn_argv=lambda ctx: ([sys.executable, "-c", script], {"cwd": ctx.working_dir}),
     )

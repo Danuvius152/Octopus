@@ -65,9 +65,7 @@ class Settings(BaseSettings):
     # in-app Codex login gets `<codex_home_dir>/<credential_id>/`, which holds
     # the `auth.json` Codex writes + manages. `~` expanded at use time.
     codex_home_dir: str = "~/.octopus/codex"
-    # Explicit development selection; ordinary exec remains the default until
-    # the integration/cutover ticket passes. Never switch after a send failure.
-    codex_transport: Literal["exec", "app-server"] = "exec"
+    # Ordinary requests use the verified App Server; Research owns its exec leaf.
     codex_app_server_binary: str = "codex"
     # A deep-research job's scratch cwd and its report. It was hardcoded to
     # `~/.octopus/research`, which put every test run's output into whichever

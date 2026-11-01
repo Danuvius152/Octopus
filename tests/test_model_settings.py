@@ -21,6 +21,9 @@ from server.main import app
 from server.routers import agents
 from server.session_manager import SessionManager, session_manager
 from server.users import UserManager
+from tests.harness_profiles import native_submission, process_profile
+from tests.test_codex_app_server_questions import wire_frames
+from tests.test_codex_app_server_submission import native_runtime as native_runtime
 
 
 @pytest.fixture
@@ -84,38 +87,49 @@ def test_unavailable_catalog_keeps_basic_controls(catalog_home, cache):
     assert read_model_settings().reasoning_efforts == ["low", "medium", "high", "xhigh"]
 
 
-def test_effort_reaches_new_resumed_and_oneshot_argv(catalog_home, tmp_path, monkeypatch):
-    monkeypatch.setattr("server.harness.run._which_with_fallback", lambda name: "/fake/bin/codex")
+async def native_rounds(tmp_path, **options):
+    (tmp_path / "native-defaults.json").write_text(json.dumps({"model": "model-a", "effort": "high"}))
+    identity = None
+    for index in range(2):
+        run = get_harness("codex").create_run(RunConfig(mcp_servers=[], **options))
+        proofs = native_submission(run, f"settings-{index}", f"settings-attempt-{index}")
+        try:
+            await run.start("continue", str(tmp_path), identity)
+            events = [event async for event in run.stream()]
+            result, = [event for event in events if event.type == "result"]
+            assert not result.is_error
+            identity = result.session_id
+            assert any(proof.state == "accepted" for proof in proofs)
+        finally:
+            await run.stop()
+    return [frame for frame in wire_frames(tmp_path) if frame.get("method") in {"thread/start", "thread/resume"}]
+
+
+async def test_effort_reaches_new_resumed_native_requests_and_oneshot(catalog_home, native_runtime, tmp_path):
     harness = get_harness("codex")
     run = harness.create_run(RunConfig(model="model-a", reasoning_effort="high", mcp_servers=[]))
-    for resume_id in (None, "existing-thread"):
-        argv, _ = run.build_argv("continue", str(tmp_path), resume_id)
-        assert 'model_reasoning_effort="high"' in argv
-        assert argv[argv.index("-m") + 1] == "model-a"
-        if resume_id:
-            assert argv.index('model_reasoning_effort="high"') < argv.index("resume")
-            assert argv[argv.index("resume") + 1] == resume_id
+    frames = await native_rounds(tmp_path, model="model-a", reasoning_effort="high")
+    assert [frame["method"] for frame in frames] == ["thread/start", "thread/resume"]
+    assert all(frame["params"]["model"] == "model-a" and
+               frame["params"]["config"]["model_reasoning_effort"] == "high" for frame in frames)
+    assert frames[1]["params"]["threadId"] == "exact-native-thread"
     ctx = OneShotContext(prompt="hello", reasoning_effort="low")
     argv, _ = harness.profile.build_oneshot_argv(ctx)
     assert argv[argv.index("--effort") + 1] == "low"
     inherited = harness.create_run(RunConfig(mcp_servers=[]))
-    assert not any(a.startswith("model_reasoning_effort=") for a in inherited.build_argv("hi", str(tmp_path))[0])
+    assert inherited._config.reasoning_effort is None
     changed = harness.create_run(RunConfig(model="model-a", reasoning_effort="low", mcp_servers=[]))
     assert changed.spawn_signature(str(tmp_path), None) != run.spawn_signature(str(tmp_path), None)
 
 
 @pytest.mark.parametrize("tier, rendered", [(None, "default"), ("default", "default"), ("fast", "fast")])
-def test_speed_reaches_new_resumed_and_oneshot_argv(catalog_home, tmp_path, tier, rendered, monkeypatch):
-    monkeypatch.setattr("server.harness.run._which_with_fallback", lambda name: "/fake/bin/codex")
+async def test_speed_reaches_new_resumed_native_requests_and_oneshot(catalog_home, native_runtime, tmp_path, tier, rendered):
     harness = get_harness("codex")
     run = harness.create_run(RunConfig(service_tier=tier, mcp_servers=[]))
-    flag = f'service_tier="{rendered}"'
-    for resume_id in (None, "existing-thread"):
-        argv, _ = run.build_argv("continue", str(tmp_path), resume_id)
-        assert flag in argv
-        assert "features.fast_mode=true" in argv
-        if resume_id:
-            assert argv.index(flag) < argv.index("resume")
+    frames = await native_rounds(tmp_path, service_tier=tier)
+    assert [frame["method"] for frame in frames] == ["thread/start", "thread/resume"]
+    assert all(frame["params"]["config"]["service_tier"] == rendered and
+               frame["params"]["config"]["features.fast_mode"] is True for frame in frames)
     argv, _ = harness.profile.build_oneshot_argv(OneShotContext(prompt="hello", service_tier=tier))
     assert argv[argv.index("--tier") + 1] == rendered
     other = harness.create_run(RunConfig(service_tier="default" if tier == "fast" else "fast", mcp_servers=[]))
@@ -256,8 +270,7 @@ async def test_speed_inheritance_clear_reload_and_history(client):
     changed = await client.patch(f"/api/agents/{agent['id']}", headers=client.headers, json={"service_tier": None})
     assert changed.status_code == 200
     assert changed.json()["service_tier"] is None
-    argv, _ = session_manager._make_run(current, changed.json()).build_argv("continue", "/tmp", "original-thread")
-    assert 'service_tier="default"' in argv
+    assert session_manager._make_run(current, changed.json())._config.service_tier is None
 
 
 @pytest.mark.asyncio
@@ -333,23 +346,20 @@ async def test_legal_defaults_save_before_an_old_session_is_repaired_and_resumed
     effects = tmp_path / 'continued-settings.jsonl'
     script = tmp_path / 'resume-configuration.py'
     script.write_text(
-        "import json,sys\nfrom pathlib import Path\nargs=sys.argv[2:]\n"
-        "record={'model':args[args.index('-m')+1],'resume':args[args.index('resume')+1],"
-        "'effort':next(a for a in args if a.startswith('model_reasoning_effort=')),"
-        "'tier':next(a for a in args if a.startswith('service_tier='))}\n"
+        "import json,sys\nfrom pathlib import Path\nrecord=json.loads(sys.argv[2])\n"
         "with Path(sys.argv[1]).open('a') as out: out.write(json.dumps(record)+'\\n')\n"
         "print(json.dumps({'type':'thread.started','thread_id':'original-thread'}),flush=True)\n"
         "print(json.dumps({'type':'item.completed','item':{'type':'agent_message','text':'Continued'}}),flush=True)\n"
         "print(json.dumps({'type':'turn.completed','usage':{}}),flush=True)\n"
     )
     harness = get_harness('codex')
-    render = harness.profile.build_turn_argv
 
     def controlled_process(context):
-        argv, kwargs = render(context)
-        return [sys.executable, '-u', str(script), str(effects), *argv[1:]], kwargs
+        captured = {'model': context.model, 'resume': context.resume_id,
+                    'effort': context.reasoning_effort, 'tier': context.service_tier or 'default'}
+        return [sys.executable, '-u', str(script), str(effects), json.dumps(captured)], {'cwd': context.working_dir}
 
-    monkeypatch.setattr(harness, 'profile', replace(
+    monkeypatch.setattr(harness, 'profile', process_profile(
         harness.profile, binary=sys.executable, build_turn_argv=controlled_process,
         activity_observer=None, prepare_resume=None,
     ))
@@ -391,8 +401,8 @@ async def test_legal_defaults_save_before_an_old_session_is_repaired_and_resumed
     assert succeeded.outcome.status == 'success', succeeded.outcome.message
     assert [json.loads(line) for line in effects.read_text().splitlines()] == [{
         'model': 'model-b', 'resume': 'original-thread',
-        'effort': 'model_reasoning_effort="medium"' if field == 'reasoning_effort' else 'model_reasoning_effort="low"',
-        'tier': 'service_tier="default"',
+        'effort': 'medium' if field == 'reasoning_effort' else 'low',
+        'tier': 'default',
     }]
 
 
@@ -478,12 +488,10 @@ async def test_saved_custom_model_controls_reach_native_argv_and_process(
     script.write_text(
         "import json,sys\nfrom pathlib import Path\n"
         "backend=sys.argv[2]; args=sys.argv[3:]\n"
-        "flag='-m' if backend=='codex' else '--model'\n"
-        "observed={'model':args[args.index(flag)+1]}\n"
         "if backend=='codex':\n"
-        " observed['effort']=next(a for a in args if a.startswith('model_reasoning_effort='))\n"
-        " observed['tier']=next(a for a in args if a.startswith('service_tier='))\n"
+        " observed=json.loads(args[0])\n"
         "else:\n"
+        " observed={'model':args[args.index('--model')+1]}\n"
         " observed['effort']=args[args.index('--effort')+1]\n"
         " observed['deny']=args[args.index('--disallowedTools')+1].split(',')\n"
         "with Path(sys.argv[1]).open('a') as out: out.write(json.dumps(observed)+'\\n')\n"
@@ -499,10 +507,14 @@ async def test_saved_custom_model_controls_reach_native_argv_and_process(
     render = harness.profile.build_turn_argv
 
     def controlled_process(context):
+        if backend == 'codex':
+            captured = {'model': context.model, 'effort': context.reasoning_effort,
+                        'tier': context.service_tier or 'default'}
+            return [sys.executable, '-u', str(script), str(effects), backend, json.dumps(captured)], {'cwd': context.working_dir}
         argv, kwargs = render(context)
         return [sys.executable, '-u', str(script), str(effects), backend, *argv[1:]], kwargs
 
-    monkeypatch.setattr(harness, 'profile', replace(
+    monkeypatch.setattr(harness, 'profile', process_profile(
         harness.profile, binary=sys.executable, build_turn_argv=controlled_process,
         activity_observer=None, prepare_resume=None,
     ))
@@ -519,7 +531,7 @@ async def test_saved_custom_model_controls_reach_native_argv_and_process(
         completion = await asyncio.wait_for(receipt.wait(), 5)
         assert completion.outcome.status == 'success', completion.outcome.message
         expected = {'model': 'private-model-alias'}
-        expected.update({'effort': 'model_reasoning_effort="low"', 'tier': 'service_tier="fast"'}
+        expected.update({'effort': 'low', 'tier': 'fast'}
                         if backend == 'codex' else {'effort': 'low', 'deny': ['AskUserQuestion', 'Write']})
         assert [json.loads(line) for line in effects.read_text().splitlines()] == [expected]
     finally:

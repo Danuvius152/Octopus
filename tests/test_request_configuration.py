@@ -22,6 +22,7 @@ from server.harness.model_settings import ModelSettings
 from server.routers import agents, credentials, sessions
 from server.sessions import SessionManager
 from tests.accounts import create_account
+from tests.harness_profiles import process_profile
 
 
 @pytest.fixture
@@ -52,7 +53,7 @@ async def configuration_host(tmp_path, monkeypatch):
         return [sys.executable, "-u", str(model), str(effects), json.dumps(observed)], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, build_turn_argv=argv,
         activity_observer=None, prepare_resume=None, new_driver=ArgvDriver,
         model_settings=lambda credential: ModelSettings(reasoning_efforts=["low", "high"], service_tiers=["default", "fast"]),
@@ -270,7 +271,7 @@ async def test_credential_deleted_after_spawn_cannot_receive_initial_input(confi
         "print('{\"type\":\"turn.completed\",\"usage\":{}}',flush=True)\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: ([sys.executable, "-u", str(model), str(effects)], {"cwd": context.working_dir}),
     ))
@@ -437,7 +438,7 @@ async def test_next_request_uses_the_new_credential_instead_of_a_held_process(co
         " print('{\"type\":\"turn.completed\",\"usage\":{}}',flush=True)\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, new_driver=ClaudeDriver, can_steer=True, reusable=True, credential_style=credential_style,
         build_turn_argv=lambda context: (
             [sys.executable, "-u", str(model), str(effects),

@@ -23,7 +23,7 @@ from server.mcp_identity import revoke_run, scope_is_live, verify
 from server.sessions import SessionManager
 from server.users import UserManager
 from tests.accounts import create_account
-from tests.harness_profiles import session_turn_argv
+from tests.harness_profiles import process_profile, session_turn_argv
 
 
 async def _finished(manager, rec):
@@ -83,7 +83,7 @@ async def _seed_running_round(path: Path, request: str, agents_dir: Path) -> Non
         f"while os.getppid()=={os.getpid()}: time.sleep(.005)\n"
     )
     harness = get_harness("codex")
-    harness.profile = replace(
+    harness.profile = process_profile(
         harness.profile, binary=sys.executable, prepare_resume=None, activity_observer=None,
         new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: ([sys.executable, "-u", "-c", code], {"cwd": context.working_dir}),
@@ -157,7 +157,7 @@ async def _crash_scenario(directory: Path, mode: str, applied: bool) -> None:
         return [sys.executable, "-u", "-c", code], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    harness.profile = replace(harness.profile, build_turn_argv=session_turn_argv(harness.profile, argv), prepare_resume=None, activity_observer=None)
+    harness.profile = process_profile(harness.profile, build_turn_argv=session_turn_argv(harness.profile, argv), prepare_resume=None, activity_observer=None)
     database = Database(str(path))
     await database.initialize()
     if unfinished is None:

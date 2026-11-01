@@ -23,7 +23,8 @@ import signal
 import time
 import uuid as uuid_module
 from collections import deque
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -232,6 +233,7 @@ class HarnessRun:
         self._preparation_task: asyncio.Task[tuple[TurnContext, list[str], dict[str, Any]]] | None = None
         self._stop_task: asyncio.Task[None] | None = None
         self._retirement_started = asyncio.Event()
+        self._retirement_phases: list[dict[str, Any]] = []
         self._activity_observer: ActivityObserver | None = None
         self._driver = profile.new_driver(profile)
         self._write_lock = asyncio.Lock()
@@ -244,6 +246,7 @@ class HarnessRun:
         self._private_settings: PrivateSettings | None = None
         self._spawn_identity: str | None = None
         self._started_at: float | None = None
+        self._spawned_at: float | None = None
         self._event_queue: deque[tuple[HarnessEvent, int]] = deque()
         self._event_bytes = 0
         self._event_changed = asyncio.Event()
@@ -260,6 +263,7 @@ class HarnessRun:
         self.native_end_reason = "process_ended"
         self._activity_generation = 0
         self._activity_callback: Callable[[float | None], None] | None = None
+        self._observation_clock: Callable[[float], dict[str, Any]] | None = None
         # Events that arrive with no turn in flight (native-subagents.md §7):
         # an asynchronous sub-agent finishing, the follow-up turn the CLI
         # wakes to report it, a native cron tick. Without a handler they are
@@ -421,6 +425,7 @@ class HarnessRun:
         self._spawn_task = spawn
         try:
             process = await _await_owned_task(spawn)
+            self._spawned_at = time.monotonic()
         except asyncio.CancelledError:
             # A transport can have spawned the process before returning its
             # handle. Keep that reservation alive until the captured group is
@@ -866,6 +871,36 @@ class HarnessRun:
             raise
 
     async def _stop(self) -> None:
+        retired = False
+        try:
+            await self._stop_process()
+            retired = True
+        finally:
+            try:
+                await self._driver.close_observations(retired=retired)
+            except Exception:
+                logger.warning("Supplementary observation cleanup failed provider=%s run=%s",
+                               self._profile.backend, self.run_lease_id, exc_info=True)
+            finally:
+                self._observation_clock = None
+        self._close_stream()
+
+    @contextmanager
+    def _retirement_phase(self, phase: str, grace: float) -> Iterator[float]:
+        """Observe the exact timeout used by this owner, without another clock."""
+        observed: dict[str, Any] = {"phase": phase, "grace_ms": grace * 1000}
+        self._retirement_phases.append(observed)
+        began = time.monotonic()
+        try:
+            yield grace
+        finally:
+            observed["elapsed_ms"] = round((time.monotonic() - began) * 1000, 3)
+
+    @property
+    def retirement_phases(self) -> list[dict[str, Any]]:
+        return [dict(phase) for phase in self._retirement_phases]
+
+    async def _stop_process(self) -> None:
         if self._preparation_task is not None:
             preparation = self._preparation_task
             if not preparation.done():
@@ -895,16 +930,17 @@ class HarnessRun:
         if proc is None:
             if self._private_settings is not None:
                 self._private_settings.close()
-            self._close_stream()
             if self._activity_observer is not None:
                 await self._activity_observer.close()
             return
 
         if self._driver.multiplexed and self._question_replies:
-            await asyncio.wait(tuple(self._question_replies), timeout=0.6)
+            with self._retirement_phase("question_replies", 0.6) as grace:
+                await asyncio.wait(tuple(self._question_replies), timeout=grace)
         try:
-            async with asyncio.timeout(0.5):
-                await self._driver.interrupt(self)
+            with self._retirement_phase("protocol_interrupt", 0.5) as grace:
+                async with asyncio.timeout(grace):
+                    await self._driver.interrupt(self)
         except Exception as error:
             logger.debug("Harness protocol interrupt failed: %s", self.format_exception(error))
         if not self._driver.multiplexed:
@@ -923,7 +959,8 @@ class HarnessRun:
 
         if proc.returncode is None:
             try:
-                await asyncio.wait_for(proc.wait(), timeout=2.0)
+                with self._retirement_phase("graceful_exit", 2.0) as grace:
+                    await asyncio.wait_for(proc.wait(), timeout=grace)
             except TimeoutError:
                 pass
         # The leader's wait and pipe EOF cannot prove its redirected children
@@ -933,12 +970,14 @@ class HarnessRun:
                            self._profile.backend, self.run_lease_id)
             _terminate_process_group(proc, signal.SIGTERM)
             try:
-                await wait_group_exit(proc.pid, timeout=2.0)
+                with self._retirement_phase("term_exit", 2.0) as grace:
+                    await wait_group_exit(proc.pid, timeout=grace)
             except TimeoutError:
                 logger.warning("Harness retirement escalation provider=%s run=%s signal=SIGKILL",
                                self._profile.backend, self.run_lease_id)
                 _terminate_process_group(proc, signal.SIGKILL)
-                await wait_group_exit(proc.pid, timeout=2.0, after_kill=True)
+                with self._retirement_phase("kill_exit", 2.0) as grace:
+                    await wait_group_exit(proc.pid, timeout=grace, after_kill=True)
         if self._private_settings is not None:
             self._private_settings.close()
         for task, name in (
@@ -951,7 +990,8 @@ class HarnessRun:
                 # Native delivery never waits for presentation. Let the original
                 # reader parse the finite pipe prefix after execution admission
                 # is revoked; raw drain below is only descriptor cleanup.
-                done, _ = await asyncio.wait({task}, timeout=2.0)
+                with self._retirement_phase("native_collection", 2.0) as grace:
+                    done, _ = await asyncio.wait({task}, timeout=grace)
                 if not done:
                     self.fail_stream("native_collection_incomplete", "Native reader did not record the complete shutdown prefix")
             if not task.done():
@@ -970,12 +1010,13 @@ class HarnessRun:
         # Drain both captured pipes in bounded chunks: a pending process wait
         # can need pipe EOF even after the child has exited. Confirm both the
         # descriptors and the actual process exit before retirement returns.
-        async with asyncio.timeout(2.0):
-            for pipe in (proc.stdout, proc.stderr):
-                if pipe is not None:
-                    while await pipe.read(64 * 1024):
-                        pass
-            await proc.wait()
+        with self._retirement_phase("pipe_drain", 2.0) as grace:
+            async with asyncio.timeout(grace):
+                for pipe in (proc.stdout, proc.stderr):
+                    if pipe is not None:
+                        while await pipe.read(64 * 1024):
+                            pass
+                await proc.wait()
 
         logger.info("Harness exit provider=%s run=%s elapsed_ms=%s exit_code=%s",
                     self._profile.backend, self.run_lease_id,
@@ -983,8 +1024,6 @@ class HarnessRun:
                     proc.returncode)
 
         await self._driver.finish_observations()
-        self._close_stream()
-
         self._process = None
         self._stdout_task = None
         self._stderr_task = None
@@ -998,6 +1037,34 @@ class HarnessRun:
         await self.stop()
 
     # ------------------------------------------------------------------ helpers
+
+    def record_measurement(self, event: HarnessEvent, *, request_id: str, attempt_id: str) -> None:
+        """Disposable metadata bypasses necessary-output capacity and activity."""
+        try:
+            self._record_measurement(event, request_id=request_id, attempt_id=attempt_id)
+        except Exception:
+            logger.warning("Supplementary measurement unavailable provider=%s run=%s",
+                           self._profile.backend, self.run_lease_id, exc_info=True)
+
+    def _record_measurement(self, event: HarnessEvent, *, request_id: str, attempt_id: str) -> None:
+        from .. import monitor
+        from ..monitor import Event
+
+        detail = dict(event.raw or {})
+        kind, completed = detail.pop("kind", None), detail.pop("completed_at", None)
+        if kind not in {"codex_response", "codex_turn_latency", "codex_native_usage", "codex_run", "codex_steer"}:
+            return
+        detail.update(request_id=request_id, attempt_id=attempt_id, work_id=self.work_id,
+                      run_lease_id=self.run_lease_id)
+        if kind == "codex_run" and self._observation_clock is not None:
+            detail.update(self._observation_clock(self.admission_closed_at or time.monotonic()))
+        monitor.record(Event(kind=kind, ts=completed if isinstance(completed, (int, float)) else time.time(),
+            session_id=self._config.session_id, backend=self._profile.backend,
+            duration_ms=event.duration_ms, detail=detail))
+
+    def bind_observation_clock(self, clock: Callable[[float], dict[str, Any]]) -> None:
+        """Read the Owner's existing clocks without creating another deadline."""
+        self._observation_clock = clock
 
     async def _emit(self, event: HarnessEvent) -> None:
         if self._stream_closed:

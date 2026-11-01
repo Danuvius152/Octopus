@@ -3,7 +3,6 @@
 import asyncio
 import json
 import sys
-from dataclasses import replace
 
 import httpx
 import pytest
@@ -16,6 +15,7 @@ from server.harness import get_harness
 from server.routers.sessions import router
 from server.sessions import SessionManager
 from tests.accounts import create_account
+from tests.harness_profiles import process_profile
 
 
 @pytest.fixture
@@ -64,7 +64,7 @@ def scripted_cli(monkeypatch, scripts):
         return [sys.executable, "-u", "-c", code], {"cwd": ctx.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(harness.profile, build_turn_argv=argv, prepare_resume=None))
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile, build_turn_argv=argv, prepare_resume=None))
     return prompts
 
 

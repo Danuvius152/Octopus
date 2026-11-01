@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import sys
-from dataclasses import replace
 
 import pytest
 
@@ -13,6 +12,7 @@ from server.harness import HarnessEvent, get_harness
 from server.harness.claude_code import ClaudeDriver
 from server.sessions.owner import SessionMailboxFull
 from tests import test_question_lifecycle as question_tests
+from tests.harness_profiles import process_profile
 
 QUESTIONS = question_tests.QUESTIONS
 question_host = question_tests.question_host
@@ -254,7 +254,7 @@ async def test_http_question_prefix_precedes_the_original_success_receipt(
         return [sys.executable, "-u", str(model), str(allow_result)], {"cwd": context.working_dir}
 
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
         new_driver=ClaudeDriver, can_steer=True, reusable=True, build_turn_argv=build_argv,
     ))
@@ -359,7 +359,7 @@ async def test_live_question_subscriber_can_archive_without_waiting_on_its_prefi
         "sys.stdin.read()\n"
     )
     harness = get_harness("codex")
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
         new_driver=ClaudeDriver, can_steer=True, reusable=True,
         build_turn_argv=lambda context: ([sys.executable, "-u", str(model)], {"cwd": context.working_dir}),

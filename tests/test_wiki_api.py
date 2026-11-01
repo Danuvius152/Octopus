@@ -1590,6 +1590,7 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
     from server.harness import get_harness
     from server.harness.assembly import select_mcp_servers
     from tests.fake_run import FakeRunBase
+    from tests.harness_profiles import process_profile
 
     vault = tmp_path / "vault"
     vault.mkdir()
@@ -1602,6 +1603,7 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
     seen = []
     credentials = []
     harness = get_harness(backend)
+    monkeypatch.setattr(harness, "profile", process_profile(harness.profile))
     real_create = harness.create_run
 
     def create(run_config):
@@ -1619,10 +1621,7 @@ async def test_explicit_turn_has_tools_and_credentials_expire_at_turn_end(
         from server.wiki.workflow import BOOTSTRAP
 
         if backend == "codex":
-            import tomllib
-
-            override = next(arg for arg in argv if arg.startswith("developer_instructions="))
-            prompt = tomllib.loads(override)["developer_instructions"]
+            prompt = real._make_context("test", str(tmp_path), None, None).system_prompt
         else:
             prompt = argv[argv.index("--append-system-prompt") + 1]
         seen.append((wiki is not None, BOOTSTRAP in prompt))

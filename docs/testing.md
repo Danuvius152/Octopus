@@ -26,8 +26,8 @@ default test selection.
 
 ### Existing tests when adding a transport
 
-The transport matrix currently retains Claude stream-JSON, Codex exec and the
-explicitly selected Codex App Server. Keep each existing test's business guarantee
+The transport matrix retains Claude stream-JSON, ordinary Codex App Server and
+the independent Codex exec leaf/text worker. Keep each existing test's business guarantee
 and choose its fixture from what it tests:
 
 | Test intent | Adaptation and evidence |
@@ -46,6 +46,12 @@ reader to finish. Do not globally change old tests to App Server, remove their
 assertions or turn incompatibilities into skips. A selected live test that skips
 does not certify App Server acceptance. Default cutover has its own integration
 scope; the explicit exec leaf and text-worker uses retain their tests.
+
+`tests/harness_profiles.py::process_profile` declares a synthetic process peer's
+actual driver and capabilities. Replacing an argv builder alone cannot turn the
+native App Server profile into an argv peer. Shared tests retain their original
+business assertions, while native input evidence and RPC behavior require the
+native controlled-stdio fixtures. Cold subprocess fixtures follow the same rule.
 
 ### Fast checks during development
 
@@ -146,18 +152,25 @@ root; use the PATH setup in [local-wsl.md](local-wsl.md#本机测试).
 | Supervisor integration | `.venv/bin/pytest tests/ -m "real and supervisor" -v` | Isolated systemd user units: installation ownership, environment/token handling, process retirement and managed restart. No provider CLI or production-service mutation. |
 | Frontend unit | `cd web && bun run test` | Stores, HTTP/WS events, components, input lifecycle, account/service generation boundaries and Wiki job cards. Vitest tests are colocated with source. |
 | Offline browser E2E | `cd web && bun run test:e2e:fast` | Real browser plus isolated backend: login/accounts, sessions, input recovery, sidebar/pins, attachments, Wiki cards and page readiness. Uses a test-only harness and verifies an offline execution audit; actual provider behavior needs the live tier. |
-| Codex browser E2E | `cd web && bun run test:e2e:llm codex.spec.ts` | Real Codex session creation, response streaming and Monitor reporting through the product backend. Needs the installed, signed-in Codex CLI. |
+| Codex browser E2E | `cd web && bun run test:e2e:llm codex.spec.ts codex-app-server.spec.ts` | Real default Codex creation, complete streamed response, Monitor, original-receipt deduplication and precise native resume after reload/reopen. Needs the pinned, signed-in Codex CLI. |
 
-The development-only App Server path has an additional explicit browser case:
-`cd web && bun run test:e2e:llm codex-app-server.spec.ts`, with
-`OCTOPUS_CODEX_TRANSPORT=app-server` and `OCTOPUS_CODEX_APP_SERVER_BINARY` selecting
-the [G0-pinned binary](implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume).
-It checks original-receipt deduplication and precise native resume after reloading
-and reopening the same session. Without that selection the case skips; a skip is
-not transport acceptance. The default exec browser case remains independently
-required. App Server live pytest covers both exec-origin and native-origin history
-in `tests/test_codex_app_server_real.py`; these no-descendant cases do not establish
-the later interaction, descendant or Monitor contracts.
+Both browser files exercise ordinary App Server without a transport opt-in;
+`OCTOPUS_CODEX_APP_SERVER_BINARY` must resolve to the
+[G0-pinned binary](implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume).
+App Server live pytest in `tests/test_codex_app_server_real.py` covers exec-origin
+and native-origin cold history. Old exec history is seeded by a test-only external
+CLI, then resumed through the ordinary product path; it does not retain a product
+exec fallback. Separate live cases exercise nested wait/followup, root-early helper
+partial/retirement, fresh-file metering and saved history/fork behavior.
+
+`tests/test_codex_app_server_monitor.py` verifies real secure-reader callbacks
+before delayed typed root/child association, cold snapshot replay, rejected work,
+finite stalled-read closure and disposable capacity loss through the original
+Owner and Monitor query. `tests/test_codex_app_server_preservation.py` checks the
+four distinct save boundaries, including accepted-but-processing-unconfirmed
+steer. `tests/test_codex_cutover.py` checks default profile/capability consistency
+and removal of the ordinary exec entry; `tests/test_fork_native_copy.py` and
+`tests/test_codex_app_server_fork.py` retain legacy and native recovery coverage.
 
 Native question/control and output regressions use controlled stdio peers in
 `tests/test_codex_app_server_questions.py` and `tests/test_codex_app_server_output.py`.

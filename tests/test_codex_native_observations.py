@@ -50,6 +50,32 @@ async def native_source(tmp_path):
         await observer.close()
 
 
+async def test_native_metrics_wait_for_lazily_created_first_rollout(tmp_path):
+    started = datetime.now(UTC).timestamp()
+    path = tmp_path / "sessions" / f"rollout-{THREAD}.jsonl"
+    events = []
+    observer = CodexActivityObserver({"CODEX_HOME": str(tmp_path)}, lambda _: None,
+        native_thread_id=THREAD, rollout_path=str(path), started_at=started)
+    observer.set_event_handler(events.extend)
+    try:
+        # thread/start returns a path before the first input creates the file.
+        await observer.start()
+        path.parent.mkdir()
+        stamp = datetime.now(UTC).isoformat()
+        append_rows(path, [
+            {"type": "session_meta", "payload": {"id": THREAD}},
+            {"timestamp": stamp, "type": "event_msg", "payload": {"type": "task_started", "turn_id": TURN}},
+            {"timestamp": stamp, "type": "token_usage_record", "payload": {"thread_id": THREAD,
+                "turn_id": TURN, "response_id": "first-response", "usage": {"output_tokens": 7}}},
+            {"timestamp": stamp, "type": "event_msg", "payload": {"type": "task_complete", "turn_id": TURN}},
+        ])
+        await observer.poll_once()
+        assert observer.metrics_status == "verified"
+        assert [event.raw["output_tokens"] for event in events] == [7]
+    finally:
+        await observer.close()
+
+
 @pytest.mark.asyncio
 async def test_real_native_metadata_observes_spawn_and_two_successful_rounds(tmp_path):
     fixture = json.loads(FIXTURE.read_text())

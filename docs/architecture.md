@@ -232,8 +232,8 @@ The harness is the **only** place that talks to a model runtime. There is one
 | `assembly.py` | Shared per-turn assembly: MCP server selection, system-prompt composition (in-app tools blurb, connectors blurb, memory blurb), working-dir absolutization. |
 | `events.py` | Backend-neutral `HarnessEvent` DTOs (`text`, `thinking`, `tool_use`, `tool_result`, `question_request`, `result`, `error`, `session_started`). |
 | `claude_code.py` | Claude profile — `claude --print --output-format=stream-json` argv, event normalization, JSONL transcript codec, `run_oneshot`. |
-| `codex.py` | Codex profile — `codex exec --json` argv (per-turn `-c` TOML overrides for MCP), event normalization, `run_oneshot`. Each attempt uses its own exec process; recovery follows the [evidence contract](implemented/harness-transient-retry.md#4-recovery-evidence-in-the-original-owner). |
-| `codex_app_server.py` | Opt-in G0-pinned stdio RPC driver: preparation, exact native resume, input/root correlation, bidirectional questions and native output. Original submissions, OwnerQuestions and Owner retain input, answer and settlement authority; [scope and limits](implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume). |
+| `codex.py` | Codex assembly helpers, explicit independent Research exec leaf, legacy event parser and `run_oneshot` text-worker entry. The registered ordinary profile is App Server; no exec resume/fallback entry remains. |
+| `codex_app_server.py` | Ordinary G0-pinned stdio RPC driver: preparation, exact native resume, input/root correlation, bidirectional questions, native output and passive scoped measurement. Original submissions, OwnerQuestions and Owner retain input, answer and settlement authority; [scope and limits](implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume). |
 | `native_output.py` | Bounded projection of original native child/work facts. Carries typed source and reconciles final observations after resource retirement, independently of the UI card cache; no scheduler or parent-consumption oracle. |
 | `codex_text.py` | Codex one-shot model-only worker: native authentication/configuration, subscription text HTTP with no tool dispatcher, completed-text result. The common Harness owns admission and process-group retirement; [capability contract](implemented/codex-backend.md#source-and-verification). |
 | `registry.py` | `get_harness(backend)` / `available_backends()` (a kind appears only when its CLI resolves on PATH; `claude-code` is always listed). |
@@ -325,7 +325,7 @@ Admission and dispatch share that frozen retirement evidence. Current writers
 remain with their original SessionOwner until the captured resources retire;
 standalone startup retains conservative process-group/host-boot checks.
 
-The opt-in App Server path records initial `not_sent` before Owner preparation,
+The ordinary App Server path records initial `not_sent` before Owner preparation,
 then records possible sending before its business RPC. Explicit unsent evidence
 permits recovery after preparation failure or restart; unknown native acceptance
 survives a successful terminal. Late correlated proof can refine the input after
@@ -595,8 +595,8 @@ reservation refuses deletion with 409 until that original operation finishes.
   transcript into the first turn's user-message channel; turn 2+ resumes natively).
   `/fork [name]` duplicates the current session onto an independent full copy of
   the working directory using a native transcript copy (Claude: copy the JSONL
-  and rewrite session id + cwd; Codex exec: copy the rollout file; selected App
-  Server: native thread/fork with actual-ID checkpoint and managed host retirement) so the fork resumes
+  and rewrite session id + cwd; Codex: native thread/fork with actual-ID checkpoint
+  and managed host retirement, including exec-origin history) so the fork resumes
   with genuine context. Both commands produce `origin='fork'` session rows with a
   `forked_from_session_id` pointer and inherit the parent's account in both
   memory and persistence; fork broadcasts are scoped to that account. Startup

@@ -3,7 +3,6 @@
 import asyncio
 import json
 import sys
-from dataclasses import replace
 
 import pytest
 
@@ -15,6 +14,7 @@ from server.session_manager import session_manager
 from server.wiki.registry import registry
 from server.wiki.tasks import tasks
 from server.workspace import paths_for
+from tests.harness_profiles import process_profile
 from tests.test_agent_credential_bindings import bindings as bindings
 
 
@@ -45,7 +45,7 @@ async def test_owner_uses_steer_and_reuse_capabilities_independently(bindings, t
         scopes.extend(verify(entry.credential) for entry in context.mcp_servers if entry.key == "wiki")
         return [sys.executable, "-u", str(script), str(effects), str(release)], {"cwd": context.working_dir}
 
-    monkeypatch.setattr(harness, "profile", replace(
+    monkeypatch.setattr(harness, "profile", process_profile(
         harness.profile, binary=sys.executable, activity_observer=None, prepare_resume=None,
         new_driver=ClaudeDriver, can_steer=can_steer, reusable=reusable,
         build_turn_argv=argv,
@@ -93,10 +93,8 @@ async def test_owner_uses_steer_and_reuse_capabilities_independently(bindings, t
         await manager.stop_all_held_processes()
 
 
-@pytest.mark.parametrize("backend,transport,can_steer", [("claude-code", "exec", True), ("codex", "exec", False), ("codex", "app-server", True)])
-async def test_session_capabilities_are_consistent_across_live_and_archived_views(bindings, monkeypatch, backend, transport, can_steer):
-    from server.config import settings
-    monkeypatch.setattr(settings, "codex_transport", transport)
+@pytest.mark.parametrize("backend,can_steer", [("claude-code", True), ("codex", True)])
+async def test_session_capabilities_are_consistent_across_live_and_archived_views(bindings, backend, can_steer):
     client, headers, _, _ = bindings
     agent = await client.post("/api/agents", headers=headers, json={"name": "Projection", "backend": backend})
     agent_id = agent.json()["id"]
@@ -125,7 +123,7 @@ async def test_session_capabilities_are_consistent_across_live_and_archived_view
     assert restored.json()["can_steer"] is can_steer
 
 
-@pytest.mark.parametrize("backend,can_steer", [("claude-code", True), ("codex", False)])
+@pytest.mark.parametrize("backend,can_steer", [("claude-code", True), ("codex", True)])
 async def test_import_uses_common_fields_without_changing_transcript_watermark(bindings, backend, can_steer):
     client, headers, _, _ = bindings
     imported = await client.post("/api/sessions/import", headers=headers, json={

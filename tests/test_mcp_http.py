@@ -147,7 +147,7 @@ class TestRendering:
         argv, _ = run.build_argv("Ask a question", "/tmp", None)
         assert f"mcp_servers.ask.tool_timeout_sec={expected}" in argv
         assert not any("mcp_servers.bg.tool_timeout_sec=" in arg for arg in argv)
-        assert argv[:3] == ["codex", "exec", "--json"]
+        assert argv[:2] == ["codex", "app-server"]
 
     def test_claude_renders_http_with_the_bearer_inline(self):
         from server.harness import claude_code

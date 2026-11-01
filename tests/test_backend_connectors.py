@@ -117,8 +117,8 @@ def test_codex_merges_connector_overrides_and_blurb():
     assert f"mcp_servers.{key}.url=" in joined
     assert f"mcp_servers.{key}.bearer_token_env_var=" in joined
     assert f"mcp_servers.{key}.command=" not in joined, "nothing is spawned"
-    # Developer-instructions blurb is injected via -c developer_instructions=…
-    assert "== Connectors ==" in joined
+    # The native driver sends the assembled instructions through thread/start.
+    assert "== Connectors ==" in run._make_context("hi", "/tmp", None, None).system_prompt
 
 
 def test_codex_no_connectors_has_no_connector_overrides():

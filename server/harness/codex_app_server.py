@@ -9,14 +9,23 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
 from ..submission_models import NativeInputEvidence
-from .codex import _apply_home_dir, _apply_mcp_bearers, _mcp_config_args
+from .codex import (
+    _OCTOPUS_SYSTEM_PROMPT_CODEX,
+    _apply_home_dir,
+    _apply_mcp_bearers,
+    _fork_prepare_replay,
+    _mcp_config_args,
+)
+from .codex_activity import CodexActivityObserver
 from .codex_control import _latest_checkpoint, controller_message, turn_message
 from .driver import ActiveTurnRef, RunDriver, SteerNotAccepted
 from .events import HarnessEvent, HarnessPreparationError, NativeQuestionRef
@@ -26,8 +35,13 @@ from .profile import ParseOutput, RuntimeProfile, TurnContext
 if TYPE_CHECKING:
     from .run import HarnessRun
 
+logger = logging.getLogger(__name__)
+
 BINARY_SHA256 = "b8a11fedf24b2dfb59a70c9e52b030f9a508dcd49cd2dd0d41956f4c785156b8"
 _RPC_TIMEOUT = 20.0
+_METRICS_CLOSE_GRACE = 1.0
+_METRICS_PENDING_COUNT = 256
+_METRICS_PENDING_BYTES = 1024 * 1024
 # Leave room for native item/identity metadata below HarnessRun's 4 MiB
 # stdout line budget when the server echoes a submitted text item.
 _FRAME_LIMIT_BYTES = 4 * 1024 * 1024 - 4096
@@ -62,6 +76,8 @@ def profile(base: RuntimeProfile) -> RuntimeProfile:
 
     return replace(base, new_driver=AppServerDriver, build_turn_argv=build_argv,
                    activity_observer=None, prepare_resume=None, can_steer=True,
+                   native_input_evidence=True, tools_prompt=_OCTOPUS_SYSTEM_PROMPT_CODEX,
+                   injects_memory_prompt=True, can_fork=True, fork_prepare=_fork_prepare_replay,
                    reusable=False, can_continue=False, stale_session_patterns=(),
                    auth_error_patterns=(), transient_error_patterns=(), transient_error_codes=(), inline_large_inputs=True,
                    fork_copy=fork_copy, fork_cleanup=fork_cleanup)
@@ -116,6 +132,19 @@ class AppServerDriver(RunDriver):
         self._output: NativeOutput | None = None
         self._items: dict[tuple[str, str, str], str] = {}
         self._started_turns: set[tuple[str, str]] = set()
+        self._metrics: dict[str, CodexActivityObserver] = {}
+        self._metrics_env: dict[str, str] = {}
+        self._metrics_started = time.time()
+        self._prepared_at: float | None = None
+        self._submitted_at: float | None = None
+        self._accepted_at: float | None = None
+        self._first_output_at: float | None = None
+        self._terminal_at: float | None = None
+        self._steer_started: dict[str, float] = {}
+        self._metrics_capacity_drops = 0
+        self._pending_measurements: list[tuple[HarnessEvent, int]] = []
+        self._pending_measurement_bytes = 0
+        self._preparation_mode = "not_started"
 
     def _save_proof(self, evidence: NativeInputEvidence, completed: Any) -> None:
         assert self._io is not None
@@ -144,6 +173,123 @@ class AppServerDriver(RunDriver):
     async def finish_observations(self) -> None:
         if self._proof_tail is not None:
             await asyncio.shield(self._proof_tail)
+
+    async def close_observations(self, *, retired: bool) -> None:
+        complete = True
+        deadline = asyncio.get_running_loop().time() + _METRICS_CLOSE_GRACE
+
+        async def finish(observer: CodexActivityObserver) -> None:
+            nonlocal complete
+            try:
+                await observer.drain_observations()
+            except Exception:
+                complete = False
+                logger.warning("Native response metadata drain failed", exc_info=True)
+        try:
+            async with asyncio.timeout_at(deadline):
+                await asyncio.gather(*(finish(observer) for observer in self._metrics.values()))
+        except TimeoutError:
+            complete = False
+            logger.warning("Native response metadata reached its finite collection deadline")
+        finally:
+            for observer in self._metrics.values():
+                observer.invalidate()
+                try:
+                    source_closed = await observer.close(deadline=deadline)
+                    complete &= source_closed
+                    if source_closed:
+                        self._observe_measurements(observer.finish_metrics())
+                except Exception:
+                    complete = False
+                    logger.warning("Native supplementary observer close failed", exc_info=True)
+        if self._io is None or self._input is None:
+            self._metrics.clear()
+            self._metrics_env.clear()
+            return
+        self._flush_measurements(final=True)
+        now = time.monotonic()
+        started, closed = self._io._started_at, self._io.admission_closed_at
+
+        def elapsed(start: float | None, end: float | None) -> float | None:
+            return round(max(0, end - start) * 1000, 3) if start is not None and end is not None else None
+
+        self._io.record_measurement(HarnessEvent(type="model_measurement", raw={
+            "kind": "codex_run", "transport": "app-server", "root_thread_id": self._input.thread_id,
+            "root_turn_id": self._input.turn_id, "root_turns": int(self._input.turn_id is not None),
+            "child_turns": self._output.child_turn_count if self._output is not None else 0,
+            "input_state": self._input.state, "native_status": self._terminal,
+            "resource_state": "proven" if retired else "failed", "end_reason": self._io.native_end_reason,
+            "host_ms": elapsed(started, now), "preparation_ms": elapsed(started, self._prepared_at),
+            "spawn_ms": elapsed(started, self._io._spawned_at), "preparation_mode": self._preparation_mode,
+            "start_ack_ms": elapsed(self._submitted_at, self._accepted_at),
+            "first_output_ms": elapsed(self._submitted_at, self._first_output_at),
+            "root_active_ms": elapsed(self._submitted_at, self._terminal_at or closed),
+            "retirement_ms": elapsed(closed, now), "metrics_threads": len(self._metrics),
+            "metrics_unavailable": sum(observer.metrics_status != "verified" for observer in self._metrics.values()),
+            "metrics_capacity_drops": self._metrics_capacity_drops,
+            "metrics_collection_complete": complete,
+            "retirement_phases": self._io.retirement_phases,
+        }), request_id=self._input.input_id, attempt_id=self._input.attempt_id)
+        self._metrics.clear()
+        self._metrics_env.clear()
+
+    def _observe_measurements(self, events: list[HarnessEvent]) -> None:
+        assert self._io is not None and self._input is not None
+        for event in events:
+            assert event.raw is not None
+            event.raw["transport"] = "app-server"
+            scope = self._measurement_scope(event)
+            if scope is not None:
+                self._publish_measurement(event, scope)
+                continue
+            # Rollout persistence can precede the corresponding typed turn.
+            # This disposable join buffer never accepts work or delays business
+            # output. Unassociated measurements become diagnostic only when the
+            # original finite collection ends; capacity loss stays explicit.
+            size = len(json.dumps(event.raw, ensure_ascii=False).encode())
+            if (len(self._pending_measurements) >= _METRICS_PENDING_COUNT
+                    or self._pending_measurement_bytes + size > _METRICS_PENDING_BYTES):
+                self._metrics_capacity_drops += 1
+                continue
+            self._pending_measurements.append((event, size))
+            self._pending_measurement_bytes += size
+
+    def _measurement_scope(self, event: HarnessEvent) -> str | None:
+        assert self._input is not None and event.raw is not None
+        thread, turn = event.raw.get("native_thread_id"), event.raw.get("native_turn_id")
+        if self._input.turn_id is not None:
+            if thread == self._input.thread_id:
+                return "root" if turn == self._input.turn_id else "anomalous_root"
+            if self._output is not None and self._output.contains_turn(thread, turn):
+                return "child"
+        return None
+
+    def _publish_measurement(self, event: HarnessEvent, scope: str) -> None:
+        assert self._io is not None and self._input is not None and event.raw is not None
+        event.raw.update(root_thread_id=self._input.thread_id, root_turn_id=self._input.turn_id, scope=scope)
+        self._io.record_measurement(event, request_id=self._input.input_id, attempt_id=self._input.attempt_id)
+
+    def _flush_measurements(self, *, final: bool = False) -> None:
+        pending, self._pending_measurements = self._pending_measurements, []
+        self._pending_measurement_bytes = 0
+        for event, size in pending:
+            scope = self._measurement_scope(event)
+            if scope is None and not final:
+                self._pending_measurements.append((event, size))
+                self._pending_measurement_bytes += size
+            else:
+                self._publish_measurement(event, scope or "unbound")
+
+    def _metrics_observer(self, thread_id: str, *, path: str | None = None) -> CodexActivityObserver | None:
+        if thread_id in self._metrics or len(self._metrics) >= 128:
+            if thread_id not in self._metrics:
+                self._metrics_capacity_drops += 1
+            return self._metrics.get(thread_id)
+        observer = CodexActivityObserver(self._metrics_env, lambda _: None,
+            native_thread_id=thread_id, rollout_path=path, started_at=self._metrics_started)
+        observer.set_event_handler(self._observe_measurements)
+        self._metrics[thread_id] = observer
+        return observer
 
     def question_open(self, ref: NativeQuestionRef) -> bool:
         return (not self._terminal and ref.connection_generation == self._generation
@@ -232,6 +378,7 @@ class AppServerDriver(RunDriver):
             evidence = evidence.model_copy(update={"rpc_id": identifier, "state": "unknown"})
             await io.record_input(evidence)
             self._steers[identifier] = evidence
+            self._steer_started[identifier] = time.monotonic()
             writing = True
             await io.write_input(data, target=target)
             async with asyncio.timeout(_RPC_TIMEOUT):
@@ -253,12 +400,20 @@ class AppServerDriver(RunDriver):
             known = self._steers.get(identifier)
             if known is not None and known.state in {"accepted", "rejected"}:
                 self._steers.pop(identifier)
+                self._steer_started.pop(identifier, None)
             if future.done() and not future.cancelled():
                 future.exception()
 
     def _accept_steer(self, identifier: str, evidence: NativeInputEvidence, source: str) -> None:
-        assert self._io is not None
+        assert self._io is not None and self._input is not None
         if evidence.state != "accepted":
+            began = self._steer_started.pop(identifier, None)
+            self._io.record_measurement(HarnessEvent(type="model_measurement",
+                duration_ms=(time.monotonic() - began) * 1000 if began is not None else None,
+                raw={"kind": "codex_steer", "input_id": evidence.input_id,
+                     "native_thread_id": evidence.thread_id, "native_turn_id": evidence.target_turn_id,
+                     "state": "accepted", "acceptance_source": source}),
+                request_id=self._input.input_id, attempt_id=evidence.attempt_id)
             updated = NativeInputEvidence.model_validate({**evidence.model_dump(), "state": "accepted",
                 "turn_id": evidence.target_turn_id, "acceptance_source": source})
             self._steers[identifier] = updated
@@ -284,6 +439,8 @@ class AppServerDriver(RunDriver):
 
     async def begin_input(self, io: HarnessRun, resume_id: str | None) -> None:
         self._io = io
+        self._metrics_started = time.time()
+        self._preparation_mode = "resume" if resume_id else "new"
         request_id, attempt_id = io.input_identity
         self._input = NativeInputEvidence(input_id=request_id, attempt_id=attempt_id, thread_id=resume_id,
                                           connection_generation=self._generation)
@@ -291,6 +448,7 @@ class AppServerDriver(RunDriver):
 
     async def prepare(self, io: HarnessRun, context: TurnContext, argv: list[str], kwargs: dict[str, Any]) -> None:
         await asyncio.to_thread(verify_binary, argv[0])
+        self._metrics_env = {"CODEX_HOME": (kwargs.get("env") or os.environ).get("CODEX_HOME") or ""}
 
     async def _model_metadata(self, model: str | None) -> dict[str, Any]:
         """Resolve the current native default or capability across catalog pages."""
@@ -330,6 +488,7 @@ class AppServerDriver(RunDriver):
             data = _encode_frame(identifier, method, params)
             if business:
                 await self._record(rpc_id=identifier, state="unknown")
+                self._submitted_at = time.monotonic()
                 await self._io.write_input(data)
             else:
                 if controller_change:
@@ -410,6 +569,14 @@ class AppServerDriver(RunDriver):
             if prepared.get("serviceTier") != ("priority" if tier == "fast" else tier):
                 raise NativeProtocolError("Codex effective service tier differs from the request")
             await self._record(thread_id=thread_id)
+            observer = self._metrics_observer(thread_id, path=thread.get("path"))
+            if observer is not None:
+                try:
+                    async with asyncio.timeout(_METRICS_CLOSE_GRACE):
+                        await observer.start()
+                except TimeoutError:
+                    observer.invalidate("metrics_preparation_cutoff")
+                    await observer.close(deadline=asyncio.get_running_loop().time())
             await io._emit(HarnessEvent(type="session_started", session_id=thread_id))
             if context.resume_id:
                 checkpoint = await asyncio.to_thread(_latest_checkpoint, thread["path"], thread_id)
@@ -426,6 +593,7 @@ class AppServerDriver(RunDriver):
         except Exception as error:
             io.retire()
             raise HarnessPreparationError(str(error), error_code="native_preparation_failed") from error
+        self._prepared_at = time.monotonic()
         await self._request("turn/start", {"threadId": thread_id,
             "input": [{"type": "text", "text": context.prompt}], "clientUserMessageId": request_id}, business=True)
 
@@ -436,6 +604,7 @@ class AppServerDriver(RunDriver):
         if self._input.turn_id is not None and self._input.turn_id != turn_id:
             raise NativeProtocolError("Conflicting accepted native root identities")
         if self._input.state != "accepted":
+            self._accepted_at = time.monotonic()
             self._input = NativeInputEvidence.model_validate({**self._input.model_dump(), "turn_id": turn_id,
                 "state": "accepted", "acceptance_source": source})
 
@@ -470,10 +639,21 @@ class AppServerDriver(RunDriver):
                 break
             output.events.extend(parsed.events)
             output.end_of_stream |= parsed.end_of_stream
+        self._flush_measurements()
         return output
 
     def receive(self, obj: dict[str, Any]) -> ParseOutput:
         try:
+            params = obj.get("params") or {}
+            if (self._input is not None and obj.get("method") == "turn/started"
+                    and isinstance(params.get("threadId"), str)):
+                # Capture declared execution consumption before strict binding
+                # rejects it. This read-only source never accepts that turn or
+                # grants it a tool/input capability; unknown ancestry stays
+                # diagnostic, outside normal response aggregates.
+                observer = self._metrics_observer(params["threadId"])
+                if observer is not None:
+                    observer.start_live()
             return self._receive(obj)
         except Exception as error:
             return self._protocol_failure(obj, error)
@@ -575,6 +755,9 @@ class AppServerDriver(RunDriver):
                 "code": -32601, "message": "This native request is not supported by the selected transport"}}) + "\n").encode())
             raise NativeProtocolError(f"Unsupported native request: {obj['method']}")
         params = obj.get("params") or {}
+        if obj["method"] == "thread/tokenUsage/updated":
+            self._usage_snapshot(params)
+            return ParseOutput(activity=False)
         if obj["method"] == "serverRequest/resolved":
             if not self._input.turn_id:
                 self._buffer_frame(obj)
@@ -607,6 +790,25 @@ class AppServerDriver(RunDriver):
             return ParseOutput()
         return self._event(obj)
 
+    def _usage_snapshot(self, params: dict[str, Any]) -> None:
+        assert self._input is not None and self._io is not None
+        thread, turn, usage = params.get("threadId"), params.get("turnId"), params.get("tokenUsage")
+        if not isinstance(thread, str) or not isinstance(turn, str) or not isinstance(usage, dict):
+            return
+        total = usage.get("total")
+        if not isinstance(total, dict):
+            return
+        detail: dict[str, Any] = {"kind": "codex_native_usage", "native_thread_id": thread,
+            "native_turn_id": turn, "source": "provider_cumulative_snapshot",
+            "historical": self._input.rpc_id is None or thread == self._input.thread_id
+                and turn != self._input.turn_id and (thread, turn) not in self._started_turns}
+        for source, target in (("inputTokens", "input_tokens"), ("cachedInputTokens", "cached_input_tokens"),
+                ("outputTokens", "output_tokens"), ("reasoningOutputTokens", "reasoning_tokens"), ("totalTokens", "total_tokens")):
+            value = total.get(source)
+            detail[target] = value if type(value) is int and value >= 0 else None
+        self._io.record_measurement(HarnessEvent(type="model_measurement", raw=detail),
+            request_id=self._input.input_id, attempt_id=self._input.attempt_id)
+
     def _buffer_frame(self, obj: dict[str, Any]) -> None:
         self._buffer_bytes += len(json.dumps(obj, ensure_ascii=False).encode())
         if self._buffer_bytes > 8 * 1024 * 1024 or len(self._buffer) >= 256:
@@ -627,6 +829,7 @@ class AppServerDriver(RunDriver):
             return ParseOutput()
         if not self._output.accepts(params.get("threadId"), params.get("turn") or {}):
             raise NativeProtocolError("Native output has no original root/child association")
+        observer = self._metrics_observer(params["threadId"])
         turn_id = (params.get("turn") or {}).get("id") if method in {"turn/started", "turn/completed"} else params.get("turnId")
         if not isinstance(turn_id, str) or not turn_id:
             raise NativeProtocolError("Native output has no turn identity")
@@ -664,6 +867,10 @@ class AppServerDriver(RunDriver):
             event.runtime_metadata = self._output.metadata(source)
         observations = self._output.observe(method, params)
         output.events.extend(observations)
+        if observer is not None and self._output.contains_turn(params["threadId"], turn_id):
+            observer.start_live()
+        if method in {"turn/started", "turn/completed"}:
+            self._flush_measurements()
         if method == "turn/completed" and observations:
             # A newly observed child terminal is progress; repeating its
             # diagnostic after that state is known cannot renew idle.
@@ -693,6 +900,9 @@ class AppServerDriver(RunDriver):
             raise NativeProtocolError(f"Unexpected root turn: {turn_id}")
         if root and method == "turn/started" and self._terminal:
             raise NativeProtocolError("Native root restarted after terminal")
+        if root and self._first_output_at is None and (method == "item/agentMessage/delta" and params.get("delta")
+                or method == "item/completed" and (params.get("item") or {}).get("type") in {"agentMessage", "reasoning"}):
+            self._first_output_at = time.monotonic()
         if method == "error":
             if not isinstance(params.get("willRetry"), bool) or not isinstance(params.get("error"), dict):
                 raise NativeProtocolError("Malformed native error notification")
@@ -717,6 +927,7 @@ class AppServerDriver(RunDriver):
                     raise NativeProtocolError("Conflicting native root terminals")
                 return ParseOutput(activity=False)
             self._terminal = status
+            self._terminal_at = time.monotonic()
             assert self._io is not None
             if self._io.native_end_reason == "process_ended":
                 self._io.native_end_reason = "parent_done" if turn.get("status") == "completed" else "parent_error"
