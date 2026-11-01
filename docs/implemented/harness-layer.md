@@ -87,8 +87,8 @@ only Owner advances notification revisions. The serial writer validates an
 App Server target after authorization and immediately before its write.
 
 For multiplexed App Server I/O, stdout never waits for display capacity or an
-input-proof database commit. One reader separates responses, native requests
-and notifications; both RPC directions have independent IDs. Existing run-owned
+input-proof database commit. `RunDriver.receive` synchronously separates responses,
+native requests and notifications; both RPC directions have independent IDs. Existing run-owned
 proof tasks preserve observed input acceptance/refusal in order and are joined
 before collection closes. One write lock serializes complete control and
 business frames. Native question replies use that lock's final eligibility

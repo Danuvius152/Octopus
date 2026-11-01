@@ -85,11 +85,9 @@ class RunDriver(ABC):
     def begin_turn(self) -> None:
         self.parser.begin_turn()
 
-    def parse(self, obj: dict[str, Any]) -> ParseOutput:
+    def receive(self, obj: dict[str, Any]) -> ParseOutput:
+        """Consume one frame without waiting on I/O or product recording."""
         return self.parser.parse(obj)
-
-    async def receive(self, obj: dict[str, Any]) -> ParseOutput:
-        return self.parse(obj)
 
     async def interrupt(self, io: HarnessRun) -> None:
         """Existing JSONL transports retire by EOF and process-group signals."""

@@ -1138,7 +1138,7 @@ class HarnessRun:
         # A terminal may synchronously revoke the lease while releasing an
         # already accepted prefix. Revocation cannot erase that prefix's owner.
         context = self._tool_context
-        out = await self._driver.receive(obj)
+        out = self._driver.receive(obj)
         request_id, attempt_id = context or (None, None)
         for level, message in out.diagnostics:
             logger.log(level, "Harness parser diagnostic provider=%s run=%s request=%s attempt=%s: %s",

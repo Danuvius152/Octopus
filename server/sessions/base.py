@@ -279,6 +279,18 @@ class PendingQuestion:
     backend: HarnessRun | None = field(default=None, repr=False)
     native_ref: NativeQuestionRef | None = field(default=None, repr=False)
 
+    def is_current(self, attempt_id: str | None) -> bool:
+        """Read original attempt eligibility; callers own state and expiry."""
+        if self.attempt_id is not None and self.attempt_id != attempt_id:
+            return False
+        backend = self.backend
+        if backend is not None and backend.captures_retirement_output and not backend.question_admission_open:
+            return False
+        if self.native_ref is not None:
+            assert backend is not None
+            return backend.question_open(self.native_ref)
+        return True
+
 
 @dataclass
 class BackendRetirement:

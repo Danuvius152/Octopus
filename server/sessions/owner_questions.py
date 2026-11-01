@@ -155,7 +155,7 @@ class OwnerQuestions:
             if pending is None or pending.state != "pending":
                 return False
             answers = validate_answers(pending.questions, command.answers)
-            if not self._current(pending):
+            if not pending.is_current(self.owner.session._run.question_attempt_id):
                 await self._close(pending, "attempt_ended")
                 return False
             if await self._expire(pending):
@@ -168,7 +168,7 @@ class OwnerQuestions:
         if isinstance(command, CaptureQuestion):
             pending = self.owner.session._questions.get(command.question_id)
             if pending is not None and pending.state == "pending":
-                if not self._current(pending):
+                if not pending.is_current(self.owner.session._run.question_attempt_id):
                     await self._close(pending, "attempt_ended")
                 else:
                     await self._expire(pending)
@@ -197,17 +197,6 @@ class OwnerQuestions:
 
     def _owned(self, pending: PendingQuestion) -> bool:
         return self.owner.session._questions.get(pending.question_id) is pending
-
-    def _current(self, pending: PendingQuestion) -> bool:
-        if pending.attempt_id is not None and pending.attempt_id != self.owner.session._run.question_attempt_id:
-            return False
-        backend = pending.backend
-        if backend is not None and backend.captures_retirement_output and not backend.question_admission_open:
-            return False
-        if pending.native_ref is not None:
-            assert backend is not None
-            return backend.question_open(pending.native_ref)
-        return True
 
     async def _create(self, command: CreateQuestion | RegisterNativeQuestion) -> PendingQuestion | None:
 
@@ -274,7 +263,7 @@ class OwnerQuestions:
             # The task owns only time. Its original record remains the fact;
             # the callback neither mutates it nor starts an enqueue task.
             pending.timer.add_done_callback(lambda _done: self.owner.wake())
-        if pending.backend is not None and pending.backend.captures_retirement_output and not self._current(pending):
+        if pending.backend is not None and pending.backend.captures_retirement_output and not pending.is_current(session._run.question_attempt_id):
             await self._close(pending, "attempt_ended")
         return pending
 
@@ -387,7 +376,7 @@ class OwnerQuestions:
         if (pending.state != "pending" or pending.expires_at is None
                 or time.monotonic() < pending.expires_at):
             return False
-        if not self._current(pending):
+        if not pending.is_current(self.owner.session._run.question_attempt_id):
             return await self._close(pending, "attempt_ended")
         return await self._answer(pending, self.owner.manager.AUTO_ANSWER_TEXT, auto=True)
 
@@ -405,7 +394,7 @@ class OwnerQuestions:
                 self.owner.wake()
         for pending in tuple(self.owner.session._questions.values()):
             if (pending.backend is not None and pending.backend.captures_retirement_output
-                    and pending.state == "pending" and not self._current(pending)):
+                    and pending.state == "pending" and not pending.is_current(self.owner.session._run.question_attempt_id)):
                 await self._close(pending, "attempt_ended")
                 self.owner.wake()
                 return

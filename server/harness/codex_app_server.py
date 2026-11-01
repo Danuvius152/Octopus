@@ -237,7 +237,7 @@ class AppServerDriver(RunDriver):
             if future.done() and not future.cancelled():
                 future.exception()
 
-    async def _accept_steer(self, identifier: str, evidence: NativeInputEvidence, source: str) -> None:
+    def _accept_steer(self, identifier: str, evidence: NativeInputEvidence, source: str) -> None:
         assert self._io is not None
         if evidence.state != "accepted":
             updated = NativeInputEvidence.model_validate({**evidence.model_dump(), "state": "accepted",
@@ -403,7 +403,7 @@ class AppServerDriver(RunDriver):
         await self._request("turn/start", {"threadId": thread_id,
             "input": [{"type": "text", "text": context.prompt}], "clientUserMessageId": request_id}, business=True)
 
-    async def _bind(self, turn_id: Any, source: str) -> ParseOutput:
+    def _bind(self, turn_id: Any, source: str) -> ParseOutput:
         assert self._input is not None
         if not isinstance(turn_id, str) or not turn_id:
             raise NativeProtocolError("Native start acceptance has no turn identity")
@@ -446,9 +446,9 @@ class AppServerDriver(RunDriver):
             output.end_of_stream |= parsed.end_of_stream
         return output
 
-    async def receive(self, obj: dict[str, Any]) -> ParseOutput:
+    def receive(self, obj: dict[str, Any]) -> ParseOutput:
         try:
-            return await self._receive(obj)
+            return self._receive(obj)
         except Exception as error:
             return self._protocol_failure(obj, error)
 
@@ -468,7 +468,7 @@ class AppServerDriver(RunDriver):
         return ParseOutput(events=[HarnessEvent(type="result", is_error=True,
             error_code="native_protocol_failed", content=detail, raw=obj)], end_of_stream=True)
 
-    async def _receive(self, obj: dict[str, Any]) -> ParseOutput:
+    def _receive(self, obj: dict[str, Any]) -> ParseOutput:
         assert self._input is not None
         identifier = obj.get("id")
         if "method" not in obj:
@@ -497,7 +497,7 @@ class AppServerDriver(RunDriver):
                     turn_id = (obj.get("result") or {}).get("turnId")
                     if turn_id != steer.target_turn_id:
                         raise NativeProtocolError("Native steer response does not name its original root")
-                    await self._accept_steer(identifier, steer, "steer_response")
+                    self._accept_steer(identifier, steer, "steer_response")
                 return ParseOutput()
             if future is None and identifier != self._input.rpc_id:
                 return ParseOutput()
@@ -518,7 +518,7 @@ class AppServerDriver(RunDriver):
                 if not isinstance(result, dict):
                     raise NativeProtocolError("Malformed native RPC response")
                 if identifier == self._input.rpc_id:
-                    output = await self._bind(result.get("turn", {}).get("id"), "start_response")
+                    output = self._bind(result.get("turn", {}).get("id"), "start_response")
                 elif future is not None and not future.done():
                     future.set_result(result)
             return output
@@ -568,7 +568,7 @@ class AppServerDriver(RunDriver):
                 if client_id == evidence.input_id:
                     if params.get("turnId") != evidence.target_turn_id:
                         raise NativeProtocolError("Native steer observation does not name its original root")
-                    await self._accept_steer(rpc_id, evidence, "user_message")
+                    self._accept_steer(rpc_id, evidence, "user_message")
                     break
         if not self._input.turn_id:
             if obj["method"] not in {"turn/started", "turn/completed", "item/started", "item/completed", "item/agentMessage/delta"}:
@@ -577,8 +577,7 @@ class AppServerDriver(RunDriver):
             item = params.get("item") or {}
             if (obj["method"] == "item/completed" and item.get("type") == "userMessage"
                     and item.get("clientId") == self._input.input_id):
-                output = await self._bind(params.get("turnId"), "user_message")
-                return output
+                return self._bind(params.get("turnId"), "user_message")
             return ParseOutput()
         return self._event(obj)
 
