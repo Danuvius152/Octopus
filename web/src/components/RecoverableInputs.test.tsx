@@ -20,20 +20,21 @@ it("distinguishes native acceptance from processing when execution is unknown", 
   expect(screen.queryByRole("button", { name: "Restore to input" })).toBeNull();
 });
 
-it("keeps accepted steer visible after a successful root without offering replay", async () => {
-  const native = { ...item, execution: { ...execution, state: "done", recoverable_input: false,
+it("still reports an unknown execution when its steer acceptance is confirmed", async () => {
+  const native = { ...item, execution: { ...execution, state: "unknown", recoverable_input: false,
     native_inputs: [{ kind: "steer", state: "accepted" }] } };
   vi.stubGlobal("fetch", vi.fn(async () => Response.json({ items: [native] })));
   render(<RecoverableInputs sessionId="s" connected disabled={false} onRestore={vi.fn()} />);
-  expect(await screen.findByText("Accepted by runtime · processing unconfirmed")).toBeTruthy();
+  expect(await screen.findByText("Execution result unknown")).toBeTruthy();
+  expect(screen.queryByText("Accepted by runtime · processing unconfirmed")).toBeNull();
   expect(screen.queryByRole("button", { name: "Restore to input" })).toBeNull();
 });
 
-it.each(["empty", "pending", "unknown"])("refreshes %s input to accepted while its root is still active", async (previous) => {
+it.each(["empty", "pending", "unknown"])("clears a %s notice once the server confirms steer acceptance", async (previous) => {
   let accepted = false;
-  const fetch = vi.fn(async () => Response.json({ items: previous === "empty" && !accepted ? [] : [{ ...item, execution: {
+  const fetch = vi.fn(async () => Response.json({ items: previous === "empty" || accepted ? [] : [{ ...item, execution: {
     ...execution, state: "running", recoverable_input: false,
-    native_inputs: [{ kind: "steer", state: accepted ? "accepted" : previous === "pending" ? "not_sent" : "unknown" }],
+    native_inputs: [{ kind: "steer", state: previous === "pending" ? "not_sent" : "unknown" }],
   } }] }));
   vi.stubGlobal("fetch", fetch);
   render(<RecoverableInputs sessionId="s" connected disabled={false} onRestore={vi.fn()} />);
@@ -43,8 +44,8 @@ it.each(["empty", "pending", "unknown"])("refreshes %s input to accepted while i
   act(() => handleWsMessage({ type: "dispatch_state", session_id: "s", dispatch_state: {
     generation: "steer-evidence-service", revision: 10, paused: false, active_request_id: "root", items: [],
   } }));
-  expect(await screen.findByText("Accepted by runtime · processing unconfirmed")).toBeTruthy();
-  expect(fetch).toHaveBeenCalledTimes(2);
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2));
+  await waitFor(() => expect(screen.queryByRole("region", { name: "Saved inputs" })).toBeNull());
   expect(screen.queryByRole("button", { name: "Restore to input" })).toBeNull();
 });
 

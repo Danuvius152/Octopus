@@ -61,6 +61,7 @@ test("current questions submit complete answers and keep answered and cancelled 
     await submit.click();
     await expect(form).toHaveCount(0);
     await expect(page.locator(".msg-question-answer")).toHaveText(answerText);
+    await expect(page.getByLabel("Command confirmations")).toHaveCount(0);
     await expect.poll(() => answers().length).toBe(1);
     expect(answers()[0]).toMatchObject({
       question_id: question.question_id, request_id: null, attempt_id: null,

@@ -1,5 +1,6 @@
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, render, renderHook, screen } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { CommandNotices } from "../components/CommandNotices";
 import { useSessionStore } from "../stores/sessionStore";
 import { useWebSocket } from "./useWebSocket";
 
@@ -52,6 +53,37 @@ it("marks an unconfirmed Stop unknown and never replays it on reconnect", async 
   expect((await pending).state).toBe("unknown");
   expect(Object.values(useSessionStore.getState().controlCommands)[0].state).toBe("unknown");
   expect(Socket.instances[1].send).not.toHaveBeenCalled();
+});
+
+it("clears a confirmed answer without leaving a dismissible notice", async () => {
+  const { result } = renderHook(useWebSocket);
+  const socket = Socket.instances[0];
+  const pending = result.current.answerQuestion("s", "question", [{ selected: ["Yes"] }]);
+  render(<CommandNotices sessionId="s" />);
+  expect(screen.getByRole("status")).toHaveTextContent("awaiting confirmation");
+  const payload = JSON.parse(socket.send.mock.calls[0][0]);
+  expect(payload).toMatchObject({ type: "answer_question", question_id: "question", answers: [{ selected: ["Yes"] }] });
+  expect(useSessionStore.getState().controlCommands[payload.client_command_id].state).toBe("pending");
+  act(() => socket.onmessage?.({ data: JSON.stringify({ type: "command_receipt", operation: "answer_question", session_id: "s",
+    client_command_id: payload.client_command_id, accepted: true }) }));
+  expect((await pending).accepted).toBe(true);
+  expect(useSessionStore.getState().controlCommands[payload.client_command_id]).toBeUndefined();
+  expect(screen.queryByLabelText("Command confirmations")).toBeNull();
+});
+
+it.each(["failed", "unknown"])("keeps a %s answer notice for review", async (state) => {
+  const { result } = renderHook(useWebSocket);
+  const socket = Socket.instances[0];
+  const pending = result.current.answerQuestion("s", "question", [{ selected: ["Yes"] }]);
+  render(<CommandNotices sessionId="s" />);
+  const payload = JSON.parse(socket.send.mock.calls[0][0]);
+  if (state === "failed") act(() => socket.onmessage?.({ data: JSON.stringify({ type: "command_receipt", operation: "answer_question",
+    session_id: "s", client_command_id: payload.client_command_id, accepted: false, message: "The question is closed." }) }));
+  else act(() => vi.advanceTimersByTime(15_000));
+  expect((await pending).accepted).toBe(false);
+  expect(useSessionStore.getState().controlCommands[payload.client_command_id].state).toBe(state);
+  expect(screen.getByRole("alert")).toHaveTextContent(state === "failed" ? "The question is closed." : "Command confirmation timed out.");
+  expect(screen.getByRole("button", { name: "Dismiss" })).toBeVisible();
 });
 
 it("retains the exact submission identity when confirming after a lost ACK", async () => {

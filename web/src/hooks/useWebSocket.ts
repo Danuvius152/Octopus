@@ -783,7 +783,7 @@ export function useWebSocket() {
     const generation = getState().accountGeneration;
     const update = (state: "pending" | "accepted" | "failed" | "unknown", message?: string) => {
       if (getState().accountGeneration !== generation) return;
-      if (operation === "interrupt" && state === "accepted") {
+      if (state === "accepted") {
         getState().dismissControlCommand(id);
       } else {
         getState().setControlCommand({ id, sessionId, operation, state, message });

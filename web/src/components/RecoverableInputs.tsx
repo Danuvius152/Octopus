@@ -130,16 +130,12 @@ export function RecoverableInputs({ sessionId, connected, disabled, onRestore }:
   return <section aria-label="Saved inputs" className="shrink-0 max-h-72 overflow-auto px-6 py-2 text-sm">
     {page.items.map((item) => {
       const native = item.execution.native_inputs ?? [];
-      const accepted = native.some((input) => input.kind === "steer" && input.state === "accepted") &&
-        !native.some((input) => input.state === "unknown");
       const waiting = native.some((input) => input.kind === "steer" && input.state === "not_sent") &&
         item.execution.state === "running";
       return <article key={item.client_request_id} className="mb-2 rounded-md border border-border p-3">
-      <p className="font-medium">{accepted ? "Accepted by runtime · processing unconfirmed" : waiting
+      <p className="font-medium">{waiting
         ? "Added to active turn · acceptance pending" : item.execution.state === "withdrawn" ? "Not executed · input saved" : "Execution result unknown"}</p>
-      <p className="text-xs text-muted-foreground">{accepted
-        ? "The root response does not prove this instruction was consumed. Review the conversation before deciding on further work."
-        : waiting ? "The input is owned by the active request. Runtime acceptance has not been confirmed."
+      <p className="text-xs text-muted-foreground">{waiting ? "The input is owned by the active request. Runtime acceptance has not been confirmed."
         : item.execution.state === "withdrawn"
         ? "This input was withdrawn before it ran. Restore it to review and send it again."
         : "Review the conversation and saved input before starting new work. It will not run again automatically."}</p>

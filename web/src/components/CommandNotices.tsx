@@ -11,7 +11,7 @@ export function CommandNotices({ sessionId }: { sessionId: string }) {
     {sessionCommands.map((command) => <div key={command.id}
       role={command.state === "failed" || command.state === "unknown" ? "alert" : "status"}>
       {labels[command.operation] ?? command.operation}: {command.state === "pending" ? "awaiting confirmation…" :
-        command.state === "accepted" ? "confirmed" : command.message || command.state}
+        command.message || command.state}
       {command.state !== "pending" && <button type="button" className="ml-2 underline"
         onClick={() => dismiss(command.id)}>Dismiss</button>}
     </div>)}

@@ -120,12 +120,15 @@ input whose single `recovery_of` link identifies its source; source eligibility
 and the unique direct successor are checked in the admission transaction.
 Legacy forward links are read during migration and have no runtime writer.
 An unknown input has no one-click restore-and-run action.
-Accepted native steer also retains a review notice when model processing is
-unconfirmed, with no restore-and-run action. An old unsent/rejected steer that
-subsequently executes as an ordinary request does not leave a stale notice.
+Accepted native steer keeps its original input and acceptance evidence without
+a success notice. Separate execution or delivery uncertainty remains reviewable,
+with no restore-and-run action. An old unsent/rejected steer that subsequently
+executes as an ordinary request does not leave a stale notice.
 
 Saved inputs **Dismiss notice** commits only a persistent visibility edit,
 then best-effort notifies the original Owner. An unavailable or retired Owner
 does not veto the edit or get recreated. **Stop** interrupts the active request
 and pauses dispatch; **Resume processing** explicitly resumes the backlog.
-The control prompt's **Dismiss** only hides that frontend prompt.
+Stop and question-answer confirmations clear their pending frontend notice on
+success. Failed or unconfirmed commands remain visible; their **Dismiss** only
+hides that frontend prompt. Question answers remain in the conversation history.

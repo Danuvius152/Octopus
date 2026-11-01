@@ -12,7 +12,7 @@ export interface ControlCommandStatus {
   id: string;
   sessionId: string;
   operation: string;
-  state: "pending" | "accepted" | "failed" | "unknown";
+  state: "pending" | "failed" | "unknown";
   message?: string;
 }
 

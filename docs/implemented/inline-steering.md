@@ -75,9 +75,11 @@ existing cleanup protection and database deadline. Resource cancellation starts
 independently; a late proof updates only its original input. Owner coalesces
 committed evidence notifications into its existing dispatch revision so Saved
 inputs refreshes during an active root, including an unknown-to-accepted change.
-Accepted steer remains reviewable with a processing-unconfirmed notice after
-root success; it has no restore-and-run action. Requeued input that later runs
-normally does not retain a stale steer notice. Full identity, evidence and
+Accepted steer keeps its input and evidence without a success notice, during
+the active root or after completion. Separate execution uncertainty, including
+an earlier RPC timeout awaiting root completion, remains reviewable without a
+restore-and-run action. Requeued input that later runs normally does not retain
+a stale steer notice. Full identity, evidence and
 recovery rules belong to the
 [input contract](architecture-contract.md#codex-native-input-evidence).
 
@@ -117,8 +119,9 @@ Verification entry points include `tests/test_session_dispatch.py`,
 `tests/test_codex_app_server_steering.py` cover active wait, overflow and order,
 configuration/connector changes, rejection, write/Stop/terminal races, lost and
 late proof, and quiet stdout under subscriber pressure. Saved-input frontend
-tests cover empty, pending and unknown snapshots becoming accepted through the
-normal WebSocket dispatch revision while the root stays active.
+tests cover the normal WebSocket dispatch revision clearing pending or unknown
+acceptance notices while the root stays active; separate unknown execution
+still renders its recovery notice.
 
 The [original experiments and rationale](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/inline-steering.md)
 retain their tested CLI version and conditions. Current test policy is in

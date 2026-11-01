@@ -45,6 +45,7 @@ async def test_human_input_steers_the_bound_root_during_native_wait(native_runti
         return any(item["state"] == "accepted" for item in saved["execution"]["native_inputs"])
 
     await wait_until(accepted)
+    assert not (await database.list_recoverable_submissions(session.id))[0]
     duplicate = await submit_client_message(manager, session.id, "Use the other file", [], "correction", wiki_mode=None)
     assert duplicate["request_id"] == submitted["request_id"]
     frames = [json.loads(line) for line in (tmp_path / "native-steers.jsonl").read_text().splitlines()]
@@ -60,7 +61,7 @@ async def test_human_input_steers_the_bound_root_during_native_wait(native_runti
     assert "processing" in saved["message"].lower()
     assert not saved["execution"]["recoverable_input"]
     notices, _ = await database.list_recoverable_submissions(session.id)
-    assert [item["client_id"] for item in notices] == ["correction"]
+    assert not notices
 
 
 async def test_explicit_rejection_requeues_original_before_later_human_input(native_runtime, tmp_path):
@@ -452,7 +453,7 @@ async def test_changed_connector_selection_queues_new_human_input(native_runtime
 
 
 @pytest.mark.parametrize("late", [False, True])
-async def test_ack_refreshes_saved_input_while_root_remains_active(native_runtime, tmp_path, monkeypatch, late):
+async def test_ack_updates_saved_input_notices_while_root_remains_active(native_runtime, tmp_path, monkeypatch, late):
     manager, database, session, mode, starts, events = native_runtime
     monkeypatch.setattr(native_tests.codex_app_server, "_RPC_TIMEOUT", .05 if late else 5)
     mode[0] = "steer_gate"
@@ -476,6 +477,17 @@ async def test_ack_refreshes_saved_input_while_root_remains_active(native_runtim
 
     await wait_until(refreshed)
     new_page, _ = await database.list_recoverable_submissions(session.id)
-    assert new_page[0]["native_inputs"][0]["state"] == "accepted"
+    if late:
+        # The earlier RPC timeout still leaves execution unknown until the
+        # root ends. Acceptance alone must not hide that separate uncertainty.
+        assert len(new_page) == 1
+        assert new_page[0]["execution_state"] == "unknown"
+    else:
+        assert not new_page
+    saved = await submission_status(manager, session.id, "visible-ack")
+    assert saved["execution"]["native_inputs"][0]["state"] == "accepted"
     assert manager.dispatch_snapshot(session.id)["active_request_id"] is not None
     assert len(starts) == 1 and len((tmp_path / "native-steers.jsonl").read_text().splitlines()) == 1
+    (tmp_path / "native-finish").touch()
+    await wait_dispatch_idle(manager, session.id)
+    assert not (await database.list_recoverable_submissions(session.id))[0]

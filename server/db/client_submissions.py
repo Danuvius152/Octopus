@@ -25,11 +25,11 @@ _SELECT = (
     "LEFT JOIN client_submissions successor ON successor.session_id=i.session_id AND successor.recovery_of=i.client_id "
 )
 
-# Accepted steer has no model-consumption proof. Keep it reviewable through
-# the existing saved-input surface, including after its carrier succeeds.
+# Only unresolved steer acceptance needs a notice. Accepted evidence stays on
+# the original input without requiring the user to dismiss a success notice.
 _NATIVE_STEER_NOTICE = (
     "(json_extract(i.receipt,'$.disposition')='steered' AND EXISTS(SELECT 1 FROM json_each(i.native_inputs) "
-    "WHERE json_extract(value,'$.kind')='steer' AND json_extract(value,'$.state') IN ('not_sent','unknown','accepted'))"
+    "WHERE json_extract(value,'$.kind')='steer' AND json_extract(value,'$.state') IN ('not_sent','unknown'))"
     ")"
 )
 
