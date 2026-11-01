@@ -458,6 +458,12 @@ async def test_ack_updates_saved_input_notices_while_root_remains_active(native_
     monkeypatch.setattr(native_tests.codex_app_server, "_RPC_TIMEOUT", .05 if late else 5)
     mode[0] = "steer_gate"
     await active_root(native_runtime, tmp_path)
+    anchor = [("a" * 40, False)]
+
+    async def capture_anchor(_working_dir):
+        return anchor[0]
+
+    monkeypatch.setattr("server.sessions.owner_runtime.fork_helpers.capture_git_anchor", capture_anchor)
     await submit_client_message(manager, session.id, "Confirm acceptance live", [], "visible-ack", wiki_mode=None)
 
     async def before_ack():
@@ -469,6 +475,7 @@ async def test_ack_updates_saved_input_notices_while_root_remains_active(native_
     old_page, _ = await database.list_recoverable_submissions(session.id)
     assert old_page[0]["native_inputs"][0]["state"] == "unknown"
     revision = manager.dispatch_snapshot(session.id)["revision"]
+    anchor[0] = ("b" * 40, True)
     (tmp_path / "native-release-ack").touch()
 
     async def refreshed():
@@ -491,3 +498,5 @@ async def test_ack_updates_saved_input_notices_while_root_remains_active(native_
     (tmp_path / "native-finish").touch()
     await wait_dispatch_idle(manager, session.id)
     assert not (await database.list_recoverable_submissions(session.id))[0]
+    stored = next(row for row in await database.load_messages(session.id) if row["content"] == "Confirm acceptance live")
+    assert (stored["git_head"], stored["git_status_clean"]) == ("a" * 40, False)

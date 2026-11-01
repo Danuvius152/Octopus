@@ -70,6 +70,12 @@ permits Owner to return the original input and order to ordinary dispatch.
 Generic internal errors and missing acknowledgments remain unknown. They cannot
 trigger replay, a different target or automatic resumption after Stop.
 
+The current steer owns its message and persisted sequence. Its completed
+preparation task retains the original immutable Git anchor across the write;
+delayed acceptance or uncertain delivery never recaptures the working tree.
+There is no second input-record snapshot on the queued request. Requeued inputs
+are reconstructed from their original durable identity.
+
 Observed acceptance/rejection commits survive reader cancellation through the
 existing cleanup protection and database deadline. Resource cancellation starts
 independently; a late proof updates only its original input. Owner coalesces
@@ -122,6 +128,8 @@ late proof, and quiet stdout under subscriber pressure. Saved-input frontend
 tests cover the normal WebSocket dispatch revision clearing pending or unknown
 acceptance notices while the root stays active; separate unknown execution
 still renders its recovery notice.
+The delayed-ACK cases also verify that both timely and late acceptance preserve
+the Git anchor captured before the write.
 
 The [original experiments and rationale](https://github.com/Danuvius152/Octopus/blob/a8abac5ae0a9e3b98b7e71df003cfcd88c211571/docs/plans/inline-steering.md)
 retain their tested CLI version and conditions. Current test policy is in

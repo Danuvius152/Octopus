@@ -195,17 +195,6 @@ def fork_info_fields(
 
 
 @dataclass
-class RecordedInput:
-    """One fixed request input retained through uncertain inline delivery."""
-
-    seq: int | None
-    message: MessageContent
-    git_head: str | None = None
-    git_status_clean: bool | None = None
-    confirmed: bool = False
-
-
-@dataclass
 class QueuedPrompt:
     """A user turn waiting to run.
 
@@ -229,7 +218,6 @@ class QueuedPrompt:
     order: int = 0
     question_session_id: str | None = None
     question_id: str | None = None
-    recorded_input: RecordedInput | None = None
     queued_event: dict[str, Any] | None = field(default=None, repr=False)
 
     @property

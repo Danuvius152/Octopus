@@ -49,7 +49,6 @@ from .base import (
     ForkError,
     PendingInput,
     QueuedPrompt,
-    RecordedInput,
     Session,
     _augment_prompt_with_attachments,
     logger,
@@ -1408,7 +1407,6 @@ class OwnerRuntime:
                                      "work_id": request.work_id, "knowledge": json.loads(encode(knowledge)),
                                  }})
         seq = await manager._persist_message(session, message, git_head=prepared.git_head, git_status_clean=prepared.git_clean)
-        request.recorded_input = RecordedInput(seq, message, prepared.git_head, prepared.git_clean, True)
         session._run.knowledge_context, session._run.wiki_mode = knowledge, mode
         session._run.wiki_task_id = tasks.open(session, mode, knowledge.trusted_request,
                                               request_id=request.request_id, knowledge=knowledge) if mode in {"auto", "read", "maintain"} else None
@@ -1991,18 +1989,16 @@ class OwnerRuntime:
                 steer.merged = merged
                 request = steer.request
                 request.knowledge_context, request.trusted_request, request.wiki_mode = merged, merged.trusted_request, merged.mode
-                if request.recorded_input is None:
-                    from ..knowledge import encode
-                    message = MessageContent(role=MessageRole.user, type="text", content=request.prompt,
-                        tool_input={"request_context": {"request_id": request.request_id, "source": request.source,
-                            "work_id": request.work_id, "knowledge": json.loads(encode(merged))}})
-                    if steer.target is not None:
-                        assert message.tool_input is not None
-                        message.tool_input["native_steer"] = True
-                    seq = None if steer.target is not None else await manager._persist_message(
-                        session, message, git_head=prepared.git_head, git_status_clean=prepared.git_clean)
-                    request.recorded_input = RecordedInput(seq, message, prepared.git_head, prepared.git_clean, steer.target is None)
-                steer.message, steer.seq = request.recorded_input.message, request.recorded_input.seq
+                from ..knowledge import encode
+                steer.message = MessageContent(role=MessageRole.user, type="text", content=request.prompt,
+                    tool_input={"request_context": {"request_id": request.request_id, "source": request.source,
+                        "work_id": request.work_id, "knowledge": json.loads(encode(merged))}})
+                if steer.target is not None:
+                    assert steer.message.tool_input is not None
+                    steer.message.tool_input["native_steer"] = True
+                else:
+                    steer.seq = await manager._persist_message(
+                        session, steer.message, git_head=prepared.git_head, git_status_clean=prepared.git_clean)
                 # Constraints are installed before frame I/O can expose them to
                 # tools. The original owner restores them if no frame is sent.
                 session._run.knowledge_context = merged
@@ -2053,7 +2049,6 @@ class OwnerRuntime:
                 request.started = False
                 if execution.interrupted:
                     request.priority = False
-                request.recorded_input = None
                 session._inline_requests[execution.request.request_id].remove(request)
                 session._pending_queue.extend([self._pending_input(request), *session._steer_queue])
                 session._pending_queue.sort(key=lambda item: item.order)
@@ -2068,11 +2063,10 @@ class OwnerRuntime:
             logger.error("Steer delivery unconfirmed session=%s request=%s error=%s\n%s",
                          session.id, request.request_id, type(error).__name__, steer.backend.format_exception(error))
         if steer.target is not None and (delivered or uncertain):
-            recorded = request.recorded_input
-            assert recorded is not None
-            steer.seq = await manager._persist_message(session, recorded.message,
-                git_head=recorded.git_head, git_status_clean=recorded.git_status_clean)
-            recorded.seq, recorded.confirmed = steer.seq, True
+            assert steer.message is not None
+            _, prepared = steer.prepared.result()
+            steer.seq = await manager._persist_message(session, steer.message,
+                git_head=prepared.git_head, git_status_clean=prepared.git_clean)
             session._request_observations[request.request_id].follow(
                 session._request_observations[execution.request.request_id])
         if uncertain:
