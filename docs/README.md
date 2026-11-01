@@ -77,7 +77,7 @@ leave the README unchanged.
 | [Model, reasoning and speed settings](implemented/model-reasoning.md) | implemented | Independent model, reasoning and Normal/Fast speed controls with runtime discovery and preserved conversation history. |
 | [Named-agent delegation: conversations and work rounds](implemented/agent-collaboration.md) | implemented | Asynchronous same-account collaboration with original-receipt completion and exact-work cancellation. |
 | [Native research: pipeline, report and return ownership](implemented/native-deep-research.md) | implemented | Bounded native leaves with distinct research completion, follow-up processing and retirement. |
-| [Native sub-agents, surfaced](implemented/native-subagents.md) | implemented | Native helper observations, scoped App Server work cards and retained child output, including late events within the original resource lifetime. |
+| [Native sub-agents, surfaced](implemented/native-subagents.md) | implemented | Native helper observations, scoped App Server work cards and read-only saved child details, including late events within the original resource lifetime. |
 | [Octopus on a phone](implemented/mobile.md) | implemented | Octopus on a phone — the drawer that puts itself away, 16px fields, touch targets, and safe-area insets. |
 | [Octopus 当前跨模块契约](implemented/architecture-contract.md) | implemented | 当前所有权、输入、完成、资源退休、账户与数据保证；不代表生产部署。 |
 | [Scheduled runs: what a fire is, and what stops it stacking](implemented/scheduled-runs.md) | implemented | What a scheduled fire is: the overlap guard, the `[scheduled:…]` marker, and the link from "last run" to the run. |

@@ -331,6 +331,17 @@ class MessagePage(BaseModel):
     has_more_messages: bool = False
 
 
+class NativeDetailPage(BaseModel):
+    """Collected items for the work resolved from a product transcript reference."""
+
+    anchor_seq: int
+    child: SubagentRun
+    availability: Literal["available", "not_collected"]
+    messages: list[MessageContent] = []
+    next_after_seq: int | None = None
+    has_more: bool = False
+
+
 class SessionDetail(SessionInfo):
     messages: list[MessageContent] = []
     active_attempt: dict[str, str] | None = None

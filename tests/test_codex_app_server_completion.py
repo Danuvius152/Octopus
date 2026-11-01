@@ -29,6 +29,44 @@ from tests.test_runtime_review_races import wait_dispatch_idle
 native_runtime = native_tests.native_runtime
 
 
+@pytest.mark.parametrize("window", ["committed", "delivered"])
+async def test_stop_after_selection_preserves_original_completion_and_pauses_dispatch(native_runtime, tmp_path, window):
+    manager, database, session, _, starts, events = native_runtime
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def hold_terminal(event):
+        if event.get("terminal") and window == "committed":
+            entered.set()
+            await release.wait()
+
+    manager.on_broadcast("terminal-stop-window", hold_terminal)
+    receipt = await manager.start_message(session.id, "Finish once", source="human")
+    waiting = asyncio.create_task(receipt.wait())
+    try:
+        if window == "committed":
+            await asyncio.wait_for(entered.wait(), 4)
+            assert not waiting.done()
+        else:
+            completion = await asyncio.wait_for(asyncio.shield(waiting), 4)
+            assert completion.notification_state == "delivered"
+        # The resource observation survives removal of the current backend.
+        resource = receipt.execution.attempts[0]
+        saved = await database.read_session_result(session.id, receipt.request_id)
+        assert saved.outcome.status == "success"
+        assert resource.state == "proven"
+        await manager.interrupt(session.id)
+        assert manager.dispatch_snapshot(session.id)["paused"]
+    finally:
+        release.set()
+    completion = await asyncio.wait_for(waiting, 4)
+    await wait_dispatch_idle(manager, session.id)
+    assert completion.outcome.status == "success"
+    assert completion.recording_state == "committed" and completion.notification_state == "delivered"
+    assert (await database.read_session_result(session.id, receipt.request_id)).outcome == completion.outcome
+    assert len(starts) == 1 and resource.state == "proven"
+    assert len([event for event in events if event.get("terminal")]) == 1
+
+
 async def test_root_terminal_uses_retirement_grace_instead_of_active_budget(native_runtime, tmp_path, monkeypatch):
     from server.harness import run as run_module
 

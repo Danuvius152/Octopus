@@ -51,6 +51,7 @@ export type ToolReceipt = components["schemas"]["ToolReceipt"];
 export type MessageContent = components["schemas"]["MessageContent"];
 // A page of older transcript (polish-2026-09.md §4 B2).
 export type MessagePage = components["schemas"]["MessagePage"];
+export type NativeDetailPage = components["schemas"]["NativeDetailPage"];
 export type MessageRole = components["schemas"]["MessageRole"];
 export type ModelSettings = components["schemas"]["ModelSettings"];
 export type NotifierInfo = components["schemas"]["NotifierInfo"];

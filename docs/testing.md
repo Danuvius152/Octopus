@@ -192,6 +192,20 @@ transcript tests cover stale snapshots and service-generation changes. Retain
 failed logs and combine unchanged full-run evidence with affected-module fixes
 under the reuse policy above; passing browser mocks do not certify R2 cutover.
 
+`tests/test_codex_app_server_completion.py` checks Stop before outcome selection,
+after selection before commit, after commit before notification, and after
+receipt delivery. `tests/test_codex_app_server_stop.py` adds the controlled
+process/SQLite path through question waiting, nested helper observations,
+silent process-group cleanup, independent BG returns, manual correction and
+explicit queue resumption. Service reentry retains initial/steer unknown and
+accepted-without-consumption evidence without another business send. Existing
+recovery and original-resource tests retain unconfirmed-writer refusal.
+`tests/test_native_child_details.py` exercises the authenticated saved-item API,
+delayed child binding, precise pages/ownership, archived and damaged records,
+and reads concurrent with Stop. Native detail component and browser tests
+check late pages, same-service reconnect and saved body after reload, keeping
+chat high water and model execution unchanged.
+
 ### Markers, providers and isolation
 
 - **`real` selects live-provider and supervisor integration.** `real_claude`

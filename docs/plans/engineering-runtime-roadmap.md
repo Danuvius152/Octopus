@@ -385,9 +385,10 @@ Monitor 区分产品请求、native turn、采样与父子累计/增量用量，
 行为等价的 driver 预重构，技术上无协议前置；03 同时等待 01 与 02。随后分票
 闭合配置、输入、问题、身份、根终态/退休、正文、详情、业务效果、历史、错误、
 观测和保存范围；12 不依赖 09。17 汇合全部验收再切默认。这个技术前沿不自动
-授予代码或模型执行权限。当前 01–07 的各自范围均已通过独立验收，08–17 未启动；
-当前已实现范围见[Codex 合同](../implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume)。
-后续票据保留原依赖，本轮在 06–07 边界停止；已验收范围不能解释为完整 R2 或默认切换放行。
+授予代码或模型执行权限。当前 01–11 的产品实现范围见
+[Codex 合同](../implemented/codex-backend.md#opt-in-app-server-start-and-precise-resume)和
+[原生子任务合同](../implemented/native-subagents.md#saved-app-server-details)。
+12–17 保留原依赖；阶段性交付不能解释为完整 R2 或默认切换放行。
 
 开发期发送前明确 transport，不双跑副作用请求、不在 unknown 后换协议。
 默认切换须在同一候选通过原仓库门禁及本机离线 E2E、Codex live pytest/浏览器

@@ -16,6 +16,7 @@ from typing import Any
 
 import aiosqlite
 
+from ..models import NativeDetailPage
 from ..session_results import SessionResult, committed_result
 from .applications import ApplicationDeleting
 from .base import DatabaseBase
@@ -43,6 +44,15 @@ async def insert_session(tx: Transaction, record: dict[str, Any]) -> None:
 
 
 class SessionsMixin(DatabaseBase):
+
+    async def read_native_details(
+        self, session_id: str, user_id: str | None, anchor_seq: int,
+        *, after_seq: int | None = None, limit: int = 50,
+    ) -> NativeDetailPage:
+        from .native_details import read_native_details
+
+        async with self.transaction(write=False) as tx:
+            return await read_native_details(tx, session_id, user_id, anchor_seq, after_seq=after_seq, limit=limit)
 
     async def get_session_resume_id(self, session_id: str) -> str | None:
         """Read the committed history after the preceding writer has retired."""

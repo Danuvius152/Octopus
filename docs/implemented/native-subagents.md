@@ -1,13 +1,13 @@
 # Native sub-agents, surfaced
 
-> **Status:** implemented — Native helper observations, scoped App Server work cards and retained child output, including late events within the original resource lifetime.
+> **Status:** implemented — Native helper observations, scoped App Server work cards and read-only saved child details, including late events within the original resource lifetime.
 
 The implemented scope is observation and presentation, including Claude
 held-process late events and opt-in Codex App Server capture through bounded
 retirement. A card does not prove that the parent consumed a child result or
 that a delegation receives a later parent report. Codex root success may coexist
 with an unfinished helper retired as interrupted. Default Codex execution still
-uses exec; the remaining completion, result-consumer and cutover scope belongs to
+uses exec; the remaining compatibility and cutover scope belongs to
 the [runtime roadmap](../plans/engineering-runtime-roadmap.md#codex-native-tail).
 
 ## 1. Observation sources
@@ -103,7 +103,7 @@ projection hides child text from main chat; raw transcript rows, original seq,
 global high water and tool audit remain intact. Cards rebuild their summary from
 the collected child text with matching request/attempt/thread/turn. Historical
 pagination and realtime output use the same association. If a window has child
-text but lacks the older status row, its card remains unconfirmed. A typed live
+text or tools but lacks the older status row, its card remains unconfirmed. A typed live
 snapshot can supply a missing display anchor without inventing a stored seq;
 loading the original row deduplicates that anchor.
 
@@ -111,6 +111,39 @@ Legacy cards render where the spawning tool call sits in the transcript: the sub
 tool counts as they climb, elapsed time, and — when it lands — the summary,
 collapsed to a few lines with the full text one click away. Failure says so
 with its reason rather than a chip that simply stops moving.
+
+### Saved App Server details
+
+Expanding a native card reads the collected body and tool items through
+`GET /api/sessions/{session_id}/native-details/{anchor_seq}`. The client sends
+an original product message sequence, never an arbitrary native thread ID.
+Within one read transaction, the server checks the exact account/session,
+resolves request/attempt/root and child thread/turn, and reads only matching
+saved rows. Archived sessions use the same reader. A spawn observation can
+precede its child turn; resolution follows that same card's saved binding,
+without falling back to all turns on the child thread. Conflicting identities
+or duplicate sequences fail the query. A window with only child body or tools
+can supply its own real saved reference. A snapshot alone cannot manufacture one.
+
+Each page rechecks ownership and its original target. `after_seq` must belong
+to that precise child work. The UI keeps pages separately from main chat and
+deduplicates by saved seq, so a tool call and its result sharing one native
+item both survive. Refresh, target/account/service changes, close/reopen and
+disconnect/reconnect invalidate pending reads, including a reconnect to the
+same service. Detail reads do not advance chat high water, alter its display
+cache, add usage or change saved messages.
+
+Available items, uncollected history and query errors are distinct. Saved
+partial output remains readable with the helper's actual status and stop
+reason; neither helper completion nor a readable body proves parent consumption.
+Malformed saved content is a query failure, not uncollected history. Necessary
+complete-item recording failures still follow the original execution failure
+contract, rather than being excused as unavailable optional details.
+
+The endpoint only reads the original messages; there is no second body store,
+native history host or optional live-host supplement. Opening, refreshing or
+paging the panel cannot execute a model, send child input, extend a lease or
+idle budget, or hold retirement. It does not recover uncaptured history.
 
 ## 6. Agents that bring their own sub-agents
 
@@ -221,6 +254,13 @@ live-provider run. Frontend source-adjacent tests and
 `web/e2e/native-output.spec.ts` cover partial interleaving, sparse windows,
 reconnect and refresh; the browser fixture does not establish native I/O semantics.
 
+`tests/test_native_child_details.py` covers delayed spawn binding, distinct
+rounds, tools and paging, account/refusal/integrity boundaries, archived reads,
+and pending detail delivery across actual Stop retirement. Component tests
+exercise stale initial/next pages on refresh, target changes and same-service
+reconnect. The browser case opens saved details after completion and reload,
+with an execution audit proving that viewing makes no model request.
+
 
 Parser snapshots for both harnesses (every event, including the anonymous
 `task_updated`), the session-manager path (broadcast-only, snapshot-carried,
@@ -237,7 +277,8 @@ both its completion and the agent's follow-up report survive.
 * **Custom sub-agent definitions for Codex** are not rendered by the current
   profile. A transport change must verify its own supported native surface.
 * **Opening a sub-agent's full native transcript.** Collected App Server child
-  text is readable in its card. Additional transcript reading remains separate.
+  body and tools are readable in its saved details. Uncollected transcript
+  history remains unavailable through this interface.
   Claude writes one under the
   session's `tasks/` dir and Codex's child threads are real threads on disk;
   reading them is a file-tailing feature, not an event-stream one.

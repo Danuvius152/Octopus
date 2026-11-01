@@ -6,6 +6,7 @@ from fastapi.responses import Response, StreamingResponse
 from ..auth import verify_token
 from ..config import settings
 from ..credential_bindings import CredentialBindingError, validate_credential_binding
+from ..db.native_details import NativeDetailError
 from ..deps import ScopeUser, SessionMgr
 from ..harness import BackendForkNotSupported
 from ..models import (
@@ -16,6 +17,7 @@ from ..models import (
     ImportSessionRequest,
     MessageContent,
     MessagePage,
+    NativeDetailPage,
     PendingQuestionInfo,
     SessionDetail,
     SessionInfo,
@@ -416,6 +418,20 @@ async def export_transcript(
         media_type="application/x-ndjson",
         headers={"Content-Disposition": 'attachment; filename="transcript.jsonl"'},
     )
+
+
+@router.get("/{session_id}/native-details/{anchor_seq}", response_model=NativeDetailPage)
+async def native_child_details(
+    session_manager: SessionMgr, session_id: str, anchor_seq: int,
+    user_id: ScopeUser = None, after_seq: int | None = Query(None, ge=0),
+    limit: int = Query(50, ge=1, le=100), _: str = Depends(verify_token),
+):
+    """Read only saved items; the original host and its lease are untouched."""
+    try:
+        return await session_manager.db.read_native_details(session_id, user_id, anchor_seq, after_seq=after_seq, limit=limit)
+    except NativeDetailError as error:
+        code = str(error)
+        raise HTTPException(404 if code == "not_found" else 409, {"code": code}) from error
 
 
 @router.get("/{session_id}/messages", response_model=MessagePage)

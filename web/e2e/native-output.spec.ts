@@ -23,6 +23,7 @@ test("native root and helper items stay separate through completion, reconnect a
   let reconnectGeneration = 0;
   const sent: unknown[] = [];
   const httpWrites: { method: string; path: string }[] = [];
+  const detailReads: number[] = [];
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (!path.startsWith("/api/")) { await route.continue(); return; }
@@ -39,6 +40,17 @@ test("native root and helper items stay separate through completion, reconnect a
     else if (path === "/api/agents") data = [{ id: session.agent_id, name: "Octo", backend: "codex", pinned: true, is_system: true }];
     else if (path === "/api/backends") data = { available: ["codex"], default: "codex", models: { codex: [] } };
     else if (path === "/api/sessions") data = [{ ...session, status: done ? "idle" : "running" }];
+    else if (path.startsWith(`/api/sessions/${session.id}/native-details/`)) {
+      const anchor = Number(path.split("/").at(-1));
+      detailReads.push(anchor);
+      if (!messages.some((row) => row.seq === anchor)) {
+        await route.fulfill({ status: 404, json: { detail: "No saved reference" } });
+        return;
+      }
+      const collected = messages.filter((row) => row.type === "text" && row.runtime_metadata?.native?.thread_id === "helper");
+      data = { anchor_seq: anchor, child: helper, availability: collected.length ? "available" : "not_collected",
+        messages: collected, next_after_seq: collected.at(-1)?.seq ?? null, has_more: false };
+    }
     else if (path === `/api/sessions/${session.id}`) {
       const reconnected = reconnectGeneration > 0 && connections >= reconnectGeneration;
       if (reconnected) reconnectDetails += 1;
@@ -68,6 +80,10 @@ test("native root and helper items stay separate through completion, reconnect a
   // anchor, without manufacturing a stored message or executable work.
   await expect(card).toHaveCount(1);
   await expect(card.locator(".subagent-name")).toHaveText("/root/reviewer");
+  await card.locator(".subagent-summary-row").click();
+  await expect(card.getByText(/No saved reference/)).toBeVisible();
+  expect(detailReads).toEqual([]);
+  await card.locator(".subagent-summary-row").click();
   send({ type: "assistant_delta", content: "Root partial", runtime_metadata: identity("root", "same") });
   send({ type: "assistant_delta", content: "Helper partial", runtime_metadata: identity("helper", "same") });
   await expect(page.locator('[data-testid="streaming-text"] .msg-streaming-text')).toHaveText("Root partial");
@@ -92,6 +108,11 @@ test("native root and helper items stay separate through completion, reconnect a
   await expect(page.locator('[data-testid="streaming-text"]')).toHaveCount(0);
   await expect(card).toHaveClass(/subagent-completed/);
   await expect(card.locator(".subagent-description")).toHaveText("helper finished");
+  await card.locator(".subagent-summary-row").click();
+  const savedDetails = card.getByRole("region", { name: "Saved helper details" });
+  await expect(savedDetails.getByText("Helper saved answer", { exact: true })).toBeVisible();
+  await expect(savedDetails.getByText(/parent has consumed/)).toBeVisible();
+  await card.locator(".subagent-summary-row").click();
   reconnectGeneration = connections + 1;
   socket!.close({ code: 1012, reason: "Original stream reconnect" });
   await expect.poll(() => connections).toBeGreaterThanOrEqual(reconnectGeneration);
@@ -107,6 +128,9 @@ test("native root and helper items stay separate through completion, reconnect a
   await expect(card).toHaveClass(/subagent-completed/);
   await expect(card.locator(".subagent-summary")).toHaveText("Helper saved answer");
   await expect(page.locator(".msg-assistant .msg-content")).toHaveText(["Root progress", "Root final answer"]);
+  await card.locator(".subagent-summary-row").click();
+  await expect(card.getByRole("region", { name: "Saved helper details" }).getByText("Helper saved answer", { exact: true })).toBeVisible();
+  expect(detailReads.length).toBeGreaterThanOrEqual(2);
   expect(sent).toEqual([]);
   expect(httpWrites).toEqual([]);
 });

@@ -17,10 +17,26 @@ function workKey(identity: RuntimeMetadata | null | undefined, thread?: string |
   return identity && thread && turn ? JSON.stringify([identity.request_id, identity.attempt_id, thread, turn]) : undefined;
 }
 
+/** Only real persisted seqs may identify a detail read, never snapshot ids. */
+export function nativeDetailAnchor(messages: Message[], card: SubagentRun): number | undefined {
+  const identity = card.runtime_metadata;
+  const status = messages.find((message) => message.seq !== undefined && message.type === "native_subagent" &&
+    message.tool_input?.card_id === card.card_id && message.runtime_metadata?.native &&
+    message.runtime_metadata.request_id === identity?.request_id && message.runtime_metadata.attempt_id === identity?.attempt_id);
+  if (status) return status.seq;
+  if (!identity || !card.native_thread_id || !card.native_turn_id) return undefined;
+  return messages.find((message) => message.seq !== undefined && isNativeChild(message.runtime_metadata) &&
+    message.runtime_metadata?.request_id === identity.request_id && message.runtime_metadata?.attempt_id === identity.attempt_id &&
+    message.runtime_metadata?.native?.root_thread_id === identity.native?.root_thread_id &&
+    message.runtime_metadata?.native?.root_turn_id === identity.native?.root_turn_id &&
+    message.runtime_metadata?.native?.thread_id === card.native_thread_id &&
+    message.runtime_metadata?.native?.turn_id === card.native_turn_id)?.seq;
+}
+
 function observedCard(message: Message): SubagentRun | undefined {
   const identity = readRuntimeMetadata(message.runtime_metadata);
   const source = identity?.native;
-  if (message.type !== "text" || !isNativeChild(identity) || !source) return undefined;
+  if (!["text", "thinking", "tool_use", "tool_result"].includes(message.type) || !isNativeChild(identity) || !source) return undefined;
   return { card_id: `observed:${workKey(identity, source.thread_id, source.turn_id)}`,
     task_id: source.thread_id, native_thread_id: source.thread_id, native_turn_id: source.turn_id,
     parent_thread_id: source.parent_thread_id, runtime_metadata: identity,

@@ -733,6 +733,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/sessions/{session_id}/native-details/{anchor_seq}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Native Child Details
+         * @description Read only saved items; the original host and its lease are untouched.
+         */
+        get: operations["native_child_details_api_sessions__session_id__native_details__anchor_seq__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/sessions/{session_id}/messages": {
         parameters: {
             query?: never;
@@ -4623,6 +4643,32 @@ export interface components {
             default_service_tier?: string | null;
         };
         /**
+         * NativeDetailPage
+         * @description Collected items for the work resolved from a product transcript reference.
+         */
+        NativeDetailPage: {
+            /** Anchor Seq */
+            anchor_seq: number;
+            child: components["schemas"]["SubagentRun"];
+            /**
+             * Availability
+             * @enum {string}
+             */
+            availability: "available" | "not_collected";
+            /**
+             * Messages
+             * @default []
+             */
+            messages: components["schemas"]["MessageContent"][];
+            /** Next After Seq */
+            next_after_seq?: number | null;
+            /**
+             * Has More
+             * @default false
+             */
+            has_more: boolean;
+        };
+        /**
          * NativeInputEvidence
          * @description Protocol facts for one original input attempt, never proof of consumption.
          */
@@ -7577,6 +7623,42 @@ export interface operations {
                 };
                 content: {
                     "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    native_child_details_api_sessions__session_id__native_details__anchor_seq__get: {
+        parameters: {
+            query?: {
+                after_seq?: number | null;
+                limit?: number;
+                token?: string | null;
+            };
+            header?: never;
+            path: {
+                session_id: string;
+                anchor_seq: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["NativeDetailPage"];
                 };
             };
             /** @description Validation Error */

@@ -1,12 +1,21 @@
 import { beforeEach, expect, test } from "vitest";
 import { handleWsMessage } from "../hooks/useWebSocket";
 import { useSessionStore } from "../stores/sessionStore";
-import { nativeCard, nativeChatMessages } from "./nativeOutput";
+import { nativeCard, nativeChatMessages, nativeDetailAnchor } from "./nativeOutput";
 import { projectToolCall } from "./toolIdentity";
 
 const identity = (thread: string) => ({ request_id: "r", attempt_id: "a", native: {
   thread_id: thread, turn_id: "t", item_id: "same", root_thread_id: "root", root_turn_id: "t",
 } });
+
+test("a tool-only historical window exposes a saved child reference without inventing completion", () => {
+  const messages = [{ role: "tool" as const, type: "tool_result", seq: 40, content: "Saved tool output", runtime_metadata: identity("child") }];
+  const cards = nativeChatMessages(messages);
+  expect(cards).toHaveLength(1);
+  const card = nativeCard(messages, cards[0].tool_input!.card_id as string)!;
+  expect(card.status).toBe("unknown");
+  expect(nativeDetailAnchor(messages, card)).toBe(40);
+});
 
 beforeEach(() => useSessionStore.setState({ messages: {}, streamingText: {}, streamingItems: {}, lastAppliedSeq: {} }));
 

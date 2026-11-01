@@ -126,6 +126,20 @@ and named delegation share that selection. Legacy records retain their prior
 interpretation. See the [result contract](architecture-contract.md#原请求结果读取)
 for formatting, input uncertainty and failure semantics.
 
+Stop before the Owner's unique outcome selection chooses interrupted, even
+after a native success candidate. Stop after selection preserves the chosen
+outcome across unconfirmed recording, committed-but-unnotified and delivered
+receipt windows; it still pauses dispatch and closes remaining admission.
+It preserves partial output and external effects. Independent BG, Research and
+named work keep their own owners and queue in acceptance order. A manual
+correction can run while old backlog stays paused; explicit Resume releases it.
+Service reentry retains original input and steer evidence without replay,
+including unknown and accepted-without-consumption proof despite root success.
+
+Native card [saved details](native-subagents.md#saved-app-server-details) read
+only original persisted items. They do not keep this host alive or extend its
+budgets, and cannot reopen native execution after Stop or root terminal.
+
 ### Active-root human input
 
 Owner captures the original attempt and the driver's connection/thread/turn

@@ -10,7 +10,8 @@ import {
 } from "@tabler/icons-react";
 
 import { useSessionStore, type SubagentRun } from "../stores/sessionStore";
-import { nativeCard } from "../lib/nativeOutput";
+import { nativeCard, nativeDetailAnchor } from "../lib/nativeOutput";
+import { NativeSubagentDetails } from "./NativeSubagentDetails";
 
 export function NativeSubagentCard({ sessionId, cardId }: { sessionId: string; cardId: string }) {
   const messages = useSessionStore((s) => s.messages[sessionId]);
@@ -26,7 +27,8 @@ export function NativeSubagentCard({ sessionId, cardId }: { sessionId: string; c
       item.runtime_metadata.native?.turn_id === saved.native_turn_id);
     return { ...saved, summary: [saved.summary, ...partials.map((item) => item.content)].filter(Boolean).join("\n\n") };
   }, [messages, streaming, cardId, snapshots]);
-  return <SubagentCard sessionId={sessionId} observedRun={run} />;
+  const anchorSeq = run ? nativeDetailAnchor(messages || [], run) : undefined;
+  return <SubagentCard key={`${sessionId}:${cardId}`} sessionId={sessionId} observedRun={run} detailAnchor={anchorSeq} />;
 }
 
 const stopReasons: Record<string, string> = {
@@ -58,10 +60,12 @@ export function SubagentCard({
   sessionId,
   toolCallId,
   observedRun,
+  detailAnchor,
 }: {
   sessionId: string;
   toolCallId?: string | null;
   observedRun?: SubagentRun;
+  detailAnchor?: number;
 }) {
   const cached = useSessionStore((s) =>
     toolCallId ? s.subagents[sessionId]?.[toolCallId] : undefined
@@ -197,6 +201,7 @@ export function SubagentCard({
               </p>
             </div>
           )}
+          {run.native_thread_id && <NativeSubagentDetails sessionId={sessionId} anchorSeq={detailAnchor} />}
         </div>
       )}
     </div>
