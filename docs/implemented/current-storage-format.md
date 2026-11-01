@@ -112,6 +112,28 @@ runtime metadata retains original request/attempt/native source, and
 `tool_input.provider_error` retains the driver's structured error payload. The
 diagnostic remains independent of the selected business status and answer refs.
 
+Fork history copies terminal request keys, original seqs, native metadata and
+final refs without remapping historical identities. Existing user-message
+`tool_input.copied_input` captures immutable source-session/request, carrier,
+delivery state and native input evidence. It is a historical observation, with
+no copied submission, process identity or recovery permission. Result reads use
+that observation to retain input uncertainty; malformed refs never read a parent
+session to reconstruct text. The existing `fork_metadata.native_fork` records a
+native creation's unknown/created phase, selected home/strategy, RPC connection
+and actual returned ID/path for its original initializing saga. Its
+`cleanup_allowed` qualification is closed through ACK and while a management
+host remains unconfirmed; only trusted, confirmed retirement can open it.
+Starting another management operation first persists it closed. Missing or false
+qualification retains the recovery material instead of authorizing deletion.
+Ready history
+does not restore management hosts or execution authority from that metadata.
+These facts add no DDL or storage root and require no format transition.
+
+Native `fileChange` result records retain their producer's tool name in the
+existing message field. The original JSON body remains the patch payload;
+the Harness decoder checks that producer kind and item identity before exposing
+paths to rewind. Ordinary tool/model text is not promoted to file-effect evidence.
+
 A format-6 installation requires this release's finite publication conversion
 after its original writers retire: append only `native_inputs` as `[]` and commit
 marker 7 in the same SQLite transaction. Ordinary startup never performs it.

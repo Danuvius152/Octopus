@@ -57,7 +57,7 @@ leave the README unchanged.
 
 | Contract | Status | What |
 |---|---|---|
-| [/fork: full conversation and working-directory copy](implemented/session-fork.md) | implemented | Native transcript copy with explicit replay fallback; original session and files remain unchanged. |
+| [/fork: full conversation and working-directory copy](implemented/session-fork.md) | implemented | Native history copy or API fork, saved creation uncertainty and explicit replay fallback; original session and files remain unchanged. |
 | [Accounts, authorization and owned data](implemented/multi-tenancy.md) | implemented | Account authentication, scoped business state, per-account keys and managed paths. |
 | [Agent memory: native files and content ownership](implemented/memory.md) | implemented | Per-agent durable Markdown, role-specific preferences and a small project entry surface. |
 | [Agents and their conversations](implemented/agent-refactor.md) | implemented | Account-owned agent configuration, session inheritance and agent lifecycle. |

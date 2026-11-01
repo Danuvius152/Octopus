@@ -595,7 +595,8 @@ reservation refuses deletion with 409 until that original operation finishes.
   transcript into the first turn's user-message channel; turn 2+ resumes natively).
   `/fork [name]` duplicates the current session onto an independent full copy of
   the working directory using a native transcript copy (Claude: copy the JSONL
-  and rewrite session id + cwd; Codex: copy the rollout file) so the fork resumes
+  and rewrite session id + cwd; Codex exec: copy the rollout file; selected App
+  Server: native thread/fork with actual-ID checkpoint and managed host retirement) so the fork resumes
   with genuine context. Both commands produce `origin='fork'` session rows with a
   `forked_from_session_id` pointer and inherit the parent's account in both
   memory and persistence; fork broadcasts are scoped to that account. Startup

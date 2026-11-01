@@ -13,14 +13,17 @@ import json
 import os
 import shutil
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .. import fork_helpers
 from ..attachments import AttachmentError
 from ..attachments import get_path as get_attachment_path
-from ..harness import BackendForkNotSupported, get_harness
+from ..harness import BackendForkNotSupported, HarnessRun, get_harness
+from ..harness.fork import ForkHooks
 from ..models import MessageContent
 from .base import (
     ForkError,
@@ -28,10 +31,37 @@ from .base import (
     SessionManagerBase,
     logger,
 )
-from .owner_runtime import ReserveFork
+from .owner_runtime import OwnForkProcess, ReserveFork, RetireProcess
+
+if TYPE_CHECKING:
+    from .owner import SessionOwner
 
 
 class ForkingMixin(SessionManagerBase):
+
+    def _fork_hooks(self, owner: SessionOwner, fork: Session, metadata: dict[str, Any]) -> ForkHooks:
+        async def checkpoint(artifact: dict[str, Any]) -> None:
+            assert self.db is not None
+            metadata["native_fork"] = dict(artifact)
+            serialized = json.dumps(metadata)
+            identity = artifact.get("thread_id") if artifact["phase"] == "created" else None
+            await self.db.update_session_field(fork.id, fork_metadata=serialized, claude_session_id=identity)
+            fork.fork_metadata, fork.claude_session_id = serialized, identity
+
+        @asynccontextmanager
+        async def manage(backend: HarnessRun) -> AsyncIterator[None]:
+            await owner.call_runtime(OwnForkProcess(backend))
+            try:
+                yield
+            finally:
+                if owner.failed:
+                    retirement = await self._failed_owner_retirement(owner)
+                else:
+                    retirement = await owner.call_runtime(RetireProcess(backend, "fork_finished"))
+                if retirement is not None:
+                    await asyncio.shield(retirement)
+
+        return ForkHooks(checkpoint, manage, fork.id, fork.user_id)
 
     async def _require_unambiguous_transcript(self, parent: Session) -> None:
         ambiguous = ((await self.db.message_sequence_state(parent.id))[2] != 0
@@ -69,6 +99,7 @@ class ForkingMixin(SessionManagerBase):
                 incomplete = self.sessions.pop(fork_id, None)
                 if incomplete is not None:
                     self._session_removed(incomplete)
+                recovery = None
                 try:
                     harness = get_harness(row["backend"])
                     # Codex needs the credential to find its CODEX_HOME rollout
@@ -98,9 +129,18 @@ class ForkingMixin(SessionManagerBase):
                         require_auth=False,
                         user_id=row.get("user_id"),
                     )
+                    metadata = json.loads(row["fork_metadata"]) if row.get("fork_metadata") else {}
+                    artifact = metadata.get("native_fork")
+                    extra = {}
+                    if artifact:
+                        recovery = Session(id=fork_id, name="Incomplete fork cleanup", working_dir=row["working_dir"],
+                            backend=row["backend"], user_id=row["user_id"], agent_id=row["agent_id"],
+                            origin="fork", fork_status="initializing")
+                        recovery_owner = self._session_owner(recovery)
+                        extra = {"artifact": artifact, "hooks": self._fork_hooks(recovery_owner, recovery, metadata)}
                     await harness.cleanup_incomplete_fork_artifacts(
                         row["working_dir"], row["resume_id"], fork_id,
-                        credential=cred,
+                        credential=cred, **extra,
                     )
                 except Exception:
                     logger.exception(
@@ -109,6 +149,9 @@ class ForkingMixin(SessionManagerBase):
                         fork_id,
                     )
                     continue
+                finally:
+                    if recovery is not None:
+                        self._session_removed(recovery)
                 await self.db.delete_session(fork_id)
                 # A /fork duplicate owns a private working-dir copy under
                 # ~/.octopus/fork/ — remove it too so an abandoned saga doesn't
@@ -605,6 +648,7 @@ class ForkingMixin(SessionManagerBase):
                     parent_credential=parent_cred,
                     dest_working_dir=dest,
                     new_resume_id=resume_id_hint,
+                    hooks=self._fork_hooks(owner, fork, fork_meta_dict),
                 )
             except Exception:
                 # Compensate in order (mirrors fork_session): cleanup artifacts
@@ -616,7 +660,9 @@ class ForkingMixin(SessionManagerBase):
                 # review). The sweep rmtrees the copied dir once cleanup wins.
                 try:
                     await harness.cleanup_incomplete_fork_artifacts(
-                        dest, resume_id_hint, fork_id, credential=parent_cred
+                        dest, fork.claude_session_id, fork_id, credential=parent_cred,
+                        artifact=fork_meta_dict.get("native_fork"),
+                        hooks=self._fork_hooks(owner, fork, fork_meta_dict),
                     )
                 except Exception:
                     logger.exception(

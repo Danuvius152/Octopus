@@ -17,7 +17,13 @@ never branch on backend.
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
+from contextlib import AbstractAsyncContextManager
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from .run import HarnessRun
 
 # Strategy tokens — used only inside the harness layer for clarity.
 NATIVE_TRANSCRIPT = "native_transcript"
@@ -28,13 +34,23 @@ HISTORY_REPLAY = "history_replay"
 class ForkArtifact:
     """What ``Harness.prepare_fork`` returns.
 
-    NATIVE backends return the backend-native resume handle in ``resume_id``
-    (equal to the caller's hint) and ``needs_replay=False``. REPLAY backends
-    return ``resume_id=None`` and ``needs_replay=True`` — their real resume id
-    arrives later (Codex's ``thread.started``)."""
+    Native preparation returns the actual resume handle with no replay. File
+    copies use the caller's hint; a native API can allocate a different ID and
+    checkpoint it in the original saga. Replay returns no handle; the first
+    explicit request later establishes its own native identity."""
 
     resume_id: str | None
     needs_replay: bool
+
+
+@dataclass(frozen=True)
+class ForkHooks:
+    """The existing saga commits identity and owns the short native host."""
+
+    checkpoint: Callable[[dict[str, Any]], Awaitable[None]]
+    manage: Callable[[HarnessRun], AbstractAsyncContextManager[None]]
+    session_id: str
+    user_id: str | None
 
 
 class BackendForkNotSupported(Exception):

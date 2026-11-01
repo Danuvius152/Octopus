@@ -9,6 +9,7 @@ from server.config import settings
 from server.database import Database
 from server.sessions import SessionManager
 from server.sessions.client_submissions import submission_status, submit_client_message
+from server.sessions.forking import ForkingMixin
 from tests.accounts import create_account
 from tests.cli_gate import codex_cli_works
 
@@ -66,5 +67,54 @@ async def test_live_native_start_and_precise_resume(tmp_path, monkeypatch, first
     finally:
         await manager.interrupt(session.id)
         await manager.await_session_execution(session.id, timeout=10)
+        await manager.close_session_owners()
+        await database.close()
+
+
+@pytest.mark.parametrize("first_transport", ["exec", "app-server"])
+async def test_live_old_and_native_history_fork_continue_independently(tmp_path, monkeypatch, first_transport):
+    database = Database(str(tmp_path / "fork-product.db"))
+    await database.initialize()
+    await create_account(database, extra_roots=[tmp_path])
+    agent = await database.get_system_agent()
+    await database.update_agent(agent["id"], mcp_servers=[])
+    manager = SessionManager()
+    await manager.initialize(database)
+    work = tmp_path / "work"
+    work.mkdir()
+    monkeypatch.setattr(ForkingMixin, "_fork_copy_base", staticmethod(lambda: str(tmp_path / "copies")))
+    parent = await manager.create_session(agent["id"], "Live fork source", str(work), backend="codex")
+
+    async def ask(session, prompt):
+        receipt = await manager.start_message(session.id, prompt)
+        completion = await asyncio.wait_for(receipt.wait(), 120)
+        assert completion.outcome.status == "success", completion
+        await manager.await_session_execution(session.id, timeout=10)
+        return await database.read_session_result(session.id, receipt.request_id)
+
+    try:
+        monkeypatch.setattr(settings, "codex_transport", first_transport)
+        first = await ask(parent, "Use the command tool to write FORK_ARTIFACT_81 into seed.txt in the working directory. "
+                          "Remember amber-thread-93 in this conversation. Reply with that phrase. Do not spawn helpers.")
+        assert (work / "seed.txt").read_text().strip() == "FORK_ARTIFACT_81"
+        monkeypatch.setattr(settings, "codex_transport", "app-server")
+        branch = await manager.duplicate_session(parent.id, user_id=parent.user_id)
+        assert branch.claude_session_id and branch.claude_session_id != parent.claude_session_id
+        assert branch.user_id == parent.user_id and branch.backend == "codex"
+        from pathlib import Path
+
+        assert (Path(branch.working_dir) / "seed.txt").read_bytes() == (work / "seed.txt").read_bytes()
+        assert (await database.read_session_result(branch.id, first.request_id)).fragments == first.fragments
+        fork_reply = await ask(branch, "Use the command tool to write BRANCH_ONLY into branch-only.txt in the current working "
+                               "directory. Reply with the phrase I asked you to remember. Do not spawn helpers.")
+        assert "amber-thread-93" in fork_reply.reply_text()
+        assert (Path(branch.working_dir) / "branch-only.txt").read_text().strip() == "BRANCH_ONLY"
+        assert not (work / "branch-only.txt").exists()
+        source_reply = await ask(parent, "Reply only with the phrase I asked you to remember. Do not use helpers.")
+        assert "amber-thread-93" in source_reply.reply_text()
+        await manager.delete_session(parent.id)
+        assert (await database.read_session_result(branch.id, first.request_id)).fragments == first.fragments
+    finally:
+        await manager.drain_turns(timeout=10)
         await manager.close_session_owners()
         await database.close()

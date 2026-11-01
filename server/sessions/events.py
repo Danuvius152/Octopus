@@ -61,6 +61,7 @@ class EventsMixin(SessionManagerBase):
                 role=MessageRole.tool,
                 type="tool_result",
                 content=event.content,
+                tool_name=event.tool_name,
                 tool_use_id=event.tool_use_id,
                 runtime_metadata=RuntimeMetadata.model_validate(event.runtime_metadata) if event.runtime_metadata else None,
                 is_error=event.is_error,

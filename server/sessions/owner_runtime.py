@@ -164,6 +164,10 @@ class ReserveFork:
     reserve: bool
 
 
+@dataclass(frozen=True)
+class OwnForkProcess:
+    backend: HarnessRun
+
 
 
 @dataclass(frozen=True)
@@ -209,7 +213,7 @@ class IdlePublication:
 
 
 RuntimeCommand = (Submit | Resume | Interrupt | CancelRequest | Reset | CloseWork | RetireProcess | RetireHeldProcess
-                  | CloseExecution | ReleaseApplication | ReserveFork | ReleaseArchive | AutoArchive | FinishAutoArchive
+                  | CloseExecution | ReleaseApplication | ReserveFork | OwnForkProcess | ReleaseArchive | AutoArchive | FinishAutoArchive
                   | IdleEvent | CorrelatedControl | RecoveryDismissed)
 
 
@@ -551,6 +555,12 @@ class OwnerRuntime:
         if isinstance(command, ReleaseApplication):
             if manager.sessions.get(session.id) is session and session._archive_reservation is None:
                 session._admission_closed = False
+            return True
+        if isinstance(command, OwnForkProcess):
+            if (not (session._forking or session.fork_status == "initializing") or self.current is not None
+                    or session._run.backend is not None or session._run.retirements):
+                raise RuntimeError("Native fork host requires its original exclusive lifecycle reservation")
+            session._run.backend = command.backend
             return True
         if isinstance(command, ReserveFork):
             if command.reserve:

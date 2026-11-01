@@ -168,6 +168,13 @@ claim，没有无数据库执行分支；待执行队列只持身份与展示/�
 构建状态、App ask/SSE、Research、Wiki 和 scheduler 消费原请求完成事实。
 App 的成功 `done` 还要求原正文通知前缀已送达；响应结束不直接释放执行槽位。
 
+App build、scheduler 与 Wiki 不依赖最终正文或新增 SessionResult 查询。
+App build 在原完成入口继续核验真实 entrypoint；根 success 与 helper partial
+均不能代替产物。scheduler 先取原完成和退休事实，再记录完成并按原政策归档；
+Stop 暂停的会话仍可见。Wiki 分别核验原 task grant、执行终态、资源退休与
+applied/indexed 效果，根 terminal 或 Stop 后授权不因有限采集继续存在。
+已有部分效果和失败原因保留。通知失败不倒写已提交结论，也不重跑模型或效果。
+
 ### 原执行的观察
 
 原接纳回执的 `execution` 持有 `RequestObservation`：原 input request/work、
@@ -200,6 +207,11 @@ backend 清理。`require_retired` 使用会话公开的 work/旧会话范围查
 attempt、有序正文、成本和可识别缺失。确认的 inline 输入沿真实承载关系读取；
 unknown 输入不借用主请求的成功。旧 terminal 无 attempt 时只回退同 request
 已关联文本，不按时间、文字含义或“最佳答案”猜关联，也不建答案引用表。
+
+fork 复制原 terminal request key、seq 和原生来源，不重映射历史 ID；最终引用
+只在分支内校验。用户行的只读 `copied_input` 保存原 delivery/native 事实，
+不复制执行提交或恢复权；原输入 unknown、已接纳未消费的事实不会因分支而消失。
+截断或损坏的引用不向父会话或其他请求补正文，删除源会话不影响已复制的完整记录。
 
 新 App Server terminal 的 `final_answer` 仅保存绑定根 thread/turn 和有序原消息
 seq。Owner 只在完整根 `final_answer` item 已提交后纳入引用；commentary、child、

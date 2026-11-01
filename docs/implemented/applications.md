@@ -65,6 +65,12 @@ leave the build permanently building. The shared ownership and completion
 rules are in the [architecture contract](architecture-contract.md#输入完成与资源退休);
 deployment is verified separately.
 
+For App Server, completion follows the bound root and its original resource
+retirement. A remaining helper partial neither proves a valid app nor forces a
+build failure. The entrypoint check still decides the artifact status, including
+a usable artifact written before root failure or Stop. This consumer reads no
+final-answer string and adds no result-text query.
+
 The broadcast subscriber only derives running progress from current execution.
 Per-session projection updates coordinate without holding that coordination
 across subscriber callbacks; after awaited backend rebuild work, the consumer

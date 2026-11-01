@@ -816,12 +816,10 @@ async def _fork_prepare_replay(
     resume_id_hint: str | None,
     fork_id: str,
 ) -> Any:
-    """No on-disk work (session-rewind.md §5.3.2). Codex's resume state is
-    internal to the binary and has no transcript codec, so the first fork turn
-    instead carries the truncated history wrapped into its USER PROMPT (done in
-    `SessionManager._execute_claimed_request`). `thread.started` captures the real resume id
-    on turn 1; turn 2+ uses native Codex resume. The `resume_id_hint` is
-    ignored."""
+    """Rewind uses product seq, which can split one native turn at a steer.
+    The retained history therefore travels in the first explicit USER input,
+    without approximating it as a native turn count. No creation or model
+    execution occurs here; the hint is unused."""
     from .fork import ForkArtifact
 
     return ForkArtifact(resume_id=None, needs_replay=True)
@@ -835,7 +833,7 @@ def _codex_sessions_dir(credential: Any) -> Path:
     home = (
         credential.home_dir
         if credential is not None and getattr(credential, "home_dir", None)
-        else os.path.join(os.path.expanduser("~"), ".codex")
+        else os.environ.get("CODEX_HOME") or os.path.join(os.path.expanduser("~"), ".codex")
     )
     return Path(home) / "sessions"
 
@@ -880,16 +878,26 @@ async def _fork_copy(
     parent_working_dir: str,
     parent_resume_id: str | None,
     parent_credential: Any = None,
-    dest_working_dir: str,  # unused: codex rollouts are keyed by id, not cwd
+    dest_working_dir: str,
     new_resume_id: str,
+    hooks: Any = None,
 ) -> Any:
-    """Full-copy fork (session-fork.md): copy the parent's rollout to a new
-    rollout file under the SAME CODEX_HOME with `session_meta.id` rewritten to
+    """Select native API fork for App Server, legacy rollout copy for exec.
+
+    The legacy copy stays in the SAME CODEX_HOME with `session_meta.id` rewritten to
     `new_resume_id`, so the fork resumes the whole conversation natively — no
     history replay. Codex resume is by id (cwd-independent), so the copied
     working dir is irrelevant here. Falls back to replay when the parent has no
     rollout yet (never ran a turn)."""
+    from ..config import settings
     from .fork import ForkArtifact
+
+    if settings.codex_transport == "app-server":
+        from .codex_history import fork_copy
+
+        return await fork_copy(parent_working_dir=parent_working_dir, parent_resume_id=parent_resume_id,
+            parent_credential=parent_credential, dest_working_dir=dest_working_dir,
+            new_resume_id=new_resume_id, hooks=hooks)
 
     if not parent_resume_id:
         return ForkArtifact(resume_id=None, needs_replay=True)

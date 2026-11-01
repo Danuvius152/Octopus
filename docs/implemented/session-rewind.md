@@ -18,6 +18,12 @@ the branch point and remaining real-world effects. This prevents old transcript
 instructions from becoming higher-priority rules and preserves ordinary
 large-input handling.
 
+Native history lines retain original seq, root/child identity and phase; helper
+status records retain partial/interruption causes. Rewind can split a native
+turn at a steer, so product seq is never approximated as a native turn count.
+Copied input observations remain historical evidence, not permission to repeat
+uncertain operations. A later explicit user request establishes a new execution.
+
 ## 5. Behavior
 
 ### 5.1 Forking from the browser
@@ -88,6 +94,13 @@ attributed to the agent. Paths are normalized against cwd and repository root;
 rename source/destination and unusual filenames cannot disappear in parsing.
 Unknown or mixed ownership refuses revert with a reason while keeping the
 conversation fork usable.
+
+Explicit native `fileChange` paths feed this same preflight, including both
+rename endpoints and a complete item with no preceding start. The Harness
+decoder checks the saved producer kind and original native item association;
+an MCP result containing similar JSON supplies no file attribution. Matching
+start/result observations count once. Known patch paths do not authorize
+reverting unrelated human edits or imply that external effects were rolled back.
 
 The operation stashes before restoring attributable files and records its outcome
 in `fork_revert_record`. Failure does not erase the successfully created fork or

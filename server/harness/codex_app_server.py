@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
 
@@ -57,14 +58,32 @@ def build_argv(ctx: TurnContext) -> tuple[list[str], dict[str, Any]]:
 
 
 def profile(base: RuntimeProfile) -> RuntimeProfile:
+    from .codex_history import fork_cleanup, fork_copy
+
     return replace(base, new_driver=AppServerDriver, build_turn_argv=build_argv,
                    activity_observer=None, prepare_resume=None, can_steer=True,
                    reusable=False, can_continue=False, stale_session_patterns=(),
-                   transient_error_patterns=(), transient_error_codes=(), inline_large_inputs=True)
+                   auth_error_patterns=(), transient_error_patterns=(), transient_error_codes=(), inline_large_inputs=True,
+                   fork_copy=fork_copy, fork_cleanup=fork_cleanup)
 
 
 class NativeProtocolError(RuntimeError):
     pass
+
+
+def _provider_error_code(error: dict[str, Any]) -> str:
+    """Only the bound provider's typed error can reject its credential."""
+    info = error.get("codexErrorInfo")
+    if info == "unauthorized":
+        return "unauthorized"
+    if isinstance(info, dict) and any(
+        isinstance(info.get(kind), dict) and info[kind].get("httpStatusCode") == 401
+        for kind in ("httpConnectionFailed", "responseStreamConnectionFailed",
+                     "responseStreamDisconnected", "responseTooManyFailedAttempts")
+    ):
+        return "unauthorized"
+    return {"usageLimitExceeded": "usage_limit_exceeded", "rateLimitExceeded": "rate_limit_exceeded",
+            "serverOverloaded": "server_overloaded"}.get(info if isinstance(info, str) else "", "native_turn_failed")
 
 
 def _encode_frame(identifier: str, method: str, params: dict[str, Any]) -> bytes:
@@ -300,7 +319,8 @@ class AppServerDriver(RunDriver):
         self._input = updated
 
     async def _request(self, method: str, params: dict[str, Any], *, business: bool = False,
-                       controller_change: bool = False) -> dict[str, Any]:
+                       controller_change: bool = False,
+                       before_write: Callable[[str], Awaitable[None]] | None = None) -> dict[str, Any]:
         assert self._io is not None
         self._serial += 1
         identifier = f"octopus:{self._serial}"
@@ -315,6 +335,8 @@ class AppServerDriver(RunDriver):
                 if controller_change:
                     await self._record(controller="unknown")
                 await self._io.authorize_input()
+                if before_write is not None:
+                    await before_write(identifier)
                 await self._io.write_control(data)
             async with asyncio.timeout(_RPC_TIMEOUT):
                 return await future
@@ -330,20 +352,24 @@ class AppServerDriver(RunDriver):
             if future.done() and not future.cancelled():
                 future.exception()
 
+    async def _initialize(self, io: HarnessRun, context: TurnContext) -> dict[str, Any]:
+        await self._request("initialize", {"clientInfo": {"name": "octopus", "version": "1"},
+                                              "capabilities": {"experimentalApi": True}})
+        await io.write_control(b'{"method":"initialized"}\n')
+        config = (await self._request("config/read", {"includeLayers": True, "cwd": context.working_dir}))["config"]
+        for key, expected in _REQUIRED_FEATURES.items():
+            actual: Any = config
+            for part in key.split("."):
+                actual = actual.get(part) if isinstance(actual, dict) else None
+            if actual is not expected:
+                raise NativeProtocolError(f"Codex required configuration mismatch: {key}")
+        return config
+
     async def start_input(self, io: HarnessRun, context: TurnContext) -> None:
         assert self._input is not None
         request_id = self._input.input_id
         try:
-            await self._request("initialize", {"clientInfo": {"name": "octopus", "version": "1"},
-                                              "capabilities": {"experimentalApi": True}})
-            await io.write_control(b'{"method":"initialized"}\n')
-            config = (await self._request("config/read", {"includeLayers": True, "cwd": context.working_dir}))["config"]
-            for key, expected in _REQUIRED_FEATURES.items():
-                actual: Any = config
-                for part in key.split("."):
-                    actual = actual.get(part) if isinstance(actual, dict) else None
-                if actual is not expected:
-                    raise NativeProtocolError(f"Codex required configuration mismatch: {key}")
+            config = await self._initialize(io, context)
             controller = controller_message(context.system_prompt)
             # Null product overrides select this invocation's native defaults,
             # rather than the settings persisted in the resumed history.
@@ -503,7 +529,7 @@ class AppServerDriver(RunDriver):
                 return ParseOutput()
             output = ParseOutput()
             if "error" in obj:
-                if identifier == self._input.rpc_id:
+                if identifier == self._input.rpc_id and (obj["error"] or {}).get("code") in {-32600, -32602}:
                     self._input = self._input.model_copy(update={"state": "rejected"})
 
                     def rejected_start() -> None:
@@ -558,7 +584,7 @@ class AppServerDriver(RunDriver):
         if obj["method"] == "turn/started" and self._input.rpc_id is None:
             raise NativeProtocolError("Native root began before this input was submitted")
         if params.get("threadId") != self._input.thread_id and not self._input.turn_id:
-            if obj["method"].startswith(("item/", "turn/")):
+            if obj["method"].startswith(("item/", "turn/")) or obj["method"] == "error":
                 self._buffer_frame(obj)
             return ParseOutput()
         if (params.get("threadId") == self._input.thread_id and obj["method"] == "item/completed"
@@ -571,7 +597,7 @@ class AppServerDriver(RunDriver):
                     self._accept_steer(rpc_id, evidence, "user_message")
                     break
         if not self._input.turn_id:
-            if obj["method"] not in {"turn/started", "turn/completed", "item/started", "item/completed", "item/agentMessage/delta"}:
+            if obj["method"] not in {"turn/started", "turn/completed", "item/started", "item/completed", "item/agentMessage/delta", "error"}:
                 return ParseOutput()
             self._buffer_frame(obj)
             item = params.get("item") or {}
@@ -597,7 +623,7 @@ class AppServerDriver(RunDriver):
     def _event(self, obj: dict[str, Any]) -> ParseOutput:
         assert self._output is not None
         method, params = obj["method"], obj.get("params") or {}
-        if not method.startswith(("turn/", "item/")):
+        if not method.startswith(("turn/", "item/")) and method != "error":
             return ParseOutput()
         if not self._output.accepts(params.get("threadId"), params.get("turn") or {}):
             raise NativeProtocolError("Native output has no original root/child association")
@@ -636,7 +662,12 @@ class AppServerDriver(RunDriver):
                                      item.get("phase"))
         for event in output.events:
             event.runtime_metadata = self._output.metadata(source)
-        output.events.extend(self._output.observe(method, params))
+        observations = self._output.observe(method, params)
+        output.events.extend(observations)
+        if method == "turn/completed" and observations:
+            # A newly observed child terminal is progress; repeating its
+            # diagnostic after that state is known cannot renew idle.
+            output.activity = True
         for event in output.events:
             if event.subagent is not None and event.subagent.status == "interrupted":
                 event.subagent.stop_reason = self._io.native_end_reason if self._io and self._io._lease_closed else "native_interrupted"
@@ -658,12 +689,24 @@ class AppServerDriver(RunDriver):
         method, params = obj["method"], obj.get("params") or {}
         turn_id = (params.get("turn") or {}).get("id") if method in {"turn/started", "turn/completed"} else params.get("turnId")
         root = params.get("threadId") == self._input.thread_id
-        if root and method.startswith(("turn/", "item/")) and turn_id != self._input.turn_id:
+        if root and (method.startswith(("turn/", "item/")) or method == "error") and turn_id != self._input.turn_id:
             raise NativeProtocolError(f"Unexpected root turn: {turn_id}")
         if root and method == "turn/started" and self._terminal:
             raise NativeProtocolError("Native root restarted after terminal")
+        if method == "error":
+            if not isinstance(params.get("willRetry"), bool) or not isinstance(params.get("error"), dict):
+                raise NativeProtocolError("Malformed native error notification")
+            error = params["error"]
+            return ParseOutput(events=[HarnessEvent(type="error", content=error.get("message"),
+                error_code="native_provider_retry" if params["willRetry"] else "native_provider_error" if root else "native_child_error",
+                error_details={**error, "willRetry": params["willRetry"], "connection_generation": self._generation}, raw=obj)],
+                activity=False)
         if method == "turn/completed":
             if not root:
+                error = (params.get("turn") or {}).get("error")
+                if error:
+                    return ParseOutput(events=[HarnessEvent(type="error", content=error.get("message"),
+                        error_code="native_child_error", error_details=error, raw=obj)], activity=False)
                 return ParseOutput()
             turn = params["turn"]
             status = turn.get("status")
@@ -679,7 +722,8 @@ class AppServerDriver(RunDriver):
                 self._io.native_end_reason = "parent_done" if turn.get("status") == "completed" else "parent_error"
             self._io.retire()
             return ParseOutput(events=[HarnessEvent(type="result", session_id=self._input.thread_id,
-                is_error=status != "completed", error_code=None if status == "completed" else f"native_turn_{status}",
+                is_error=status != "completed", error_code=None if status == "completed" else
+                    _provider_error_code(turn.get("error") or {}) if status == "failed" else "native_turn_interrupted",
                 content=(turn.get("error") or {}).get("message"), error_details=turn.get("error"), raw=obj)])
         if method == "item/agentMessage/delta":
             return ParseOutput(events=[HarnessEvent(type="text_delta", content=params.get("delta", ""), raw=obj)],
@@ -706,6 +750,7 @@ class AppServerDriver(RunDriver):
                         tool_name=item.get("tool") or kind, tool_input=params, raw=obj)
                 else:
                     event = HarnessEvent(type="tool_result", tool_use_id=item["id"],
+                        tool_name=kind if kind == "fileChange" else None,
                         content=json.dumps(params, ensure_ascii=False),
                         is_error=item.get("status") in {"failed", "errored"}, raw=obj)
                 return ParseOutput(events=[event])

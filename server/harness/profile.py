@@ -291,9 +291,10 @@ class RuntimeProfile:
     # False). Typed as Any to avoid importing the fork DTOs into this module.
     fork_prepare: Callable[..., Any] | None = None
     fork_cleanup: Callable[..., Any] | None = None
-    # Full-copy fork (session-fork.md): copy the backend's NATIVE
-    # transcript (the parent's real conversation file) into a fresh resumable id
-    # at the fork's location, so a `/fork` duplicate continues with real context
+    # Full-copy fork (session-fork.md): prepare independent native history by
+    # file copy or the backend's API, without running a model turn. The actual
+    # returned id, not the caller's hint, is authoritative. The duplicate continues
+    # with real context
     # instead of replaying the whole history into the first prompt. Returns a
     # `ForkArtifact`; falls back to `needs_replay=True` when the parent has no
     # native transcript yet. None on a backend with no native-copy strategy

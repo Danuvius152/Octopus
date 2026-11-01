@@ -75,25 +75,35 @@ each backend declares how *its* CLI reports an auth-credential rejection:
 - `RuntimeProfile.auth_error_patterns: tuple[str, ...]` — lowercased
   substrings. A turn-failure whose combined error text contains any of
   them is an auth-expiry.
-- `Harness.is_auth_error(text) -> bool` — case-insensitive substring match
-  over the profile patterns. Pure; no I/O.
+- `Harness.is_auth_error(text, *, code=None) -> bool` — accepts a trusted
+  normalized auth code first, then uses the profile's case-insensitive text
+  patterns when enabled. Pure; no I/O.
 
-Patterns are intentionally specific phrases ("invalid authentication
+Claude and Codex exec patterns are intentionally specific phrases ("invalid authentication
 credentials", "invalid x-api-key", "401 unauthorized", "invalid_grant",
 …) rather than a bare `401`, and detection is **gated on the turn having
 failed** (see §4), so a tool that merely *returns* a 401 to the model
 (which then continues to a normal result) never trips it.
 
+The opt-in App Server profile disables text-pattern auth detection. Its driver
+accepts only typed provider-auth failure from the exact bound root terminal.
+RPC, child/tool 401 and arbitrary stderr retain diagnostics without invalidating
+the credential. Native retry/error notifications are diagnostic even if another
+cause later fails the root; they do not accumulate as terminal auth evidence.
+See [native error source and recovery](codex-backend.md#error-source-and-recovery).
+
 ## 4. Run-loop wiring (`server/sessions/turns.py`)
 
-The combined error text for a turn is the terminal error event's
-`content` (Codex `turn.failed`/`error` carry the message) plus the run's
-captured `stderr_text` (Claude prints API errors there). After the stream
-ends and `backend.stop()` runs:
+The original Owner classifies the failed attempt using its actual selected
+profile. It passes the terminal error code and, where that profile enables text
+matching, the terminal diagnostic plus captured `stderr_text`. App Server's
+typed bound-root code is its auth evidence; native retry/child notifications
+and arbitrary stderr cannot supply it. Resource retirement remains owned by
+the original execution.
 
-- A turn is *failed* when it produced an `is_error` `result`/`error`
-  event, or ended with no `result` at all.
-- If failed AND `harness.is_auth_error(blob)`:
+- A turn is *failed* when its terminal `result` is an error, or it ended with
+  no `result`. Native diagnostic notifications do not select a failed result.
+- If failed AND `harness.is_auth_error(blob, code=attempt.error_code)`:
   - mark the bound credential (`session.credential_id` ?? agent's)
     `needs_reconnect` with `RefreshErrorCode.invalid_credentials` (reuses
     `_mark_needs_reconnect`); no-op if no credential is bound (host-default

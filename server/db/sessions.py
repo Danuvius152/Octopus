@@ -230,12 +230,25 @@ class SessionsMixin(DatabaseBase):
                 "INSERT INTO messages "
                 "(session_id, seq, role, type, content, tool_name, tool_input, "
                 " tool_use_id, is_error, session_id_ref, cost, attachments, "
-                " git_head, git_status_clean, created_at, runtime_metadata) "
+                " git_head, git_status_clean, created_at, runtime_metadata, terminal_request_id) "
                 "SELECT ?, seq, role, type, content, tool_name, tool_input, "
                 " tool_use_id, is_error, session_id_ref, cost, attachments, "
-                " git_head, git_status_clean, created_at, runtime_metadata "
+                " git_head, git_status_clean, created_at, runtime_metadata, terminal_request_id "
                 "FROM messages WHERE session_id = ? AND seq <= ?",
                 (fork_id, parent_id, fork_after_seq),
+            )
+            # Historical input evidence belongs to the copied message. Do not
+            # clone executable submissions, process handles or recovery rights.
+            await tx.execute(
+                "UPDATE messages AS m SET tool_input=json_set(COALESCE(m.tool_input,'{}'),'$.copied_input',json(("
+                "SELECT json_object('request_id',i.request_id,'source_session_id',?,"
+                "'execution_owner',i.execution_owner,'delivery_state',i.delivery_state,"
+                "'native_inputs',json(i.native_inputs)) FROM client_submissions i "
+                "WHERE i.session_id=? AND i.request_id=json_extract(m.tool_input,'$.request_context.request_id')))) "
+                "WHERE m.session_id=? AND m.role='user' AND m.type='text' AND EXISTS("
+                "SELECT 1 FROM client_submissions i WHERE i.session_id=? "
+                "AND i.request_id=json_extract(m.tool_input,'$.request_context.request_id'))",
+                (parent_id, parent_id, fork_id, parent_id),
             )
 
     async def load_sessions(
@@ -593,6 +606,19 @@ class SessionsMixin(DatabaseBase):
                 "SELECT execution_owner,delivery_state FROM client_submissions WHERE session_id=? AND request_id=?",
                 (session_id, input_request_id),
             )
+            if original is None:
+                copied = await tx.fetch_one(
+                    "SELECT json_extract(tool_input,'$.copied_input') FROM messages "
+                    "WHERE session_id=? AND role='user' AND type='text' "
+                    "AND json_extract(tool_input,'$.request_context.request_id')=?",
+                    (session_id, input_request_id),
+                )
+                if copied and copied[0] is not None:
+                    evidence = json.loads(copied[0])
+                    if (not isinstance(evidence, dict) or evidence.get("request_id") != input_request_id
+                            or evidence.get("delivery_state") not in {"none", "confirmed", "unknown"}):
+                        return SessionResult(input_request_id, input_request_id, missing="input_unconfirmed")
+                    original = (evidence.get("execution_owner"), evidence["delivery_state"])
             request_id = input_request_id
             if original is not None:
                 if original[1] == "unknown" or original[0] not in (None, input_request_id) and original[1] != "confirmed":
@@ -679,7 +705,7 @@ class SessionsMixin(DatabaseBase):
             cursor = await tx.execute(
                 "SELECT id, forked_from_session_id, working_dir, backend, "
                 "claude_session_id, fork_status, fork_revert_record, credential_id, "
-                "agent_id, fork_metadata "
+                "agent_id, fork_metadata, user_id "
                 "FROM sessions WHERE origin = 'fork' AND fork_status IN "
                 "('initializing', 'reverting')"
             )
@@ -696,6 +722,7 @@ class SessionsMixin(DatabaseBase):
                     "credential_id": r[7],
                     "agent_id": r[8],
                     "fork_metadata": r[9],
+                    "user_id": r[10],
                 }
                 for r in rows
             ]

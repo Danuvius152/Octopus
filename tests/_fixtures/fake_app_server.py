@@ -14,12 +14,16 @@ thread_id = json.loads(history.read_text().splitlines()[0])["payload"]["id"] if 
 delayed = None
 late_steer = None
 gated_steer = None
+created_fork = None
 defaults_path = root / "native-defaults.json"
 defaults = json.loads(defaults_path.read_text()) if defaults_path.exists() else {"model": "fixture", "effort": "low"}
 selected_path = root / "native-selected.json"
 
 
 def send(frame):
+    if "__stderr" in frame:
+        print(frame["__stderr"], file=sys.stderr, flush=True)
+        return
     if "__raw_stdout" in frame:
         print(frame["__raw_stdout"], flush=True)
         return
@@ -50,6 +54,19 @@ def frames():
                 continue
             chunk = os.read(sys.stdin.fileno(), 65536)
             if not chunk:
+                if created_fork is not None and mode.startswith("fork_untrusted_"):
+                    identifier, cwd = created_fork
+                    (Path(cwd) / "unexpected-native-work.txt").write_text("Retain this unexpected effect\n")
+                    fault = mode.removeprefix("fork_untrusted_")
+                    if fault == "turn":
+                        send({"method": "turn/started", "params": {"threadId": identifier, "turn": {"id": "unexpected"}}})
+                    elif fault == "item":
+                        send({"method": "item/started", "params": {"threadId": identifier, "turnId": "unexpected",
+                            "item": {"id": "unexpected-work", "type": "commandExecution"}}})
+                    elif fault == "request":
+                        send({"id": "unexpected-request", "method": "item/tool/requestUserInput", "params": {"threadId": identifier}})
+                    else:
+                        send({"__raw_stdout": "{unreadable native frame"})
                 if mode == "control_stop_tail":
                     for frame in json.loads((root / "native-stop-tail.json").read_text()):
                         send(frame)
@@ -83,7 +100,44 @@ for line in frames():
         result = {"config": {"model": defaults["model"], "model_reasoning_effort": defaults["effort"],
             "features": {"fast_mode": mode != "bad_fast_config", "wake_on_agent_messages": mode == "bad_config", "goals": False,
             "sleep_tool": False, "multi_agent": True, "multi_agent_v2": {"enabled": True, "wait_agent_enabled": True}}}}
+    if method == "thread/fork":
+        identifier = "actual-native-fork"
+        copied = root / f"{identifier}.jsonl"
+        records = [json.loads(line) for line in history.read_text().splitlines()]
+        records[0]["payload"]["id"] = identifier
+        copied.write_text("".join(json.dumps(record) + "\n" for record in records))
+        copied.with_suffix(".cwd").write_text(params["cwd"])
+        created_fork = identifier, params["cwd"]
+        if mode == "fork_lost_ack":
+            continue
+        if mode == "fork_error_after_creation":
+            send({"id": frame["id"], "error": {"code": -32600, "message": "Could not restore inherited settings"}})
+            continue
+        result = {"thread": {"id": identifier, "path": str(copied), "cwd": params["cwd"]},
+                  "cwd": params["cwd"]}
+        if mode == "fork_wrong_identity":
+            result["thread"]["id"] = thread_id
+        if mode == "fork_foreign_path":
+            result["thread"]["path"] = "/foreign-store/fork.jsonl"
+    if method in {"thread/read", "thread/delete"}:
+        path = root / f"{params['threadId']}.jsonl"
+        if params["threadId"] == thread_id:
+            path = history
+        if not path.exists():
+            send({"id": frame["id"], "error": {"code": -32600, "message": f"thread not found: {params['threadId']}"}})
+            continue
+        result = {"thread": {"id": params["threadId"], "path": str(path),
+                             "cwd": path.with_suffix(".cwd").read_text() if path.with_suffix(".cwd").exists() else str(root)}}
+        if method == "thread/delete":
+            if mode == "fork_cleanup_failed":
+                send({"id": frame["id"], "error": {"code": -32603, "message": "Native cleanup failed"}})
+                continue
+            path.unlink()
+            result = {}
     if method in {"thread/start", "thread/resume"}:
+        if method == "thread/resume" and (root / f"{params['threadId']}.jsonl").exists():
+            thread_id = params["threadId"]
+            history = root / f"{thread_id}.jsonl"
         if method == "thread/resume" and (not history.exists() or params["threadId"] != thread_id):
             send({"id": frame["id"], "error": {"code": -32600, "message": "No rollout found for thread"}})
             continue
@@ -123,6 +177,9 @@ for line in frames():
             continue
         if mode == "rejected":
             send({"id": frame["id"], "error": {"code": -32600, "message": "Input refused before acceptance"}})
+            continue
+        if mode == "start_internal_error":
+            send({"id": frame["id"], "error": {"code": -32603, "message": "Internal error after possible creation"}})
             continue
         if mode not in {"unknown", "unknown_disconnect", "late_tools", "late_bad_item", "control_question_resolved_before_ack"}:
             send({"id": frame["id"], "result": {"turn": {"id": turn_id}}})

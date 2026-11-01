@@ -881,10 +881,13 @@ class TurnsMixin(SessionManagerBase):
                     ))
             return frames
         if event.type == "error":
-            self._capture_error_text(attempt, event)
+            # Native notifications (including internal retries and children)
+            # are diagnostics. Only the bound root terminal selects failure.
+            if not native:
+                self._capture_error_text(attempt, event)
             frames.append(await self._recovery_frame(
-                session, code="backend_diagnostic", phase="diagnostic",
-                message=event.content or "Backend notification",
+                session, code=event.error_code or "backend_diagnostic", phase="diagnostic",
+                message=event.content or "Backend notification", source=event,
             ))
             return frames
         pending_question = None

@@ -10,8 +10,8 @@ parsing to the profile; HarnessRun retains process and retirement ownership.
 Native thread identity is retained for resume. Stdin closes after the
 initial input; additional user input queues for a subsequent turn. Basic opt-in
 App Server start, precise resume, steering, native questions and scoped
-root/child output are implemented below; remaining completion/consumer
-integration and default cutover remain in
+root/child output, completion consumers and native fork are implemented below;
+native Monitor accounting, the remaining data acceptance and default cutover remain in
 [the runtime plan](../plans/engineering-runtime-roadmap.md).
 
 The profile renders selected MCP entries and a composed controller through
@@ -83,10 +83,10 @@ an ordinary request. Native user questions use the existing product question
 owner; unsupported approval/dynamic requests receive explicit method-specific
 negative responses. Root and child output retain their original identities, and
 known helper state is reconciled through finite retirement. Bound-root completion
-and selected final replies use the contracts below. Full native detail reading,
-Stop/recovery integration, effect consumers and native Monitor accounting retain
-their remaining tickets. Implemented controls and
-output routing do not certify full R2 cutover.
+and selected final replies, saved details, Stop/recovery, effect consumers and
+history branching use the contracts below. Native Monitor accounting and the
+remaining acceptance/cutover retain their tickets. These implemented behaviors
+do not certify full R2 cutover.
 Research web leaves remain explicitly on exec; one-shots keep the text worker.
 
 ### Root completion and selected answer
@@ -240,6 +240,65 @@ read the original materials and use its original live scoped tools. Retained
 materials do not keep authorization alive after Stop or root terminal. The
 [execution contract](architecture-contract.md#输入完成与资源退休) separates closing
 admission, late input proof, outcome recording and confirmed resource retirement.
+
+### Native history branching
+
+With App Server selected, full `/fork` uses `thread/fork` in the selected
+`CODEX_HOME`, for both exec-origin and App Server histories. Paginated native
+storage cannot be cloned by changing a rollout ID or relocating its home.
+The short management driver reuses initialization, the pinned binary and
+HarnessRun retirement. It sends no `turn/start`, disables wake/goals/sleep and
+sets `deferGoalContinuation`; unexpected execution is a protocol failure.
+The original SessionOwner owns that host through actual retirement. The existing
+fork saga checkpoints possible creation before the write and saves the returned
+thread ID/path before further validation or installation. Its preallocated hint
+does not identify an API-created artifact.
+
+Unknown creation, including an RPC error after possible creation, retains the
+initializing row and copied directory. Confirmed artifacts retain their strategy,
+home and identity for recovery even when current transport or agent defaults
+change. Cleanup checks the original ID/path/cwd/home, then uses `thread/delete`
+only for this unexecuted fork. Its saved `cleanup_allowed` qualification starts
+closed: ACK proves identity, while trusted, confirmed management-host retirement
+proves the non-executing boundary. Each new management operation closes that
+gate before starting. Unexpected execution or protocol corruption retains the
+actual identity, initializing row and cwd; immediate and cold recovery both
+refuse automatic deletion without the qualification. Upstream reference refusals
+remain failures; cleanup
+does not expand to the source or related histories. Ordinary product archive,
+delete, reset and handoff keep their existing scope. Legacy exec and Claude
+file-copy strategies remain available. See [the fork saga](session-fork.md).
+
+`/rewind` retains product-message seq as its boundary: a steer may split one
+native turn. History replay preserves native root/child, phase, partial/cause
+and original seq, without executing during branch creation or replaying old
+inputs as instructions. Known native patch paths, including rename endpoints
+and complete-only items, feed the existing file-revert preflight through the
+Harness decoder. Tool/model text cannot fabricate that file-effect provenance.
+External effects and unknown input facts remain; see [rewind](session-rewind.md).
+
+### Error source and recovery
+
+Only a failed bound root's typed `codexErrorInfo` can establish provider
+authentication rejection: `unauthorized`, or HTTP 401 on the known provider
+connection/response variants. Arbitrary stderr, RPC rejection, connector/tool
+text and child errors cannot mark the selected credential invalid. The original
+reauth flow keeps its binding and login entry available.
+
+Native error notifications retain original request/attempt/thread/turn and
+connection identity, including before ACK after correlation. `willRetry` and
+child diagnostics never become root failure evidence; the root terminal selects
+its own status and provider code. Pure error diagnostics do not refresh idle.
+A newly observed child terminal remains progress; repeating its error does not
+renew the deadline. Quota, exhausted provider retry, disconnect and
+protocol failure remain distinct. The Owner uses the actual run profile:
+App Server supplies no automatic continuation or outer transient matching, so
+accepted/unknown inputs are not resent after transient or idle failure. Generic
+start RPC failure remains unknown; the pinned protocol's explicit InvalidRequest
+or InvalidParams rejection can prove nonacceptance. No fallback transport or
+summary turn repairs uncertainty. The shared policies remain in
+[credential reauth](harness-credential-reauth.md) and
+[transient recovery](harness-transient-retry.md).
 
 <a id="single-call-text-contract"></a>
 ## Single-call text contract

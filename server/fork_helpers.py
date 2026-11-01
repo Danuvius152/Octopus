@@ -7,8 +7,8 @@ Everything here is backend-agnostic and side-effect-contained:
   - the strict safe-revert preflight + git ops (§5.6.3)
   - the first-turn system-context note (§5.6.4)
 
-`SessionManager.fork_session` orchestrates these; the harness owns the one
-genuinely backend-specific piece (`prepare_fork`).
+`SessionManager.fork_session` orchestrates these; the harness owns native
+preparation and decoding the saved protocol's explicit file-effect facts.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import os
 import re
 from typing import Any
 
+from .harness.native_output import recorded_file_change_paths
 from .models import MessageContent, MessageRole
 from .tool_pairs import pair_tool_records
 
@@ -168,6 +169,7 @@ async def classify_side_effects(db, parent_id: str, from_seq: int) -> dict[str, 
     messages = await db.load_messages(parent_id)
     rows = [m for m in messages if m["seq"] >= from_seq]
     pairs = pair_tool_records(rows)
+    starts = {result: start for start, result in pairs.items()}
 
     file_turns: dict[str, set[int]] = {}
     bash_count = 0
@@ -176,6 +178,12 @@ async def classify_side_effects(db, parent_id: str, from_seq: int) -> dict[str, 
     other_counts: dict[str, int] = {}
 
     for index, m in enumerate(rows):
+        native_paths = recorded_file_change_paths(m)
+        if native_paths:
+            seq = rows[starts.get(index, index)]["seq"]
+            for native_path in native_paths:
+                file_turns.setdefault(native_path, set()).add(seq)
+            continue
         if m["type"] != "tool_use":
             continue
         name = m.get("tool_name") or ""
@@ -285,19 +293,34 @@ def render_replay_history(parent_messages: list[MessageContent]) -> str:
     lines: list[str] = []
     for m in parent_messages:
         seq = m.seq if m.seq is not None else "?"
+        native = m.runtime_metadata.native if m.runtime_metadata else None
+        source = ""
+        if native:
+            source = (f" {'root' if native.thread_id == native.root_thread_id else 'child'}"
+                      f" thread={native.thread_id} turn={native.turn_id}")
+            if native.phase:
+                source += f" phase={native.phase}"
         if m.type == "text" and m.role == MessageRole.user:
-            lines.append(f"[seq {seq}] user: {_trunc(m.content)}")
+            evidence = (m.tool_input or {}).get("copied_input")
+            observed = f" input_observation={json.dumps(evidence, ensure_ascii=False)}" if evidence else ""
+            lines.append(f"[seq {seq}] user{observed}: {_trunc(m.content)}")
         elif m.type == "text" and m.role == MessageRole.assistant:
-            lines.append(f"[seq {seq}] assistant: {_trunc(m.content)}")
+            lines.append(f"[seq {seq}] assistant{source}: {_trunc(m.content)}")
+        elif m.type == "native_subagent":
+            card = m.tool_input or {}
+            lines.append(f"[seq {seq}] native_subagent{source}: status={card.get('status')} "
+                         f"stop_reason={card.get('stop_reason')} partial={card.get('status') != 'completed'}")
         elif m.type == "thinking":
             continue  # internal reasoning isn't replayed
         elif m.type == "tool_use":
             lines.append(
-                f"[seq {seq}] tool_use {m.tool_name}: "
+                f"[seq {seq}] tool_use {m.tool_name}{source}: "
                 f"{_trunc(_fmt_tool_input(m.tool_name, m.tool_input))}"
             )
         elif m.type == "tool_result":
-            lines.append(f"[seq {seq}] tool_result (truncated): {_trunc(m.content)}")
+            lines.append(f"[seq {seq}] tool_result{source} (truncated): {_trunc(m.content)}")
+        elif m.type == "result" and native:
+            lines.append(f"[seq {seq}] result{source}: {_trunc(m.content)}")
     return "\n".join(lines)
 
 

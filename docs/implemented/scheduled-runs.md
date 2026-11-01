@@ -13,6 +13,14 @@ A fire runs the schedule's prompt in one of two places (agent-refactor.md
 * **a throwaway session** under the agent, auto-archived on idle, when there
   is no origin (continuity across fires comes from agent memory).
 
+Completion uses the original submission receipt and execution retirement before
+updating the completion timestamp and attempting automatic archive. For native
+App Server, a root terminal freezes execution while its original resources retire;
+that interval is not another parent computation. Empty final text and helper
+partials do not replace the root outcome or require a result-text query. Failed
+notification leaves the committed outcome intact. Stop pauses dispatch and keeps
+that conversation visible under the existing archive policy.
+
 ## 2. A schedule never has two runs outstanding
 
 A schedule that runs every 5 minutes and takes 10 used to start a second run

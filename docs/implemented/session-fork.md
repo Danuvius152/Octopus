@@ -1,6 +1,6 @@
 # /fork: full conversation and working-directory copy
 
-> **Status:** implemented — Native transcript copy with explicit replay fallback; original session and files remain unchanged.
+> **Status:** implemented — Native history copy or API fork, saved creation uncertainty and explicit replay fallback; original session and files remain unchanged.
 
 ## 1. What & why
 
@@ -20,15 +20,19 @@ throwaway copy of the project without disturbing the original.
   user chose the literal copy; created with `mkdir -p`).
 - **History carried over (native-copy)**: the fork **resumes the parent's real
   conversation**, not a replay. `harness.prepare_fork_copy` copies the backend's
-  NATIVE transcript into a fresh resume id at the fork's location, so the fork's
+  native history into an independent resume identity at the fork's location, so the fork's
   first turn continues with genuine context:
   - **Claude**: copy `~/.claude/projects/<parent-slug>/<id>.jsonl` →
     `<dest-slug>/<new-id>.jsonl`, rewriting each line's `cwd`→dest and
     `sessionId`→new id. (Empirically the CLI resumes a copied *real* transcript
     fine — the old "No conversation found" was specific to *synthesized* ones.)
-  - **Codex**: copy the rollout (`CODEX_HOME/sessions/.../rollout-*-<id>.jsonl`)
+  - **Codex exec**: copy the rollout (`CODEX_HOME/sessions/.../rollout-*-<id>.jsonl`)
     → a new rollout with `session_meta.id`→new id. Codex resume is by id
     (cwd-independent), so the working-dir copy is irrelevant to it.
+  - **Codex App Server**: use the pinned native `thread/fork` in the same home,
+    save its actual returned identity and retire its short management host before
+    installing the branch. This supports both old exec and native source histories;
+    branch creation sends no model input. [Native protocol details](codex-backend.md#native-history-branching).
   - **Fallback**: if the parent has no native transcript yet (never ran a turn),
     `prepare_fork_copy` returns `needs_replay=True` and we use the old replay
     path — history is tiny/empty then, so no transcript-dump problem.
@@ -40,6 +44,12 @@ throwaway copy of the project without disturbing the original.
   feeds the sidebar/chat, the transcript feeds the model. Both are snapshotted
   at fork time and evolve per-session afterward — the same two stores every
   session already keeps, just duplicated.
+  Original seq, native source, child details, final-answer references and terminal
+  request keys remain branch-local historical facts. User rows carry immutable
+  `copied_input` delivery/native evidence; executable submissions and recovery
+  rights are not cloned. Unknown delivery and accepted but unconfirmed steer
+  remain unconfirmed. Result
+  reads validate the copied rows, never consult the parent to repair a bad ref.
 - **Parent untouched**: NOT archived. The fork has `forked_from_session_id` set
   (lineage → nests under the parent in the sidebar). `fork_after_seq` stays set
   to the last copied seq — it doubles as the HISTORY_REPLAY cutoff, so nulling
@@ -63,7 +73,7 @@ throwaway copy of the project without disturbing the original.
      copies ALL messages, inserts the fork row (origin='fork', forked_from).
   5. resolve the parent credential (Codex needs it for CODEX_HOME), then
      `prepare_fork_copy(parent_working_dir, parent_resume_id, parent_credential,
-     dest, new_resume_id)` → native-copy the transcript; set claude_session_id
+     dest, new_resume_id)` → prepare independent native history; set claude_session_id
      (= new id on success, None on replay-fallback) + fork_needs_replay.
      Compensation on failure: cleanup artifacts first (passing the credential so
      Codex can find its rollout store), then delete row + `rmtree` dest; if
@@ -71,8 +81,19 @@ throwaway copy of the project without disturbing the original.
      startup sweep to retry idempotently (the sweep `rmtree`s the private copy
      once cleanup wins — `_is_fork_copy_dir` excludes a rewind's shared parent
      dir; the sweep resolves the credential from the row for Codex cleanup).
+     API creation additionally checkpoints unknown before write and the actual
+     returned ID/path before subsequent work. Recovery uses that saved strategy,
+     home and fork-time credential. An unknown artifact retains row and cwd for
+     inspection; it is never deleted by the old hint. The original Owner also
+     supervises recovery hosts for noninstalled initializing rows.
+     ACK alone leaves `cleanup_allowed` closed. Trusted, confirmed host retirement
+     grants that qualification; a new management operation closes it before
+     starting. Unexpected turn/item/server execution or protocol corruption
+     leaves actual identity, row and cwd for inspection, including after restart.
+     A missing qualification never falls back to hint-based deletion.
   6. keep `fork_after_seq` (= replay cutoff for the fallback path + the DB
      message-copy bound); set `fork_metadata.full_copy = True` + status='ready'.
+     A native management host must have confirmed retirement first.
   7. do NOT archive the parent; broadcast a `session_forked` event so other
      tabs add the new session.
 - Route: `POST /api/sessions/{id}/duplicate {label?}` → returns the new
@@ -106,6 +127,11 @@ cost in the command hint.
   missing CLI or an environmental auth/rate-limit failure).
 - route + /fork command (frontend); e2e: /fork creates a second session,
   original remains; deferred /fork while busy fires on idle.
+- `test_codex_app_server_fork.py`: actual-ID checkpoint, unknown creation and
+  cold recovery, original-host retirement, copied results/details after source
+  deletion, product-seq steer rewind and real Git patch/rename restoration.
+  `test_codex_app_server_real.py` verifies independent source/branch continuation
+  and filesystem effects for both exec-origin and native-origin history.
 
 ## Historical evidence
 

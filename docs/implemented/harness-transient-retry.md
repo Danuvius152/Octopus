@@ -74,11 +74,22 @@ attempt prompt; it does not recover an earlier original prompt over already
 attempted continuation work.
 
 `RuntimeProfile.can_continue` is independent of steering and process reuse.
-Both current adapters support native conversation continuation. The logical
+Claude stream-JSON and Codex exec support native conversation continuation. The logical
 turn retains conversation evidence observed during its own attempts, including
 a failed attempt with no display output. A resume ID inherited from a previous
 request alone does not authorize this recovery. Continuation is a new input;
 it cannot promise exactly-once tool or external effects.
+
+The Owner classifies against the actual attempt's selected profile. App Server
+has `can_continue=False` and no outer transient text/code matches. Its provider
+may retry inside the bound root; `willRetry` is a saved diagnostic, without a
+new product attempt or reset budget. Repeated retry/child error diagnostics do
+not refresh idle; a newly observed child terminal still counts as progress.
+Accepted/unknown input, idle failure and
+exhausted provider retry do not authorize another send. A proven pre-submission
+refusal remains subject to the original preparation policy. Quota and unrelated
+tool/child auth errors retain their distinct source; see
+[the native error contract](codex-backend.md#error-source-and-recovery).
 
 Stale-history recovery can clear the stale ID and prepare a retained-history
 wrapper once only if the input was not submitted and this turn has no captured

@@ -206,6 +206,29 @@ and reads concurrent with Stop. Native detail component and browser tests
 check late pages, same-service reconnect and saved body after reload, keeping
 chat high water and model execution unchanged.
 
+`tests/test_codex_app_server_effects.py` drives the real build, schedule and Wiki
+worker entrances with original receipts, actual artifacts/publication receipts
+and a real redirected process-group retirement barrier. It covers empty answers,
+helper partials, root failure, Stop/revocation, pending questions and failed
+notification without another execution. `tests/test_codex_app_server_errors.py`
+keeps typed bound-root auth separate from child/tool/stderr and internal retry,
+including error notification before ACK and generic RPC uncertainty. Repeated
+retry/child error diagnostics cannot renew idle or cause a second send.
+
+`tests/test_codex_app_server_fork.py` covers native actual ID, creation unknown,
+saved-strategy cold cleanup, retirement before installation, copied result/detail
+reads after source deletion, product-seq steer rewind and retained input uncertainty.
+Post-ACK unexpected turn/item/request and unreadable-protocol cases retain the
+actual artifact, row and working-directory effects through cold recovery;
+the retirement test checks that ACK alone never opens automatic cleanup.
+Real Git update/rename cases cover root/child and complete-only observations;
+unrelated edits and connector JSON cannot acquire file-revert attribution.
+The selected `test_live_old_and_native_history_fork_continue_independently` cases
+in `tests/test_codex_app_server_real.py` verify real pinned native fork, recalled
+context and independent file effects for exec-origin and native-origin sources.
+Their existing-login/network isolation follows the live policy below; they do not
+establish default cutover or stronger recursive completion.
+
 ### Markers, providers and isolation
 
 - **`real` selects live-provider and supervisor integration.** `real_claude`

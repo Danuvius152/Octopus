@@ -67,6 +67,17 @@ matching provider history. Restoration preserves unknown acceptance and preparat
 changes; it does not infer consumption from a saved terminal or automatically
 replay an input. An absent original transcript remains a visible resume failure.
 
+Fork `copied_input` observations, copied terminal keys and native creation
+checkpoints also belong to existing message/session records. Account archives
+exclude them with chats; import does not restore an unfinished fork, writer or
+replay right. A complete backup retains those rows plus their selected native
+home and copied working directory while recovery still depends on them. Restore
+keeps unknown creation unknown and uses only the saved actual artifact identity
+and confirmed non-executing retirement qualification for cleanup. A missing or
+false qualification retains the recovery material after restore; an ACK alone
+cannot supply it. Restore does not substitute a preallocated hint or the target's
+current transport for the original fork strategy.
+
 ### Prepare and export
 
 Use the **same Octopus build** for both commands and retain it with the archive.

@@ -184,26 +184,29 @@ class Harness:
         parent_credential=None,
         dest_working_dir: str,
         new_resume_id: str,
+        hooks=None,
     ):
-        """Full-copy fork (session-fork.md): copy the backend's NATIVE
-        transcript (the parent's real conversation, identified by
-        `parent_resume_id`) into `new_resume_id` at `dest_working_dir`, so a
-        `/fork` duplicate resumes with real context — no history replay into the
-        first prompt. Returns a `ForkArtifact`. Falls back to
+        """Prepare an independent native history without executing a turn.
+
+        File-copy adapters use `new_resume_id`; an API adapter returns its
+        allocated identity and uses the original saga's hooks for checkpoints
+        and host ownership. Returns a `ForkArtifact`. Falls back to
         `needs_replay=True` when the backend has no native-copy strategy or the
         parent has no transcript yet (e.g. it never ran a turn)."""
         from .fork import BackendForkNotSupported, ForkArtifact
 
         if not self.profile.can_fork:
             raise BackendForkNotSupported(self.backend)
-        if self.profile.fork_copy is None:
+        profile = self.profile
+        if profile.fork_copy is None:
             return ForkArtifact(resume_id=None, needs_replay=True)
-        return await self.profile.fork_copy(
+        return await profile.fork_copy(
             parent_working_dir=parent_working_dir,
             parent_resume_id=parent_resume_id,
             parent_credential=parent_credential,
             dest_working_dir=dest_working_dir,
             new_resume_id=new_resume_id,
+            hooks=hooks,
         )
 
     async def cleanup_incomplete_fork_artifacts(
@@ -213,17 +216,22 @@ class Harness:
         fork_id: str,
         *,
         credential=None,
+        artifact=None,
+        hooks=None,
     ) -> None:
         """Sweep any backend-specific files a fork strategy may have left when a
         saga didn't complete (session-rewind.md §3.1, session-fork.md).
-        Idempotent — safe on every boot for every 'initializing' row. No-op when
-        the backend has no on-disk fork artifacts to sweep. `credential` lets a
+        An unknown API creation retains its row instead of guessing an identity.
+        Known artifacts use their saved strategy, independent of current transport.
+        No-op when the backend has no on-disk fork artifacts. `credential` lets a
         directory-backed backend (Codex / CODEX_HOME) locate its rollout store."""
-        if self.profile.fork_cleanup is None:
+        profile = self.runtime_profile(RunConfig(transport=artifact["transport"])) if artifact else self.profile
+        if profile.fork_cleanup is None:
             return
-        await self.profile.fork_cleanup(
-            working_dir, resume_id_hint, fork_id, credential=credential
-        )
+        kwargs = {"credential": credential}
+        if artifact is not None:
+            kwargs.update(artifact=artifact, hooks=hooks)
+        await profile.fork_cleanup(working_dir, resume_id_hint, fork_id, **kwargs)
 
     # ------------------------------------------------------------------ one-shot
 

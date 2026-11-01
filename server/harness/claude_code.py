@@ -746,6 +746,7 @@ async def _fork_copy(
     parent_credential: Any = None,  # unused: Claude transcripts live under ~/.claude
     dest_working_dir: str,
     new_resume_id: str,
+    hooks: Any = None,
 ) -> Any:
     """Full-copy fork (session-fork.md): copy the parent's REAL transcript
     into the fork's project slug under `new_resume_id`, rewriting each line's

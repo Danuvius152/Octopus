@@ -14,6 +14,46 @@ from ..models import NativeSource, RuntimeMetadata
 from .events import HarnessEvent, SubagentUpdate
 
 
+def recorded_file_change_paths(message: dict[str, Any]) -> list[str]:
+    """Read saved native patch facts, including a completion without a start.
+
+    The wire payload stays in its original tool record. Consumers never infer
+    paths from model text or mistake an arbitrary tool's JSON output for a patch.
+    """
+    native = (message.get("runtime_metadata") or {}).get("native")
+    if not native or message.get("tool_name") != "fileChange":
+        return []
+    if message.get("type") == "tool_use":
+        params = message.get("tool_input")
+    elif message.get("type") == "tool_result" and isinstance(message.get("content"), str):
+        try:
+            params = json.loads(message["content"])
+        except (ValueError, TypeError):
+            return []
+    else:
+        return []
+    if not isinstance(params, dict):
+        return []
+    item = params.get("item")
+    if (not isinstance(item, dict) or item.get("type") != "fileChange"
+            or (params.get("threadId"), params.get("turnId"), item.get("id"))
+            != (native.get("thread_id"), native.get("turn_id"), native.get("item_id"))):
+        return []
+    changes = item.get("changes")
+    if not isinstance(changes, list):
+        return []
+    paths = []
+    for change in changes:
+        if not isinstance(change, dict):
+            continue
+        if isinstance(change.get("path"), str) and change["path"]:
+            paths.append(change["path"])
+        kind = change.get("kind")
+        if isinstance(kind, dict) and kind.get("type") == "update" and isinstance(kind.get("move_path"), str) and kind["move_path"]:
+            paths.append(kind["move_path"])
+    return paths
+
+
 @dataclass
 class _Work:
     update: SubagentUpdate
